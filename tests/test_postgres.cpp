@@ -3176,7 +3176,7 @@ TEST(PostgresBilling, WorkloadResourcesAndClassRatesFollowTheContract) {
                                                        lake::control::new_uuid_v4().substr(0, 8));
 }
 
-// lake#658, migration 0076_metered_jobs: an agent cron run's resources are a workload_resources
+// lake#658, migration 0077_metered_jobs: an agent cron run's resources are a workload_resources
 // kind, and a cron run's finish time reaches lake so its duration can be charged.
 TEST(PostgresBilling, CronRunsAreAWorkloadKindAndTheirEndIsRead) {
     const char* uri = lake::test::postgres_uri();
@@ -3194,7 +3194,7 @@ TEST(PostgresBilling, CronRunsAreAWorkloadKindAndTheirEndIsRead) {
             tx.exec_params("SELECT to_regclass($1)", std::string("metered_jobs_guard"))[0][0]
                 .is_null());
         EXPECT_FALSE(
-            tx.exec("SELECT 1 FROM schema_migrations WHERE version = '0076_metered_jobs'").empty());
+            tx.exec("SELECT 1 FROM schema_migrations WHERE version = '0077_metered_jobs'").empty());
         tx.exec_params("INSERT INTO workload_resources (object_kind, object_id, cpu_millis) "
                        "VALUES ('agent_cron_run', $1::uuid, 250)",
                        run);

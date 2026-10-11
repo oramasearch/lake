@@ -189,7 +189,7 @@ GPU-minute, with a GPU rate per class (`billing_plan_prices.class`). `instances`
 the operator must vendor the schema, select `workload_resources_guard` and report the resources
 (orama-operator#288).
 See `docs/api/metering.md#resources` and `docs/api/billing.md#price-list`.
-Every kind of usage is metered and billed (lake#658, migration `0076_metered_jobs`): a finished
+Every kind of usage is metered and billed (lake#658, migration `0077_metered_jobs`): a finished
 build, job launch or agent cron run (new `workload_resources` kind `agent_cron_run`) is charged once
 whenever lake first finds its resources reported, in the hour it ended, recorded `if_absent` in its
 workspace (`lake_metering_job_records`); `transcribe` names its workspace (lake#613); Zetta's
@@ -200,6 +200,14 @@ workspace (`lake_metering_job_records`); `transcribe` names its workspace (lake#
 billed dimension without a list rate. Not deployed; the operator must vendor the schema, select
 `metered_jobs_guard` and report cron runs and job templates. See
 `docs/api/metering.md#what-is-metered-where`.
+Deleting and revoking follow (lake#645, migration `0076_organization_deletion`): `delete_organization`
+(an owner; refused while its account has workspaces, which it names; the organization and its account
+are marked `deleted_at`, never erased, because the central audit chain names the account),
+`revoke_invitation`, `revoke_grant`, `delete_secret_mount` (every record out of the mount's workspace
+Zetta before its route), `delete_dataset`, `delete_model`, `delete_run`, `delete_index` (the workspace
+engine's deletes, zetta#1257; `not_supported` from an older engine) and `delete_ask_conversation`,
+each with `dry_run: true` and a typed confirmation in Lake Console. Not deployed; the operator must
+vendor the schema and select `organization_deletion_guard`. See `docs/api/deletion.md`.
 A user's secret reaches a Kubernetes Secret only as a sealed projection (lake#625, decision 58, no
 migration): lake has two levels of secrets, Orama's platform credentials as environment variables
 of the hosting platform and users' workspace secrets in the secret store (`docs/deployment/secrets.md`).

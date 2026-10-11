@@ -26,6 +26,7 @@ public:
     Result<Organization> create_organization(const NewOrganization&) override;
     Result<std::vector<Organization>> list_organizations(int limit) override;
     Result<Organization> get_organization(const std::string& id) override;
+    Result<OrganizationDeletion> delete_organization(const std::string& id, bool dry_run) override;
     Result<Customer> create_customer(const NewCustomer&) override;
     Result<std::vector<Customer>> list_customers(int limit,
                                                  const std::string& user_id = {}) override;
@@ -64,6 +65,7 @@ public:
                                                      const std::string& team_id,
                                                      int limit) override;
     Result<Invitation> get_invitation(const std::string& id) override;
+    Result<Invitation> revoke_invitation(const std::string& id, bool dry_run) override;
     Result<OrganizationSpace> create_organization_space(const NewOrganizationSpace&) override;
     Result<OrganizationSpace> convert_personal_space(const ConvertPersonalSpace&) override;
     Result<std::vector<Membership>> list_user_memberships(const std::string& user_id,
@@ -81,6 +83,8 @@ public:
     Result<std::vector<ObjectPathEntry>>
     policy_paths(const std::vector<std::string>& requested_object_ids) override;
     Result<Grant> create_grant(const NewGrant&) override;
+    Result<Grant> get_grant(const std::string& id) override;
+    Result<Grant> revoke_grant(const std::string& id, bool dry_run) override;
     Result<std::vector<Grant>> list_grants(const std::vector<std::string>& object_ids,
                                            const std::optional<std::string>& principal_taap_id,
                                            int limit) override;
@@ -326,6 +330,7 @@ public:
                                    const std::vector<PkiRecoveryShareEvidence>& evidence) override;
     Result<SecretMountRoute> create_secret_mount_route(const SecretMountRoute& value) override;
     Result<SecretMountRoute> get_secret_mount_route(const std::string& mount_id) override;
+    Result<void> delete_secret_mount_route(const std::string& mount_id) override;
     Result<std::vector<SecretMountRoute>>
     list_secret_mount_routes(const std::string& customer_id,
                              const std::string& workspace_id) override;
@@ -454,6 +459,8 @@ private:
     std::mutex mutex_;
     std::vector<User> users_;
     std::vector<Organization> organizations_;
+    // Organizations deleted by delete_organization and their spaces (lake#645): kept, never read.
+    std::set<std::string> deleted_organizations_, deleted_customers_;
     std::vector<Customer> customers_;
     std::vector<Repository> repositories_; // routing rows: no description (lake#315 part 2)
     // Audit event id -> (workspace, outcome), as workspace_assignments holds them (lake#317).

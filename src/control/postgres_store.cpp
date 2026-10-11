@@ -1857,7 +1857,8 @@ public:
             [&](pqxx::work& tx) -> Result<std::vector<Organization>> {
                 const pqxx::result rows =
                     tx.exec_params(std::string("SELECT ") + organization_columns +
-                                       " FROM organizations ORDER BY created_at DESC LIMIT $1",
+                                       " FROM organizations WHERE deleted_at IS NULL "
+                                       "ORDER BY created_at DESC LIMIT $1",
                                    limit);
                 std::vector<Organization> out;
                 for (const auto& r : rows)
@@ -1868,7 +1869,8 @@ public:
     Result<Organization> get_organization(const std::string& id) override {
         return with_tx<Organization>([&](pqxx::work& tx) -> Result<Organization> {
             const pqxx::result rows = tx.exec_params(std::string("SELECT ") + organization_columns +
-                                                         " FROM organizations WHERE id = $1::uuid",
+                                                         " FROM organizations WHERE id = $1::uuid "
+                                                         "AND deleted_at IS NULL",
                                                      id);
             if (rows.empty())
                 return std::unexpected(StoreError{"not_found", "no organization " + id});
@@ -1907,6 +1909,7 @@ public:
             const pqxx::result rows =
                 tx.exec_params(std::string("SELECT ") + customer_columns +
                                    " FROM customers WHERE ($2 = '' OR user_id::text = $2) "
+                                   "AND deleted_at IS NULL "
                                    "ORDER BY created_at DESC LIMIT $1",
                                limit,
                                user_id);
@@ -1919,7 +1922,8 @@ public:
     Result<Customer> get_customer(const std::string& id) override {
         return with_tx<Customer>([&](pqxx::work& tx) -> Result<Customer> {
             const pqxx::result rows = tx.exec_params(std::string("SELECT ") + customer_columns +
-                                                         " FROM customers WHERE id = $1::uuid",
+                                                         " FROM customers WHERE id = $1::uuid "
+                                                         "AND deleted_at IS NULL",
                                                      id);
             if (rows.empty())
                 return std::unexpected(StoreError{"not_found", "no customer " + id});
@@ -1931,7 +1935,8 @@ public:
         return with_tx<Customer>([&](pqxx::work& tx) -> Result<Customer> {
             const pqxx::result rows =
                 tx.exec_params(std::string("SELECT ") + customer_columns +
-                                   " FROM customers WHERE organization_id = $1::uuid",
+                                   " FROM customers WHERE organization_id = $1::uuid "
+                                   "AND deleted_at IS NULL",
                                organization_id);
             if (rows.empty())
                 return std::unexpected(
@@ -7981,6 +7986,211 @@ public:
             return SecretMountRoute{rows[0][0].as<std::string>(), rows[0][1].as<std::string>(),
                                     rows[0][2].as<std::string>(), rows[0][3].as<std::string>(),
                                     rows[0][4].as<std::string>()};
+        });
+    }
+
+    // ---- deletions (lake#645) ----
+
+    // Every policy object below (and including) the roots, which `DELETE FROM objects` removes
+    // with them through objects.parent_id ON DELETE CASCADE, and the grants on them.
+    static constexpr const char* policy_subtree_cte =
+        "WITH RECURSIVE subtree AS (SELECT id FROM objects WHERE id = ANY($1::uuid[]) "
+        "UNION SELECT o.id FROM objects o JOIN subtree s ON o.parent_id = s.id) ";
+
+    Result<OrganizationDeletion> delete_organization(const std::string& id, bool dry_run) override {
+        return with_tx<OrganizationDeletion>([&](pqxx::work& tx) -> Result<OrganizationDeletion> {
+            const pqxx::result rows = tx.exec_params(
+                std::string("SELECT ") + organization_columns +
+                    " FROM organizations WHERE id = $1::uuid AND deleted_at IS NULL FOR UPDATE",
+                id);
+            if (rows.empty()) {
+                return std::unexpected(StoreError{"not_found", "no organization " + id});
+            }
+            OrganizationDeletion plan{.organization = organization_of(rows[0])};
+            const pqxx::result customers =
+                tx.exec_params("SELECT id::text, name FROM customers WHERE organization_id = "
+                               "$1::uuid AND deleted_at IS NULL FOR UPDATE",
+                               id);
+            if (!customers.empty()) {
+                plan.customer_id = customers[0][0].as<std::string>();
+                plan.customer_name = customers[0][1].as<std::string>();
+                const pqxx::result live = tx.exec_params(
+                    std::string("SELECT ") + workspace_columns +
+                        " FROM workspaces WHERE customer_id = $1::uuid AND desired <> 'deleted' "
+                        "ORDER BY created_at, id",
+                    plan.customer_id);
+                for (const auto& row : live) {
+                    plan.live_workspaces.push_back(workspace_from(row));
+                }
+            }
+            const pqxx::result roots =
+                tx.exec_params("SELECT coalesce(array_agg(id::text), '{}') FROM objects WHERE "
+                               "(object_type = 'organization' AND external_id = $1) OR "
+                               "($2 <> '' AND object_type = 'customer' AND external_id = $2)",
+                               id,
+                               plan.customer_id);
+            const std::string root_ids = roots[0][0].as<std::string>();
+            const auto count = [&](const std::string& table) -> std::int64_t {
+                return tx
+                    .exec_params("SELECT count(*) FROM " + table +
+                                     " WHERE organization_id = $1::uuid",
+                                 id)[0][0]
+                    .as<std::int64_t>();
+            };
+            const std::string mounts = "(organization_id = $1::uuid OR ($2 <> '' AND "
+                                       "customer_id::text = $2))";
+            for (const char* table :
+                 {"teams", "memberships", "invitations", "sso_providers", "federation_issuers"}) {
+                plan.counts[table] = count(table);
+            }
+            plan.counts["secret_mount_routes"] =
+                tx.exec_params("SELECT count(*) FROM secret_mount_routes WHERE " + mounts,
+                               id,
+                               plan.customer_id)[0][0]
+                    .as<std::int64_t>();
+            plan.counts["policy_objects"] =
+                tx.exec_params(std::string(policy_subtree_cte) + "SELECT count(*) FROM subtree",
+                               root_ids)[0][0]
+                    .as<std::int64_t>();
+            plan.counts["grants"] =
+                tx.exec_params(std::string(policy_subtree_cte) +
+                                   "SELECT count(*) FROM grants WHERE object_id IN "
+                                   "(SELECT id FROM subtree)",
+                               root_ids)[0][0]
+                    .as<std::int64_t>();
+            if (dry_run) {
+                return plan;
+            }
+            if (!plan.live_workspaces.empty()) {
+                std::string names;
+                for (const Workspace& workspace : plan.live_workspaces) {
+                    names += (names.empty() ? "" : ", ") + workspace.name;
+                }
+                return std::unexpected(StoreError{
+                    "conflict",
+                    "the organization's account still has workspaces; delete them first: " +
+                        names});
+            }
+            tx.exec_params("DELETE FROM secret_lease_routes WHERE mount_id IN (SELECT mount_id "
+                           "FROM secret_mount_routes WHERE " +
+                               mounts + ")",
+                           id,
+                           plan.customer_id);
+            tx.exec_params("DELETE FROM secret_mount_routes WHERE " + mounts, id, plan.customer_id);
+            for (const char* table : {"invitations",
+                                      "memberships",
+                                      "teams",
+                                      "sso_providers",
+                                      "federation_issuers",
+                                      "offline_recovery_attempts"}) {
+                tx.exec_params(
+                    std::string("DELETE FROM ") + table + " WHERE organization_id = $1::uuid", id);
+            }
+            tx.exec_params("DELETE FROM objects WHERE id = ANY($1::uuid[])", root_ids);
+            const pqxx::result deleted =
+                tx.exec_params("UPDATE organizations SET deleted_at = now() WHERE id = $1::uuid "
+                               "RETURNING deleted_at::text",
+                               id);
+            if (!plan.customer_id.empty()) {
+                tx.exec_params("UPDATE customers SET deleted_at = now() WHERE id = $1::uuid",
+                               plan.customer_id);
+            }
+            plan.deleted_at = deleted[0][0].as<std::string>();
+            return plan;
+        });
+    }
+
+    Result<Invitation> revoke_invitation(const std::string& id, bool dry_run) override {
+        return with_tx<Invitation>([&](pqxx::work& tx) -> Result<Invitation> {
+            const pqxx::result rows = tx.exec_params(
+                std::string("SELECT ") + invitation_columns +
+                    ", (expires_at <= now()) FROM invitations WHERE id = $1::uuid FOR UPDATE",
+                id);
+            if (rows.empty()) {
+                return std::unexpected(StoreError{"not_found", "no invitation " + id});
+            }
+            Invitation invitation = invitation_of(rows[0]);
+            const bool expired = rows[0][12].as<bool>();
+            if (invitation.status != "pending" || expired) {
+                return std::unexpected(
+                    StoreError{"conflict",
+                               "only a pending invitation can be revoked; this one is " +
+                                   (invitation.status == "pending" ? std::string("expired")
+                                                                   : invitation.status)});
+            }
+            if (dry_run) {
+                return invitation;
+            }
+            const pqxx::result revoked = tx.exec_params(
+                std::string("UPDATE invitations SET status = 'revoked' WHERE id = $1::uuid "
+                            "RETURNING ") +
+                    invitation_columns,
+                id);
+            return invitation_of(revoked[0]);
+        });
+    }
+
+    Result<Grant> get_grant(const std::string& id) override {
+        return with_tx<Grant>([&](pqxx::work& tx) -> Result<Grant> {
+            const pqxx::result rows = tx.exec_params(
+                std::string("SELECT ") + grant_columns + " FROM grants WHERE id = $1::uuid", id);
+            if (rows.empty()) {
+                return std::unexpected(StoreError{"not_found", "no grant " + id});
+            }
+            return grant_of(rows[0]);
+        });
+    }
+
+    Result<Grant> revoke_grant(const std::string& id, bool dry_run) override {
+        return with_tx<Grant>([&](pqxx::work& tx) -> Result<Grant> {
+            const pqxx::result rows = tx.exec_params(std::string("SELECT ") + grant_columns +
+                                                         " FROM grants WHERE id = $1::uuid FOR "
+                                                         "UPDATE",
+                                                     id);
+            if (rows.empty()) {
+                return std::unexpected(StoreError{"not_found", "no grant " + id});
+            }
+            const Grant grant = grant_of(rows[0]);
+            const pqxx::result derived = tx.exec_params(
+                "SELECT EXISTS (SELECT 1 FROM memberships WHERE principal_taap_id = $1 "
+                "AND attestation_digest = $2)",
+                grant.principal_taap_id,
+                grant.attestation_digest);
+            if (derived[0][0].as<bool>()) {
+                return std::unexpected(StoreError{
+                    "conflict", "this grant comes with a membership; remove the member instead"});
+            }
+            const pqxx::result last = tx.exec_params(
+                "SELECT o.object_type = 'customer' AND $2 = 'admin' AND (SELECT count(*) FROM "
+                "grants WHERE object_id = o.id AND role = 'admin') = 1 FROM objects o "
+                "WHERE o.id = $1::uuid",
+                grant.object_id,
+                grant.role);
+            if (!last.empty() && last[0][0].as<bool>()) {
+                return std::unexpected(StoreError{
+                    "conflict",
+                    "this is the account's last admin grant; grant admin to someone else first"});
+            }
+            if (!dry_run) {
+                tx.exec_params("DELETE FROM grants WHERE id = $1::uuid", id);
+            }
+            return grant;
+        });
+    }
+
+    Result<void> delete_secret_mount_route(const std::string& mount_id) override {
+        return with_tx<void>([&](pqxx::work& tx) -> Result<void> {
+            const pqxx::result removed = tx.exec_params(
+                "DELETE FROM secret_mount_routes WHERE mount_id = $1::uuid RETURNING mount_id",
+                mount_id);
+            if (removed.empty()) {
+                return std::unexpected(StoreError{"not_found", "no secret mount " + mount_id});
+            }
+            tx.exec_params("DELETE FROM secret_lease_routes WHERE mount_id = $1::uuid", mount_id);
+            tx.exec_params("DELETE FROM objects WHERE object_type = 'secret_mount' AND "
+                           "external_id = $1",
+                           mount_id);
+            return {};
         });
     }
 

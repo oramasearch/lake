@@ -85,6 +85,9 @@ void register_transcript_capabilities(Registry& registry);
 // docs/api/solutions.md): list_solutions, get_solution, create_solution, update_solution,
 // delete_solution, duplicate_solution.
 void register_solution_capabilities(Registry& registry);
+// Deleting what a workspace holds (lake#645, docs/api/deletion.md): delete_dataset, delete_model,
+// delete_run, delete_index (the workspace's engine) and delete_ask_conversation (its records).
+void register_deletion_capabilities(Registry& registry);
 // Drives (lake#561, docs/api/drives.md): create_drive, list_drives, get_drive, rename_drive,
 // delete_drive; and a workspace-files or virtual drive's folders, files and shortcuts:
 // list_drive_entries, get_drive_entry, create_drive_folder_entry, create_drive_shortcut,

@@ -1731,6 +1731,92 @@ ApiResult attestation_failure(const ApiError& error) {
     return ApiResult::failure(error.code, error.message, error.path);
 }
 
+// What delete_organization answers (lake#645, docs/api/organizations.md#deleting-an-organization).
+json organization_deletion_json(const control::OrganizationDeletion& plan, bool dry_run) {
+    json workspaces = json::array();
+    for (const control::Workspace& workspace : plan.live_workspaces) {
+        workspaces.push_back({{"id", workspace.id},
+                              {"name", workspace.name},
+                              {"environment", workspace.environment}});
+    }
+    json counts = json::object();
+    for (const auto& [kind, count] : plan.counts) {
+        counts[kind] = count;
+    }
+    return {{"organization_id", plan.organization.id},
+            {"display_name", plan.organization.display_name},
+            {"customer_id", plan.customer_id.empty() ? json(nullptr) : json(plan.customer_id)},
+            {"handle", plan.customer_name.empty() ? json(nullptr) : json(plan.customer_name)},
+            {"workspaces", std::move(workspaces)},
+            {"counts", std::move(counts)},
+            {"dry_run", dry_run},
+            {"deleted", !dry_run},
+            {"deleted_at", plan.deleted_at.empty() ? json(nullptr) : json(plan.deleted_at)}};
+}
+
+// delete_organization: an owner (or the instance operator) deletes an organization whose space
+// holds no workspace. `confirm` is its handle, or its id when it has no space.
+ApiResult delete_organization(const json& in, ApiContext& ctx) {
+    if (!ctx.store) {
+        return no_store();
+    }
+    const std::string id = in.at("organization_id");
+    const bool dry_run = in.value("dry_run", false);
+    auto plan = ctx.store->delete_organization(id, true);
+    if (!plan) {
+        auto failed = from_store_error(plan.error());
+        failed.error.path = "/organization_id";
+        return failed;
+    }
+    ctx.audit_kind = dry_run ? "organization.delete.plan" : "organization.delete";
+    ctx.audit_object = "organization/" + id;
+    ctx.audit_customer_id = plan->customer_id;
+    ctx.audit_details = {{"organization_id", id}, {"handle", plan->customer_name}};
+    if (ctx.acting_identity != "admin") {
+        const auto memberships = ctx.store->list_memberships(id, "", 1000);
+        if (!memberships) {
+            return from_store_error(memberships.error());
+        }
+        if (std::ranges::none_of(*memberships, [&](const control::Membership& membership) {
+                return membership.team_id.empty() && membership.role == "owner" &&
+                       membership.principal_taap_id == ctx.acting_identity;
+            })) {
+            return ApiResult::failure("unauthorized",
+                                      "only an owner of the organization can delete it");
+        }
+    }
+    const std::string expected = plan->customer_name.empty() ? id : plan->customer_name;
+    const bool confirmed = in.contains("confirm") && in.at("confirm") == expected;
+    if (!confirmed && (!dry_run || in.contains("confirm"))) {
+        return ApiResult::failure(
+            "invalid_input", "confirm must match the organization's handle", "/confirm");
+    }
+    json value = organization_deletion_json(*plan, true);
+    ctx.audit_details["counts"] = value["counts"];
+    if (dry_run) {
+        return ApiResult::success(std::move(value));
+    }
+    if (!plan->live_workspaces.empty()) {
+        std::string names;
+        for (const control::Workspace& workspace : plan->live_workspaces) {
+            names += (names.empty() ? "" : ", ") + workspace.name;
+        }
+        return ApiResult::failure("conflict",
+                                  "the organization still owns workspaces; delete them first: " +
+                                      names,
+                                  "/organization_id");
+    }
+    auto deleted = ctx.store->delete_organization(id, false);
+    if (!deleted) {
+        auto failed = from_store_error(deleted.error());
+        failed.error.path = "/organization_id";
+        return failed;
+    }
+    value = organization_deletion_json(*deleted, false);
+    ctx.audit_details["counts"] = value["counts"];
+    return ApiResult::success(std::move(value));
+}
+
 // A grant or membership written with the attestation lake signed for it (lake#602): the answer is
 // the row plus `attestation: {statement, signer, signature, digest}`, and the audit event carries
 // the same.
@@ -2172,6 +2258,30 @@ void register_identity_capabilities(Registry& registry) {
                                                              in.value("display_name", ""),
                                                              in.value("customer_id", "")}));
                             }});
+    registry.add(Capability{
+        .name = "delete_organization",
+        .title = "Delete an organization",
+        .description =
+            "Delete an organization, which cannot be undone: its teams, members, invitations, "
+            "SSO providers, federation issuers and every access grant on it and its account. It is "
+            "refused while the organization's account still has workspaces, which the refusal "
+            "names "
+            "(delete them first with delete_workspace). Only an owner can delete it. `confirm` "
+            "must be its handle (its id when it has no account). `dry_run: true` deletes nothing "
+            "and lists what would go, with counts and any workspaces in the way.",
+        .input_schema = {{"type", "object"},
+                         {"properties",
+                          {{"organization_id", {{"type", "string"}}},
+                           {"confirm", {{"type", "string"}}},
+                           {"dry_run", {{"type", "boolean"}}}}},
+                         {"required", json::array({"organization_id"})},
+                         {"additionalProperties", false}},
+        .output_schema = {{"type", "object"}},
+        .kind = CapabilityKind::Action,
+        .object = "organization",
+        .action = "admin",
+        .resolve_object = entity_object("organization", "organization_id"),
+        .handler = delete_organization});
 
     // ---- customers ----
     registry.add(Capability{
@@ -4872,6 +4982,40 @@ void register_organization_capabilities(Registry& registry) {
                                                                     ctx.request_id}));
         }});
     registry.add(Capability{
+        .name = "revoke_invitation",
+        .title = "Revoke an invitation",
+        .description = "Revoke a pending invitation so it can no longer be accepted; it stays "
+                       "listed as revoked. An accepted invitation is a membership: remove the "
+                       "member instead. `dry_run: true` changes nothing and answers the "
+                       "invitation that would be revoked.",
+        .input_schema = {{"type", "object"},
+                         {"properties",
+                          {{"invitation_id", {{"type", "string"}}},
+                           {"dry_run", {{"type", "boolean"}}}}},
+                         {"required", json::array({"invitation_id"})},
+                         {"additionalProperties", false}},
+        .output_schema = invitation_schema(),
+        .kind = CapabilityKind::Action,
+        .object = "invitation scope",
+        .action = "admin",
+        .resolve_object = invitation_object,
+        .handler = [](const json& in, ApiContext& ctx) {
+            if (!ctx.store) {
+                return no_store();
+            }
+            const bool dry_run = in.value("dry_run", false);
+            ctx.audit_kind = dry_run ? "invitation.revoke.plan" : "invitation.revoke";
+            ctx.audit_object = "invitation/" + in.at("invitation_id").get<std::string>();
+            auto result = one_result(ctx.store->revoke_invitation(in.at("invitation_id"), dry_run));
+            if (!result.ok && result.error.path.empty()) {
+                result.error.path = "/invitation_id";
+            }
+            if (result.ok) {
+                result.value["dry_run"] = dry_run;
+            }
+            return result;
+        }});
+    registry.add(Capability{
         .name = "accept_invitation",
         .title = "Accept invitation",
         .description = "Accept a pending invitation into a membership. Lake signs the membership's "
@@ -5229,6 +5373,52 @@ void register_policy_capabilities(Registry& registry) {
                 *attestation,
                 ctx);
         }});
+    registry.add(Capability{
+        .name = "revoke_grant",
+        .title = "Revoke a grant",
+        .description =
+            "Remove one access grant (list_grants names them). A grant that comes with a "
+            "membership is removed with it (remove_member), and the last admin grant on an account "
+            "is kept so the account always has an administrator. `dry_run: true` changes nothing "
+            "and answers the grant that would be revoked.",
+        .input_schema = {{"type", "object"},
+                         {"properties",
+                          {{"grant_id", {{"type", "string"}}}, {"dry_run", {{"type", "boolean"}}}}},
+                         {"required", json::array({"grant_id"})},
+                         {"additionalProperties", false}},
+        .output_schema = grant_schema(),
+        .kind = CapabilityKind::Action,
+        .object = "policy object",
+        .action = "admin",
+        .resolve_object = [](const json& in,
+                             ApiContext& ctx) -> std::expected<std::string, ApiError> {
+            const auto grant = ctx.store->get_grant(in.at("grant_id"));
+            if (!grant) {
+                return std::unexpected(
+                    ApiError{grant.error().code, grant.error().message, "/grant_id"});
+            }
+            return grant->object_id;
+        },
+        .handler =
+            [](const json& in, ApiContext& ctx) {
+                if (!ctx.store) {
+                    return no_store();
+                }
+                const bool dry_run = in.value("dry_run", false);
+                ctx.audit_kind = dry_run ? "grant.revoke.plan" : "grant.revoke";
+                ctx.audit_object = "grant/" + in.at("grant_id").get<std::string>();
+                auto result = one_result(ctx.store->revoke_grant(in.at("grant_id"), dry_run));
+                if (!result.ok && result.error.path.empty()) {
+                    result.error.path = "/grant_id";
+                }
+                if (result.ok) {
+                    ctx.audit_details = {{"principal_taap_id", result.value["principal_taap_id"]},
+                                         {"object_id", result.value["object_id"]},
+                                         {"role", result.value["role"]}};
+                    result.value["dry_run"] = dry_run;
+                }
+                return result;
+            }});
     registry.add(Capability{
         .name = "effective_access",
         .title = "Effective access",
@@ -5952,6 +6142,7 @@ void register_core_capabilities(Registry& registry, std::string_view version) {
     register_transcript_capabilities(registry);
     register_solution_capabilities(registry);
     register_drives_capabilities(registry);
+    register_deletion_capabilities(registry);
 }
 
 } // namespace lake::api

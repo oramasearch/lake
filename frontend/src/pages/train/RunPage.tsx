@@ -2,9 +2,11 @@
  * its report once it finished, its lineage, outputs, log and trace, beside its facts. While it runs
  * the page checks again every 15 seconds; the report is asked for only once the run is no longer
  * running, queued or pending (asking a running run makes Zetta drop the connection). */
-import { useSearchParams } from "react-router-dom";
-import { Activity, LineChart } from "lucide-react";
+import { useNavigate, useSearchParams } from "react-router-dom";
+import { Activity, LineChart, Trash2 } from "lucide-react";
 import type { Row } from "@/lib/api";
+import { runLines } from "@/lib/deletion";
+import { DeletionButton } from "@/lib/deletionDialog";
 import { entityCrumb, useTrail } from "@/lib/trail";
 import { Banner, Button, Card, Chip, ErrorBlock, KeyValue, Mono, Query, Split, Stat, Status } from "@/lib/ui";
 import { WorkspaceFrame, cellText, qs, text, timeAgo, useWorkspace, useWorkspaceState, useWq, useWsPath } from "./workspace";
@@ -15,7 +17,8 @@ export default function RunPage() {
   const [params] = useSearchParams();
   const id = params.get("id") ?? "";
   const path = useWsPath();
-  const { customerId } = useWorkspace();
+  const navigate = useNavigate();
+  const { customerId, workspaceId } = useWorkspace();
   const space = qs({ customer_id: customerId });
   const ready = !!useWorkspaceState().data?.ready;
   const run = useWq<Row>("get_run", { run_id: id }, {
@@ -53,6 +56,23 @@ export default function RunPage() {
             <Button to={path(`/train/experiment/run?${qs({ customer_id: customerId, run: text(run.data, "id") || id })}`)}>
               <LineChart size={14} aria-hidden /> Training charts
             </Button>
+            {run.data ? (
+              <DeletionButton
+                capability="delete_run"
+                input={{ customer_id: customerId, workspace_id: workspaceId, id }}
+                disabled={UNFINISHED.has(status)}
+                hint={UNFINISHED.has(status) ? "A run is deleted once it has finished" : undefined}
+                title={pipeline ? `Delete This Run of ${pipeline}` : "Delete This Run"}
+                confirmLabel="Delete run"
+                intro="Deleting the run removes it and its report from the workspace. It cannot be undone."
+                typed={() => id.slice(0, 8)}
+                lines={runLines}
+                done="Run deleted"
+                onDone={() => navigate(path(`/train/runs?${space}`))}
+              >
+                <Trash2 size={14} aria-hidden /> Delete
+              </DeletionButton>
+            ) : null}
           </>
         ) : null
       }

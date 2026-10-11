@@ -891,9 +891,26 @@ in its own pull request ([orama-operator#288](https://github.com/oramasearch/ora
 before a lake with this change is rolled. `OperatorContract.*` prepares that pull request's
 statements against this schema.
 
+## Organization deletion migration
+
+`0076_organization_deletion` (lake#645) lets an organization be deleted
+([`../api/organizations.md#deleting-an-organization`](../api/organizations.md#deleting-an-organization)):
+
+- `organizations.deleted_at` and `customers.deleted_at` (null while live). `delete_organization`
+  removes the organization's teams, memberships, invitations, SSO providers, federation issuers,
+  recovery attempts, secret mount and lease routes, and the policy objects of the organization
+  and its account with every grant on them, then sets both. The rows stay, marked, because
+  `audit_events.customer_id` is `ON DELETE RESTRICT` and an audit event is never rewritten; every
+  read and list of organizations and customers leaves a marked row out.
+
+Nothing is dropped; idempotent; guard `organization_deletion_guard`. The operator vendors the schema
+and selects that guard before a lake with this change is rolled; a lake before it never sets the
+columns, and a lake with it on an older schema fails its organization and customer reads, so the
+schema goes first.
+
 ## Metered jobs migration
 
-`0076_metered_jobs` (lake#658) widens `workload_resources.object_kind` to `agent_cron_run`: one row
+`0077_metered_jobs` (lake#658) widens `workload_resources.object_kind` to `agent_cron_run`: one row
 per run an agent cron schedule's CronJob starts (`object_id` the `agent_cron_runs` id), reported by
 the Orama operator from the run's pods (or its Job's pod template) and kept with `pods` 0 after they
 finish, as for a job-mode launch. Lake charges each finished build, job launch and cron run once,

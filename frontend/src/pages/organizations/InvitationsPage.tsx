@@ -5,6 +5,7 @@ import { Navigate } from "react-router-dom";
 import { UserPlus } from "lucide-react";
 import { useList, type Row } from "@/lib/api";
 import { Button, DataTable, FilterChips, Page, SearchInput, Status, Toolbar } from "@/lib/ui";
+import { RevokeInvitation } from "./OrganizationPage";
 import { NameCell, PanelEmpty, RoleBadge, When, countBy, matches, useMetaTrail, useParam } from "./shared";
 
 export default function InvitationsPage() {
@@ -47,6 +48,7 @@ export default function InvitationsPage() {
           { key: "role", label: "Role", render: (i) => <RoleBadge role={i.role} /> },
           { key: "status", label: "Status", render: (i) => <Status value={i.status} /> },
           { key: "expires", label: "Expires", render: (i) => <When value={i.expires_at} />, sort: (i) => i.expires_at },
+          { key: "revoke", label: "", render: (i) => <RevokeInvitation invitation={i} /> },
         ]}
       />
     </Page>

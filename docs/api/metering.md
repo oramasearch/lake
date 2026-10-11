@@ -165,11 +165,11 @@ three, and the Usage page marks their tiles *Detail, not billed*.
 | `transfer` | bytes | `in`, `out` | the exact hourly repository transfer records (`lake_metering_usage`, above), plus every other byte lake moves for a workspace (lake#658): drive uploads and reads, tenant image pushes and pulls, repository file reads, Hub `resolve` downloads, LFS staging and commits, shared-file downloads |
 | `build_compute` | seconds | `repository`, `image` | the repository build records (above) and the operator's finished image builds, at the hour each finished; titled Build Time |
 | `run_compute` | seconds | `run` | the workspace's runs (`list_runs`), training and experiment trials included, at the time each last changed; titled Workspace Run Time. A run executes in its workspace's engine, so its CPU and RAM are the engine's, never counted twice |
-| `speech` | seconds | `transcript`, `dictation` | the audio length of each transcript made from audio (`create_transcript`) and of each dictation (`transcribe`, in the workspace it names, lake#613), rounded up, when the speech-to-text model reports it (`whisper-1`); `gpt-4o-transcribe` reports tokens instead, which count as its `model_tokens` |
+| `speech` | seconds | `transcript`, `dictation` | the audio length of each transcript made from audio (`create_transcript`) and of each dictation (`transcribe`, in the workspace it names, lake#613), rounded up: what the speech-to-text model reports (`whisper-1`), else what lake measures from the recording ([transcripts.md](transcripts.md#how-long-a-recording-is)). The tokens `gpt-4o-transcribe` reports are audit detail only and never `model_tokens` (lake#658): speech is billed once, by the minute |
 | `calls` | calls | `api`, `mcp` | every capability call routed to the workspace, the same attribution as `lake_requests` ([telemetry](../serving/telemetry.md#the-workspace-request-series)), answered or refused |
 | `predictions` | calls | — (`object_id` is the model) | each answered `predict` of a model the workspace has |
 | `searches` | calls | — (`object_id` is the index) | each answered `search_index` of a published index (lake#658) |
-| `model_tokens` | tokens | `input`, `output` (also `agent`, `launch_id`, `model`) | what an agent reports with `record_model_usage` (below), and the tokens a speech-to-text model reports for a transcript (`model` only) |
+| `model_tokens` | tokens | `input`, `output` (also `agent`, `launch_id`, `model`) | what an agent reports with `record_model_usage` (below); never speech-to-text, which is `speech` |
 | `instances` | instance-seconds | the service kind (`zetta`, `postgres`, …) or `app` (`object_id` is the service or app) | the owner loop's sample of running services and apps; detail, never billed |
 | `volumes` | GiB-seconds | `service`, `store` (`object_id`) | the owner loop's sample of running services' and stores' volumes |
 
@@ -235,7 +235,7 @@ the operator is the one place that knows them.
 | `app` | the app | its replicas |
 | `build` | the build | the image build's pod |
 | `agent_launch` | the launch | agent-runtime's Job (`job`) or Deployment (`service`) |
-| `agent_cron_run` | the run (`agent_cron_runs.id`) | one Job an agent's cron schedule started (lake#658, migration `0076_metered_jobs`) |
+| `agent_cron_run` | the run (`agent_cron_runs.id`) | one Job an agent's cron schedule started (lake#658, migration `0077_metered_jobs`) |
 
 **What the sampler records** (`sample_usage`, every fifteen minutes, by the store root's owner):
 
