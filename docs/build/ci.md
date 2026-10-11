@@ -1,5 +1,12 @@
 # Continuous integration and image publishing
 
+> **Both workflows are disabled** (Steve, 2026-10-11, lake#622): `gh workflow disable ci` and
+> `gh workflow disable image` on `oramasearch/lake`, a repository setting that keeps the files.
+> `gh workflow list --repo oramasearch/lake --all` shows them as `disabled_manually`. Proof is the
+> local suite plus the cluster BuildKit Linux lane (`run-lake-linux-tests.sh`, liquid-dev skill), and
+> deployment images are built on the cluster BuildKit (`build-lake.sh`). This page describes what
+> the workflow files would do if someone re-enabled them; do not, without Steve.
+
 GitHub Actions has two workflows that keep the repository buildable and publish deployment
 images. The Dockerfile remains the canonical Linux toolchain recipe; CI installs the same Ubuntu
 24.04 packages, LLVM 19 channel, checksum-verified OpenSSL 3.6.3 source build, and CMake 3.31.5
