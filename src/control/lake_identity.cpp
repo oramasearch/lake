@@ -6,12 +6,12 @@ namespace {
 class UnavailableLakeIdentity final : public LakeIdentity {
 public:
     std::expected<LakeIdentityDocument, std::string> document() const override {
-        return std::unexpected("lake identity is provided by issue #18");
+        return std::unexpected("Lake identity is provided by issue #18");
     }
 
     std::expected<std::string, std::string>
     sign_passkey_binding(const std::string&) const override {
-        return std::unexpected("lake identity is provided by issue #18");
+        return std::unexpected("Lake identity is provided by issue #18");
     }
 };
 

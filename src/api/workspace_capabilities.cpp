@@ -953,8 +953,8 @@ void register_workspace_call(Registry& registry, bool read) {
                    "indexes, by naming one allowed action `capability` and its `input`. "
                    "expose_model and expose_index answer `call`, the Lake capability that serves "
                    "what was published. A Python agent's create_agent or update_agent definition "
-                   "is {source: zetta, instructions, entrypoint, files: [{path, contents}]} or "
-                   "{source: lake, repository_id, revision, entrypoint}; Lake refuses any other "
+                   "is `{source: zetta, instructions, entrypoint, files: [{path, contents}]}` or "
+                   "`{source: lake, repository_id, revision, entrypoint}`; Lake refuses any other "
                    "field.",
         // The names `capability` takes, so OpenAPI and MCP list them (lake#650); each is also
         // its own named capability (docs/api/engine-capabilities.md).
@@ -1007,13 +1007,13 @@ bool valid_service_name(const std::string& name) {
 std::string workspace_description(const std::string& operation) {
     static const std::map<std::string, std::string> descriptions = {
         {"list_workspaces",
-         "List a space's workspaces (each its own Zetta) with their environment, desired state "
+         "List an account's workspaces (each its own Zetta) with their environment, desired state "
          "and the operator's observed phase; the `id` is the workspace_id other calls name."},
         {"get_workspace",
          "Read one workspace: its name, environment, desired state and whether the operator "
          "reports it ready."},
         {"create_workspace",
-         "Create a workspace, a Zetta of its own for one environment of a space; poll "
+         "Create a workspace, a Zetta of its own for one environment of an account; poll "
          "workspace_status until it is ready."},
         {"update_workspace",
          "Rename a workspace or stop and start it (`desired: stopped | running`); its data is "
@@ -1302,9 +1302,9 @@ void register_store_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "list_store_providers",
         .title = "List store providers",
-        .description = "Every type × provider pair a store can be (object, filesystem, "
-                       "network_filesystem, volume on cluster, r2, s3, b2, azure, gcs, lake, "
-                       "zetta, nfs), whether this Lake offers it, and why not when it does not.",
+        .description = "Every type × provider pair a store can be (`object`, `filesystem`, "
+                       "`network_filesystem`, `volume` on `cluster`, `r2`, `s3`, `b2`, `azure`, "
+                       "`gcs`, `lake`, `zetta`, `nfs`), whether this Lake offers it, and why not when it does not.",
         .input_schema = control_input_schema(json::object(), json::array()),
         .output_schema = {{"type", "object"}},
         .kind = CapabilityKind::Read,
@@ -1373,7 +1373,7 @@ void register_store_capabilities(Registry& registry) {
         .title = "Create a store",
         .description = "Ask the operator for a new store in this workspace: a `type` and "
                        "`provider` pair that list_store_providers reports available (today volume "
-                       "on cluster), a `name` unique in the space, and optionally `size_gi` 1-100 "
+                       "on cluster), a `name` unique in the account, and optionally `size_gi` 1-100 "
                        "(default 10) and `region`. Private by default.",
         .input_schema = customer_input_schema(
             {{"type", {{"type", "string"}, {"enum", store_types_enum()}}},
@@ -3871,7 +3871,7 @@ void register_agent_flow_capabilities(Registry& registry) {
         .description =
             "Create the agent an AgentCreator proposal describes (agent_turn with agent-creator "
             "answers `proposal`): a native agent, or a Python agent whose code goes into a new "
-            "private Lake repository (storage lake) or into the workspace (storage zetta). A "
+            "private Lake repository (`storage: lake`) or into the workspace (`storage: zetta`). A "
             "Python agent with a trigger is scheduled, and its first check run starts. Refused "
             "when "
             "the proposal lists defects.",
@@ -4210,7 +4210,7 @@ void register_agent_flow_capabilities(Registry& registry) {
                        "Factory in one workspace, oldest first, with each answer's reads, "
                        "proposals and delegations. A conversation lives in the workspace Zetta of "
                        "the workspace it was held in; only the person who had it can read it, and "
-                       "another workspace of the same space never shows it.",
+                       "another workspace of the same account never shows it.",
         .input_schema = customer_input_schema(
             {{"conversation_id", {{"type", "string"}}},
              {"limit", {{"type", "integer"}, {"minimum", 1}, {"maximum", 500}}}},
@@ -4782,7 +4782,7 @@ void register_conversation_capabilities(Registry& registry) {
             "the agent. A library agent answers in the background: follow `task_id` with "
             "get_agent_task, then call settle_ask_turn {conversation_id, task_id, kind} once it "
             "finished, because the answer is saved in the conversation only by that call (the "
-            "web app makes it; an API or MCP client must too). An agent of the space "
+            "web app makes it; an API or MCP client must too). An agent of the account "
             "answers at once, stored as `reply_id`. Without `conversation_id` a new conversation "
             "starts. `page` names the page it was asked from, by its path and query values.",
         .input_schema = customer_input_schema({{"conversation_id", {{"type", "string"}}},
@@ -5031,7 +5031,7 @@ void register_agent_run_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "list_agent_launches",
         .title = "List agent runs",
-        .description = "The runs of the space's agents (or one agent's), newest first, with the "
+        .description = "The runs of the account's agents (or one agent's), newest first, with the "
                        "operator's phase and each finished job's result.",
         .input_schema = customer_agent_schema(
             {{"agent_id", {{"type", "string"}}}, {"limit", {{"type", "integer"}}}}, json::array()),
@@ -5287,7 +5287,7 @@ void register_agent_run_capabilities(Registry& registry) {
                 task->workspace_id != input.at("workspace_id").get<std::string>() ||
                 (task->requested_by_user_id != context.acting_user_id &&
                  context.acting_identity != "admin")) {
-                co_return ApiResult::failure("not_found", "no such task in this space");
+                co_return ApiResult::failure("not_found", "no such task in this account");
             }
             // Its request, message and answer are a record in its workspace (lake#374, #375).
             if (auto loaded = control::settled(co_await load_agent_task_content(context, *task));
@@ -5307,12 +5307,12 @@ void register_agent_run_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "list_opportunities",
         .title = "List Opportunities",
-        .description = "What Auto-Suggest recommended for the space's data in this workspace, kept "
+        .description = "What Auto-Suggest recommended for the account's data in this workspace, kept "
                        "across scans, newest scan first: each Opportunity's intent, catalogue "
                        "solution, methodology, why the data supports it, and its status (new, "
                        "project, dismissed, or not_yet when Auto-Suggest declined it). "
                        "Opportunities live in the workspace Zetta of the workspace their scan ran "
-                       "in; another workspace of the space never lists them. `task_id` settles a "
+                       "in; another workspace of the account never lists them. `task_id` settles a "
                        "scan of this workspace that just finished.",
         .input_schema = customer_agent_schema({{"task_id", {{"type", "string"}}}}, json::array()),
         .output_schema = {{"type", "object"}},
@@ -5413,7 +5413,7 @@ void register_agent_run_capabilities(Registry& registry) {
             "Send one message to any agent: a specialized agent of the Agent Library by its key "
             "(agent-ask-orama, agent-project, agent-application, agent-experiments, "
             "agent-autosuggest, agent-creator) or an agent of "
-            "this space by its id. A library agent's turn runs in the background: the answer is "
+            "this account by its id. A library agent's turn runs in the background: the answer is "
             "{task_id, status} at once, and get_agent_task follows it to its answer. A native "
             "agent answers from the workspace; a Python agent from its running service (started "
             "on first use).",
@@ -6426,7 +6426,7 @@ void register_agent_bus_capabilities(Registry& registry) {
                         context.acting_identity == "admin");
             };
             if (!owned(context.store->get_agent_task(task_id))) {
-                co_return ApiResult::failure("not_found", "no such task in this space");
+                co_return ApiResult::failure("not_found", "no such task in this account");
             }
             if (context.agent_bus == nullptr) {
                 co_return ApiResult::failure("store_unavailable",
@@ -6620,7 +6620,7 @@ void register_workspace_capabilities(Registry& registry) {
                         const auto decision = control::authorize(*context.store, context.acting_identity,
                             *object, "read", context.authorization_cache);
                         if (!decision || !decision->allowed) {
-                            return ApiResult::failure("unauthorized", "principal cannot read this space");
+                            return ApiResult::failure("unauthorized", "principal cannot read this account");
                         }
                     }
                     const auto rows = context.store->list_workspaces(input.at("customer_id"));
@@ -6640,7 +6640,7 @@ void register_workspace_capabilities(Registry& registry) {
                 }
                 const auto row = context.store->get_workspace(input.at("workspace_id"));
                 if (!row || row->customer_id != input.at("customer_id").get<std::string>()) {
-                    return ApiResult::failure("invalid_input", "workspace_id is not in this space", "/workspace_id");
+                    return ApiResult::failure("invalid_input", "workspace_id is not in this account", "/workspace_id");
                 }
                 if (operation == "get_workspace") {
                     return ApiResult::success(control::workspace_json(*row, operator_view(context)));
@@ -6702,10 +6702,10 @@ void register_workspace_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "start_workspace",
         .title = "Start a workspace",
-        .description = "Make sure the space has its first workspace (named after the account's "
+        .description = "Make sure the account has its first workspace (named after the account's "
                        "handle; one created earlier as `workspace` keeps that name), asking "
                        "the operator for it if absent, and answer its state with its "
-                       "`workspace_id`. Repeating it is harmless. A space can hold many "
+                       "`workspace_id`. Repeating it is harmless. An account can hold many "
                        "workspaces: `create_workspace` adds another and `list_workspaces` lists "
                        "them. Every workspace-scoped call names one with `workspace_id`.",
         .input_schema = control_input_schema(json::object(), json::array()),

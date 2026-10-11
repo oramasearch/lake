@@ -57,7 +57,7 @@ std::expected<control::Build, ApiResult> owned_build(const json& input, ApiConte
     auto build = context.store->get_build(input.at("build_id"));
     if (!build || build->customer_id != input.at("customer_id").get<std::string>() ||
         build->workspace_id != input.at("workspace_id").get<std::string>()) {
-        return std::unexpected(ApiResult::failure("not_found", "no such build in this space"));
+        return std::unexpected(ApiResult::failure("not_found", "no such build in this account"));
     }
     return *build;
 }
@@ -185,7 +185,7 @@ std::expected<control::Build, ApiResult> create_build(const json& input,
     }
     auto source = context.store->get_repository(repository);
     if (!source || source->customer_id != customer->id || !source->deleted_at.empty()) {
-        return std::unexpected(ApiResult::failure("not_found", "no such repository in this space"));
+        return std::unexpected(ApiResult::failure("not_found", "no such repository in this account"));
     }
     if (revision.empty()) {
         return std::unexpected(
@@ -306,7 +306,7 @@ void register_build_capabilities(Registry& registry) {
             if (!app || app->customer_id != input.at("customer_id").get<std::string>() ||
                 app->workspace_id != input.at("workspace_id").get<std::string>() ||
                 app->desired == "deleted") {
-                return ApiResult::failure("not_found", "no such app in this space");
+                return ApiResult::failure("not_found", "no such app in this account");
             }
             // Deploying a built image switches the App to image mode and drops its stored source,
             // so a rebuild after a code change names the source explicitly. create_build checks
@@ -375,7 +375,7 @@ void register_build_capabilities(Registry& registry) {
         .name = "list_builds",
         .title = "List builds",
         .description =
-            "List a space's image builds, newest first, with their state, to follow or find one.",
+            "List an account's image builds, newest first, with their state, to follow or find one.",
         .input_schema = input_schema(json::object()),
         .output_schema = {{"type", "object"}},
         .kind = CapabilityKind::Read,
@@ -400,7 +400,7 @@ void register_build_capabilities(Registry& registry) {
                 }
                 if (!decision->allowed) {
                     return ApiResult::failure(
-                        "unauthorized", "principal is not allowed to read this space's builds");
+                        "unauthorized", "principal is not allowed to read this account's builds");
                 }
             }
             auto builds = context.store->list_builds(input.at("customer_id"));
@@ -474,7 +474,7 @@ void register_build_capabilities(Registry& registry) {
                 build->workspace_id != input.at("workspace_id").get<std::string>() ||
                 (input.contains("customer_id") && input.at("customer_id") != build->customer_id)) {
                 return std::unexpected(
-                    ApiError{"not_found", "no such build in this space", "/build_id"});
+                    ApiError{"not_found", "no such build in this account", "/build_id"});
             }
             json resolved = input;
             resolved["customer_id"] = build->customer_id;
@@ -486,7 +486,7 @@ void register_build_capabilities(Registry& registry) {
             if (!build ||
                 build->workspace_id != input.at("workspace_id").get<std::string>() ||
                 (input.contains("customer_id") && input.at("customer_id") != build->customer_id)) {
-                co_return ApiResult::failure("not_found", "no such build in this space");
+                co_return ApiResult::failure("not_found", "no such build in this account");
             }
             if (input.dump().size() > 65'536) {
                 co_return ApiResult::failure("invalid_input",

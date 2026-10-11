@@ -507,7 +507,7 @@ public:
     // directories. A dry run takes no hold, closes nothing and reports what would be removed.
     virtual SyncStoreResult<SpaceStoreRemoval>
     remove_space_store(const std::string&, bool, const std::function<SyncStoreResult<void>()>&) {
-        return std::unexpected(SyncStoreError{"unsupported", "space stores are unavailable"});
+        return std::unexpected(SyncStoreError{"unsupported", "account stores are unavailable"});
     }
     // Closes the workspace's store and releases its bucket lease (workspace deletion, drain).
     virtual SyncStoreResult<void> close_workspace_store(const std::string&) {
