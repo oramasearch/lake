@@ -641,19 +641,6 @@ public:
     put_billing_plan(const control::BillingPlan& plan) override {
         return call("put_billing_plan", [&] { return store_->put_billing_plan(plan); });
     }
-    control::Result<std::vector<control::BillingSubscription>>
-    billing_subscriptions(const std::string& customer_id) override {
-        return call("billing_subscriptions",
-                    [&] { return store_->billing_subscriptions(customer_id); });
-    }
-    control::Result<std::vector<control::BillingSubscription>>
-    set_billing_subscription(const std::string& customer_id,
-                             const std::string& effective_from,
-                             const std::string& plan_id) override {
-        return call("set_billing_subscription", [&] {
-            return store_->set_billing_subscription(customer_id, effective_from, plan_id);
-        });
-    }
     control::Result<control::Invoice> create_invoice(const control::Invoice& invoice) override {
         return call("create_invoice", [&] { return store_->create_invoice(invoice); });
     }

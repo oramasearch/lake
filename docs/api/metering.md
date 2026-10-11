@@ -230,7 +230,8 @@ it. Limits are rows of `customer_usage_limits` (migration `0072_usage_limits`), 
 configuration like the storage quota. **Storage's limit is the repository storage quota**:
 `set_usage_limit` with `storage` sets `set_storage_quota`'s quota, still enforced on new repository
 writes (below), and keeps its warning percentage. Every other limit is per UTC calendar month and
-warns without refusing anything; enforcing one is an extension point for when plans are decided.
+warns without refusing anything. Lake is priced by usage only, with no plans or included amounts
+(lake#635, [billing.md](billing.md#usage-only-lake635)); enforcing a limit is an extension point.
 
 `usage_limits {customer_id}` answers each limit with what is used (storage: the repository bytes
 the quota is enforced against; any other: this month's total across the account's workspaces),

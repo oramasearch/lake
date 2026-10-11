@@ -122,10 +122,11 @@ metering store methods: the retired tables and their legacy reads are gone (migr
 `store.hpp`'s `UsageLimit`, `usage_limits` and `set_usage_limit` are an account's per-dimension
 usage limits (migration `0072_usage_limits`, lake#564): content-free configuration; the usage stays
 in workspace Zettas.
-`store.hpp`'s `BillingPlan`, `BillingPrice`, `BillingSubscription`, `Invoice` and `InvoiceLine`, with
-`billing_plans`, `put_billing_plan`, `billing_subscriptions`, `set_billing_subscription`,
-`create_invoice`, `list_invoices`, `get_invoice` and `set_invoice_state`, are billing records
-(migration `0073_billing`, lake#564, decision 56): control-plane multitenancy; usage stays in
+`store.hpp`'s `BillingPlan`, `BillingPrice`, `Invoice` and `InvoiceLine`, with `billing_plans`,
+`put_billing_plan`, `create_invoice`, `list_invoices`, `get_invoice` and `set_invoice_state`, are
+billing records (migration `0073_billing`, lake#564, decision 56; since lake#635 each publication
+of the usage-only price list is one `BillingPlan` row, and the subscription methods are gone because
+there is no plan to choose): control-plane multitenancy; usage stays in
 workspace Zettas and an invoice line keeps only the quantity billed. `PaymentEvent`,
 `PaymentEventResult`, `billing_provider_customer`, `set_billing_provider_customer` and
 `apply_payment_event` are the payment provider's records (migration `0074_payment_provider`,

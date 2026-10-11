@@ -108,7 +108,8 @@ export const NAV: NavItem[] = [
   { section: "organization", path: "/secret-mounts", label: "Secrets", icon: "secrets", audience: ["account"] },
   // Usage over time across a person's workspaces (lake#564); /metering is its repository usage by hour.
   { section: "organization", path: "/usage", label: "Usage", icon: "metering", audience: ["account"] },
-  // Plans and invoices, only where the lake bills (lake#564; off on an enterprise install).
+  // Usage billing and invoices, only where the lake bills (lake#564, lake#635; off on an enterprise
+  // install).
   { section: "organization", path: "/billing", label: "Billing", icon: "metering", audience: ["account"], billing: true },
   { section: "organization", path: "/activity", label: "Activity", icon: "audit", audience: ["account"] },
   { section: "administration", path: "/customers", label: "Customers", icon: "customers", audience: ["operator"] },

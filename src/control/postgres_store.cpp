@@ -5603,66 +5603,6 @@ public:
         return std::unexpected(StoreError{"store_error", "plan " + plan.id + " was not kept"});
     }
 
-    static Result<std::vector<BillingSubscription>>
-    subscriptions_in(pqxx::work& tx, const std::string& customer_id) {
-        const pqxx::result customers =
-            tx.exec_params("SELECT 1 FROM customers WHERE id = $1::uuid", customer_id);
-        if (customers.empty()) {
-            return std::unexpected(StoreError{"not_found", "no customer " + customer_id});
-        }
-        const pqxx::result rows = tx.exec_params(
-            "SELECT to_char(effective_from, 'YYYY-MM-DD'), plan_id, " + utc_column("created_at") +
-                " FROM billing_subscriptions WHERE customer_id = $1::uuid ORDER BY effective_from",
-            customer_id);
-        std::vector<BillingSubscription> out;
-        for (const auto& row : rows) {
-            out.push_back({customer_id,
-                           row[0].as<std::string>(),
-                           row[1].as<std::string>(),
-                           row[2].as<std::string>()});
-        }
-        return out;
-    }
-
-    Result<std::vector<BillingSubscription>>
-    billing_subscriptions(const std::string& customer_id) override {
-        return with_tx<std::vector<BillingSubscription>>(
-            [&](pqxx::work& tx) { return subscriptions_in(tx, customer_id); });
-    }
-
-    Result<std::vector<BillingSubscription>>
-    set_billing_subscription(const std::string& customer_id,
-                             const std::string& effective_from,
-                             const std::string& plan_id) override {
-        if (effective_from.size() != 10 || effective_from.substr(8) != "01") {
-            return std::unexpected(
-                StoreError{"invalid_input", "a plan takes effect on the first day of a month"});
-        }
-        return with_tx<std::vector<BillingSubscription>>(
-            [&](pqxx::work& tx) -> Result<std::vector<BillingSubscription>> {
-                auto before = subscriptions_in(tx, customer_id);
-                if (!before) {
-                    return before;
-                }
-                if (!plan_id.empty() &&
-                    tx.exec_params("SELECT 1 FROM billing_plans WHERE id = $1", plan_id).empty()) {
-                    return std::unexpected(StoreError{"not_found", "no plan " + plan_id});
-                }
-                tx.exec_params("DELETE FROM billing_subscriptions WHERE customer_id = $1::uuid "
-                               "AND effective_from >= $2::date",
-                               customer_id,
-                               effective_from);
-                if (!plan_id.empty()) {
-                    tx.exec_params("INSERT INTO billing_subscriptions (customer_id, "
-                                   "effective_from, plan_id) VALUES ($1::uuid, $2::date, $3)",
-                                   customer_id,
-                                   effective_from,
-                                   plan_id);
-                }
-                return subscriptions_in(tx, customer_id);
-            });
-    }
-
     static std::string invoice_columns() {
         return "id::text, number, customer_id::text, period, plan_id, plan_name, currency, "
                "total_micros, state, provider, provider_reference, instructions, note, " +
