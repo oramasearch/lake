@@ -2023,6 +2023,79 @@ TEST(AgentRuns, CronExpressionsAreCheckedAsACronJobWouldTakeThem) {
     EXPECT_FALSE(normalize_cron("0 9 * * 1; rm"));
 }
 
+// zetta#1238: a compiled pipeline is named from the intent, and lake passes on the template its
+// steps started from; an engine that names none leaves `template` out.
+TEST(AgentRuns, ABuiltPipelineSaysWhichTemplateItStartedFrom) {
+    AgentRuns r;
+    r.w.caller->answers["capture_intent"] = {{"input_id", "in-1"}};
+    r.w.caller->answers["compile_intent"] = {{"name", "Predict which customers will cancel"},
+                                             {"template", "the M-1 churn template"}};
+    const auto built = r.call(
+        "compile_pipeline",
+        {{"project", "retention"}, {"intent", "Predict which customers will cancel next month"}});
+    ASSERT_TRUE(built.ok) << built.error.message;
+    EXPECT_EQ(built.value["graph"], "Predict which customers will cancel");
+    EXPECT_EQ(built.value["template"], "the M-1 churn template");
+
+    r.w.caller->answers["compile_intent"] = {{"name", "churn skeleton"}};
+    const auto older = r.call("compile_pipeline", {{"project", "retention"}, {"intent", "Churn"}});
+    ASSERT_TRUE(older.ok) << older.error.message;
+    EXPECT_FALSE(older.value.contains("template"));
+}
+
+TEST(AgentRuns, ScheduleTimeZonesAreIanaNames) {
+    using lake::control::checked_time_zone;
+    EXPECT_EQ(checked_time_zone("Etc/UTC"), "Etc/UTC");
+    EXPECT_EQ(checked_time_zone("America/Toronto"), "America/Toronto");
+    EXPECT_EQ(checked_time_zone("UTC"), "UTC");
+    EXPECT_FALSE(checked_time_zone("Mars/Olympus"));
+    EXPECT_FALSE(checked_time_zone(""));
+    EXPECT_FALSE(checked_time_zone("Factory")) << "not a zone a person means";
+    EXPECT_FALSE(checked_time_zone("../etc/passwd"));
+    const auto folded = checked_time_zone("europe/paris");
+    ASSERT_FALSE(folded);
+    EXPECT_NE(folded.error().find("'Europe/Paris'"), std::string::npos) << folded.error();
+    EXPECT_TRUE(std::ranges::is_sorted(lake::control::iana_time_zones()));
+}
+
+// lake#586: a person reads a schedule's state in lake's words, never Kubernetes's.
+TEST(AgentRuns, AScheduleStatusNeverShowsKubernetesText) {
+    using lake::control::agent_schedule_progress;
+    lake::control::AgentCronSchedule schedule{.time_zone = "Etc/UTC", .desired = "present"};
+    EXPECT_EQ(agent_schedule_progress(schedule).phase, "Pending");
+    schedule.phase = "Ready";
+    schedule.message = "scheduled";
+    schedule.observed_generation = 1;
+    EXPECT_EQ(agent_schedule_progress(schedule).message, "Scheduled.");
+
+    schedule.time_zone = "Mars/Olympus";
+    schedule.phase = "Failed";
+    schedule.message = "Kubernetes refused the schedule: CronJob.batch \"prod-as-32d98966e14c\" "
+                       "is invalid: spec.timeZone: Invalid value: \"Mars/Olympus\": unknown time "
+                       "zone Mars/Olympus";
+    auto progress = agent_schedule_progress(schedule);
+    EXPECT_EQ(progress.phase, "Failed");
+    EXPECT_NE(progress.message.find("time zone 'Mars/Olympus'"), std::string::npos);
+    for (const char* word : {"Kubernetes", "CronJob", "spec.", "prod-as-"}) {
+        EXPECT_EQ(progress.message.find(word), std::string::npos) << word;
+    }
+
+    schedule.time_zone = "Etc/UTC";
+    schedule.message = "Kubernetes refused the schedule: CronJob.batch \"prod-as-1\" is invalid";
+    progress = agent_schedule_progress(schedule);
+    EXPECT_EQ(progress.message.find("Kubernetes"), std::string::npos);
+    EXPECT_NE(progress.message.find("Remove it and add it again"), std::string::npos);
+
+    schedule.message = "agents are not enabled on this Lake (spec.agents.runtimeImage)";
+    progress = agent_schedule_progress(schedule);
+    EXPECT_EQ(progress.message.find("spec."), std::string::npos);
+    EXPECT_NE(progress.message.find("not enabled"), std::string::npos);
+
+    schedule.desired = "absent";
+    schedule.phase = "Stopped";
+    EXPECT_EQ(agent_schedule_progress(schedule).phase, "Stopped");
+}
+
 TEST(AgentRuns, AScheduleCredentialActsAsWhoeverSetTheSchedule) {
     lake::control::InMemoryStore store;
     const auto session = store.sign_in_clerk(minted("scheduler"));
@@ -2152,6 +2225,31 @@ TEST(AgentRuns, LaunchStopAndScheduleAPythonAgentButNeverANativeOne) {
     EXPECT_FALSE(r.call("schedule_agent",
                         {{"agent_id", "a-1"}, {"cron", "0 9 * * *"}, {"time_zone", "$(x)"}})
                      .ok);
+
+    // lake#586: a zone Kubernetes would refuse is refused at once, and no schedule is stored.
+    const std::size_t before =
+        r.call("list_agent_schedules", {{"agent_id", "a-1"}}).value["schedules"].size();
+    const auto martian = r.call("schedule_agent",
+                                {{"agent_id", "a-1"},
+                                 {"cron", "0 9 1 1 *"},
+                                 {"time_zone", "Mars/Olympus"},
+                                 {"input", "x"}});
+    ASSERT_FALSE(martian.ok);
+    EXPECT_EQ(martian.error.code, "invalid_input");
+    EXPECT_EQ(martian.error.path, "/time_zone");
+    EXPECT_NE(martian.error.message.find("Mars/Olympus"), std::string::npos);
+    const auto lowercase =
+        r.call("schedule_agent",
+               {{"agent_id", "a-1"}, {"cron", "0 9 * * *"}, {"time_zone", "america/toronto"}});
+    ASSERT_FALSE(lowercase.ok);
+    EXPECT_NE(lowercase.error.message.find("America/Toronto"), std::string::npos)
+        << lowercase.error.message;
+    const auto badcron = r.call("schedule_agent", {{"agent_id", "a-1"}, {"cron", "0 9 32 * *"}});
+    ASSERT_FALSE(badcron.ok);
+    EXPECT_EQ(badcron.error.path, "/cron");
+    EXPECT_EQ(r.call("list_agent_schedules", {{"agent_id", "a-1"}}).value["schedules"].size(),
+              before)
+        << "a refused schedule leaves no row";
 
     r.w.caller->answers["get_agent"] = {{"id", "n-1"}, {"name", "Native"}, {"runtime", "native"}};
     EXPECT_FALSE(r.call("launch_agent", {{"agent_id", "n-1"}}).ok);

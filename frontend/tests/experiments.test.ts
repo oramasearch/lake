@@ -5,7 +5,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { canCompare, chosenRuns, ema, metricData, nextCursor, parameterDiff, type RunDetail } from "../src/pages/experiments/transforms.ts";
+import { canCompare, chosenRuns, ema, heldOutScores, metricData, nextCursor, parameterDiff, type RunDetail } from "../src/pages/experiments/transforms.ts";
 
 const points = [
   { step: 1, value: 4, time: "2026-09-28T00:00:00Z" },
@@ -59,6 +59,28 @@ test("the live read resumes after the last event it saw", () => {
   assert.equal(nextCursor({ events: [{ sequence: 10 }, { sequence: 11 }], next_sequence: 100 }, 10), 12);
   assert.equal(nextCursor({ events: [], next_sequence: 100 }, 12), 100);
   assert.equal(nextCursor({ events: [{ sequence: 1 }], next_sequence: 2 }, 12), 12);
+});
+
+test("held-out scores line up per run, with the best marked (zetta#1239)", () => {
+  const details = [
+    { run: "r1", summary: { held_out_auc: { final: 0.874 }, held_out_log_loss: { final: 0.41 }, held_out_rows: { final: 300 }, "train.log_loss": { final: 0.2 } } },
+    { run: "r2", summary: { held_out_auc: { final: 0.89 }, held_out_log_loss: { final: 0.383 }, held_out_rows: { final: 292 } } },
+    { run: "r3", summary: { "train.log_loss": { final: 0.1 } } },
+    { run: "dp", metrics_suppressed: "differential_privacy", summary: { held_out_auc: { final: 0.99 } } },
+  ] as unknown as RunDetail[];
+  const scores = heldOutScores(details);
+  assert.deepEqual(scores.metrics, ["held_out_auc", "held_out_log_loss", "held_out_rows"]);
+  assert.deepEqual(
+    scores.rows.map((row) => [row.run, ...row.values]),
+    [
+      ["r1", 0.874, 0.41, 300],
+      ["r2", 0.89, 0.383, 292],
+      ["r3", null, null, null],
+    ],
+  );
+  assert.deepEqual(scores.best, ["r2", "r2", null], "AUC higher is better, log loss lower; rows are not a score");
+  assert.deepEqual(heldOutScores([details[2]]), { metrics: [], rows: [{ run: "r3", values: [] }], best: [] });
+  assert.deepEqual(heldOutScores([details[0]]).best, [null, null, null], "one run has nothing to beat");
 });
 
 test("Compare Runs compares only two to eight chosen runs (lake#576)", () => {

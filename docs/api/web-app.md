@@ -18,7 +18,7 @@ calls the capability or the shared function, so the two cannot disagree.
 | `mcp_setup` | read | signed in | — | `{origin, mcp_url, tool_groups, flows, scopes}` |
 | `resolve_model` | read | anyone, for a public model | `namespace?`, `name` | `{repository_id, revision}` |
 | `latest_agent_task` | read | read on the space | `customer_id`, `workspace_id`, `subject` | `{task: <get_agent_task value> \| null}` |
-| `compile_pipeline` | action | write on the space | `customer_id`, `workspace_id`, `project`, `intent`, `dataset?`, `methodology?` | `{graph}` |
+| `compile_pipeline` | action | write on the space | `customer_id`, `workspace_id`, `project`, `intent`, `dataset?`, `methodology?` | `{graph, template?}` |
 | `render_pipeline` | read | read on the space | `customer_id`, `workspace_id`, `project`, `graph`, `step?` | `{svg}` |
 
 The Ask Orama and Agent Factory conversation (`send_ask_message`, `settle_ask_turn`,
@@ -148,7 +148,11 @@ The project page's Build a Pipeline, as one call, with exactly what its form pos
 `intent` as the project's intent (`capture_intent`), compile it (`compile_intent`, with
 `methodology` that methodology's own pipeline), and with `dataset` (`"<database>.<table>"`) point
 the new pipeline's first connect step at it (`get_graph`, then `edit_pipeline`). The value names
-the new pipeline as `graph` (empty when the engine named none). Each step is its own audited
+the new pipeline as `graph` (empty when the engine named none) and, from an engine with zetta#1238,
+`template`: the template its steps started from (`"the M-1 churn template"`). The engine names the
+pipeline from the intent's own words, so `graph` is no longer always `churn skeleton`; the step
+names (`load_customers`, `notify_retention` …) are the template's until edited, and Build a
+Pipeline says so when it finishes. Each step is its own audited
 capability call. The web app's project page calls it. For example,
 `POST /w/<workspace_id>/v1/compile_pipeline`:
 

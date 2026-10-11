@@ -2809,6 +2809,8 @@ json opportunity_json(const control::Opportunity& row) {
 }
 
 json schedule_json(const control::AgentCronSchedule& schedule) {
+    // The phase and message in lake's words, never the operator's or Kubernetes's (lake#586).
+    const control::AgentScheduleProgress progress = control::agent_schedule_progress(schedule);
     return {{"id", schedule.id},
             {"customer_id", schedule.customer_id},
             {"workspace_id", schedule.workspace_id},
@@ -2820,8 +2822,8 @@ json schedule_json(const control::AgentCronSchedule& schedule) {
             {"input", schedule.input},
             {"slug", schedule.slug},
             {"desired", schedule.desired},
-            {"phase", schedule.phase},
-            {"message", schedule.message},
+            {"phase", progress.phase},
+            {"message", progress.message},
             {"last_schedule_at", schedule.last_schedule_at},
             {"created_at", schedule.created_at},
             {"created_by_taap_id", schedule.created_by_taap_id}};
@@ -3253,10 +3255,20 @@ liquid::runtime::task<ApiResult> compile_pipeline(ApiContext& context,
         co_return result;
     }
     const std::string graph = result.value.value("name", result.value.value("graph", std::string()));
+    // The template its steps started from (zetta#1238), said so a person knows the step names
+    // are the template's until they edit them. An older engine names none.
+    const std::string template_name = result.value.value("template", std::string());
+    const auto with_template = [&](ApiResult answer) {
+        if (answer.ok && !template_name.empty()) {
+            answer.value["template"] = template_name;
+        }
+        return answer;
+    };
     if (graph.empty() || (dataset.empty() && !model.is_object())) {
-        co_return ApiResult::success({{"graph", graph}});
+        co_return with_template(ApiResult::success({{"graph", graph}}));
     }
-    co_return called(co_await point_pipeline(context, customer_id, project, graph, dataset, model));
+    co_return with_template(
+        called(co_await point_pipeline(context, customer_id, project, graph, dataset, model)));
 }
 
 liquid::runtime::task<ApiResult> settle_build(ApiContext& context, control::AgentTask task) {
@@ -4714,14 +4726,16 @@ void register_conversation_capabilities(Registry& registry) {
             "The project page's Build a Pipeline: capture `intent` as the project's intent, "
             "compile it (with `methodology`, that methodology's own pipeline), and, with "
             "`dataset` (\"<database>.<table>\"), point the new pipeline's first connect step at "
-            "it. Answers the new pipeline's name as `graph`.",
+            "it. Answers the new pipeline's name as `graph` (from the intent's words) and, from "
+            "an engine that says so, the `template` its steps started from.",
         .input_schema = customer_input_schema({{"project", {{"type", "string"}, {"minLength", 1}}},
                                                {"intent", {{"type", "string"}, {"minLength", 1}}},
                                                {"dataset", {{"type", "string"}}},
                                                {"methodology", {{"type", "string"}}}},
                                               json::array({"project", "intent"})),
         .output_schema = {{"type", "object"},
-                          {"properties", {{"graph", {{"type", "string"}}}}},
+                          {"properties",
+                           {{"graph", {{"type", "string"}}}, {"template", {{"type", "string"}}}}},
                           {"required", json::array({"graph"})},
                           {"additionalProperties", false}},
         .kind = CapabilityKind::Action,
@@ -4913,14 +4927,15 @@ void register_agent_run_capabilities(Registry& registry) {
             "which the Orama operator runs. Give `cron` (five fields, or @hourly, @daily, "
             "@weekly, @monthly) or `trigger` in plain words (every N minutes, hours or days, "
             "hourly, daily, weekly, every day|weekday|<weekday> at HH:MM). At most once every "
-            "five minutes; `time_zone` is an IANA zone, UTC by default.",
-        .input_schema = customer_agent_schema(
-            {{"agent_id", {{"type", "string"}}},
-             {"cron", {{"type", "string"}}},
-             {"trigger", {{"type", "string"}}},
-             {"time_zone", {{"type", "string"}}},
-             {"input", {{"description", "what each run is asked to do"}}}},
-            json::array({"agent_id"})),
+            "five minutes; `time_zone` is an IANA zone (such as America/Toronto), Etc/UTC by "
+            "default. An unknown zone or cron expression is refused before anything is stored.",
+        .input_schema =
+            customer_agent_schema({{"agent_id", {{"type", "string"}}},
+                                   {"cron", {{"type", "string"}}},
+                                   {"trigger", {{"type", "string"}}},
+                                   {"time_zone", {{"type", "string"}}},
+                                   {"input", {{"description", "what each run is asked to do"}}}},
+                                  json::array({"agent_id"})),
         .output_schema = {{"type", "object"}},
         .kind = CapabilityKind::Action,
         .object = "customer",
@@ -4950,14 +4965,14 @@ void register_agent_run_capabilities(Registry& registry) {
             if (!normalized) {
                 co_return ApiResult::failure("invalid_input", normalized.error(), "/cron");
             }
-            const std::string time_zone = input.value("time_zone", std::string("Etc/UTC"));
-            if (time_zone.empty() || time_zone.size() > 64 ||
-                time_zone.find_first_not_of(
-                    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789/_+-") !=
-                    std::string::npos) {
-                co_return ApiResult::failure(
-                    "invalid_input", "time_zone is an IANA zone such as Etc/UTC", "/time_zone");
+            // A CronJob takes only IANA names; refuse any other before a schedule exists
+            // (lake#586), rather than let Kubernetes refuse it later.
+            const auto zone =
+                control::checked_time_zone(input.value("time_zone", std::string("Etc/UTC")));
+            if (!zone) {
+                co_return ApiResult::failure("invalid_input", zone.error(), "/time_zone");
             }
+            const std::string& time_zone = *zone;
             auto agent = answered(
                 co_await zetta_call(context, customer_id, "get_agent", {{"id", agent_id}}));
             if (!agent) {
@@ -4995,10 +5010,10 @@ void register_agent_run_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "list_agent_schedules",
         .title = "List agent schedules",
-        .description = "The cron schedules of the space's agents (or one agent's), oldest first, "
-                       "with the operator's phase and when each last fired.",
-        .input_schema =
-            customer_agent_schema({{"agent_id", {{"type", "string"}}}}, json::array()),
+        .description = "The cron schedules of the workspace's agents (or one agent's), oldest "
+                       "first, each with its phase (Pending, Ready, Failed, Stopped), a message "
+                       "that says why and what to do, and when it last fired.",
+        .input_schema = customer_agent_schema({{"agent_id", {{"type", "string"}}}}, json::array()),
         .output_schema = {{"type", "object"}},
         .kind = CapabilityKind::Read,
         .object = "customer",

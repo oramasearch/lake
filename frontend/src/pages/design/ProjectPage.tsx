@@ -353,19 +353,23 @@ function BuildPipeline({ project, datasets, methodologies, onClose }: { project:
         ...(methodology ? { methodology } : {}),
       });
       const graph = text(answer, "graph");
+      // zetta#1238: the steps' names are the template's until edited; say which one.
+      const template = text(answer, "template");
+      const from = template ? ` from ${template}; rename its steps to fit your data` : "";
       setIntent("");
       if (dataset && graph) {
         // Pointed at a dataset: open the pipeline at its Run form, the dataset chosen.
+        if (from) toast(`Built${from}.`);
         navigate(ws(`/design/pipeline?${qs({ project, graph, dataset })}#run`));
         return;
       }
-      toast(graph ? `Pipeline ${graph} built` : "Pipeline built");
+      toast(graph ? `Pipeline ${graph} built${from}` : "Pipeline built");
       onClose();
     });
   return (
     <Drawer
       title="Build a Pipeline"
-      subtitle="Describe what it should predict or answer; lake builds the steps."
+      subtitle="Describe what it should predict or answer; lake builds the steps from a template you can edit."
       onClose={onClose}
       footer={
         <>

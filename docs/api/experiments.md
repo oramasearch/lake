@@ -205,7 +205,10 @@ answers keep the engine's `run` field.
 `get_run_metrics` (MCP: `get_run_metrics`) accepts optional metric `names`, `from_step` and
 `max_points` (4–10000). Omit those fields for all recorded series. Each point carries its original
 step, value and wall time. Engine read-time compaction preserves extrema. Artifacts are closed
-typed data for confusion matrices, ROC/PR curves, calibration, feature importance and predictions.
+typed data for confusion matrices, ROC/PR curves, calibration, feature importance and predictions,
+but only a trainer that logs them fills the list: the engine's GBDT training logs none, so
+`artifacts` is usually `[]`, and the capability's description no longer promises these charts
+(zetta#1239).
 
 ```json
 {"customer_id":"space-id","workspace_id":"workspace-id","run_id":"run-id","names":["train.loss"],"max_points":500}
@@ -225,6 +228,14 @@ params, series, summaries and artifacts for relative/wall-time views and paramet
 ```json
 {"runs":["run-a","run-b"],"metrics":[],"details":[{"run":"run-a","params":{},"summary":{},"series":[],"artifacts":[]},{"run":"run-b","params":{},"summary":{},"series":[],"artifacts":[]}]}
 ```
+
+**Held-out scores (zetta#1239).** The score that decides between runs is measured on rows the model
+never trained on: `held_out_auc`, `held_out_log_loss`, `held_out_accuracy` (classifiers),
+`held_out_rmse`, `held_out_mae` (regressors) and `held_out_rows`. Engines with
+https://github.com/oramasearch/zetta/pull/1245 or later record them as one-point series at the end
+of training, so they appear in `summary` (and in `compare_runs`); older runs have them only in
+`get_run_report` and on the model (`list_models` `metrics`). The run and compare pages show them in
+a **Held-Out Scores** table, one row per run with the best marked, rather than as curves.
 
 DP Runs retain `metrics_suppressed:"differential_privacy"`. Lake clears their curves in single-run
 and comparison responses and omits them from live metric polls; the existing released summary and

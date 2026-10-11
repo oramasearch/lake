@@ -11,7 +11,7 @@ import { LiveSwitch, pause, qs, useWorkspaceLink } from "@/pages/apps/shared";
 import { useConfirm } from "@/pages/streams/common";
 import "@/styles/experiments.css";
 import { Chart, ChartContext, newRegistry, viewAction } from "./Chart";
-import { cell, ema, metricData, nextCursor, parameterDiff, type RunDetail } from "./transforms";
+import { cell, ema, heldOutScores, metricData, nextCursor, parameterDiff, type RunDetail } from "./transforms";
 import { stopsPolling } from "@/lib/errors";
 
 export type Mode = "list" | "experiment" | "run" | "compare";
@@ -275,7 +275,8 @@ export function MetricsView({ details }: { details: RunDetail[] }) {
   const [smoothing, setSmoothing] = useState(0);
   const [log, setLog] = useState(false);
   const weight = smoothing / 100;
-  const names = useMemo(() => [...new Set(details.filter((run) => !run.metrics_suppressed).flatMap((run) => (run.series ?? []).map((series) => series.name)))].sort(), [details]);
+  // Held-out scores are one figure per run, shown in their own table rather than as a curve.
+  const names = useMemo(() => [...new Set(details.filter((run) => !run.metrics_suppressed).flatMap((run) => (run.series ?? []).map((series) => series.name)))].filter((name) => !name.startsWith("held_out_")).sort(), [details]);
   const labels = useMemo(() => details.map((run) => run.run), [details]);
   const groups = useMemo(() => {
     const out = new Map<string, string[]>();
@@ -336,6 +337,7 @@ export function MetricsView({ details }: { details: RunDetail[] }) {
               {run.run}: curves suppressed for differential privacy
             </Banner>
           ))}
+        <HeldOut details={details} />
         {!names.length && <Empty compact title="No Training Curves Yet">No training curves have been recorded. Live updates will appear here.</Empty>}
         {[...groups].map(([prefix, metrics]) => (
           <Card key={prefix} label="Curves" title={prefix === "Metrics" ? prefix : `${prefix[0].toUpperCase()}${prefix.slice(1)} Metrics`}>
@@ -358,6 +360,34 @@ export function MetricsView({ details }: { details: RunDetail[] }) {
         </Card>
       </div>
     </ChartContext.Provider>
+  );
+}
+
+/** The score that decides between runs (zetta#1239): measured on rows the model never trained on,
+ * one figure per run, best marked. Training curves are in-sample and flatter every model. */
+function HeldOut({ details }: { details: RunDetail[] }) {
+  const scores = useMemo(() => heldOutScores(details), [details]);
+  if (!details.length) return null;
+  return (
+    <Card title="Held-Out Scores" label="Evaluation">
+      {scores.metrics.length ? (
+        <>
+          <Table
+            headers={["Run", ...scores.metrics.map((name) => (name === "held_out_rows" ? "Held-out rows" : name))]}
+            rows={scores.rows.map((row) => [
+              row.run,
+              ...row.values.map((value, column) =>
+                value === null ? "—" : `${scores.metrics[column] === "held_out_rows" ? value : value.toFixed(4)}${scores.best[column] === row.run ? " (best)" : ""}`,
+              ),
+            ])}
+            caption="Held-out scores"
+          />
+          <p className="muted mb-0 mt-2 text-[12.5px]">Measured on rows the model never trained on. Higher is better, except for losses and errors.</p>
+        </>
+      ) : (
+        <p className="muted m-0 text-[13px]">No held-out score was recorded. The run held no rows out, or it ran before lake recorded held-out scores; its run report may still have one.</p>
+      )}
+    </Card>
   );
 }
 

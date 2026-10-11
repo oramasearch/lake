@@ -269,6 +269,53 @@ std::expected<std::string, std::string> trigger_cron(std::string_view trigger) {
     return unplaceable();
 }
 
+std::expected<std::string, std::string> checked_time_zone(std::string_view name) {
+    const auto& names = iana_time_zones();
+    if (std::ranges::binary_search(names, name)) {
+        return std::string(name);
+    }
+    const std::string quoted = "'" + std::string(name) + "'";
+    const std::string folded = lowered(name);
+    for (const std::string_view known : names) {
+        if (lowered(known) == folded) {
+            return std::unexpected(quoted + " is not an IANA time zone; did you mean '" +
+                                   std::string(known) + "'? (the name is case-sensitive)");
+        }
+    }
+    return std::unexpected(quoted + " is not an IANA time zone; give one such as Etc/UTC, "
+                                    "America/Toronto or Europe/Paris");
+}
+
+AgentScheduleProgress agent_schedule_progress(const AgentCronSchedule& schedule) {
+    if (schedule.desired != "present" && (schedule.phase.empty() || schedule.phase == "Stopped")) {
+        return {"Stopped", "Removed: it runs no more."};
+    }
+    if (schedule.phase.empty() && schedule.observed_generation == 0) {
+        return {"Pending", "Waiting for lake to set up this schedule."};
+    }
+    if (schedule.phase == "Ready") {
+        return {"Ready", "Scheduled."};
+    }
+    if (schedule.phase != "Failed") {
+        return {schedule.phase, schedule.message};
+    }
+    // The operator's message names Kubernetes objects and fields; a person gets what to do.
+    const std::string not_scheduled = "Not scheduled, so it will not run. ";
+    if (!checked_time_zone(schedule.time_zone)) {
+        return {"Failed",
+                not_scheduled + "Lake does not know the time zone '" + schedule.time_zone +
+                    "'. Remove this schedule and add it again with an IANA zone such as Etc/UTC."};
+    }
+    if (schedule.message.find("not enabled") != std::string::npos) {
+        return {"Failed",
+                not_scheduled + "Unattended agent runs are not enabled on this lake; ask the "
+                                "person who runs it to turn them on."};
+    }
+    return {"Failed",
+            not_scheduled + "Lake could not set it up. Remove it and add it again; if it fails "
+                            "again, ask the person who runs this lake."};
+}
+
 std::optional<std::chrono::sys_seconds> utc_seconds(std::string_view text) {
     // YYYY-MM-DDTHH:MM:SSZ, as both stores write created_at.
     if (text.size() != 20 || text[4] != '-' || text[7] != '-' || text[10] != 'T' ||

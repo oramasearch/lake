@@ -125,8 +125,15 @@ in the data table. Drag selects an X region, Shift-drag pans, and keyboard-acces
 pan and reset across every metric chart. The hover crosshair and legend show values.
 User-selected X bounds survive live refreshes; changing the axis resets them.
 
+A **Held-Out Scores** table comes first on the run and compare pages (zetta#1239): each run's
+`held_out_*` summary values, one row per run, with `(best)` on the run that scored best on each
+(higher is better, lower for losses and errors; `held_out_rows` is a count, not a score). Those
+one-point series are left out of the curves. A run without them says so, and points at its run
+report (`heldOutScores` in `transforms.ts`, tested in `frontend/tests/experiments.test.ts`).
+
 The parameter table marks differing values and distinguishes missing values from null. Artifacts
-include confusion matrices, ROC/PR, calibration, feature importance and sample prediction tables.
+include confusion matrices, ROC/PR, calibration, feature importance and sample prediction tables
+when a trainer logged them; GBDT training logs none, so the card usually says none were recorded.
 Every chart has its exact data in a table (**Chart Data** under each metric). User-controlled
 strings are rendered as text. A differential-privacy run says *curves suppressed for differential
 privacy* and is excluded from curve drawing and live metric requests.

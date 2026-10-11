@@ -68,7 +68,24 @@ already written stay.
 (5–59, or whole hours), `every N hours|days`, `hourly`, `daily`, `weekly`, `every day|weekday|<weekday>
 at HH:MM`. lake checks each field's range and refuses a schedule that could fire more often than
 once every five minutes. The refusal states the rule: `every 1 minutes` answers that a schedule runs
-at most once every five minutes, so the shortest is `every 5 minutes` (lake#442). A schedule
+at most once every five minutes, so the shortest is `every 5 minutes` (lake#442).
+
+`time_zone` must be a name in the IANA time zone database (`Etc/UTC` when omitted), because the
+operator hands it to the CronJob's `spec.timeZone`, which Kubernetes refuses otherwise. lake checks
+it before anything is stored (lake#586): `{"cron": "0 9 1 1 *", "time_zone": "Mars/Olympus"}`
+answers `invalid_input` at `/time_zone`, *'Mars/Olympus' is not an IANA time zone; give one such as
+Etc/UTC, America/Toronto or Europe/Paris*, and no schedule exists. A name that differs only in
+letter case is refused with the spelling it most likely meant (`america/toronto` → *did you mean
+'America/Toronto'?*). The cron expression is checked first, at `/cron`. The list of names is
+`src/control/time_zones.cpp`, generated from tz database 2026c by `tools/tz/generate-time-zones.py`;
+regenerate it when IANA publishes a release.
+
+A schedule's `phase` and `message` are lake's, not the operator's (`agent_schedule_progress`,
+lake#586): `Pending` until the operator reports (*Waiting for lake to set up this schedule.*),
+`Ready` (*Scheduled.*), `Stopped` once removed, and `Failed` with why and what to do: an unknown time
+zone (from a schedule stored before the check), runs not enabled on this lake, or otherwise *Lake
+could not set it up. Remove it and add it again*. The operator's own text, which names Kubernetes
+objects and fields, stays in `agent_cron_schedule_status` for whoever runs lake. A schedule
 belongs to its workspace, as a launch does. Creating a Python agent with a trigger in Train → Agents (or through the
 Agent Factory) adds its first schedule; deleting the agent removes all of them.
 
@@ -132,8 +149,8 @@ service.
 | `launch_agent` | action | `write` on the customer | `{workspace_id, agent_id, mode: job\|service, input?}`; Python agents only |
 | `list_agent_launches` | read | `read` | `{workspace_id, agent_id?, limit?}`, the workspace's runs newest first, with phase, message, `operator_phase`, `stop_reason`, exit code and result; the schedules' runs are included (trigger `schedule`) |
 | `stop_agent_launch` | action | `write` | `{launch_id}`; the operator removes the Job or Deployment |
-| `schedule_agent` | action | `write` | `{agent_id, cron \| trigger, time_zone?, input?}`; adds one schedule; Python agents only |
-| `list_agent_schedules` | read | `read` | `{agent_id?}`, oldest first, with the operator's phase and last firing |
+| `schedule_agent` | action | `write` | `{agent_id, cron \| trigger, time_zone?, input?}`; adds one schedule; Python agents only; an unknown IANA zone is `invalid_input` at `/time_zone` |
+| `list_agent_schedules` | read | `read` | `{agent_id?}`, oldest first, with its phase, a message in lake's words (lake#586) and last firing |
 | `unschedule_agent` | action | `write` | `{schedule_id}`; the operator deletes its CronJob |
 | `agent_turn` | action | `write` | `{agent, message, conversation_id?, context?, page?, kind?}`; Lake creates the conversation ID when omitted and uses it to attach the preceding same-kind turn; ExperimentsAgent accepts `experiment`, `experiment_status`, or `experiment_explain` |
 

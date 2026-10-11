@@ -47,7 +47,8 @@ pretending to train.
   `{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "project": "retention", "intent": "Predict the churned column of accounts", "dataset": "datasets.accounts"}`.
   Without the project, `compile_pipeline` answers `not_found` at `/project` and says to create it.
   `dataset` is `<database>.<table>`; `methodology` (for example `M-3`) is optional. The answer's
-  `graph` is the new pipeline's id.
+  `graph` is the new pipeline's name, taken from your description's first words; `template` says
+  which template its steps started from.
 - MCP: `workspace_act` with `create_project`, then the `compile_pipeline` tool, with the same
   input. `compile_pipeline` is the one recipe: it captures the sentence and compiles it (the
   engine's `capture_intent` and `compile_intent`) in one call, and `mcp_setup`'s *Train a model*

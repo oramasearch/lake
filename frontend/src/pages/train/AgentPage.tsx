@@ -276,7 +276,7 @@ function Schedules({ agentId }: { agentId: string }) {
         </Button>
       }
     >
-      <p className="muted mt-0 text-[12.5px]">Each schedule is its own Kubernetes CronJob: every tick runs this agent once, as you, with what you ask it here.</p>
+      <p className="muted mt-0 text-[12.5px]">Every tick of a schedule runs this agent once, as you, with what you ask it here.</p>
       {remove.error ? <ErrorBlock error={remove.error} /> : null}
       <DataTable
         q={schedules}

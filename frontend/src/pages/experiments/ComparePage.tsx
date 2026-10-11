@@ -30,9 +30,9 @@ export default function ComparePage() {
     if (comparable) void refresh();
   }, [refresh, runs, comparable]);
   const status = useFollow(live && comparable, () => details.filter((detail) => !detail.metrics_suppressed).map((detail) => ({ kind: "run" as const, id: detail.run })), refresh);
-  const metrics = new Set(details.filter((run) => !run.metrics_suppressed).flatMap((run) => (run.series ?? []).map((series) => series.name))).size;
+  const metrics = new Set(details.filter((run) => !run.metrics_suppressed).flatMap((run) => (run.series ?? []).map((series) => series.name)).filter((name) => !name.startsWith("held_out_"))).size;
   const artifacts = details.reduce((sum, run) => sum + (run.artifacts ?? []).length, 0);
-  const sub = "Two to eight runs' curves on shared charts, with their parameter differences and artifacts.";
+  const sub = "Two to eight runs' held-out scores and curves on shared charts, with their parameter differences and artifacts.";
   if (!comparable) {
     return (
       <ExperimentsShell mode="compare" notice={notice} live={false} onLive={setLive} status="" sub={sub}>
