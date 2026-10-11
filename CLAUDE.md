@@ -65,6 +65,17 @@ a resent chunk answers the true `received`, and unfinished uploads are listed an
 24 hours (lake#588); `load_drive_dataset` loads a drive's CSV or JSONL file (lake#593); the web app
 retries an edge 503 read under the one `shouldRetry` rule and names who answered (lake#573,
 `docs/ui/web-app.md#a-read-answered-503`).
+Data → Connections (lake#651, no migration): the databases a workspace reads have their own page
+(`/connections`, one connection's tables at `/connections/connection?name=`), out of Datasets,
+whose Load data picks from them; old `?browse=`/`#connections` links redirect
+(`docs/ui/connections.md`). Storage moves from Datasets to the Storage tab of Data → Drives, and a
+bucket or filesystem store opens as a fourth drive kind, `store` (lake#656, no migration):
+`create_drive {storage: "store", store_id}` and the entry capabilities browse it in place through
+`control::StoreContents` and the injected `StoreBrowser` (an item's id is its path; deleting the
+drive never deletes the store; a volume is refused). No provider is browsable yet, so without a
+browser it answers `not_supported` (lake#664); which services and apps mount a store is not
+recorded (lake#666). Not deployed. See `docs/api/drives.md#store-drives` and
+`docs/ui/drives.md#storage`.
 
 A workspace's own AI solutions follow (lake#597, no migration): sealed `lake_solutions` records in
 the workspace Zetta in the catalogue's shape (name, business problem, decision, measurement with
@@ -189,6 +200,14 @@ GPU-minute, with a GPU rate per class (`billing_plan_prices.class`). `instances`
 the operator must vendor the schema, select `workload_resources_guard` and report the resources
 (orama-operator#288).
 See `docs/api/metering.md#resources` and `docs/api/billing.md#price-list`.
+Deleting and revoking follow (lake#645, migration `0076_organization_deletion`): `delete_organization`
+(an owner; refused while its account has workspaces, which it names; the organization and its account
+are marked `deleted_at`, never erased, because the central audit chain names the account),
+`revoke_invitation`, `revoke_grant`, `delete_secret_mount` (every record out of the mount's workspace
+Zetta before its route), `delete_dataset`, `delete_model`, `delete_run`, `delete_index` (the workspace
+engine's deletes, zetta#1257; `not_supported` from an older engine) and `delete_ask_conversation`,
+each with `dry_run: true` and a typed confirmation in Lake Console. Not deployed; the operator must
+vendor the schema and select `organization_deletion_guard`. See `docs/api/deletion.md`.
 A user's secret reaches a Kubernetes Secret only as a sealed projection (lake#625, decision 58, no
 migration): lake has two levels of secrets, Orama's platform credentials as environment variables
 of the hosting platform and users' workspace secrets in the secret store (`docs/deployment/secrets.md`).
@@ -654,7 +673,7 @@ one adapter TU) and the pure renderers in `include/zetta/api/web_ui.hpp`.
 - **Schema.** `db/schema.sql` is the source of truth; the operator carries a byte-identical
   vendored copy at `internal/controller/assets/lake-schema.sql` and applies it per Lake as an
   owned `PostgresSchema` (one transaction, guarded on the table the **newest** migration creates,
-  `workload_resources_guard` in the source tree, versioned by content hash).
+  `organization_deletion_guard` in the source tree, versioned by content hash).
   Change the schema HERE, then copy it into the operator in the same change; the operator's test
   checks the copy carries the source-of-truth header. Migrations are single-shot today
   (incremental migrations are the PostgresSchema follow-up), so until then a schema change means

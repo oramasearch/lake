@@ -227,7 +227,7 @@ void register_github_import_capabilities(Registry& registry) {
         .title = "Import GitHub repository",
         .description = "Import Git history and recorded GitHub forge responses as a new "
                        "repository in one workspace (`workspace_id`, required) of the "
-                       "customer's space.",
+                       "customer's account.",
         .input_schema = {{"type", "object"},
                          {"properties",
                           {{"customer_id", {{"type", "string"}}},

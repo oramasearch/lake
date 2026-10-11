@@ -193,6 +193,45 @@ of an organization or team.
 The membership, its member object and the grant derived from it are removed at once. Lake refuses
 to remove the last owner, including when that owner is you.
 
+## Revoke an Invitation
+
+1. Open the organization's **Invitations** tab.
+2. On a pending invitation, press **Revoke**, type `revoke` and press **Revoke invitation**.
+
+- REST: `POST /v1/revoke_invitation` with `{"invitation_id": "<id>"}`; add `"dry_run": true` to
+  check first.
+- MCP: `revoke_invitation`.
+
+The invitation can no longer be accepted and stays listed as revoked. An accepted invitation is a
+membership: remove the member instead.
+
+## Revoke a Grant
+
+1. Open **Effective Access** for the organization, team or repository and follow a source to its
+   direct grants, or open `/grants?object_id=<object id>`.
+2. Press **Revoke** on the grant, type `revoke` and press **Revoke grant**.
+
+- REST: `POST /v1/revoke_grant` with `{"grant_id": "<id>"}`.
+- MCP: `revoke_grant`.
+
+Lake refuses a grant that comes with a membership (remove the member instead) and the last admin
+grant on an account, so it always has an administrator.
+
+## Delete an Organization
+
+1. Delete each of the organization's workspaces first, on **Workspaces**.
+2. Open the organization and press **Delete organization**. The dialog lists what goes: its members
+   (who lose access), teams, invitations, access grants and SSO settings. While it still owns a
+   workspace, the dialog names it and the button stays disabled.
+3. Type the organization's handle and press **Delete organization**.
+
+- REST: `POST /v1/delete_organization` with `{"organization_id": "<id>", "confirm": "<handle>"}`;
+  `{"organization_id": "<id>", "dry_run": true}` lists what would go.
+- MCP: `delete_organization`.
+
+Only an owner can delete an organization, and it cannot be undone. Its handle is retired and cannot
+be used again.
+
 ## Permissions
 
 | Action | Needs |

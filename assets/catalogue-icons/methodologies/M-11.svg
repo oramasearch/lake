@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" role="img" aria-label="A page with one field picked out">
+<title>M-11 Document intelligence</title>
+<style>.l,.a{fill:none;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round}.l{stroke:currentColor}.a{stroke:var(--cat-accent,#0f62fe)}.d{fill:var(--cat-accent,#0f62fe)}.t{fill:var(--cat-tint,#0f62fe33)}.s{stroke-dasharray:2 2.5}</style>
+<rect class="t" x="6.5" y="12.5" width="8" height="4" rx="1"/>
+<path class="l" d="M4 3h10l4 4v14H4z"/>
+<path class="l" d="M14 3v4h4"/>
+<path class="l" d="M7.5 9h7"/>
+<rect class="a" x="6.5" y="12.5" width="8" height="4" rx="1"/>
+<path class="l" d="M7.5 19h4"/>
+</svg>

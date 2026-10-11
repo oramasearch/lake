@@ -347,7 +347,7 @@ audit::Result<audit::Identity> InMemoryStore::current_lake_identity() {
             return identity;
         }
     }
-    return std::unexpected(audit::Error{"not_found", "no lake identity exists"});
+    return std::unexpected(audit::Error{"not_found", "no Lake identity exists"});
 }
 
 audit::Result<audit::Identity> InMemoryStore::lake_identity_by_taap_id(const std::string& taap_id) {
@@ -357,14 +357,14 @@ audit::Result<audit::Identity> InMemoryStore::lake_identity_by_taap_id(const std
             return identity;
         }
     }
-    return std::unexpected(audit::Error{"not_found", "no lake identity for " + taap_id});
+    return std::unexpected(audit::Error{"not_found", "no Lake identity for " + taap_id});
 }
 
 audit::Result<void> InMemoryStore::create_lake_identity(const audit::Identity& identity) {
     std::lock_guard lock(mutex_);
     for (const audit::Identity& existing : identities_) {
         if (existing.current || existing.taap_id == identity.taap_id) {
-            return std::unexpected(audit::Error{"conflict", "a lake identity already exists"});
+            return std::unexpected(audit::Error{"conflict", "a Lake identity already exists"});
         }
     }
     identities_.push_back(identity);
@@ -381,7 +381,7 @@ audit::Result<void> InMemoryStore::rotate_lake_identity(const audit::Identity& p
             return {};
         }
     }
-    return std::unexpected(audit::Error{"conflict", "the lake identity changed before rotation"});
+    return std::unexpected(audit::Error{"conflict", "the Lake identity changed before rotation"});
 }
 
 Result<void> InMemoryStore::append_audit_event(const audit::Event& event) {
@@ -706,7 +706,7 @@ Result<OciRepositoryRoute> InMemoryStore::create_oci_repository_route(
     if (workspace == workspaces_.end() || workspace->customer_id != customer_id ||
         workspace->desired == "deleted") {
         return std::unexpected(
-            StoreError{"invalid_input", "workspace_id must name a live workspace of this space"});
+            StoreError{"invalid_input", "workspace_id must name a live workspace of this account"});
     }
     const auto existing = std::ranges::find_if(oci_repository_routes_, [&](const auto& route) {
         return route.customer_id == customer_id && route.name == name;
@@ -759,7 +759,7 @@ InMemoryStore::delete_oci_repository_route(const std::string& customer_id, const
         if (workspace == workspaces_.end() || workspace->customer_id != customer_id ||
             workspace->desired == "deleted") {
             return std::unexpected(StoreError{
-                "invalid_input", "workspace_id must name a live workspace of this space"});
+                "invalid_input", "workspace_id must name a live workspace of this account"});
         }
     }
     std::vector<std::string> names{name};
@@ -1112,7 +1112,7 @@ Result<WebApp> InMemoryStore::authorize_web_app(const std::string& app_id,
         return std::unexpected(StoreError{"not_found", "no protected app " + app_id});
     }
     if (!user_can_access_web_app_locked(*app, user_id)) {
-        return std::unexpected(StoreError{"unauthorized", "user is not a member of this space"});
+        return std::unexpected(StoreError{"unauthorized", "user is not a member of this account"});
     }
     return *app;
 }
@@ -1200,7 +1200,7 @@ Result<WebApp> InMemoryStore::create_web_app(const NewWebApp& input) {
             return workspace.id == input.workspace_id && workspace.customer_id == input.customer_id &&
                    workspace.desired != "deleted";
         })) {
-        return std::unexpected(StoreError{"invalid_input", "workspace_id must name a workspace Zetta in this space"});
+        return std::unexpected(StoreError{"invalid_input", "workspace_id must name a workspace Zetta in this account"});
     }
     if (std::ranges::none_of(customers_, [&](const Customer& customer) {
             return customer.id == input.customer_id;
@@ -1399,7 +1399,7 @@ Result<Build> InMemoryStore::create_build(const NewBuild& input) {
             return workspace.id == input.workspace_id && workspace.customer_id == input.customer_id &&
                    workspace.desired != "deleted";
         })) {
-        return std::unexpected(StoreError{"invalid_input", "workspace_id must name a workspace Zetta in this space"});
+        return std::unexpected(StoreError{"invalid_input", "workspace_id must name a workspace Zetta in this account"});
     }
     if (std::ranges::none_of(customers_, [&](const Customer& customer) {
             return customer.id == input.customer_id;
@@ -1833,7 +1833,7 @@ Result<AgentTask> InMemoryStore::create_agent_task(const AgentTask& in) {
             return workspace.id == in.workspace_id && workspace.customer_id == in.customer_id &&
                    workspace.desired != "deleted";
         })) {
-        return std::unexpected(StoreError{"invalid_input", "workspace_id must name a workspace Zetta in this space"});
+        return std::unexpected(StoreError{"invalid_input", "workspace_id must name a workspace Zetta in this account"});
     }
     if (in.agent.empty() || in.scopes.empty()) {
         return std::unexpected(StoreError{"invalid_input", "agent task is invalid"});
@@ -2435,7 +2435,12 @@ Result<Organization> InMemoryStore::create_organization(const NewOrganization& i
 
 Result<std::vector<Organization>> InMemoryStore::list_organizations(int limit) {
     std::lock_guard lock(mutex_);
-    std::vector<Organization> out(organizations_.rbegin(), organizations_.rend());
+    std::vector<Organization> out;
+    for (auto it = organizations_.rbegin(); it != organizations_.rend(); ++it) {
+        if (!deleted_organizations_.contains(it->id)) {
+            out.push_back(*it);
+        }
+    }
     if (limit > 0 && out.size() > static_cast<std::size_t>(limit))
         out.resize(static_cast<std::size_t>(limit));
     return out;
@@ -2444,7 +2449,7 @@ Result<std::vector<Organization>> InMemoryStore::list_organizations(int limit) {
 Result<Organization> InMemoryStore::get_organization(const std::string& id) {
     std::lock_guard lock(mutex_);
     for (const auto& o : organizations_)
-        if (o.id == id)
+        if (o.id == id && !deleted_organizations_.contains(id))
             return o;
     return std::unexpected(StoreError{"not_found", "no organization " + id});
 }
@@ -2506,7 +2511,7 @@ Result<std::vector<Customer>> InMemoryStore::list_customers(int limit, const std
     std::lock_guard lock(mutex_);
     std::vector<Customer> out;
     for (auto it = customers_.rbegin(); it != customers_.rend(); ++it) {
-        if (user_id.empty() || it->user_id == user_id) {
+        if ((user_id.empty() || it->user_id == user_id) && !deleted_customers_.contains(it->id)) {
             out.push_back(*it);
         }
     }
@@ -2518,7 +2523,7 @@ Result<std::vector<Customer>> InMemoryStore::list_customers(int limit, const std
 Result<Customer> InMemoryStore::get_customer(const std::string& id) {
     std::lock_guard lock(mutex_);
     for (const auto& c : customers_)
-        if (c.id == id)
+        if (c.id == id && !deleted_customers_.contains(id))
             return c;
     return std::unexpected(StoreError{"not_found", "no customer " + id});
 }
@@ -2526,9 +2531,10 @@ Result<Customer> InMemoryStore::get_customer(const std::string& id) {
 Result<Customer> InMemoryStore::organization_customer(const std::string& organization_id) {
     std::lock_guard lock(mutex_);
     for (const auto& c : customers_)
-        if (!organization_id.empty() && c.organization_id == organization_id)
+        if (!organization_id.empty() && c.organization_id == organization_id &&
+            !deleted_customers_.contains(c.id))
             return c;
-    return std::unexpected(StoreError{"not_found", "no space for organization " + organization_id});
+    return std::unexpected(StoreError{"not_found", "no account for organization " + organization_id});
 }
 
 } // namespace lake::control
@@ -4336,7 +4342,7 @@ Result<Repository> InMemoryStore::create_repository(const NewRepository& in) {
                    workspace.desired != "deleted";
         })) {
         return std::unexpected(
-            StoreError{"invalid_input", "workspace_id must name a workspace in this space"});
+            StoreError{"invalid_input", "workspace_id must name a workspace in this account"});
     }
     for (const auto& r : repositories_) {
         if (r.customer_id == in.customer_id && r.name == in.name && r.deleted_at.empty()) {
@@ -5118,7 +5124,7 @@ Result<OrganizationSpace> InMemoryStore::convert_personal_space(const ConvertPer
     std::lock_guard lock(mutex_);
     if (in.owner_user_id.empty() || in.owner_taap_id.empty()) {
         return std::unexpected(StoreError{
-            "invalid_input", "a personal space is converted by the person who owns it"});
+            "invalid_input", "a person's own account is converted by the person who owns it"});
     }
     if (std::ranges::none_of(users_, [&](const User& row) {
             return row.id == in.owner_user_id && row.taap_id == in.owner_taap_id;
@@ -5132,17 +5138,17 @@ Result<OrganizationSpace> InMemoryStore::convert_personal_space(const ConvertPer
     }
     if (customer->customer_type != "individual") {
         return std::unexpected(
-            StoreError{"conflict", "this space already belongs to an organization"});
+            StoreError{"conflict", "this account already belongs to an organization"});
     }
     if (customer->user_id != in.owner_user_id) {
         return std::unexpected(StoreError{
-            "unauthorized", "only the person whose personal space this is can convert it"});
+            "unauthorized", "only the person whose own account this is can convert it"});
     }
     const auto customer_object = std::ranges::find_if(policy_objects_, [&](const PolicyObject& row) {
         return row.object_type == "customer" && row.external_id == in.customer_id;
     });
     if (customer_object == policy_objects_.end()) {
-        return std::unexpected(StoreError{"store_error", "the space's policy object is missing"});
+        return std::unexpected(StoreError{"store_error", "the account's policy object is missing"});
     }
     const std::string customer_object_id = customer_object->id;
     std::string fresh_handle;
@@ -5771,7 +5777,7 @@ Result<SecretMountRoute> InMemoryStore::create_secret_mount_route(const SecretMo
     if (workspace == workspaces_.end() || workspace->customer_id != input.customer_id ||
         workspace->desired == "deleted") {
         return std::unexpected(
-            StoreError{"invalid_input", "workspace_id must name a live workspace of this space"});
+            StoreError{"invalid_input", "workspace_id must name a live workspace of this account"});
     }
     if (input.mount_id.empty() ||
         std::ranges::any_of(secret_mount_routes_, [&](const SecretMountRoute& route) {
@@ -6422,6 +6428,194 @@ Result<RecoveryContact> InMemoryStore::get_recovery_contact(const std::string& r
         return std::unexpected(StoreError{"not_found", "repository has no recovery contact"});
     }
     return *found;
+}
+
+// ---- deletions (lake#645) ----
+
+namespace {
+
+// The policy objects below (and including) `roots`, so a deletion removes a subtree as
+// PostgreSQL's ON DELETE CASCADE on objects.parent_id does.
+std::set<std::string> policy_subtree(const std::vector<PolicyObject>& objects,
+                                     std::set<std::string> roots) {
+    std::set<std::string> found = roots;
+    bool grew = true;
+    while (grew) {
+        grew = false;
+        for (const PolicyObject& object : objects) {
+            if (!object.parent_id.empty() && found.contains(object.parent_id) &&
+                found.insert(object.id).second) {
+                grew = true;
+            }
+        }
+    }
+    return found;
+}
+
+} // namespace
+
+Result<OrganizationDeletion> InMemoryStore::delete_organization(const std::string& id,
+                                                                bool dry_run) {
+    std::lock_guard lock(mutex_);
+    const auto organization = std::ranges::find(organizations_, id, &Organization::id);
+    if (organization == organizations_.end() || deleted_organizations_.contains(id)) {
+        return std::unexpected(StoreError{"not_found", "no organization " + id});
+    }
+    OrganizationDeletion plan{.organization = *organization};
+    const auto customer = std::ranges::find_if(customers_, [&](const Customer& value) {
+        return value.organization_id == id && !deleted_customers_.contains(value.id);
+    });
+    if (customer != customers_.end()) {
+        plan.customer_id = customer->id;
+        plan.customer_name = customer->name;
+        for (const Workspace& workspace : workspaces_) {
+            if (workspace.customer_id == customer->id && workspace.desired != "deleted") {
+                plan.live_workspaces.push_back(workspace);
+            }
+        }
+    }
+    std::set<std::string> roots;
+    for (const PolicyObject& object : policy_objects_) {
+        if ((object.object_type == "organization" && object.external_id == id) ||
+            (!plan.customer_id.empty() && object.object_type == "customer" &&
+             object.external_id == plan.customer_id)) {
+            roots.insert(object.id);
+        }
+    }
+    const std::set<std::string> objects = policy_subtree(policy_objects_, roots);
+    const auto of_organization = [&](const auto& value) { return value.organization_id == id; };
+    const auto mount_of = [&](const SecretMountRoute& route) {
+        return route.organization_id == id ||
+               (!plan.customer_id.empty() && route.customer_id == plan.customer_id);
+    };
+    plan.counts = {
+        {"teams", std::ranges::count_if(teams_, of_organization)},
+        {"memberships", std::ranges::count_if(memberships_, of_organization)},
+        {"invitations", std::ranges::count_if(invitations_, of_organization)},
+        {"sso_providers", std::ranges::count_if(sso_providers_, of_organization)},
+        {"federation_issuers", std::ranges::count_if(federation_issuers_, of_organization)},
+        {"secret_mount_routes", std::ranges::count_if(secret_mount_routes_, mount_of)},
+        {"policy_objects", static_cast<std::int64_t>(objects.size())},
+        {"grants", std::ranges::count_if(grants_, [&](const Grant& grant) {
+             return objects.contains(grant.object_id);
+         })}};
+    if (dry_run) {
+        return plan;
+    }
+    if (!plan.live_workspaces.empty()) {
+        std::string names;
+        for (const Workspace& workspace : plan.live_workspaces) {
+            names += (names.empty() ? "" : ", ") + workspace.name;
+        }
+        return std::unexpected(StoreError{
+            "conflict",
+            "the organization's account still has workspaces; delete them first: " + names});
+    }
+    std::erase_if(teams_, of_organization);
+    std::erase_if(memberships_, of_organization);
+    std::erase_if(invitations_, of_organization);
+    std::erase_if(sso_providers_, of_organization);
+    std::erase_if(federation_issuers_, of_organization);
+    std::erase_if(recovery_attempts_,
+                  [&](const RecoveryRecord& value) { return value.attempt.organization_id == id; });
+    std::erase_if(secret_lease_routes_, [&](const SecretLeaseRoute& lease) {
+        return std::ranges::any_of(secret_mount_routes_, [&](const SecretMountRoute& route) {
+            return route.mount_id == lease.mount_id && mount_of(route);
+        });
+    });
+    std::erase_if(secret_mount_routes_, mount_of);
+    std::erase_if(grants_, [&](const Grant& grant) { return objects.contains(grant.object_id); });
+    std::erase_if(policy_objects_,
+                  [&](const PolicyObject& object) { return objects.contains(object.id); });
+    deleted_organizations_.insert(id);
+    if (!plan.customer_id.empty()) {
+        deleted_customers_.insert(plan.customer_id);
+    }
+    plan.deleted_at = now_iso8601();
+    return plan;
+}
+
+Result<Invitation> InMemoryStore::revoke_invitation(const std::string& id, bool dry_run) {
+    std::lock_guard lock(mutex_);
+    const auto invitation = std::ranges::find(invitations_, id, &Invitation::id);
+    if (invitation == invitations_.end() ||
+        deleted_organizations_.contains(invitation->organization_id)) {
+        return std::unexpected(StoreError{"not_found", "no invitation " + id});
+    }
+    if (invitation->status != "pending" || invitation->expires_at <= now_iso8601()) {
+        return std::unexpected(StoreError{
+            "conflict",
+            "only a pending invitation can be revoked; this one is " +
+                (invitation->status == "pending" ? std::string("expired") : invitation->status)});
+    }
+    if (dry_run) {
+        return *invitation;
+    }
+    invitation->status = "revoked";
+    invitation->updated_at = now_iso8601();
+    return *invitation;
+}
+
+Result<Grant> InMemoryStore::get_grant(const std::string& id) {
+    std::lock_guard lock(mutex_);
+    const auto grant = std::ranges::find(grants_, id, &Grant::id);
+    if (grant == grants_.end()) {
+        return std::unexpected(StoreError{"not_found", "no grant " + id});
+    }
+    return *grant;
+}
+
+Result<Grant> InMemoryStore::revoke_grant(const std::string& id, bool dry_run) {
+    std::lock_guard lock(mutex_);
+    const auto grant = std::ranges::find(grants_, id, &Grant::id);
+    if (grant == grants_.end()) {
+        return std::unexpected(StoreError{"not_found", "no grant " + id});
+    }
+    if (std::ranges::any_of(memberships_, [&](const Membership& membership) {
+            return membership.principal_taap_id == grant->principal_taap_id &&
+                   membership.attestation_digest == grant->attestation_digest;
+        })) {
+        return std::unexpected(StoreError{
+            "conflict", "this grant comes with a membership; remove the member instead"});
+    }
+    const auto object = std::ranges::find(policy_objects_, grant->object_id, &PolicyObject::id);
+    if (object != policy_objects_.end() && object->object_type == "customer" &&
+        grant->role == "admin" && std::ranges::count_if(grants_, [&](const Grant& other) {
+                                      return other.object_id == grant->object_id &&
+                                             other.role == "admin";
+                                  }) == 1) {
+        return std::unexpected(StoreError{
+            "conflict",
+            "this is the account's last admin grant; grant admin to someone else first"});
+    }
+    const Grant revoked = *grant;
+    if (!dry_run) {
+        grants_.erase(grant);
+    }
+    return revoked;
+}
+
+Result<void> InMemoryStore::delete_secret_mount_route(const std::string& mount_id) {
+    std::lock_guard lock(mutex_);
+    const auto route =
+        std::ranges::find(secret_mount_routes_, mount_id, &SecretMountRoute::mount_id);
+    if (route == secret_mount_routes_.end()) {
+        return std::unexpected(StoreError{"not_found", "no secret mount " + mount_id});
+    }
+    std::set<std::string> roots;
+    for (const PolicyObject& object : policy_objects_) {
+        if (object.object_type == "secret_mount" && object.external_id == mount_id) {
+            roots.insert(object.id);
+        }
+    }
+    const std::set<std::string> objects = policy_subtree(policy_objects_, roots);
+    std::erase_if(grants_, [&](const Grant& grant) { return objects.contains(grant.object_id); });
+    std::erase_if(policy_objects_,
+                  [&](const PolicyObject& object) { return objects.contains(object.id); });
+    std::erase_if(secret_lease_routes_,
+                  [&](const SecretLeaseRoute& lease) { return lease.mount_id == mount_id; });
+    secret_mount_routes_.erase(route);
+    return {};
 }
 
 } // namespace lake::control

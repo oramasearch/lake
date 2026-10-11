@@ -25,7 +25,7 @@ import {
 const hit = (key: string, title: string, extra: Partial<Hit> = {}): Hit => ({ key, title, ...extra });
 
 test("every place Data → Search covers is a place, transcripts among the workspace places", () => {
-  assert.deepEqual([...PLACE_IDS], ["repositories", "code", "datasets", "transcripts", "projects", "agents", "models", "drives", "docs"]);
+  assert.deepEqual([...PLACE_IDS], ["repositories", "code", "datasets", "transcripts", "projects", "solutions", "agents", "models", "drives", "docs"]);
   assert.ok(WORKSPACE_PLACES.includes("transcripts"));
   assert.ok(!WORKSPACE_PLACES.includes("docs"));
 });

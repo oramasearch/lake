@@ -157,6 +157,9 @@ struct ServerOptions {
     // An injected transcriber (tests); empty: OpenAI over the server's outbound client when
     // `openai_api_key` is set.
     Transcriber transcriber;
+    // An injected store browser (tests' fakes; lake#656). Empty: no bucket or filesystem provider
+    // is browsable yet (lake#664).
+    control::StoreBrowser store_browser;
     // The model gateway (docs/api/model-gateway.md, lake#248): agents' model calls go to
     // `model_provider_url` (LAKE_MODEL_PROVIDER_URL, empty: OpenAI's API) with `openai_api_key`,
     // Orama's own key. `model_provider` is an injected provider (tests); empty: that one over the

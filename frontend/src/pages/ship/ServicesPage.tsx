@@ -512,7 +512,7 @@ function DeleteService({ customerId, service, used, onClose }: { customerId: str
       >
         {used && (
           <Banner tone="warn">
-            Train → Data's connection <code>{name}</code> uses it and stops working.
+            The connection <code>{name}</code> (Data → Connections) uses it and stops working.
           </Banner>
         )}
         <Field

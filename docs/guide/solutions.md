@@ -38,6 +38,17 @@ Design** (sketches that are not yet a module).
 Open one of Orama's to read **What It Does**, its **Levels**, and its status: whether it runs here
 and, when it does not, where that is tracked.
 
+Each solution has an icon: a small picture of what it does, with an amber accent. Each methodology
+has an icon with a blue accent, and a solution's icon reuses the picture of the methodology it is
+built on. Your own solutions get an icon too:
+
+- A duplicate of one of Orama's solutions keeps the original's icon.
+- Otherwise your solution uses the icon of its first methodology, or of the methodology you marked
+  as primary.
+- A solution with no methodology shows the first letter of its name.
+
+To see every icon, open **Design → Catalogue Icons** (`/design/icons`).
+
 Through the API, `list_solutions` lists both kinds, each with `source` (`orama` or `workspace`) and
 `editable`, and `get_solution` reads one:
 

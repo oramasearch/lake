@@ -7,8 +7,10 @@
 import { useMemo, useState } from "react";
 import { useQueries } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
-import { KeyRound, Lock, Plus, Vault } from "lucide-react";
+import { KeyRound, Lock, Plus, Trash2, Vault } from "lucide-react";
 import { ApiError, act, read, useList, useRead, type Row } from "@/lib/api";
+import { secretMountLines } from "@/lib/deletion";
+import { DeletionButton } from "@/lib/deletionDialog";
 import { Modal, SheetActions } from "@/lib/overlay";
 import { useSession } from "@/lib/session";
 import { useToast } from "@/lib/toast";
@@ -119,6 +121,22 @@ export default function SecretMountsPage() {
                     <Button to={`/encryption-keys?mount_id=${encodeURIComponent(m.id)}`}>
                       <KeyRound size={14} aria-hidden /> Keys
                     </Button>
+                    <DeletionButton
+                      variant="ghost"
+                      capability="delete_secret_mount"
+                      input={{ mount_id: m.id }}
+                      workspace={null}
+                      title={`Delete ${m.name}`}
+                      confirmLabel="Delete mount"
+                      intro="Deleting the mount removes everything in it from its workspace. It cannot be undone."
+                      typed={(plan) => String(plan.name || m.name)}
+                      sendConfirm
+                      lines={secretMountLines}
+                      details={(plan) => <SecretNames names={plan.secrets} />}
+                      done={`Deleted ${m.name}`}
+                    >
+                      <Trash2 size={14} aria-hidden /> Delete
+                    </DeletionButton>
                   </span>
                 ),
               },
@@ -128,6 +146,24 @@ export default function SecretMountsPage() {
       )}
       {creating && <NewMount workspaceId={workspace?.id ?? ""} organizationId={organizationId} onClose={() => setCreating(false)} />}
     </Page>
+  );
+}
+
+/** The names of the secrets a mount deletion removes, folded. */
+function SecretNames({ names }: { names: unknown }) {
+  const list = Array.isArray(names) ? (names as string[]) : [];
+  if (list.length === 0) return null;
+  return (
+    <details className="mt-2">
+      <summary className="cursor-pointer text-[12.5px] text-ink-2">Every secret by name</summary>
+      <ul className="mt-2 space-y-1 pl-4 text-[13px]">
+        {list.map((name) => (
+          <li key={name}>
+            <code>{name}</code>
+          </li>
+        ))}
+      </ul>
+    </details>
   );
 }
 

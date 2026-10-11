@@ -439,9 +439,9 @@ void register_pki_capabilities(Registry& registry) {
             .title = title,
             .description =
                 profile == "client"
-                    ? "Issue a short-lived TLS client certificate from the space's authority, so a "
+                    ? "Issue a short-lived TLS client certificate from the account's authority, so a "
                       "program can prove who it is to a server that trusts it."
-                    : "Issue a short-lived device certificate from the space's authority, so a "
+                    : "Issue a short-lived device certificate from the account's authority, so a "
                       "machine can prove which device it is.",
             .input_schema = {{"type", "object"},
                              {"properties",
@@ -484,10 +484,10 @@ void register_pki_capabilities(Registry& registry) {
             .name = name,
             .title = title,
             .description =
-                host ? std::string("Sign a server's Ed25519 SSH host key with the space's SSH "
+                host ? std::string("Sign a server's Ed25519 SSH host key with the account's SSH "
                                    "authority, so clients that trust the authority can connect "
                                    "without a host-key prompt; short-lived.")
-                     : std::string("Sign a person's or workload's Ed25519 SSH key with the space's "
+                     : std::string("Sign a person's or workload's Ed25519 SSH key with the account's "
                                    "SSH authority, so it can log in as the listed principals; "
                                    "short-lived."),
             .input_schema =

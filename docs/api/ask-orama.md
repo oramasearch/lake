@@ -54,7 +54,7 @@ shows it and keeps it honest.
   workspace Zetta of the workspace the conversation was held in (collection `lake_ask_messages`,
   [workspace-records.md](../architecture/workspace-records.md)): the person's text, and for Ask
   Orama's the reply with its proposals, reads, delegations and trace id. The page's `/w/<id>/`
-  workspace owns it; another workspace of the same space never shows it. Only the person who had a
+  workspace owns it; another workspace of the same account never shows it. Only the person who had a
   conversation reads it back, from any replica. A workspace that is not ready shows the error
   instead of falling back anywhere. Lake's PostgreSQL `ask_messages` table (migration `0030`) was copied
   into the workspace Zettas by the operator's one-shot copy and dropped by migration
@@ -103,6 +103,17 @@ For example, the web app's `send_ask_message` (`POST /w/<workspace_id>/v1/send_a
 ```json
 {"customer_id": "8f1c…", "workspace_id": "4b2e…", "message": "What do I have?", "page": {"path": "/design/project", "name": "churn"}}
 ```
+
+## Deleting a conversation
+
+`delete_ask_conversation {customer_id, workspace_id, conversation_id, dry_run?}` (lake#645)
+deletes one of the caller's conversations in that workspace: every message record is removed from
+the workspace Zetta by key. Only the person who had it can, because a conversation is found by its
+id and its person; another person's id finds nothing (`not_found` at `/conversation_id`). The
+answer is `{conversation_id, messages, first_message, dry_run, deleted}`; `dry_run: true` removes
+nothing. The agent tasks the conversation started stay in Agent Tasks, the account's task history.
+The event goes to the workspace's audit chain. Lake Console offers it beside New conversation
+([../ui/deletion.md](../ui/deletion.md)).
 
 ## Routes
 

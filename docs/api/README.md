@@ -18,6 +18,10 @@ lake#623, lake#635, lake#637: [billing.md](billing.md#price-list) carries Orama 
 usage only (one rate per dimension, no plans, no fee, nothing included; Metis is priced by sales),
 time per minute, each rate with its reference rate, date and margin, worked bills, how a change of
 rates mid-month is billed, and when to revisit it.
+lake#645: [deletion.md](deletion.md) documents deleting and revoking what could only be created
+before, each with `dry_run: true` first and a typed confirmation in Lake Console:
+`delete_organization`, `revoke_invitation`, `revoke_grant`, `delete_secret_mount`, `delete_dataset`,
+`delete_model`, `delete_run`, `delete_index` and `delete_ask_conversation`.
 lake#561: [drives.md](drives.md) documents drives (repository, workspace files, virtual) and workspace files in the workspace Zetta. [transcripts.md](transcripts.md) documents speech-to-text (`transcribe`) and the
 workspace transcripts kept in the workspace Zetta (`create_transcript`, `list_transcripts`,
 `get_transcript`, `update_transcript`, `delete_transcript`), the audio never kept.
@@ -122,6 +126,11 @@ Database `ERROR:` and `DETAIL:` diagnostics are logged server-side and replaced 
 `ApiResult` is constructed. Capability handlers may provide a more specific product message and
 JSON pointer, such as repository-name conflicts at `/name`; REST and MCP therefore expose the
 same actionable error without schema names, SQL text or tenant identifiers from the database.
+A message, from the API layer or from the stores, transparency, audit and search code beneath it,
+calls the product **Lake** and never says "space": it says the account, the workspace or the
+organization, whichever is true (decision 59, lake#647). Field names (`customer_id`), key-derivation
+and AEAD labels (`lake data key/…`), attestation types, pool ids and the `lake:v1` prefix keep
+their form.
 
 Registry input validation descends through declared object properties and array `items`, checking
 types, required fields, `enum` values, numeric bounds (`minimum`, `maximum`, `exclusiveMinimum`,
@@ -166,7 +175,7 @@ ranges, and verify the digest from the completed file; [`builds.md`](builds.md) 
 
 [`services.md`](services.md) defines a customer's managed services, and [`storage.md`](storage.md)
 a customer's stores (buckets, filesystems, network filesystems and volumes; a cluster volume in
-phase 1, lake#196), with their capabilities and the Train → Data → Storage panel.
+phase 1, lake#196), with their capabilities and the Data → Drives → Storage tab (lake#656), and store drives that browse a bucket or filesystem in place.
 [`web-apps.md`](web-apps.md) defines customer-scoped Ship app creation, direct-zone hosts,
 platform-reserved names, deployment, lifecycle, authentication, environment, attach/detach
 bindings, logs, events and the read-only app registry pull token. It is separate from identity
@@ -216,6 +225,7 @@ and `Experiments.CompareRunsAnswersItsGetFormWithRepeatedKeysOrACommaList`
 | `my_permissions`, `list_packages`, `list_docs`, `get_doc`, `mcp_setup`, `resolve_model` | read (`list_docs`, `get_doc` and a public `resolve_model` need no credential) | see the page | permission flags, the Packages catalog, the Docs guides, Developer → MCP, a model's repository by name | [web-app.md](web-app.md) |
 | `latest_agent_task`, `render_pipeline` / `compile_pipeline` | read / action | `customer_id`, `workspace_id`, then `subject`, or `project` and `graph`, or `project` and `intent` | a project's background task, a pipeline drawn as SVG, a pipeline compiled from a description | [web-app.md](web-app.md) |
 | `send_ask_message`, `settle_ask_turn`, `confirm_ask_proposal`, `approve_agent_proposal` | action | `customer_id`, `workspace_id`, `conversation_id`, … | the Ask Orama and Agent Factory conversation, written only by lake | [ask-orama.md](ask-orama.md#capabilities-lake561) |
+| `delete_ask_conversation` | action, the person who had it | `customer_id`, `workspace_id`, `conversation_id`, `dry_run?` | `{conversation_id, messages, first_message, dry_run, deleted}` | [ask-orama.md](ask-orama.md#deleting-a-conversation) |
 | `transcribe` | action, any signed-in caller | `name`, `audio_base64`, `language?` | `{text, seconds?, model}`: speech-to-text through OpenAI with lake's key; keeps nothing; `not_supported` without `LAKE_OPENAI_API_KEY` | [transcripts.md](transcripts.md) |
 | `create_transcript`, `list_transcripts`, `get_transcript`, `update_transcript`, `delete_transcript` | action / read / read / action / action | `customer_id`, `workspace_id`, then `title`, `source`, `text` or `audio_base64`; `q`, `limit`, `cursor`; or `id` | a transcript kept as a sealed `lake_transcripts` record in the workspace Zetta (the audio never kept), a searchable page of them, or `{deleted: true}` | [transcripts.md](transcripts.md) |
 | `list_solutions`, `get_solution`, `create_solution`, `update_solution`, `delete_solution`, `duplicate_solution` | read / read / action / action / action / action | `customer_id`, `workspace_id`, then `source?`; `id`; `name`, `problem`, `decision`, `measurement`, `methodologies?`, `pipeline?`, `notes?`; or `id` and `name?` | Orama's catalogue (read-only) and the workspace's own, each marked `source` (`orama` or `workspace`) and `editable`; one of the workspace's own as a sealed `lake_solutions` record; `forbidden` for an edit or delete of Orama's | [solutions.md](solutions.md) |
@@ -227,6 +237,8 @@ and `Experiments.CompareRunsAnswersItsGetFormWithRepeatedKeysOrACommaList`
 | `list_organizations` | read | `limit` | `{items: [organization]}` | [customers.md](customers.md) |
 | `get_organization` | read | `id` | organization, with its own space's `customer_id` (null when none) | [customers.md](customers.md) |
 | `create_organization` | action | `taap_id?`, `display_name?`, `customer_id?` | organization | [organizations.md](organizations.md) |
+| `delete_organization` | action, an owner | `organization_id`, `confirm` (its handle), `dry_run?` | what went, with counts; `409` naming the workspaces it still owns | [organizations.md](organizations.md#deleting-an-organization) |
+| `revoke_invitation`, `revoke_grant` | action, `admin` on the scope or object | `invitation_id` or `grant_id`, `dry_run?` | the invitation (now `revoked`) or the grant removed | [organizations.md](organizations.md#revoking-an-invitation), [policy.md](policy.md#revoking-a-grant) |
 | `list_customers` | read | `limit` | `{items: [customer]}` | [customers.md](customers.md) |
 | `get_customer` | read | `customer_id` (`id` deprecated) | customer | [customers.md](customers.md) |
 | `create_customer` | action | `customer_type`, `user_id?`, `organization_id?`, `name?` | customer | [customers.md](customers.md) |
@@ -247,6 +259,7 @@ and `Experiments.CompareRunsAnswersItsGetFormWithRepeatedKeysOrACommaList`
 | `preview_drive_share_link`, `download_drive_share_link` | read, bearer link | token, ref, file path | scoped format-registry preview or exact base64 bytes; expiry and revocation checked on every call | [sharing.md](sharing.md) |
 | `model_traffic` | read | `customer_id`, `workspace_id`, `model_id?`, `from_ms?`, `to_ms?`, `step_ms?` | each model's `predict` calls, errors and mean latency, step by step, from the workspace's own series; the workspace's `predict` requests; drift not measured yet (lake#599) | [workspaces.md](workspaces.md) |
 | `get_model`, `get_dataset`, `resolve_model_file`, `resolve_dataset_file` | read | repository id and revision, or, without `revision`, a workspace model or dataset id with `customer_id` and `workspace_id`; file path where required | compatible model/dataset metadata, the workspace's trained model or dataset schema, storage/provenance, or exact file | [models.md](models.md) |
+| `delete_dataset`, `delete_model`, `delete_run`, `delete_index` | action | `customer_id`, `workspace_id`, `id`, `dry_run?` | the engine's account of what went (`removed`, `kept`); `501 not_supported` from an older engine | [models.md](models.md#deleting-from-a-workspace) |
 | `prepare_repository_upload`, `stage_repository_file`, `commit_repository_files` | action | repository id plus upload plan, verified staged bytes, or file operations | upload modes, unique stored bytes, or immutable committed revision | [models.md](models.md) |
 | `attach_model_provenance`, `verify_model_provenance` | action | model and dataset revisions plus canonical liquid attestations, or model revision | attached or re-verified dataset-to-model training chain | [models.md](models.md) |
 | `create_repository` | action | `customer_id`, `workspace_id`, `name`, `description?`, `visibility?` | repository, with its `workspace_id` | [repositories.md](repositories.md) |
@@ -334,6 +347,7 @@ and `Experiments.CompareRunsAnswersItsGetFormWithRepeatedKeysOrACommaList`
 | `record_model_usage` | action | `model_name`, `input_tokens`, `output_tokens`, `task_id?` | an agent's own task, launch, schedule or bus credential reports the tokens of a model call made outside Lake; lake adds them to that workspace's usage (lake#564) | [metering.md](metering.md#model-tokens) |
 | `model_completion` | action | `endpoint` (`chat/completions`, `responses`, `embeddings`), `request` (the OpenAI body) | the model gateway: an agent's task, launch or schedule credential calls the model provider through Lake with Orama's key; the provider's answer, its tokens counted as the run's workspace's `model_tokens`, refused past the monthly limit; also served OpenAI-compatible at `POST /openai/v1/<endpoint>` (lake#248) | [model-gateway.md](model-gateway.md) |
 | `create_secret_mount`, `list_secret_mounts`, `get_secret_mount` | action/read | customer, `workspace_id`, optional organization (without it the account owns the mount, lake#561), mount fields | mount metadata with `owner_type` (in the mount's workspace Zetta) | [secrets.md](secrets.md) |
+| `delete_secret_mount` | action, `admin` on the mount | `mount_id`, `confirm` (its name), `dry_run?` | counts of what went from the workspace Zetta, and the secrets' names | [secrets.md](secrets.md#deleting-a-mount) |
 | `put_secret`, `read_secret`, `secret_metadata` | action/read | mount, name, value/version/metadata fields | versioned value or history | [secrets.md](secrets.md) |
 | `list_secrets` | read | mount, `prefix?`, `cursor?`, `limit?` | a mount's secret paths with current version, times and deleted state; never values | [secrets.md](secrets.md) |
 | `delete_secret_versions`, `undelete_secret_versions`, `destroy_secret_versions` | action | mount, name, `versions[]` | updated history | [secrets.md](secrets.md) |

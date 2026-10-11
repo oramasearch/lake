@@ -30,7 +30,8 @@ import {
   text,
   type J,
 } from "./logic";
-import { MethodologyLinks, NoCatalogue } from "./catalogue";
+import { MethodologyLinks, NoCatalogue, useMethodologyFamilies } from "./catalogue";
+import { SolutionIcon } from "@/components/CatalogueIcon";
 import { FormError, Panel, Refusal, RunsBadge, RunsPanel, When, entityCrumb, useDesignTrail, useSubmit } from "./parts";
 import { SolutionFields } from "./SolutionForm";
 import "@/styles/design.css";
@@ -58,8 +59,10 @@ export default function SolutionPage() {
   useDesignTrail({ label: "Solutions", path: "/design/solutions" }, [id ? entityCrumb(own ? name : id) : { label: "Solution" }], id ? `Solution: ${own ? name : id}` : "Solution");
   const startable = !!solution && (own || solution.runnable === true || text(solution, "status") === "preview");
   const [open, setOpen] = useState<Open>(null);
+  const families = useMethodologyFamilies(ready);
   return (
     <Page
+      icon={solution ? <SolutionIcon entry={solution} size={64} families={families} /> : undefined}
       eyebrow={solution ? (own ? "Design · Your Solution" : `Design · Solution ${text(solution, "id")}`) : "Design · Solution"}
       title={
         solution ? (

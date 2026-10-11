@@ -332,6 +332,10 @@ void check_web_app(HttpEvidence& http,
               with({{"conversation_id", conversation},
                     {"message_id", proposed.at("id")},
                     {"proposal_sha256", proposed.at("payload").at("proposal_sha256")}}));
+    // Deleting the conversation (lake#645): the plan, then the deletion.
+    http.call("delete_ask_conversation",
+              with({{"conversation_id", conversation}, {"dry_run", true}}));
+    http.call("delete_ask_conversation", with({{"conversation_id", conversation}}));
     http.bearer = operator_bearer;
 }
 

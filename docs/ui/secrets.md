@@ -71,6 +71,14 @@ writing a new version, and deleting or destroying the revealed version. Every re
 
 A destroyed version reads *erased* and offers nothing.
 
+## Deleting a Mount (lake#645)
+
+Secret Mounts has **Delete** on each mount. The dialog lists, from
+`delete_secret_mount {dry_run: true}`, how many secrets (with their versions), encryption keys, data
+keys and leases go, and every secret by name, and asks for the mount's name, which it sends as
+`confirm`. Everything is removed from the mount's workspace; anything its keys encrypted can no
+longer be decrypted. See [deletion.md](deletion.md).
+
 ## Encryption Keys
 
 **New key** takes a lowercase name. The schema has no key type: one key encrypts and decrypts

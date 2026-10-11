@@ -20,6 +20,7 @@ layout.
 | `delete_secret_versions` | `write` on the mount | `mount_id`, `name`, positive `versions[]` | updated metadata |
 | `undelete_secret_versions` | `write` on the mount | same | updated metadata |
 | `destroy_secret_versions` | `write` on the mount | same | updated metadata |
+| `delete_secret_mount` | `admin` on the mount | `mount_id`, `confirm` (its name), `dry_run?` | what went ([below](#deleting-a-mount)) |
 
 `version` omitted or zero reads the current version. A nonzero `check_and_set` must equal the
 current version or the put returns `conflict`; zero makes no concurrency assertion. Creating the
@@ -128,6 +129,20 @@ names); the ones 0009 made stay until the tables are dropped.
 Every call passes through `Registry::call` and `audit::record`. Secret audit events identify the
 customer, caller, mount, workspace, name and version or version set; values and ciphertext are
 never audit details. A policy refusal records outcome `denied` against `secret_mount/<mount-id>`.
+
+## Deleting a Mount
+
+`delete_secret_mount {mount_id, confirm, dry_run?}` (lake#645) needs `admin` on the mount.
+`confirm` must be the mount's name. It removes, from the mount's workspace Zetta, every record of
+the mount: each secret's versions and entry, its named keys, the data keys of the mount and of
+its keys, its dynamic leases, its name claim and last the mount record, each by key. Then the
+control store drops its route, its leases' routes and its policy object (with its secrets' objects
+and every grant on them). Records go before the route, so a deletion stopped part way is finished
+by calling again: a record already gone is not an error, and a mount whose record is gone is
+confirmed by its id. The answer is `{mount_id, name, workspace_id, dry_run, deleted, counts:
+{secrets, versions, encryption_keys, data_keys, leases, mount}, secrets: [names]}`; `dry_run: true`
+removes nothing. The name is free again in that workspace. The event goes to the mount's workspace
+audit chain (`secret_mount.delete`).
 
 ## Migration 0071: Account Owners (lake#561)
 

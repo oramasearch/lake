@@ -5,7 +5,7 @@
  * the URL (and this browser remembers it).
  *
  * The places, their reads and the hits live in `@/lib/federatedPlaces`, which the top bar's search
- * uses too (lake#633). Workspace places (datasets, transcripts, projects, agents, models, drives)
+ * uses too (lake#633). Workspace places (datasets, transcripts, projects, solutions, agents, models, drives)
  * are searched in every workspace the person has, each hit naming its workspace when there are
  * several.
  *
@@ -82,7 +82,7 @@ export default function SearchPage() {
   const total = results.reduce((n, r) => n + (r.data?.hits.length ?? 0), 0);
 
   return (
-    <Page eyebrow="Data" title="Search" sub="One search across your repositories, code, datasets, transcripts, projects, agents, models, drives and the docs. Choose where to look.">
+    <Page eyebrow="Data" title="Search" sub="One search across your repositories, code, datasets, transcripts, projects, solutions, agents, models, drives and the docs. Choose where to look.">
       <form
         className="mb-3 flex flex-wrap items-center gap-2"
         onSubmit={(e) => {
@@ -137,13 +137,13 @@ export default function SearchPage() {
         {chosen.some((p) => p.workspace) && (
           <p className="muted mt-2 mb-0 text-[12.5px]">
             {scopes.length > 1 ? (
-              <>Datasets, transcripts, projects, agents, models and drives are searched in all {scopes.length} of your workspaces.</>
+              <>Datasets, transcripts, projects, solutions, agents, models and drives are searched in all {scopes.length} of your workspaces.</>
             ) : scopes.length === 1 ? (
               <>
-                Datasets, transcripts, projects, agents, models and drives are searched in the workspace <strong>{scopes[0].name}</strong>.
+                Datasets, transcripts, projects, solutions, agents, models and drives are searched in the workspace <strong>{scopes[0].name}</strong>.
               </>
             ) : (
-              <>Create a workspace to search its datasets, transcripts, projects, agents, models and drives.</>
+              <>Create a workspace to search its datasets, transcripts, projects, solutions, agents, models and drives.</>
             )}
           </p>
         )}

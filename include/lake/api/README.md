@@ -164,3 +164,7 @@ move (`transfer_to_workspace_store`, `switch_workspace_store`, `create_repositor
 `server.hpp` adds `ServerOptions::object_transport` and `workspace_store_lease_ttl`, and
 `registry_upload_max_age` (lake#383 phase B: abandoned OCI uploads are removed after it) and
 `registry_stream_idle_timeout` (a pull whose client takes no bytes for it is ended).
+
+`register_deletion_capabilities` (`capabilities.hpp`, lake#645) registers `delete_dataset`,
+`delete_model`, `delete_run`, `delete_index` and `delete_ask_conversation`
+([deletion.md](../../../docs/api/deletion.md)).
