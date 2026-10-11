@@ -58,6 +58,27 @@ curl -s https://lake.oramadev.net/v1/viewer -H "Authorization: Bearer $LAKE_KEY"
 `viewer` needs no key; with one it names you and the workspaces you can open. Replace
 `lake.oramadev.net` with your lake's address wherever it appears on this page.
 
+### Send a User-Agent
+
+Every call must carry a `User-Agent` header that names your program. `curl`, Python `requests`,
+Node's `fetch` and browsers send one already. Python's built-in `urllib` sends
+`Python-urllib/3.x`, which the network edge in front of lake.oramadev.net refuses before the call
+reaches lake: the answer is `403` with the plain-text body `error code: 1010`, not lake's JSON
+envelope. Name your script instead:
+
+```
+import json, os, urllib.request
+
+req = urllib.request.Request(
+    "https://lake.oramadev.net/v1/viewer",
+    headers={"Authorization": "Bearer " + os.environ["LAKE_KEY"],
+             "User-Agent": "my-script/1.0"},
+)
+print(json.load(urllib.request.urlopen(req))["value"])
+```
+
+The **Quick start** tab on **Developer → API** shows the same call from Python.
+
 ## Reads and Actions
 
 A read is `GET /v1/<capability>` with its input as query parameters. Numbers and booleans are
@@ -213,7 +234,7 @@ Each capability's page in [Docs](/docs) and its OpenAPI operation name the input
 | `rate_limited` | 429 | Too many long requests are waiting; retry after `Retry-After`. |
 | `store_error`, `corrupt`, `io`, `crypto_error` | 500 | The server failed; the message says what. |
 | `not_supported` | 501 | This lake or its workspace engine cannot do this yet. |
-| `engine_error` | 502 | The workspace engine could not complete the call; the message is its own. |
+| `engine_error` | 422 | The workspace engine or an outside service refused the call (a SQL typo, unreadable audio); the message is its own. |
 | `store_unavailable`, `busy` | 503 | A dependency is unreachable or busy; retry. |
 | `workspace_not_ready` | 503 | The workspace exists but is not ready. |
 | `quota_exceeded` | 507 | Your storage quota is full; what is stored stays readable. |
@@ -268,6 +289,12 @@ says why.
 - **`unexpected field …`**: the input has a field the schema does not declare. Check the spelling
   against the operation on **Developer → API → Operations**.
 - **`405 method_not_allowed`**: a read was sent as `POST` or an action as `GET`.
+- **`403` with the body `error code: 1010`**, not JSON: the edge refused your program's
+  `User-Agent` (Python's `urllib` default). Send your own; see
+  [Send a User-Agent](#send-a-user-agent).
+- **A `502` or `504` HTML page**: it came from the edge, not from lake, which never answers either
+  (an engine refusal is `422 engine_error` with lake's message). lake was unreachable or the call ran
+  past the edge's 100-second limit; retry, and split a very long recording.
 - **`workspace_not_ready`**: the workspace Zetta is starting. See
   [Workspaces](/docs/workspaces).
 - More answers: [FAQ and Troubleshooting](/docs/faq).

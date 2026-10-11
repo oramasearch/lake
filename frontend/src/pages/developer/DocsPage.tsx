@@ -26,7 +26,7 @@ export default function DocsPage() {
   // `/docs` is the first guide.
   const slug = page ?? first;
   const current = pages.find((p) => p.slug === slug);
-  const guide = useRead<Doc>(slug ? "get_doc" : null, { page: slug }, { ...NO_WORKSPACE, staleTime: 300_000 });
+  const guide = useRead<Doc>(slug ? "get_doc" : null, { slug }, { ...NO_WORKSPACE, staleTime: 300_000 });
   useTrail([{ label: "Docs", to: "/docs" }, ...(guide.data ? [{ label: guide.data.title }] : [])]);
 
   const [q, setQ] = useState("");

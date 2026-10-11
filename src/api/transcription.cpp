@@ -272,6 +272,25 @@ std::string audio_mime(std::string_view file_name) {
     return "application/octet-stream";
 }
 
+std::string not_audio_reason(std::string_view name) {
+    if (const std::size_t slash = name.find_last_of("/\\"); slash != std::string_view::npos) {
+        name.remove_prefix(slash + 1);
+    }
+    const std::string extension = extension_of(name);
+    if (extension.empty() || audio_mime(name) != "application/octet-stream") {
+        return {};
+    }
+    std::string known;
+    for (const auto& [listed, type] : audio_types) {
+        known += (known.empty() ? "" : ", ") + std::string(listed);
+    }
+    std::string reason = std::string(name) + " is not audio or video: send " + known;
+    if (extension == ".txt" || extension == ".vtt" || extension == ".srt") {
+        reason += ", or add the text with create_transcript (source text or upload)";
+    }
+    return reason;
+}
+
 std::string audio_file_name(std::string_view name, std::string_view mime) {
     if (const std::size_t slash = name.find_last_of("/\\"); slash != std::string_view::npos) {
         name.remove_prefix(slash + 1);

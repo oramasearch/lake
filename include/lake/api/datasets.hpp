@@ -42,5 +42,13 @@ std::optional<DatasetRef> parse_id(std::string_view id);
 // Adds `id` and `kind` to each entry of a list_datasets answer ({"datasets": [...]}). An entry
 // that carries the name as `dataset` (the system.datasets column) also gains `name`.
 void annotate_list(nlohmann::json& listed);
+// One dataset as get_dataset answers it (lake#594): `format` says what the person loaded
+// (`source_format`, csv for a CSV upload) and the engine's own storage format moves to
+// `storage_format`; a name SQL cannot name (from before the naming rule, such as one with a
+// hyphen) is marked `sql_queryable: false` with what to do. annotate_list applies the same to
+// each listed dataset.
+void annotate_one(nlohmann::json& dataset);
+// Whether SQL can name this table: letters, digits and underscores, not starting with a digit.
+bool sql_name(std::string_view name);
 
 }  // namespace lake::api::datasets

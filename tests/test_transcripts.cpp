@@ -107,6 +107,10 @@ TEST(Transcripts, TheAudioFileNameCarriesAFormatTheProviderKnows) {
     EXPECT_EQ(lake::api::audio_file_name("a\r\nb.wav", ""), "ab.wav");
     EXPECT_EQ(lake::api::audio_mime("x.m4a"), "audio/mp4");
     EXPECT_EQ(lake::api::audio_mime("x.bin"), "application/octet-stream");
+    EXPECT_TRUE(lake::api::not_audio_reason("memo.m4a").empty());
+    EXPECT_TRUE(lake::api::not_audio_reason("voice").empty()) << "its media type decides";
+    EXPECT_TRUE(lake::api::not_audio_reason("memo.txt").starts_with("memo.txt is not audio"));
+    EXPECT_NE(lake::api::not_audio_reason("call.vtt").find("create_transcript"), std::string::npos);
 }
 
 struct Sent {

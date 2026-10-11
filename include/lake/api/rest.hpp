@@ -21,8 +21,9 @@ std::string rest_method(const Capability& capability);  // "GET" for reads, "POS
 nlohmann::json rest_input_from_query(const Capability& capability,
                                      const std::vector<std::pair<std::string, std::string>>& query);
 
-// 200 on ok; invalid_input 400, unauthorized 403, not_found / unknown_capability 404, conflict
-// 409, store_unavailable 503, anything else 500.
+// 200 on ok; otherwise the status error_codes() gives the code (invalid_input 400, not_found 404,
+// engine_error 422, store_unavailable 503, …). No code answers 502 or 504, whose bodies
+// Cloudflare replaces with its own page (lake#572).
 int rest_status(const ApiResult& result);
 
 // { ok, value | error{code,message,path}, duration_ms } — the same envelope MCP carries as

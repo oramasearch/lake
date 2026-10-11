@@ -42,7 +42,7 @@ Every capability answers a failure the same way on REST and MCP:
 | `gate_blocked` | 409 | A pipeline gate refused the run; the message names the failing check. |
 | `invalid_chain` | 409 | The audit log's hash chain is broken: an event is missing or was changed. |
 | `size_invalid` | 413 | The request body is larger than the limit. |
-| `engine_error` | 502 | The workspace engine could not complete the call; the message is its. |
+| `engine_error` | 422 | The workspace engine or the outside service refused the call; the message is its. |
 | `not_supported` | 501 | This lake or its workspace engine cannot do what was asked yet. |
 | `quota_exceeded` | 507 | The customer's storage quota is full; existing content stays readable. |
 | `store_error` | 500 | The server failed; the message says what failed. |
@@ -55,7 +55,24 @@ Every capability answers a failure the same way on REST and MCP:
 | `rate_limited` | 429 | Too many requests from this caller, or in all, are waiting; retry. Sent with `Retry-After: 1` when a long poll finds the long-request caps full ([http](../serving/http.md#connections-and-workers), lake#534). |
 
 `not_supported` was 500, `engine_error` 500, `quota_exceeded` 500, and a missing or rejected
-credential 403 `unauthorized` before lake#450.
+credential 403 `unauthorized` before lake#450. `engine_error` was 502 from lake#450 until lake#572.
+
+### No code answers 502 or 504
+
+lake is reached through Cloudflare, which answers an origin's `502` or `504` with its own HTML page
+("Error 502: Bad gateway … the origin web server returned an invalid or incomplete response"), so a
+REST caller never saw lake's JSON body and could not tell a typo in SQL from an outage (lake#572).
+Cloudflare passes `500`, `501` and `503` bodies through unchanged, and every 4xx. So:
+
+- `engine_error` is `422`: the workspace engine refused the call (`table "x" does not exist`, a SQL
+  parse error) or an outside service refused it (OpenAI could not transcribe the audio). The caller
+  can change the input; it is not lake's fault.
+- An engine that cannot be reached is `store_unavailable` (`503`); lake's own faults stay `500`.
+- An identity application's OAuth callback answers `503` when the provider's token or user
+  endpoint fails.
+
+`ApiErrors.NoCodeAnswersAStatusCloudflareReplaces` (`tests/test_api.cpp`) fails if a documented code
+is given `502` or `504`. See [http](../serving/http.md#statuses-behind-cloudflare).
 
 ## 401: missing, invalid or expired
 
@@ -78,7 +95,12 @@ WWW-Authenticate: Bearer realm="lake", error="invalid_token",
 - `invalid`: anything else: unknown, mistyped, revoked, or a revoked device.
 
 A capability that lets anonymous callers read public repositories answers the same 401 when it
-refuses an anonymous caller. MCP answers the same error object in a `tools/call` result with
+refuses an anonymous caller. A **bearer** key lake rejects (invalid or expired) is refused with this
+401 on lake's own public reads too, those whose object is the server (`viewer`, `server_info`,
+`list_docs`, `get_doc`; lake#594): a script with a mistyped key learns so instead of reading `signed_in: false`. A
+browser's stale `lake_session` cookie is not refused there; `viewer` answers it as a visitor, so
+the web app shows its sign-in page. Capabilities that verify their own bearer (the agent bus, SCIM
+providers) keep their own answers. MCP answers the same error object in a `tools/call` result with
 `isError: true` over HTTP 200, as it does every capability failure. A credential that is valid but
 lacks a scope or a grant is still 403 `unauthorized`.
 
@@ -100,6 +122,21 @@ lacks a scope or a grant is still 403 `unauthorized`.
   registry points `path` at that field when the handler gave none.
 - **A space that does not own the workspace** is refused at `/customer_id` (`customer_id is not the
   space that owns workspace …`); an unknown workspace at `/workspace_id`.
+- **A database constraint the input broke** (lake#592). PostgreSQL's diagnostic never reaches a
+  caller (it is logged as `api_store_error`); `constraint_rules` in `src/api/registry.cpp` turns
+  the constraints an input can break into the rule, at the field. The field is the caller's `path`
+  when the handler gave one, so `create_drive`'s `repository_name` reads *"repository_name is 1 to
+  256 lowercase letters, digits and hyphens, starting and ending with a letter or digit"* at
+  `/repository_name`, and otherwise the constraint's own field: an empty `attestation_digest` is
+  *"attestation_digest is required: …"* at `/attestation_digest`, and a second identical grant
+  *"principal_taap_id already holds this role here: the item is already shared with that person in
+  that role"* at `/principal_taap_id`. The in-memory store names the same constraints in its
+  messages. Only a diagnostic for a constraint not in the table still answers the generic *"the
+  request contains invalid data"*; add the constraint to the table when an input can reach it.
+- **Secrets** name the secret and the field: *"no secret named nope"* at `/name`, *"secret database
+  has no version 9"* at `/version` (or `/versions` for the version changes), *"version 1 of secret
+  database is deleted; undelete it with undelete_secret_versions"*. A mount, key or derived key name
+  states the handle rule (`control::handle_rule`).
 
 ## Other HTTP answers
 

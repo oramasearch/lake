@@ -40,11 +40,17 @@ of the account that owns your workspaces (yours, or your organization's).
 A pipeline whose methodology does not train yet says **This Pipeline Trains Nothing Yet** instead of
 pretending to train.
 
-- REST: `POST /v1/compile_pipeline` with
+- REST: the project must exist first. Make it once with `POST /v1/workspace_act`
+  `{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "capability": "create_project", "input": {"name": "retention", "intent": "Predict which accounts churn"}}`,
+  then `POST /v1/compile_pipeline` with
   `{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "project": "retention", "intent": "Predict the churned column of accounts", "dataset": "datasets.accounts"}`.
+  Without the project, `compile_pipeline` answers `not_found` at `/project` and says to create it.
   `dataset` is `<database>.<table>`; `methodology` (for example `M-3`) is optional. The answer's
   `graph` is the new pipeline's id.
-- MCP: the `compile_pipeline` tool, with the same input.
+- MCP: `workspace_act` with `create_project`, then the `compile_pipeline` tool, with the same
+  input. `compile_pipeline` is the one recipe: it captures the sentence and compiles it (the
+  engine's `capture_intent` and `compile_intent`) in one call, and `mcp_setup`'s *Train a model*
+  flow uses it too.
 
 You can also start a pipeline empty, from an n8n export or from Python:
 `POST /v1/create_pipeline` with

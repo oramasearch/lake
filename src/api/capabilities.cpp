@@ -146,12 +146,24 @@ std::string repository_input_value(const json& input,
     return canonical_value.empty() ? builder_value : canonical_value;
 }
 
+// The repository a content read names: `repository_id`, as the drive calls name it (lake#591),
+// or the older `id` or `repository`. Empty when none is sent or two disagree.
+std::string repository_reference(const json& input) {
+    const std::string named = input.value("repository_id", "");
+    const std::string older = repository_input_value(input, "id", "repository");
+    if (!named.empty() && !older.empty() && named != older) {
+        return {};
+    }
+    return named.empty() ? older : named;
+}
+
 std::expected<std::string, ApiError> repository_content_object(const json& input,
                                                                ApiContext& context) {
-    const std::string id = repository_input_value(input, "id", "repository");
+    const std::string id = repository_reference(input);
     if (id.empty()) {
-        return std::unexpected(
-            ApiError{"invalid_input", "id or repository is required", "/repository"});
+        return std::unexpected(ApiError{"invalid_input",
+                                        "repository_id is required (or the older id or repository)",
+                                        "/repository_id"});
     }
     if (context.store == nullptr) {
         return std::unexpected(
@@ -172,7 +184,7 @@ readable_repository(const json& input, ApiContext& context, bool revision_requir
         return std::unexpected(
             ApiError{"store_unavailable", "no control-plane store is configured", {}});
     }
-    const std::string id = repository_input_value(input, "id", "repository");
+    const std::string id = repository_reference(input);
     const std::string ref = repository_input_value(input, "ref", "revision");
     if (id.empty() || (revision_required && ref.empty())) {
         return std::unexpected(ApiError{"invalid_input",
@@ -3901,6 +3913,7 @@ void register_repository_capabilities(Registry& registry) {
                           {{"id", {{"type", "string"}}},
                            {"ref", {{"type", "string"}}},
                            {"repository", {{"type", "string"}}},
+                           {"repository_id", {{"type", "string"}}},
                            {"revision", {{"type", "string"}}},
                            {"recursive", {{"type", "boolean"}}}}},
                          {"additionalProperties", false}},
@@ -3938,6 +3951,7 @@ void register_repository_capabilities(Registry& registry) {
                           {{"id", {{"type", "string"}}},
                            {"ref", {{"type", "string"}}},
                            {"repository", {{"type", "string"}}},
+                           {"repository_id", {{"type", "string"}}},
                            {"revision", {{"type", "string"}}},
                            {"path", {{"type", "string"}}},
                            {"units", {{"type", "boolean"}}}}},
@@ -5155,7 +5169,7 @@ void register_policy_capabilities(Registry& registry) {
 // answers one `invalid_input`, so its existence elsewhere is not revealed.
 std::expected<search::Query, ApiError> search_scope(const json& input, ApiContext& context) {
     search::Query query{input.at("query").get<std::string>(),
-                        input.value("customer", ""),
+                        input.value("customer_id", ""),
                         input.value("repository", ""),
                         input.value("ref", ""),
                         limit_of(input),
@@ -5236,9 +5250,10 @@ std::expected<search::Query, ApiError> search_scope(const json& input, ApiContex
         }
         if (customers->size() >= static_cast<std::size_t>(page)) {
             // No cursor for this list: refused rather than searched in part.
-            return std::unexpected(ApiError{"invalid_input",
-                                            "too many spaces to search them all; name a customer",
-                                            "/customer"});
+            return std::unexpected(
+                ApiError{"invalid_input",
+                         "too many spaces to search them all; name a customer_id",
+                         "/customer_id"});
         }
         std::vector<std::string> objects;
         std::map<std::string, std::string> space_of_object;
@@ -5276,7 +5291,7 @@ void register_search_capability(Registry& registry) {
         .input_schema = {{"type", "object"},
                          {"properties",
                           {{"query", {{"type", "string"}}},
-                           {"customer", {{"type", "string"}}},
+                           {"customer_id", {{"type", "string"}}},
                            {"repository", {{"type", "string"}}},
                            {"ref", {{"type", "string"}}},
                            {"change", {{"type", "string"}}},
@@ -5291,29 +5306,33 @@ void register_search_capability(Registry& registry) {
         .action = "read",
         .resolve_object = global_object,
         .authorizes_candidates = true,
-        .handler = [](const json& input, ApiContext& context) {
-            if (!context.search) {
-                return no_search();
-            }
-            if (!context.store) {
-                return no_store();
-            }
-            auto scope = search_scope(input, context);
-            if (!scope) {
-                return ApiResult::failure(scope.error().code, scope.error().message,
-                                          scope.error().path);
-            }
-            auto result = context.search->query(*scope, context.acting_identity, *context.store);
-            if (result) {
-                context.audit_object =
-                    input.value("repository", "").empty()
-                        ? "repository/search"
-                        : "repository/" + input.at("repository").get<std::string>();
-                context.audit_details = {{"mode", search::to_string(result->mode)},
-                                         {"scanned_changes", result->scanned_changes}};
-            }
-            return search_result(std::move(result));
-        }});
+        .handler =
+            [](const json& input, ApiContext& context) {
+                if (!context.search) {
+                    return no_search();
+                }
+                if (!context.store) {
+                    return no_store();
+                }
+                auto scope = search_scope(input, context);
+                if (!scope) {
+                    return ApiResult::failure(
+                        scope.error().code, scope.error().message, scope.error().path);
+                }
+                auto result =
+                    context.search->query(*scope, context.acting_identity, *context.store);
+                if (result) {
+                    context.audit_object =
+                        input.value("repository", "").empty()
+                            ? "repository/search"
+                            : "repository/" + input.at("repository").get<std::string>();
+                    context.audit_details = {{"mode", search::to_string(result->mode)},
+                                             {"scanned_changes", result->scanned_changes}};
+                }
+                return search_result(std::move(result));
+            },
+        // Every other capability names a space `customer_id` (lake#591).
+        .input_aliases = {{"customer", "customer_id"}}});
     registry.add(Capability{
         .name = "reindex_artifacts",
         .title = "Reindex published artifacts",

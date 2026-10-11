@@ -77,6 +77,15 @@ struct ErrorCode {
 std::span<const ErrorCode> error_codes();
 const ErrorCode* find_error_code(std::string_view code);
 
+struct Capability;
+// What a capability does, as MCP's tool annotations and mcp_setup say it (lake#594), one rule for
+// both: it writes unless it is a read or authorized as one (`predict` scores without changing
+// anything); it destroys only when it deletes, destroys, removes, revokes or drops something; it
+// is idempotent when calling it again with the same input changes nothing more.
+bool capability_writes(const Capability& capability);
+bool capability_destroys(const Capability& capability);
+bool capability_idempotent(const Capability& capability);
+
 struct ApiResult {
     bool ok = false;
     nlohmann::json value;

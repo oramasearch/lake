@@ -188,7 +188,7 @@ recordings transcribe well within it. Split a long recording, or upload its text
 | What you see | Why, and what to do |
 |---|---|
 | `not_supported` (501) | Speech-to-text is not configured on this lake. Use **Upload text** or **Paste**. |
-| `engine_error` (502) | OpenAI could not transcribe the audio, is busy or over its quota, or could not be reached. The message says which; try again shortly. |
+| `engine_error` (422) | OpenAI could not transcribe the audio, is busy or over its quota, or could not be reached. The message says which; try again shortly. |
 | `size_invalid` (413) at `/audio_base64` or `/text` | The audio is over 25 MiB or the text over 400,000 bytes. Split it. |
 | `invalid_input` at `/text` | Neither text nor audio was sent, or no speech was heard in the audio. |
 | `invalid_input` at `/title`, `/language`, `/recorded_at` or `/cursor` | That field is empty, too long or malformed. |
