@@ -118,7 +118,7 @@ Files are under `frontend/src/pages/`.
 | `/repository/tree?id=&ref=` | `repositories/TreePage.tsx` | every path with its newest change | `get_repository`, `repository_tree`, `list_changes` |
 | `/file?repository_id=&ref=&path=` | `repositories/FilePage.tsx` | one file, line anchors, blame | `get_repository`, `repository_file`, `list_changes`, `change_diff` |
 | `/changes`, `/change` | `repositories/ChangesPage.tsx`, `ChangePage.tsx` | the change log; one change under review | `list_changes`, `get_change`, `change_diff`, `list_reviews`, `list_review_comments`, `list_artifacts` |
-| `/issues`, `/issue` | `repositories/IssuesPage.tsx`, `IssuePage.tsx` | issues; one issue and its discussion | `list_issues`, `list_issue_comments` |
+| `/issues`, `/issue` | `repositories/IssuesPage.tsx`, `IssuePage.tsx`, `NewIssue.tsx`, `IssueParts.tsx` | issues and New issue; one issue, its conversation and its changes | `list_issues`, `list_issue_comments`, `issue_assignees`, `my_permissions`, `create_issue`, `update_issue`, `create_issue_comment` |
 | `/releases` | `repositories/ReleasesPage.tsx` | releases with notes and attested artifacts | `list_releases` |
 | `/webhooks` | `repositories/WebhooksPage.tsx` | webhooks and their deliveries, with retry | `list_webhooks`, `list_webhook_deliveries`, `retry_webhook_delivery` |
 | `/protection` | `repositories/ProtectionPage.tsx` | branch protection rules and refused updates | `list_branch_protections`, `audit` |
