@@ -1186,7 +1186,7 @@ Result<AppendResult> TiledLog::append(const std::vector<std::string>& attestatio
     std::unique_lock lock(impl_->mutex);
     if (!impl_->valid_instance) {
         return std::unexpected(
-            Error{"invalid_input", "lake instance name is not a safe path component"});
+            Error{"invalid_input", "Lake instance name is not a safe path component"});
     }
     return impl_->append_entries(attestations, std::nullopt, std::nullopt);
 }
@@ -1212,7 +1212,7 @@ Result<Tile> TiledLog::tile(std::uint64_t index, std::size_t width) const {
     std::unique_lock lock(impl_->mutex);
     if (!impl_->valid_instance) {
         return std::unexpected(
-            Error{"invalid_input", "lake instance name is not a safe path component"});
+            Error{"invalid_input", "Lake instance name is not a safe path component"});
     }
     if (width == 0 || width > transparency_tile_width) {
         return std::unexpected(Error{"invalid_input", "tile width must be between 1 and 1024"});
@@ -1241,7 +1241,7 @@ TiledLog::hash_tile(std::uint32_t level, std::uint64_t index, std::size_t width)
     std::unique_lock lock(impl_->mutex);
     if (!impl_->valid_instance) {
         return std::unexpected(
-            Error{"invalid_input", "lake instance name is not a safe path component"});
+            Error{"invalid_input", "Lake instance name is not a safe path component"});
     }
     if (level == 0 || level >= 64) {
         return std::unexpected(Error{"invalid_input", "hash tile level must be between 1 and 63"});
@@ -1291,7 +1291,7 @@ Result<InclusionProof> TiledLog::inclusion_proof(std::uint64_t leaf_index,
     std::unique_lock lock(impl_->mutex);
     if (!impl_->valid_instance) {
         return std::unexpected(
-            Error{"invalid_input", "lake instance name is not a safe path component"});
+            Error{"invalid_input", "Lake instance name is not a safe path component"});
     }
     if (tree_size == 0 || leaf_index >= tree_size) {
         return std::unexpected(
@@ -1338,7 +1338,7 @@ Result<ConsistencyProof> TiledLog::consistency_proof(std::uint64_t old_tree_size
     std::unique_lock lock(impl_->mutex);
     if (!impl_->valid_instance) {
         return std::unexpected(
-            Error{"invalid_input", "lake instance name is not a safe path component"});
+            Error{"invalid_input", "Lake instance name is not a safe path component"});
     }
     if (old_tree_size > new_tree_size) {
         return std::unexpected(
@@ -1396,7 +1396,7 @@ Result<LogState> TiledLog::state() const {
     std::unique_lock lock(impl_->mutex);
     if (!impl_->valid_instance) {
         return std::unexpected(
-            Error{"invalid_input", "lake instance name is not a safe path component"});
+            Error{"invalid_input", "Lake instance name is not a safe path component"});
     }
     const auto current = stored_state(impl_->state_path());
     if (!current) {
@@ -1409,7 +1409,7 @@ Result<LogState> TiledLog::state_at(std::uint64_t tree_size) const {
     std::unique_lock lock(impl_->mutex);
     if (!impl_->valid_instance) {
         return std::unexpected(
-            Error{"invalid_input", "lake instance name is not a safe path component"});
+            Error{"invalid_input", "Lake instance name is not a safe path component"});
     }
     std::error_code error;
     std::filesystem::create_directories(impl_->directory, error);
@@ -1440,7 +1440,7 @@ Result<LogReplicationBatch> TiledLog::replication_batch(std::uint64_t after_tree
     std::unique_lock lock(impl_->mutex);
     if (!impl_->valid_instance) {
         return std::unexpected(
-            Error{"invalid_input", "lake instance name is not a safe path component"});
+            Error{"invalid_input", "Lake instance name is not a safe path component"});
     }
     std::error_code error;
     std::filesystem::create_directories(impl_->directory, error);
@@ -1488,7 +1488,7 @@ Result<AppendResult> TiledLog::apply_replication_batch(const LogReplicationBatch
     std::unique_lock lock(impl_->mutex);
     if (!impl_->valid_instance) {
         return std::unexpected(
-            Error{"invalid_input", "lake instance name is not a safe path component"});
+            Error{"invalid_input", "Lake instance name is not a safe path component"});
     }
     if (batch.source_tree_size < batch.head.tree_size ||
         batch.head.tree_size < batch.base.tree_size ||
@@ -1505,7 +1505,7 @@ Result<IdentityScan> TiledLog::scan_identity(const std::string& identity,
     const auto started = std::chrono::steady_clock::now();
     if (!impl_->valid_instance) {
         return std::unexpected(
-            Error{"invalid_input", "lake instance name is not a safe path component"});
+            Error{"invalid_input", "Lake instance name is not a safe path component"});
     }
     if (!identity.starts_with("taap:1:")) {
         return std::unexpected(Error{"invalid_input", "identity must be a TAAP identifier"});

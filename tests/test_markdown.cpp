@@ -15,6 +15,8 @@
 #include "lake/api/billing.hpp"
 #include "lake/api/capabilities.hpp"
 #include "lake/api/markdown.hpp"
+#include "lake/api/mcp.hpp"
+#include "lake/api/rest.hpp"
 #include "lake/api/web_ui.hpp"
 
 using lake::api::markdown_to_html;
@@ -374,26 +376,115 @@ TEST(Docs, EveryCapabilityHasADeliberateGroup) {
     EXPECT_TRUE(group("Search").contains("search"));
 }
 
-// llms.txt, llms-full.txt and the skill say Lake and never "space" in their own words: the summary,
-// what Lake does, Connect, the group summaries, the flows and the rules (lake#642). A tool's own
-// title and description come from the registry and are left out here.
-TEST(Docs, AgentDocsSayLakeAndNeverSpace) {
+namespace {
+
+// Where a text a person reads says "space" or names the product "lake" in prose: one line each, with
+// what is around it. Code spans and blocks are left out (`customer_id`, `remove_space_store`,
+// `claude mcp add lake`), and so are workspace, namespace and whitespace, which are other words.
+std::vector<std::string> wording_faults(std::string_view text) {
+    static const std::regex space(R"re(\bspaces?\b)re", std::regex::icase);
+    const std::string prose = prose_of(text);
+    std::vector<std::string> faults;
+    for (auto it = std::sregex_iterator(prose.begin(), prose.end(), space);
+         it != std::sregex_iterator();
+         ++it) {
+        const auto at = static_cast<std::size_t>(it->position());
+        faults.push_back("says \"" + it->str() + "\": " +
+                         prose.substr(at < 60 ? 0 : at - 60, 120));
+    }
+    for (const std::string& near : lowercase_product_names(prose)) {
+        faults.push_back("names the product \"lake\": " + near);
+    }
+    return faults;
+}
+
+// Every description, summary and title in a JSON document (OpenAPI, or MCP's tools), with where it
+// is, so a fault names the tool or route and the field.
+void collect_descriptions(const nlohmann::json& value,
+                          const std::string& where,
+                          std::vector<std::pair<std::string, std::string>>& out) {
+    if (value.is_object()) {
+        for (const auto& [key, child] : value.items()) {
+            if ((key == "description" || key == "summary" || key == "title") && child.is_string()) {
+                out.emplace_back(where + "/" + key, child.get<std::string>());
+            } else {
+                collect_descriptions(child, where + "/" + key, out);
+            }
+        }
+    } else if (value.is_array()) {
+        for (std::size_t index = 0; index < value.size(); ++index) {
+            const std::string name = value[index].is_object() && value[index].contains("name") &&
+                                             value[index]["name"].is_string()
+                                         ? value[index]["name"].get<std::string>()
+                                         : std::to_string(index);
+            collect_descriptions(value[index], where + "/" + name, out);
+        }
+    }
+}
+
+lake::api::Registry every_capability() {
     lake::api::Registry registry;
     lake::api::register_core_capabilities(registry, "test");
     lake::api::register_billing_capabilities(registry);
+    return registry;
+}
+
+} // namespace
+
+TEST(Docs, WordingFaultsAreFoundOnlyInProse) {
+    EXPECT_EQ(wording_faults("read the audits of this space's live workspaces").size(), 1U);
+    EXPECT_EQ(wording_faults("List the Spaces you can see").size(), 1U);
+    EXPECT_EQ(wording_faults("the handle of their personal space, on this lake.").size(), 2U);
+    EXPECT_TRUE(wording_faults("A workspace in a namespace, whitespace trimmed.").empty());
+    EXPECT_TRUE(wording_faults("`remove_space_store` names `customer_id`; Lake answers.").empty());
+    EXPECT_TRUE(wording_faults("See https://lake.example/llms.txt and LAKE_STORE_ROOT.").empty());
+}
+
+// Every word a person or an agent reads about Lake's tools says Lake and never "space"
+// (decision 59, lake#642, lake#647): all of llms.txt, llms-full.txt and the skill, every
+// description, summary and title in OpenAPI (both audiences) and in MCP's tools/list (both
+// audiences), the registry's descriptions and input schemas included. Account, workspace or
+// organization is said instead, whichever is true.
+TEST(Docs, AgentDocsSayLakeAndNeverSpace) {
+    const lake::api::Registry registry = every_capability();
     const std::string origin = "https://lake.example";
-    const std::regex space(R"re(\bspaces?\b)re", std::regex::icase);
-    std::string own = lake::api::agent_docs::llms_txt(registry, origin);
-    own = own.substr(0, own.find("## Tools")) + own.substr(own.find("## Worked flows"));
-    for (const auto& group : lake::api::agent_docs::tool_groups(registry)) {
-        own += group.summary + "\n";
+    // The skill's frontmatter names it `lake`, an identifier; its body is read.
+    const std::string skill = lake::api::agent_docs::skill_md(registry, origin);
+    const std::size_t body = skill.find("\n---\n", 4);
+    ASSERT_NE(body, std::string::npos);
+    for (const auto& [name, text] :
+         std::vector<std::pair<std::string, std::string>>{
+             {"llms.txt", lake::api::agent_docs::llms_txt(registry, origin)},
+             {"llms-full.txt", lake::api::agent_docs::llms_full_txt(registry, origin)},
+             {"SKILL.md", skill.substr(body + 5)}}) {
+        for (const std::string& fault : wording_faults(text)) {
+            ADD_FAILURE() << name << " " << fault;
+        }
     }
-    std::smatch found;
-    EXPECT_FALSE(std::regex_search(own, found, space))
-        << "says \"" << found.str() << "\" near: "
-        << own.substr(static_cast<std::size_t>(std::max<long>(0, found.position() - 60)), 120);
-    for (const std::string& near : lowercase_product_names(prose_of(own))) {
-        ADD_FAILURE() << "names the product \"lake\": " << near;
+    for (const auto audience :
+         {lake::api::SchemaAudience::Caller, lake::api::SchemaAudience::AgentTask}) {
+        std::vector<std::pair<std::string, std::string>> texts;
+        collect_descriptions(lake::api::openapi_document(registry, "test", audience), "openapi", texts);
+        collect_descriptions(lake::api::mcp_tools(registry, audience), "tools/list", texts);
+        ASSERT_GT(texts.size(), registry.list().size());
+        for (const auto& [where, text] : texts) {
+            for (const std::string& fault : wording_faults(text)) {
+                ADD_FAILURE() << where << " " << fault;
+            }
+        }
+    }
+}
+
+// llms.txt, llms-full.txt and the skill keep their own sections: what Lake does, the flows, every
+// tool with its input schema, and every group in the skill (lake#642).
+TEST(Docs, AgentDocsKeepTheirSections) {
+    const lake::api::Registry registry = every_capability();
+    const std::string origin = "https://lake.example";
+    const std::string own = lake::api::agent_docs::llms_txt(registry, origin);
+    for (const auto& group : lake::api::agent_docs::tool_groups(registry)) {
+        for (const std::string& fault : wording_faults(group.summary)) {
+            ADD_FAILURE() << group.title << " " << fault;
+        }
     }
     EXPECT_NE(own.find("## What Lake Does"), std::string::npos);
     for (const char* flow :

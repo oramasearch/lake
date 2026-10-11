@@ -246,7 +246,7 @@ std::expected<std::string, ApiResult> bus_topic(const json& input, ApiContext& c
     if (scope->agents.contains(name.substr(12))) {
         return name;
     }
-    return std::unexpected(ApiResult::failure("not_found", "no such stream in this space"));
+    return std::unexpected(ApiResult::failure("not_found", "no such stream in this account"));
 }
 
 Task browse(ApiContext& context, const json& input) {
@@ -286,7 +286,7 @@ Task browse(ApiContext& context, const json& input) {
             if ((!task.empty() && !scope->tasks.contains(task)) ||
                 (!agent.empty() && !scope->agents.contains(agent)) ||
                 (!task.empty() && !agent.empty() && scope->tasks.at(task).agent != agent)) {
-                co_return ApiResult::failure("not_found", "no such agent turn in this space");
+                co_return ApiResult::failure("not_found", "no such agent turn in this account");
             }
         }
     }
@@ -472,7 +472,7 @@ Task list(ApiContext& context, const json& input) {
             co_return ApiResult::failure(decision.error().code, decision.error().message);
         }
         if (!decision->allowed) {
-            co_return ApiResult::failure("unauthorized", "principal cannot read this space's streams");
+            co_return ApiResult::failure("unauthorized", "principal cannot read this account's streams");
         }
     }
     const std::string customer = input.at("customer_id");
