@@ -444,8 +444,16 @@ WorkspaceService::request(std::string customer_id, std::string requested_by) {
     if (!rows) {
         co_return from_store<WorkspaceState>(rows.error());
     }
+    // A new account's first workspace is named after the account's handle (lake#638), so the
+    // picker reads the person's or organization's name, not a placeholder. An account whose first
+    // workspace was created as `workspace` keeps it under that name; it is never renamed here.
+    std::string name = "workspace";
+    if (const auto customer = store_->get_customer(customer_id);
+        customer && !customer->name.empty()) {
+        name = customer->name;
+    }
     for (const Workspace& row : *rows) {
-        if (row.name == "workspace" && row.desired != "deleted") {
+        if ((row.name == "workspace" || row.name == name) && row.desired != "deleted") {
             const auto found = store_->get_service(row.zetta_service_id);
             if (!found) {
                 co_return from_store<WorkspaceState>(found.error());
@@ -453,7 +461,7 @@ WorkspaceService::request(std::string customer_id, std::string requested_by) {
             co_return state_of(customer_id, *found);
         }
     }
-    const auto created = store_->create_workspace({customer_id, "workspace", "prod", requested_by});
+    const auto created = store_->create_workspace({customer_id, name, "prod", requested_by});
     if (!created) {
         co_return from_store<WorkspaceState>(created.error());
     }
