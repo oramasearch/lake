@@ -39,7 +39,7 @@ writes only its SHA-256 (`credential_sha256`). lake's stores resolve such a bear
 digests in constant time (`context_for`): it acts as the person who launched it, limited to the
 launch's `scopes` (`control::agent_launch_scopes`: `workspace_query`, `workspace_act`,
 `workspace_openapi`, `list_agent_library`, `repository_tree`, `repository_file`, and the workspace's
-transcripts through `list_transcripts` and `get_transcript`, lake#561; the tools of the workspace's MCP connections through `list_mcp_connection_tools`, `read_mcp_tool` and `call_mcp_tool`, lake#652, where Lake checks the agent's `mcp:<prefix>` skill on every call, [MCP connections](mcp-connections.md#who-may-call-a-tool)). A launch that is
+transcripts through `list_transcripts` and `get_transcript`, lake#561; the tools of the workspace's MCP connections through `list_mcp_connection_tools`, `read_mcp_tool` and `call_mcp_tool`, lake#652, where Lake checks the agent's `mcp:<prefix>` skill on every call, [MCP connections](mcp-connections.md#who-may-call-a-tool)). A launch or schedule credential that leaves out `workspace_id` gets its launch's or schedule's workspace, as a task credential gets its task's (lake#652). A launch that is
 stopped (`desired = absent`) or not yet reported has no usable credential.
 
 ## Schedules

@@ -3708,6 +3708,10 @@ TEST_P(WorkspaceRecordStores, McpConnectionsLiveInTheirWorkspaceAndKeepTheirToke
                    "read_mcp_tool",
                    in(0, {{"connection_id", id}, {"tool", "echo"}, {"arguments", {{"text", "a"}}}}))
                     .ok);
+    // agent-runtime sends no workspace_id: the launch names it.
+    json without = in(0, {{"connection_id", id}, {"tool", "echo"}, {"arguments", {{"text", "a"}}}});
+    without.erase("workspace_id");
+    EXPECT_TRUE(as(agent, "read_mcp_tool", without).ok) << "the launch's workspace";
     const json change_input = in(
         0, {{"connection_id", id}, {"tool", "create_ticket"}, {"arguments", {{"title", "auto"}}}});
     EXPECT_EQ(as(agent, "call_mcp_tool", change_input).error.code, "not_approved");
