@@ -10,11 +10,16 @@ import {
   initialOf,
   needsFilter,
   newWorkspacePath,
+  orderOwners,
   ownerKind,
   ownerName,
   pillOwner,
+  phaseOf,
   pillTitle,
+  resolveWorkspace,
   showsOwner,
+  workspaceFigures,
+  workspaceGroups,
   workspaceCount,
   type PickerSpace,
 } from "../src/lib/workspacePicker.ts";
@@ -73,4 +78,57 @@ test("filtering keeps matching workspaces and drops owners left empty", () => {
 test("New workspace opens Workspaces with its dialog, for the current owner", () => {
   assert.equal(newWorkspacePath("c2"), "/workspaces?customer_id=c2&new=1");
   assert.equal(newWorkspacePath(null), "/workspaces?new=1");
+});
+
+test("the person's own account comes first, then each organization in lake's order", () => {
+  assert.deepEqual(orderOwners([acme, mine, north]).map((s) => s.id), ["c1", "c2", "c3"]);
+});
+
+test("a workspace deleted since it was linked or remembered falls back to one the person can reach", () => {
+  const empty: PickerSpace = { ...acme, workspaces: [] };
+  // Steve's screenshot: the remembered organization's only workspace was deleted.
+  const gone = resolveWorkspace([empty, mine], { fromPath: null, remembered: "deleted-ws", suggested: null });
+  assert.deepEqual(gone, { id: "c1-0", replace: false, remember: "c1-0" }, "the person's own first workspace, stored in place of the stale one");
+  const linked = resolveWorkspace([empty, mine], { fromPath: "deleted-ws", remembered: "deleted-ws", suggested: null });
+  assert.deepEqual(linked, { id: "c1-0", replace: true, remember: "c1-0" }, "the URL is rewritten too");
+  assert.deepEqual(resolveWorkspace([empty, mine], { fromPath: "c1-2", remembered: "deleted-ws" }), { id: "c1-2", replace: false, remember: null }, "a live URL wins");
+  assert.equal(resolveWorkspace([empty, mine], { fromPath: null, remembered: "c1-1", suggested: null }).id, "c1-1", "a live remembered one stays");
+  assert.equal(resolveWorkspace([mine, acme], { fromPath: null, remembered: null, suggested: "c2-1" }).id, "c2-1", "lake's suggestion when live");
+  const noneOfMine: PickerSpace = { ...mine, workspaces: [] };
+  assert.equal(resolveWorkspace([noneOfMine, acme], { fromPath: null, remembered: "x" }).id, "c2-0", "another owner's when the person has none");
+  assert.deepEqual(resolveWorkspace([noneOfMine, empty], { fromPath: "x", remembered: "x" }), { id: null, replace: false, remember: null }, "none only when nothing is reachable");
+});
+
+test("Workspaces groups every owner in the picker's order with the picker's names and counts", () => {
+  const listed = {
+    c1: [
+      { id: "c1-2", name: "Forecasts", phase: "Ready", storage_gi: 5 },
+      { id: "c1-0", name: "workspace", phase: "Ready", storage_gi: 5 },
+      { id: "c1-1", name: "Churn study", phase: "Failed", storage_gi: 10 },
+      { id: "c1-9", name: "Old", desired: "deleted", phase: "Ready", storage_gi: 5 },
+    ],
+    c2: [
+      { id: "c2-0", name: "Production", phase: "Pending", storage_gi: 20 },
+      { id: "c2-1", name: "Staging" },
+    ],
+    c3: [],
+  };
+  const groups = workspaceGroups([acme, north, mine], listed);
+  assert.deepEqual(
+    groups.map((g) => [g.space.id, g.rows?.map((r) => r.name)]),
+    [
+      ["c1", ["workspace", "Churn study", "Forecasts"]],
+      ["c2", ["Production", "Staging"]],
+      ["c3", []],
+    ],
+    "the picker's owners, names and order; a deleting workspace is gone from both",
+  );
+  const picker = orderOwners([acme, north, mine]);
+  assert.deepEqual(groups.map((g) => g.rows?.length), picker.map((s) => s.workspaces.length), "the same counts");
+  assert.equal(workspaceGroups([mine], {})[0].rows, null, "an owner not answered yet");
+  const extra = workspaceGroups([north], { c3: [{ id: "new", name: "Just made" }] });
+  assert.deepEqual(extra[0].rows?.map((r) => r.id), ["new"], "one the viewer read has not seen yet comes last");
+  assert.deepEqual(workspaceFigures(groups.flatMap((g) => g.rows ?? [])), { workspaces: 5, ready: 2, failed: 1, storage: 40 }, "figures cover every owner");
+  assert.equal(phaseOf({ id: "x", name: "x" }), "pending");
+  assert.equal(phaseOf({ id: "x", name: "x", desired: "deleted", phase: "Ready" }), "deleting");
 });

@@ -99,3 +99,64 @@ export function newWorkspacePath(spaceId: string | null | undefined): string {
 function fold(text: string): string {
   return text.normalize("NFD").replace(/\p{M}/gu, "").toLocaleLowerCase();
 }
+
+/** The owners in the order the picker and Workspaces show them: the person's own account first,
+ * then each organization in the order lake answered them. */
+export function orderOwners<S extends PickerSpace>(spaces: S[]): S[] {
+  return [...spaces.filter((s) => s.personal), ...spaces.filter((s) => !s.personal)];
+}
+
+/** Which workspace the app is in, and what to fix when the one asked for is gone (lake#638).
+ * `fromPath` is the URL's `/w/<id>`, `remembered` this browser's `lake-workspace`, `suggested` the
+ * `viewer` read's `workspace_id`. A live `fromPath` wins. Otherwise: the suggested one if it is
+ * live, else the remembered one, else the person's own first workspace, else the first one any
+ * owner has; none only when the person can reach no workspace at all. `replace` says the URL names
+ * a workspace that no longer exists and must be rewritten to `id`; `remember` is what to store in
+ * place of a stale remembered workspace. */
+export function resolveWorkspace(
+  spaces: PickerSpace[],
+  { fromPath, remembered, suggested }: { fromPath: string | null; remembered: string | null; suggested?: string | null },
+): { id: string | null; replace: boolean; remember: string | null } {
+  const live = new Set(spaces.flatMap((s) => s.workspaces.map((w) => w.id)));
+  if (fromPath && live.has(fromPath)) return { id: fromPath, replace: false, remember: null };
+  const first = orderOwners(spaces).find((s) => s.workspaces.length)?.workspaces[0]?.id ?? null;
+  const id = (suggested && live.has(suggested) ? suggested : null) ?? (remembered && live.has(remembered) ? remembered : null) ?? first;
+  return { id, replace: !!fromPath && !!id, remember: id && remembered !== id ? id : null };
+}
+
+/** A workspace row of Workspaces (`list_workspaces`), as much of it as the grouping reads. */
+export type ListedWorkspace = { id: string; name: string; desired?: string; phase?: string; storage_gi?: number };
+
+/** Workspaces' groups: every owner the picker shows, in its order, each with its workspaces in the
+ * picker's order (`list_workspaces` supplies the details). A workspace being deleted is gone from
+ * the picker and from here; one lake listed that the viewer read has not seen yet comes last. An
+ * owner whose list has not answered yet has `rows: null`. */
+export function workspaceGroups<S extends PickerSpace, W extends ListedWorkspace>(
+  spaces: S[],
+  listed: Record<string, W[] | undefined>,
+): { space: S; rows: W[] | null }[] {
+  return orderOwners(spaces).map((space) => {
+    const answered = listed[space.id];
+    if (!answered) return { space, rows: null };
+    const live = answered.filter((w) => w.desired !== "deleted");
+    const byId = new Map(live.map((w) => [w.id, w]));
+    const ordered = space.workspaces.map((w) => byId.get(w.id)).filter((w): w is W => !!w);
+    const known = new Set(space.workspaces.map((w) => w.id));
+    return { space, rows: [...ordered, ...live.filter((w) => !known.has(w.id))] };
+  });
+}
+
+/** The phase a Workspaces row shows: a requested deletion first, then the operator's phase. */
+export function phaseOf(row: ListedWorkspace): string {
+  return row.desired === "deleted" ? "deleting" : row.phase || "pending";
+}
+
+/** Workspaces' figures, over every workspace of every owner. */
+export function workspaceFigures(rows: ListedWorkspace[]): { workspaces: number; ready: number; failed: number; storage: number } {
+  return {
+    workspaces: rows.length,
+    ready: rows.filter((r) => phaseOf(r) === "Ready").length,
+    failed: rows.filter((r) => phaseOf(r) === "Failed").length,
+    storage: rows.reduce((sum, r) => sum + (typeof r.storage_gi === "number" ? r.storage_gi : 0), 0),
+  };
+}

@@ -3,7 +3,8 @@
  * workspaces the person can choose, whether sign-in is Clerk). The workspace in the URL
  * (`/w/<id>/…`) is the context for Design, Train and Ship; the server enforces scope regardless. */
 import { createContext, type ReactNode, useContext, useEffect, useMemo, useRef } from "react";
-import { useLocation } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
+import { resolveWorkspace } from "./workspacePicker";
 import { prefetchRead, setSignedIn, setWorkspace, useRead } from "./api";
 
 /** A workspace the viewer can choose. */
@@ -118,7 +119,24 @@ export function SessionProvider({ children, fallback }: { children: ReactNode; f
     initialDataUpdatedAt: exact ? Date.now() : 0,
   });
   const viewer = q.data ?? (q.isError ? ANONYMOUS : null);
-  const workspaceId = fromPath ?? viewer?.workspace_id ?? null;
+  // The workspace: the URL's when it is live, else a fallback the person can reach, never none
+  // while one exists (lake#638). A workspace deleted since it was remembered or linked is replaced
+  // in this browser's memory and in the URL.
+  const resolved = viewer?.signed_in
+    ? resolveWorkspace(viewer.spaces ?? [], { fromPath, remembered: rememberedWorkspace(), suggested: viewer.workspace_id })
+    : { id: fromPath, replace: false, remember: null };
+  const workspaceId = resolved.replace ? resolved.id : (fromPath ?? resolved.id ?? null);
+  const navigate = useNavigate();
+  // Only on a settled read: a workspace created a moment ago is not mistaken for a deleted one.
+  const settled = !!viewer && !q.isFetching;
+  useEffect(() => {
+    if (!settled) return;
+    if (resolved.remember) remember(resolved.remember);
+    if (resolved.replace && resolved.id && fromPath) {
+      const rest = location.pathname.slice(`/w/${encodeURIComponent(fromPath)}`.length);
+      navigate(`/w/${encodeURIComponent(resolved.id)}${rest || "/design/projects"}${location.search}`, { replace: true });
+    }
+  }, [settled, resolved.remember, resolved.replace, resolved.id, fromPath, location.pathname, location.search, navigate]);
   // Every capability called from a workspace page (/w/<id>/…) is called under the same prefix.
   // Other pages call unscoped: the registry fills `workspace_id` from the prefix and refuses a
   // different one, so a remembered workspace must never scope them.

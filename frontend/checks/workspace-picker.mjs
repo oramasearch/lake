@@ -93,5 +93,52 @@ for (const [scenario, viewer] of Object.entries(VIEWERS)) {
     await context.close();
   }
 }
+// Steve, 2026-10-11: the remembered organization's only workspace was deleted. The app must fall
+// back to the person's own first workspace, store it, rewrite the URL, and never say "Choose a
+// workspace"; Workspaces lists every owner's workspaces, as the picker does.
+{
+  const listsByOwner = {
+    me: ws("me", ["steve", "Churn experiments", "Quarterly revenue forecasts"]).map((w, i) => ({ ...w, environment: "prod", phase: i === 1 ? "Failed" : "Ready", desired: "running", storage_gi: 5 })),
+    acme: [],
+    north: ws("north", ["Reporting"]).map((w) => ({ ...w, environment: "dev", phase: "Pending", desired: "running", storage_gi: 5 })),
+  };
+  const s = spaces([], ["Reporting"]);
+  const stale = { ...viewerFor([s[1], s[0], s[2]]), customer_id: "acme", workspace_id: null };
+  for (const width of [1440, 390]) {
+    const context = await browser.newContext({ viewport: { width, height: width > 600 ? 900 : 844 }, deviceScaleFactor: width > 600 ? 1 : 2, colorScheme: "light" });
+    await context.addInitScript(() => localStorage.setItem("lake-workspace", "deleted-ws"));
+    await context.route(/\/v1\/[a-z_]+/, async (route) => {
+      const url = new URL(route.request().url());
+      const name = url.pathname.split("/v1/")[1];
+      const value =
+        name === "viewer" ? stale
+        : name === "workspace_status" ? { requested: true, ready: true, phase: "Ready" }
+        : name === "list_workspaces" ? { workspaces: listsByOwner[url.searchParams.get("customer_id")] ?? [] }
+        : {};
+      return route.fulfill({ contentType: "application/json", body: JSON.stringify({ ok: true, value }) });
+    });
+    const page = await context.newPage();
+    const errors = [];
+    page.on("pageerror", (e) => errors.push(String(e)));
+    const facts = { scenario: "stale", width };
+    await page.goto(BASE + "/w/deleted-ws/design/projects", { waitUntil: "networkidle" });
+    await page.waitForTimeout(500);
+    facts.linkedUrl = page.url().replace(BASE, "");
+    facts.remembered = await page.evaluate(() => localStorage.getItem("lake-workspace"));
+    facts.pill = await page.locator('header button[aria-haspopup="listbox"]').textContent();
+    await page.evaluate(() => localStorage.setItem("lake-workspace", "deleted-ws"));
+    await page.goto(BASE + "/design/projects", { waitUntil: "networkidle" });
+    await page.waitForTimeout(500);
+    facts.unprefixedUrl = page.url().replace(BASE, "");
+    facts.choose = await page.getByText("Choose a workspace", { exact: false }).count();
+    await page.goto(BASE + "/workspaces", { waitUntil: "networkidle" });
+    await page.waitForTimeout(500);
+    await page.screenshot({ path: `${OUT}/workspaces-${width}.png`, fullPage: true });
+    facts.groups = await page.evaluate(() => [...document.querySelectorAll("main section[aria-label]")].map((g) => `${g.getAttribute("aria-label")} (${[...g.querySelectorAll("tbody tr")].length})`));
+    facts.newRows = await page.locator("main section button", { hasText: "New workspace" }).count();
+    report.push({ ...facts, errors });
+    await context.close();
+  }
+}
 await browser.close();
 console.log(JSON.stringify(report, null, 2));

@@ -175,7 +175,7 @@ Workspaces)
 | `/ship/apps`, `/ship/app` | `apps/AppsPage.tsx`, `AppPage.tsx` | apps, ApplicationAgent, one app ([apps.md](apps.md)) | see apps.md |
 | `/deployments` | `apps/DeploymentsPage.tsx` | every environment across readable repositories | `server_info` (whether Deployments are set up, lake#605), `list_repositories`, `list_environments` |
 | `/services` | `ship/ServicesPage.tsx` | the space's databases, streams and engines | `list_services`, `list_service_kinds`, `create_service`, `delete_service`, `service_connection` |
-| `/workspaces` | `workspaces/WorkspacesPage.tsx` | a customer's workspaces with phase and storage, New workspace (`?new=1`, asking the owner), Rename and deletion in dialogs ([workspace-selection.md](workspace-selection.md#the-workspaces-page)) | `list_workspaces`, `create_workspace`, `update_workspace`, `delete_workspace` |
+| `/workspaces` | `workspaces/WorkspacesPage.tsx` | every workspace the person can reach, grouped by owner as the picker groups them, with phase and storage; New workspace (`?new=1`, asking the owner), Rename and deletion in dialogs ([workspace-selection.md](workspace-selection.md#the-workspaces-page)) | `list_workspaces`, `create_workspace`, `update_workspace`, `delete_workspace` |
 | `/ask`, `/w/<id>/ask` | `ask/AskRedirect.tsx` | the old Ask Orama page's address: opens the home (`/`) with its query, less `customer_id`; `/w/<id>/ask` first makes `<id>` the current workspace ([../api/ask-orama.md](../api/ask-orama.md)) | none; the home calls `send_ask_message`, `settle_ask_turn`, `confirm_ask_proposal`, `get_ask_conversation`, `get_agent_task`, `list_agent_library` |
 
 **Organization and administration** ([settings.md](settings.md), [identity.md](identity.md))

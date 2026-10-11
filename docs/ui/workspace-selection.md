@@ -15,9 +15,24 @@ form into `/w/<id>/`; both are gone.
 - **A workspace page** (`workspace: true` in its `routes.ts`) answers at `/w/<workspace_id><path>`.
   Its query parameters are unchanged (`/w/<id>/design/project?name=churn`).
 - **Its unprefixed address** (`/design/projects`, from an old link or the docs) opens the same page
-  in the current workspace: the remembered one when the `viewer` read accepts it, else the only
-  workspace across the viewer's spaces. With neither it shows *Choose a Workspace* with a link to
-  Workspaces. A visitor is sent to sign in (`WorkspaceRedirect` in `src/App.tsx`).
+  in the current workspace (below). Only a person who can reach no workspace at all sees *Choose a
+  Workspace* with a link to Workspaces. A visitor is sent to sign in (`WorkspaceRedirect` in
+  `src/App.tsx`).
+
+## The current workspace, and a deleted one
+
+`resolveWorkspace` in `lib/workspacePicker.ts`, called by `lib/session.tsx` (lake#638):
+
+- the URL's `/w/<id>` when it is live in one of the person's spaces;
+- else the `viewer` read's `workspace_id` when live, else the remembered one when live, else the
+  person's own first workspace, else the first workspace any organization of theirs has.
+
+So a workspace deleted since it was linked or remembered never leaves the app on *Choose a
+workspace* while another exists (Steve, 2026-10-11: the review organization's only workspace was
+deleted and the picker read "ux-review-2026… / Choose a w…"). Once the `viewer` read has settled
+(not while it is being fetched again, so a workspace made a moment ago is not taken for a deleted
+one), the session stores the fallback in `lake-workspace` and, when the URL named the deleted
+workspace, replaces `/w/<deleted>` with `/w/<fallback>` keeping the rest of the path and the query.
 - **`/w/<workspace_id>` and `/w/<workspace_id>/`** open the workspace's home,
   `/w/<workspace_id>/design/projects`, keeping the query.
 - **The rail** marks the current item by the path without its `/w/<id>` prefix (`localPath` in
@@ -76,7 +91,8 @@ are pure functions in `lib/workspacePicker.ts` (lake#638).
 ![The picker at 1440 wide: one account with three workspaces and two organizations](screenshots/workspace-picker/three-1440-open.png)
 
 Screenshots at 1440 and 390 wide, from mocked answers (one account with three workspaces, two
-organizations, and a second viewer with twelve workspaces for the filter), are in
+organizations, a second viewer with twelve workspaces for the filter, and a third whose remembered
+workspace was deleted, with Workspaces grouped by owner), are in
 [`screenshots/workspace-picker/`](screenshots/workspace-picker/). Make them again with
 `frontend/checks/workspace-picker.mjs` against `npx vite --port 5174` (its header says how); it also
 prints whether the page scrolls sideways, the pill's text and tooltip, the group headers, and
@@ -100,7 +116,14 @@ whether or not the workspace is ready, because it is lake's, not the workspace's
 ## The Workspaces page
 
 `/workspaces` (`pages/workspaces/WorkspacesPage.tsx`) is outside `/w/` so the first workspace can be
-created before one exists. `?new=1` opens its New Workspace dialog (the picker's *New workspace*),
+created before one exists. It lists **every workspace the person can reach, grouped by owner** exactly
+as the picker groups them (lake#638): their account first, then each organization, each group headed
+by its initial, kind and name as written, with the picker's names, order and counts
+(`workspaceGroups`, one `list_workspaces` per owner; a workspace being deleted is gone from both). The
+figures (Workspaces, Ready, Failed, Storage) cover every owner (`workspaceFigures`). An owner with no
+workspace shows a *New workspace* row in its group, which opens the dialog for that owner; the page is
+never empty while an owner has one. The search and the phase filter apply across groups.
+`?customer_id=` only chooses the owner a new workspace defaults to. `?new=1` opens its New Workspace dialog (the picker's *New workspace*),
 which asks for the owner when the viewer has more than one. **Rename** on a row renames the workspace
 (`update_workspace {name}`); its data, address and namespace stay. Figures on top count the chosen customer's workspaces, the ready and
 failed ones and the storage they request; the list shows each workspace's name, environment and

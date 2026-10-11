@@ -11,7 +11,7 @@ import { Check, ChevronDown, Layers, Plus, Search } from "lucide-react";
 import { useSession, type SpaceChoice } from "@/lib/session";
 import { isWorkspacePath, localPath } from "@/routes";
 import { cx } from "@/lib/ui";
-import { filterGroups, firstMatch, initialOf, needsFilter, newWorkspacePath, ownerKind, ownerName, pillOwner, pillTitle, showsOwner } from "@/lib/workspacePicker";
+import { filterGroups, firstMatch, initialOf, needsFilter, newWorkspacePath, orderOwners, ownerKind, ownerName, pillOwner, pillTitle, showsOwner } from "@/lib/workspacePicker";
 
 export function WorkspacePicker() {
   const { viewer, space, workspace, workspaceId } = useSession();
@@ -53,7 +53,7 @@ export function WorkspacePicker() {
   const label = workspace ? workspace.name : "Choose a workspace";
   const title = workspace ? pillTitle(workspace.name, owner, viewer, many) : label;
   const searchable = needsFilter(spaces);
-  const groups = filterGroups(spaces, viewer, filter);
+  const groups = filterGroups(orderOwners(spaces), viewer, filter);
 
   return (
     <div ref={box} className="relative min-w-0 shrink">

@@ -1,19 +1,19 @@
-/** Ship → Workspaces (lake's workspaces_content and workspace_deletion_confirmation): a customer's
- * workspaces with their phase and storage, New Workspace in a dialog, and the typed-name deletion
- * (`?delete=<id>`, a dialog) that first lists what goes with counts from
- * `delete_workspace {dry_run: true}`. Not a workspace page: it is never under `/w/<id>/`, so every
- * call here goes unprefixed with the customer named. */
+/** Ship → Workspaces: every workspace the person can reach, grouped by owner as the top bar's
+ * picker groups them (lake#638), with their phase and storage, New Workspace in a dialog that asks
+ * the owner, Rename, and the typed-name deletion (`?delete=<id>`, a dialog) that first lists what
+ * goes with counts from `delete_workspace {dry_run: true}`. Not a workspace page: it is never under
+ * `/w/<id>/`, so every call here goes unprefixed with the customer named. */
 import { type ReactNode, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
-import { useQuery } from "@tanstack/react-query";
+import { useQueries, useQuery } from "@tanstack/react-query";
 import { Boxes, HardDrive, Pencil, Plus, SearchX, Trash2 } from "lucide-react";
-import { act, useRead, type Row } from "@/lib/api";
+import { act, read, type Row } from "@/lib/api";
 import { Modal } from "@/lib/overlay";
 import { useSession } from "@/lib/session";
 import { useToast } from "@/lib/toast";
 import { useTrail } from "@/lib/trail";
-import { ownerKind, ownerName } from "@/lib/workspacePicker";
-import { Button, DataTable, Empty, ErrorBlock, Field, FilterChips, Form, Page, SearchInput, Skeleton, Stat, StatRow, Status, Toolbar, fieldError } from "@/lib/ui";
+import { initialOf, orderOwners, ownerKind, ownerName, phaseOf, workspaceFigures, workspaceGroups } from "@/lib/workspacePicker";
+import { Button, type Column, cx, DataTable, Empty, ErrorBlock, Field, FilterChips, Form, Page, SearchInput, Skeleton, Stat, StatRow, Status, Toolbar, fieldError } from "@/lib/ui";
 import { dateTime, relative } from "@/lib/format";
 import { postRead } from "@/pages/design/api";
 import { FormError } from "@/pages/design/parts";
@@ -42,111 +42,60 @@ type Plan = {
 
 const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
 
-/** The phase a row shows: a requested deletion first, then the operator's phase. */
-function phaseOf(row: Workspace): string {
-  return row.desired === "deleted" ? "deleting" : row.phase || "pending";
-}
-
 export default function WorkspacesPage() {
   const { viewer, space, refresh } = useSession();
   const [params, setParams] = useSearchParams();
-  // The customer: an accessible `?customer_id=`, else the current workspace's, else the first.
+  // Every workspace the person can reach, grouped by owner as the picker groups them (lake#638).
+  // `?customer_id=` only says which owner a new workspace defaults to.
   const asked = params.get("customer_id");
-  const customerId = viewer.spaces.find((s) => s.id === asked)?.id ?? space?.id ?? viewer.customer_id ?? viewer.spaces[0]?.id ?? "";
+  const customerId = viewer.spaces.find((s) => s.id === asked)?.id ?? space?.id ?? viewer.spaces.find((s) => s.personal)?.id ?? viewer.spaces[0]?.id ?? "";
   const doomed = params.get("delete") ?? "";
   const back = `/workspaces?customer_id=${encodeURIComponent(customerId)}`;
-  // `?new=1` (the top bar's "New workspace", lake#638) opens the dialog; closing it drops it.
-  const [creating, setCreatingState] = useState(params.get("new") === "1");
-  const setCreating = (open: boolean) => {
-    setCreatingState(open);
-    if (!open && params.has("new")) {
+  // `?new=1` (the top bar's "New workspace") opens the dialog for that owner; closing drops it.
+  const [creating, setCreatingState] = useState<string | null>(params.get("new") === "1" ? customerId : null);
+  const setCreating = (owner: string | null) => {
+    setCreatingState(owner);
+    if (!owner && params.has("new")) {
       const next = new URLSearchParams(params);
       next.delete("new");
       setParams(next, { replace: true });
     }
   };
-  const [renaming, setRenaming] = useState<Workspace | null>(null);
+  const [renaming, setRenaming] = useState<{ owner: string; row: Workspace } | null>(null);
   const [search, setSearch] = useState("");
   const [phase, setPhase] = useState<string | null>(null);
 
   useTrail([{ label: "Ship", to: "/ship/models" }, { label: "Workspaces", to: back }], "Workspaces");
 
-  const listed = useRead<{ workspaces?: Workspace[] }>("list_workspaces", { customer_id: customerId }, { workspace: null, enabled: !!customerId });
-  const rows = listed.data?.workspaces ?? [];
+  const owners = orderOwners(viewer.spaces);
+  const lists = useQueries({
+    queries: owners.map((s) => ({
+      queryKey: ["list_workspaces", "", { customer_id: s.id }],
+      queryFn: ({ signal }: { signal: AbortSignal }) => read<{ workspaces?: Workspace[] }>("list_workspaces", { customer_id: s.id }, { workspace: null, signal }),
+    })),
+  });
+  const listed: Record<string, Workspace[] | undefined> = {};
+  owners.forEach((s, i) => {
+    listed[s.id] = lists[i]?.data ? (lists[i].data?.workspaces ?? []) : undefined;
+  });
+  const failedList = lists.find((l) => l.isError);
+  const loading = lists.some((l) => l.isLoading);
+  const groups = workspaceGroups(owners, listed);
+  const rows = groups.flatMap((g) => g.rows ?? []);
+  const figures = workspaceFigures(rows);
   const phases = new Map<string, number>();
   for (const r of rows) phases.set(phaseOf(r), (phases.get(phaseOf(r)) ?? 0) + 1);
   const needle = search.trim().toLowerCase();
-  const shown = rows.filter((r) => (!phase || phaseOf(r) === phase) && (!needle || `${r.name} ${r.environment ?? ""} ${r.namespace ?? ""}`.toLowerCase().includes(needle)));
-  const ready = rows.filter((r) => phaseOf(r) === "Ready").length;
-  const failed = rows.filter((r) => phaseOf(r) === "Failed").length;
-  const storage = rows.reduce((sum, r) => sum + (typeof r.storage_gi === "number" ? r.storage_gi : 0), 0);
+  const matches = (r: Workspace) => (!phase || phaseOf(r) === phase) && (!needle || `${r.name} ${r.environment ?? ""} ${r.namespace ?? ""}`.toLowerCase().includes(needle));
+  const filtering = !!needle || !!phase;
+  const ownerOf = (id: string) => groups.find((g) => g.rows?.some((r) => r.id === id))?.space.id ?? customerId;
   const askDelete = (id: string) => {
     const next = new URLSearchParams(params);
-    next.set("customer_id", customerId);
+    next.set("customer_id", ownerOf(id));
     next.set("delete", id);
     setParams(next);
   };
-
-  return (
-    <Page
-      eyebrow="Ship"
-      title="Workspaces"
-      sub="Isolated environments, each keeping its own projects, data and models apart from every other."
-      actions={
-        customerId ? (
-          <Button variant="primary" onClick={() => setCreating(true)}>
-            <Plus size={14} aria-hidden /> New workspace
-          </Button>
-        ) : undefined
-      }
-    >
-      {!customerId ? (
-        <Empty icon={Boxes} title="No Workspace Yet">
-          You have no workspace yet.
-        </Empty>
-      ) : listed.isLoading ? (
-        <Skeleton />
-      ) : listed.isError ? (
-        <ErrorBlock error={listed.error} retry={() => void listed.refetch()} what="workspaces" />
-      ) : (
-        <>
-          <StatRow cols={4}>
-            <Stat label="Workspaces" value={rows.length} icon={Boxes} />
-            <Stat label="Ready" value={ready} tone={ready ? "ok" : undefined} sub={`${rows.length - ready - failed} not ready yet`} />
-            <Stat label="Failed" value={failed} tone={failed ? "bad" : undefined} />
-            <Stat label="Storage" value={`${storage} GiB`} icon={HardDrive} sub="requested across workspaces" />
-          </StatRow>
-          <Toolbar>
-            <SearchInput value={search} onChange={setSearch} placeholder="Search workspaces…" label="Search workspaces" />
-            <FilterChips options={[...phases].map(([id, count]) => ({ id, label: id.charAt(0).toUpperCase() + id.slice(1), count }))} value={phase} onChange={setPhase} />
-          </Toolbar>
-          <DataTable<Workspace>
-            rows={shown}
-            q={listed}
-            what="workspaces"
-            caption="Workspaces"
-            rowKey={(row) => row.id}
-            initialSort={{ key: "name", dir: "ascending" }}
-            empty={
-              rows.length ? (
-                <Empty compact icon={SearchX} title="No Workspace Matches">
-                  Clear the search or the filter to see more.
-                </Empty>
-              ) : (
-                <Empty
-                  icon={Boxes}
-                  title="No Workspaces Yet"
-                  action={
-                    <Button variant="primary" onClick={() => setCreating(true)}>
-                      <Plus size={14} aria-hidden /> New workspace
-                    </Button>
-                  }
-                >
-                  A workspace keeps its own projects, data and models, apart from every other.
-                </Empty>
-              )
-            }
-            columns={[
+  const columns = (owner: string): Column<Workspace>[] => [
               {
                 key: "name",
                 label: "Workspace",
@@ -201,7 +150,7 @@ export default function WorkspacesPage() {
                 render: (row) =>
                   row.desired !== "deleted" ? (
                     <span className="inline-flex flex-wrap justify-end gap-1">
-                      <Button variant="ghost" onClick={() => setRenaming(row)} aria-label={`Rename ${row.name}`}>
+                      <Button variant="ghost" onClick={() => setRenaming({ owner, row })} aria-label={`Rename ${row.name}`}>
                         <Pencil size={14} aria-hidden /> Rename
                       </Button>
                       {/* The confirmation lists what the deletion destroys before it asks for the name. */}
@@ -220,13 +169,84 @@ export default function WorkspacesPage() {
                     <span className="text-[12.5px] text-ink-3">Deletion requested</span>
                   ),
               },
-            ]}
-          />
-          {doomed && <DeleteConfirmation key={doomed} customerId={customerId} workspaceId={doomed} back={back} onDone={refresh} />}
-          {renaming && <RenameWorkspace customerId={customerId} workspace={renaming} onDone={refresh} onClose={() => setRenaming(null)} />}
+            ];
+
+  return (
+    <Page
+      eyebrow="Ship"
+      title="Workspaces"
+      sub="Isolated environments, each keeping its own projects, data and models apart from every other."
+      actions={
+        customerId ? (
+          <Button variant="primary" onClick={() => setCreating(customerId)}>
+            <Plus size={14} aria-hidden /> New workspace
+          </Button>
+        ) : undefined
+      }
+    >
+      {!customerId ? (
+        <Empty icon={Boxes} title="No Workspace Yet">
+          You have no workspace yet.
+        </Empty>
+      ) : loading ? (
+        <Skeleton />
+      ) : failedList ? (
+        <ErrorBlock error={failedList.error} retry={() => lists.forEach((l) => void l.refetch())} what="workspaces" />
+      ) : (
+        <>
+          <StatRow cols={4}>
+            <Stat label="Workspaces" value={figures.workspaces} icon={Boxes} sub={owners.length > 1 ? `across ${plural(owners.length, "owner", "owners")}` : undefined} />
+            <Stat label="Ready" value={figures.ready} tone={figures.ready ? "ok" : undefined} sub={`${figures.workspaces - figures.ready - figures.failed} not ready yet`} />
+            <Stat label="Failed" value={figures.failed} tone={figures.failed ? "bad" : undefined} />
+            <Stat label="Storage" value={`${figures.storage} GiB`} icon={HardDrive} sub="requested across workspaces" />
+          </StatRow>
+          <Toolbar>
+            <SearchInput value={search} onChange={setSearch} placeholder="Search workspaces…" label="Search workspaces" />
+            <FilterChips options={[...phases].map(([id, count]) => ({ id, label: id.charAt(0).toUpperCase() + id.slice(1), count }))} value={phase} onChange={setPhase} />
+          </Toolbar>
+          <div className="flex flex-col gap-6">
+            {groups.map(({ space: owner, rows: ownRows }) => {
+              const shown = (ownRows ?? []).filter(matches);
+              if (filtering && !shown.length) return null;
+              return (
+                <section key={owner.id} aria-label={`${ownerKind(owner)}: ${ownerName(owner, viewer)}`} className="flex flex-col gap-2">
+                  <div className="flex items-center gap-2">
+                    <OwnerInitial space={owner} name={ownerName(owner, viewer)} />
+                    <div className="min-w-0 flex-1 leading-tight">
+                      <div className="text-[11.5px] text-ink-3">{ownerKind(owner)}</div>
+                      {/* The owner's name as written: not an h2, whose page style is an upper-cased label. */}
+                      <div role="heading" aria-level={2} className="truncate text-[15px] font-semibold text-ink">
+                        {ownerName(owner, viewer)}
+                      </div>
+                    </div>
+                    <span className="font-mono text-[12px] text-ink-3">{plural((ownRows ?? []).length, "workspace", "workspaces")}</span>
+                  </div>
+                  {ownRows && ownRows.length ? (
+                    <DataTable<Workspace> rows={shown} what="workspaces" caption={`Workspaces of ${ownerName(owner, viewer)}`} rowKey={(row) => row.id} columns={columns(owner.id)} />
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => setCreating(owner.id)}
+                      className="flex w-full items-center gap-2 rounded-[6px] border border-dashed border-rule px-3 py-3 text-left text-[13px] text-ink-2 hover:border-action hover:text-ink"
+                    >
+                      <Plus size={14} aria-hidden /> New workspace
+                      <span className="text-ink-3">· {ownerName(owner, viewer)} has none yet</span>
+                    </button>
+                  )}
+                </section>
+              );
+            })}
+            {filtering && !rows.some(matches) && (
+              <Empty compact icon={SearchX} title="No Workspace Matches">
+                Clear the search or the filter to see more.
+              </Empty>
+            )}
+          </div>
+          {doomed && <DeleteConfirmation key={doomed} customerId={ownerOf(doomed)} workspaceId={doomed} back={back} onDone={refresh} />}
+          {renaming && <RenameWorkspace customerId={renaming.owner} workspace={renaming.row} onDone={refresh} onClose={() => setRenaming(null)} />}
           {creating && (
             <NewWorkspace
-              customerId={customerId}
+              customerId={creating}
               onDone={(owner) => {
                 refresh();
                 if (owner !== customerId) {
@@ -236,12 +256,27 @@ export default function WorkspacesPage() {
                   setParams(next, { replace: true });
                 }
               }}
-              onClose={() => setCreating(false)}
+              onClose={() => setCreating(null)}
             />
           )}
         </>
       )}
     </Page>
+  );
+}
+
+/** An owner's initial, as the top bar's picker draws it. */
+function OwnerInitial({ space, name }: { space: { personal: boolean }; name: string }) {
+  return (
+    <span
+      aria-hidden
+      className={cx(
+        "inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-[6px] text-[12.5px] font-semibold",
+        space.personal ? "bg-ai-soft text-ai" : "bg-action-soft text-action",
+      )}
+    >
+      {initialOf(name)}
+    </span>
   );
 }
 
