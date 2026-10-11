@@ -6,12 +6,13 @@
 import { type ReactNode, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { Boxes, HardDrive, Plus, SearchX, Trash2 } from "lucide-react";
+import { Boxes, HardDrive, Pencil, Plus, SearchX, Trash2 } from "lucide-react";
 import { act, useRead, type Row } from "@/lib/api";
 import { Modal } from "@/lib/overlay";
 import { useSession } from "@/lib/session";
 import { useToast } from "@/lib/toast";
 import { useTrail } from "@/lib/trail";
+import { ownerKind, ownerName } from "@/lib/workspacePicker";
 import { Button, DataTable, Empty, ErrorBlock, Field, FilterChips, Form, Page, SearchInput, Skeleton, Stat, StatRow, Status, Toolbar, fieldError } from "@/lib/ui";
 import { dateTime, relative } from "@/lib/format";
 import { postRead } from "@/pages/design/api";
@@ -54,7 +55,17 @@ export default function WorkspacesPage() {
   const customerId = viewer.spaces.find((s) => s.id === asked)?.id ?? space?.id ?? viewer.customer_id ?? viewer.spaces[0]?.id ?? "";
   const doomed = params.get("delete") ?? "";
   const back = `/workspaces?customer_id=${encodeURIComponent(customerId)}`;
-  const [creating, setCreating] = useState(false);
+  // `?new=1` (the top bar's "New workspace", lake#638) opens the dialog; closing it drops it.
+  const [creating, setCreatingState] = useState(params.get("new") === "1");
+  const setCreating = (open: boolean) => {
+    setCreatingState(open);
+    if (!open && params.has("new")) {
+      const next = new URLSearchParams(params);
+      next.delete("new");
+      setParams(next, { replace: true });
+    }
+  };
+  const [renaming, setRenaming] = useState<Workspace | null>(null);
   const [search, setSearch] = useState("");
   const [phase, setPhase] = useState<string | null>(null);
 
@@ -189,17 +200,22 @@ export default function WorkspacesPage() {
                 className: "text-right",
                 render: (row) =>
                   row.desired !== "deleted" ? (
-                    // The confirmation lists what the deletion destroys before it asks for the name.
-                    <a
-                      href={`${back}&delete=${encodeURIComponent(row.id)}#delete-workspace`}
-                      className="button button-ghost"
-                      onClick={(e) => {
-                        e.preventDefault();
-                        askDelete(row.id);
-                      }}
-                    >
-                      <Trash2 size={14} aria-hidden /> Delete
-                    </a>
+                    <span className="inline-flex flex-wrap justify-end gap-1">
+                      <Button variant="ghost" onClick={() => setRenaming(row)} aria-label={`Rename ${row.name}`}>
+                        <Pencil size={14} aria-hidden /> Rename
+                      </Button>
+                      {/* The confirmation lists what the deletion destroys before it asks for the name. */}
+                      <a
+                        href={`${back}&delete=${encodeURIComponent(row.id)}#delete-workspace`}
+                        className="button button-ghost"
+                        onClick={(e) => {
+                          e.preventDefault();
+                          askDelete(row.id);
+                        }}
+                      >
+                        <Trash2 size={14} aria-hidden /> Delete
+                      </a>
+                    </span>
                   ) : (
                     <span className="text-[12.5px] text-ink-3">Deletion requested</span>
                   ),
@@ -207,15 +223,79 @@ export default function WorkspacesPage() {
             ]}
           />
           {doomed && <DeleteConfirmation key={doomed} customerId={customerId} workspaceId={doomed} back={back} onDone={refresh} />}
-          {creating && <NewWorkspace customerId={customerId} onDone={refresh} onClose={() => setCreating(false)} />}
+          {renaming && <RenameWorkspace customerId={customerId} workspace={renaming} onDone={refresh} onClose={() => setRenaming(null)} />}
+          {creating && (
+            <NewWorkspace
+              customerId={customerId}
+              onDone={(owner) => {
+                refresh();
+                if (owner !== customerId) {
+                  const next = new URLSearchParams(params);
+                  next.delete("new");
+                  next.set("customer_id", owner);
+                  setParams(next, { replace: true });
+                }
+              }}
+              onClose={() => setCreating(false)}
+            />
+          )}
         </>
       )}
     </Page>
   );
 }
 
-function NewWorkspace({ customerId, onDone, onClose }: { customerId: string; onDone: () => void; onClose: () => void }) {
+/** Renames a workspace (`update_workspace {name}`); an account's first workspace created as
+ * `workspace` is renamed here, never by lake (lake#638). */
+function RenameWorkspace({ customerId, workspace, onDone, onClose }: { customerId: string; workspace: Workspace; onDone: () => void; onClose: () => void }) {
   const toast = useToast();
+  const [name, setName] = useState(workspace.name);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<unknown>(null);
+  const submit = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await act("update_workspace", { customer_id: customerId, workspace_id: workspace.id, name: name.trim() }, { workspace: null });
+      onDone();
+      toast("Workspace renamed");
+      onClose();
+    } catch (e) {
+      setError(e);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <Modal
+      title="Rename Workspace"
+      subtitle="Only its name changes: its data, address and namespace stay."
+      onClose={onClose}
+      width={440}
+      footer={
+        <>
+          <Button onClick={onClose}>Cancel</Button>
+          <Button type="submit" form="rename-workspace" variant="primary" loading={busy} disabled={!name.trim() || name.trim() === workspace.name}>
+            Rename
+          </Button>
+        </>
+      }
+    >
+      <Form id="rename-workspace" onSubmit={submit}>
+        <FormError error={error && !fieldError(error, "name") ? error : null} />
+        <Field label="Name" required error={fieldError(error, "name")}>
+          <input name="name" maxLength={128} value={name} autoFocus onChange={(e) => setName(e.target.value)} />
+        </Field>
+      </Form>
+    </Modal>
+  );
+}
+
+function NewWorkspace({ customerId, onDone, onClose }: { customerId: string; onDone: (owner: string) => void; onClose: () => void }) {
+  const toast = useToast();
+  const { viewer } = useSession();
+  // Which account or organization owns it: asked only when the viewer has more than one (lake#638).
+  const [owner, setOwner] = useState(customerId);
   const [name, setName] = useState("");
   const [environment, setEnvironment] = useState("dev");
   const [busy, setBusy] = useState(false);
@@ -224,8 +304,8 @@ function NewWorkspace({ customerId, onDone, onClose }: { customerId: string; onD
     setBusy(true);
     setError(null);
     try {
-      await act("create_workspace", { customer_id: customerId, name, environment }, { workspace: null });
-      onDone();
+      await act("create_workspace", { customer_id: owner, name, environment }, { workspace: null });
+      onDone(owner);
       toast("Workspace created");
       onClose();
     } catch (e) {
@@ -252,6 +332,17 @@ function NewWorkspace({ customerId, onDone, onClose }: { customerId: string; onD
     >
       <Form id="new-workspace" onSubmit={submit}>
         <FormError error={generic} />
+        {viewer.spaces.length > 1 && (
+          <Field label="Owner" required help="Your account, or an organization you belong to.">
+            <select name="owner" value={owner} onChange={(e) => setOwner(e.target.value)}>
+              {viewer.spaces.map((s) => (
+                <option key={s.id} value={s.id}>
+                  {ownerKind(s)}: {ownerName(s, viewer)}
+                </option>
+              ))}
+            </select>
+          </Field>
+        )}
         <Field label="Name" required error={fieldError(error, "name")}>
           <input name="name" maxLength={128} value={name} onChange={(e) => setName(e.target.value)} />
         </Field>
