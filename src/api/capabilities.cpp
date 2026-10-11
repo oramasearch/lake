@@ -5,6 +5,7 @@
 #include "lake/api/billing.hpp"
 #include "lake/api/images.hpp"
 #include "lake/api/metering_recorder.hpp"
+#include "lake/api/sealed_delivery.hpp"
 #include "lake/version.hpp"
 #include "lake_attestation.hpp"
 #include "repository_records_api.hpp"
@@ -5921,6 +5922,7 @@ void register_core_capabilities(Registry& registry, std::string_view version) {
     register_search_capability(registry);
     register_audit_capabilities(registry);
     register_secret_capabilities(registry);
+    register_sealed_delivery_capabilities(registry);
     register_offline_recovery_capabilities(registry);
     register_forge_capabilities(registry);
     register_export_capabilities(registry);

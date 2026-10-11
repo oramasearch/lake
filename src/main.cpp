@@ -151,6 +151,9 @@ int main(int argc, char** argv) {
     opts.identity_seed = env_or("LAKE_IDENTITY_SEED", "");
     opts.instance_kek = env_or("LAKE_INSTANCE_KEK", "");
     opts.clerk_publishable_key = env_or("LAKE_CLERK_PUBLISHABLE_KEY", "");
+    // The cluster delivery key the operator publishes (a public key, not a secret): the only one
+    // mint_sealed_secret seals a user's secret to (lake#625).
+    opts.sealing_public_key = env_or("LAKE_SEALING_PUBLIC_KEY", "");
     // Speech-to-text (docs/api/transcripts.md): without a key, transcribe answers not_supported.
     opts.openai_api_key = env_or("LAKE_OPENAI_API_KEY", "");
     opts.transcribe_model = env_or("LAKE_TRANSCRIBE_MODEL", "");

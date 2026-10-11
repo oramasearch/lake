@@ -58,7 +58,10 @@ labels stack over their controls).
 | Delete | `delete_app`; requires the app's exact name |
 | Logs | `app_logs` (its `items`) |
 
-Secret references render only as `••••••` and never appear in the page.
+A secret variable renders as the secret and field it comes from (`database → DATABASE_URL`,
+`secretEnvLabel` in `frontend/src/pages/apps/secretEnv.ts`); its value never reaches the page. The
+Environment form sets either a value or a secret (**Secret mount ID**, **Secret name**, **Field**;
+`envInput`), lake#625.
 
 ## Live state
 

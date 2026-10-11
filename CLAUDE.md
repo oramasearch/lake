@@ -175,6 +175,14 @@ lake's own platform credentials, environment variables of the hosting platform (
 Orama's deployments; `spec.env` with a `secretKeyRef` on the dev cluster), never a user's secret
 store; without them, the manual provider, said on the Billing page and in `viewer`/`server_info`. Not deployed; the operator must vendor the schema
 and select `payment_provider_guard`. See `docs/api/billing.md#stripe`.
+A user's secret reaches a Kubernetes Secret only as a sealed projection (lake#625, decision 58, no
+migration): lake has two levels of secrets, Orama's platform credentials as environment variables
+of the hosting platform and users' workspace secrets in the secret store (`docs/deployment/secrets.md`).
+`mint_sealed_secret`, for the operator credential only, answers a `LakeSealedSecret` source's fields
+sealed to the cluster's X25519 delivery key in the operator's envelope version 1, never a value; an
+app's secret environment names a lake secret (`lake-secret://<mount>/<name>#<field>`) and the
+operator projects it, refreshing every five minutes. Not deployed; needs the orama-operator change.
+See `docs/api/secrets.md#projections`.
 Dynamic-secret leases follow (lake#362, migration `0058`): each lease is a sealed record in its
 mount's workspace, and PostgreSQL keeps only `secret_lease_routes` (lease → mount, workspace, and
 `due_at`), the content-free route and due index. Renew, revoke and the owner loop's expiry pass

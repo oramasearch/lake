@@ -60,7 +60,16 @@ The binding contract is:
 
 Lake writes only those scopes and service IDs, with no token or token Secret reference. The
 operator resolves the service connection. Plain environment values are scanned for secrets;
-secret environment configuration remains represented by references.
+secret environment configuration is represented by references.
+
+`secret_env_refs` is an object of environment names to `lake-secret://<mount id>/<name>#<field>`
+references (lake#625): one field of one secret in a secret mount of the app's workspace. It names
+the secret, never a value and never a Kubernetes Secret. The operator owns a `LakeSealedSecret` with
+a `lake` source for each secret, which lake's `mint_sealed_secret` answers sealed to the cluster's
+delivery key ([../api/secrets.md](../api/secrets.md#projections),
+[../deployment/secrets.md](../deployment/secrets.md)). Lake no longer writes a Kubernetes Secret
+name here; the operator still reads the old `<secret>` and `<secret>/<key>` forms of rows written
+before.
 
 ## Operator tokens
 

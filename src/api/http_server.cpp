@@ -8523,6 +8523,7 @@ struct ApiServer::Impl {
         ctx.public_host = options.public_host;
         ctx.external_origin = options.external_origin;
         ctx.clerk_publishable_key = options.clerk_publishable_key;
+        ctx.sealing_public_key = options.sealing_public_key;
         ctx.transcriber = transcriber;
         ctx.payments = payments;
         ctx.object_transport = object_transport;

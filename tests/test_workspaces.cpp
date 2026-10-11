@@ -3094,7 +3094,7 @@ TEST(AgentRuns, ApplicationAgentWritesAppsOnlyAfterTheProposalIsConfirmed) {
                             {"port", 8080},
                             {"host", nullptr},
                             {"auth", "public"},
-                            {"env", {{"API_KEY", {{"secret", "reports-api-key"}}}}}};
+                            {"env", {{"REPORT_TITLE", "Weekly accounts"}}}};
     EXPECT_EQ(r.call_as(*first_principal, "create_app", create_input).error.code, "unauthorized");
     EXPECT_EQ(r.call_as(*first_principal,
                         "deploy_app",
@@ -3175,7 +3175,15 @@ TEST(AgentRuns, ApplicationAgentWritesAppsOnlyAfterTheProposalIsConfirmed) {
     const auto created = r.call_as(*third_principal, "create_app", create_input);
     ASSERT_TRUE(created.ok) << created.error.message;
     EXPECT_EQ(created.value["auth"], "none");
-    EXPECT_EQ(created.value["secret_env_refs"]["API_KEY"], "reports-api-key");
+    EXPECT_EQ(created.value["env"]["REPORT_TITLE"], "Weekly accounts");
+    // A Kubernetes Secret name is not a secret reference (lake#625): the agent's proposal must
+    // name a lake secret, which its credential must be able to read.
+    json named_secret = create_input;
+    named_secret["name"] = "agent-reports-secret";
+    named_secret["env"] = {{"API_KEY", {{"secret", "reports-api-key"}}}};
+    const auto refused = r.call_as(*third_principal, "create_app", named_secret);
+    EXPECT_EQ(refused.error.code, "invalid_input");
+    EXPECT_EQ(refused.error.path, "/env/API_KEY/secret");
     const auto deployed = r.call_as(
         *third_principal,
         "deploy_app",

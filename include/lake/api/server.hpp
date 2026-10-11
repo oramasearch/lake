@@ -145,6 +145,10 @@ struct ServerOptions {
     // and sign-up are Clerk's and lake's own identity pages leave the navigation; empty or `xxx`
     // keeps lake's own sign-in, as an on-prem install uses. See docs/api/clerk.md.
     std::string clerk_publishable_key;
+    // The cluster's sealed-secret delivery key (LAKE_SEALING_PUBLIC_KEY, unpadded base64url X25519,
+    // set by the operator from Lake status.sealing). When set, mint_sealed_secret seals only to it
+    // (lake#625, docs/api/secrets.md#projections).
+    std::string sealing_public_key;
     // Speech-to-text (docs/api/transcripts.md, lake#561): OpenAI's key (LAKE_OPENAI_API_KEY) and
     // the transcription model (LAKE_TRANSCRIBE_MODEL, empty: gpt-4o-transcribe). With no key and
     // no injected `transcriber`, transcribe and audio transcripts answer not_supported.

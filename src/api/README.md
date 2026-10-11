@@ -450,6 +450,14 @@ workspace (lake#363): `begin_application_authorization` writes the code there, a
 `exchange_application_authorization_code` reads the routing row for the workspace before it redeems
 the code. The retired `auth_app_authorization_codes` table and its copy went with migration
 `0070`.
+`sealed_delivery.cpp` (lake#625, decision 58) is `mint_sealed_secret`, the operator's delivery of a
+user's secret to the Kubernetes Secret an app, service or deployment mounts: it reads the secret
+(or leases a dynamic one) through the registry as the operator and seals each field to the
+cluster's X25519 key in the orama-operator's envelope version 1 (X25519, HKDF-SHA-256, HChaCha20
+written here over OpenSSL's ChaCha20-Poly1305, canonical CBOR). It also parses and writes the
+`lake-secret://<mount>/<name>#<field>` references `web_app_capabilities.cpp` stores for an app's
+secret environment, after checking them with the caller's own reads. See
+[secrets](../../docs/api/secrets.md#projections).
 
 `image_capabilities.cpp` registers `create_image_repository` (an explicit `workspace_id`, no
 default), `list_image_repositories` (the routes with each workspace's tags) and the operator-only
