@@ -1,0 +1,80 @@
+#pragma once
+
+// Stripe, lake's payment provider (decision 57, lake#620, docs/api/billing.md#stripe). Lake's own
+// client for Stripe's REST API (form-encoded requests with a bearer key and an Idempotency-Key on
+// every write), never Stripe's SDK, and the check of Stripe's webhook signatures. The HTTP
+// exchange is the server's outbound client, injected as a StripeHttp the tests replace with a
+// fake.
+
+#include <chrono>
+#include <cstdint>
+#include <expected>
+#include <functional>
+#include <memory>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
+
+#include "lake/api/billing.hpp"
+
+namespace lake::api {
+
+inline constexpr std::string_view stripe_api_base = "https://api.stripe.com";
+// The Stripe API version lake's requests are written against, sent as Stripe-Version so a change
+// of the account's default version does not change what lake reads.
+inline constexpr std::string_view stripe_api_version = "2024-06-20";
+// How far a webhook's timestamp may be from lake's clock (Stripe's libraries use five minutes).
+inline constexpr std::chrono::seconds stripe_signature_tolerance{300};
+
+struct StripeRequest {
+    std::string method = "POST";
+    std::string url;
+    std::string body; // application/x-www-form-urlencoded
+    std::vector<std::pair<std::string, std::string>> headers;
+};
+struct StripeResponse {
+    int status = 0;
+    std::string body;
+    std::string error; // the transport's failure, never the request
+};
+using StripeHttp = std::function<StripeResponse(const StripeRequest&)>;
+
+// One form field, percent-encoded as application/x-www-form-urlencoded (`metadata[k]=v`).
+std::string stripe_form(const std::vector<std::pair<std::string, std::string>>& fields);
+
+// Millionths of a currency unit as cents, rounded half up.
+std::int64_t stripe_cents(std::uint64_t micros);
+
+// The Stripe-Signature check: `header` is `t=<unix seconds>,v1=<hex>[,v1=...][,v0=...]`; the
+// signed payload is `<t>.<body>` under HMAC-SHA256 with the webhook secret. invalid_signature when
+// no v1 matches (compared in constant time), stale_timestamp when `t` is more than `tolerance`
+// from `now` either way.
+std::expected<void, NoticeRejection>
+verify_stripe_signature(std::string_view body,
+                        std::string_view header,
+                        std::string_view webhook_secret,
+                        std::chrono::system_clock::time_point now,
+                        std::chrono::seconds tolerance = stripe_signature_tolerance);
+
+// The header Stripe would send for `body` at `timestamp` (tests and documentation).
+std::string stripe_signature_header(std::string_view body,
+                                    std::string_view webhook_secret,
+                                    std::int64_t timestamp);
+
+// What lake does with a verified event: invoice.paid moves a due invoice to paid,
+// invoice.voided to void, invoice.payment_failed keeps it due with provider_status
+// payment_failed; any other event is acknowledged and ignored.
+std::expected<PaymentNotice, NoticeRejection> parse_stripe_event(std::string_view body);
+
+// Whether a value looks like a Stripe secret key (sk_ or rk_) or a webhook secret (whsec_).
+bool stripe_secret_key_shape(std::string_view key);
+bool stripe_webhook_secret_shape(std::string_view secret);
+
+// The Stripe provider: customers, invoices with an invoice item per lake line, finalization and
+// the hosted invoice URL, voids, and webhook events. `base` is Stripe's API origin (a fake's in
+// tests).
+std::shared_ptr<PaymentProvider> stripe_payment_provider(
+    StripeKeys keys, StripeHttp http, std::string base = std::string(stripe_api_base));
+
+} // namespace lake::api

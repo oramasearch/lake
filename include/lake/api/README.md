@@ -72,7 +72,13 @@ per-workspace `lake_usage` counter and `lake_storage` readings (lake#564, `ApiCo
 decision 56): the `PaymentProvider` interface and its manual implementation, `billing_enabled`
 (`LAKE_BILLING`), `register_billing_capabilities` (called by `ApiServer` only where
 `ServerOptions::billing` is on), `billing_registered`, and the pure `price_of` and `bill_lines`. See
-[billing](../../../docs/api/billing.md). `request_recorder.hpp` declares `RequestRecorder`, the
+[billing](../../../docs/api/billing.md). Since lake#620 (decision 57) it also declares
+`PaymentProviders` (the provider chosen at use: `fixed_payment_providers`, or
+`secret_payment_providers`, which reads the Stripe keys from a secret mount), `PaymentStatus` and
+`payment_status_json`, and `receive_payment_notice`, the webhook's logic. `stripe.hpp` declares
+lake's own Stripe client: `stripe_payment_provider` over an injected `StripeHttp`, the
+`Stripe-Signature` check (`verify_stripe_signature`), `parse_stripe_event`, `stripe_form` and
+`stripe_cents`. `request_recorder.hpp` declares `RequestRecorder`, the
 bounded per-workspace `lake_requests` counts on their way to each workspace Zetta's time series
 (decision 54 S9, lake#384); `registry.hpp`'s `RequestAttribution` (`ApiContext::request_attribution`)
 is what one HTTP request's capability calls resolved: its outermost capability, its workspace and

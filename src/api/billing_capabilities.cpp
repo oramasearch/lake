@@ -13,6 +13,7 @@
 #include <cmath>
 #include <format>
 #include <limits>
+#include <mutex>
 #include <optional>
 #include <set>
 #include <string>
@@ -21,6 +22,7 @@
 #include <nlohmann/json.hpp>
 
 #include "lake/api/usage_recorder.hpp"
+#include "lake/audit/audit.hpp"
 
 namespace lake::api {
 namespace {
@@ -157,6 +159,8 @@ json invoice_json(const control::Invoice& invoice) {
             {"issued_at", invoice.issued_at},
             {"paid_at", invoice.paid_at},
             {"voided_at", invoice.voided_at},
+            {"payment_url", invoice.payment_url},
+            {"provider_status", invoice.provider_status},
             {"lines", lines_json(invoice.lines)}};
 }
 
@@ -214,6 +218,8 @@ json invoice_schema() {
                           {"issued_at", string_schema()},
                           {"paid_at", string_schema()},
                           {"voided_at", string_schema()},
+                          {"payment_url", string_schema()},
+                          {"provider_status", string_schema()},
                           {"lines", {{"type", "array"}, {"items", {{"type", "object"}}}}}},
                          json::array({"id",
                                       "number",
@@ -448,13 +454,16 @@ public:
     std::string_view title() const override {
         return "Invoice only";
     }
-    std::expected<PaymentRequest, std::string> request_payment(const control::Invoice&) override {
+    std::expected<PaymentRequest, std::string> request_payment(const PaymentAccount&,
+                                                               const control::Invoice&) override {
         return PaymentRequest{
             {},
             instructions_.empty()
                 ? "Orama will send you payment details for this invoice. It is paid once Orama "
                   "records your payment."
-                : instructions_};
+                : instructions_,
+            {},
+            {}};
     }
     bool records_payments_by_hand() const override {
         return true;
@@ -464,10 +473,12 @@ private:
     std::string instructions_;
 };
 
-json provider_json(const PaymentProvider& provider) {
+json provider_json(const PaymentProvider& provider, const PaymentStatus& status) {
     return {{"name", provider.name()},
             {"title", provider.title()},
-            {"records_payments_by_hand", provider.records_payments_by_hand()}};
+            {"records_payments_by_hand", provider.records_payments_by_hand()},
+            {"online_payment", !provider.records_payments_by_hand()},
+            {"reason", provider.records_payments_by_hand() ? status.reason : std::string()}};
 }
 
 json subscription_json(const control::BillingSubscription& row,
@@ -482,8 +493,10 @@ json subscription_json(const control::BillingSubscription& row,
 }
 
 // The account's billing: its plan this month, the plan chosen for next month, and its history.
-ApiResult
-account_of(ApiContext& context, const std::string& customer_id, const PaymentProvider& provider) {
+ApiResult account_of(ApiContext& context,
+                     const std::string& customer_id,
+                     const PaymentProvider& provider,
+                     const PaymentStatus& status) {
     const auto rows = context.store->billing_subscriptions(customer_id);
     if (!rows) {
         return from_store(rows.error());
@@ -510,7 +523,7 @@ account_of(ApiContext& context, const std::string& customer_id, const PaymentPro
                                {"current", std::move(current)},
                                {"next", std::move(next)},
                                {"history", std::move(history)},
-                               {"provider", provider_json(provider)}});
+                               {"provider", provider_json(provider, status)}});
 }
 
 json account_schema() {
@@ -563,6 +576,208 @@ std::expected<control::Invoice, ApiResult> invoice_named(ApiContext& context, co
     return *invoice;
 }
 
+// ------------------------------------------------------------------------------------------------
+// Where the provider comes from.
+
+std::string utc_now() {
+    return std::format("{:%Y-%m-%dT%H:%M:%SZ}",
+                       std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now()));
+}
+
+using ProviderOr = std::expected<std::shared_ptr<PaymentProvider>, ApiError>;
+
+class FixedPaymentProviders final : public PaymentProviders {
+public:
+    FixedPaymentProviders(std::shared_ptr<PaymentProvider> provider, std::string reason)
+        : provider_(std::move(provider)) {
+        status_.provider = std::string(provider_->name());
+        status_.title = std::string(provider_->title());
+        status_.online_payment = !provider_->records_payments_by_hand();
+        status_.reason = status_.online_payment ? std::string() : std::move(reason);
+    }
+    liquid::runtime::task<std::expected<std::shared_ptr<PaymentProvider>, ApiError>>
+    current(ApiContext&, bool) override {
+        co_return ProviderOr(provider_);
+    }
+    PaymentStatus status() const override {
+        return status_;
+    }
+
+private:
+    std::shared_ptr<PaymentProvider> provider_;
+    PaymentStatus status_;
+};
+
+// The Stripe keys in lake's own secret store (docs/api/billing.md#where-the-keys-live): read with
+// read_secret as the operator, kept for `ttl`, never logged; the manual provider, with a reason,
+// while the mount, the secret or a key is missing.
+class SecretPaymentProviders final : public PaymentProviders {
+public:
+    explicit SecretPaymentProviders(SecretPaymentConfig config)
+        : config_(std::move(config)), manual_(manual_payment_provider(config_.instructions)) {}
+
+    liquid::runtime::task<std::expected<std::shared_ptr<PaymentProvider>, ApiError>>
+    current(ApiContext& context, bool refresh) override {
+        {
+            std::lock_guard lock(mutex_);
+            if (!refresh && cached_ && std::chrono::steady_clock::now() - fetched_ < config_.ttl) {
+                co_return ProviderOr(cached_);
+            }
+        }
+        if (context.registry == nullptr) {
+            co_return ProviderOr(std::unexpected(
+                ApiError{"store_unavailable", "no registry to read the billing secret", {}}));
+        }
+        // The keys are read as the operator: the account looking at its bill has no grant on the
+        // operator's mount, and must not need one.
+        ApiContext inner = context;
+        inner.authorized = true;
+        inner.operator_credential = true;
+        inner.session_credential = false;
+        inner.acting_identity = "admin";
+        inner.authentication_method = "billing_provider";
+        inner.workspace_id.clear();
+        inner.path_workspace_id.clear();
+        auto read = co_await context.registry->call_async(
+            "read_secret", {{"mount_id", config_.mount_id}, {"name", config_.secret_name}}, inner);
+        std::optional<ApiResult> answer;
+        if (read) {
+            answer = std::move(*read);
+        }
+        if (!answer || (!answer->ok && answer->error.code != "not_found" &&
+                        answer->error.code != "invalid_input")) {
+            // The secret's workspace did not answer: keep using what was read before, if anything.
+            std::lock_guard lock(mutex_);
+            if (cached_) {
+                co_return ProviderOr(cached_);
+            }
+            co_return ProviderOr(std::unexpected(
+                ApiError{"store_unavailable",
+                         "lake could not read the billing secret: " +
+                             (answer ? answer->error.message : read.error().message),
+                         {}}));
+        }
+        if (!answer->ok) {
+            co_return ProviderOr(use_manual(
+                answer->error.path == "/mount_id"
+                    ? "the billing secret mount (LAKE_BILLING_SECRETS) does not "
+                      "exist"
+                    : "the billing secret mount has no live `" + config_.secret_name + "` secret"));
+        }
+        const json value = answer->value.value("value", json::object());
+        const std::uint64_t version = answer->value.value("version", std::uint64_t{0});
+        StripeKeys keys{value.is_object() ? value.value("secret_key", "") : "",
+                        value.is_object() ? value.value("webhook_secret", "") : ""};
+        if (keys.secret_key.empty() || keys.webhook_secret.empty()) {
+            co_return ProviderOr(
+                use_manual("the `" + config_.secret_name +
+                           "` secret needs both `secret_key` and `webhook_secret`"));
+        }
+        if (!config_.stripe) {
+            co_return ProviderOr(use_manual("this lake has no Stripe client"));
+        }
+        auto provider = config_.stripe(keys);
+        if (!provider) {
+            co_return ProviderOr(
+                use_manual("the `" + config_.secret_name + "` secret's keys are malformed"));
+        }
+        std::lock_guard lock(mutex_);
+        cached_ = provider;
+        fetched_ = std::chrono::steady_clock::now();
+        status_ = {std::string(provider->name()),
+                   std::string(provider->title()),
+                   true,
+                   {},
+                   utc_now(),
+                   version};
+        co_return ProviderOr(provider);
+    }
+
+    PaymentStatus status() const override {
+        std::lock_guard lock(mutex_);
+        return status_;
+    }
+
+private:
+    std::shared_ptr<PaymentProvider> use_manual(std::string reason) {
+        std::lock_guard lock(mutex_);
+        // The manual provider is cached too, so a missing secret is not read on every call; a
+        // secret put later is picked up within `ttl`.
+        cached_ = manual_;
+        fetched_ = std::chrono::steady_clock::now();
+        status_ = {std::string(manual_->name()),
+                   std::string(manual_->title()),
+                   false,
+                   "Card payment is not set up: " + std::move(reason) + ".",
+                   utc_now(),
+                   0};
+        return manual_;
+    }
+
+    SecretPaymentConfig config_;
+    std::shared_ptr<PaymentProvider> manual_;
+    mutable std::mutex mutex_;
+    std::shared_ptr<PaymentProvider> cached_;
+    std::chrono::steady_clock::time_point fetched_{};
+    PaymentStatus status_{
+        "manual", "Invoice only", false, "The billing secret has not been read yet.", {}, 0};
+};
+
+ApiResult from_api_error(const ApiError& error) {
+    return ApiResult::failure(error.code, error.message, error.path);
+}
+
+// The provider to use now, or why there is none.
+struct Resolved {
+    std::shared_ptr<PaymentProvider> provider;
+    ApiResult failure;
+};
+
+liquid::runtime::task<Resolved>
+resolve(PaymentProviders& providers, ApiContext& context, bool refresh = false) {
+    auto current = co_await providers.current(context, refresh);
+    if (!current) {
+        co_return Resolved{nullptr, ApiResult::failure("store_error", current.error().message)};
+    }
+    if (!*current) {
+        co_return Resolved{nullptr, from_api_error(current->error())};
+    }
+    co_return Resolved{**current, {}};
+}
+
+// Why an awaited resolve gave no provider.
+template <class Awaited> ApiResult unresolved(const Awaited& awaited) {
+    return awaited ? awaited->failure : ApiResult::failure("store_error", awaited.error().message);
+}
+
+// The account as the provider sees it, with the provider's id for it (created and kept first,
+// so a failed payment request never loses it).
+std::expected<PaymentAccount, ApiResult> payment_account(ApiContext& context,
+                                                         PaymentProvider& provider,
+                                                         const control::Customer& customer,
+                                                         std::uint64_t attempt) {
+    PaymentAccount account{customer.id, customer.name, {}, attempt};
+    const std::string name(provider.name());
+    const auto kept = context.store->billing_provider_customer(customer.id, name);
+    if (!kept) {
+        return std::unexpected(from_store(kept.error()));
+    }
+    account.provider_customer_id = *kept;
+    auto id = provider.provider_customer(account);
+    if (!id) {
+        return std::unexpected(
+            ApiResult::failure("store_unavailable", "the payment provider refused: " + id.error()));
+    }
+    if (!id->empty() && *id != account.provider_customer_id) {
+        const auto stored = context.store->set_billing_provider_customer(customer.id, name, *id);
+        if (!stored) {
+            return std::unexpected(from_store(stored.error()));
+        }
+        account.provider_customer_id = *stored;
+    }
+    return account;
+}
+
 } // namespace
 
 std::shared_ptr<PaymentProvider> manual_payment_provider(std::string instructions) {
@@ -575,6 +790,18 @@ bool billing_enabled(std::string_view value) {
 
 bool billing_registered(const Registry* registry) {
     return registry != nullptr && registry->find("billing_account") != nullptr;
+}
+
+json payment_status_json(const ApiContext& context) {
+    if (!billing_registered(context.registry) || !context.payments) {
+        return nullptr;
+    }
+    const PaymentStatus status = context.payments->status();
+    return {{"provider", status.provider},
+            {"title", status.title},
+            {"online_payment", status.online_payment},
+            {"reason", status.reason},
+            {"checked_at", status.checked_at}};
 }
 
 std::uint64_t price_of(std::uint64_t billable, std::uint64_t unit_micros, std::uint64_t per) {
@@ -626,9 +853,144 @@ std::vector<control::InvoiceLine> bill_lines(const control::BillingPlan& plan,
     return lines;
 }
 
-void register_billing_capabilities(Registry& registry, std::shared_ptr<PaymentProvider> provider) {
+std::shared_ptr<PaymentProviders> fixed_payment_providers(std::shared_ptr<PaymentProvider> provider,
+                                                          std::string reason) {
     if (!provider) {
         provider = manual_payment_provider();
+    }
+    return std::make_shared<FixedPaymentProviders>(std::move(provider), std::move(reason));
+}
+
+std::shared_ptr<PaymentProviders> secret_payment_providers(SecretPaymentConfig config) {
+    return std::make_shared<SecretPaymentProviders>(std::move(config));
+}
+
+liquid::runtime::task<NoticeOutcome> receive_payment_notice(PaymentProviders& providers,
+                                                            ApiContext& context,
+                                                            std::string_view body,
+                                                            std::string_view signature) {
+    const auto record = [&](std::string customer_id,
+                            std::string kind,
+                            std::string object,
+                            std::string outcome,
+                            json details) {
+        if (context.store == nullptr) {
+            return true;
+        }
+        audit::EventDraft event{.customer_id = std::move(customer_id),
+                                .kind = std::move(kind),
+                                .principal = "payment-provider",
+                                .object = std::move(object),
+                                .action = "payment_notice",
+                                .outcome = std::move(outcome),
+                                .request_id = context.request_id,
+                                .method = "webhook",
+                                .details = std::move(details)};
+        const audit::IdentityOptions options{.configured_seed = context.identity_seed,
+                                             .instance_kek = context.instance_kek};
+        return audit::record(*context.store, event, options).has_value();
+    };
+    const auto answer = [](int status, std::string code, std::string message) {
+        return NoticeOutcome{status, {{"error", {{"code", code}, {"message", message}}}}};
+    };
+    if (context.store == nullptr) {
+        co_return answer(503, "store_unavailable", "no control-plane store is configured");
+    }
+    auto resolved = co_await resolve(providers, context);
+    if (!resolved || !resolved->provider) {
+        const ApiResult failure = unresolved(resolved);
+        co_return answer(503, failure.error.code, failure.error.message);
+    }
+    std::shared_ptr<PaymentProvider> provider = resolved->provider;
+    if (provider->records_payments_by_hand()) {
+        co_return answer(404, "not_found", "this lake takes no payment notices");
+    }
+    const auto now = std::chrono::system_clock::now();
+    auto notice = provider->read_notice(body, signature, now);
+    if (!notice && notice.error().code == "invalid_signature") {
+        // The webhook secret may have been rotated since it was read: check once more with the
+        // newest keys before refusing.
+        auto fresh = co_await resolve(providers, context, true);
+        if (fresh && fresh->provider && fresh->provider != provider &&
+            !fresh->provider->records_payments_by_hand()) {
+            provider = fresh->provider;
+            notice = provider->read_notice(body, signature, now);
+        }
+    }
+    const std::string name(provider->name());
+    if (!notice) {
+        record({},
+               "billing.payment.notice",
+               "billing/" + name,
+               "denied",
+               {{"provider", name}, {"reason", notice.error().code}});
+        co_return answer(notice.error().code == "not_supported" ? 404 : 400,
+                         notice.error().code,
+                         notice.error().message);
+    }
+    if (notice->state.empty() && notice->provider_status.empty()) {
+        // An event lake does not act on: acknowledged, so the provider stops sending it.
+        co_return NoticeOutcome{200, {{"received", true}, {"ignored", true}}};
+    }
+    control::PaymentEvent event{
+        name,
+        notice->event_id,
+        notice->event_type,
+        notice->reference,
+        notice->state,
+        notice->provider_status,
+        notice->state == "void" ? "Voided in " + std::string(provider->title()) : std::string()};
+    const auto applied = context.store->apply_payment_event(event);
+    if (!applied) {
+        co_return answer(503, applied.error().code, applied.error().message);
+    }
+    json details{{"provider", name},
+                 {"event_id", notice->event_id},
+                 {"event_type", notice->event_type},
+                 {"reference", notice->reference}};
+    if (applied->duplicate) {
+        // A second delivery of an event already applied (a provider's retry, or a replay inside
+        // the tolerance window): it changes nothing.
+        co_return NoticeOutcome{200, {{"received", true}, {"duplicate", true}}};
+    }
+    if (!applied->matched) {
+        record({}, "billing.payment.notice", "billing/" + name, "ignored", std::move(details));
+        co_return NoticeOutcome{200, {{"received", true}, {"matched", false}}};
+    }
+    const control::Invoice& invoice = applied->invoice;
+    details["invoice_id"] = invoice.id;
+    details["number"] = invoice.number;
+    details["period"] = invoice.period;
+    details["state"] = invoice.state;
+    details["provider_status"] = invoice.provider_status;
+    details["changed"] = applied->changed;
+    const std::string kind = !applied->changed         ? "billing.payment.notice"
+                             : notice->state == "paid" ? "billing.invoice.paid"
+                             : notice->state == "void" ? "billing.invoice.void"
+                                                       : "billing.invoice.payment_failed";
+    if (!record(invoice.customer_id,
+                kind,
+                "customer/" + invoice.customer_id + "/billing",
+                "success",
+                std::move(details))) {
+        co_return answer(503, "store_unavailable", "lake could not record the notice");
+    }
+    co_return NoticeOutcome{200,
+                            {{"received", true},
+                             {"invoice_id", invoice.id},
+                             {"state", invoice.state},
+                             {"provider_status", invoice.provider_status},
+                             {"changed", applied->changed}}};
+}
+
+void register_billing_capabilities(Registry& registry, std::shared_ptr<PaymentProvider> provider) {
+    register_billing_capabilities(registry, fixed_payment_providers(std::move(provider)));
+}
+
+void register_billing_capabilities(Registry& registry,
+                                   std::shared_ptr<PaymentProviders> providers) {
+    if (!providers) {
+        providers = fixed_payment_providers(nullptr);
     }
     json dimension_names = json::array();
     for (const UsageDimension& dimension : usage_dimensions()) {
@@ -758,16 +1120,22 @@ void register_billing_capabilities(Registry& registry, std::shared_ptr<PaymentPr
         .action = "read",
         .resolve_object = customer_object,
         .resolves_operator_audit_target = true,
-        .handler = [provider](const json& input, ApiContext& context) {
+        .async_handler = [providers](const json& input,
+                                     ApiContext& context) -> liquid::runtime::task<ApiResult> {
             if (!context.store) {
-                return no_store();
+                co_return no_store();
+            }
+            auto resolved = co_await resolve(*providers, context);
+            if (!resolved || !resolved->provider) {
+                co_return unresolved(resolved);
             }
             const std::string customer_id = input.at("customer_id");
-            ApiResult result = account_of(context, customer_id, *provider);
+            ApiResult result =
+                account_of(context, customer_id, *resolved->provider, providers->status());
             if (result.ok) {
                 audit(context, customer_id, "billing.account.read");
             }
-            return result;
+            co_return result;
         }});
 
     registry.add(Capability{
@@ -786,23 +1154,28 @@ void register_billing_capabilities(Registry& registry, std::shared_ptr<PaymentPr
         .action = "admin",
         .resolve_object = customer_object,
         .resolves_operator_audit_target = true,
-        .handler = [provider](const json& input, ApiContext& context) {
+        .async_handler = [providers](const json& input,
+                                     ApiContext& context) -> liquid::runtime::task<ApiResult> {
             if (!context.store) {
-                return no_store();
+                co_return no_store();
+            }
+            auto resolved = co_await resolve(*providers, context);
+            if (!resolved || !resolved->provider) {
+                co_return unresolved(resolved);
             }
             const std::string customer_id = input.at("customer_id");
             const std::string plan_id = input.at("plan_id");
             auto plan = find_plan(context, plan_id);
             if (!plan) {
-                return plan.error();
+                co_return plan.error();
             }
             if (!plan->active) {
-                return ApiResult::failure(
+                co_return ApiResult::failure(
                     "invalid_input", "plan " + plan_id + " is retired", "/plan_id");
             }
             const auto rows = context.store->billing_subscriptions(customer_id);
             if (!rows) {
-                return from_store(rows.error());
+                co_return from_store(rows.error());
             }
             const Month now = this_month();
             const auto current = in_effect(*rows, now);
@@ -822,9 +1195,10 @@ void register_billing_capabilities(Registry& registry, std::shared_ptr<PaymentPr
                     context.store->set_billing_subscription(customer_id, effective_from, plan_id);
             }
             if (!written) {
-                return from_store(written.error());
+                co_return from_store(written.error());
             }
-            ApiResult result = account_of(context, customer_id, *provider);
+            ApiResult result =
+                account_of(context, customer_id, *resolved->provider, providers->status());
             if (result.ok) {
                 audit(context,
                       customer_id,
@@ -833,7 +1207,7 @@ void register_billing_capabilities(Registry& registry, std::shared_ptr<PaymentPr
                        {"effective_from", effective_from},
                        {"previous_plan_id", current ? current->plan_id : std::string()}});
             }
-            return result;
+            co_return result;
         }});
 
     registry.add(Capability{
@@ -912,8 +1286,8 @@ void register_billing_capabilities(Registry& registry, std::shared_ptr<PaymentPr
         .object = "billing invoice",
         .action = "admin",
         .resolve_object = administrator_only,
-        .async_handler = [provider](const json& input,
-                                    ApiContext& context) -> liquid::runtime::task<ApiResult> {
+        .async_handler = [providers](const json& input,
+                                     ApiContext& context) -> liquid::runtime::task<ApiResult> {
             if (!instance_administrator(context)) {
                 co_return refused();
             }
@@ -930,7 +1304,8 @@ void register_billing_capabilities(Registry& registry, std::shared_ptr<PaymentPr
                 co_return ApiResult::failure(
                     "conflict", month->name() + " has not ended yet", "/period");
             }
-            if (const auto customer = context.store->get_customer(customer_id); !customer) {
+            const auto customer = context.store->get_customer(customer_id);
+            if (!customer) {
                 co_return ApiResult::failure(
                     "not_found", "no account " + customer_id, "/customer_id");
             }
@@ -938,11 +1313,17 @@ void register_billing_capabilities(Registry& registry, std::shared_ptr<PaymentPr
             if (!existing) {
                 co_return from_store(existing.error());
             }
+            // Which issue of the month this is: a provider keys its writes on it, so a retry of
+            // one issue never bills twice and an issue after a void is a new request.
+            std::uint64_t attempt = 0;
             for (const control::Invoice& invoice : *existing) {
                 if (invoice.period == month->name() && invoice.state != "void") {
                     co_return ApiResult::failure("conflict",
                                                  "invoice " + std::to_string(invoice.number) +
                                                      " already bills " + month->name());
+                }
+                if (invoice.period == month->name()) {
+                    ++attempt;
                 }
             }
             auto plan = plan_for(context, customer_id, *month);
@@ -976,14 +1357,25 @@ void register_billing_capabilities(Registry& registry, std::shared_ptr<PaymentPr
             for (const control::InvoiceLine& line : invoice.lines) {
                 invoice.total_micros = add_capped(invoice.total_micros, line.amount_micros);
             }
-            invoice.provider = std::string(provider->name());
-            auto request = provider->request_payment(invoice);
+            auto resolved = co_await resolve(*providers, context);
+            if (!resolved || !resolved->provider) {
+                co_return unresolved(resolved);
+            }
+            PaymentProvider& provider = *resolved->provider;
+            invoice.provider = std::string(provider.name());
+            auto account = payment_account(context, provider, *customer, attempt);
+            if (!account) {
+                co_return account.error();
+            }
+            auto request = provider.request_payment(*account, invoice);
             if (!request) {
                 co_return ApiResult::failure("store_unavailable",
                                              "the payment provider refused: " + request.error());
             }
             invoice.provider_reference = request->reference;
             invoice.instructions = request->instructions;
+            invoice.payment_url = request->payment_url;
+            invoice.provider_status = request->provider_status;
             const auto stored = context.store->create_invoice(invoice);
             if (!stored) {
                 co_return from_store(stored.error());
@@ -997,7 +1389,8 @@ void register_billing_capabilities(Registry& registry, std::shared_ptr<PaymentPr
                    {"plan_id", stored->plan_id},
                    {"total_micros", stored->total_micros},
                    {"currency", stored->currency},
-                   {"provider", stored->provider}});
+                   {"provider", stored->provider},
+                   {"provider_reference", stored->provider_reference}});
             co_return ApiResult::success(invoice_json(*stored));
         }});
 
@@ -1066,26 +1459,53 @@ void register_billing_capabilities(Registry& registry, std::shared_ptr<PaymentPr
             return ApiResult::success(invoice_json(*invoice));
         }});
 
-    const auto settle = [provider](std::string state) {
-        return [provider, state](const json& input, ApiContext& context) {
+    const auto settle = [providers](std::string state) {
+        return [providers, state](const json& input,
+                                  ApiContext& context) -> liquid::runtime::task<ApiResult> {
             if (!instance_administrator(context)) {
-                return refused();
+                co_return refused();
             }
             if (!context.store) {
-                return no_store();
+                co_return no_store();
             }
-            if (state == "paid" && !provider->records_payments_by_hand()) {
-                return ApiResult::failure("conflict",
-                                          "the payment provider reports payments itself");
+            auto resolved = co_await resolve(*providers, context);
+            if (!resolved || !resolved->provider) {
+                co_return unresolved(resolved);
             }
+            PaymentProvider& provider = *resolved->provider;
             auto invoice = invoice_named(context, input);
             if (!invoice) {
-                return invoice.error();
+                co_return invoice.error();
+            }
+            // Payments are recorded by hand only for an invoice whose provider takes them so: an
+            // invoice issued by the manual provider stays recordable after Stripe is set up, and a
+            // Stripe invoice is paid through Stripe, whichever provider is in use now.
+            const bool by_hand =
+                invoice->provider == "manual" ||
+                (invoice->provider == provider.name() && provider.records_payments_by_hand());
+            if (state == "paid" && !by_hand) {
+                co_return ApiResult::failure("conflict",
+                                             "the payment provider reports payments itself");
+            }
+            if (state == "void" && invoice->state == "due") {
+                if (invoice->provider != std::string(provider.name())) {
+                    if (!invoice->provider_reference.empty() && invoice->provider != "manual") {
+                        co_return ApiResult::failure(
+                            "store_unavailable",
+                            "invoice " + std::to_string(invoice->number) + " was issued through " +
+                                invoice->provider +
+                                ", which is not configured now; void it there "
+                                "first");
+                    }
+                } else if (auto cancelled = provider.cancel_payment(*invoice); !cancelled) {
+                    co_return ApiResult::failure(
+                        "store_unavailable", "the payment provider refused: " + cancelled.error());
+                }
             }
             const auto stored = context.store->set_invoice_state(
                 invoice->id, state, input.value("reference", ""), input.value("note", ""));
             if (!stored) {
-                return from_store(stored.error());
+                co_return from_store(stored.error());
             }
             audit(context,
                   stored->customer_id,
@@ -1094,8 +1514,9 @@ void register_billing_capabilities(Registry& registry, std::shared_ptr<PaymentPr
                    {"number", stored->number},
                    {"period", stored->period},
                    {"total_micros", stored->total_micros},
-                   {"reference", stored->provider_reference}});
-            return ApiResult::success(invoice_json(*stored));
+                   {"reference", stored->provider_reference},
+                   {"provider", stored->provider}});
+            co_return ApiResult::success(invoice_json(*stored));
         };
     };
     registry.add(Capability{
@@ -1114,7 +1535,7 @@ void register_billing_capabilities(Registry& registry, std::shared_ptr<PaymentPr
         .object = "billing invoice",
         .action = "admin",
         .resolve_object = administrator_only,
-        .handler = settle("paid")});
+        .async_handler = settle("paid")});
     registry.add(Capability{
         .name = "void_invoice",
         .title = "Void an invoice",
@@ -1130,7 +1551,7 @@ void register_billing_capabilities(Registry& registry, std::shared_ptr<PaymentPr
         .object = "billing invoice",
         .action = "admin",
         .resolve_object = administrator_only,
-        .handler = settle("void")});
+        .async_handler = settle("void")});
 }
 
 } // namespace lake::api

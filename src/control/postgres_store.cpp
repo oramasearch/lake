@@ -5667,7 +5667,7 @@ public:
         return "id::text, number, customer_id::text, period, plan_id, plan_name, currency, "
                "total_micros, state, provider, provider_reference, instructions, note, " +
                utc_column("issued_at") + ", " + utc_column("paid_at") + ", " +
-               utc_column("voided_at");
+               utc_column("voided_at") + ", payment_url, provider_status";
     }
 
     static Invoice invoice_of(const pqxx::row& row) {
@@ -5688,6 +5688,8 @@ public:
         invoice.issued_at = row[13].as<std::string>();
         invoice.paid_at = row[14].as<std::string>();
         invoice.voided_at = row[15].as<std::string>();
+        invoice.payment_url = row[16].as<std::string>();
+        invoice.provider_status = row[17].as<std::string>();
         return invoice;
     }
 
@@ -5738,8 +5740,8 @@ public:
             }
             tx.exec_params("INSERT INTO billing_invoices (id, customer_id, period, plan_id, "
                            "plan_name, currency, total_micros, provider, provider_reference, "
-                           "instructions, note) VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6, $7, "
-                           "$8, $9, $10, $11)",
+                           "instructions, note, payment_url, provider_status) VALUES ($1::uuid, "
+                           "$2::uuid, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
                            id,
                            invoice.customer_id,
                            invoice.period,
@@ -5750,7 +5752,9 @@ public:
                            invoice.provider,
                            invoice.provider_reference,
                            invoice.instructions,
-                           invoice.note);
+                           invoice.note,
+                           invoice.payment_url,
+                           invoice.provider_status);
             int position = 0;
             for (const InvoiceLine& line : invoice.lines) {
                 tx.exec_params(
@@ -5823,6 +5827,124 @@ public:
                 provider_reference,
                 note);
             return invoice_in(tx, id);
+        });
+    }
+
+    // ---- payment providers (migration 0074, lake#620, docs/api/billing.md#stripe) ----
+
+    Result<std::string> billing_provider_customer(const std::string& customer_id,
+                                                  const std::string& provider) override {
+        return with_tx<std::string>([&](pqxx::work& tx) -> Result<std::string> {
+            if (tx.exec_params("SELECT 1 FROM customers WHERE id = $1::uuid", customer_id)
+                    .empty()) {
+                return std::unexpected(StoreError{"not_found", "no customer " + customer_id});
+            }
+            const pqxx::result rows = tx.exec_params(
+                "SELECT provider_customer_id FROM billing_accounts WHERE customer_id = $1::uuid "
+                "AND provider = $2",
+                customer_id,
+                provider);
+            return rows.empty() ? std::string() : rows[0][0].as<std::string>();
+        });
+    }
+
+    Result<std::string>
+    set_billing_provider_customer(const std::string& customer_id,
+                                  const std::string& provider,
+                                  const std::string& provider_customer_id) override {
+        if (provider.empty() || provider_customer_id.empty() || provider_customer_id.size() > 255) {
+            return std::unexpected(
+                StoreError{"invalid_input", "a provider and its customer id are required"});
+        }
+        return with_tx<std::string>([&](pqxx::work& tx) -> Result<std::string> {
+            if (tx.exec_params("SELECT 1 FROM customers WHERE id = $1::uuid", customer_id)
+                    .empty()) {
+                return std::unexpected(StoreError{"not_found", "no customer " + customer_id});
+            }
+            tx.exec_params("INSERT INTO billing_accounts (customer_id, provider, "
+                           "provider_customer_id) VALUES ($1::uuid, $2, $3) ON CONFLICT DO NOTHING",
+                           customer_id,
+                           provider,
+                           provider_customer_id);
+            return tx
+                .exec_params("SELECT provider_customer_id FROM billing_accounts WHERE customer_id "
+                             "= $1::uuid AND provider = $2",
+                             customer_id,
+                             provider)[0][0]
+                .as<std::string>();
+        });
+    }
+
+    Result<PaymentEventResult> apply_payment_event(const PaymentEvent& event) override {
+        if (event.provider.empty() || event.event_id.empty() || event.event_id.size() > 255 ||
+            (!event.state.empty() && event.state != "paid" && event.state != "void")) {
+            return std::unexpected(StoreError{"invalid_input",
+                                              "a payment event needs its provider, its id and a "
+                                              "state of paid or void"});
+        }
+        return with_tx<PaymentEventResult>([&](pqxx::work& tx) -> Result<PaymentEventResult> {
+            PaymentEventResult result;
+            const pqxx::result recorded = tx.exec_params(
+                "INSERT INTO billing_payment_events (provider, event_id, event_type, reference) "
+                "VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING RETURNING 1",
+                event.provider,
+                event.event_id,
+                event.event_type.substr(0, 128),
+                event.reference.substr(0, 256));
+            if (recorded.empty()) {
+                result.duplicate = true;
+                return result;
+            }
+            if (event.reference.empty()) {
+                return result;
+            }
+            const pqxx::result rows = tx.exec_params(
+                "SELECT id::text FROM billing_invoices WHERE provider = $1 AND provider_reference "
+                "= $2 ORDER BY number DESC LIMIT 1 FOR UPDATE",
+                event.provider,
+                event.reference);
+            if (rows.empty()) {
+                return result;
+            }
+            const std::string id = rows[0][0].as<std::string>();
+            auto before = invoice_in(tx, id);
+            if (!before) {
+                return std::unexpected(before.error());
+            }
+            result.matched = true;
+            if (before->state == "due") {
+                const pqxx::result changed = tx.exec_params(
+                    "UPDATE billing_invoices SET state = CASE WHEN $2 = '' THEN state ELSE $2 END, "
+                    "paid_at = CASE WHEN $2 = 'paid' THEN now() ELSE paid_at END, voided_at = CASE "
+                    "WHEN $2 = 'void' THEN now() ELSE voided_at END, note = CASE WHEN $2 <> '' AND "
+                    "$4 <> '' THEN $4 ELSE note END, provider_status = CASE WHEN $3 = '' THEN "
+                    "provider_status ELSE $3 END WHERE id = $1::uuid AND state = 'due' AND ($2 <> "
+                    "'' OR ($3 <> '' AND provider_status <> $3)) RETURNING 1",
+                    id,
+                    event.state,
+                    event.provider_status,
+                    event.note);
+                result.changed = !changed.empty();
+            } else if (!event.state.empty() && event.state == before->state &&
+                       !event.provider_status.empty() &&
+                       before->provider_status != event.provider_status) {
+                tx.exec_params(
+                    "UPDATE billing_invoices SET provider_status = $2 WHERE id = $1::uuid",
+                    id,
+                    event.provider_status);
+                result.changed = true;
+            }
+            tx.exec_params("UPDATE billing_payment_events SET invoice_id = $3::uuid WHERE "
+                           "provider = $1 AND event_id = $2",
+                           event.provider,
+                           event.event_id,
+                           id);
+            auto after = invoice_in(tx, id);
+            if (!after) {
+                return std::unexpected(after.error());
+            }
+            result.invoice = std::move(*after);
+            return result;
         });
     }
 

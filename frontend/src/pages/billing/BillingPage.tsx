@@ -22,6 +22,7 @@ import {
   months,
   money,
   owed,
+  paymentSummary,
   priceLabel,
   quantityLabel,
   type Account,
@@ -87,8 +88,13 @@ export default function BillingPage() {
             <Stat label="Plan" value={current?.name ?? "None"} icon={Tags} sub={next ? `${next.plan?.name ?? next.plan_id} from ${monthLabel(nextMonth)}` : current ? `since ${monthLabel(account.data.current!.effective_from)}` : "choose a plan below"} />
             <Stat label="This Month So Far" value={bill.data ? money(bill.data.total_micros, bill.data.currency) : "—"} sub={bill.data ? monthLabel(bill.data.period) : hasPlan ? "reading usage" : "no plan yet"} />
             <Stat label="Due" value={due.length ? due.map((d) => money(d.micros, d.currency)).join(" + ") : "Nothing"} tone={due.length ? "bad" : undefined} sub={`${(invoices.data?.invoices ?? []).filter((i) => i.state === "due").length} invoices due`} />
-            <Stat label="Payment" value={account.data.provider.title} sub={account.data.provider.records_payments_by_hand ? "Orama records each payment" : "paid through the provider"} />
+            <Stat label="Payment" value={paymentSummary(account.data.provider).value} sub={paymentSummary(account.data.provider).sub} />
           </StatRow>
+          {account.data.provider.reason && (
+            <Banner tone="quiet" title="Invoice Only">
+              {operator ? account.data.provider.reason : "Card payment is not set up on this lake yet. Orama sends payment details with each invoice and records your payment."}
+            </Banner>
+          )}
           {!hasPlan && (
             <Banner tone="info" title="Choose a Plan">
               Your account has no plan yet. A plan you choose now applies from the start of this month.

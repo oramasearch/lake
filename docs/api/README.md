@@ -4,8 +4,10 @@ lake#564 (decision 56, migration `0073_billing`): [billing.md](billing.md) docum
 where `LAKE_BILLING` is (Orama Cloud): `billing_plans`, `set_billing_plan`, `billing_account`,
 `choose_billing_plan`, `bill_preview`, `issue_invoice`, `list_invoices`, `get_invoice`,
 `record_invoice_payment` and `void_invoice`, the `PaymentProvider` interface with its manual
-implementation (no provider chosen yet), and the switch that leaves them absent on an enterprise
-install.
+implementation, and the switch that leaves them absent on an enterprise install. lake#620
+(decision 57, migration `0074_payment_provider`): Stripe is the payment provider, with its keys in
+lake's own secret store and its webhook at `POST /billing/stripe/webhook`
+([billing.md#stripe](billing.md#stripe)).
 lake#623: [billing.md](billing.md#price-list) carries Orama Cloud's price list (Free, Team and
 Business), each unit price with its reference rate, date and margin, worked bills, and when to
 revisit it.

@@ -161,9 +161,19 @@ dimension. Ten capabilities (`billing_plans`, `set_billing_plan`, `billing_accou
 `choose_billing_plan`, `bill_preview`, `issue_invoice`, `list_invoices`, `get_invoice`,
 `record_invoice_payment`, `void_invoice`), audited centrally, are registered only where
 `LAKE_BILLING=on`; off (an enterprise install), they, the Billing pages, `viewer.billing` and the
-Billing guide are absent. Payment goes through the `PaymentProvider` interface; only the manual
-(invoice only) provider exists, and no provider is chosen (lake#620). Not deployed; the operator
-must vendor the schema and select `billing_guard`. See `docs/api/billing.md`.
+Billing guide are absent. Payment goes through the `PaymentProvider` interface. Not deployed; the
+operator must vendor the schema and select `billing_guard`. See `docs/api/billing.md`.
+Stripe is the payment provider (lake#620, decision 57, migration `0074_payment_provider`): lake's own
+REST client through the outbound client (no SDK; form-encoded, an Idempotency-Key on every write)
+makes an account a Stripe Customer at its first invoice (`billing_accounts`) and each issued invoice a
+finalized Stripe Invoice with an item per lake line in cents; lake's invoice keeps the amounts, the
+hosted URL (`payment_url`) and Stripe's status. `POST /billing/stripe/webhook` checks
+`Stripe-Signature` (HMAC-SHA256, 300 s window) and applies `invoice.paid`, `invoice.payment_failed`
+and `invoice.voided` once per event id (`billing_payment_events`), audited centrally. The keys live
+in lake's secret store, never a Kubernetes Secret: the secret `stripe` in the mount
+`LAKE_BILLING_SECRETS` names, read at use and cached 60 s; without them, the manual provider, said on
+the Billing page and in `viewer`/`server_info`. Not deployed; the operator must vendor the schema
+and select `payment_provider_guard`. See `docs/api/billing.md#stripe`.
 Dynamic-secret leases follow (lake#362, migration `0058`): each lease is a sealed record in its
 mount's workspace, and PostgreSQL keeps only `secret_lease_routes` (lease → mount, workspace, and
 `due_at`), the content-free route and due index. Renew, revoke and the owner loop's expiry pass
@@ -621,7 +631,7 @@ one adapter TU) and the pure renderers in `include/zetta/api/web_ui.hpp`.
 - **Schema.** `db/schema.sql` is the source of truth; the operator carries a byte-identical
   vendored copy at `internal/controller/assets/lake-schema.sql` and applies it per Lake as an
   owned `PostgresSchema` (one transaction, guarded on the table the **newest** migration creates,
-  `billing_guard` in the source tree, versioned by content hash).
+  `payment_provider_guard` in the source tree, versioned by content hash).
   Change the schema HERE, then copy it into the operator in the same change; the operator's test
   checks the copy carries the source-of-truth header. Migrations are single-shot today
   (incremental migrations are the PostgresSchema follow-up), so until then a schema change means

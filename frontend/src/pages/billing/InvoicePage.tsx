@@ -1,10 +1,12 @@
 /** One invoice (`/billing/invoices/:invoiceId`, lake#564): its lines as issued, its state and how to
- * pay it. The account is the current workspace's, or `?customer_id=` for the operator, who can also
- * record a payment (`record_invoice_payment`) or void a due invoice (`void_invoice`). Reads
+ * pay it: **Pay with Stripe** opens Stripe's hosted invoice page while it is due (lake#620), with
+ * Stripe's own state of it. The account is the current workspace's, or `?customer_id=` for the
+ * operator, who can also void a due invoice (`void_invoice`, which voids it in Stripe too) and
+ * record the payment of an invoice paid outside lake (`record_invoice_payment`). Reads
  * `get_invoice`. Only where the lake bills. */
 import { useState } from "react";
 import { useParams, useSearchParams } from "react-router-dom";
-import { Ban, CircleCheck, Printer } from "lucide-react";
+import { Ban, CircleCheck, CreditCard, Printer } from "lucide-react";
 import { act, useRead } from "@/lib/api";
 import { useSession } from "@/lib/session";
 import { entityCrumb, useTrail } from "@/lib/trail";
@@ -13,7 +15,7 @@ import { Modal } from "@/lib/overlay";
 import { dateTime } from "@/lib/format";
 import { Banner, Button, Card, ErrorBlock, Field, Form, KeyValue, Page, Skeleton, Split, Status } from "@/lib/ui";
 import { LinesTable } from "./BillingPage";
-import { invoiceTone, monthLabel, money, type Invoice } from "./billing";
+import { invoiceTone, monthLabel, money, payOnline, providerStatus, recordedByHand, type Invoice } from "./billing";
 
 export default function InvoicePage() {
   const { invoiceId = "" } = useParams();
@@ -24,6 +26,8 @@ export default function InvoicePage() {
   const [settling, setSettling] = useState<"paid" | "void" | null>(null);
   const invoice = useRead<Invoice>(customerId && invoiceId ? "get_invoice" : null, { customer_id: customerId, invoice_id: invoiceId }, { workspace: null });
   const title = invoice.data ? `Invoice ${invoice.data.number}` : "Invoice";
+  const payUrl = invoice.data ? payOnline(invoice.data) : null;
+  const stripeState = invoice.data ? providerStatus(invoice.data.provider_status) : null;
   const back = operator && customerId ? `/billing?customer_id=${encodeURIComponent(customerId)}` : "/billing";
   useTrail([{ label: "Billing", to: back }, entityCrumb(title)], title);
 
@@ -47,10 +51,17 @@ export default function InvoicePage() {
               <Button onClick={() => setSettling("void")}>
                 <Ban size={14} aria-hidden /> Void
               </Button>
-              <Button variant="primary" onClick={() => setSettling("paid")}>
-                <CircleCheck size={14} aria-hidden /> Record payment
-              </Button>
+              {recordedByHand(invoice.data) && (
+                <Button variant={payUrl ? "secondary" : "primary"} onClick={() => setSettling("paid")}>
+                  <CircleCheck size={14} aria-hidden /> Record payment
+                </Button>
+              )}
             </>
+          )}
+          {payUrl && (
+            <Button variant="primary" href={payUrl}>
+              <CreditCard size={14} aria-hidden /> Pay with Stripe
+            </Button>
           )}
         </>
       }
@@ -75,12 +86,18 @@ export default function InvoicePage() {
                     ...(invoice.data.paid_at ? ([["Paid", dateTime(invoice.data.paid_at)]] as [string, string][]) : []),
                     ...(invoice.data.voided_at ? ([["Voided", dateTime(invoice.data.voided_at)]] as [string, string][]) : []),
                     ...(invoice.data.provider_reference ? ([["Reference", <span className="font-mono">{invoice.data.provider_reference}</span>]] as [string, React.ReactNode][]) : []),
+                    ...(stripeState ? ([["Stripe", <Status value={stripeState.label} tone={stripeState.tone} />]] as [string, React.ReactNode][]) : []),
                   ]}
                 />
               </Card>
               {invoice.data.state === "due" && invoice.data.instructions && (
-                <Banner tone="info" title="How to Pay">
+                <Banner tone="info" title="How to Pay" action={payUrl ? <Button variant="primary" href={payUrl}>Pay with Stripe</Button> : undefined}>
                   {invoice.data.instructions}
+                </Banner>
+              )}
+              {invoice.data.state === "due" && invoice.data.provider_status === "payment_failed" && (
+                <Banner tone="warn" title="The Last Payment Failed">
+                  Stripe could not take the last payment. Pay again on Stripe's page with another card or account.
                 </Banner>
               )}
               {invoice.data.note && (

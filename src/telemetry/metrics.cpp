@@ -671,6 +671,24 @@ public:
         return call("set_invoice_state",
                     [&] { return store_->set_invoice_state(id, state, provider_reference, note); });
     }
+    control::Result<std::string> billing_provider_customer(const std::string& customer_id,
+                                                           const std::string& provider) override {
+        return call("billing_provider_customer",
+                    [&] { return store_->billing_provider_customer(customer_id, provider); });
+    }
+    control::Result<std::string>
+    set_billing_provider_customer(const std::string& customer_id,
+                                  const std::string& provider,
+                                  const std::string& provider_customer_id) override {
+        return call("set_billing_provider_customer", [&] {
+            return store_->set_billing_provider_customer(
+                customer_id, provider, provider_customer_id);
+        });
+    }
+    control::Result<control::PaymentEventResult>
+    apply_payment_event(const control::PaymentEvent& event) override {
+        return call("apply_payment_event", [&] { return store_->apply_payment_event(event); });
+    }
     control::Result<std::uint64_t> set_storage_quota(const std::string& customer_id,
                                                      std::uint64_t quota_bytes) override {
         return call("set_storage_quota",
