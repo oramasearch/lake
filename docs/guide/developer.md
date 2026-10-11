@@ -58,6 +58,27 @@ curl -s https://lake.oramadev.net/v1/viewer -H "Authorization: Bearer $LAKE_KEY"
 `viewer` needs no key; with one it names you and the workspaces you can open. Replace
 `lake.oramadev.net` with your lake's address wherever it appears on this page.
 
+### Send a User-Agent
+
+Every call must carry a `User-Agent` header that names your program. `curl`, Python `requests`,
+Node's `fetch` and browsers send one already. Python's built-in `urllib` sends
+`Python-urllib/3.x`, which the network edge in front of lake.oramadev.net refuses before the call
+reaches lake: the answer is `403` with the plain-text body `error code: 1010`, not lake's JSON
+envelope. Name your script instead:
+
+```
+import json, os, urllib.request
+
+req = urllib.request.Request(
+    "https://lake.oramadev.net/v1/viewer",
+    headers={"Authorization": "Bearer " + os.environ["LAKE_KEY"],
+             "User-Agent": "my-script/1.0"},
+)
+print(json.load(urllib.request.urlopen(req))["value"])
+```
+
+The **Quick start** tab on **Developer → API** shows the same call from Python.
+
 ## Reads and Actions
 
 A read is `GET /v1/<capability>` with its input as query parameters. Numbers and booleans are
@@ -268,6 +289,12 @@ says why.
 - **`unexpected field …`**: the input has a field the schema does not declare. Check the spelling
   against the operation on **Developer → API → Operations**.
 - **`405 method_not_allowed`**: a read was sent as `POST` or an action as `GET`.
+- **`403` with the body `error code: 1010`**, not JSON: the edge refused your program's
+  `User-Agent` (Python's `urllib` default). Send your own; see
+  [Send a User-Agent](#send-a-user-agent).
+- **A `502` or `504` HTML page**: it came from the edge, not from lake, which never answers either
+  (an engine refusal is `422 engine_error` with lake's message). lake was unreachable or the call ran
+  past the edge's 100-second limit; retry, and split a very long recording.
 - **`workspace_not_ready`**: the workspace Zetta is starting. See
   [Workspaces](/docs/workspaces).
 - More answers: [FAQ and Troubleshooting](/docs/faq).

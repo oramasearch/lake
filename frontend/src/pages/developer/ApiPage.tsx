@@ -128,6 +128,17 @@ function QuickStart({ keyValue }: { keyValue: string | null }) {
     `const body = await res.json();\n` +
     `if (!body.ok) throw new Error(\`\${body.error.code}: \${body.error.message} at \${body.error.path}\`);\n` +
     `console.log(body.value.items);`;
+  // Python's urllib announces itself as "Python-urllib/3.x", which the edge in front of lake
+  // refuses with "403 error code: 1010" (lake#589); a script names itself instead.
+  const pythonCode =
+    `import json, os, urllib.request\n\n` +
+    `req = urllib.request.Request(\n` +
+    `    "${base}/v1/list_repositories?limit=5",\n` +
+    `    headers={"Authorization": "Bearer " + os.environ["LAKE_KEY"],\n` +
+    `             "User-Agent": "my-script/1.0"},\n` +
+    `)\n` +
+    `body = json.load(urllib.request.urlopen(req))\n` +
+    `print(body["value"]["items"])`;
   return (
     <div className="space-y-4">
       {!keyValue && (
@@ -144,6 +155,11 @@ function QuickStart({ keyValue }: { keyValue: string | null }) {
           note="An action changes something and is recorded in the audit log under your name. A read-only key is refused it."
         />
         <CodeBlock title="from JavaScript" code={fetchCode} />
+        <CodeBlock
+          title="from Python: send a User-Agent"
+          code={pythonCode}
+          note={'Every call needs a User-Agent header. Python\'s urllib default is refused at the edge with 403 "error code: 1010"; curl, requests and fetch send one already.'}
+        />
         <CodeBlock
           title="in a workspace: /w/<id>/v1"
           code={`curl -s "${base}/w/${workspace}/v1/workspace_status?customer_id=${customer}&workspace_id=${workspace}" \\\n  -H "Authorization: Bearer ${key}"`}
