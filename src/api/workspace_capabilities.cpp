@@ -13,6 +13,8 @@
 
 #include <optional>
 #include <regex>
+#include <span>
+#include <vector>
 
 #include "agent_task_records_api.hpp"
 #include "lake/api/datasets.hpp"
@@ -285,6 +287,12 @@ constexpr std::array<std::string_view, 41> workspace_actions = {"create_project"
 template <std::size_t Size>
 bool listed(const std::array<std::string_view, Size>& names, std::string_view name) {
     return std::ranges::find(names, name) != names.end();
+}
+
+template <std::size_t Size> json allowed_names(const std::array<std::string_view, Size>& names) {
+    std::vector<std::string> sorted(names.begin(), names.end());
+    std::ranges::sort(sorted);
+    return json(sorted);
 }
 
 std::expected<std::string, ApiError> customer_object(const json& input, ApiContext& context) {
@@ -635,6 +643,240 @@ void published_call(json& value, const std::string& capability, const json& inpu
     }
 }
 
+// One call to a workspace engine capability through the allow-lists, the policy and the audit
+// (docs/api/workspaces.md): workspace_query and workspace_act, and each named engine capability
+// (docs/api/engine-capabilities.md, lake#650), run this. `input` is {customer_id, workspace_id,
+// capability, input}; a refusal's path points below `/input`.
+liquid::runtime::task<ApiResult> workspace_call(bool read, json input, ApiContext& context) {
+        if (!context.workspaces) {
+            co_return unavailable();
+        }
+        const std::string capability = input.at("capability");
+        // Name the inner capability in the audit event before any refusal, so a person's
+        // activity says what a refused workspace call tried to do (lake#445).
+        set_audit(context, read ? "workspace.query" : "workspace.act", input, capability);
+        if (read ? !workspace_read_allowed(capability)
+                 : !workspace_action_allowed(capability)) {
+            co_return ApiResult::failure("invalid_input",
+                                         capability + " is not a workspace " +
+                                             (read ? "read" : "action"),
+                                         "/capability");
+        }
+        const auto agent_task = calling_agent_task(context);
+        // An agent turn acts only through the workspace actions its credential names
+        // (lake#438): `workspace_act` alone never opens the whole allow-list to an agent. The
+        // ExperimentsAgent's reads are named per turn as well.
+        // A turn's credential may name the capability by the engine's name or by Lake's
+        // (engine_capability_name, lake#650).
+        if (agent_task && (!read || agent_task->agent == "agent-experiments") &&
+            !has_scope(context, capability) &&
+            !has_scope(context, engine_capability_name(capability))) {
+            const control::LibraryAgent* library = control::library_agent(agent_task->agent);
+            co_return ApiResult::failure(
+                "unauthorized",
+                "this " + (library ? std::string(library->name) : agent_task->agent) +
+                    " turn does not grant " + capability);
+        }
+        if (!read && agent_task && agent_task->agent == "agent-project" &&
+            capability == "compile_intent") {
+            co_return co_await project_agent_compile_check(context, input, *agent_task);
+        }
+        if (capability == "create_agent" || capability == "update_agent") {
+            if (auto refused = agent_definition_refusal(input.value("input", json::object()))) {
+                co_return *refused;
+            }
+        }
+        // The engine's study actions are lake's confirmed experiment capabilities (lake#561):
+        // the call speaks the engine's names in and out (`study`, `run`), and lake's
+        // capability takes `experiment_id` and `run_id`.
+        const std::map<std::string, std::string> study_actions = {
+            {"create_study", "start_experiment"},
+            {"stop_study", "stop_experiment"},
+            {"stop_trial", "stop_experiment_trial"},
+            {"promote_trial", "promote_trial"}};
+        if (!read && study_actions.contains(capability)) {
+            auto arguments = input.value("input", json::object());
+            if (agent_task && agent_task->agent == "agent-experiments" &&
+                has_scope(context, capability)) {
+                arguments["confirm"] = true;
+            }
+            if (capability != "create_study" && arguments.contains("study") &&
+                !arguments.contains("experiment_id")) {
+                arguments["experiment_id"] = std::move(arguments["study"]);
+                arguments.erase("study");
+            }
+            arguments["customer_id"] = input.at("customer_id");
+            arguments["workspace_id"] = input.at("workspace_id");
+            const auto result = co_await context.registry->call_async(
+                study_actions.at(capability), arguments, context);
+            if (!result) {
+                co_return ApiResult::failure("store_error", result.error().message);
+            }
+            ApiResult answer = *result;
+            if (answer.ok && answer.value.is_object() &&
+                answer.value.contains("experiment_id")) {
+                answer.value["study"] = std::move(answer.value["experiment_id"]);
+                answer.value.erase("experiment_id");
+            }
+            if (!answer.ok && answer.error.path.starts_with("/experiment_id")) {
+                answer.error.path = "/study" + answer.error.path.substr(14);
+            }
+            co_return answer;
+        }
+        json arguments = input.value("input", json::object());
+        const json sent = arguments;
+        // A native agent runs lake's base model, which only lake knows (viewer no longer
+        // answers its path, lake#594): an agent created without one gets it here.
+        if (!read && capability == "create_agent" && context.workspaces != nullptr &&
+            arguments.value("runtime", std::string()) == "native" &&
+            arguments.value("model", std::string()).empty()) {
+            arguments["model"] = context.workspaces->config().base_agent_model;
+        }
+        // The engine refuses an empty name and a name in use with one message that names
+        // neither (lake#452); lake says which.
+        std::string project_name;
+        if (!read && capability == "create_project") {
+            const auto name = arguments.find("name");
+            project_name = name != arguments.end() && name->is_string()
+                               ? name->get<std::string>()
+                               : std::string();
+            if (std::ranges::all_of(project_name, [](unsigned char character) {
+                    return std::isspace(character) != 0;
+                })) {
+                co_return ApiResult::failure(
+                    "invalid_input", "a project needs a name", "/input/name");
+            }
+        }
+        // A project's decision is lake's to keep (lake#577): the engine's project has no
+        // field for it, so it is taken out here and written to the project's workspace
+        // records once the engine has created the project.
+        std::string decision;
+        if (!read && capability == "create_project" && arguments.contains("decision")) {
+            const json& field = arguments.at("decision");
+            if (!field.is_null() && !field.is_string()) {
+                co_return ApiResult::failure(
+                    "invalid_input", "the decision is text", "/input/decision");
+            }
+            if (field.is_string()) {
+                decision = trimmed_text(field.get<std::string>());
+            }
+            if (decision.size() > control::max_project_decision_bytes) {
+                co_return ApiResult::failure(
+                    "invalid_input",
+                    "the decision is longer than " +
+                        std::to_string(control::max_project_decision_bytes) + " bytes",
+                    "/input/decision");
+            }
+            arguments.erase("decision");
+        }
+        // One name per concept (lake#450): `run` or `run_id`, `model` or `model_id`, as the
+        // engine capability takes it.
+        const auto renamed = canonical_workspace_input(capability, arguments);
+        // compare_runs reads every metric the runs share when `names` is left out, as the
+        // top-level compare_runs does (lake#450).
+        if (read && capability == "compare_runs" && !arguments.contains("names")) {
+            json compare = arguments;
+            compare["customer_id"] = input.at("customer_id");
+            compare["workspace_id"] = input.at("workspace_id");
+            const auto result =
+                co_await context.registry->call_async("compare_runs", compare, context);
+            co_return result ? *result
+                             : ApiResult::failure("store_error", result.error().message);
+        }
+        // Dataset rules lake applies before and after the workspace answers (lake#447).
+        std::string requested_table;
+        if (!read && (capability == "upload_dataset" ||
+                      capability == "create_dataset_from_query")) {
+            auto checked = co_await check_dataset_write(
+                context, input.at("customer_id"), capability, arguments);
+            if (!checked) {
+                co_return ApiResult::failure("store_error", checked.error().message);
+            }
+            if (checked->failure) {
+                co_return *checked->failure;
+            }
+            requested_table = std::move(checked->requested_table);
+        } else {
+            normalize_dataset_reference(capability, arguments);
+        }
+        auto called = co_await call_workspace(context,
+                                              input.at("customer_id"),
+                                              capability,
+                                              workspace_uses_get(capability),
+                                              std::move(arguments));
+        if (!called) {
+            co_return ApiResult::failure("store_unavailable", called.error().message);
+        }
+        if (!*called) {
+            if (capability == "create_project" &&
+                called->error().message.starts_with("create_project rejected")) {
+                // The name is not empty (checked above), so it is in use.
+                co_return ApiResult::failure(
+                    "conflict",
+                    "a project named '" + project_name +
+                        "' already exists in this workspace; choose another name",
+                    "/input/name");
+            }
+            // Point at the field the workspace names (lake#256, lake#450), in lake's codes.
+            ApiResult failed = workspace_failure(called->error(), sent, "/input", renamed);
+            // An engine enum refusal lists the values, as lake's own do (lake#591).
+            if (failed.error.message.ends_with(" is not one of the values it accepts") &&
+                failed.error.path.starts_with("/input/")) {
+                auto described = co_await call_workspace(
+                    context, input.at("customer_id"), "openapi.json", true, json::object());
+                if (described && *described) {
+                    std::string field = failed.error.path.substr(7);
+                    if (const auto back = std::ranges::find_if(
+                            renamed, [&](const auto& pair) { return pair.second == field; });
+                        back != renamed.end()) {
+                        field = back->first;
+                    }
+                    if (const auto values = engine_input_enum(**described, capability, field)) {
+                        failed.error.message = "expected one of " + values->dump();
+                    }
+                }
+            }
+            co_return failed;
+        }
+        json value = std::move(**called);
+        if (value.is_object() &&
+            (capability == "create_project" || capability == "get_project" ||
+             capability == "delete_project")) {
+            auto step = co_await project_decision_step(
+                context, input, capability, project_name, decision, value);
+            if (!step) {
+                co_return ApiResult::failure("store_error", step.error().message);
+            }
+            if (*step) {
+                co_return std::move(**step);
+            }
+        }
+        if (value.is_object() &&
+            (capability == "expose_model" || capability == "unexpose_model" ||
+             capability == "expose_index" || capability == "unexpose_index")) {
+            published_call(value, capability, input);
+        }
+        if (capability == "list_datasets") {
+            datasets::annotate_list(value);
+        } else if (capability == "get_dataset" && value.is_object() &&
+                   value.contains("name") && value["name"].is_string()) {
+            const std::string database = value.value("database", std::string("datasets"));
+            value["id"] = datasets::id_of(database, value["name"].get<std::string>());
+            value["kind"] = datasets::kind_of(database);
+            datasets::annotate_one(value);
+        } else if (!requested_table.empty() && value.is_object()) {
+            const std::string table = value.value("table", std::string());
+            if (!table.empty() && table != requested_table) {
+                value["renamed_from"] = requested_table;
+            }
+            if (!table.empty()) {
+                value["id"] = datasets::id_of(value.value("database", std::string()), table);
+            }
+        }
+        co_return ApiResult::success(value.is_object() ? std::move(value)
+                                                       : json{{"value", std::move(value)}});
+}
+
 void register_workspace_call(Registry& registry, bool read) {
     registry.add(Capability{
         .name = read ? "workspace_query" : "workspace_act",
@@ -654,240 +896,21 @@ void register_workspace_call(Registry& registry, bool read) {
                    "is {source: zetta, instructions, entrypoint, files: [{path, contents}]} or "
                    "{source: lake, repository_id, revision, entrypoint}; Lake refuses any other "
                    "field.",
+        // The names `capability` takes, so OpenAPI and MCP list them (lake#650); each is also
+        // its own named capability (docs/api/engine-capabilities.md).
         .input_schema = customer_input_schema(
-            {{"capability", {{"type", "string"}}}, {"input", {{"type", "object"}}}},
+            {{"capability",
+              {{"type", "string"},
+               {"enum", read ? allowed_names(workspace_reads) : allowed_names(workspace_actions)}}},
+             {"input", {{"type", "object"}}}},
             json::array({"capability"})),
         .output_schema = {{"type", "object"}},
         .kind = CapabilityKind::Action,
         .object = "customer",
         .action = read ? "read" : "write",
         .resolve_object = customer_object,
-        .async_handler = [read](const json& input,
-                                ApiContext& context) -> liquid::runtime::task<ApiResult> {
-            if (!context.workspaces) {
-                co_return unavailable();
-            }
-            const std::string capability = input.at("capability");
-            // Name the inner capability in the audit event before any refusal, so a person's
-            // activity says what a refused workspace call tried to do (lake#445).
-            set_audit(context, read ? "workspace.query" : "workspace.act", input, capability);
-            if (read ? !workspace_read_allowed(capability)
-                     : !workspace_action_allowed(capability)) {
-                co_return ApiResult::failure("invalid_input",
-                                             capability + " is not a workspace " +
-                                                 (read ? "read" : "action"),
-                                             "/capability");
-            }
-            const auto agent_task = calling_agent_task(context);
-            // An agent turn acts only through the workspace actions its credential names
-            // (lake#438): `workspace_act` alone never opens the whole allow-list to an agent. The
-            // ExperimentsAgent's reads are named per turn as well.
-            if (agent_task && (!read || agent_task->agent == "agent-experiments") &&
-                !has_scope(context, capability)) {
-                const control::LibraryAgent* library = control::library_agent(agent_task->agent);
-                co_return ApiResult::failure(
-                    "unauthorized",
-                    "this " + (library ? std::string(library->name) : agent_task->agent) +
-                        " turn does not grant " + capability);
-            }
-            if (!read && agent_task && agent_task->agent == "agent-project" &&
-                capability == "compile_intent") {
-                co_return co_await project_agent_compile_check(context, input, *agent_task);
-            }
-            if (capability == "create_agent" || capability == "update_agent") {
-                if (auto refused = agent_definition_refusal(input.value("input", json::object()))) {
-                    co_return *refused;
-                }
-            }
-            // The engine's study actions are lake's confirmed experiment capabilities (lake#561):
-            // the call speaks the engine's names in and out (`study`, `run`), and lake's
-            // capability takes `experiment_id` and `run_id`.
-            const std::map<std::string, std::string> study_actions = {
-                {"create_study", "start_experiment"},
-                {"stop_study", "stop_experiment"},
-                {"stop_trial", "stop_experiment_trial"},
-                {"promote_trial", "promote_trial"}};
-            if (!read && study_actions.contains(capability)) {
-                auto arguments = input.value("input", json::object());
-                if (agent_task && agent_task->agent == "agent-experiments" &&
-                    has_scope(context, capability)) {
-                    arguments["confirm"] = true;
-                }
-                if (capability != "create_study" && arguments.contains("study") &&
-                    !arguments.contains("experiment_id")) {
-                    arguments["experiment_id"] = std::move(arguments["study"]);
-                    arguments.erase("study");
-                }
-                arguments["customer_id"] = input.at("customer_id");
-                arguments["workspace_id"] = input.at("workspace_id");
-                const auto result = co_await context.registry->call_async(
-                    study_actions.at(capability), arguments, context);
-                if (!result) {
-                    co_return ApiResult::failure("store_error", result.error().message);
-                }
-                ApiResult answer = *result;
-                if (answer.ok && answer.value.is_object() &&
-                    answer.value.contains("experiment_id")) {
-                    answer.value["study"] = std::move(answer.value["experiment_id"]);
-                    answer.value.erase("experiment_id");
-                }
-                if (!answer.ok && answer.error.path.starts_with("/experiment_id")) {
-                    answer.error.path = "/study" + answer.error.path.substr(14);
-                }
-                co_return answer;
-            }
-            json arguments = input.value("input", json::object());
-            const json sent = arguments;
-            // A native agent runs lake's base model, which only lake knows (viewer no longer
-            // answers its path, lake#594): an agent created without one gets it here.
-            if (!read && capability == "create_agent" && context.workspaces != nullptr &&
-                arguments.value("runtime", std::string()) == "native" &&
-                arguments.value("model", std::string()).empty()) {
-                arguments["model"] = context.workspaces->config().base_agent_model;
-            }
-            // The engine refuses an empty name and a name in use with one message that names
-            // neither (lake#452); lake says which.
-            std::string project_name;
-            if (!read && capability == "create_project") {
-                const auto name = arguments.find("name");
-                project_name = name != arguments.end() && name->is_string()
-                                   ? name->get<std::string>()
-                                   : std::string();
-                if (std::ranges::all_of(project_name, [](unsigned char character) {
-                        return std::isspace(character) != 0;
-                    })) {
-                    co_return ApiResult::failure(
-                        "invalid_input", "a project needs a name", "/input/name");
-                }
-            }
-            // A project's decision is lake's to keep (lake#577): the engine's project has no
-            // field for it, so it is taken out here and written to the project's workspace
-            // records once the engine has created the project.
-            std::string decision;
-            if (!read && capability == "create_project" && arguments.contains("decision")) {
-                const json& field = arguments.at("decision");
-                if (!field.is_null() && !field.is_string()) {
-                    co_return ApiResult::failure(
-                        "invalid_input", "the decision is text", "/input/decision");
-                }
-                if (field.is_string()) {
-                    decision = trimmed_text(field.get<std::string>());
-                }
-                if (decision.size() > control::max_project_decision_bytes) {
-                    co_return ApiResult::failure(
-                        "invalid_input",
-                        "the decision is longer than " +
-                            std::to_string(control::max_project_decision_bytes) + " bytes",
-                        "/input/decision");
-                }
-                arguments.erase("decision");
-            }
-            // One name per concept (lake#450): `run` or `run_id`, `model` or `model_id`, as the
-            // engine capability takes it.
-            const auto renamed = canonical_workspace_input(capability, arguments);
-            // compare_runs reads every metric the runs share when `names` is left out, as the
-            // top-level compare_runs does (lake#450).
-            if (read && capability == "compare_runs" && !arguments.contains("names")) {
-                json compare = arguments;
-                compare["customer_id"] = input.at("customer_id");
-                compare["workspace_id"] = input.at("workspace_id");
-                const auto result =
-                    co_await context.registry->call_async("compare_runs", compare, context);
-                co_return result ? *result
-                                 : ApiResult::failure("store_error", result.error().message);
-            }
-            // Dataset rules lake applies before and after the workspace answers (lake#447).
-            std::string requested_table;
-            if (!read && (capability == "upload_dataset" ||
-                          capability == "create_dataset_from_query")) {
-                auto checked = co_await check_dataset_write(
-                    context, input.at("customer_id"), capability, arguments);
-                if (!checked) {
-                    co_return ApiResult::failure("store_error", checked.error().message);
-                }
-                if (checked->failure) {
-                    co_return *checked->failure;
-                }
-                requested_table = std::move(checked->requested_table);
-            } else {
-                normalize_dataset_reference(capability, arguments);
-            }
-            auto called = co_await call_workspace(context,
-                                                  input.at("customer_id"),
-                                                  capability,
-                                                  workspace_uses_get(capability),
-                                                  std::move(arguments));
-            if (!called) {
-                co_return ApiResult::failure("store_unavailable", called.error().message);
-            }
-            if (!*called) {
-                if (capability == "create_project" &&
-                    called->error().message.starts_with("create_project rejected")) {
-                    // The name is not empty (checked above), so it is in use.
-                    co_return ApiResult::failure(
-                        "conflict",
-                        "a project named '" + project_name +
-                            "' already exists in this workspace; choose another name",
-                        "/input/name");
-                }
-                // Point at the field the workspace names (lake#256, lake#450), in lake's codes.
-                ApiResult failed = workspace_failure(called->error(), sent, "/input", renamed);
-                // An engine enum refusal lists the values, as lake's own do (lake#591).
-                if (failed.error.message.ends_with(" is not one of the values it accepts") &&
-                    failed.error.path.starts_with("/input/")) {
-                    auto described = co_await call_workspace(
-                        context, input.at("customer_id"), "openapi.json", true, json::object());
-                    if (described && *described) {
-                        std::string field = failed.error.path.substr(7);
-                        if (const auto back = std::ranges::find_if(
-                                renamed, [&](const auto& pair) { return pair.second == field; });
-                            back != renamed.end()) {
-                            field = back->first;
-                        }
-                        if (const auto values = engine_input_enum(**described, capability, field)) {
-                            failed.error.message = "expected one of " + values->dump();
-                        }
-                    }
-                }
-                co_return failed;
-            }
-            json value = std::move(**called);
-            if (value.is_object() &&
-                (capability == "create_project" || capability == "get_project" ||
-                 capability == "delete_project")) {
-                auto step = co_await project_decision_step(
-                    context, input, capability, project_name, decision, value);
-                if (!step) {
-                    co_return ApiResult::failure("store_error", step.error().message);
-                }
-                if (*step) {
-                    co_return std::move(**step);
-                }
-            }
-            if (value.is_object() &&
-                (capability == "expose_model" || capability == "unexpose_model" ||
-                 capability == "expose_index" || capability == "unexpose_index")) {
-                published_call(value, capability, input);
-            }
-            if (capability == "list_datasets") {
-                datasets::annotate_list(value);
-            } else if (capability == "get_dataset" && value.is_object() &&
-                       value.contains("name") && value["name"].is_string()) {
-                const std::string database = value.value("database", std::string("datasets"));
-                value["id"] = datasets::id_of(database, value["name"].get<std::string>());
-                value["kind"] = datasets::kind_of(database);
-                datasets::annotate_one(value);
-            } else if (!requested_table.empty() && value.is_object()) {
-                const std::string table = value.value("table", std::string());
-                if (!table.empty() && table != requested_table) {
-                    value["renamed_from"] = requested_table;
-                }
-                if (!table.empty()) {
-                    value["id"] = datasets::id_of(value.value("database", std::string()), table);
-                }
-            }
-            co_return ApiResult::success(value.is_object() ? std::move(value)
-                                                           : json{{"value", std::move(value)}});
+        .async_handler = [read](const json& input, ApiContext& context) {
+            return workspace_call(read, input, context);
         }});
 }
 
@@ -5881,6 +5904,19 @@ ApiResult workspace_failure(const control::ZettaControlError& error,
                               field.empty() ? std::string() : std::string(prefix) + "/" + field);
 }
 
+std::span<const std::string_view> workspace_read_names() {
+    return workspace_reads;
+}
+
+std::span<const std::string_view> workspace_action_names() {
+    return workspace_actions;
+}
+
+liquid::runtime::task<ApiResult>
+call_workspace_capability(bool read, nlohmann::json input, ApiContext& context) {
+    return workspace_call(read, std::move(input), context);
+}
+
 bool workspace_read_allowed(std::string_view capability) {
     return listed(workspace_reads, capability);
 }
@@ -6679,6 +6715,7 @@ void register_workspace_capabilities(Registry& registry) {
             }});
     register_workspace_call(registry, true);
     register_workspace_call(registry, false);
+    register_engine_capabilities(registry);
     register_service_capabilities(registry);
     register_store_capabilities(registry);
 }

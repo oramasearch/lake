@@ -569,7 +569,8 @@ authorize_app_token(const Capability& entry, const nlohmann::json& input, ApiCon
     } else if (context.credential_kind == "app_zetta") {
         if (app->desired == "deleted" ||
             input.value("workspace_id", "") != app->workspace_id ||
-            (entry.name != "workspace_query" && entry.name != "workspace_sql") ||
+            (entry.name != "workspace_query" && entry.name != "workspace_sql" &&
+             entry.granted_by_scope != "workspace_query") ||
             input.value("customer_id", "") != app->customer_id ||
             app->bindings.value("zetta", nlohmann::json()) !=
                 nlohmann::json{{"scopes", nlohmann::json::array({"read"})}}) {
@@ -756,7 +757,10 @@ CallState prepare_call(std::shared_ptr<const Capability> capability,
         state.proceed = state.result.ok;
     } else if (entry.requires_auth && context.session_credential &&
                std::ranges::find(context.scopes, "*") == context.scopes.end() &&
-               std::ranges::find(context.scopes, entry.name) == context.scopes.end()) {
+               std::ranges::find(context.scopes, entry.name) == context.scopes.end() &&
+               (entry.granted_by_scope.empty() ||
+                std::ranges::find(context.scopes, entry.granted_by_scope) ==
+                    context.scopes.end())) {
         state.result =
             ApiResult::failure("unauthorized", "credential does not grant " + entry.name);
         state.proceed = false;

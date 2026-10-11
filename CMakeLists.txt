@@ -67,6 +67,18 @@ add_custom_command(
   DEPENDS ${LAKE_GUIDE_FILES} cmake/embed_guide.cmake
   VERBATIM)
 
+# The workspace engine's input schemas for the capabilities lake allows (lake#650), vendored by
+# tools/api/vendor-engine-openapi.py and embedded so each named engine capability publishes them.
+set(LAKE_EMBEDDED_ENGINE_OPENAPI_CPP "${CMAKE_CURRENT_BINARY_DIR}/generated/engine_openapi.cpp")
+add_custom_command(
+  OUTPUT "${LAKE_EMBEDDED_ENGINE_OPENAPI_CPP}"
+  COMMAND "${CMAKE_COMMAND}"
+    "-DINPUT_FILE=${CMAKE_CURRENT_SOURCE_DIR}/src/api/engine_openapi.json"
+    "-DOUTPUT_FILE=${LAKE_EMBEDDED_ENGINE_OPENAPI_CPP}"
+    -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_engine_openapi.cmake"
+  DEPENDS src/api/engine_openapi.json cmake/embed_engine_openapi.cmake
+  VERBATIM)
+
 # The web app (frontend/, React + Vite): built with npm and embedded into the binary, so lake
 # serves its whole UI with no files at run time (docs/ui/README.md). LAKE_FRONTEND_DIST points
 # at an already-built dist/ instead (the image's Node stage); empty builds it here.
@@ -200,6 +212,7 @@ add_library(lake-core STATIC
   src/control/builds.cpp
   ${LAKE_EMBEDDED_FONTS_CPP}
   ${LAKE_EMBEDDED_GUIDE_CPP}
+  ${LAKE_EMBEDDED_ENGINE_OPENAPI_CPP}
   ${LAKE_EMBEDDED_WEB_APP_CPP}
   src/api/web_app.cpp
   src/control/lake_identity.cpp
@@ -256,6 +269,7 @@ add_library(lake-core STATIC
   src/api/workspace_store_capabilities.cpp
   src/api/datasets.cpp
   src/api/stream_capabilities.cpp
+  src/api/engine_capabilities.cpp
   src/api/experiment_capabilities.cpp
   src/api/pipeline.cpp
   src/api/registry.cpp

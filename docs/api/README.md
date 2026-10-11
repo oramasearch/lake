@@ -1,5 +1,12 @@
 # The `/v1` API and MCP
 
+lake#650: [engine-capabilities.md](engine-capabilities.md) documents every capability of a
+workspace's engine as a named Lake capability (its own route, OpenAPI operation and MCP tool, with
+the engine's input schema vendored in `src/api/engine_openapi.json`), the names Lake gives the
+engine's where they would collide or say too little (`check_pipeline`, `start_run`,
+`search_workspace_index`, `get_holdout_experiment`, ...), the Lake capabilities that already
+covered the rest, and the `enum` `workspace_query` and `workspace_act` now carry on `capability`.
+
 lake#564 (decision 56, migration `0073_billing`): [billing.md](billing.md) documents billing, on only
 where `LAKE_BILLING` is (Orama Cloud): `price_list`, `set_price_list`, `billing_account`,
 `bill_preview`, `issue_invoice`, `list_invoices`, `get_invoice`, `record_invoice_payment` and

@@ -5,6 +5,7 @@
 #include <cctype>
 
 #include "lake/api/audit_recorder.hpp"
+#include "lake/api/capabilities.hpp"
 #include "lake/control/store.hpp"
 
 namespace lake::api {
@@ -622,7 +623,8 @@ std::optional<AuditLog> audit_log_of(std::string_view capability) {
     if (listed(central, capability)) {
         return AuditLog::Central;
     }
-    if (listed(workspace, capability)) {
+    // Each named engine capability is a workspace_query or workspace_act call (lake#650).
+    if (listed(workspace, capability) || !engine_capability_of(capability).empty()) {
         return AuditLog::Workspace;
     }
     return std::nullopt;

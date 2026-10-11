@@ -213,17 +213,21 @@ exactly the tools the server has.
 ## What the Tools Do
 
 Step 4, **What the Tools Do**, lists every tool by product group, with a read or write chip, a
-search and a filter. The groups are: Workspace: Design, Train and Ship; Experiments; Solutions;
-Agents; Streams; Drives; Transcripts; Search; Apps and packages; Services; Storage; Repositories;
-Organizations and access; Usage and billing; Identity and sessions; Secrets, keys and certificates;
-Audit and transparency; Server. Each group says in one line what it holds.
+search and a filter. The groups are: Workspace: Design, Train and Ship; Projects and pipelines;
+Training and runs; Experiments; Models; Search indexes; Datasets; Connections; Decisions;
+Solutions; Agents; Streams; Drives; Transcripts; Search; Apps and packages; Services; Storage;
+Repositories; Organizations and access; Usage and billing; Identity and sessions; Secrets, keys and
+certificates; Audit and transparency; Engine; Server. Each group says in one line what it holds.
 
 A few things to know:
 
 - Every tool's input schema is the REST operation's, byte for byte. Design, Train, Ship and
   Transcripts tools require `customer_id` and `workspace_id`.
-- `workspace_query` (any allowed engine read) is a read tool; `workspace_act` (any allowed engine
-  action) is a write tool. [REST API and OpenAPI](/docs/developer) explains both.
+- Everything your workspace's engine does is its own tool: `list_projects`, `check_pipeline`,
+  `start_run`, `get_run_report`, `list_models`, `score`, `create_index`, `analyze_dataset`,
+  `create_connection`, `create_agent`, `decide` and the rest, each with its own input schema.
+  `workspace_query` (any allowed engine read, by the engine's name) and `workspace_act` (any
+  allowed engine action) still work. [REST API and OpenAPI](/docs/developer) explains both.
 - The repository sync operations that stream bytes (liquid push and pull) are not MCP tools; use
   [the liquid CLI](/docs/cli).
 - A refused call is a tool result with `isError: true` carrying the same error envelope REST
@@ -235,19 +239,19 @@ Step 5, **Worked Flows**, shows the tools an agent calls, in order, for the jobs
 
 | Flow | Tools in order |
 |---|---|
-| Load a dataset | `create_workspace` once, `workspace_status` until ready, `workspace_act` (`upload_dataset`), `workspace_query` (`get_dataset`), `workspace_sql` |
-| Train a model and call it | `workspace_act` (`create_project`, `capture_intent`, `compile_intent`, `approve_plan`), `run_pipeline`, `workspace_query` (`get_run_report`), `workspace_act` (`expose_model`), `predict` |
-| Build and run a pipeline | `create_pipeline`, `edit_pipeline`, `get_pipeline`, `workspace_act` (`approve_plan`), `run_pipeline` |
+| Load a dataset | `create_workspace` once, `workspace_status` until ready, `upload_dataset`, `get_dataset`, `workspace_sql` |
+| Train a model and call it | `create_project`, `compile_pipeline`, `approve_pipeline`, `run_pipeline`, `get_run_report`, `expose_model`, `predict` |
+| Build and run a pipeline | `create_pipeline`, `edit_pipeline`, `get_pipeline`, `approve_pipeline`, `run_pipeline` |
 | Stand up a Postgres service and connect it | `list_service_kinds`, `create_service`, `list_services`, `service_connection`, `connect_service` |
 | Create a volume | `list_store_providers`, `create_store`, `list_stores`, `store_connection` |
-| Search a published index | `workspace_query` (`list_indexes`), `workspace_act` (`expose_index`), `search_index` |
+| Search a published index | `list_indexes`, `expose_index`, `search_index` |
 
 The first step of loading a dataset as raw `tools/call` requests:
 
 ```
 {"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"workspace_status","arguments":{"customer_id":"<customer id>","workspace_id":"<workspace id>"}}}
 
-{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"workspace_act","arguments":{"customer_id":"<customer id>","workspace_id":"<workspace id>","capability":"upload_dataset","input":{"table_name":"accounts","format":"csv","content":"id,plan\n1,pro\n"}}}}
+{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"upload_dataset","arguments":{"customer_id":"<customer id>","workspace_id":"<workspace id>","table_name":"accounts","format":"csv","content":"id,plan\n1,pro\n"}}}
 ```
 
 Rules the skill gives an agent, which hold for you too: an edited pipeline must be approved again

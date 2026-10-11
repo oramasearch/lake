@@ -131,6 +131,15 @@ latest actions, while the bounded decision rows supply pending A1 approval contr
 operating-state reads remain concurrent. See
 [`workspaces.md`](../../docs/api/workspaces.md).
 
+`engine_capabilities.cpp` registers every allow-listed workspace engine capability that no Lake
+capability already covers as a named capability (lake#650): the engine's input schema from
+`engine_openapi.json` (vendored by `tools/api/vendor-engine-openapi.py`, embedded by
+`cmake/embed_engine_openapi.cmake`), Lake's name where the engine's collides or says too little,
+and a handler that is `call_workspace_capability`, the `workspace_query`/`workspace_act` path, so
+policy, agent scopes, audit and caching are the same. `granted_by_scope` lets a credential that may
+call `workspace_query` or `workspace_act` call them. See
+[`engine-capabilities.md`](../../docs/api/engine-capabilities.md).
+
 `experiment_capabilities.cpp` registers eleven space-scoped experiment/run operations using the
 closed contracts in `experiment_schemas.hpp`, and translates lake's experiment names to the engine's
 study names and back (lake#561); the web app's Experiments pages call only them. The

@@ -5,6 +5,7 @@
 #include <format>
 #include <initializer_list>
 
+#include "lake/api/capabilities.hpp"
 #include "lake/api/mcp.hpp"
 
 namespace lake::api::agent_docs {
@@ -34,8 +35,9 @@ constexpr std::array group_rules{
     GroupRule{
         "Experiments",
         "Read training experiments (each trial is one run of its settings), run metrics, "
-        "comparisons and bounded live events in a workspace. get_experiment is distinct from "
-        "the solutions holdout experiment that workspace_query's get_experiment reads. Start and "
+        "comparisons and bounded live events in a workspace, and check a proposed experiment "
+        "without starting it (validate_experiment). get_experiment is distinct from the "
+        "solutions holdout experiment get_holdout_experiment reads. Start and "
         "stop require write permission and the person's confirmation; promote_trial requires "
         "admin on the account and confirmation. Curves are suppressed for differential privacy.",
         [](std::string_view n) {
@@ -43,8 +45,54 @@ constexpr std::array group_rules{
                    n == "list_experiment_trials" || n == "get_experiment_analysis" ||
                    n == "tail_experiment_events" || n == "stop_experiment_trial" ||
                    n == "get_run_metrics" || n == "compare_runs" || n == "start_experiment" ||
-                   n == "stop_experiment" || n == "promote_trial";
+                   n == "stop_experiment" || n == "promote_trial" ||
+                   engine_capability_group(n) == "Experiments";
         }},
+    // The workspace engine's capabilities by name (lake#650, docs/api/engine-capabilities.md).
+    GroupRule{"Projects and pipelines",
+              "A workspace's AI projects and their pipelines: create and delete projects, capture "
+              "what a project is for and compile it into a pipeline (compile_intent, or "
+              "import_n8n and compile_n8n, or compile_python), save, check, approve and deploy a "
+              "pipeline, and the methodologies the engine can run. get_pipeline, edit_pipeline, "
+              "create_pipeline and run_pipeline are the same jobs in fewer calls.",
+              [](std::string_view n) {
+                  return engine_capability_group(n) == "Projects and pipelines";
+              }},
+    GroupRule{"Training and runs",
+              "Runs and what they produced: start a run of a checked pipeline with every runner "
+              "setting (start_run), read a run, its report and its jobs. list_runs, "
+              "get_run_metrics and compare_runs read runs across a workspace.",
+              [](std::string_view n) { return engine_capability_group(n) == "Training and runs"; }},
+    GroupRule{"Models",
+              "The models a workspace trained: list them, read whether one can still be trusted "
+              "(model_health), score a dataset or rows with one and explain a single score, and "
+              "publish or withdraw a model's endpoint (expose_model, unexpose_model). get_model "
+              "reads one; predict scores through a published one.",
+              [](std::string_view n) { return engine_capability_group(n) == "Models"; }},
+    GroupRule{"Search indexes",
+              "Full-text indexes over a workspace's tables: create, list and read them, search any "
+              "of them (search_workspace_index), and publish or withdraw one's endpoint. "
+              "search_index searches a published index.",
+              [](std::string_view n) { return engine_capability_group(n) == "Search indexes"; }},
+    GroupRule{"Datasets",
+              "Load data into a workspace (upload_dataset, create_dataset_from_query from a saved "
+              "connection), read what a dataset holds and how to featurize it (analyze_dataset, "
+              "plan_features), keep more copies of it (promote_dataset), and generate training "
+              "corpora. list_datasets and get_dataset read them.",
+              [](std::string_view n) { return engine_capability_group(n) == "Datasets"; }},
+    GroupRule{"Connections",
+              "Saved connections to a warehouse or database (credentials never read back), and "
+              "the tables behind one before anything is loaded (list_source_tables).",
+              [](std::string_view n) { return engine_capability_group(n) == "Connections"; }},
+    GroupRule{"Decisions",
+              "A solution project's governed operating state: its decision policy and its "
+              "versions, decisions and their approval, recorded outcomes, the ledger, the "
+              "holdout experiment, drift monitoring and the ROI readout.",
+              [](std::string_view n) { return engine_capability_group(n) == "Decisions"; }},
+    GroupRule{"Engine",
+              "The workspace engine itself: its version and what it holds "
+              "(workspace_engine_info), and the traces every call records.",
+              [](std::string_view n) { return engine_capability_group(n) == "Engine"; }},
     GroupRule{"Transcripts",
               "What people said, added to a workspace from a recording, an uploaded audio or "
               "caption file, or pasted text, and kept in the workspace. Ask Orama and agents read "
@@ -67,7 +115,7 @@ constexpr std::array group_rules{
                   return n == "list_solutions" || n == "get_solution" || n == "create_solution" ||
                          n == "update_solution" || n == "delete_solution" ||
                          n == "duplicate_solution" || n == "list_opportunities" ||
-                         n == "dismiss_opportunity";
+                         n == "dismiss_opportunity" || engine_capability_group(n) == "Solutions";
               }},
     GroupRule{"Drives",
               "A workspace's file managers, in three kinds: workspace files (`storage: files`, "
@@ -101,8 +149,9 @@ constexpr std::array group_rules{
               [](std::string_view n) { return n.find("stream") != std::string_view::npos; }},
     GroupRule{"Agents",
               "The Agent Library of specialized agents Orama ships, Ask Orama, and the agents you "
-              "build in Train > Agents: create them through workspace_act, talk to any of them "
-              "with agent_turn, run Python agents with launch_agent and give them cron schedules "
+              "build in Train > Agents: create, change and delete them (create_agent, "
+              "update_agent, delete_agent), talk to any of them with agent_turn or "
+              "chat_with_agent, run Python agents with launch_agent and give them cron schedules "
               "with schedule_agent (each its own Kubernetes CronJob, at most once every five "
               "minutes). A Python agent's definition is {source: zetta, instructions, entrypoint, "
               "files: [{path, contents}]}; Lake refuses any other field. Runs and schedules belong "
@@ -117,12 +166,13 @@ constexpr std::array group_rules{
                          n == "confirm_solution" || n == "get_ask_conversation" ||
                          n == "send_ask_message" || n == "settle_ask_turn" ||
                          n == "confirm_ask_proposal" || n == "approve_agent_proposal" ||
-                         n == "latest_agent_task";
+                         n == "latest_agent_task" || engine_capability_group(n) == "Agents";
               }},
     GroupRule{"Workspace: Design, Train and Ship",
               "Your workspace: projects and pipelines, data, runs, models and search indexes, and "
-              "publishing models (with traffic and monitoring) and indexes. workspace_query and "
-              "workspace_act reach every capability the workspace allows.",
+              "publishing models (with traffic and monitoring) and indexes. Every capability "
+              "of the workspace engine is also its own tool, in the groups below; "
+              "workspace_query and workspace_act still reach each by name.",
               [](std::string_view n) {
                   return contains_any(n, {"pipeline"}) || n.starts_with("workspace_") ||
                          n == "start_workspace" || n == "delete_workspace" || n == "search_index" ||
@@ -255,8 +305,15 @@ constexpr std::array group_rules{
 };
 
 // The order groups are shown in.
-constexpr std::array<std::string_view, 19> group_order{"Workspace: Design, Train and Ship",
+constexpr std::array<std::string_view, 27> group_order{"Workspace: Design, Train and Ship",
+                                                       "Projects and pipelines",
+                                                       "Training and runs",
                                                        "Experiments",
+                                                       "Models",
+                                                       "Search indexes",
+                                                       "Datasets",
+                                                       "Connections",
+                                                       "Decisions",
                                                        "Solutions",
                                                        "Agents",
                                                        "Streams",
@@ -272,6 +329,7 @@ constexpr std::array<std::string_view, 19> group_order{"Workspace: Design, Train
                                                        "Identity and sessions",
                                                        "Secrets, keys and certificates",
                                                        "Audit and transparency",
+                                                       "Engine",
                                                        "Server",
                                                        ungrouped};
 
@@ -335,8 +393,8 @@ constexpr std::string_view rules =
     "- Every Design, Train and Ship data-plane tool takes `customer_id` and an explicit "
     "`workspace_id` from `list_workspaces`. A workspace ID is not a service ID. Create one with "
     "`create_workspace` (name and environment), then wait for `workspace_status` to report ready.\n"
-    "- An edited pipeline is **proposed** again: approve it (`workspace_act`, capability "
-    "`approve_plan`) before `run_pipeline`.\n"
+    "- An edited pipeline is **proposed** again: approve it (`approve_pipeline`) before "
+    "`run_pipeline`.\n"
     "- `run_pipeline` runs Zetta's checks first; a failing gate answers `{gate}` and runs "
     "nothing. Read every check's reason.\n"
     "- A service is usable when `list_services` reports it `Ready`; `service_connection` "
@@ -348,7 +406,9 @@ constexpr std::string_view rules =
     "- Names: an account (yours or an organization's) is always `customer_id`, a workspace "
     "`workspace_id`, a run `run_id`, a "
     "model `model_id` and an index `index_id`, including inside `workspace_query` and "
-    "`workspace_act` input. The older `run`, `model`, `index` and get_customer's `id` still work "
+    "`workspace_act` input. Every engine capability is its own tool (`list_projects`, "
+    "`get_run_report`, `create_agent`, ...); `workspace_query` and `workspace_act` still take "
+    "the engine's names. The older `run`, `model`, `index` and get_customer's `id` still work "
     "and are deprecated. A dataset id is `<database>/<name>` everywhere.\n"
     "- A failure is `{ok: false, error: {code, message, path}}`. `path` points at the input field "
     "at fault; `code` is one of those `/v1/openapi.json` lists in `error_envelope`. "
@@ -422,9 +482,8 @@ const std::vector<Flow>& flows() {
            "one edit per call: `op: \"add_step\"` with `step`, `kind`, `name`; `op: \"add_edge\"` "
            "with `from`, `to`; also rename_step, kind_step, remove_step, remove_edge, rename"},
           {"get_pipeline", "read the graph back: steps, edges, approval"},
-          {"workspace_act",
-           "`capability: \"approve_plan\"`, `input: {project, graph}`: an edited pipeline must be "
-           "approved again"},
+          {"approve_pipeline",
+           "`project`, `graph`: an edited pipeline must be approved again"},
           {"run_pipeline", "runs the checks, then the pipeline; answers {gate, run}"}}},
         {"Load a dataset",
          "A dataset is a table in your workspace. Upload a CSV or JSONL file's text (up to 16 "
@@ -432,32 +491,27 @@ const std::vector<Flow>& flows() {
          {{"create_workspace",
            "once (a `name` and an `environment`); its `id` is the `workspace_id` every later call "
            "names. Poll `workspace_status` until it is ready"},
-          {"workspace_act",
-           "`capability: \"upload_dataset\"`, `input: {table_name, format: \"csv\"|\"jsonl\", "
-           "content}`; answers the rows loaded and the dataset's `id`. A name is letters, digits "
+          {"upload_dataset",
+           "`table_name`, `format: \"csv\"|\"jsonl\"`, `content`; answers the rows loaded and "
+           "the dataset's `id`. A name is letters, digits "
            "and underscores; a taken name answers `conflict` unless `if_exists: \"rename\"`; a "
            "CSV row whose field count differs from the header is refused with its line"},
-          {"workspace_query",
-           "`capability: \"get_dataset\"`, `input: {dataset}` (the `id` "
-           "`<database>/<name>` from `list_datasets`): its columns"},
+          {"get_dataset",
+           "`id` (the `<database>/<name>` from `list_datasets`): its columns"},
           {"workspace_sql", "`statement: \"SELECT … LIMIT 20\"` to look at it"}}},
         {"Train a model and call it",
          "Train from a dataset, read the report, publish the model and score new rows.",
-         {{"workspace_act",
-           "`capability: \"create_project\"`, `input: {name, description, intent}`"},
+         {{"create_project", "`name`, `description`"},
           {"compile_pipeline",
            "`project`, `intent: <what to predict>`, `dataset: \"datasets.<name>\"`: a pipeline "
            "built from the sentence (one call; the Train Docs use the same); answers its "
            "`graph`"},
-          {"workspace_act", "`capability: \"approve_plan\"`, `input: {project, graph}`"},
+          {"approve_pipeline", "`project`, `graph`"},
           {"run_pipeline",
            "`dataset_path: \"datasets.<name>\"`, `holdout_fraction: 0.2`, `model_name`; answers "
            "{gate, run}"},
-          {"workspace_query",
-           "`capability: \"get_run_report\"`, `input: {run_id}` once it finished"},
-          {"workspace_act",
-           "`capability: \"expose_model\"`, `input: {model_id: <id>}` to publish it; answers "
-           "the `predict` call to make"},
+          {"get_run_report", "`run_id` once it finished"},
+          {"expose_model", "`model_id` to publish it; answers the `predict` call to make"},
           {"predict",
            "`model_id`, `rows` (each with its key in `entity`): the rows ranked by risk, each "
            "answered with its `entity` key and `row`"}}},
@@ -537,9 +591,8 @@ const std::vector<Flow>& flows() {
         {"Search a published index",
          "A search index is BM25F over a dataset; outside callers can search it once it is "
          "published.",
-         {{"workspace_query", "`capability: \"list_indexes\"` to find the index id"},
-          {"workspace_act",
-           "`capability: \"expose_index\"` to publish it (`unexpose_index` to stop)"},
+         {{"list_indexes", "to find the index id"},
+          {"expose_index", "`index_id` to publish it (`unexpose_index` to stop)"},
           {"search_index",
            "`index_id`, `query`; optional `field`, `top_k`, `fields` (which row fields each "
            "hit carries)"}}},
