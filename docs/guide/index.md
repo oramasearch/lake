@@ -24,7 +24,7 @@ The rail on the left groups lake's pages:
 | **Home** | Home | Where to start and what is happening |
 | **Data** | Repositories, Shared with Me, Search, Datasets, Transcripts | Where your data lives and is found |
 | **Design** | Projects, Opportunities, Solutions, Methodologies, Agent Library | Deciding what AI to build, and designing its workflow |
-| **Train** | Agents, Runs, Experiments, Streams | Training models and agents, and watching them work |
+| **Train** | Agents, Runs, Experiments, Models, Streams | Training models and agents, and watching them work |
 | **Ship** | Models, Search Indexes, Packages, Apps, Deployments, Services, Workspaces | Putting what you built to work |
 | **Organization** | Organizations, Secrets, Usage, Activity | People, credentials, usage and history |
 | **Developer** | API, MCP, Docs | Calling lake from code and from AI agents |
@@ -134,7 +134,8 @@ rows most at risk and what the run cannot tell you ([Train a Model](/docs/train)
 
 ## 6. Publish and Call the Model
 
-1. Open **Ship → Models** and press **Publish** on your model.
+1. Open **Ship → Models** and press **Publish v1** on your model (the button names the version it
+   publishes). **Train → Models** is where you compare its versions and retrain it.
 2. Press **Call** on it. The drawer shows the call with your account, workspace and model filled in.
 3. Call it from your own code with a lake key in `LAKE_KEY`:
 

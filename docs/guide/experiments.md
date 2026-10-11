@@ -214,7 +214,7 @@ Each of these asks first, in words, with the exact input shown; **Cancel** or Es
 - **Promote**, on a completed trial with a model, makes its registered model the experiment's
   project model: `POST /v1/promote_trial` with
   `{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "experiment_id": "<experiment id>", "run_id": "<run id>", "confirm": true}`
-  (MCP: `promote_trial`). The promoted model is marked **promoted** on **Ship → Models**.
+  (MCP: `promote_trial`). The promoted model is marked **promoted** on **Train → Models** and **Ship → Models**.
 
 ## Permissions
 

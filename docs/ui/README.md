@@ -7,9 +7,11 @@ capabilities, the same ones REST and MCP callers use, with the same authorizatio
 can do nothing the API cannot.
 
 - How the app is built, its kit and the rules for a page: [web-app.md](web-app.md).
-- The Train and Data pages (Agents, Agent, Agent Factory, Runs, Run, Datasets, Dataset, Query):
+- The Train and Data pages (Agents, Agent, Agent Factory, Runs, Run, Models, Model, Datasets,
+  Dataset, Query):
   [train.md](train.md).
-- The Ship pages (Models, Search Indexes, Search Index, Services): [ship.md](ship.md).
+- The Ship pages (Models, Model, Search Indexes, Search Index, Services): [ship.md](ship.md).
+  Train → Models is about training a model, Ship → Models about serving it (lake#599).
 - How it works on a phone, and how to check it at 390×844: [mobile-web.md](mobile-web.md).
 - Data → Transcripts, with dictation, recording and upload: [transcripts.md](transcripts.md).
 - Data → Drives, one file manager over repository, workspace-files and virtual drives: [drives.md](drives.md).
@@ -136,8 +138,9 @@ Workspaces)
 | `/transcripts`, `/transcript?id=` | `transcripts/TranscriptsPage.tsx`, `TranscriptPage.tsx`, `NewTranscript.tsx` | Data → Transcripts: record, upload or paste a transcript; search, read, edit, copy, delete, Ask Orama about it ([transcripts.md](transcripts.md)) | `list_transcripts`, `get_transcript`, `create_transcript`, `update_transcript`, `delete_transcript`, `transcribe` |
 | `/train/runs`, `/train/run` | `train/RunsPage.tsx`, `RunPage.tsx` | pipeline runs; one run's report, lineage, log and trace | engine `list_runs`, `list_studies`, `get_run`, `get_run_report`, `list_traces` |
 | `/train/experiments`, `/train/experiment`, `/train/experiment/run`, `/train/experiments/compare` | `experiments/*.tsx` | experiments and runs with live charts ([experiments.md](experiments.md)) | see experiments.md |
+| `/train/models`, `/train/model` | `train/ModelsPage.tsx`, `ModelPage.tsx`, `models.ts`, `modelParts.tsx` | training each model: its versions, held-out scores over versions, comparing versions, what it learned from, its pipeline steps, Retrain and Promote to Ship ([train.md](train.md)) | `run_pipeline`; engine `list_models`, `list_studies`, `get_run_report`, `get_graph`, `expose_model`, `unexpose_model` |
 | `/train/streams`, `/train/stream` | `streams/StreamsPage.tsx`, `TopicPage.tsx` | topics and messages ([streams.md](streams.md)) | see streams.md |
-| `/ship/models` | `ship/ModelsPage.tsx` | trained models and their prediction endpoints | engine `list_models`, `expose_model`, `unexpose_model` |
+| `/ship/models`, `/ship/model` | `ship/ModelsPage.tsx`, `ModelPage.tsx` | serving each model: the version published, inference with Try It, access (predict keys, origins), destinations and monitoring ([ship.md](ship.md)) | `predict`, `model_traffic`, `list_sessions`, `create_token`; engine `list_models`, `expose_model`, `unexpose_model` |
 | `/ship/indexes`, `/ship/index` | `ship/IndexesPage.tsx`, `IndexPage.tsx` | search indexes, one index, search it | `search_index`, `create_token`; engine `list_indexes`, `create_index`, `get_index`, `expose_index`, `unexpose_index` |
 | `/ship/packages` | `apps/PackagesPage.tsx` | the instance registry, the space's images and builds | `list_packages`, `list_image_repositories`, `list_builds`, `receive_build_events` |
 | `/ship/apps`, `/ship/app` | `apps/AppsPage.tsx`, `AppPage.tsx` | apps, ApplicationAgent, one app ([apps.md](apps.md)) | see apps.md |

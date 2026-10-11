@@ -88,7 +88,10 @@ export const NAV: NavItem[] = [
   { section: "train", path: "/train/agents", label: "Agents", icon: "agent", audience: AO },
   { section: "train", path: "/train/runs", label: "Runs", icon: "metering", audience: AO },
   { section: "train", path: "/train/experiments", label: "Experiments", icon: "metering", audience: AO },
+  // Training a model; serving it is Ship → Models (lake#599).
+  { section: "train", path: "/train/models", label: "Models", icon: "metering", audience: AO },
   { section: "train", path: "/train/streams", label: "Streams", icon: "streams", audience: AO },
+  // Serving a model: inference, access, destinations and monitoring (lake#599).
   { section: "ship", path: "/ship/models", label: "Models", icon: "api", audience: AO },
   { section: "ship", path: "/ship/indexes", label: "Search Indexes", icon: "search", audience: AO },
   { section: "ship", path: "/ship/packages", label: "Packages", icon: "repository", audience: AO },

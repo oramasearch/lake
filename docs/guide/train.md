@@ -24,7 +24,8 @@ of the account that owns your workspaces (yours, or your organization's).
 | **Run** | One execution of a pipeline, with its report, lineage, outputs, log and trace. |
 | **Hold-out** | The share of rows kept out of training to measure the model honestly. |
 | **Held-out score** | The score on those rows: `held_out_auc`, `held_out_log_loss`, `held_out_accuracy`, `held_out_rmse` or `held_out_mae`. A score measured on the rows the model learned from is *in-sample* and flatters it. |
-| **Model** | A learned function inside the pipeline: a `model` step. A pipeline may have several. Each model a successful run trains is registered and appears on **Ship → Models**; a model can also be uploaded on its own, with no pipeline. |
+| **Model** | A learned function inside the pipeline: a `model` step. A pipeline may have several. Each model a successful run trains is registered and appears on **Train → Models**; a model can also be uploaded on its own, with no pipeline. |
+| **Version** | One training of a model. Every run of the pipeline (or trial of an experiment) that trains it adds a version with its own model id; **Train → Models** groups them under the model. |
 
 ## Build a Pipeline from a Sentence
 
@@ -200,10 +201,73 @@ curves on Experiments; **Workspace streams** opens Train → Streams.
 
 `workspace_query` is a read sent as `POST`; it changes nothing.
 
+## Train → Models
+
+**Train → Models** is about training each model. Serving it is **Ship → Models**
+([Models and Search Indexes](/docs/ship)); each page links to the other for the same model.
+
+The list shows one row per model: the records of one model step of one pipeline (or of one
+experiment) are its versions. The figures count the models and versions, the ones with a held-out
+score, the ones from experiments and pipelines, and the ones serving. Each row shows the latest
+held-out score, how many versions and runs trained it with a link to the latest run and to its
+experiment, the dataset and features it learned from, when it was last trained, and the version
+serving in Ship.
+
+- **Search models, features or ids…** filters the list; **Pipeline**, **Experiment** and **No
+  pipeline** filter by where a model came from.
+- **Train a model** opens Design → Projects, where pipelines are built and run.
+- A model uploaded on its own, with no pipeline, is a model repository on **Data → Repositories**.
+  This page does not list model repositories yet.
+
+### A Model's Training Page
+
+Press a model's name to open its training page, at its latest version.
+
+- **Held-out score over versions** charts the score each version measured, oldest first. When the
+  versions measured several held-out figures, choose one with the chips.
+- **Versions** lists every version: when it was trained, its held-out score (or *in-sample only*),
+  the run that trained it and whether it is serving. Press a version to open it.
+- **Compare** on a version's row shows it beside the open one: every figure both recorded, with
+  held-out figures said **better** or **worse**. **Training curves** opens the two runs in Train →
+  Experiments → Compare Runs.
+- **What it learned from** names the dataset in the run report and the features the version reads.
+- **Pipeline** names the model step or steps it belongs to, linked to the pipeline. A model trained
+  by an experiment with no pipeline names the experiment; a model with neither says *Uploaded, no
+  pipeline*.
+
+### Retrain a Model
+
+Press **Retrain** on the model's training page. Lake runs the model's pipeline again, after its
+checks, under the model's name, and opens the new run. The new run's model becomes the next
+version.
+
+- REST: `POST /v1/run_pipeline` with the model's pipeline and name:
+
+```json
+{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "project": "retention", "graph": "<pipeline name>", "model_name": "<model name>"}
+```
+
+- MCP: `run_pipeline` with the same input.
+
+### Promote a Version to Ship
+
+Press **Promote v3 to Ship** (the button names the version open) and confirm. Lake publishes that
+version, so `predict` answers with it, and unpublishes every other version of the model; a call
+naming an unpublished version's id is refused from then on. The model's serving page opens.
+
+- REST: `POST /v1/workspace_act` with `expose_model` for the version, then `unexpose_model` for each
+  other published version:
+
+```json
+{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "capability": "expose_model", "input": {"model_id": "<model id>"}}
+```
+
+- MCP: `workspace_act` with the same input.
+
 ## After Training
 
-A successful run registers a model. Publish it and call it from your code on
-[Models and Search Indexes](/docs/ship). Experiments use the same held-out names as their objectives
+A successful run registers a model version. Compare it on **Train → Models**, then publish it and
+call it from your code on [Models and Search Indexes](/docs/ship). Experiments use the same held-out names as their objectives
 ([Experiments](/docs/experiments)).
 
 ## Permissions
@@ -242,5 +306,5 @@ A scoped key needs each capability it calls by name ([Tokens and Keys](/docs/tok
 - [AI Projects and Pipelines](/docs/design)
 - [Experiments](/docs/experiments)
 - [Agents](/docs/agents)
-- [Models and Search Indexes](/docs/ship)
+- [Models and Search Indexes](/docs/ship): serving a model
 - [Ask Orama](/docs/ask-orama)
