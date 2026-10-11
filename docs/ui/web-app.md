@@ -34,6 +34,7 @@ Orama design tokens, the same IBM Plex faces and the same component classes the 
 | `src/lib/ui.tsx` | The kit: `Page`, `Section`, `Card`, `Grid`, `KeyValue`, `Button`, `Actions`, `Tabs`, `StateTabs`, `Badge`, `Status`, `Notice`, `Empty`, `Skeleton`, `ErrorBlock`, `Query`, `DataTable`, `CopyBlock`, `Mono`, `Kbd`, `Field`, `Form`, `fieldError`. |
 | `src/lib/overlay.tsx` | `Modal` (with `sheet`, a full-screen sheet on a phone, and `SheetActions` pinned above the keyboard), `Drawer`, `ConfirmButton` (with `typed`, Confirm stays disabled until that exact text is typed, for an action that cannot be undone; with `danger`, a quiet trigger confirms with a danger button). The only surfaces with a shadow. |
 | `src/lib/toast.tsx` | `useToast()` for a short confirmation after a write. |
+| `src/lib/deletionDialog.tsx`, `src/lib/deletion.ts` | `DeletionDialog` and `DeletionButton`: every delete and revoke asks its capability with `dry_run: true`, lists what goes, and waits for typed confirmation; `deletion.ts` turns each plan into the dialog's lines (pure, tested by `tests/deletion.test.ts`) ([deletion.md](deletion.md)). |
 | `src/lib/session.tsx` | `useSession()`: the `viewer` read (who is signed in, the operator, the spaces and their workspaces, Clerk), the current workspace and space. |
 | `src/lib/trail.tsx` | `useTrail([...])` sets a page's breadcrumb; `entityCrumb` shortens ids. |
 | `src/lib/format.ts` | Dates (a date-only value keeps its day in every time zone), numbers, `bytes`, `shortId`. |

@@ -64,6 +64,27 @@ Grouping is the web app's (`frontend/src/pages/train/models.ts`); no capability 
 A model uploaded on its own is a model repository (the routes above). Lake does not record which
 repositories hold a model, so Train → Models does not list them yet.
 
+## Deleting from a workspace
+
+`delete_dataset`, `delete_model`, `delete_run` and `delete_index` (lake#645) delete one dataset,
+trained model, run or search index from the workspace's engine. Each takes `customer_id`,
+`workspace_id`, `id` and `dry_run?`, needs `write` on the account, like `workspace_act`, and is
+recorded in the workspace's own audit chain (`workspace.delete`, or `workspace.delete.plan` for a
+dry run, naming the capability, the id and what was removed).
+
+| Capability | `id` | Engine input | What goes, and what is kept |
+|---|---|---|---|
+| `delete_dataset` | `<database>/<dataset>`, as `list_datasets` returns it | `dataset`, `database` | the table, its rows and partitions, and every search index on it; a run still reading it is not detected, so delete a dataset no run reads |
+| `delete_model` | the model id (`model_id` is accepted too) | `model_id` | the trained model, no longer served if it was published; the run that trained it is kept |
+| `delete_run` | the run id (`run_id` too) | `run_id` | a finished run and its report; refused while pending or running; the models it trained are kept and named |
+| `delete_index` | the index id (`index_id` too) | `index_id` | the index, no longer served if it was published; the dataset is kept |
+
+The answer is the engine's (`removed`, and `kept` where something stays) with `id`, `dry_run` and
+`deleted`. `dry_run: true` deletes nothing and answers what would go. An unknown id is
+`not_found` at `/id`. The engine capabilities arrive with zetta#1257; a workspace whose engine is
+older answers `501 not_supported`, saying so, and nothing is deleted. Overview:
+[deletion.md](deletion.md).
+
 ## Training provenance
 
 Training provenance uses two canonical libliquid attestations, not a Lake-specific envelope:

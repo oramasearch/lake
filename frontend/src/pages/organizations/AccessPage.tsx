@@ -3,11 +3,11 @@
  * (serve_access_page); `/repository/access`, `/organization/access` and `/team/access` take `?id=`
  * of that entity (serve_entity_access_page). */
 import { useState } from "react";
-import { Navigate, useLocation } from "react-router-dom";
+import { Link, Navigate, useLocation } from "react-router-dom";
 import type { UseQueryResult } from "@tanstack/react-query";
 import { ShieldCheck } from "lucide-react";
 import { useRead, type Row } from "@/lib/api";
-import { Chip, DataTable, ErrorBlock, FilterChips, Mono, Page, SearchInput, Stat, StatRow, Toolbar } from "@/lib/ui";
+import { Button, Chip, DataTable, ErrorBlock, FilterChips, Mono, Page, SearchInput, Stat, StatRow, Toolbar } from "@/lib/ui";
 import { PanelEmpty, RoleBadge, countBy, matches, useMetaTrail, useParam } from "./shared";
 
 const ENTITY: Record<string, string> = {
@@ -44,6 +44,7 @@ export default function AccessPage() {
           "Who can access this object, what they can do, and where it comes from."
         )
       }
+      actions={shown?.id ? <Button to={`/grants?object_id=${encodeURIComponent(shown.id)}`}>Direct grants</Button> : undefined}
     >
       {failed ? <ErrorBlock error={failed.error} retry={() => void failed.refetch()} what="effective access" /> : <AccessTable q={entries} />}
     </Page>
@@ -92,7 +93,12 @@ function AccessTable({ q }: { q: UseQueryResult<Row> }) {
             label: "Source",
             render: (e) => (
               <span className="text-[12.5px] text-ink-2">
-                {e.inherited ? "inherited from" : "direct on"} <Mono short={16}>{e.source_object_id}</Mono>
+                {e.inherited ? "inherited from" : "direct on"}{" "}
+                {e.source_object_id ? (
+                  <Link to={`/grants?object_id=${encodeURIComponent(e.source_object_id)}`} title="The grants on it, to revoke one">
+                    <Mono short={16}>{e.source_object_id}</Mono>
+                  </Link>
+                ) : null}
               </span>
             ),
           },

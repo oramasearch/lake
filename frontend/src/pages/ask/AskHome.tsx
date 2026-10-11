@@ -6,11 +6,14 @@
  * A link's query hands the conversation over and is then dropped (`linkThread`): `conversation`,
  * `task` and `agent` (old `/ask` links, "Talk to this agent in Ask Orama"); `from` stays, the page
  * the panel's "Open as a page" came from. On this page the top bar's Ask Orama button opens no panel:
- * it puts the cursor in the message box (`focusAsk`, lib/ask.ts). */
+ * it puts the cursor in the message box (`focusAsk`, lib/ask.ts). Delete removes the conversation
+ * from the workspace after a typed confirmation (`delete_ask_conversation`, docs/ui/deletion.md). */
 import { useCallback, useEffect, useMemo, useRef } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
-import { Plus, Sparkles, X } from "lucide-react";
+import { Plus, Sparkles, Trash2, X } from "lucide-react";
 import { onFocusAsk } from "@/lib/ask";
+import { conversationLines, DELETE_WORD } from "@/lib/deletion";
+import { DeletionButton } from "@/lib/deletionDialog";
 import { useSession } from "@/lib/session";
 import { useTrail } from "@/lib/trail";
 import { Button } from "@/lib/ui";
@@ -110,9 +113,27 @@ function HomeConversation({ workspaceId, customerId }: { workspaceId: string; cu
                   <p className="eyebrow m-0">
                     <Sparkles size={13} aria-hidden /> Ask Orama
                   </p>
-                  <Button variant="ghost" onClick={() => update({ ...EMPTY_THREAD, agent: state.agent })}>
-                    <Plus size={14} aria-hidden /> New conversation
-                  </Button>
+                  <span className="inline-flex flex-wrap items-center gap-1.5">
+                    {state.conversation && !working ? (
+                      <DeletionButton
+                        variant="ghost"
+                        capability="delete_ask_conversation"
+                        input={{ customer_id: customerId, workspace_id: workspaceId, conversation_id: state.conversation }}
+                        title="Delete This Conversation"
+                        confirmLabel="Delete conversation"
+                        intro="Its messages are removed from this workspace. It cannot be undone."
+                        typed={() => DELETE_WORD}
+                        lines={conversationLines}
+                        done="Conversation deleted"
+                        onDone={() => update({ ...EMPTY_THREAD, agent: state.agent })}
+                      >
+                        <Trash2 size={14} aria-hidden /> Delete
+                      </DeletionButton>
+                    ) : null}
+                    <Button variant="ghost" onClick={() => update({ ...EMPTY_THREAD, agent: state.agent })}>
+                      <Plus size={14} aria-hidden /> New conversation
+                    </Button>
+                  </span>
                 </div>
                 <AskMessages
                   conversationId={state.conversation}

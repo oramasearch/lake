@@ -2,14 +2,16 @@
  * access, SSO, applications, usage and audit, each a tab in the query (web_ui_organization,
  * serve_organization_page and the team, invitation and SSO form handlers). */
 import { useState } from "react";
-import { Link, Navigate } from "react-router-dom";
-import { HardDrive, Mail, Plus, ScrollText, Timer, UserPlus, Users, UsersRound } from "lucide-react";
+import { Link, Navigate, useNavigate } from "react-router-dom";
+import { HardDrive, Mail, Plus, ScrollText, Timer, Trash2, UserPlus, Users, UsersRound } from "lucide-react";
 import { act, ApiError, useList, useRead, type Row } from "@/lib/api";
 import { bytes, plural } from "@/lib/format";
 import { usageDuration } from "@/pages/admin/usageFormat";
 import { Drawer, Modal } from "@/lib/overlay";
 import { useSession } from "@/lib/session";
 import { useToast } from "@/lib/toast";
+import { organizationBlockers, organizationLines, organizationTyped, invitationLines, REVOKE_WORD } from "@/lib/deletion";
+import { DeletionButton } from "@/lib/deletionDialog";
 import {
   Button,
   Card,
@@ -60,6 +62,7 @@ export default function OrganizationPage() {
   const id = useParam("id");
   const tab = useParam("tab") || "overview";
   const { viewer } = useSession();
+  const navigate = useNavigate();
   const organization = useRead<Row>(id ? "get_organization" : null, { id });
   const teams = useList<Row>(id ? "list_teams" : null, { organization_id: id, limit: 500 }, { pick: "items" });
   const memberships = useList<Row>(id ? "list_memberships" : null, { organization_id: id, limit: 500 }, { pick: "items" });
@@ -103,9 +106,29 @@ export default function OrganizationPage() {
         </span>
       }
       actions={
-        <Button variant="primary" onClick={() => setInviting(true)}>
-          <UserPlus size={14} aria-hidden /> Invite people
-        </Button>
+        <>
+          {own?.role === "owner" || viewer.administrator ? (
+            <DeletionButton
+              capability="delete_organization"
+              input={{ organization_id: id }}
+              workspace={null}
+              title={`Delete ${org.display_name || "Organization"}`}
+              confirmLabel="Delete organization"
+              intro="Deleting the organization removes everything below. It cannot be undone."
+              typed={organizationTyped}
+              sendConfirm
+              lines={organizationLines}
+              blocked={(plan) => (organizationBlockers(plan).length > 0 ? <WorkspacesInTheWay plan={plan} /> : null)}
+              done={`Deleted ${org.display_name || "the organization"}`}
+              onDone={() => navigate("/organizations")}
+            >
+              <Trash2 size={14} aria-hidden /> Delete organization
+            </DeletionButton>
+          ) : null}
+          <Button variant="primary" onClick={() => setInviting(true)}>
+            <UserPlus size={14} aria-hidden /> Invite people
+          </Button>
+        </>
       }
     >
       <QueryTabs label="Organization settings" tabs={TABS.map(([name, label]) => ({ to: base + name, label, active: tab === name, count: counts[name] }))} />
@@ -120,6 +143,27 @@ export default function OrganizationPage() {
       {tab === "audit" && <AuditTab organizationId={id} />}
       {inviting && <InviteDialog organizationId={id} onClose={() => setInviting(false)} />}
     </Page>
+  );
+}
+
+/** The workspaces an organization still owns, each linked to its deletion: the organization is
+ * deleted only once there are none (docs/ui/deletion.md). */
+function WorkspacesInTheWay({ plan }: { plan: Row }) {
+  const workspaces = organizationBlockers(plan);
+  if (workspaces.length === 0) return null;
+  return (
+    <>
+      <strong className="block">Delete its {workspaces.length === 1 ? "workspace" : `${workspaces.length} workspaces`} first</strong>
+      The organization still owns {workspaces.length === 1 ? "this workspace" : "these workspaces"}; each holds data that is deleted with it.
+      <ul className="mt-2 mb-0 space-y-1 pl-4">
+        {workspaces.map((workspace) => (
+          <li key={workspace.id}>
+            <Link to={`/workspaces?delete=${encodeURIComponent(workspace.id)}`}>{workspace.name}</Link>
+            {workspace.environment ? <span className="text-ink-2"> ({workspace.environment})</span> : null}
+          </li>
+        ))}
+      </ul>
+    </>
   );
 }
 
@@ -345,6 +389,7 @@ function InvitationsTab({ invitations, onInvite }: { invitations: ReturnType<typ
     { key: "role", label: "Role", render: (i) => <RoleBadge role={i.role} /> },
     { key: "status", label: "Status", render: (i) => <Status value={i.status} /> },
     { key: "expires", label: "Expires", render: (i) => <When value={i.expires_at} />, sort: (i) => i.expires_at },
+    { key: "revoke", label: "", render: (i) => <RevokeInvitation invitation={i} /> },
   ];
   return (
     <>
@@ -376,6 +421,26 @@ function InvitationsTab({ invitations, onInvite }: { invitations: ReturnType<typ
         }
       />
     </>
+  );
+}
+
+/** Revoke, on a pending invitation that has not expired: the one an invitee could still accept. */
+export function RevokeInvitation({ invitation }: { invitation: Row }) {
+  if (invitation.status !== "pending" || (invitation.expires_at && Date.parse(invitation.expires_at) <= Date.now())) return null;
+  return (
+    <DeletionButton
+      variant="ghost"
+      capability="revoke_invitation"
+      input={{ invitation_id: invitation.id }}
+      workspace={null}
+      title={`Revoke the Invitation to ${invitation.invitee}`}
+      confirmLabel="Revoke invitation"
+      typed={() => REVOKE_WORD}
+      lines={invitationLines}
+      done="Invitation revoked"
+    >
+      Revoke
+    </DeletionButton>
   );
 }
 

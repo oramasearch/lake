@@ -11,6 +11,12 @@ unfinished builds, sets the workspace `deleted` with its services absent, and re
 in `workspace_deletions`; repeating it answers the record. `pending_workspace_deletions` and
 `complete_workspace_deletion` drive the resume ([workspaces.md](../../docs/api/workspaces.md#deletion)).
 
+Both stores implement the deletions of lake#645: `delete_organization` (with `dry_run`, refused
+while the organization's account has a live workspace; marks the organization and its account
+`deleted_at`, migration `0076`, and every read and list of them leaves a marked row out),
+`revoke_invitation`, `get_grant` and `revoke_grant`, and `delete_secret_mount_route`, the last
+step of deleting a mount ([deletion.md](../../docs/api/deletion.md)).
+
 `WorkspaceService` caches deployment catalogues and project/pipeline definitions in memory for
 five seconds, scoped to the workspace and connection generation. Successful writes explicitly
 invalidate entries and prevent in-flight stale refills. Ownership, readiness and credentials

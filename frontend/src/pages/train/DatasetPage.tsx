@@ -1,13 +1,15 @@
 /** Data → Dataset (web_ui.cpp workspace_content "dataset"): one dataset's figures, its columns
  * with their types, its first rows and its partitions beside its facts and actions. */
 import { useState } from "react";
-import { useSearchParams } from "react-router-dom";
-import { Columns3, Database, HardDrive, Rows3, Shield, Terminal } from "lucide-react";
+import { useNavigate, useSearchParams } from "react-router-dom";
+import { Columns3, Database, HardDrive, Rows3, Shield, Terminal, Trash2 } from "lucide-react";
 import type { Row } from "@/lib/api";
 import { bytes } from "@/lib/format";
 import { useTrail, entityCrumb } from "@/lib/trail";
 import { Banner, Button, Card, Chip, DataTable, Empty, ErrorBlock, KeyValue, Mono, Skeleton, Split, Stat, StateTabs, StatRow, Status } from "@/lib/ui";
 import { useToast } from "@/lib/toast";
+import { datasetLines } from "@/lib/deletion";
+import { DeletionButton } from "@/lib/deletionDialog";
 import { WorkspaceFrame, cellText, qs, text, useAsync, useSpaceRead, useWorkspace, useWq, useWsPath, wa } from "./workspace";
 import { ObjectTable, engineDatabase, resultDataset } from "./datasets";
 
@@ -115,6 +117,7 @@ function DatasetContent({ name, database }: { name: string; database: string }) 
   const scope = useWorkspace();
   const ws = useWsPath();
   const toast = useToast();
+  const navigate = useNavigate();
   const promote = useAsync();
   const [tab, setTab] = useState<"columns" | "rows" | "partitions">("columns");
   const got = useWq<Row>("get_dataset", { dataset: name, database });
@@ -190,6 +193,20 @@ function DatasetContent({ name, database }: { name: string; database: string }) 
                 <Button variant="ghost" to={ws(`/train/data?${qs({ customer_id: scope.customerId })}`)}>
                   <Database size={14} aria-hidden /> All datasets
                 </Button>
+                <DeletionButton
+                  variant="ghost"
+                  capability="delete_dataset"
+                  input={{ customer_id: scope.customerId, workspace_id: scope.workspaceId, id: `${database}/${name}` }}
+                  title={`Delete ${name}`}
+                  confirmLabel="Delete dataset"
+                  intro="Deleting the dataset removes it from this workspace. It cannot be undone."
+                  typed={() => name}
+                  lines={datasetLines}
+                  done={`Deleted ${name}`}
+                  onDone={() => navigate(ws(`/train/data?${qs({ customer_id: scope.customerId })}`))}
+                >
+                  <Trash2 size={14} aria-hidden /> Delete dataset
+                </DeletionButton>
               </div>
             </Card>
           </>
