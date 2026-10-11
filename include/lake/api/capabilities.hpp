@@ -44,6 +44,10 @@ void register_console_capabilities(Registry& registry, std::string_view version)
 // Speech-to-text and workspace transcripts (lake#561, docs/api/transcripts.md): transcribe,
 // create_transcript, list_transcripts, get_transcript, update_transcript, delete_transcript.
 void register_transcript_capabilities(Registry& registry);
+// A workspace's own AI solutions beside Orama's read-only catalogue (lake#597,
+// docs/api/solutions.md): list_solutions, get_solution, create_solution, update_solution,
+// delete_solution, duplicate_solution.
+void register_solution_capabilities(Registry& registry);
 // Drives (lake#561, docs/api/drives.md): create_drive, list_drives, get_drive, rename_drive,
 // delete_drive; and a workspace-files or virtual drive's folders, files and shortcuts:
 // list_drive_entries, get_drive_entry, create_drive_folder_entry, create_drive_shortcut,

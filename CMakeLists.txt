@@ -219,6 +219,7 @@ add_library(lake-core STATIC
   src/control/workspace_store.cpp
   src/control/ask_messages.cpp
   src/control/opportunities.cpp
+  src/control/solutions.cpp
   src/control/transcripts.cpp
   src/control/project_decisions.cpp
   src/control/drives.cpp
@@ -247,6 +248,7 @@ add_library(lake-core STATIC
   src/api/repository_records_api.cpp
   src/api/workspace_deletion.cpp
   src/api/workspace_record_capabilities.cpp
+  src/api/solution_capabilities.cpp
   src/api/transcript_capabilities.cpp
   src/api/drives_capabilities.cpp
   src/api/transcription.cpp

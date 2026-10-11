@@ -54,6 +54,18 @@ constexpr std::array group_rules{
                          n == "get_transcript" || n == "update_transcript" ||
                          n == "delete_transcript";
               }},
+    GroupRule{"Solutions",
+              "The AI solutions a workspace can start: Orama's catalogue (S-1, …, read-only) and "
+              "the workspace's own, kept in its workspace Zetta. list_solutions and get_solution "
+              "answer both, each with `source` (orama or workspace) and `editable`. "
+              "create_solution, update_solution and delete_solution change only the workspace's "
+              "own and answer `forbidden` for Orama's; duplicate_solution copies either kind into "
+              "a new editable one.",
+              [](std::string_view n) {
+                  return n == "list_solutions" || n == "get_solution" || n == "create_solution" ||
+                         n == "update_solution" || n == "delete_solution" ||
+                         n == "duplicate_solution";
+              }},
     GroupRule{"Streams",
               "Ask Orama and ApplicationAgent may freely read list_streams, get_stream and "
               "browse_stream. Stream writes require the person's confirmation; deletes require "

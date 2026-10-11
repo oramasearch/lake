@@ -3379,8 +3379,9 @@ void register_agent_flow_capabilities(Registry& registry) {
         .title = "Confirm a solution foundation",
         .description =
             "Confirm one finished solution:<project> Project Agent task. Optional edits are a "
-            "JSON merge patch over result.foundation. This is the only step that calls "
-            "create_solution.",
+            "JSON merge patch over result.foundation. This is the only step that calls the "
+            "engine's create_solution (not lake's create_solution, which writes a workspace's "
+            "own solution).",
         .input_schema = {{"type", "object"},
                          {"properties",
                           {{"task_id", {{"type", "string"}, {"minLength", 1}}},

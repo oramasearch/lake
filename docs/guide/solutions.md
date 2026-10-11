@@ -2,8 +2,9 @@
 
 Three Design pages help you decide what to build before you build it:
 
-- **Design → Solutions**: Orama's catalogue of ready-made AI solutions. Each answers one business
-  problem end to end. Start one and it becomes an AI project in your workspace, with its pipeline.
+- **Design → Solutions**: Orama's catalogue of ready-made AI solutions, and the solutions you write
+  yourself. Each answers one business problem end to end. Start one and it becomes an AI project in
+  your workspace, with its pipeline.
 - **Design → Methodologies**: the modelling methods your workspace's engine knows, what each needs
   and makes, and whether it runs there today. Solutions compose them.
 - **Design → Opportunities**: what your data could be used for. Auto-Suggest reads your datasets and
@@ -17,7 +18,7 @@ to find them.
 
 | Term | What it is |
 |---|---|
-| **Solution** | A module from Orama's catalogue: the methodologies it composes, the decision it drives, and how its return is measured. Its id looks like `S-1`. |
+| **Solution** | An AI solution: the business problem it answers, the decision it drives, how its return is measured and the methodologies it composes. **Orama's** come from the catalogue, are read-only, and have ids like `S-1`. **Yours** are written in your workspace and can be edited. |
 | **Level** | How far a solution goes, from 1 to 4; each solution lists its own levels. |
 | **Methodology** | A modelling method the engine runs, such as churn classification, segmentation, forecasting or anomaly detection. Its id looks like `M-3`. |
 | **Foundation** | What a solution project is built on: the snapshot date, the entity, the dataset and its label and feature columns, the methodology roles, the exclusion predicates, delivery and economics. |
@@ -27,30 +28,110 @@ to find them.
 
 ## Browse the Solutions
 
-Open **Design → Solutions**. The figures count the solutions in the catalogue, how many run on
-this workspace's engine (**Run here**) and how many are **In design** (sketches that are not yet a
-module). Search filters the cards. **Modules** come first, then **In Design**.
+Open **Design → Solutions**. Every card is marked **Orama** (from Orama's catalogue, read-only) or
+**Yours** (written in this workspace, editable). The figures count Orama's solutions, yours, and how
+many of Orama's run on this workspace's engine (**Run here**). Search filters the cards; the
+**Orama** and **Yours** chips keep one kind, and the run-state chips (**Runs today**, **Not yet**,
+**In design**) filter Orama's. **Yours** come first, then **Orama's Modules** and **Orama's, in
+Design** (sketches that are not yet a module).
 
-Open a solution to read **What It Does**, its **Levels**, and its status: whether it runs here and,
-when it does not, where that is tracked.
+Open one of Orama's to read **What It Does**, its **Levels**, and its status: whether it runs here
+and, when it does not, where that is tracked.
 
-Through the API, the catalogue is `list_solutions` and one solution is `get_solution`, both inside
-`workspace_query`:
+Through the API, `list_solutions` lists both kinds, each with `source` (`orama` or `workspace`) and
+`editable`, and `get_solution` reads one:
 
-`POST /v1/workspace_query`
+`GET /v1/list_solutions?customer_id=<customer id>&workspace_id=<workspace id>`
+
+`GET /v1/get_solution?customer_id=<customer id>&workspace_id=<workspace id>&id=S-1`
+
+Add `source=orama` or `source=workspace` to `list_solutions` to keep one kind. When the workspace's
+engine does not list Orama's solutions, the page says so and lists yours; the answer's
+`catalogue.available` is `false`.
+
+## Create Your Own Solution
+
+Write your own when the catalogue does not cover your problem.
+
+1. On **Design → Solutions**, press **New solution**.
+2. In **New Solution**, fill in:
+   - **Name**;
+   - **The business problem** it answers;
+   - **The decision it drives**;
+   - under **How Its Return Is Measured**, the **Metric**, and optionally its **Baseline** (where it
+     stands today) and **Target** (where it should go);
+   - under **What It Composes**, the **Methodologies**: ids separated by commas, with the level each
+     starts at after a colon when above 1, such as `M-1, M-3:2`. The help lists the methodologies
+     this workspace's engine knows;
+   - optionally a **Pipeline template or reference** (`project/pipeline` links to that pipeline) and
+     **Notes**.
+3. Press **Create solution**. Your solution opens.
+
+`POST /v1/create_solution`
 
 ```json
-{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "capability": "get_solution", "input": {"solution": "S-1"}}
+{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "name": "Late payments", "problem": "Invoices are paid late and cash runs short at month end.", "decision": "Which customers collections calls first each morning.", "measurement": {"metric": "days sales outstanding", "baseline": "52", "target": "40"}, "methodologies": ["M-1", {"id": "M-3", "minimum_level": 2}], "pipeline": "collections/late-payers"}
 ```
 
-An engine without the solution registry says so on the page instead of listing anything.
+The answer is `{solution}`, with its `id`. The MCP tool is `create_solution`. Your solutions are kept
+in your workspace and are not seen from your other workspaces.
 
-## Start a Solution
+## Edit, Duplicate and Delete
 
-Starting a solution creates a project, then the Project Agent proposes its foundation for you to
+On one of your own solutions:
+
+- **Edit** opens the same fields in a drawer; press **Save**.
+- **Duplicate** makes a copy named *<name> (copy)* and opens it.
+- **Delete** asks you to type the solution's name, then deletes it. It cannot be restored. Projects
+  you started from it are kept.
+
+Orama's solutions are read-only. To change one, open it and press **Duplicate to edit**: it becomes
+one of yours, with its problem, decision, measured outcome, methodologies and pipeline order filled
+in, and notes that say where it came from. Its baseline and target are yours to fill in.
+
+`POST /v1/update_solution`
+
+```json
+{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "id": "<solution id>", "measurement": {"metric": "days sales outstanding", "baseline": "52", "target": "38"}}
+```
+
+The fields you send replace theirs; the others are kept.
+
+`POST /v1/duplicate_solution`
+
+```json
+{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "id": "S-1", "name": "Our churn"}
+```
+
+`POST /v1/delete_solution`
+
+```json
+{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "id": "<solution id>"}
+```
+
+Editing or deleting one of Orama's is refused with `forbidden` (403), whatever your permissions,
+and the message says to duplicate it instead.
+
+## Start Your Own as a Project
+
+On one of your own solutions, press **Start as a project** (or **Start as a project** in the side
+column). In the drawer, give the **Project name**, choose the **Methodology** its first pipeline
+uses (one the solution composes; the first by default) and optionally a dataset under **From
+data**, then press **Start**. lake creates the project with your solution's problem and decision,
+and builds its first pipeline from the decision with that methodology. The project opens (or, with
+a dataset, the new pipeline at its Run form).
+
+A solution of your own does not get the governed foundation Orama's do (policy, holdout experiment
+and ROI readout): the engine composes those only for its own catalogue solutions. If the first
+pipeline cannot be built, the project is kept and the page says why; press **Build pipeline** on the
+project to try again ([AI Projects and Pipelines](/docs/design#build-a-pipeline-from-a-sentence)).
+
+## Start One of Orama's Solutions
+
+Starting one of Orama's solutions creates a project, then the Project Agent proposes its foundation for you to
 review. Nothing else is created until you confirm.
 
-1. On the solution, press **Start this solution** (or **Start** in the side column).
+1. On one of Orama's solutions, press **Start this solution** (or **Start** in the side column).
 2. In **Start This Solution**, fill in:
    - **Project name**;
    - **Level**;
@@ -196,6 +277,7 @@ earlier Opportunities stay listed. **Design → Agent Library** shows which agen
 | To | You need, on the account that owns the workspace |
 |---|---|
 | Browse solutions, methodologies and opportunities | `read` |
+| Create, edit, duplicate or delete your own solutions, or start one as a project | `write` |
 | Start or confirm a solution, run it, change its policy, approve A1 decisions, record outcomes | `write` |
 | Scan, create project drafts, dismiss | `write` |
 
@@ -205,8 +287,13 @@ Only the person who started a solution (or the operator) can confirm its foundat
 ## Limits
 
 - Delivery is a webhook, Salesforce or HubSpot; its endpoint and owner are required.
-- Only a solution that runs on this engine, or one in preview, can be started; the others are
-  listed with where their work is tracked.
+- Only one of Orama's solutions that runs on this engine, or one in preview, can be started with
+  **Start this solution**; the others are listed with where their work is tracked.
+- Orama's solutions cannot be edited or deleted; duplicate one to make it yours.
+- Your own solution starts as a project with its first pipeline, not with the governed foundation
+  (policy, holdout, ROI readout) Orama's get.
+- A name is at most 200 bytes, the problem and decision 4,000 bytes each, and a solution composes at
+  most 32 methodologies.
 - Missing exclusion evidence blocks Run until the dataset carries it.
 
 ## Troubleshooting
@@ -219,6 +306,9 @@ Only the person who started a solution (or the operator) can confirm its foundat
 | `not_approved` (409) | Approve the plan or the decision first. |
 | *The scan did not finish* | Auto-Suggest failed; the message says why. Scan again. |
 | `unknown_capability` from `list_methodologies` | The workspace engine predates the registry; it runs churn classification only. |
+| `forbidden` when you edit or delete a solution | It is one of Orama's, which are read-only. Open it and press **Duplicate to edit**. |
+| `invalid_input` at `/measurement/metric`, `/problem` or `/decision` | A solution of your own needs its problem, its decision and the metric its return is measured by. |
+| `invalid_input` at `/methodologies/...` | Write methodology ids such as `M-1`, each once, with a level of 1 to 4 after a colon. |
 | `unauthorized` | You have `read` but not `write`, or you did not start this solution. |
 
 ## Related Pages

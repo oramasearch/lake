@@ -66,6 +66,17 @@ a resent chunk answers the true `received`, and unfinished uploads are listed an
 retries an edge 503 read under the one `shouldRetry` rule and names who answered (lake#573,
 `docs/ui/web-app.md#a-read-answered-503`).
 
+A workspace's own AI solutions follow (lake#597, no migration): sealed `lake_solutions` records in
+the workspace Zetta in the catalogue's shape (name, business problem, decision, measurement with
+metric, baseline and target, composed methodologies, pipeline template or reference, notes).
+`list_solutions` and `get_solution` answer Orama's catalogue (read through the workspace's engine)
+and the workspace's own, marked `source: orama|workspace`; `create_solution`, `update_solution`,
+`delete_solution` and `duplicate_solution` change only the workspace's own, and an edit or delete of
+Orama's answers the new `forbidden` (403). Lake's `create_solution` is not the engine's, which
+`confirm_solution` still calls inside `workspace_act`. Start as a Project for one of your own creates
+the project and its first pipeline from the composed methodology, since the engine composes the
+governed foundation only for catalogue ids. Not deployed. See `docs/api/solutions.md`.
+
 Every future deployment image receives OCI revision and creation labels. The binary reports the
 same embedded revision through `GET /v1/server_info`; details are in
 [`docs/build/container-image.md`](docs/build/container-image.md).
