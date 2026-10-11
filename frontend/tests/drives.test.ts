@@ -3,7 +3,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { ancestors, chunkBySize, chunkRanges, cleanPath, driveSlug, expandTo, isWithin, joinPath, nameOf, parentOf, planMoves, planUpload, rangeSelect, sortEntries, validName } from "../src/pages/drives/paths.ts";
-import { cleanTarget, storageLabel, targetHref, targetProblem } from "../src/pages/drives/targets.ts";
+import { cleanTarget, nameAfterTarget, selectsOnFocus, storageLabel, targetHref, targetProblem } from "../src/pages/drives/targets.ts";
 
 test("drive paths", () => {
   assert.equal(cleanPath("/a//b/./c/"), "a/b/c");
@@ -106,4 +106,13 @@ test("a shortcut's target is checked as lake checks it", () => {
   assert.equal(targetProblem({ kind: "url", url: "ftp://x" }), "A web address starts with http:// or https://.");
   assert.equal(targetProblem({ kind: "url", url: "https://x.test" }), null);
   assert.deepEqual(cleanTarget({ kind: "repository_path", repository_id: " r ", path: "/a/b/", id: "stray", url: "x" }), { kind: "repository_path", repository_id: "r", path: "a/b" });
+});
+
+test("New shortcut: a suggested name is replaced by typing, a typed one is kept (lake#580)", () => {
+  assert.equal(nameAfterTarget("", false, "app-e2e-notes"), "app-e2e-notes");
+  assert.equal(nameAfterTarget("app-e2e-notes", false, "other"), "other", "a new target suggests again");
+  assert.equal(nameAfterTarget("notes app source", true, "app-e2e-notes"), "notes app source", "what was typed stays");
+  assert.equal(selectsOnFocus("app-e2e-notes", false), true, "focus selects the suggestion, so typing replaces it");
+  assert.equal(selectsOnFocus("notes app source", true), false);
+  assert.equal(selectsOnFocus("", false), false);
 });
