@@ -2132,6 +2132,10 @@ std::string app_sign_in_return(const boost::http::route_params& route) {
     return decoded ? app_return_path(*decoded) : std::string();
 }
 
+// Where an account holder lands after signing in when nothing names a page: the home, which is Ask
+// Orama for a signed-in person (lake#600). The operator's token sign-in still opens Repositories.
+constexpr std::string_view account_landing = "/";
+
 // Where a sign-in goes next when the browser names it (the web app posts `next`, lake#561): a
 // same-origin path (one leading '/', never "//" or "/\", which a browser reads as another host),
 // or a Ship app return. Empty: anything else.
@@ -9521,7 +9525,7 @@ struct ApiServer::Impl {
             destination = app_sign_in_return(route);
         }
         co_return co_await redirect(
-            route, destination.empty() ? "/repositories" : destination, cookie);
+            route, destination.empty() ? std::string(account_landing) : destination, cookie);
     }
 
     boost::http::route_task serve_oauth_callback(boost::http::route_params& route) {
@@ -9679,7 +9683,7 @@ struct ApiServer::Impl {
         if (request_is_https(route)) {
             cookie += "; Secure";
         }
-        std::string destination = "/repositories";
+        std::string destination(account_landing);
         if (issued_pool != "lake") {
             // The redirect URI is the application's settings in its workspace (lake#351); when
             // they cannot be read, the user returns to the application's hosted sign-in.

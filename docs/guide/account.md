@@ -43,7 +43,8 @@ administrator adds people.
 
 ## Sign In
 
-**With Clerk**, press **Sign in** and follow Clerk's steps; you return to the page that sent you.
+**With Clerk**, press **Sign in** and follow Clerk's steps; you return to the page that sent you,
+or to **Ask Orama**, lake's home.
 
 **With lake's own sign-in** (`/sign-in`):
 
@@ -52,7 +53,7 @@ administrator adds people.
    sign in**.
 3. Or choose **Use a passkey**, or a configured social **Provider** and **Continue to provider**.
 
-You return to the page that sent you to sign in, or to **Sessions** by default.
+You return to the page that sent you to sign in, or to **Ask Orama**, lake's home, by default.
 
 Through the REST API, send `POST /v1/sign_in_password` with this body:
 

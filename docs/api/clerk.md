@@ -36,7 +36,9 @@ every page and API call is resolved by `context_for` as before.
    (`HttpOnly`, `SameSite=Lax`, `Secure` over HTTPS) to the posted `next` field when it is a
    same-origin path (one leading `/`, never `//` or `/\`) or a Ship app return
    (`/apps/authorize?app=…&rd=…`), else to the `lake_sign_in_return` app return, else to
-   `/repositories` (lake#561: the web app posts the page that sent the person to sign in). A
+   the home, Ask Orama (`/`; lake#600, `account_landing` in `http_server.cpp`; it was `/repositories`)
+   (lake#561: the web app posts the page that sent the person to sign in). An OAuth or OIDC sign-in
+   in lake's own pool lands there too. A
    failure redirects to `/sign-in?error=<message>`.
 5. `POST /logout` clears `lake_session` and, with Clerk on, redirects to `/sign-in?signed_out=1`,
    which signs the browser out of Clerk as well. Without that, the next visit would sign the person

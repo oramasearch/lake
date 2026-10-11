@@ -23,3 +23,18 @@ export function onOpenAsk(listener: (request: AskRequest) => void): () => void {
     listeners.delete(listener);
   };
 }
+
+/** On the Ask Orama home the top bar's Ask Orama button opens no panel: it puts the cursor in the
+ * home's message box (lake#600). */
+const focusListeners = new Set<() => void>();
+
+export function focusAsk() {
+  focusListeners.forEach((l) => l());
+}
+
+export function onFocusAsk(listener: () => void): () => void {
+  focusListeners.add(listener);
+  return () => {
+    focusListeners.delete(listener);
+  };
+}
