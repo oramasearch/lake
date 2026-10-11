@@ -13,6 +13,7 @@ import { screens as developer } from "@/pages/developer/routes";
 import { screens as drives } from "@/pages/drives/routes";
 import { screens as experiments } from "@/pages/experiments/routes";
 import { screens as home } from "@/pages/home/routes";
+import { screens as mcp } from "@/pages/mcp/routes";
 import { screens as organizations } from "@/pages/organizations/routes";
 import { screens as repositories } from "@/pages/repositories/routes";
 import { screens as search } from "@/pages/search/routes";
@@ -37,6 +38,7 @@ export const SCREENS: Screen[] = [
   ...design,
   ...train,
   ...transcripts,
+  ...mcp,
   ...experiments,
   ...streams,
   ...ship,
@@ -85,6 +87,8 @@ export const NAV: NavItem[] = [
   { section: "data", path: "/train/data", label: "Datasets", icon: "metering", audience: AO },
   // Recordings, uploads and pasted text made into searchable transcripts (lake#561).
   { section: "data", path: "/transcripts", label: "Transcripts", icon: "audit", audience: AO },
+  // Remote MCP servers the workspace is a client of, their tools and agents (lake#652).
+  { section: "data", path: "/mcp-connections", label: "MCP Connections", icon: "api", audience: AO },
   { section: "design", path: "/design/projects", label: "Projects", icon: "audit", audience: AO },
   { section: "design", path: "/design/opportunities", label: "Opportunities", icon: "search", audience: AO },
   { section: "design", path: "/design/solutions", label: "Solutions", icon: "audit", audience: AO },
@@ -191,6 +195,6 @@ export function navigableScreens(session: Pick<Session, "viewer">): Screen[] {
 /** A link to a capability-free route that is not part of the app (downloads, the OpenAPI document,
  * protocol routes). The router must never handle these. */
 export function isServerRoute(path: string): boolean {
-  return /^\/(v1|mcp|fonts|ui|assets|scim|acme|v2|buildid|_lake|legacy|simple|packages|api|healthz|readyz|metrics|llms|skills|style)/.test(path) ||
+  return /^\/(v1|mcp(?![-\w])|fonts|ui|assets|scim|acme|v2|buildid|_lake|legacy|simple|packages|api|healthz|readyz|metrics|llms|skills|style)/.test(path) ||
     /^\/(file\/(raw|download)|drive\/download|exports\/download|share\/[^/]+\/download|developer\/mcp\/skill|apps\/)/.test(path);
 }
