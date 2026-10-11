@@ -375,6 +375,8 @@ constexpr std::array workspace = std::to_array<std::string_view>({
     "list_webhooks",
     "load_drive_dataset",
     "map_review_anchors",
+    // The operator's delivery of a secret to a Kubernetes Secret: the mount's workspace (lake#625).
+    "mint_sealed_secret",
     "model_traffic",
     "move_drive_entry",
     "move_drive_path",

@@ -10,12 +10,13 @@
 #include <string_view>
 #include <vector>
 
+#include "agent_task_records_api.hpp"
+#include "lake/api/sealed_delivery.hpp"
 #include "lake/control/agent_bus.hpp"
 #include "lake/control/platform.hpp"
 #include "lake/control/policy.hpp"
 #include "lake/control/zetta_workspace.hpp"
 #include "scan/detectors.hpp"
-#include "agent_task_records_api.hpp"
 #include "workspace_bus.hpp"
 
 namespace lake::api {
@@ -241,11 +242,38 @@ std::optional<ApiResult> validate_plain_env(const json& env) {
         if (flagged_secret(key, value.get<std::string>())) {
             return ApiResult::failure(
                 "secret_required",
-                "the value looks like a secret; store it as a Secret and pass secret_ref",
+                "the value looks like a secret; put it in a secret mount and pass secret",
                 "/env/" + key);
         }
     }
     return std::nullopt;
+}
+
+// A secret environment value names one field of one secret in a lake secret mount (lake#625): the
+// object {mount_id, name, field} or the string `lake-secret://<mount id>/<name>#<field>`, stored as
+// the string. A Kubernetes Secret name is no longer accepted: a Kubernetes Secret is only the
+// projection the operator writes from the secret when the app is deployed.
+std::expected<std::string, ApiResult> lake_secret_reference(const json& value,
+                                                            const std::string& path) {
+    const std::string usage = "a secret is {mount_id, name, field} of a lake secret mount, or "
+                              "lake-secret://<mount id>/<name>#<field>";
+    if (value.is_object()) {
+        const auto text = [&](const char* key) {
+            const auto found = value.find(key);
+            return found != value.end() && found->is_string() ? found->get<std::string>()
+                                                              : std::string();
+        };
+        const LakeSecretRef reference{text("mount_id"), text("name"), text("field")};
+        if (value.size() != 3 || reference.mount_id.empty() || reference.name.empty() ||
+            !kubernetes_secret_key(reference.field)) {
+            return std::unexpected(ApiResult::failure("invalid_input", usage, path));
+        }
+        return lake_secret_ref(reference);
+    }
+    if (value.is_string() && parse_lake_secret_ref(value.get<std::string>())) {
+        return value.get<std::string>();
+    }
+    return std::unexpected(ApiResult::failure("invalid_input", usage, path));
 }
 
 std::expected<std::pair<json, json>, ApiResult> normalized_app_env(const json& env) {
@@ -260,26 +288,82 @@ std::expected<std::pair<json, json>, ApiResult> normalized_app_env(const json& e
             return std::unexpected(
                 ApiResult::failure("invalid_input", "env keys must be names", "/env"));
         }
-        if (value.is_object() && value.size() == 1 && value.contains("secret") &&
-            value.at("secret").is_string() && !value.at("secret").get<std::string>().empty()) {
-            secret_refs[key] = value.at("secret");
+        if (value.is_object() && value.size() == 1 && value.contains("secret")) {
+            auto reference = lake_secret_reference(value.at("secret"), "/env/" + key + "/secret");
+            if (!reference) {
+                return std::unexpected(reference.error());
+            }
+            secret_refs[key] = *reference;
             continue;
         }
         if (!value.is_string()) {
             return std::unexpected(ApiResult::failure(
                 "invalid_input",
-                "env values must be strings or {secret: <operator reference>}",
+                "env values must be strings or {secret: {mount_id, name, field}}",
                 "/env/" + key));
         }
         if (flagged_secret(key, value.get<std::string>())) {
             return std::unexpected(ApiResult::failure(
                 "secret_required",
-                "the value looks like a secret; use {secret: <operator reference>}",
+                "the value looks like a secret; put it in a secret mount and use "
+                "{secret: {mount_id, name, field}}",
                 "/env/" + key));
         }
         plain[key] = value;
     }
     return std::pair{std::move(plain), std::move(secret_refs)};
+}
+
+// Each secret reference must name a mount of the app's workspace that the caller may read, and a
+// live secret with that field. Checked with the caller's own credential (get_secret_mount and
+// read_secret, each audited in the mount's workspace); the value read is never kept or answered.
+liquid::runtime::task<std::optional<ApiResult>> check_secret_references(
+    const json& secret_refs, const std::string& workspace_id, ApiContext& context) {
+    if (secret_refs.empty()) {
+        co_return std::nullopt;
+    }
+    if (context.registry == nullptr) {
+        co_return ApiResult::failure("store_unavailable", "no registry to check secret references");
+    }
+    for (const auto& [key, stored] : secret_refs.items()) {
+        const auto reference = parse_lake_secret_ref(stored.get<std::string>());
+        const std::string path = "/env/" + key + "/secret";
+        if (!reference) {
+            co_return ApiResult::failure("invalid_input", "not a lake secret reference", path);
+        }
+        ApiContext inner = context;
+        inner.audit_details = json::object();
+        auto mount = co_await context.registry->call_async(
+            "get_secret_mount", {{"mount_id", reference->mount_id}}, inner);
+        if (!mount || !mount->ok) {
+            co_return ApiResult::failure(
+                mount && mount->error.code == "unauthorized" ? "unauthorized" : "not_found",
+                "no secret mount " + reference->mount_id + " this caller can read",
+                path);
+        }
+        if (mount->value.value("workspace_id", "") != workspace_id) {
+            co_return ApiResult::failure(
+                "invalid_input",
+                "the secret mount belongs to another workspace than the app",
+                path);
+        }
+        ApiContext reader = context;
+        reader.audit_details = json::object();
+        auto read = co_await context.registry->call_async(
+            "read_secret", {{"mount_id", reference->mount_id}, {"name", reference->name}}, reader);
+        if (!read || !read->ok) {
+            co_return ApiResult::failure(
+                "not_found", "the mount has no live secret " + reference->name, path);
+        }
+        const json value = read->value.value("value", json::object());
+        if (!value.is_object() || !value.contains(reference->field)) {
+            co_return ApiResult::failure("not_found",
+                                         "the secret " + reference->name + " has no field " +
+                                             reference->field,
+                                         path);
+        }
+    }
+    co_return std::nullopt;
 }
 
 // A binding names a live service by id or, for agents and people, by its unique name in the
@@ -646,6 +730,14 @@ void register_web_app_capabilities(Registry& registry) {
             if (!env) {
                 co_return env.error();
             }
+            auto checked = co_await check_secret_references(
+                env->second, input.at("workspace_id").get<std::string>(), context);
+            if (!checked) {
+                co_return ApiResult::failure("store_error", checked.error().message);
+            }
+            if (*checked) {
+                co_return **checked;
+            }
             json host_input = input;
             if (host_input.value("host", json()).is_null()) {
                 host_input.erase("host");
@@ -783,11 +875,23 @@ void register_web_app_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "set_app_env",
         .title = "Set app environment value",
-        .description = "Set one plain value or one opaque Secret reference after secret scanning.",
-        .input_schema = app_input_schema({{"key", {{"type", "string"}}},
-                                          {"value", {{"type", "string"}}},
-                                          {"secret_ref", {{"type", "string"}}}},
-                                         json::array({"key"})),
+        .description =
+            "Set one plain value, scanned for secrets, or one secret: a field of a secret in a "
+            "secret mount of the app's workspace ({mount_id, name, field}, or secret_ref "
+            "lake-secret://<mount id>/<name>#<field>), which the operator projects into the app "
+            "and rewrites when the secret gets a new version.",
+        .input_schema =
+            app_input_schema({{"key", {{"type", "string"}}},
+                              {"value", {{"type", "string"}}},
+                              {"secret",
+                               {{"type", "object"},
+                                {"properties",
+                                 {{"mount_id", {{"type", "string"}}},
+                                  {"name", {{"type", "string"}}},
+                                  {"field", {{"type", "string"}}}}},
+                                {"required", json::array({"mount_id", "name", "field"})}}},
+                              {"secret_ref", {{"type", "string"}}}},
+                             json::array({"key"})),
         .output_schema = {{"type", "object"}},
         .kind = CapabilityKind::Action,
         .object = "customer",
@@ -804,9 +908,12 @@ void register_web_app_capabilities(Registry& registry) {
                 co_return ApiResult::failure(
                     "invalid_input", "key is not an environment name", "/key");
             }
-            if (input.contains("value") == input.contains("secret_ref")) {
+            const int given = static_cast<int>(input.contains("value")) +
+                              static_cast<int>(input.contains("secret")) +
+                              static_cast<int>(input.contains("secret_ref"));
+            if (given != 1) {
                 co_return ApiResult::failure("invalid_input",
-                                             "provide exactly one of value or secret_ref");
+                                             "provide exactly one of value, secret or secret_ref");
             }
             control::WebAppPatch patch;
             json details{{"key", key}};
@@ -815,21 +922,35 @@ void register_web_app_capabilities(Registry& registry) {
                 if (flagged_secret(key, value)) {
                     co_return ApiResult::failure(
                         "secret_required",
-                        "the value looks like a secret; store it as a Secret and pass secret_ref",
+                        "the value looks like a secret; put it in a secret mount and pass secret",
                         "/value");
                 }
                 app->env[key] = value;
                 app->secret_env_refs.erase(key);
                 details["secret"] = false;
             } else {
-                const std::string reference = input.at("secret_ref");
-                if (reference.empty()) {
-                    co_return ApiResult::failure(
-                        "invalid_input", "secret_ref cannot be empty", "/secret_ref");
+                const bool object = input.contains("secret");
+                auto reference =
+                    lake_secret_reference(object ? input.at("secret") : input.at("secret_ref"),
+                                          object ? "/secret" : "/secret_ref");
+                if (!reference) {
+                    co_return reference.error();
+                }
+                json one{{key, *reference}};
+                auto checked = co_await check_secret_references(one, app->workspace_id, context);
+                if (!checked) {
+                    co_return ApiResult::failure("store_error", checked.error().message);
+                }
+                if (*checked) {
+                    ApiResult refused = std::move(**checked);
+                    refused.error.path = object ? "/secret" : "/secret_ref";
+                    co_return refused;
                 }
                 app->env.erase(key);
-                app->secret_env_refs[key] = reference;
+                app->secret_env_refs[key] = *reference;
                 details["secret"] = true;
+                // The reference, never a value: which mount, secret and field the app reads.
+                details["secret_ref"] = *reference;
             }
             patch.env = app->env;
             patch.secret_env_refs = app->secret_env_refs;
@@ -839,7 +960,7 @@ void register_web_app_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "unset_app_env",
         .title = "Unset app environment value",
-        .description = "Remove one plain value or Secret reference from desired state.",
+        .description = "Remove one plain value or secret reference from desired state.",
         .input_schema = app_input_schema({{"key", {{"type", "string"}}}}, json::array({"key"})),
         .output_schema = {{"type", "object"}},
         .kind = CapabilityKind::Action,

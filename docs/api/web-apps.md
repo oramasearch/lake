@@ -21,7 +21,7 @@ REST and MCP expose the same registry, customer policy and signed audit records.
 | `create_app` | name, mode, source or image, framework, port; optional replicas/host/auth/bindings/env; public also requires `confirm_public` | generation 1 and create event |
 | `deploy_app`, `rollback_app` | `app_id` (ApplicationAgent may use `app` for deploy), source or image | new desired deployment and generation |
 | `delete_app` | `app_id`, `confirm` equal to name | `desired = deleted` |
-| `set_app_env`, `unset_app_env` | `app_id`, key; set takes value or secret_ref | scanned environment update |
+| `set_app_env`, `unset_app_env` | `app_id`, key; set takes `value`, `secret` (`{mount_id, name, field}`) or `secret_ref` (`lake-secret://…`) | scanned environment update; a secret is checked, never read back |
 | `set_app_auth` | `app_id`, auth; public also requires `confirm_public` | lake sign-in or public access |
 | `restart_app`, `stop_app`, `start_app` | `app_id` | lifecycle intent |
 | `scale_app` | `app_id`, replicas | desired count within customer quota |
@@ -165,12 +165,35 @@ workload to zero; starting restores that count. Delete requires the app name, th
 operator's `Deleted` acknowledgement before Lake physically removes the row. Status exposes
 `phase`, `url`, `ready`, `message`, and `observed_generation`.
 
-Plain environment values are scanned; detected credentials return `secret_required`. On create,
-ApplicationAgent may supply `{"KEY":{"secret":"operator-reference"}}`; Lake separates it into
-the App's masked Secret references. Secret environment updates use a reference instead of a clear
-value. Audit records contain the key and
-whether it is secret, never its value. Bindings and operator tokens are delivered as mounted
-Secrets.
+Plain environment values are scanned; detected credentials return `secret_required`. Bindings and
+operator tokens are delivered as mounted Secrets.
+
+## Secret environment
+
+A secret environment value names one field of one secret in a secret mount of the app's own
+workspace ([secrets.md](secrets.md)); lake's secret store is its source of truth and a Kubernetes
+Secret is only the projection the operator writes at deploy (lake#625,
+[../deployment/secrets.md](../deployment/secrets.md)).
+
+- `set_app_env` takes `secret: {mount_id, name, field}`, or `secret_ref` as the string
+  `lake-secret://<mount id>/<name>#<field>` (the name may contain `/` and `#`; the field follows the
+  last `#` and must be a Kubernetes Secret key, `[-._a-zA-Z0-9]+`). Exactly one of `value`, `secret`
+  and `secret_ref`.
+- `create_app` takes the same in `env`: `{"KEY": {"secret": {"mount_id": "…", "name": "…", "field":
+  "…"}}}` or `{"KEY": {"secret": "lake-secret://…"}}` (ApplicationAgent's form).
+- Lake stores the reference string in `secret_env_refs` and answers it there; the value is never
+  read back or answered.
+- Before it writes, lake checks with the caller's own credential that the mount exists and the
+  caller may read it (`get_secret_mount`), that it belongs to the app's workspace (else
+  `invalid_input`), and that the secret is live and has the field (`read_secret`, else `not_found`).
+  Those two reads are audited in the mount's workspace like any other.
+- A Kubernetes Secret name (`db-url`, `db-credentials/password`) is refused with `invalid_input`;
+  apps written before lake#625 kept theirs in `secret_env_refs`, and none existed on dev.
+- The audit event of `set_app_env` names the key and the reference, never a value.
+
+The operator's half (a `LakeSealedSecret` per lake secret, delivered by `mint_sealed_secret` and
+refreshed every five minutes, the field copied into the app and the pods rolled on a new version) is
+orama-operator `docs/lake/apps.md#lake-secret-references-lake625`.
 
 ## ApplicationAgent confirmation
 

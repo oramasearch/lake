@@ -88,6 +88,10 @@ its request id. `ServerOptions::request_series_flush_interval` (ten seconds) and
 `ServerOptions::secret_lease_expiry_interval` (ten seconds; zero: every tick) paces the owner
 loop's dynamic-lease expiry pass (lake#362), which runs only with a store, workspaces and an
 instance KEK.
+`sealed_delivery.hpp` (lake#625) declares the sealed-secret envelope (`seal_for_cluster`,
+`sealing_kid`, `decode_sealing_public_key`), the `lake-secret://` reference (`LakeSecretRef`,
+`parse_lake_secret_ref`, `lake_secret_ref`) and `register_sealed_delivery_capabilities`
+(`mint_sealed_secret`). See [secrets](../../../docs/api/secrets.md#projections).
 
 `forge.hpp` declares `BranchProtectionRecords` and `load_branch_protection`: the rules, reviews and
 releases a push needs, read from the repository's workspace before the push (lake#341), and

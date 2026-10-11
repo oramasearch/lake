@@ -558,6 +558,11 @@ create or finish tasks directly in a store; `AgentRuns::task` and `HttpResponseI
 `assembled_task` read a task from both halves, and `test_instance_kek` gives memory-store tests a
 KEK. `Stores/AgentLeases.ReclaimedTaskUsesFirstTerminalWriteAndRejectsLaterEvents` also checks that
 the workspace keeps only the winning answer.
+Projections (lake#625): `test_sealed_delivery.cpp` reproduces the orama-operator's sealed-secret
+reference fixture byte for byte, checks `lake-secret://` references, delivers every field of a
+secret sealed and never a value (rotation, a pinned version, the audit event), refuses anyone but
+the operator and any key but the cluster's, leases a dynamic source, and checks an app's secret
+environment against the mount's workspace, the secret and its field.
 
 Workspace deletion (lake#514, decision 54 S12): `test_workspace_deletion.cpp` runs on the memory
 store and, with `LAKE_TEST_DB_URI`, on PostgreSQL. `CascadesToEverythingTheWorkspaceHoldsAndNothingElse`

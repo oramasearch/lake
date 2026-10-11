@@ -12,6 +12,7 @@ import { ConfirmButton } from "@/lib/overlay";
 import { useSession } from "@/lib/session";
 import { entityCrumb, useTrail } from "@/lib/trail";
 import { Button, Card, type Column, DataTable, Empty, ErrorBlock, KeyValue, Page, Skeleton, Split, Status } from "@/lib/ui";
+import { envInput, secretEnvLabel } from "./secretEnv";
 import { AppPhase, AppUrl, decimal, formValues } from "./AppsPage";
 import { PageError, pause, qs, QueryTabs, storedNumber, storeNumber, streamHref, Terminal, useQueryTab, useRunner, useWorkspaceLink } from "./shared";
 import { stopsPolling } from "@/lib/errors";
@@ -380,8 +381,8 @@ export default function AppPage() {
                 <EnvTable env={env} secretEnv={secretEnv} busy={runner.busy} call={call} />
                 <div className="border-t border-hairline px-4 py-3">
                   <ResetForm
-                    className="row-form grid grid-cols-1 items-end gap-2 sm:grid-cols-[1fr_1fr_1fr_auto]"
-                    onSubmit={(form) => call("env", "set_app_env", form.secret_ref ? { key: form.key, secret_ref: form.secret_ref } : { key: form.key, value: form.value ?? "" }, `Set ${form.key}`)}
+                    className="row-form grid grid-cols-1 items-end gap-2 sm:grid-cols-[1fr_1fr_1fr_1fr_1fr_auto]"
+                    onSubmit={(form) => call("env", "set_app_env", envInput(form), `Set ${form.key}`)}
                   >
                     <label>
                       Key
@@ -392,14 +393,24 @@ export default function AppPage() {
                       <input name="value" />
                     </label>
                     <label>
-                      Secret reference
-                      <input name="secret_ref" />
+                      Secret mount ID
+                      <input name="mount_id" />
+                    </label>
+                    <label>
+                      Secret name
+                      <input name="secret_name" />
+                    </label>
+                    <label>
+                      Field
+                      <input name="field" />
                     </label>
                     <Button type="submit" loading={runner.busy === "env"}>
                       <Plus size={14} aria-hidden /> Set
                     </Button>
                   </ResetForm>
-                  <p className="muted mb-0 mt-2 text-[12.5px]">A secret reference takes the place of a value; its value is never shown.</p>
+                  <p className="muted mb-0 mt-2 text-[12.5px]">
+                    For a secret, name a field of a secret in a secret mount of this workspace instead of a value. Its value is never shown here; the app receives it when it is deployed, and again when the secret gets a new version.
+                  </p>
                 </div>
               </Card>
               <Card title="Authentication" label="Access">
@@ -606,7 +617,7 @@ function EnvTable({
 }) {
   const rows = [
     ...Object.entries(env).map(([key, value]) => ({ key, value: typeof value === "string" ? value : JSON.stringify(value), secret: false })),
-    ...Object.keys(secretEnv).map((key) => ({ key, value: "••••••", secret: true })),
+    ...Object.entries(secretEnv).map(([key, reference]) => ({ key, value: secretEnvLabel(reference), secret: true })),
   ];
   if (rows.length === 0) return <p className="muted m-0 px-4 py-3 text-[13px]">No environment variables set.</p>;
   return (

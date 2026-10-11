@@ -344,11 +344,12 @@ TEST(WebApps, CapabilitiesAreCustomerScopedAndValidateSecretsHostsAndDeletes) {
                                    {"key", "AWS_SECRET_ACCESS_KEY"},
                                    {"value", "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"}});
     EXPECT_EQ(secret.error.code, "secret_required");
+    // A Kubernetes Secret name is no longer a reference: an app names a lake secret (lake#625,
+    // MintSealedSecret.AnAppNamesALakeSecretItsWorkspaceHolds covers the accepted forms).
     const auto reference = apps.call(
         "set_app_env", {{"app_id", id}, {"key", "DATABASE_URL"}, {"secret_ref", "db-url"}});
-    ASSERT_TRUE(reference.ok) << reference.error.message;
-    EXPECT_FALSE(reference.value["env"].contains("DATABASE_URL"));
-    EXPECT_EQ(reference.value["secret_env_refs"]["DATABASE_URL"], "db-url");
+    EXPECT_EQ(reference.error.code, "invalid_input");
+    EXPECT_EQ(reference.error.path, "/secret_ref");
     EXPECT_TRUE(apps.call("unset_app_env", {{"app_id", id}, {"key", "DATABASE_URL"}}).ok);
 
     EXPECT_EQ(apps.call("set_app_auth", {{"app_id", id}, {"auth", "none"}}).error.code,

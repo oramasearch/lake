@@ -156,7 +156,49 @@ keys and the PKI authorities. `secret_mount_routes` and the `secret` policy obje
 [workspace-records.md](../architecture/workspace-records.md#cutover-runbook-secrets-dev-cluster).
 
 The operator does not read secrets: `LakeSealedSecret` with a `lake` source asks lake over HTTP
-(`mint_sealed_secret`), never PostgreSQL, and that route names a mount, which names its workspace.
+(`mint_sealed_secret`, [below](#projections)), never PostgreSQL, and that route names a mount, which
+names its workspace.
+
+## Projections
+
+**The rule (lake#625, decision 58).** A user's secret's source of truth is this store. A Kubernetes
+Secret exists only when an app, service or deployment must mount it, as a projection the operator
+writes from the store and rewrites on rotation; never edited by hand and never the only copy.
+Orama's own platform credentials (Stripe, lake's OpenAI and Clerk keys) are environment variables of
+the hosting platform and never live in a mount. The two levels and the audit of every user secret
+flow: [../deployment/secrets.md](../deployment/secrets.md).
+
+| Capability | Authorization | Input | Result |
+|---|---|---|---|
+| `mint_sealed_secret` | the operator credential only (the Lake's admin bearer); anyone else `unauthorized` before the handler | `recipient` `{cluster, namespace, name, kid, public_key}`, `source` (the `LakeSealedSecret` source unchanged), `attestation?` | `data`: one sealed record per field of the secret; `version` for a `lake` source; `lease` `{id, expires_at}` for a `dynamic` one |
+
+- **`lake` source** `{type: "lake", lake: {mount, name, version?}}`: lake reads the version (the
+  current one when `version` is absent) with `read_secret` as the operator. Each field of the secret's
+  JSON object becomes one Kubernetes Secret key of the same name (a string as itself, any other JSON
+  value as its compact text); a field that is not a Secret key (`[-._a-zA-Z0-9]+`) is `invalid_input`.
+- **`dynamic` source** `{type: "dynamic", dynamic: {engine, role, ttl}}`: `engine` is the mount id;
+  lake leases the role's credential (`lease_dynamic_secret`, `ttl` a Go duration from `1s` to `1h`).
+- **Sealed, never a value.** Each record is the orama-operator's envelope version 1 (orama-operator
+  `docs/lake/sealed-secrets.md`): X25519 with an ephemeral key, HKDF-SHA-256 with a zero salt and
+  info `"orama lake sealed secret v1" || epk || recipient`, XChaCha20-Poly1305 over the canonical
+  CBOR of `{cluster, namespace, name}`, so a record opens only with the cluster's private key and only
+  for that Secret. `SealedDelivery.TheEnvelopeIsTheOperatorsReferenceFixtureByteForByte` reproduces
+  the operator's reference fixture byte for byte. `src/api/sealed_delivery.cpp` is lake's own
+  implementation over OpenSSL (HChaCha20 written here; OpenSSL has no XChaCha).
+- **Only to this cluster's key.** `kid` must name `public_key`, and when lake was given
+  `LAKE_SEALING_PUBLIC_KEY` (the operator sets it from Lake `status.sealing`) the recipient must be
+  that key: a credential that reaches the capability still cannot have a value sealed to another key.
+- **Audit.** The read is `read_secret`'s event in the mount's workspace; the delivery is a
+  `secret_delivery` event against `secret_mount/<mount id>` in the same workspace, naming the target
+  namespace and Secret, the source type, the field count and the version, never a value.
+- **Authentication.** The request's Kubernetes `attestation` is accepted and not verified: lake has
+  no TokenReview client on the cluster yet, so the operator presents the Lake's admin bearer
+  (decision 58).
+
+Who asks for it: an app whose secret environment names a lake secret
+([web-apps.md](web-apps.md#secret-environment)), and a deployment whose `LakeEnvironment` names a
+`LakeSealedSecret` with a `lake` source. The operator delivers an unpinned source again every five
+minutes, so a new version reaches the Secret.
 
 ## Dynamic leases
 

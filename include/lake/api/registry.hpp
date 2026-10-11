@@ -324,6 +324,8 @@ struct ApiContext {
     std::optional<std::int64_t> credential_expires_at_unix;
     std::string identity_seed;
     std::string instance_kek;
+    // The only key mint_sealed_secret seals to, when set (LAKE_SEALING_PUBLIC_KEY, lake#625).
+    std::string sealing_public_key;
     WebhookSender webhook_sender;
     // Speech-to-text for transcribe and create_transcript (docs/api/transcripts.md); empty when
     // this lake has no OpenAI key.

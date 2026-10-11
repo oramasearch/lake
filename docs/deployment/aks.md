@@ -63,6 +63,18 @@ The image must contain lake#479 before the opt-in is turned on: an older image r
 beside the running pod and the surge stalls. See
 [`store-volume.md`](store-volume.md#the-hand-off).
 
+## Secrets
+
+Lake has two levels of secrets ([secrets.md](secrets.md)). Orama's own (the Stripe and OpenAI keys
+below, the instance key, the admin token) are environment variables of the platform, set here
+through `spec.env` and Kubernetes Secrets; never a secret mount. A user's workspace secret lives in
+lake's secret store and reaches a Kubernetes Secret only as a projection the operator writes when an
+app, service or deployment mounts it (lake#625, decision 58). [secrets.md](secrets.md) has the audit
+of every Secret on this cluster that user apps, services and deployments use, and the projection
+mechanism; it needs an operator with the lake-secret projection (orama-operator, branch
+`lake-625-secret-projections`) and its updated `LakeApp` and `LakeSealedSecret` CRDs installed before
+it rolls.
+
 ## Speech-to-text key
 
 Speech-to-text (`transcribe`, and `create_transcript` from audio, lake#561,

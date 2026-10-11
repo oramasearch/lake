@@ -211,9 +211,12 @@ once it produced an image, **Cancel build**, and **Browse build stream**.
 
 ### Environment Variables and Secret References
 
-**Settings → Environment** lists the app's variables; Secret references show only as `••••••`. To
-add one, fill **Key** and either **Value** or **Secret reference**, and press **Set**. **Unset**
-removes one.
+**Settings → Environment** lists the app's variables; a secret shows as the secret and field it
+comes from, never its value. To add one, fill **Key** and either **Value**, or, for a credential,
+**Secret mount ID**, **Secret name** and **Field**: a field of a secret you keep in a secret mount of
+this workspace ([Secrets and Encryption Keys](/docs/secrets)). Press **Set**. **Unset** removes one.
+The app receives the secret when it is deployed, and again, with a restart, within five minutes of
+you putting a new version of it.
 
 - REST: `POST /v1/set_app_env`:
 
@@ -221,10 +224,11 @@ removes one.
 {"customer_id": "<customer id>", "workspace_id": "<workspace id>", "app_id": "<app id>", "key": "REPORT_TITLE", "value": "Weekly risk"}
 ```
 
-- A credential goes in as a reference, never as a value:
+- A credential goes in as a field of a secret kept in a secret mount of the app's workspace, never
+  as a value. Lake checks that the secret has the field, so put the secret in the mount first:
 
 ```json
-{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "app_id": "<app id>", "key": "CRM_TOKEN", "secret_ref": "<secret reference>"}
+{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "app_id": "<app id>", "key": "CRM_TOKEN", "secret": {"mount_id": "<mount id>", "name": "crm", "field": "token"}}
 ```
 
 - `POST /v1/unset_app_env` takes `app_id` and `key`. MCP: `set_app_env`, `unset_app_env`.
@@ -333,7 +337,7 @@ In **Delete App**, type the app's name under **App name** and press **Delete app
 |---|---|---|
 | `invalid_input` at `/name`, *is reserved* | The name is one of the reserved names. | Choose another name. |
 | `invalid_input` at `/confirm_public` | Public access was asked for without confirming it. | Tick the confirmation, or send `confirm_public: true`. |
-| `secret_required` | A plain environment value looks like a credential. | Store it as a Secret ([Secrets and Encryption Keys](/docs/secrets)) and set a **Secret reference**. |
+| `secret_required` | A plain environment value looks like a credential. | Put it in a secret mount of the workspace ([Secrets and Encryption Keys](/docs/secrets)) and set the variable from that secret's field. |
 | `conflict` | An app with that name already exists. | Choose another name. |
 | `invalid_input` at `/workspace_id` | The workspace is missing, unknown, or not one of the account's. | Use the workspace in the page address. |
 | *That task has no ApplicationAgent proposal to confirm.* | The turn asked a question or failed, or is not an app turn. | Reply, or start a new turn. |
