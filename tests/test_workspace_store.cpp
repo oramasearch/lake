@@ -5175,6 +5175,12 @@ public:
     ~StderrLines() {
         finish();
     }
+    // What the process has written so far, while capturing goes on.
+    std::string text() {
+        std::fflush(stderr);
+        std::lock_guard lock(mutex_);
+        return text_;
+    }
     std::string finish() {
         if (original_ >= 0) {
             std::fflush(stderr);
@@ -5253,17 +5259,32 @@ TEST(WorkspaceStoreHandoff, AFreshProcessCreatesOneLocalIdentityForItsConcurrent
         const auto [commit_status, committed] =
             rig.commit(rig.repo_b, "round-" + std::to_string(round) + ".txt", "later");
         EXPECT_EQ(commit_status, 200U) << committed.dump();
+
+        // The pre-open opens the repositories in the background and logs each workspace once it
+        // has; nothing orders that before the read, the commit or a stop. A stop that comes first
+        // drains it, and it logs nothing or 0 (lake#614). So wait for both events, then stop.
+        const auto preopened_of = [](const std::string& text) {
+            std::map<std::string, int> preopened;
+            std::istringstream lines(text);
+            for (std::string line; std::getline(lines, line);) {
+                const json entry = json::parse(line, nullptr, false);
+                if (entry.is_object() && entry.value("state", "") == "repositories_preopened") {
+                    preopened[entry.value("workspace_id", "")] = entry.value("repositories", -1);
+                }
+            }
+            return preopened;
+        };
+        EXPECT_TRUE(eventually(
+            [&] {
+                const auto preopened = preopened_of(stderr_lines.text());
+                return preopened.contains(rig.alpha) && preopened.contains(rig.beta);
+            },
+            30s))
+            << "the pre-open did not log both workspaces' repositories";
         rig.server->stop();
         rig.server.reset();
 
-        std::map<std::string, int> preopened;
-        std::istringstream lines(stderr_lines.finish());
-        for (std::string line; std::getline(lines, line);) {
-            const json entry = json::parse(line, nullptr, false);
-            if (entry.is_object() && entry.value("state", "") == "repositories_preopened") {
-                preopened[entry.value("workspace_id", "")] = entry.value("repositories", -1);
-            }
-        }
+        auto preopened = preopened_of(stderr_lines.finish());
         EXPECT_EQ(preopened[rig.alpha], 1) << "alpha's repository was not pre-opened";
         EXPECT_EQ(preopened[rig.beta], 1) << "beta's repository was not pre-opened";
     }

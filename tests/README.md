@@ -657,5 +657,6 @@ drops the next answers from Zetta and closes their connections, for
 `WorkspaceStoreHandoff.AFreshProcessCreatesOneLocalIdentityForItsConcurrentFirstOpens`
 (`test_workspace_store.cpp`) points `LIQUID_HOME` at a fresh directory, starts lake with the
 pre-open on, runs 32 first uses of liquid's local identity at once, then reads and commits through
-the operator token and reads the `repositories_preopened` lines from stderr. It guards the
+the operator token, waits for the `repositories_preopened` line of each workspace on stderr before
+it stops the server (the pre-open runs beside the requests, lake#614), and checks them. It guards the
 start-time creation of the identity ([`../docs/deployment/store-volume.md`](../docs/deployment/store-volume.md#liquids-local-identity)).
