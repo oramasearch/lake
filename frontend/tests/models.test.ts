@@ -8,6 +8,7 @@ import assert from "node:assert/strict";
 import {
   compareVersions,
   errorRate,
+  featuresOf,
   filledSteps,
   groupModels,
   groupOf,
@@ -148,4 +149,9 @@ test("a model's traffic, its error rate and its quiet steps", () => {
   assert.equal(errorRate(trafficOf(answer, "a")), "—");
   const steps = filledSteps(traffic, 0, 240_000, 60_000);
   assert.deepEqual(steps.map((s) => s.calls), [0, 0, 40, 0]);
+});
+
+test("a model's features read by name whatever key the trainer used, never as JSON", () => {
+  const model = { feature_schema: { features: ["tenure", { name: "plan" }, { encoded_name: "monthly_value", kind: "float", column: null }, { column: "region" }, { kind: "float" }] } };
+  assert.deepEqual(featuresOf(model), ["tenure", "plan", "monthly_value", "region"]);
 });
