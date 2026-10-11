@@ -213,6 +213,11 @@ TranscriptPage page_transcripts(const std::vector<Transcript>& transcripts,
                                 const std::string& cursor) {
     TranscriptPage page;
     const std::string needle = folded(query);
+    const auto kept = [&](const Transcript& transcript) {
+        return needle.empty() || folded(transcript.title).find(needle) != std::string::npos ||
+               folded(transcript.text).find(needle) != std::string::npos;
+    };
+    page.total = static_cast<std::size_t>(std::ranges::count_if(transcripts, kept));
     std::size_t start = 0;
     if (!cursor.empty()) {
         const auto found = std::ranges::find(transcripts, cursor, &Transcript::id);
@@ -224,8 +229,7 @@ TranscriptPage page_transcripts(const std::vector<Transcript>& transcripts,
     }
     for (std::size_t index = start; index < transcripts.size(); ++index) {
         const Transcript& transcript = transcripts[index];
-        if (!needle.empty() && folded(transcript.title).find(needle) == std::string::npos &&
-            folded(transcript.text).find(needle) == std::string::npos) {
+        if (!kept(transcript)) {
             continue;
         }
         if (page.items.size() == limit) {

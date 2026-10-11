@@ -745,6 +745,14 @@ TEST_P(WorkspaceRecordStores, TranscriptsLiveInTheirWorkspaceAndKeepNoAudio) {
     EXPECT_EQ(from_audio.value["seconds"], 42.5);
     EXPECT_EQ(from_audio.value["recorded_at"], "2026-10-09T15:00:00Z");
     EXPECT_EQ(from_audio.value["created_by"], first.principal.user_id);
+    // The author by name, from the control store (lake#579): this person signed in without a
+    // display name, so it is their email; never their user id.
+    const auto author = t.store->get_user(first.principal.user_id);
+    ASSERT_TRUE(author);
+    const std::string author_name =
+        author->display_name.empty() ? author->email : author->display_name;
+    ASSERT_FALSE(author_name.empty());
+    EXPECT_EQ(from_audio.value["created_by_name"], author_name);
     EXPECT_TRUE(from_audio.value["language"].is_null());
     EXPECT_EQ(heard.back().file_name, "call.m4a");
     EXPECT_EQ(heard.back().mime, "audio/mp4");
@@ -834,6 +842,8 @@ TEST_P(WorkspaceRecordStores, TranscriptsLiveInTheirWorkspaceAndKeepNoAudio) {
     EXPECT_EQ(listed.value["transcripts"][2]["excerpt"], "We agreed to ship the budget on Friday.");
     EXPECT_FALSE(listed.value["transcripts"][0].contains("text"));
     EXPECT_FALSE(listed.value.contains("next_cursor"));
+    EXPECT_EQ(listed.value["total"], 3);
+    EXPECT_EQ(listed.value["transcripts"][0]["created_by_name"], author_name);
     listed = list(first, 0, {{"q", "BUDGET"}});
     ASSERT_EQ(listed.value["transcripts"].size(), 2U);
     EXPECT_EQ(listed.value["transcripts"][0]["title"], "Standup captions");
@@ -842,6 +852,8 @@ TEST_P(WorkspaceRecordStores, TranscriptsLiveInTheirWorkspaceAndKeepNoAudio) {
     listed = list(first, 0, {{"limit", 2}});
     ASSERT_EQ(listed.value["transcripts"].size(), 2U);
     ASSERT_TRUE(listed.value.contains("next_cursor"));
+    EXPECT_EQ(listed.value["total"], 3) << "total counts past the page (lake#574)";
+    EXPECT_EQ(list(first, 0, {{"limit", 1}, {"q", "BUDGET"}}).value["total"], 2);
     const auto rest = list(first, 0, {{"limit", 2}, {"cursor", listed.value["next_cursor"]}});
     ASSERT_EQ(rest.value["transcripts"].size(), 1U);
     EXPECT_EQ(rest.value["transcripts"][0]["id"], from_audio.value["id"]);

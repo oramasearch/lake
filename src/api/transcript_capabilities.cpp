@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <map>
 #include <optional>
 #include <string>
 #include <utility>
@@ -89,7 +90,8 @@ json transcript_schema() {
               {"language", nullable("string")},
               {"recorded_at", nullable("string")},
               {"created_at", string_schema()},
-              {"created_by", string_schema()}}},
+              {"created_by", string_schema()},
+              {"created_by_name", nullable("string")}}},
             {"required",
              json::array({"id",
                           "title",
@@ -99,7 +101,8 @@ json transcript_schema() {
                           "language",
                           "recorded_at",
                           "created_at",
-                          "created_by"})},
+                          "created_by",
+                          "created_by_name"})},
             {"additionalProperties", false}};
 }
 
@@ -111,7 +114,38 @@ json seconds_json(const std::optional<double>& seconds) {
     return seconds ? json(*seconds) : json(nullptr);
 }
 
-json transcript_json(const control::Transcript& transcript) {
+// The author's name (lake#579): the display name of the user `created_by` names, else their
+// email, read from the control store, where identity lives. An author lake has no user for (an
+// operator credential) answers null, and a page then names no one rather than an id. `names_`
+// keeps each author's answer for one call, so a list reads each author once.
+class AuthorNames {
+public:
+    explicit AuthorNames(ApiContext& context) : context_(context) {}
+
+    json operator()(const std::string& user_id) {
+        if (const auto known = names_.find(user_id); known != names_.end()) {
+            return known->second;
+        }
+        json name = nullptr;
+        if (context_.store && !user_id.empty()) {
+            if (const auto user = context_.store->get_user(user_id); user) {
+                if (!user->display_name.empty()) {
+                    name = user->display_name;
+                } else if (!user->email.empty()) {
+                    name = user->email;
+                }
+            }
+        }
+        names_.emplace(user_id, name);
+        return name;
+    }
+
+private:
+    ApiContext& context_;
+    std::map<std::string, json> names_;
+};
+
+json transcript_json(const control::Transcript& transcript, AuthorNames& names) {
     return {{"id", transcript.id},
             {"title", transcript.title},
             {"text", transcript.text},
@@ -120,17 +154,19 @@ json transcript_json(const control::Transcript& transcript) {
             {"language", or_null(transcript.language)},
             {"recorded_at", or_null(transcript.recorded_at)},
             {"created_at", transcript.created_at},
-            {"created_by", transcript.created_by}};
+            {"created_by", transcript.created_by},
+            {"created_by_name", names(transcript.created_by)}};
 }
 
-json summary_json(const control::Transcript& transcript) {
+json summary_json(const control::Transcript& transcript, AuthorNames& names) {
     return {{"id", transcript.id},
             {"title", transcript.title},
             {"excerpt", control::transcript_excerpt(transcript.text)},
             {"source", transcript.source},
             {"seconds", seconds_json(transcript.seconds)},
             {"created_at", transcript.created_at},
-            {"created_by", transcript.created_by}};
+            {"created_by", transcript.created_by},
+            {"created_by_name", names(transcript.created_by)}};
 }
 
 ApiResult failed(const control::ZettaControlError& error) {
@@ -350,7 +386,8 @@ liquid::runtime::task<ApiResult> create_transcript(const json& input, ApiContext
     }
     context.audit_details["transcript_id"] = stored->id;
     context.audit_details["source"] = stored->source;
-    co_return ApiResult::success(transcript_json(*stored));
+    AuthorNames names(context);
+    co_return ApiResult::success(transcript_json(*stored, names));
 }
 
 liquid::runtime::task<ApiResult> list_transcripts(const json& input, ApiContext& context) {
@@ -378,10 +415,11 @@ liquid::runtime::task<ApiResult> list_transcripts(const json& input, ApiContext&
             "invalid_input", "cursor names no transcript of this list", "/cursor");
     }
     json items = json::array();
+    AuthorNames names(context);
     for (const control::Transcript& transcript : page.items) {
-        items.push_back(summary_json(transcript));
+        items.push_back(summary_json(transcript, names));
     }
-    json out{{"transcripts", std::move(items)}};
+    json out{{"transcripts", std::move(items)}, {"total", page.total}};
     if (!page.next_cursor.empty()) {
         out["next_cursor"] = page.next_cursor;
     }
@@ -402,7 +440,8 @@ liquid::runtime::task<ApiResult> get_transcript(const json& input, ApiContext& c
     if (!*found) {
         co_return ApiResult::failure("not_found", "no such transcript in this workspace", "/id");
     }
-    co_return ApiResult::success(transcript_json(**found));
+    AuthorNames names(context);
+    co_return ApiResult::success(transcript_json(**found, names));
 }
 
 liquid::runtime::task<ApiResult> update_transcript(const json& input, ApiContext& context) {
@@ -439,7 +478,8 @@ liquid::runtime::task<ApiResult> update_transcript(const json& input, ApiContext
         }
         co_return failed(edited.error());
     }
-    co_return ApiResult::success(transcript_json(*edited));
+    AuthorNames names(context);
+    co_return ApiResult::success(transcript_json(*edited, names));
 }
 
 liquid::runtime::task<ApiResult> delete_transcript(const json& input, ApiContext& context) {
@@ -529,9 +569,10 @@ void register_transcript_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "list_transcripts",
         .title = "List Transcripts",
-        .description = "The workspace's transcripts, newest first, each with an excerpt. `q` "
-                       "keeps those whose title or text contains it, ignoring case; `cursor` "
-                       "is the `next_cursor` of the page before.",
+        .description = "The workspace's transcripts, newest first, each with an excerpt and its "
+                       "author's name. `q` keeps those whose title or text contains it, ignoring "
+                       "case; `cursor` is the `next_cursor` of the page before; `total` counts "
+                       "every transcript `q` keeps, on every page.",
         .input_schema =
             workspace_input({{"q", string_schema()},
                              {"limit", {{"type", "integer"}, {"minimum", 1}, {"maximum", 100}}},
@@ -550,7 +591,8 @@ void register_transcript_capabilities(Registry& registry) {
                                   {"source", string_schema()},
                                   {"seconds", nullable("number")},
                                   {"created_at", string_schema()},
-                                  {"created_by", string_schema()}}},
+                                  {"created_by", string_schema()},
+                                  {"created_by_name", nullable("string")}}},
                                 {"required",
                                  json::array({"id",
                                               "title",
@@ -558,10 +600,12 @@ void register_transcript_capabilities(Registry& registry) {
                                               "source",
                                               "seconds",
                                               "created_at",
-                                              "created_by"})},
+                                              "created_by",
+                                              "created_by_name"})},
                                 {"additionalProperties", false}}}}},
+                            {"total", {{"type", "integer"}, {"minimum", 0}}},
                             {"next_cursor", string_schema()}}},
-                          {"required", json::array({"transcripts"})},
+                          {"required", json::array({"transcripts", "total"})},
                           {"additionalProperties", false}},
         .kind = CapabilityKind::Read,
         .object = "customer",

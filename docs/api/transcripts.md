@@ -12,12 +12,13 @@ by OpenAI with lake's own key, and **the audio is never kept**.
 |---|---|---|---|
 | `transcribe` | action, any signed-in caller | `{name, audio_base64, language?}` | `{text, seconds?, model}` |
 | `create_transcript` | action, `write` on the space | `{customer_id, workspace_id, title, text?, audio_base64?, audio_name?, language?, source, recorded_at?}` | the transcript |
-| `list_transcripts` | read, `read` on the space | `{customer_id, workspace_id, q?, limit?, cursor?}` | `{transcripts: [{id, title, excerpt, source, seconds, created_at, created_by}], next_cursor?}` |
+| `list_transcripts` | read, `read` on the space | `{customer_id, workspace_id, q?, limit?, cursor?}` | `{transcripts: [{id, title, excerpt, source, seconds, created_at, created_by, created_by_name}], total, next_cursor?}` |
 | `get_transcript` | read, `read` on the space | `{customer_id, workspace_id, id}` | the transcript |
 | `update_transcript` | action, `write` on the space | `{customer_id, workspace_id, id, title?, text?}` | the transcript |
 | `delete_transcript` | action, `write` on the space | `{customer_id, workspace_id, id}` | `{deleted: true}` |
 
-A transcript is `{id, title, text, source, seconds, language, recorded_at, created_at, created_by}`:
+A transcript is `{id, title, text, source, seconds, language, recorded_at, created_at, created_by,
+created_by_name}`:
 
 - `source` is `recording`, `upload` or `text`, as the person chose.
 - `seconds` is the audio's length when the speech-to-text model reports it, otherwise `null`.
@@ -27,6 +28,9 @@ A transcript is `{id, title, text, source, seconds, language, recorded_at, creat
 - `recorded_at` is when it was said, as the person gave it (an RFC 3339 date or instant), otherwise
   `null`.
 - `created_by` is the user id of the person who added it, or the operator's identity.
+- `created_by_name` is that person's display name, else their email, read from the control store
+  where identity lives (lake#579); `null` for an author lake has no user for, such as an operator
+  credential. A page shows it, or "you" for the person viewing, and never the id.
 - `created_at` is when lake stored it.
 
 `create_transcript` needs `text` or `audio_base64`:
@@ -183,3 +187,16 @@ which is not built.
 - A new transcript field is added to `TranscriptCodec` (`src/control/transcripts.cpp`) with a
   default in `decode`, which keeps schema version 1. Then update `transcript_json` and its output
   schema in `src/api/transcript_capabilities.cpp`, and this page.
+
+## Counting Transcripts (lake#574)
+
+`list_transcripts` answers `total`: every transcript `q` keeps in the workspace, on every page, not
+only the page's own rows. `limit` is 1 to 100; a larger one is `400 invalid_input` at `/limit`. A
+caller that wants only the count asks for `limit: 1` and reads `total`, as Home's Transcripts figure
+does. Home asked for `limit: 500` before, which answered 400, and showed "—".
+
+Verify: `GET /v1/list_transcripts?customer_id=<space>&workspace_id=<workspace>&limit=1` answers
+`{"transcripts": [<the newest>], "total": <n>, "next_cursor": ...}`.
+`WorkspaceRecordStores.TranscriptsLiveInTheirWorkspaceAndKeepNoAudio`
+(`tests/test_workspace_records.cpp`) and `Transcripts.PagesFilterIgnoringCaseAndFollowTheCursor`
+cover `total` and `created_by_name`.
