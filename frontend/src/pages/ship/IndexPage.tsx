@@ -4,10 +4,12 @@
  * on the left; the facts, publishing and the search key on the right. */
 import { useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
-import { Globe, KeyRound, Search, SearchX } from "lucide-react";
+import { Globe, KeyRound, Search, SearchX, Trash2 } from "lucide-react";
 import { act, type Row } from "@/lib/api";
 import { relative } from "@/lib/format";
 import { ConfirmButton } from "@/lib/overlay";
+import { indexLines } from "@/lib/deletion";
+import { DeletionButton } from "@/lib/deletionDialog";
 import { entityCrumb, useTrail } from "@/lib/trail";
 import { Banner, Button, Card, Chip, CopyBlock, Empty, ErrorBlock, KeyValue, Meter, Query, Skeleton, Split, StateTabs, Status } from "@/lib/ui";
 import { WorkspaceFrame, cellText, qs, text, useAsync, useWorkspace, useWq, useWsPath, wa } from "../train/workspace";
@@ -19,7 +21,8 @@ const SUB = "Search it here, publish it, and call it from your own code with a k
 export default function IndexPage() {
   const [params] = useSearchParams();
   const id = params.get("id") ?? "";
-  const { customerId } = useWorkspace();
+  const navigate = useNavigate();
+  const { customerId, workspaceId } = useWorkspace();
   const ws = useWsPath();
   const space = qs({ customer_id: customerId });
   // The same read the content makes (one cache entry): the header names the table and the state.
@@ -41,9 +44,26 @@ export default function IndexPage() {
       }
       sub={SUB}
       actions={
-        <Button to={ws(`/ship/indexes?${space}`)} variant="ghost">
-          All indexes
-        </Button>
+        <>
+          <Button to={ws(`/ship/indexes?${space}`)} variant="ghost">
+            All indexes
+          </Button>
+          {index.data ? (
+            <DeletionButton
+              capability="delete_index"
+              input={{ customer_id: customerId, workspace_id: workspaceId, id }}
+              title={table ? `Delete the Index on ${table}` : "Delete Search Index"}
+              confirmLabel="Delete index"
+              intro="Deleting the index removes it from the workspace. It cannot be undone."
+              typed={() => table || id.slice(0, 8)}
+              lines={indexLines}
+              done="Search index deleted"
+              onDone={() => navigate(ws(`/ship/indexes?${space}`))}
+            >
+              <Trash2 size={14} aria-hidden /> Delete
+            </DeletionButton>
+          ) : null}
+        </>
       }
     >
       {() => <Index id={id} />}

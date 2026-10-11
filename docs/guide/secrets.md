@@ -251,6 +251,20 @@ rewraps every data key in every workspace that holds a mount. Secret values are 
 a workspace is not ready, the rotation stops with `workspace_not_ready`, everything stays readable,
 and the next rotation finishes it.
 
+## Delete a Mount
+
+1. Open **Secret Mounts** and press **Delete** on the mount.
+2. Read what goes: every secret with all its versions, the mount's encryption keys and leases, and
+   the secrets by name.
+3. Type the mount's name and press **Delete mount**.
+
+- REST: `POST /v1/delete_secret_mount` with `{"mount_id": "<id>", "confirm": "<name>"}`;
+  `{"mount_id": "<id>", "dry_run": true}` lists what would go.
+- MCP: `delete_secret_mount`.
+
+Everything in the mount is removed from its workspace and cannot be recovered. Anything its keys
+encrypted can no longer be decrypted. The mount's name is free again in that workspace.
+
 ## Permissions
 
 | Call | Needs |

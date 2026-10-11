@@ -129,6 +129,16 @@ with a chip naming the transcript and its text attached to your next message
 ([Transcripts and Speech-to-Text](/docs/transcripts)). The chip's close button asks without that
 context. After one message, later messages are about the page as usual.
 
+## Delete a Conversation
+
+On the Ask Orama home, press **Delete** beside **New conversation**, type `delete` and press
+**Delete conversation**. Every message of it is removed from the workspace and a new conversation
+starts. Only you can delete your conversations. The agent tasks it started stay in Agent Tasks.
+
+- REST: `POST /v1/delete_ask_conversation` with `customer_id`, `workspace_id` and
+  `conversation_id`; add `"dry_run": true` to see how many messages would go.
+- MCP: `delete_ask_conversation`.
+
 ## Permissions
 
 - Ask Orama reads what you may read, in the workspace you asked in. Sending a message needs `write`

@@ -104,6 +104,17 @@ For example, the web app's `send_ask_message` (`POST /w/<workspace_id>/v1/send_a
 {"customer_id": "8f1c…", "workspace_id": "4b2e…", "message": "What do I have?", "page": {"path": "/design/project", "name": "churn"}}
 ```
 
+## Deleting a conversation
+
+`delete_ask_conversation {customer_id, workspace_id, conversation_id, dry_run?}` (lake#645)
+deletes one of the caller's conversations in that workspace: every message record is removed from
+the workspace Zetta by key. Only the person who had it can, because a conversation is found by its
+id and its person; another person's id finds nothing (`not_found` at `/conversation_id`). The
+answer is `{conversation_id, messages, first_message, dry_run, deleted}`; `dry_run: true` removes
+nothing. The agent tasks the conversation started stay in Agent Tasks, the space's task history.
+The event goes to the workspace's audit chain. Lake Console offers it beside New conversation
+([../ui/deletion.md](../ui/deletion.md)).
+
 ## Routes
 
 | Route | What it does |

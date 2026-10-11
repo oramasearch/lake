@@ -1,0 +1,75 @@
+/** What each delete and revoke dialog lists from its `dry_run: true` answer, and what the person
+ * types to confirm (docs/ui/deletion.md, lake#645). `npm test`; the build runs it. */
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import {
+  conversationLines,
+  datasetLines,
+  grantLines,
+  indexLines,
+  invitationLines,
+  modelLines,
+  organizationBlockers,
+  organizationLines,
+  organizationTyped,
+  runLines,
+  secretMountLines,
+} from "../src/lib/deletion.ts";
+
+test("an organization's plan names the workspaces in the way, and only counts that are there", () => {
+  const plan = {
+    organization_id: "o-1",
+    handle: "acme",
+    workspaces: [{ id: "w-1", name: "analytics", environment: "prod" }, { name: "no id" }],
+    counts: { memberships: 3, teams: 0, invitations: 2, grants: 5, sso_providers: 0, federation_issuers: 0 },
+  };
+  assert.deepEqual(organizationBlockers(plan), [{ id: "w-1", name: "analytics", environment: "prod" }]);
+  const lines = organizationLines(plan);
+  assert.equal(lines[0].count, null);
+  assert.deepEqual(
+    lines.slice(1).map((line) => [line.count, line.text]),
+    [
+      [3, "members, who lose access"],
+      [2, "invitations"],
+      [5, "access grants"],
+    ],
+  );
+  assert.equal(organizationTyped(plan), "acme");
+  assert.equal(organizationTyped({ organization_id: "o-2", handle: null }), "o-2", "without a handle, its id");
+  assert.deepEqual(organizationBlockers({}), []);
+});
+
+test("a mount's plan counts its secrets with their versions, keys and leases", () => {
+  const lines = secretMountLines({ counts: { secrets: 1, versions: 2, encryption_keys: 1, data_keys: 2, leases: 0 } });
+  assert.deepEqual(lines[0], { count: 1, text: "secret with 2 versions" });
+  assert.match(lines[1].text, /^encryption key\. Anything they encrypted/);
+  assert.equal(lines[2].count, 2);
+  assert.equal(lines.length, 4, "no line for leases it has none of");
+  assert.equal(secretMountLines({ counts: {} })[0].count, 0, "the secrets line stays at zero");
+});
+
+test("engine deletions say what goes and what is kept", () => {
+  assert.deepEqual(datasetLines({ removed: { rows: 1200, size_bytes: 2_500_000, partitions: 1, indexes: ["i-1"] } }), [
+    { count: 1200, text: "rows (2.5 MB)" },
+    { count: 1, text: "search index built on it" },
+  ]);
+  assert.deepEqual(datasetLines({}), [{ count: 0, text: "rows" }], "an answer without figures still reads");
+  assert.equal(modelLines({ removed: { was_exposed: true }, kept: { run: "r-1" } }).length, 3);
+  assert.equal(modelLines({ removed: {} }).length, 1);
+  assert.equal(runLines({ kept: { models: ["m-1", "m-2"] } })[1].text, "Kept: the 2 models it trained.");
+  assert.equal(runLines({ kept: { models: ["m-1"] } })[1].text, "Kept: the model it trained.");
+  assert.equal(indexLines({ removed: { was_exposed: false } }).at(-1)?.text, "Kept: the dataset it indexes.");
+});
+
+test("a conversation shows its count and how it starts, shortened", () => {
+  const long = "x".repeat(200);
+  const lines = conversationLines({ messages: 4, first_message: long });
+  assert.deepEqual(lines[0], { count: 4, text: "messages" });
+  assert.equal(lines[1].text.length, "It starts: “”".length + 120);
+  assert.equal(conversationLines({ messages: 1, first_message: "" }).length, 2);
+});
+
+test("revokes name who and what", () => {
+  assert.match(invitationLines({ invitee: "a@example.test", role: "admin" })[0].text, /a@example.test can no longer accept .* as admin/);
+  assert.match(grantLines({ role: "read" })[0].text, /^The read role/);
+});
