@@ -101,7 +101,7 @@ function Models() {
             <Stat label="Published" value={published.length} icon={Globe} tone={published.length ? "ok" : undefined} sub={`of ${groups.length} ${groups.length === 1 ? "model" : "models"}`} />
             <Stat label="Calls, 24 hours" value={traffic.data ? day.calls : "—"} icon={Activity} sub="predict calls of every model" />
             <Stat label="Errors, 24 hours" value={traffic.data ? day.errors : "—"} icon={AlertTriangle} tone={day.errors ? "bad" : undefined} sub={day.calls ? `${((100 * day.errors) / day.calls).toFixed(1)}% of calls` : "no calls"} />
-            <Stat label="Mean latency" value={day.meanMs === null ? "—" : `${day.meanMs.toFixed(0)} ms`} icon={Gauge} sub="inside lake, per call" />
+            <Stat label="Mean latency" value={day.meanMs === null ? "—" : `${day.meanMs.toFixed(0)} ms`} icon={Gauge} sub="inside Lake, per call" />
           </StatRow>
           {traffic.isError ? <ErrorBlock error={traffic.error} what="the traffic" retry={() => void traffic.refetch()} /> : null}
           <Toolbar>
@@ -132,7 +132,7 @@ function Models() {
         empty={
           groups.length === 0 ? (
             <Empty icon={Brain} title="No models yet" action={<Button to={links.trainList}>Go to Train → Models</Button>}>
-              Models appear here when a run trains one. Publish one to call it from outside lake.
+              Models appear here when a run trains one. Publish one to call it from outside Lake.
             </Empty>
           ) : (
             <Empty compact title="No model matches">
@@ -264,7 +264,7 @@ function CallAModel({ models, onClose }: { models: Row[]; onClose: () => void })
       <div id="call-a-model" className="space-y-3">
         {models.length === 0 ? (
           <Empty compact icon={Globe} title="Nothing is published">
-            Publish a model to call it from outside lake.
+            Publish a model to call it from outside Lake.
           </Empty>
         ) : (
           models.map((model) => (

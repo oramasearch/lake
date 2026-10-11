@@ -357,7 +357,7 @@ export default function AppsPage() {
               <textarea name="description" rows={6} placeholder="What should the app do?" disabled={!agent.deployed} />
             </label>
           </form>
-          {!agent.deployed && !agent.loading && <Notice tone="warning">ApplicationAgent is not registered on this lake yet.</Notice>}
+          {!agent.deployed && !agent.loading && <Notice tone="warning">ApplicationAgent is not registered on this Lake yet.</Notice>}
         </Drawer>
       )}
     </Page>
@@ -475,7 +475,7 @@ function TaskPanels({
           >
             {publicApp && (
               <>
-                <Banner tone="warn">This app will be public: anyone with its address can open it without signing in to lake.</Banner>
+                <Banner tone="warn">This app will be public: anyone with its address can open it without signing in to Lake.</Banner>
                 <label>
                   <input type="checkbox" name="confirm_public" value="1" required checked={acknowledged} onChange={(e) => setAcknowledged(e.target.checked)} /> I understand this app will be
                   public

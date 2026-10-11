@@ -1696,7 +1696,7 @@ void register_usage_capabilities(Registry& registry) {
                 }
                 reading = std::move(*read);
             } else {
-                reading.not_measured.push_back("Usage over time: this lake has no workspaces.");
+                reading.not_measured.push_back("Usage over time: this Lake has no workspaces.");
             }
             json periods = json::array();
             for (const std::int64_t start : query->periods.starts) {

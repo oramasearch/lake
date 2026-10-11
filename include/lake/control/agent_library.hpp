@@ -29,7 +29,7 @@ struct LibraryAgent {
 inline constexpr std::array<LibraryAgent, 9> agent_library{{
     {"agent-ask-orama",
      "Ask Orama",
-     "Answers questions about anything in your lake and hands work to the right agent, including "
+     "Answers questions about anything in your Lake and hands work to the right agent, including "
      "the ones you build. It never changes anything until you confirm.",
      "Ask Orama, at the top of every page",
      "service",

@@ -90,7 +90,7 @@ export function starterQuestions(state: { datasets?: string[]; projects?: string
   if (!datasets.length) out.push("How do I load my first dataset?");
   if (!projects.length) out.push("Help me turn a business question into a project.");
   out.push("What is in this workspace, and what should I look at first?");
-  out.push("What can lake do with my data?");
+  out.push("What can Lake do with my data?");
   return [...new Set(out)].slice(0, 4);
 }
 

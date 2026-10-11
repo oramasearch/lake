@@ -409,7 +409,7 @@ export default function ExperimentsPage() {
               <textarea name="goal" rows={5} placeholder="Tune a churn model for validation AUC with a bounded trial budget." required disabled={!agent.deployed} />
             </label>
           </form>
-          {!agent.deployed && !agent.loading && <Notice tone="warning">ExperimentsAgent is not registered on this lake yet.</Notice>}
+          {!agent.deployed && !agent.loading && <Notice tone="warning">ExperimentsAgent is not registered on this Lake yet.</Notice>}
         </Drawer>
       )}
 

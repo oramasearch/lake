@@ -178,7 +178,7 @@ export default function DeploymentsPage() {
 function NotSetUp() {
   return (
     <Empty icon={Rocket} title="Deployments Are Not Set Up on This Lake">
-      An operator turns them on by connecting this lake to the cluster operator's platform source. Until then, lake has no environments to show.
+      An operator turns them on by connecting this Lake to the cluster operator's platform source. Until then, Lake has no environments to show.
     </Empty>
   );
 }

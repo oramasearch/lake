@@ -1,6 +1,6 @@
 # Agents
 
-An agent is an AI helper that works in your workspace. lake has two kinds:
+An agent is an AI helper that works in your workspace. Lake has two kinds:
 
 - **The Agent Library**: the specialized agents Orama provides, such as the Project Agent and
   ExperimentsAgent. You use them where they appear in the product; you do not create or delete
@@ -18,8 +18,8 @@ your organization's), and `workspace_id`, the workspace in the page address
 ## The Agent Library
 
 Open **Design → Agent Library** (it is also at the foot of **Train → Agents**). Each card says what
-the agent does for you, where to use it, and whether this lake runs it (*Available*, or *Not running
-on this lake*).
+the agent does for you, where to use it, and whether this Lake runs it (*Available*, or *Not running
+on this Lake*).
 
 | Agent | What it does | Where you meet it |
 |---|---|---|
@@ -45,7 +45,7 @@ for **Confirm and start experiment**.
 |---|---|
 | **Engagement** | *Conversation* (answers when you talk to it) or *Runs on its own* (it has a trigger). |
 | **Orama base model** | The agent runs inside your workspace's engine, on its GPU when there is one. Its instructions are its system prompt. |
-| **Frontier model** | The agent runs on lake's agent runtime with a frontier model (OpenAI). Only these agents can be run unattended and scheduled. |
+| **Frontier model** | The agent runs on Lake's agent runtime with a frontier model (OpenAI). Only these agents can be run unattended and scheduled. |
 | **Work area** | Where it works: anywhere in this workspace, one project, or specific datasets. |
 | **Skills** | What it may do: *Search data*, *Generate a dataset*, *Train a Model*, *Summarize and explain*, *Call the API*. Granted, never assumed. |
 | **Pipelines as tools** | Approved pipelines you grant an agent; it can check, run and report on each one. |
@@ -74,7 +74,7 @@ what it may do. Search, or filter by **Conversation only** and **Runs on its own
    - **What success looks like**: its goal;
    - **What it may do**: its skills;
    - **Model**: *Orama base model, inside your workspace* or *A frontier model (OpenAI), run by
-     lake*;
+     Lake*;
    - **Runs on its own**: a trigger in plain words, such as *every Monday at 09:00*. Leave it empty
      for an agent you only talk to.
 3. Choose **Create agent**. The agent's page opens.
@@ -89,7 +89,7 @@ creates the agent: add its schedule with `schedule_agent` ([Schedule It](#schedu
 
 A frontier agent's `definition` is `source` `zetta` with `instructions`, `entrypoint` and `files`
 (each `path` and `contents`), or `source` `lake` with `repository_id`, `revision` and `entrypoint`.
-lake refuses any other field in it with `invalid_input` and the field's path.
+Lake refuses any other field in it with `invalid_input` and the field's path.
 
 ## Build It with the Agent Factory
 
@@ -101,7 +101,7 @@ The Agent Factory designs the agent with you in a conversation with **AgentCreat
    skills, trigger, pipelines and every file.
 3. A proposal with defects lists them under *This proposal has defects and cannot be created yet*
    and cannot be approved: tell AgentCreator what to change.
-4. Choose **Approve and create**. lake creates exactly the proposal you reviewed. A frontier agent
+4. Choose **Approve and create**. Lake creates exactly the proposal you reviewed. A frontier agent
    with a trigger is scheduled, and a first check run starts so its first run is one you can read.
 
 Nothing is created until you approve. If the proposal changed since the page showed it, approval is
@@ -168,7 +168,7 @@ plain words or as cron, and what each run is asked to do, then **Add schedule**.
 agent once, as you. An agent may have several schedules; each row shows its words, its cron and time
 zone, what it asks, its status and when it last fired, and **Remove**.
 
-Plain words lake understands: `every N minutes` (5 to 59), `every N hours`, `every N days`,
+Plain words Lake understands: `every N minutes` (5 to 59), `every N hours`, `every N days`,
 `hourly`, `daily`, `weekly`, and `every day at HH:MM`, `every weekday at HH:MM` or
 `every monday at HH:MM`. Cron is five fields, or `@hourly`, `@daily`, `@weekly`, `@monthly` or
 `@yearly`. The time zone is an IANA name, UTC by default.
@@ -209,7 +209,7 @@ schedules with it.
 
 A run acts as the person who started it, and a scheduled run as the person who set the schedule,
 limited to the workspace's reads and actions and the repository and transcript reads. Its
-credential is generated for the run and is never stored in lake.
+credential is generated for the run and is never stored in Lake.
 
 ## Limits
 
@@ -226,14 +226,14 @@ credential is generated for the run and is never stored in lake.
 | What you see | What to do |
 |---|---|
 | **New agent** is missing | The workspace is not ready yet; wait for it ([Workspaces](/docs/workspaces)). |
-| *The Agent Library is not available* | lake could not read the library; reload the page. |
-| An agent is *Not running on this lake* | This lake does not run that library agent; its page or Ask Orama says it is unavailable. |
-| `invalid_input` on `schedule_agent` | The trigger is not one lake understands, or it would run more often than every five minutes. |
+| *The Agent Library is not available* | Lake could not read the library; reload the page. |
+| An agent is *Not running on this Lake* | This Lake does not run that library agent; its page or Ask Orama says it is unavailable. |
+| `invalid_input` on `schedule_agent` | The trigger is not one Lake understands, or it would run more often than every five minutes. |
 | `invalid_input` on `create_agent` naming `/input/definition/…` | Remove the field it names; only the fields above are accepted. |
 | `not_found` on `stop_agent_launch` or `unschedule_agent` | The run or schedule belongs to another workspace. |
 | `invalid_input` on `approve_agent_proposal` | *This proposal still has defects*: ask AgentCreator to fix them. |
 | `conflict` on `approve_agent_proposal` | The proposal changed; review it again and approve the new one. |
-| A run stays *Pending* | lake is waiting for the platform to start it; after five minutes it fails with a reason. |
+| A run stays *Pending* | Lake is waiting for the platform to start it; after five minutes it fails with a reason. |
 
 ## Related Pages
 

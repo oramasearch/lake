@@ -56,7 +56,7 @@ import { qs, secondsSince, spokenDuration, text, useAsync, wq } from "../train/w
 import { formatValue, usageLink, usageOf, windows, type Reading } from "../usage/usage";
 import { CopyMono } from "./parts";
 
-const SUB = "The databases, streams and engines your workspaces run on lake, each its own, with its data kept apart from every other customer's.";
+const SUB = "The databases, streams and engines your workspaces run on Lake, each its own, with its data kept apart from every other customer's.";
 
 type Kind = { kind: string; label: string; ready_seconds: number };
 
@@ -219,7 +219,7 @@ function Services({ customerId, creating, setCreating }: { customerId: string; c
     const unconfigured = e instanceof ApiError && e.code === "store_unavailable" && /not configured/.test(e.message);
     return unconfigured ? (
       <Empty icon={Server} title="Services are not available here yet">
-        Services are not available on this lake yet: the operator has not enabled them.
+        Services are not available on this Lake yet: the operator has not enabled them.
       </Empty>
     ) : e instanceof ApiError && e.status >= 400 && e.status < 500 ? (
       <Empty icon={TriangleAlert} title="Services could not be listed">
@@ -390,7 +390,7 @@ function Services({ customerId, creating, setCreating }: { customerId: string; c
       {drawer}
       {shown && (
         <Modal title={`Connection to ${text(shown, "name")}`} onClose={() => setShown(null)} footer={<Button onClick={() => setShown(null)}>Close</Button>}>
-          <Banner tone="info">Reachable inside the lake cluster, from your other services. Copy it now; it is not shown again unless you ask.</Banner>
+          <Banner tone="info">Reachable inside the Lake cluster, from your other services. Copy it now; it is not shown again unless you ask.</Banner>
           <dl>
             {Object.entries(shown)
               .filter(([key]) => key !== "name")

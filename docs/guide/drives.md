@@ -20,7 +20,7 @@ drive opens in the same file manager: folders, uploads with progress, drag to mo
 - **Shortcut.** A link in a folder to something that lives elsewhere: a repository, a file or
   folder in a repository, an item of another drive, a dataset, a transcript, a project, an agent,
   a model or a web address. Deleting a shortcut never deletes what it opens. A shortcut whose
-  repository, path, drive item or transcript is gone is marked **Broken**; lake does not check
+  repository, path, drive item or transcript is gone is marked **Broken**; Lake does not check
   datasets, projects, agents, models or web addresses.
 
 ## The Drives Page
@@ -145,9 +145,9 @@ with `confirm_name`. MCP: the same names.
 
 ## Limits
 
-- Workspace files have no version history, no sharing links and no previews rendered by lake; a
+- Workspace files have no version history, no sharing links and no previews rendered by Lake; a
   repository drive has all three.
-- One upload of a workspace file is at most 64 GiB. A finished upload is checked: lake reads the
+- One upload of a workspace file is at most 64 GiB. A finished upload is checked: Lake reads the
   file back and records its SHA-256.
 - An upload left unfinished is not a file in the list, but it keeps its name: the folder shows
   **Unfinished Uploads** with each one's age, and **Remove** deletes them. `list_drive_entries`
@@ -180,7 +180,7 @@ sharing ([Grants and Effective Access](/docs/access)).
   again.
 - **"a dataset is loaded from a CSV or JSONL file"**: **Load as dataset** reads files ending
   `.csv`, `.jsonl` or `.ndjson`, of at most 16 MiB.
-- **"this lake keeps no workspace files"**: this lake has no workspace storage for files. Use a
+- **"this Lake keeps no workspace files"**: this Lake has no workspace storage for files. Use a
   repository drive.
 
 ## Related Pages

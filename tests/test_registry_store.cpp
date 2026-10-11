@@ -1583,7 +1583,7 @@ TEST(RegistryStore, ADrainingLakeRefusesBlobWorkAndNeverRetakesTheLease) {
         EXPECT_EQ(refused.headers["retry-after"], "1") << method;
     }
     const json copied = rig.copy("copy");
-    EXPECT_NE(copied.dump().find("lake is stopping"), std::string::npos) << copied.dump();
+    EXPECT_NE(copied.dump().find("Lake is stopping"), std::string::npos) << copied.dump();
     std::this_thread::sleep_for(300ms);
     EXPECT_TRUE(rig.zetta->lease(endpoint).holder.empty());
     EXPECT_EQ(rig.zetta->lease(endpoint).fence, fence) << "nothing took the lease again";

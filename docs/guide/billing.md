@@ -5,7 +5,7 @@ and finds its invoices. Lake is priced by usage only: you pay for what your work
 kind of usage at one rate. There is no plan to choose, no monthly fee and no free allowance. The bill
 is worked out from the usage your workspaces already record (see [Usage and Metering](/docs/usage)).
 
-Billing is on for Orama Cloud. An enterprise install of lake has no billing: this page, the Billing
+Billing is on for Orama Cloud. An enterprise install of Lake has no billing: this page, the Billing
 item and the billing tools are absent there, and usage is tracked as usual.
 
 Metis is not billed here. It is enterprise software priced by Orama's sales team; talk to sales.
@@ -20,7 +20,7 @@ Metis is not billed here. It is enterprise software priced by Orama's sales team
 | **Bill** | One UTC calendar month: one line per dimension with what was used, its rate and its cost (usage × rate), and the total. |
 | **Invoice** | A month's bill once Orama issues it, after the month ends. Its lines and rates are kept as issued; later usage or new rates never change it. |
 | **State** | An invoice is **due** until it is **paid**, or **void** if Orama cancels it (the month can then be invoiced again). |
-| **Stripe** | Where invoices are paid on Orama Cloud: each invoice has a page on Stripe, and Stripe tells lake when it is paid. |
+| **Stripe** | Where invoices are paid on Orama Cloud: each invoice has a page on Stripe, and Stripe tells Lake when it is paid. |
 | **Storage on a bill** | The average of each day's storage reading over the month, across your workspaces. |
 
 ## See the Rates
@@ -58,7 +58,7 @@ many short jobs are never each charged a minute.
 Invoices from before compute was priced this way keep their lines as issued, such as **Service and
 App Instances** or **Build Compute**.
 
-These are Orama Cloud's list rates; the lake you use answers its own with `price_list`, which is
+These are Orama Cloud's list rates; the Lake you use answers its own with `price_list`, which is
 what you are billed at.
 
 - REST: `GET /v1/price_list`, or the rates for another month with `GET /v1/price_list?period=2026-11`.
@@ -105,15 +105,15 @@ Orama Cloud takes payment through Stripe.
 1. Open the invoice from **Invoices** on **Organization → Billing**.
 2. Press **Pay with Stripe**. Stripe's invoice page opens, with the same lines and total.
 3. Pay by card or bank account there.
-4. Come back to the invoice. It shows **paid** once Stripe tells lake, usually within a minute.
+4. Come back to the invoice. It shows **paid** once Stripe tells Lake, usually within a minute.
 
 The **Stripe** row on the invoice says where the payment stands: **Awaiting payment**, **Payment
 failed** (pay again on Stripe's page with another card or account), **Paid** or **Void**.
 
 If the Billing page's **Payment** figure says **Invoice only**, card payment is not set up on this
-lake. Setting it up is Orama's: Stripe's keys are settings of the platform lake runs on, never
+Lake. Setting it up is Orama's: Stripe's keys are settings of the platform Lake runs on, never
 secrets in your workspace. Orama then sends payment details with each invoice (**How to Pay**), collects the payment
-outside lake, and records it; the invoice shows **paid** with the payment's reference.
+outside Lake, and records it; the invoice shows **paid** with the payment's reference.
 
 The invoice, through the API, carries the same: `payment_url` (Stripe's page) and `provider_status`.
 
@@ -135,18 +135,18 @@ The invoice, through the API, carries the same: `payment_url` (Stripe's page) an
 |---|---|
 | See the price list | Anyone signed in |
 | See your account's bill and invoices | `read` on the account |
-| Publish the price list, issue an invoice, record a payment, void an invoice | The lake operator |
+| Publish the price list, issue an invoice, record a payment, void an invoice | The Lake operator |
 | Pay an invoice on Stripe | Anyone with the invoice's Stripe page |
 
 ## Troubleshooting
 
 | You see | What it means |
 |---|---|
-| **No Price List Yet** and no bill | Orama has not published its rates on this lake. Your usage is recorded; nothing is billed until the rates are published. |
+| **No Price List Yet** and no bill | Orama has not published its rates on this Lake. Your usage is recorded; nothing is billed until the rates are published. |
 | **Some Usage Could Not Be Read** | A workspace did not answer when the bill was read. Open the page again later; the invoice waits until every workspace answers. |
-| No **Billing** item in the rail | This lake does not bill (an enterprise install). Usage is still under **Organization → Usage**. |
-| No **Pay with Stripe** on a due invoice | Card payment is not set up on this lake (**Payment** says **Invoice only**), or the invoice was issued before it was. Follow **How to Pay**. |
-| Paid on Stripe, still **due** in lake | Stripe's notice has not arrived yet. Open the invoice again in a minute; Stripe keeps retrying until lake answers. |
+| No **Billing** item in the rail | This Lake does not bill (an enterprise install). Usage is still under **Organization → Usage**. |
+| No **Pay with Stripe** on a due invoice | Card payment is not set up on this Lake (**Payment** says **Invoice only**), or the invoice was issued before it was. Follow **How to Pay**. |
+| Paid on Stripe, still **due** in Lake | Stripe's notice has not arrived yet. Open the invoice again in a minute; Stripe keeps retrying until Lake answers. |
 
 ## Related Pages
 

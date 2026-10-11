@@ -16,10 +16,10 @@ reads also answer `GET`) and an MCP tool of the same name and input.
 | **Topic** | A named, ordered log of messages kept for a while by its retention settings. |
 | **Message** | One JSON event with a sequence number, a sender, a publication time, a size and a revision. |
 | **Workspace** | The topics of this workspace: `agent-events`, `app-events.<app id>`, `build-events.<build id>`, training events, and the topics you create. Named `workspace` in calls. |
-| **Lake Bus** | The dispatch topics that hand tasks to lake's agents (`agent-tasks.<agent>`). Named `bus` in calls. You see only your own tasks there. |
+| **Lake Bus** | The dispatch topics that hand tasks to Lake's agents (`agent-tasks.<agent>`). Named `bus` in calls. You see only your own tasks there. |
 | **Subscription** | A consumer of a topic, with its position and lag. Browsing never moves it. |
-| **System topic** | A topic lake or the engine owns. It is marked *system · browse-only* and can only be read. |
-| **Creator** | The person who created a topic through lake. Only the creator can change its settings or delete it. |
+| **System topic** | A topic Lake or the engine owns. It is marked *system · browse-only* and can only be read. |
+| **Creator** | The person who created a topic through Lake. Only the creator can change its settings or delete it. |
 
 Sequence numbers are the topic's own, so gaps are normal.
 
@@ -44,7 +44,7 @@ page size, and page with **Previous** and **Next**.
 
 - REST: `POST /v1/create_stream` with
   `{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "zetta": "workspace", "topic": "orders", "settings": {"retention_ms": 86400000, "max_events": 1000}}`
-- MCP: `create_stream`. lake makes the topic visible to browsing and keeps 1,000 messages unless you
+- MCP: `create_stream`. Lake makes the topic visible to browsing and keeps 1,000 messages unless you
   set `max_events`.
 
 ## Browse a Topic

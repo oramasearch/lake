@@ -948,7 +948,7 @@ void register_application_capabilities(Registry& registry) {
         .name = "list_applications",
         .title = "List applications",
         .description =
-            "List the applications a space has registered to sign its own users in through lake.",
+            "List the applications a space has registered to sign its own users in through Lake.",
         .input_schema = application_list_input,
         .output_schema = items_schema(),
         .kind = CapabilityKind::Read,
@@ -1082,7 +1082,7 @@ void register_application_capabilities(Registry& registry) {
                                              "/code_challenge_method");
             }
             if (context.acting_user_id.empty()) {
-                co_return ApiResult::failure("unauthorized", "authorization requires a lake user");
+                co_return ApiResult::failure("unauthorized", "authorization requires a Lake user");
             }
             // The signed-in lake user becomes a user of the application on first authorization:
             // a record in the application's workspace, written only if absent.
@@ -1240,7 +1240,7 @@ void register_application_capabilities(Registry& registry) {
         .name = "get_application",
         .title = "Get application",
         .description =
-            "Read one application registered to sign its own users in through lake, with its "
+            "Read one application registered to sign its own users in through Lake, with its "
             "settings (name, allowed origins, redirect URIs, theme) read from the workspace Zetta "
             "of the application's workspace, the `workspace_id` it returns.",
         .input_schema = input_schema({{"id", {{"type", "string"}}}}, json::array({"id"})),

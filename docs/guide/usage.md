@@ -6,7 +6,7 @@ model predictions, model tokens, and the instance and volume time of your servic
 apps. Choose the workspaces
 and the period, compare it with the period before, chart it by workspace or by kind, set limits that
 warn as you near them, and export it as CSV. **Repository Usage by Hour** keeps the exact
-repository transfer and build time, the repository storage limit and, when the lake has prices set,
+repository transfer and build time, the repository storage limit and, when the Lake has prices set,
 an estimated charge.
 
 Usage is a measurement, not a bill: the dashboard shows no prices. On Orama Cloud, **Organization →
@@ -25,7 +25,7 @@ Billing** turns it into a monthly bill on your plan; an enterprise install has n
 | **Model tokens** | The tokens an agent reports it spent, by agent, run and model, and the tokens a speech-to-text model reports for a transcript. |
 | **Limit** | A ceiling on one dimension with a warning percentage. The storage limit is enforced on new repository writes; every other limit warns and refuses nothing. |
 | **Repository storage limit** | The storage limit: above it, new repository writes are refused; what is stored stays readable. |
-| **Estimated charge** | On Repository Usage by Hour only: transfer and repository build time at the prices the lake operator configured. |
+| **Estimated charge** | On Repository Usage by Hour only: transfer and repository build time at the prices the Lake operator configured. |
 
 ## Open Usage
 
@@ -100,7 +100,7 @@ on **Repository Usage by Hour** with **Set storage limit**.
   `{"customer_id": "<customer id>", "quota_bytes": 10737418240}`.
 - MCP: `set_storage_quota`.
 
-The value overrides the lake's default limit for that account; `0` removes the limit.
+The value overrides the Lake's default limit for that account; `0` removes the limit.
 
 ## What Happens over the Limit
 
@@ -147,14 +147,14 @@ Narrow the hours with `from` and `to` (inclusive UTC hours) and `limit` (1 to 10
 
 - REST: `GET /v1/metering_usage?customer_id=<customer id>&from=2026-09-01T00:00:00Z&to=2026-09-30T23:00:00Z&limit=744`.
 
-Prices are set by the lake operator, for inbound and outbound transfer per GiB and for compute per
+Prices are set by the Lake operator, for inbound and outbound transfer per GiB and for compute per
 second; only transfer and repository build time are priced, and with no price set the page says
 there is no charge to show. On Orama Cloud, your bill comes from the price list instead (see
 [Billing and Invoices](/docs/billing)).
 
 ## The Operator's View
 
-The lake operator's **Administration → Usage** lists every account's usage for the period, with the
+The Lake operator's **Administration → Usage** lists every account's usage for the period, with the
 totals across accounts, for capacity planning. **Open** shows one account's Usage with all its
 workspaces.
 

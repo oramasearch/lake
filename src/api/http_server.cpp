@@ -156,7 +156,7 @@ struct IndexWriteGate {
 
 search::Error closed_index_error() {
     return {"store_unavailable",
-            "this workspace's store was closed here, so lake writes no more of its search index; "
+            "this workspace's store was closed here, so Lake writes no more of its search index; "
             "the next owner rebuilds it"};
 }
 
@@ -5165,7 +5165,7 @@ private:
         }
         if (!config.endpoint || !config.transport) {
             return std::unexpected(SyncStoreError{
-                "store_unavailable", "workspace stores are not configured on this lake"});
+                "store_unavailable", "workspace stores are not configured on this Lake"});
         }
         if (root_.empty()) {
             return std::unexpected(
@@ -5242,8 +5242,9 @@ private:
                 // A switched workspace whose bucket is gone (a recreated Zetta, a wrong endpoint).
                 error = SyncStoreError{"corrupt",
                                        "the workspace store is missing from its workspace Zetta: "
-                                       "the workspace was switched to it, so lake will not create "
-                                       "an empty one: " + store.error().message,
+                                       "the workspace was switched to it, so Lake will not create "
+                                       "an empty one: " +
+                                           store.error().message,
                                        store.error().context};
             }
             return std::unexpected(error);
@@ -5311,9 +5312,11 @@ private:
                 if (opened.error().code == liquid::errc::not_found) {
                     return std::unexpected(SyncStoreError{
                         "corrupt",
-                        "repository " + repository_id + " is missing from its workspace store; "
-                        "the workspace was switched, so lake will not create it empty",
-                        key, "missing_repository"});
+                        "repository " + repository_id +
+                            " is missing from its workspace store; "
+                            "the workspace was switched, so Lake will not create it empty",
+                        key,
+                        "missing_repository"});
                 }
                 return std::unexpected(error_of(opened.error()));
             }
@@ -6150,7 +6153,7 @@ public:
         }
         if (!config.endpoint || !config.transport) {
             return std::unexpected(SyncStoreError{
-                "store_unavailable", "workspace stores are not configured on this lake"});
+                "store_unavailable", "workspace stores are not configured on this Lake"});
         }
         // Under the workspace's lane: no request opens the store meanwhile.
         auto lane = hold("w:" + workspace_id);
@@ -6174,7 +6177,7 @@ public:
             return std::unexpected(SyncStoreError{
                 "conflict",
                 "the workspace's bucket lake_store holds " + std::to_string(objects) +
-                    " objects but no store that opens; lake will not create a store over them"});
+                    " objects but no store that opens; Lake will not create a store over them"});
         }
         auto created = open_workspace(customer_id, workspace_id, true);
         if (!created) {
@@ -6599,8 +6602,9 @@ public:
 
 private:
     static SyncStoreError stopping_error() {
-        return SyncStoreError{"store_unavailable",
-                              "lake is stopping and hands the workspace store to its successor; retry shortly"};
+        return SyncStoreError{
+            "store_unavailable",
+            "Lake is stopping and hands the workspace store to its successor; retry shortly"};
     }
 
     WorkspaceRelease release_workspace_store(const std::string& workspace_id,
@@ -7079,7 +7083,7 @@ struct ApiServer::Impl {
         .remove_image_repository = [this](const std::string& repository)
             -> std::expected<void, std::string> {
             if (store_root_state.load() != StoreRootState::open) {
-                return std::unexpected("this lake does not own the store root yet");
+                return std::unexpected("this Lake does not own the store root yet");
             }
             return artifacts.remove_repository(repository);
         },
@@ -7099,7 +7103,7 @@ struct ApiServer::Impl {
                 return {};
             }
             if (!options.store_root.empty() && store_root_state.load() != StoreRootState::open) {
-                return std::unexpected("this lake does not own the store root yet");
+                return std::unexpected("this Lake does not own the store root yet");
             }
             const auto dropped = options.search->drop_repository(customer_id, repository_id);
             if (!dropped) {
@@ -9563,7 +9567,7 @@ struct ApiServer::Impl {
         if (!payments) {
             co_return co_await send_text(route,
                                          http::status::not_found,
-                                         error_body("not_found", "this lake does not bill"),
+                                         error_body("not_found", "this Lake does not bill"),
                                          "application/json; charset=utf-8",
                                          "no-store");
         }
@@ -9652,7 +9656,7 @@ struct ApiServer::Impl {
         }
         const auto minted = audit::mint_custodial_identity(options.instance_kek);
         if (!minted) {
-            co_return co_await back("lake cannot create an identity right now: " +
+            co_return co_await back("Lake cannot create an identity right now: " +
                                     minted.error().message);
         }
         control::Result<control::IssuedSession> issued =
@@ -9685,7 +9689,7 @@ struct ApiServer::Impl {
                                      .method = "clerk",
                                      .device = device_name,
                                  })) {
-            co_return co_await back("lake could not record the sign-in. Please try again.");
+            co_return co_await back("Lake could not record the sign-in. Please try again.");
         }
         std::string cookie = "lake_session=" + session_result.value.value("secret", "") +
                              "; HttpOnly; SameSite=Lax; Path=/";
@@ -12014,7 +12018,7 @@ struct ApiServer::Impl {
         if (draining.load()) {
             return send_text(route,
                              boost::http::status::service_unavailable,
-                             error_body("store_unavailable", "lake is stopping"),
+                             error_body("store_unavailable", "Lake is stopping"),
                              "application/json; charset=utf-8",
                              "no-store");
         }
@@ -12476,7 +12480,7 @@ struct ApiServer::Impl {
             std::chrono::steady_clock::now() + options.store_owner_wait + std::chrono::minutes(2);
         boost::corosio::timer timer(io_context);
         auto pause = std::chrono::milliseconds(5);
-        std::string reason = "lake gave up waiting for the store root";
+        std::string reason = "Lake gave up waiting for the store root";
         for (;;) {
             const StoreRootState state = store_root_state.load();
             if (state == StoreRootState::open) {
@@ -12488,7 +12492,7 @@ struct ApiServer::Impl {
                 break;
             }
             if (draining.load()) {
-                reason = "lake is stopping before it opened the store root";
+                reason = "Lake is stopping before it opened the store root";
                 break;
             }
             if (std::chrono::steady_clock::now() >= deadline) {
@@ -12497,7 +12501,7 @@ struct ApiServer::Impl {
             timer.expires_after(pause);
             auto [error] = co_await timer.wait();
             if (error) {
-                reason = "lake is stopping before it opened the store root";
+                reason = "Lake is stopping before it opened the store root";
                 break;
             }
             pause = std::min(pause * 2, std::chrono::milliseconds(100));
@@ -12717,12 +12721,12 @@ struct ApiServer::Impl {
             if (!read && !action) {
                 status = http::status::not_found;
                 body =
-                    error_body("unknown_capability", capability + " is not available through lake");
+                    error_body("unknown_capability", capability + " is not available through Lake");
             } else if (workspace_uses_get(capability) != get) {
                 status = http::status::method_not_allowed;
                 allow = workspace_uses_get(capability) ? "GET" : "POST";
                 body = error_body("method_not_allowed",
-                                  capability + " takes " + allow + " through lake");
+                                  capability + " takes " + allow + " through Lake");
             } else if (get) {
                 // Values stay strings: the workspace coerces them by its own input schema, as a
                 // direct call to Zetta would.

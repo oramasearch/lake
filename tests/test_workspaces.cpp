@@ -296,6 +296,51 @@ TEST(Workspaces, StartWorkspaceAnswersItsIdBesideTheSpacesOtherWorkspaces) {
     }
 }
 
+// A new account's first workspace is named after the account's handle, not the placeholder
+// `workspace` (lake#638); an account whose first workspace is already `workspace` keeps it.
+TEST(Workspaces, StartWorkspaceNamesTheFirstWorkspaceAfterTheHandle) {
+    Workspaces w;
+    lake::api::Registry registry;
+    lake::api::register_core_capabilities(registry, "test");
+    lake::api::ApiContext context;
+    context.store = w.store.get();
+    context.workspaces = w.service.get();
+    context.authorized = true;
+    context.acting_identity = "admin";
+    const auto call = [&](const std::string& name, json input) {
+        input["customer_id"] = w.customer_id;
+        return *liquid::runtime::block_on(registry.call_async(name, input, context));
+    };
+    const auto customer = w.store->get_customer(w.customer_id);
+    ASSERT_TRUE(customer);
+    ASSERT_FALSE(customer->name.empty());
+    const auto started = call("start_workspace", json::object());
+    ASSERT_TRUE(started.ok) << started.error.message;
+    const auto listed = call("list_workspaces", json::object()).value.at("workspaces");
+    ASSERT_EQ(listed.size(), 1U);
+    EXPECT_EQ(listed[0].at("name"), customer->name);
+    EXPECT_NE(listed[0].at("name"), "workspace");
+    EXPECT_EQ(call("start_workspace", json::object()).value.at("workspace_id"),
+              started.value.at("workspace_id"))
+        << "repeating it finds the handle-named workspace";
+
+    // An account that already has a first workspace called `workspace` keeps it, unrenamed.
+    Workspaces legacy;
+    context.store = legacy.store.get();
+    context.workspaces = legacy.service.get();
+    const auto old =
+        legacy.store->create_workspace({legacy.customer_id, "workspace", "prod", "admin"});
+    ASSERT_TRUE(old);
+    const auto again = *liquid::runtime::block_on(
+        registry.call_async("start_workspace", {{"customer_id", legacy.customer_id}}, context));
+    ASSERT_TRUE(again.ok) << again.error.message;
+    EXPECT_EQ(again.value.at("workspace_id"), old->id);
+    const auto rows = legacy.store->list_workspaces(legacy.customer_id);
+    ASSERT_TRUE(rows);
+    ASSERT_EQ(rows->size(), 1U);
+    EXPECT_EQ(rows->front().name, "workspace");
+}
+
 TEST(Workspaces, DeletingTheWorkspaceWithdrawsItAndARestartGetsANewSlug) {
     Workspaces w;
     auto refused = w.run(w.service->withdraw(w.customer_id));
@@ -742,7 +787,8 @@ TEST(Workspaces, CapabilitiesAreAllowListedAndAuthorizedOnTheCustomer) {
     ASSERT_TRUE(deleted_service.ok) << deleted_service.error.message;
     EXPECT_EQ(deleted_service.value["desired"], "absent");
 
-    const std::string slug = "workspace";
+    // The first workspace is named after the account's handle (lake#638).
+    const std::string slug = store.get_customer(owner_customer)->name;
     const auto foreign_delete = call(
         *other_principal, "delete_workspace", {{"customer_id", owner_customer}, {"confirm", slug}});
     EXPECT_FALSE(foreign_delete.ok) << "another customer cannot delete the workspace";
@@ -1791,10 +1837,10 @@ TEST(Workspaces, TheAgentLibraryListsEverySpecializedAgentAndWhatRuns) {
     EXPECT_EQ(agents[2].at("status"), "Available");
     EXPECT_EQ(agents[3].at("name"), "ExperimentsAgent");
     EXPECT_EQ(agents[3].at("status"), "Available");
-    EXPECT_EQ(agents[4].at("status"), "Not running on this lake");
+    EXPECT_EQ(agents[4].at("status"), "Not running on this Lake");
     // Every library agent takes a conversation (lake#263), but the generators are Orama's own
     // tooling (lake#451): listed here, never offered in Ask Orama's Talk to.
-    EXPECT_EQ(agents[6].at("status"), "Not running on this lake");
+    EXPECT_EQ(agents[6].at("status"), "Not running on this Lake");
     EXPECT_EQ(agents[6].at("runs_as"), "service");
     for (const auto& agent : agents) {
         EXPECT_TRUE(agent.at("chat").get<bool>()) << agent.at("key");

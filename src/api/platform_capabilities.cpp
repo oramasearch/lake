@@ -27,7 +27,7 @@ using nlohmann::json;
 // The message names no engine: the web app shows it to people (lake#583). The configuration
 // (LAKE_OPERATOR_ZETTA_URL, LAKE_OPERATOR_ZETTA_TOKEN) is in the page it points to.
 constexpr std::string_view kNotSetUp =
-    "deployments are not set up on this lake: an operator turns them on by connecting lake to "
+    "deployments are not set up on this Lake: an operator turns them on by connecting Lake to "
     "the cluster operator's platform source (docs/api/platform.md#a-lake-without-the-platform-"
     "mirror)";
 

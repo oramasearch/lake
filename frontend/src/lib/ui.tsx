@@ -508,7 +508,7 @@ export function ErrorBlock({ error, retry, what }: { error: unknown; retry?: () 
   const e = error instanceof ApiError ? error : null;
   const notSetUp = isNotSetUp(e);
   const title = notSetUp
-    ? "Not set up on this lake"
+    ? "Not set up on this Lake"
     : e?.status === 403
       ? "You don't have access to this"
       : e?.status === 404

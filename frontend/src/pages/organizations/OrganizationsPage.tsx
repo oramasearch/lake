@@ -98,7 +98,7 @@ export default function OrganizationsPage() {
       ) : (
         <>
           <StatRow cols={person ? 4 : 2}>
-            <Stat label="Organizations" value={all.length} icon={Building2} sub={person ? "you belong to or can see" : "on this lake"} />
+            <Stat label="Organizations" value={all.length} icon={Building2} sub={person ? "you belong to or can see" : "on this Lake"} />
             {person && <Stat label="You own" value={[...roles.values()].filter((r) => r === "owner").length} icon={ShieldCheck} sub="as owner" />}
             {person && <Stat label="You administer" value={[...roles.values()].filter((r) => r === "admin").length} sub="as admin" />}
             <Stat label="Invitations" value={pending.length} icon={Mail} sub={pending.length ? "waiting for you" : "none waiting"} />
@@ -268,7 +268,7 @@ function CreateOrganization({ onCreated, onClose }: { onCreated: () => void; onC
           error={nameError}
           help={
             <>
-              Names the organization's workspace, as in <code>handle/repository</code>: lowercase letters, numbers and inner hyphens. Leave it empty and lake generates one.
+              Names the organization's workspace, as in <code>handle/repository</code>: lowercase letters, numbers and inner hyphens. Leave it empty and Lake generates one.
             </>
           }
         >
@@ -327,7 +327,7 @@ function ConvertPersonalSpace({ customerId, handle, onConverted, onClose }: { cu
     >
       <p className="mt-0">
         Your workspace <code>{handle}</code> becomes the organization's. Its handle, repositories, workspaces and apps stay where they are, so links and clones keep working. You become
-        the organization's owner and can invite colleagues. lake gives you a new, empty workspace with a generated handle.
+        the organization's owner and can invite colleagues. Lake gives you a new, empty workspace with a generated handle.
       </p>
       <Banner tone="warn">This cannot be undone here.</Banner>
       <Form id="convert-workspace" onSubmit={submit} error={confirmError || displayNameError ? null : error}>

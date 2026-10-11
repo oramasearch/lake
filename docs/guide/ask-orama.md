@@ -1,6 +1,6 @@
 # Ask Orama
 
-Ask Orama is lake's home page and the assistant at the top of every page. Ask it anything about your lake in plain words:
+Ask Orama is Lake's home page and the assistant at the top of every page. Ask it anything about your Lake in plain words:
 your repositories, projects, data, runs, models, services and agents. It answers from what you are
 allowed to read, proposes every change for you to confirm, and brings in another agent when that
 agent does the job better.
@@ -12,8 +12,8 @@ agent does the job better.
   the turn ends. Ask Orama can read only what you can read.
 - **Changes are proposals.** When Ask Orama wants to change something (create a repository, start
   an agent, …) it shows a **proposal** with the capability it would call. Nothing happens until you
-  press **Confirm**; lake then runs it as you, with your permissions, and records it in the audit.
-  Only a proposal lake stored in your own conversation can be confirmed.
+  press **Confirm**; Lake then runs it as you, with your permissions, and records it in the audit.
+  Only a proposal Lake stored in your own conversation can be confirmed.
 - **It delegates.** Ask Orama hands work to the right agent: the Project Agent for pipelines,
   ApplicationAgent for apps, ExperimentsAgent for training experiments, Auto-Suggest for ideas, or an
   agent you built. Their proposals are reviewed the same way before anything is written.
@@ -25,7 +25,7 @@ agent does the job better.
 
 ## Open Ask Orama
 
-- **Home → Ask Orama** (`/`) is where you land when you sign in or open lake: the conversation
+- **Home → Ask Orama** (`/`) is where you land when you sign in or open Lake: the conversation
   across the page, in your current workspace. While it is empty it greets you and suggests up to
   four questions from what the workspace holds: a run that failed, a dataset, a project, the latest
   run's findings, or the first steps when the workspace is new. Press one to ask it. **Home →
@@ -53,7 +53,7 @@ Ask Orama needs a workspace. With none selected it says so and links to **Ship �
 3. Press **Send**.
 
 While the turn runs, the conversation says *Waiting for Ask Orama to start…* and then *Ask Orama is
-working…*, how long it has worked, its latest progress, and *Attempt 2 of 3* when lake retried it.
+working…*, how long it has worked, its latest progress, and *Attempt 2 of 3* when Lake retried it.
 When it brings in another agent you see that too (*Ask Orama asked ExperimentsAgent: …*), then that
 agent's progress. **View this turn in Streams** opens the turn's events in **Train → Streams**.
 
@@ -95,7 +95,7 @@ with `POST /v1/agent_turn`:
 ```
 
 Through MCP, call `agent_turn` with the same input. `GET /v1/list_agent_library` lists the library's
-agents and whether each runs on your lake ([Agents](/docs/agents)).
+agents and whether each runs on your Lake ([Agents](/docs/agents)).
 
 ## Confirm a Proposal
 
@@ -103,7 +103,7 @@ An answer that wants to change something shows **Proposed:** with the capability
 and a **Confirm** button.
 
 1. Read the proposal: what it calls and with which input.
-2. Press **Confirm**. lake runs it as you and adds *Done: …* or *That did not work: …* to the
+2. Press **Confirm**. Lake runs it as you and adds *Done: …* or *That did not work: …* to the
    conversation. A confirmed proposal shows **Confirmed** and is never offered again.
 
 A change to an existing pipeline goes to the Project Agent instead, and the answer shows **Review
@@ -149,8 +149,8 @@ context. After one message, later messages are about the page as usual.
 | You see | What to do |
 |---|---|
 | *Ask Orama works in a workspace, and you have none selected* | Choose a workspace in the top bar, or start one on **Ship → Workspaces**. |
-| An agent is not offered in **Talk to** | It is not deployed on your lake, is internal tooling, or does not chat. **Design → Agent Library** says which agents run. |
-| *That proposal is not in this conversation* (`not_found`) | Only proposals lake stored in your conversation can be confirmed. |
+| An agent is not offered in **Talk to** | It is not deployed on your Lake, is internal tooling, or does not chat. **Design → Agent Library** says which agents run. |
+| *That proposal is not in this conversation* (`not_found`) | Only proposals Lake stored in your conversation can be confirmed. |
 | `workspace_not_ready` | The workspace is not ready; conversations live in it. |
 | `invalid_input` at `/workspace_id` | The workspace id is unknown or not one of the account's. |
 | *That did not finish: …* | The agent failed after its retries; send the message again. |

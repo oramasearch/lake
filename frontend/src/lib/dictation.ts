@@ -22,7 +22,7 @@ export function spokenLength(seconds: number | null | undefined): string {
 }
 
 /** What lake answers when it has no speech-to-text key. */
-export const NOT_CONFIGURED = "Speech-to-text is not configured on this lake.";
+export const NOT_CONFIGURED = "Speech-to-text is not configured on this Lake.";
 
 /** Whether a failed `transcribe` or `create_transcript` means speech-to-text is not configured. */
 export function isNotSupported(error: unknown): boolean {

@@ -434,7 +434,7 @@ parse_openai_transcription(int status, std::string_view body, std::string_view m
     if (status == 401 || status == 403) {
         return std::unexpected(
             ApiError{"engine_error",
-                     "OpenAI refused this lake's API key, so speech-to-text is unavailable; an "
+                     "OpenAI refused this Lake's API key, so speech-to-text is unavailable; an "
                      "administrator should check LAKE_OPENAI_API_KEY"});
     }
     if (status < 200 || status >= 300) {

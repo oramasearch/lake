@@ -440,7 +440,7 @@ function ConnectServices({ services, connections }: { services: Row[]; connectio
   return (
     <div className="mt-4 border-t border-hairline pt-3">
       <div className="label m-0">Connect One of Your Services</div>
-      <p className="muted mt-1 mb-2 text-[12.5px]">The workspace reaches it inside the cluster, with the credential lake already holds; nothing to type.</p>
+      <p className="muted mt-1 mb-2 text-[12.5px]">The workspace reaches it inside the cluster, with the credential Lake already holds; nothing to type.</p>
       {connect.error ? <ErrorBlock error={connect.error} /> : null}
       <ul className="m-0 list-none divide-y divide-hairline p-0">
         {rows.map((service, i) => {
@@ -654,7 +654,7 @@ function Pull({ connections, onDone, onBusy }: { connections: Row[]; onDone: () 
           } catch (e) {
             // A workspace started with --governance asks for an approval lake cannot give.
             if ((e as { code?: string }).code === "consent_required")
-              throw new Error("This workspace requires an approval before it reaches an outside database, and lake cannot approve it.");
+              throw new Error("This workspace requires an approval before it reaches an outside database, and Lake cannot approve it.");
             throw e;
           }
           toast(`Pulled ${tableName}`);

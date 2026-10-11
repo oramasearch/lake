@@ -14,7 +14,7 @@ export type Screen = {
   /** The router pattern, without the `/w/:workspaceId` prefix. Keep lake's existing URL and query
    * parameters exactly: links to them are already handed out. */
   path: string;
-  /** Title Case. The document title is "lake — <title>". */
+  /** Title Case. The document title is "Lake — <title>". */
   title: string;
   section: SectionKey;
   /** Shown in the rail, in registry order within its section; a string overrides the label. */

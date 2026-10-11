@@ -303,7 +303,7 @@ function CallIt({ id, published }: { id: string; published: boolean }) {
   const py = `# Python\nimport os, requests\nr = requests.get("${origin}/v1/search_index", params={"customer_id": "${customerId}", "workspace_id": "${workspace}", "index_id": "${id}", "query": "renewal risk"},\n    headers={"Authorization": f"Bearer {os.environ['LAKE_SEARCH_KEY']}"})\nhits = r.json()["value"]["hits"]  # each {"id", "score", "fields": the row's values}`;
   return (
     <Card label="Outside calls" title="Call It from Your Code">
-      <p className="mt-0 text-[13px] text-ink-2">Call lake with the search key. The search runs in your own workspace; lake checks the key and records every query.</p>
+      <p className="mt-0 text-[13px] text-ink-2">Call Lake with the search key. The search runs in your own workspace; Lake checks the key and records every query.</p>
       <StateTabs<Lang>
         value={lang}
         onChange={setLang}

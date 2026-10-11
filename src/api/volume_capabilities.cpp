@@ -146,7 +146,7 @@ void register_volume_capabilities(Registry& registry) {
         .title = "Request volume snapshot",
         .description =
             "Operator or instance administrator only. Asks the operator for a CSI snapshot of "
-            "`target` now: `store` (lake's store volume) or a workspace id (each volume of its "
+            "`target` now: `store` (Lake's store volume) or a workspace id (each volume of its "
             "Zetta). Optional `schedule` (five cron fields, UTC) and `keep` change the target's "
             "policy. Poll volume_snapshots until the target's status shows a snapshot taken after "
             "`requested_at` that is ready to use.",

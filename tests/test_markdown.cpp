@@ -1,14 +1,19 @@
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <filesystem>
 #include <map>
 #include <regex>
 #include <set>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include <gtest/gtest.h>
 
+#include "lake/api/agent_docs.hpp"
+#include "lake/api/billing.hpp"
+#include "lake/api/capabilities.hpp"
 #include "lake/api/markdown.hpp"
 #include "lake/api/web_ui.hpp"
 
@@ -183,7 +188,7 @@ TEST(Docs, GuidesSpeakOfWorkspaces) {
     }
 }
 
-// The guides speak of lake and the workspace, never of the engine underneath it (lake#601, as the
+// The guides speak of Lake and the workspace, never of the engine underneath it (lake#601, as the
 // pages do since lake#583). Zetta stays only where a person picks it by name: it is a kind on
 // Ship -> Services, so the Services guide and the glossary's Service entry name it, and each says
 // once what it is. Every other line naming it fails. Code spans and blocks (a `zetta` kind key in
@@ -196,7 +201,7 @@ TEST(Docs, GuidesNameZettaOnlyWhereAPersonChoosesIt) {
     };
     static constexpr std::array<Allowed, 6> allowed{{
         {"concepts",
-         "| **Service** | A database, stream or engine lake runs for you: Postgres, Zetta,",
+         "| **Service** | A database, stream or engine Lake runs for you: Postgres, Zetta,",
          "the glossary lists the Service kinds a person can create, Zetta among them, and says "
          "what Zetta is"},
         {"services",
@@ -231,7 +236,7 @@ TEST(Docs, GuidesNameZettaOnlyWhereAPersonChoosesIt) {
                 return item.slug == page.slug && line.find(item.line) != std::string::npos;
             });
             EXPECT_NE(entry, allowed.end())
-                << page.slug << " names Zetta to a person; say lake or the workspace: " << line;
+                << page.slug << " names Zetta to a person; say Lake or the workspace: " << line;
             if (entry != allowed.end()) {
                 used.emplace(std::string(entry->slug), std::string(entry->line));
             }
@@ -240,6 +245,56 @@ TEST(Docs, GuidesNameZettaOnlyWhereAPersonChoosesIt) {
     for (const Allowed& item : allowed) {
         EXPECT_TRUE(used.contains({std::string(item.slug), std::string(item.line)}))
             << "an allowed line is gone; remove its entry: " << item.slug << ": " << item.line;
+    }
+}
+
+// The product's name is Lake, with a capital L (decision 59, lake#642). Prose never names it
+// lowercase; technical names keep their form: code spans and blocks (`claude mcp add lake`), a
+// hostname or dotted name (lake.live, lake.oramadev.net), a path or link (/skills/lake/SKILL.md,
+// oramasearch/lake), an identifier (lake_tok_, lake-theme, LAKE_KEY), the ciphertext prefix
+// lake:v1 and an issue reference (lake#642).
+static std::vector<std::string> lowercase_product_names(std::string_view prose) {
+    const auto inside_name = [](char c) {
+        return std::isalnum(static_cast<unsigned char>(c)) || c == '_' || c == '-' || c == '/' ||
+               c == '\\';
+    };
+    std::vector<std::string> found;
+    for (std::size_t at = prose.find("lake"); at != std::string_view::npos;
+         at = prose.find("lake", at + 4)) {
+        const char before = at == 0 ? ' ' : prose[at - 1];
+        const std::string_view after = prose.substr(at + 4, 2);
+        if (inside_name(before) || before == '.' || before == '@' || before == '$' ||
+            (!after.empty() && (inside_name(after[0]) || after[0] == '#')) ||
+            (after.size() == 2 && after[0] == '.' &&
+             std::isalpha(static_cast<unsigned char>(after[1]))) ||
+            after == ":v") {
+            continue;
+        }
+        const std::size_t from = at < 40 ? 0 : at - 40;
+        found.emplace_back(prose.substr(from, 100));
+    }
+    return found;
+}
+
+TEST(Docs, LowercaseProductNamesAreFoundOnlyInProse) {
+    EXPECT_EQ(lowercase_product_names("Open lake in the browser.").size(), 1U);
+    EXPECT_EQ(lowercase_product_names("Ask your lake's administrator.").size(), 1U);
+    EXPECT_EQ(lowercase_product_names("on this lake.").size(), 1U);
+    EXPECT_EQ(lowercase_product_names("lake checks it").size(), 1U);
+    EXPECT_TRUE(lowercase_product_names("Lake checks it, and the Lake Console shows it.").empty());
+    EXPECT_TRUE(lowercase_product_names("Open https://lake.oramadev.net or lake.live.").empty());
+    EXPECT_TRUE(lowercase_product_names("[skill](/skills/lake/SKILL.md) oramasearch/lake").empty());
+    EXPECT_TRUE(
+        lowercase_product_names("lake_tok_K, lake-theme, LAKE_KEY, lake#642, lake:v1:k").empty());
+    EXPECT_TRUE(
+        lowercase_product_names(prose_of("Run `claude mcp add lake`.\n```\nlake\n```")).empty());
+}
+
+TEST(Docs, GuidesCallTheProductLake) {
+    for (const auto& page : lake::api::web_ui_guide()) {
+        for (const std::string& near : lowercase_product_names(prose_of(page.markdown))) {
+            ADD_FAILURE() << page.slug << " names the product \"lake\"; say Lake: " << near;
+        }
     }
 }
 
@@ -255,5 +310,113 @@ TEST(Docs, GuidesSpeakOfExperiments) {
             << page.slug << " says \"" << found.str() << "\" near: "
             << prose.substr(static_cast<std::size_t>(std::max<long>(0, found.position() - 40)),
                             100);
+    }
+}
+
+// Every capability, billing's included, is listed under a group that names it on purpose: a new
+// capability no group claims fails here instead of falling into Repositories (lake#642).
+TEST(Docs, EveryCapabilityHasADeliberateGroup) {
+    lake::api::Registry registry;
+    lake::api::register_core_capabilities(registry, "test");
+    lake::api::register_billing_capabilities(registry);
+    std::vector<std::string> ungrouped;
+    for (const auto& capability : registry.list()) {
+        if (lake::api::agent_docs::group_of(capability->name) == lake::api::agent_docs::ungrouped) {
+            ungrouped.push_back(capability->name);
+        }
+    }
+    EXPECT_TRUE(ungrouped.empty()) << "no group claims: " << [&] {
+        std::string names;
+        for (const auto& name : ungrouped) {
+            names += name + " ";
+        }
+        return names;
+    }();
+    const auto groups = lake::api::agent_docs::tool_groups(registry);
+    const auto group = [&](std::string_view title) {
+        const auto found = std::ranges::find(groups, title, &lake::api::agent_docs::Group::title);
+        EXPECT_NE(found, groups.end()) << title;
+        return found == groups.end() ? std::set<std::string>{} : [&] {
+            std::set<std::string> names;
+            for (const auto& tool : found->tools) {
+                names.insert(tool.name);
+            }
+            return names;
+        }();
+    };
+    const auto drives = group("Drives");
+    for (const char* name : {"create_drive",
+                             "list_drives",
+                             "search_drives",
+                             "get_drive_entry",
+                             "begin_drive_upload",
+                             "finish_drive_upload",
+                             "load_drive_dataset"}) {
+        EXPECT_TRUE(drives.contains(name)) << name;
+    }
+    const auto billing = group("Usage and billing");
+    for (const char* name : {"usage_over_time",
+                             "usage_limits",
+                             "set_usage_limit",
+                             "price_list",
+                             "set_price_list",
+                             "bill_preview",
+                             "list_invoices",
+                             "get_invoice"}) {
+        EXPECT_TRUE(billing.contains(name)) << name;
+    }
+    const auto repositories = group("Repositories");
+    for (const char* name : {"list_issues", "create_issue", "update_issue", "issue_assignees"}) {
+        EXPECT_TRUE(repositories.contains(name)) << name;
+    }
+    EXPECT_TRUE(group("Transcripts").contains("transcribe"));
+    EXPECT_TRUE(group("Solutions").contains("duplicate_solution"));
+    EXPECT_TRUE(group("Search").contains("search"));
+}
+
+// llms.txt, llms-full.txt and the skill say Lake and never "space" in their own words: the summary,
+// what Lake does, Connect, the group summaries, the flows and the rules (lake#642). A tool's own
+// title and description come from the registry and are left out here.
+TEST(Docs, AgentDocsSayLakeAndNeverSpace) {
+    lake::api::Registry registry;
+    lake::api::register_core_capabilities(registry, "test");
+    lake::api::register_billing_capabilities(registry);
+    const std::string origin = "https://lake.example";
+    const std::regex space(R"re(\bspaces?\b)re", std::regex::icase);
+    std::string own = lake::api::agent_docs::llms_txt(registry, origin);
+    own = own.substr(0, own.find("## Tools")) + own.substr(own.find("## Worked flows"));
+    for (const auto& group : lake::api::agent_docs::tool_groups(registry)) {
+        own += group.summary + "\n";
+    }
+    std::smatch found;
+    EXPECT_FALSE(std::regex_search(own, found, space))
+        << "says \"" << found.str() << "\" near: "
+        << own.substr(static_cast<std::size_t>(std::max<long>(0, found.position() - 60)), 120);
+    for (const std::string& near : lowercase_product_names(prose_of(own))) {
+        ADD_FAILURE() << "names the product \"lake\": " << near;
+    }
+    EXPECT_NE(own.find("## What Lake Does"), std::string::npos);
+    for (const char* flow :
+         {"### Search everything", "### A drive of each kind", "### See usage and the bill"}) {
+        EXPECT_NE(own.find(flow), std::string::npos) << flow;
+    }
+    // llms-full.txt carries every tool with its input schema; the skill names every group but
+    // Server, and its frontmatter keeps the skill's name.
+    const std::string full = lake::api::agent_docs::llms_full_txt(registry, origin);
+    for (const auto& capability : registry.list()) {
+        if (capability->transport != lake::api::CapabilityTransport::Json) {
+            continue;
+        }
+        const std::size_t at = full.find("### `" + capability->name + "` — ");
+        ASSERT_NE(at, std::string::npos) << capability->name;
+        EXPECT_NE(full.find("Input schema:", at), std::string::npos) << capability->name;
+    }
+    const std::string skill = lake::api::agent_docs::skill_md(registry, origin);
+    EXPECT_TRUE(skill.starts_with("---\nname: lake\n"));
+    EXPECT_NE(skill.find("\n# Lake\n"), std::string::npos);
+    for (const auto& group : lake::api::agent_docs::tool_groups(registry)) {
+        if (group.title != "Server") {
+            EXPECT_NE(skill.find("- **" + group.title + "**"), std::string::npos) << group.title;
+        }
     }
 }

@@ -152,7 +152,7 @@ export default function SearchPage() {
       {places.includes("code") && <CodeOptionsBox options={options} onApply={(extra) => go({ extra })} />}
 
       {!q ? (
-        <Empty icon={SearchIcon} title="Search across lake">
+        <Empty icon={SearchIcon} title="Search across Lake">
           Type what you are looking for and choose where to look. You can search several places at once.
         </Empty>
       ) : (
@@ -189,7 +189,7 @@ function PlaceResults({ place, text, q, needsWorkspace }: { place: Place; text: 
             <Skeleton lines={2} />
           </div>
         ) : unavailable(q.error) ? (
-          <p className="muted m-0 px-4 py-3 text-[13px]">Searching {place.label.toLowerCase()} is not available on this lake yet.</p>
+          <p className="muted m-0 px-4 py-3 text-[13px]">Searching {place.label.toLowerCase()} is not available on this Lake yet.</p>
         ) : q.isError ? (
           <div className="p-3">
             <ErrorBlock error={q.error} retry={() => void q.refetch()} what={place.label.toLowerCase()} />

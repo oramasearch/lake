@@ -1,8 +1,8 @@
 # Single Sign-On and SCIM
 
-An organization can connect its own identity provider to lake: people sign in with their company
-account through **SAML 2.0** or **OpenID Connect (OIDC)**, and the provider keeps lake's users and
-teams in step through **SCIM 2.0**. When the provider deactivates someone, lake ends their sessions
+An organization can connect its own identity provider to Lake: people sign in with their company
+account through **SAML 2.0** or **OpenID Connect (OIDC)**, and the provider keeps Lake's users and
+teams in step through **SCIM 2.0**. When the provider deactivates someone, Lake ends their sessions
 at once.
 
 This page is for organization owners and admins.
@@ -14,8 +14,8 @@ This page is for organization owners and admins.
 | **Provider** | One SAML or OIDC identity provider registered for an organization: its name, protocol, issuer, protocol settings, attribute mapping, whether it may create users on first sign-in, and a SCIM token. |
 | **Issuer** | The provider's identifier (the SAML entity or the OIDC issuer URL). An assertion is accepted only from the registered issuer. |
 | **Federation issuer claim** | An `(organization, issuer, claim)` row allowing one claim from one issuer. An assertion is accepted only when every claim it asserts is allowed for that organization. |
-| **Just-in-time provisioning** | When on, a person's first sign-in may create their lake user, provided the provider supplies their TAAP identity. |
-| **SCIM token** | A bearer secret the provider sends to lake's SCIM endpoint. It identifies the provider and therefore the organization. |
+| **Just-in-time provisioning** | When on, a person's first sign-in may create their Lake user, provided the provider supplies their TAAP identity. |
+| **SCIM token** | A bearer secret the provider sends to Lake's SCIM endpoint. It identifies the provider and therefore the organization. |
 | **Provisioning log** | The durable record of every SCIM create, update and deactivation for a provider. |
 
 Secrets stay secret: the OIDC client secret is encrypted at rest, the SCIM token is kept only as an
@@ -36,7 +36,7 @@ Argon2id hash, and no read ever returns either.
 A provider needs, in every case: the organization, a name, the protocol (`saml` or `oidc`), the
 issuer and a SCIM token you choose (a long random value; your provider will send it). Then:
 
-- **OIDC** needs the client id and client secret your provider gave lake.
+- **OIDC** needs the client id and client secret your provider gave Lake.
 - **SAML** needs the provider's metadata and its PEM X.509 signing certificate.
 
 The **Add provider** drawer (**Configure SSO Provider**) on the **SSO** tab asks for the **Name**,
@@ -48,7 +48,7 @@ the API with them included:
   `{"organization_id": "<organization id>", "name": "Acme Okta", "protocol": "oidc", "issuer": "https://acme.okta.com", "client_id": "<client id>", "client_secret": "<client secret>", "scim_token": "<a long random value>", "jit_provisioning": true}`.
 - For SAML, send `"protocol": "saml"` with `metadata` and `signing_certificate` instead of the
   client id and secret.
-- `attribute_mapping` (an object) maps the provider's attribute names to lake's.
+- `attribute_mapping` (an object) maps the provider's attribute names to Lake's.
 - MCP: `register_sso_provider` with the same input.
 
 ## Test a Provider
@@ -81,14 +81,14 @@ The web app's sign-in page does not show a provider button; an SSO sign-in is st
 calls, which need no credential:
 
 - **OIDC:** `POST /v1/start_sso_oidc` with `{"provider_id": "<provider id>"}` answers the provider's
-  authorization address. The person signs in there, the provider redirects back to lake, and lake
+  authorization address. The person signs in there, the provider redirects back to Lake, and Lake
   exchanges the code, verifies the ID token, applies the issuer policy and creates the session.
 - **SAML:** `POST /v1/sign_in_saml` with
   `{"provider_id": "<provider id>", "saml_response": "<base64 SAML response>"}`. Lake verifies the
   response's RSA-SHA256 signature and digest against the provider's certificate before it issues a
   session.
 
-The session is an ordinary lake session of kind `saml` or `oidc`. It is bound to a SCIM user; the
+The session is an ordinary Lake session of kind `saml` or `oidc`. It is bound to a SCIM user; the
 first sign-in creates that user only when just-in-time provisioning is on and the provider supplies
 the person's TAAP identity.
 
@@ -102,15 +102,15 @@ token as `Authorization: Bearer <SCIM token>`. Lake serves:
 | `/scim/v2/Users` | list (with `filter` using `eq` on `id`, `externalId`, `userName`, `displayName`; `startIndex` and `count`), get, create, PATCH (`add`, `replace`, `remove`), delete |
 | `/scim/v2/Groups` | the same, plus member replacement, addition and filtered removal |
 
-What lake does with them:
+What Lake does with them:
 
 - **A user create** needs `externalId` or `userName`, and the person's TAAP identity as `taapId`
   (top-level, or in the `urn:orama:params:scim:schemas:extension:taap:2.0:User` extension).
-  `userName`, the first email, `displayName` and `active` become the lake user.
+  `userName`, the first email, `displayName` and `active` become the Lake user.
 - **Setting `active` to false, or deleting the user,** revokes every active session of that person
   and removes their SCIM-managed team memberships.
 - **A group** becomes a team: `externalId` is the team's stable handle and `displayName` its display
-  name. Members are named by lake's user id or by your provider's external id. Deleting the group
+  name. Members are named by Lake's user id or by your provider's external id. Deleting the group
   removes the team and its SCIM-managed access.
 
 Answers use `application/scim+json`, SCIM's `ListResponse` and SCIM's error schema. To check the
@@ -143,9 +143,9 @@ audit log.
 
 ## Limits
 
-- Protocols: SAML 2.0 (RSA-SHA256 signatures, the exclusive-canonicalization subset lake verifies)
+- Protocols: SAML 2.0 (RSA-SHA256 signatures, the exclusive-canonicalization subset Lake verifies)
   and OpenID Connect with PKCE.
-- OIDC sign-in needs the lake to know its public host; without it, `start_sso_oidc` is refused.
+- OIDC sign-in needs the Lake to know its public host; without it, `start_sso_oidc` is refused.
 - SCIM filters support `eq` only.
 - The web app has no SSO button on its sign-in page, and its **Add provider** drawer does not carry
   the protocol settings.

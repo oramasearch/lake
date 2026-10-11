@@ -687,7 +687,7 @@ TEST_P(WorkspaceRecordStores, TranscriptsLiveInTheirWorkspaceAndKeepNoAudio) {
     const auto unconfigured =
         t.call(first, "transcribe", {{"name", "memo"}, {"audio_base64", audio}});
     EXPECT_EQ(unconfigured.error.code, "not_supported");
-    EXPECT_EQ(unconfigured.error.message, "Speech-to-text is not configured on this lake.");
+    EXPECT_EQ(unconfigured.error.message, "Speech-to-text is not configured on this Lake.");
     const auto unconfigured_create =
         t.call(first,
                "create_transcript",

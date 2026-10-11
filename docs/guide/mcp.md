@@ -1,7 +1,7 @@
 # MCP Setup
 
-lake is an MCP server. Connect Claude Code, Codex, Cursor or any other client that speaks the Model
-Context Protocol, and your agent can use every lake capability as a tool: look at your datasets,
+Lake is an MCP server. Connect Claude Code, Codex, Cursor or any other client that speaks the Model
+Context Protocol, and your agent can use every Lake capability as a tool: look at your datasets,
 build and run pipelines, publish a model, read your repositories. Every tool is the same capability
 the web app and the REST API call, with the same permissions and the same audit, and the agent acts
 as you: it can never do more than the key you give it.
@@ -11,14 +11,14 @@ as you: it can never do more than the key you give it.
 | Term | What it is |
 |---|---|
 | **Endpoint** | `https://<your lake>/mcp`, for example `https://lake.oramadev.net/mcp`. JSON-RPC 2.0 over streamable HTTP, protocol version `2025-06-18`. |
-| **Key** | A lake API token sent as `Authorization: Bearer <key>`. The same keys work for MCP and REST. |
+| **Key** | A Lake API token sent as `Authorization: Bearer <key>`. The same keys work for MCP and REST. |
 | **Tool** | One capability. Its name, input schema and output schema are exactly those of the REST operation. |
 | **Read tool** | A tool that changes nothing, marked `readOnlyHint: true`. Only a tool that deletes, destroys, removes or revokes something is marked `destructiveHint: true`, so a client asks you before those; a tool that is safe to call twice is marked `idempotentHint: true`. |
-| **The lake skill** | A public `SKILL.md` that teaches an agent what lake is, which tool does what and the rules to keep. |
+| **The Lake skill** | A public `SKILL.md` that teaches an agent what Lake is, which tool does what and the rules to keep. |
 
 Everything below is on one page: **Developer → MCP**. Its strip at the top shows the MCP URL with
 **Copy**, the protocol, the header and how many tools there are. The page fills every block with
-your lake's address and your key.
+your Lake's address and your key.
 
 ## Create an MCP Key
 
@@ -31,7 +31,7 @@ your lake's address and your key.
 3. Choose its lifetime: as long as your sign-in allows (at most 30 days), 1 day, 7 days, a number of
    seconds, or **Never**. A key that never expires needs a reason, names its tools, and needs the opt-in
    of the account that owns your workspaces.
-4. Press **Create an MCP key**. The key is shown once, under *Your New Key: Copy It Now*, and lake
+4. Press **Create an MCP key**. The key is shown once, under *Your New Key: Copy It Now*, and Lake
    keeps only its hash. Store it in a password manager or your client's secret settings, then
    press **I've stored it**.
 
@@ -43,7 +43,7 @@ that page only. A key made on **Developer → API** works here too.
 Step 2, **Set Up Your Client**, has a tile per client. Choose yours; the page shows the file the
 setup goes in, the blocks with your address and key filled in, and how to check it worked. Without
 a key the blocks read the key from `LAKE_KEY` in your environment, in the syntax each client
-expands. The setups below show `https://lake.oramadev.net/mcp`; use your own lake's address.
+expands. The setups below show `https://lake.oramadev.net/mcp`; use your own Lake's address.
 
 ### Claude Code
 
@@ -53,9 +53,9 @@ Run in a terminal:
 claude mcp add --transport http lake https://lake.oramadev.net/mcp --header "Authorization: Bearer $LAKE_KEY"
 ```
 
-Add `--scope user` to use lake in every project, or `--scope project` to share it through the
+Add `--scope user` to use Lake in every project, or `--scope project` to share it through the
 project's `.mcp.json` (without your key in it). Check: run `/mcp` inside Claude Code, or
-`claude mcp list` in a terminal; lake shows *Connected*.
+`claude mcp list` in a terminal; Lake shows *Connected*.
 
 ### OpenAI Codex
 
@@ -79,7 +79,7 @@ Check: `codex mcp list` in a terminal, or `/mcp` inside Codex.
 ### Claude Desktop
 
 Claude Desktop → Settings → Developer → **Edit Config** opens `claude_desktop_config.json`
-(macOS `~/Library/Application Support/Claude/`, Windows `%APPDATA%\Claude\`). lake connects
+(macOS `~/Library/Application Support/Claude/`, Windows `%APPDATA%\Claude\`). Lake connects
 through `mcp-remote`, which needs Node.js 18 or later:
 
 ```json
@@ -96,7 +96,7 @@ through `mcp-remote`, which needs Node.js 18 or later:
 
 Put your key in place of `<LAKE_KEY>`: Claude Desktop does not read your shell's environment. The
 header goes through `env` so it survives intact on Windows. Check: restart Claude
-Desktop; lake appears in a new chat's tools menu.
+Desktop; Lake appears in a new chat's tools menu.
 
 ### Cursor
 
@@ -107,7 +107,7 @@ Desktop; lake appears in a new chat's tools menu.
 ```
 
 `${env:LAKE_KEY}` is read from the environment Cursor was started in. Check: Cursor → Settings →
-Tools & Integrations (MCP) lists lake with a green dot.
+Tools & Integrations (MCP) lists Lake with a green dot.
 
 ### VS Code
 
@@ -120,7 +120,7 @@ Copilot's agent mode reads `.vscode/mcp.json` in your project:
 }
 ```
 
-VS Code asks for the key the first time lake starts and keeps it in its secret storage; it never
+VS Code asks for the key the first time Lake starts and keeps it in its secret storage; it never
 goes into the file, so the file is safe to commit. Check: run *MCP: List Servers* from the Command
 Palette.
 
@@ -171,29 +171,29 @@ curl -s https://lake.oramadev.net/mcp \
   -d '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"list_workspaces","arguments":{"customer_id":"<customer id>"}}}'
 ```
 
-`initialize` answers lake's `serverInfo`; `tools/list` answers every tool and needs no key;
+`initialize` answers Lake's `serverInfo`; `tools/list` answers every tool and needs no key;
 `tools/call` on anything but `server_info` does.
 
 ### ChatGPT and Claude.ai
 
 - **Claude.ai**: Customize → Connectors → **Add custom connector**, with the name `lake`, the remote
-  MCP URL, and the request header `Authorization: Bearer <your key>`. Claude's servers call lake, so
-  your lake must be reachable from the internet, and Anthropic keeps the key: give it a read-only
+  MCP URL, and the request header `Authorization: Bearer <your key>`. Claude's servers call Lake, so
+  your Lake must be reachable from the internet, and Anthropic keeps the key: give it a read-only
   key.
-- **ChatGPT**: its custom connectors sign in with OAuth or no authentication and cannot carry a lake
-  key, and lake has no OAuth sign-in for connectors, so ChatGPT cannot connect to lake. Use OpenAI
+- **ChatGPT**: its custom connectors sign in with OAuth or no authentication and cannot carry a Lake
+  key, and Lake has no OAuth sign-in for connectors, so ChatGPT cannot connect to Lake. Use OpenAI
   Codex instead.
 
 ### After Lake Upgrades
 
-When lake gains or changes tools, a connected client is told (`notifications/tools/list_changed`)
+When Lake gains or changes tools, a connected client is told (`notifications/tools/list_changed`)
 on its next call, if it accepts server-sent events. If your client keeps showing an old tool list,
 reconnect or restart it.
 
 ## Teach Your Agent
 
-Step 3 gives your agent lake's rules, so it calls the right tool in the right order.
-**Download the lake skill** saves the public `/skills/lake/SKILL.md`. For Claude Code, install it
+Step 3 gives your agent Lake's rules, so it calls the right tool in the right order.
+**Download the Lake skill** saves the public `/skills/lake/SKILL.md`. For Claude Code, install it
 from a terminal:
 
 ```
@@ -204,7 +204,7 @@ Use `.claude/skills/lake/` instead to install it for one project. For Codex and 
 gives a block that downloads the skill and adds a short section to `~/.codex/AGENTS.md` or
 `~/.gemini/GEMINI.md` pointing at it.
 
-For any other agent, `/llms.txt` describes lake in one page, and `/llms-full.txt` adds every tool's
+For any other agent, `/llms.txt` describes Lake in one page, and `/llms-full.txt` adds every tool's
 description and input schema. Both are public, so an agent without a key can read them.
 
 The skill, both text files and this page are generated from the capability registry, so they list
@@ -213,9 +213,10 @@ exactly the tools the server has.
 ## What the Tools Do
 
 Step 4, **What the Tools Do**, lists every tool by product group, with a read or write chip, a
-search and a filter. The groups are: Workspace: Design, Train and Ship; Experiments; Transcripts;
-Streams; Agents; Services; Storage; Repositories; Organizations and access; Identity and sessions;
-Secrets, keys and certificates; Audit and transparency; Server.
+search and a filter. The groups are: Workspace: Design, Train and Ship; Experiments; Solutions;
+Agents; Streams; Drives; Transcripts; Search; Apps and packages; Services; Storage; Repositories;
+Organizations and access; Usage and billing; Identity and sessions; Secrets, keys and certificates;
+Audit and transparency; Server. Each group says in one line what it holds.
 
 A few things to know:
 
@@ -280,7 +281,7 @@ full rules.
 - One request body is at most 64 MiB of JSON.
 - Calls that wait for events count against 64 long requests per caller; past that a call answers
   `rate_limited`, retry.
-- `GET /mcp` and `DELETE /mcp` answer `405`: lake keeps no session and opens no standalone event
+- `GET /mcp` and `DELETE /mcp` answer `405`: Lake keeps no session and opens no standalone event
   stream.
 - A key never outlives the sign-in that made it, unless it is a standing key.
 
@@ -302,7 +303,7 @@ under your name, and you can read your own on **Organization → Activity**.
   `list_workspaces`. If the client cached an old tool list without the field, reconnect it.
 - **The client lists fewer tools than the page counts**: it holds a list from before an upgrade;
   reconnect or restart it.
-- **Claude Desktop shows lake failing to start**: `mcp-remote` needs Node.js 18 or later, and the
+- **Claude Desktop shows Lake failing to start**: `mcp-remote` needs Node.js 18 or later, and the
   key must be written into the file.
 - More answers: [FAQ and Troubleshooting](/docs/faq).
 

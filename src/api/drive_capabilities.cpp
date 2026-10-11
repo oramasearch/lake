@@ -1718,10 +1718,10 @@ void register_drive_capabilities(Registry& registry) {
         .description =
             "Give a person (or an organization) a live grant on a folder, with a role. Name them "
             "by `recipient`: their email or handle, one of the space's people (drive_share_people "
-            "lists them). A program may name a TAAP identity lake knows in `principal_taap_id` "
+            "lists them). A program may name a TAAP identity Lake knows in `principal_taap_id` "
             "instead. Lake writes and signs the grant's attestation itself and answers it with its "
             "digest, which the grant keeps as evidence; `attestation_digest` is optional, and only "
-            "the digest lake answered for this same share is accepted.",
+            "the digest Lake answered for this same share is accepted.",
         .input_schema =
             {{"type", "object"},
              {"properties",
@@ -1736,13 +1736,13 @@ void register_drive_capabilities(Registry& registry) {
                {"principal_taap_id",
                 {{"type", "string"},
                  {"description",
-                  "For programs: a person's or organization's TAAP identity that lake knows. Send "
+                  "For programs: a person's or organization's TAAP identity that Lake knows. Send "
                   "this or `recipient`."}}},
                {"role", {{"type", "string"}, {"enum", json::array({"read", "write", "share"})}}},
                {"attestation_digest",
                 {{"type", "string"},
                  {"description",
-                  "Optional. Lake makes the attestation; a digest sent must be the one lake "
+                  "Optional. Lake makes the attestation; a digest sent must be the one Lake "
                   "answered for this same folder, person and role."}}}}},
              {"required", json::array({"repository_id", "ref", "path", "role"})},
              {"additionalProperties", false}},
@@ -1782,7 +1782,7 @@ void register_drive_capabilities(Registry& registry) {
                 }
                 if (!names->contains(taap_id)) {
                     return ApiResult::failure("invalid_input",
-                                              "lake knows no person or organization with that "
+                                              "Lake knows no person or organization with that "
                                               "TAAP identity; name the person by `recipient` "
                                               "(their email or handle) instead",
                                               "/principal_taap_id");

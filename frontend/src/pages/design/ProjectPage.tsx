@@ -212,9 +212,9 @@ function ProjectBody({ name, building, onBuilding }: { name: string; building: b
                   {graphs.length === 0
                     ? designing
                       ? "Designing…"
-                      : "No pipelines yet. Describe what the project should predict or answer, and lake builds one."
+                      : "No pipelines yet. Describe what the project should predict or answer, and Lake builds one."
                     : summary.approved === 0
-                      ? "lake verifies and runs only an approved pipeline: approve one on the Pipelines tab."
+                      ? "Lake verifies and runs only an approved pipeline: approve one on the Pipelines tab."
                       : `${summary.approved} of ${summary.pipelines} pipelines approved.`}
                 </p>
               )}
@@ -260,7 +260,7 @@ function Pipelines({ project, graphs, designing, onBuild }: { project: string; g
         rowKey={(graph) => text(graph, "id") || text(graph, "name")}
         empty={
           <Empty compact icon={Workflow} title={designing ? "Designing…" : "No Pipelines Yet"}>
-            {designing ? "The Project Agent is designing this project's pipeline." : "Describe what the project should predict or answer, and lake builds one."}
+            {designing ? "The Project Agent is designing this project's pipeline." : "Describe what the project should predict or answer, and Lake builds one."}
           </Empty>
         }
         columns={[
@@ -378,7 +378,7 @@ function BuildPipeline({ project, datasets, methodologies, onClose }: { project:
   return (
     <Drawer
       title="Build a Pipeline"
-      subtitle="Describe what it should predict or answer; lake builds the steps from a template you can edit."
+      subtitle="Describe what it should predict or answer; Lake builds the steps from a template you can edit."
       onClose={onClose}
       footer={
         <>
@@ -414,7 +414,7 @@ function BuildPipeline({ project, datasets, methodologies, onClose }: { project:
         </Field>
         {columns.length > 0 && (
           <>
-            <Field label="Predicts" help="The column it learns to predict. lake names the steps from it and from the dataset.">
+            <Field label="Predicts" help="The column it learns to predict. Lake names the steps from it and from the dataset.">
               <select name="label_column" value={label} onChange={(e) => setLabel(e.target.value)}>
                 <option value="">Not chosen yet</option>
                 {columns.map((c) => (
@@ -435,7 +435,7 @@ function BuildPipeline({ project, datasets, methodologies, onClose }: { project:
         {runnable.length > 0 && (
           <Field label="Methodology" help="Only the methodologies this workspace's engine runs are listed.">
             <select name="methodology" value={methodology} onChange={(e) => setMethodology(e.target.value)}>
-              <option value="">Let lake choose from the description</option>
+              <option value="">Let Lake choose from the description</option>
               {runnable.map((m) => (
                 <option key={text(m, "id")} value={text(m, "id")}>
                   {text(m, "name")} ({text(m, "id")})
@@ -526,7 +526,7 @@ function CreatePipeline({ project, from }: { project: string; from: From }) {
           <Field label="Name">
             <input name="name" placeholder="python program" value={name} onChange={(e) => setName(e.target.value)} />
           </Field>
-          <Field label="Python pipeline" required help="lake reads it and lowers it to a pipeline; the code never runs.">
+          <Field label="Python pipeline" required help="Lake reads it and lowers it to a pipeline; the code never runs.">
             <textarea name="source" rows={6} className="font-mono" value={content} onChange={(e) => setContent(e.target.value)} />
           </Field>
           <div>

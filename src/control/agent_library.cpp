@@ -71,7 +71,7 @@ nlohmann::json agent_library_json(const std::map<std::string, std::string>& endp
         } else if (deployed) {
             status = "Available";
         } else {
-            status = "Not running on this lake";
+            status = "Not running on this Lake";
         }
         agents.push_back({{"key", std::string(agent.key)},
                           {"name", std::string(agent.name)},

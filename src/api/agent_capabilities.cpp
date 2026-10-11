@@ -131,7 +131,7 @@ void set_audit_fields(ApiContext& context,
 std::optional<ApiResult> non_expiring_refusal(ApiContext& context, const std::string& customer_id) {
     if (!context.non_expiring_credentials_allowed) {
         return ApiResult::failure("unauthorized",
-                                  "this lake does not allow credentials that never expire "
+                                  "this Lake does not allow credentials that never expire "
                                   "(LAKE_ALLOW_NON_EXPIRING_CREDENTIALS)");
     }
     auto allowed = context.store->customer_allows_non_expiring_credentials(customer_id);

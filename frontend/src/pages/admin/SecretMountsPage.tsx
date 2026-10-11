@@ -54,7 +54,7 @@ export default function SecretMountsPage() {
     <Page
       eyebrow="Organization"
       title="Secret Mounts"
-      sub="Static secrets and named encryption keys, kept in the workspace each mount was created in. Your account or one of your organizations owns each mount. Key material remains inside lake."
+      sub="Static secrets and named encryption keys, kept in the workspace each mount was created in. Your account or one of your organizations owns each mount. Key material remains inside Lake."
       actions={newMount}
     >
       {session.workspaces.length > 1 && (

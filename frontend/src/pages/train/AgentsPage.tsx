@@ -84,7 +84,7 @@ function YourAgents({ onNew }: { onNew: () => void }) {
         <Stat label="Agents" icon={Bot} value={agents.length} sub="in this workspace" />
         <Stat label="Run on their own" icon={Clock} value={unattended} sub="have a trigger" />
         <Stat label="Conversation only" icon={MessageSquare} value={agents.length - unattended} sub="answer when you talk to them" />
-        <Stat label="Frontier model" icon={Cpu} value={frontier} sub="run by lake on agent-runtime" />
+        <Stat label="Frontier model" icon={Cpu} value={frontier} sub="run by Lake on agent-runtime" />
       </StatRow>
       {agents.length === 0 ? (
         <Empty
@@ -295,7 +295,7 @@ function CreateAgent({ onClose }: { onClose: () => void }) {
         <Field label="Model">
           <select name="model" value={draft.model} onChange={(e) => set("model", e.target.value as Draft["model"])}>
             <option value="base">Orama base model, inside your workspace</option>
-            <option value="frontier">A frontier model (OpenAI), run by lake</option>
+            <option value="frontier">A frontier model (OpenAI), run by Lake</option>
           </select>
         </Field>
         <Field label="Runs on its own" help="Leave empty to use it only in conversation.">

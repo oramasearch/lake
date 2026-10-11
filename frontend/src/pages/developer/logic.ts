@@ -327,10 +327,10 @@ export function clientSetup(client: ClientId, endpoint: string, key: string | nu
             id: "mcp-claude-code",
             title: "terminal",
             code: `claude mcp add --transport http ${SERVER_NAME} ${endpoint} --header "Authorization: Bearer ${shellKey}"`,
-            note: "Add --scope user to use lake in every project, or --scope project to share it through the project's .mcp.json (without your key in it).",
+            note: "Add --scope user to use Lake in every project, or --scope project to share it through the project's .mcp.json (without your key in it).",
           },
         ],
-        check: "Run /mcp inside Claude Code, or claude mcp list in a terminal: lake shows ✔ Connected.",
+        check: "Run /mcp inside Claude Code, or claude mcp list in a terminal: Lake shows ✔ Connected.",
         notes: [],
       };
     case "codex":
@@ -346,7 +346,7 @@ export function clientSetup(client: ClientId, endpoint: string, key: string | nu
           {
             id: "mcp-codex-env",
             title: "your shell profile",
-            code: `export ${KEY_ENV}="${key ?? "<your lake key>"}"`,
+            code: `export ${KEY_ENV}="${key ?? "<your Lake key>"}"`,
           },
           {
             id: "mcp-codex-add",
@@ -354,7 +354,7 @@ export function clientSetup(client: ClientId, endpoint: string, key: string | nu
             code: `codex mcp add ${SERVER_NAME} --url ${endpoint} --bearer-token-env-var ${KEY_ENV}`,
           },
         ],
-        check: "Run codex mcp list in a terminal, or /mcp inside Codex: lake is listed with its tools.",
+        check: "Run codex mcp list in a terminal, or /mcp inside Codex: Lake is listed with its tools.",
         notes: [],
       };
     case "claude-desktop":
@@ -376,10 +376,10 @@ export function clientSetup(client: ClientId, endpoint: string, key: string | nu
                 },
               },
             }),
-            note: "Claude Desktop → Settings → Developer → Edit Config opens the file. mcp-remote (Node.js 18 or later) bridges the app to lake over HTTP; the header goes through env so the space in it survives on Windows.",
+            note: "Claude Desktop → Settings → Developer → Edit Config opens the file. mcp-remote (Node.js 18 or later) bridges the app to Lake over HTTP; the header goes through env so the space in it survives on Windows.",
           },
         ],
-        check: "Restart Claude Desktop; lake appears under the tools menu of a new chat, and Settings → Developer shows it running.",
+        check: "Restart Claude Desktop; Lake appears under the tools menu of a new chat, and Settings → Developer shows it running.",
         notes: key ? [] : [`Put your key in place of <${KEY_ENV}>: Claude Desktop does not read your shell's environment.`],
       };
     case "cursor":
@@ -395,7 +395,7 @@ export function clientSetup(client: ClientId, endpoint: string, key: string | nu
             code: json({ mcpServers: { [SERVER_NAME]: { url: endpoint, headers: { Authorization: `Bearer ${key ?? `\${env:${KEY_ENV}}`}` } } } }),
           },
         ],
-        check: "Cursor → Settings → Tools & Integrations (MCP) lists lake with a green dot and its tools.",
+        check: "Cursor → Settings → Tools & Integrations (MCP) lists Lake with a green dot and its tools.",
         notes: key ? [] : [`\${env:${KEY_ENV}} is read from the environment Cursor was started in.`],
       };
     case "vscode":
@@ -407,14 +407,14 @@ export function clientSetup(client: ClientId, endpoint: string, key: string | nu
             title: ".vscode/mcp.json",
             code: json({
               servers: { [SERVER_NAME]: { type: "http", url: endpoint, headers: { Authorization: "Bearer ${input:lake-key}" } } },
-              inputs: [{ type: "promptString", id: "lake-key", description: "lake MCP key", password: true }],
+              inputs: [{ type: "promptString", id: "lake-key", description: "Lake MCP key", password: true }],
             }),
             note: key
-              ? "VS Code asks for the key the first time lake starts and keeps it in its secret storage: paste the key from step 1. It never goes into the file."
-              : "VS Code asks for the key the first time lake starts and keeps it in its secret storage. It never goes into the file, so the file is safe to commit.",
+              ? "VS Code asks for the key the first time Lake starts and keeps it in its secret storage: paste the key from step 1. It never goes into the file."
+              : "VS Code asks for the key the first time Lake starts and keeps it in its secret storage. It never goes into the file, so the file is safe to commit.",
           },
         ],
-        check: "Run MCP: List Servers from the Command Palette: lake is Running. Its tools appear in Copilot Chat's agent mode tool picker.",
+        check: "Run MCP: List Servers from the Command Palette: Lake is Running. Its tools appear in Copilot Chat's agent mode tool picker.",
         notes: [],
       };
     case "windsurf":
@@ -431,7 +431,7 @@ export function clientSetup(client: ClientId, endpoint: string, key: string | nu
             note: "Remote servers take serverUrl, not url. Cascade → MCP servers → Refresh picks the file up.",
           },
         ],
-        check: "Cascade's MCP panel lists lake as enabled, with its tools.",
+        check: "Cascade's MCP panel lists Lake as enabled, with its tools.",
         notes: [],
       };
     case "gemini":
@@ -453,7 +453,7 @@ export function clientSetup(client: ClientId, endpoint: string, key: string | nu
             code: `gemini mcp add --transport http --header "Authorization: Bearer ${shellKey}" ${SERVER_NAME} ${endpoint}`,
           },
         ],
-        check: "Run /mcp inside Gemini CLI, or gemini mcp list in a terminal: lake is Connected.",
+        check: "Run /mcp inside Gemini CLI, or gemini mcp list in a terminal: Lake is Connected.",
         notes: [],
       };
     case "curl":
@@ -478,7 +478,7 @@ export function clientSetup(client: ClientId, endpoint: string, key: string | nu
             note: "A refused call is a result with isError: true and the same error envelope REST answers.",
           },
         ],
-        check: "initialize answers lake's serverInfo; tools/list answers every tool.",
+        check: "initialize answers Lake's serverInfo; tools/list answers every tool.",
         notes: ["Any client that speaks MCP's streamable HTTP transport and can send an Authorization header connects the same way."],
       };
     case "web":
@@ -489,12 +489,12 @@ export function clientSetup(client: ClientId, endpoint: string, key: string | nu
             id: "mcp-claude-ai",
             title: "Claude.ai → Customize → Connectors → Add custom connector",
             code: `Name:            ${SERVER_NAME}\nRemote MCP URL:  ${endpoint}\nRequest header:  Authorization: Bearer ${key ?? `<${KEY_ENV}>`}`,
-            note: "Claude.ai's custom connectors can send a fixed request header on every call. Claude's servers call lake, so lake must be reachable from the internet, and the key is kept by Anthropic: give it a read-only key.",
+            note: "Claude.ai's custom connectors can send a fixed request header on every call. Claude's servers call Lake, so Lake must be reachable from the internet, and the key is kept by Anthropic: give it a read-only key.",
           },
         ],
-        check: "The connector shows lake's tools; turn it on in a chat from the tools menu.",
+        check: "The connector shows Lake's tools; turn it on in a chat from the tools menu.",
         notes: [
-          "ChatGPT's custom connectors (developer mode) sign in with OAuth or no authentication, and a lake key is a bearer token, so ChatGPT cannot connect to lake yet. Use OpenAI Codex, which takes the key from your environment.",
+          "ChatGPT's custom connectors (developer mode) sign in with OAuth or no authentication, and a Lake key is a bearer token, so ChatGPT cannot connect to Lake yet. Use OpenAI Codex, which takes the key from your environment.",
           "Lake has no OAuth sign-in for connectors.",
         ],
       };
@@ -517,9 +517,9 @@ export function skillInstall(target: SkillTarget, origin: string): SetupBlock[] 
   const pointer = (file: string, home: string) =>
     `mkdir -p ${home} && curl -fsSL ${skill} -o ${home}/lake-SKILL.md\n` +
     `cat >> ${home}/${file} <<'EOF'\n\n` +
-    `## lake\n` +
-    `lake is connected as the MCP server "lake". Before using its tools, read\n` +
-    `${home}/lake-SKILL.md: what lake is, which tool does what, the worked flows\n` +
+    `## Lake\n` +
+    `Lake is connected as the MCP server "lake". Before using its tools, read\n` +
+    `${home}/lake-SKILL.md: what Lake is, which tool does what, the worked flows\n` +
     `and the rules (an edited pipeline is proposed again; deleting destroys data).\n` +
     `EOF`;
   switch (target) {
@@ -540,7 +540,7 @@ export function skillInstall(target: SkillTarget, origin: string): SetupBlock[] 
       return [
         {
           id: "skill-other",
-          title: "lake for any agent",
+          title: "Lake for any agent",
           code: `curl -fsSL ${origin}/llms.txt\ncurl -fsSL ${origin}/llms-full.txt   # every tool with its input schema\ncurl -fsSL ${skill}`,
           note: "All three are public. Put the one your agent can hold in its context or rules file.",
         },

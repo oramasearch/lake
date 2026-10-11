@@ -2,7 +2,7 @@
 
 Share a folder of a repository with a person, with an organization, or with anyone who holds a
 link, and see the folders other people shared with you. Sharing works on the Drive view of a
-repository (its **Files** tab), and every share is a policy grant lake checks on each open, so the
+repository (its **Files** tab), and every share is a policy grant Lake checks on each open, so the
 page always tells you who can reach a folder before and after you share it.
 
 ## Concepts
@@ -13,7 +13,7 @@ A folder can be delivered three ways:
 |---|---|---|
 | **Live grant** (People, Organization) | The live folder, under its own identity. Later changes and moves reach them. | Yes: change the policy and the next open is refused. |
 | **Link** | Anyone holding the link opens the live folder, signed in or not, until the link expires or is revoked. | Yes: revoking stops the link's next open. |
-| **Independent copy** | Bytes someone downloaded. | No. A downloaded copy is not live and cannot be recalled by anything in lake. |
+| **Independent copy** | Bytes someone downloaded. | No. A downloaded copy is not live and cannot be recalled by anything in Lake. |
 
 More terms:
 
@@ -21,7 +21,7 @@ More terms:
 |---|---|
 | **Role** | What a recipient may do: **View** (browse and download), **Edit** (also upload, rename, move and delete) or **Share** (also create shares). |
 | **Email or handle** | How you name a person when you share: their sign-in email, or their handle (`@ana`). |
-| **TAAP identity** | The id lake knows a person or organization by; programs may share by it. A person can show theirs with `liquid identity show`. |
+| **TAAP identity** | The id Lake knows a person or organization by; programs may share by it. A person can show theirs with `liquid identity show`. |
 | **Inherited access** | Access that comes from somewhere above the folder, such as the repository or an organization membership. The access table marks each entry **direct** or **inherited**. |
 | **Holding workspace** | The workspace a folder's links are kept in. Links live in one workspace of the repository's owner, chosen when you open the sharing page. |
 | **Stable folder identity** | A shared folder is followed by its identity, not its path, so moving or renaming it keeps the share pointing at the same folder. |
@@ -36,7 +36,7 @@ More terms:
    table **Who Can Access This Folder Now**: each principal, its role, the actions it allows, and
    whether access is direct or inherited.
 
-The table is the policy engine's own answer, the same check lake runs on every open.
+The table is the policy engine's own answer, the same check Lake runs on every open.
 
 - REST: `GET /v1/drive_effective_access?repository_id=<repository id>&workspace_id=<workspace id>&ref=main&path=reports`
 - MCP: `drive_effective_access` with the same input. The answer also lists the folder's links held
@@ -44,7 +44,7 @@ The table is the policy engine's own answer, the same check lake runs on every o
 
 ## Share with a Person or an Organization
 
-You name the person by their email or their handle; lake finds who that is and records the share
+You name the person by their email or their handle; Lake finds who that is and records the share
 itself.
 
 1. On the sharing page, under **Choose a Delivery**, press **Share with person** (or **Share with
@@ -59,7 +59,7 @@ itself.
    updates.
 
 Lake writes a statement of the share (the folder, the person, the role and who shared it), signs
-it with lake's own identity, and keeps the statement's digest on the grant as its evidence. You
+it with Lake's own identity, and keeps the statement's digest on the grant as its evidence. You
 never make or paste a digest. Sharing the same folder with the same person and role again answers
 the grant that is already there.
 
@@ -79,7 +79,7 @@ in the table only as their own access arrives.
 - A program that already holds a person's TAAP identity sends it instead of `recipient`:
   `{"repository_id": "<repository id>", "ref": "main", "path": "reports", "principal_taap_id": "<recipient TAAP id>", "role": "read"}`.
   Lake refuses an identity it does not know (`invalid_input` at `/principal_taap_id`).
-- `attestation_digest` is optional and only for repeating a share: lake accepts only the digest it
+- `attestation_digest` is optional and only for repeating a share: Lake accepts only the digest it
   answered for the same folder, person and role, and refuses any other (`invalid_input` at
   `/attestation_digest`).
 - MCP: `share_drive_folder` with the same input.
@@ -91,7 +91,7 @@ in the table only as their own access arrives.
    capability-aware clients only**. The signed-out page a link opens is always read-only.
 3. Set **Until when (UTC)**: every link needs a future expiry.
 4. Press **Create link**. Under **Copy this link now** the page shows the link's address once;
-   lake keeps only a hash of it, so copy it before you leave.
+   Lake keeps only a hash of it, so copy it before you leave.
 
 Links have no passcode. The **Passcode** field says so; nothing is sent or stored.
 
@@ -99,7 +99,7 @@ Links have no passcode. The **Passcode** field says so; nothing is sent or store
   `{"repository_id": "<repository id>", "workspace_id": "<workspace id>", "ref": "main", "path": "reports", "role": "read", "expires_at": "2026-12-31T23:59:59Z"}`.
 - MCP: `create_drive_share_link` with the same input. The answer carries the token once.
 
-The link's address is `/share/<token>` on your lake. The token names the workspace that holds it,
+The link's address is `/share/<token>` on your Lake. The token names the workspace that holds it,
 so it works on its own, without a lookup anywhere else.
 
 ## Manage and Revoke Links
