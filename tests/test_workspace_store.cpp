@@ -1694,7 +1694,9 @@ TEST(WorkspaceStoreSearch, ASearchNeverOpensAWorkspaceItsCallerCannotRead) {
     ASSERT_TRUE(owner_token) << owner_token.error().message;
     const auto [grantee, grantee_token] = token_for("taap:1:ed25519:search-grantee", "grantee@example.test");
     ASSERT_TRUE(rig.store->create_grant({grantee.taap_id, space->id, "read", "sha512-256:grantee", "admin", "grant"}));
-    const std::uint64_t gamma_requests = rig.zetta->requests_to(endpoint_gamma);
+    // The owner loop's quota reads of gamma's usage are not the callers' and are left out (lake#607):
+    // they run at start and every ten seconds, so under load one can land in the window below.
+    const std::uint64_t gamma_requests = rig.zetta->store_requests_to(endpoint_gamma);
     const std::uint64_t gamma_fence = rig.zetta->lease(endpoint_gamma).fence;
 
     for (const std::string& bearer : {owner_token->secret, grantee_token}) {
@@ -1724,11 +1726,17 @@ TEST(WorkspaceStoreSearch, ASearchNeverOpensAWorkspaceItsCallerCannotRead) {
         EXPECT_EQ(repository_status, 400U) << repository.dump();
     }
     // Not one request reached gamma's Zetta.
-    EXPECT_EQ(rig.zetta->requests_to(endpoint_gamma), gamma_requests);
+    EXPECT_EQ(rig.zetta->store_requests_to(endpoint_gamma), gamma_requests) << [&] {
+        std::string seen;
+        for (const std::string& line : rig.zetta->requests_seen(endpoint_gamma)) {
+            seen += "\n  " + line;
+        }
+        return seen;
+    }();
     EXPECT_EQ(rig.zetta->lease(endpoint_gamma).fence, gamma_fence);
     // The operator still reaches it.
     EXPECT_EQ(searched(rig, "gamma&workspace_id=" + rig.gamma)["value"]["items"].size(), 1U);
-    EXPECT_GT(rig.zetta->requests_to(endpoint_gamma), gamma_requests);
+    EXPECT_GT(rig.zetta->store_requests_to(endpoint_gamma), gamma_requests);
 }
 
 TEST(WorkspaceStoreSearch, AWipedOrTamperedWorkspaceIndexIsRebuiltNotServedEmpty) {

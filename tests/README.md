@@ -630,7 +630,11 @@ once, not a copy per append: lake#547);
 `durable_requests` counts the requests that asked for an fsync (lake#535).
 `fail_after` and `fail_randomly` lose requests before they are applied; `lose_next_answers` and
 `lose_answers_randomly` apply them and then lose the answer. `applied` and `most_writes_in_flight`
-show the order and concurrency of what was applied. Set `LAKE_TEST_ZETTA_BINARY` to a `zetta` built from Zetta dev
+show the order and concurrency of what was applied. `requests_seen` lists every request one endpoint received
+(method and path), and `store_requests_to` counts them without the owner loop's `:usage` reads,
+which run at start and every ten seconds whoever is calling: a test that a caller never reaches a
+workspace counts only those (lake#607, `WorkspaceStoreSearch.ASearchNeverOpensAWorkspaceItsCallerCannotRead`
+once counted a quota read that landed in its window under load). Set `LAKE_TEST_ZETTA_BINARY` to a `zetta` built from Zetta dev
 to run `WorkspaceStoreZetta.*` against it; `latency_proxy.hpp` (`LatencyProxy`) puts a loopback
 round trip in front of it, `LAKE_TEST_ZETTA_RTT_MS` (default 10) for
 `WorkspaceStoreZetta.AOneFileCommitsRequestsAreCountedAndTimed`, and holds each request that asks

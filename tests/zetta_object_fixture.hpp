@@ -222,6 +222,20 @@ public:
         std::lock_guard lock(mutex_);
         return by_endpoint_[endpoint];
     }
+    // The requests sent to one workspace Zetta other than reads of its bucket's usage (`:usage`).
+    // The owner loop reads every switched workspace's usage for the quota at start and every ten
+    // seconds (refresh_workspace_usage), whoever is calling; that read opens no store, takes no
+    // lease and carries no content, so a test of what a caller reaches counts the rest (lake#607).
+    std::uint64_t store_requests_to(const std::string& endpoint) {
+        std::lock_guard lock(mutex_);
+        return static_cast<std::uint64_t>(std::ranges::count_if(
+            seen_by_endpoint_[endpoint], [](const std::string& line) { return !line.ends_with(":usage"); }));
+    }
+    // Every request sent to one workspace Zetta, as "METHOD /path?query", in arrival order.
+    std::vector<std::string> requests_seen(const std::string& endpoint) {
+        std::lock_guard lock(mutex_);
+        return seen_by_endpoint_[endpoint];
+    }
     // Acquires of `endpoint`'s leases waiting now for a holder to let go.
     int acquiring(const std::string& endpoint) {
         std::lock_guard lock(mutex_);
@@ -504,6 +518,8 @@ private:
         for (const auto& [endpoint, node] : nodes_) {
             if (request.url.starts_with(endpoint + "/")) {
                 ++by_endpoint_[endpoint];
+                seen_by_endpoint_[endpoint].push_back(request.method + " " +
+                                                      request.url.substr(endpoint.size()));
             }
         }
         if (keep_bodies_) {
@@ -775,6 +791,7 @@ private:
     std::uint64_t incarnations_ = 0;
     std::uint64_t incarnation_refusals_ = 0;
     std::map<std::string, std::uint64_t> by_endpoint_;
+    std::map<std::string, std::vector<std::string>> seen_by_endpoint_;
     std::map<std::string, std::uint64_t> by_method_;
     std::map<std::string, int> acquiring_;
     std::vector<std::string> bodies_;
