@@ -112,6 +112,10 @@ The value overrides the Lake's default limit for that account; `0` removes the l
 
 To write again, delete what you no longer need, or ask an admin of the account to raise the limit.
 
+A **Model Tokens** limit is enforced too: once this month's model tokens reach it, every agent's
+model call is refused (`usage_limit_reached`, HTTP 429) until an admin raises or removes the limit,
+or the month ends. Every other limit only warns.
+
 ## Usage of One Agent, App, Service or Model
 
 - An agent's page (**Train → Agents**, then the agent) shows its **Model tokens** this month.
@@ -123,16 +127,22 @@ To write again, delete what you no longer need, or ask an admin of the account t
 Each card's **Usage** button opens the dashboard on that workspace and dimension. Home's
 **Dashboard** has a **Usage** button for the workspaces chosen there.
 
-## Report an Agent's Model Tokens
+## How an Agent's Model Tokens Are Counted
 
-An agent run reports the tokens it spent with its own credential (a task, launch or schedule
-credential, or a library agent's bus credential with its task):
+Every model call an agent makes goes through Lake, which sends it to the model provider and counts
+the tokens the provider reports in the workspace the agent's run belongs to, by agent, run and
+model. Ask Orama, the other library agents and the agents you build are all counted this way; none
+of them reports its own tokens, and none holds a provider key. An agent you write calls the model
+with the OpenAI SDK pointed at Lake:
 
-- REST: `POST /v1/record_model_usage` with
-  `{"model_name": "gpt-5", "input_tokens": 1200, "output_tokens": 300}`.
-- MCP: `record_model_usage`.
+```python
+from openai import OpenAI
+client = OpenAI(base_url=f"{LAKE_URL}/openai/v1", api_key=LAKE_TOKEN)
+```
 
-Lake counts them in the workspace the run belongs to. A person's own sign-in or token is refused.
+A model call made outside Lake can be reported with `record_model_usage`
+(`{"model_name": "gpt-5", "input_tokens": 1200, "output_tokens": 300}`, with the run's own
+credential). Never report a call that went through Lake: it is already counted.
 
 ## Repository Usage by Hour
 
@@ -179,7 +189,7 @@ Usage before this measurement started is not in the charts.
 |---|---|
 | `usage_over_time`, `usage_limits`, `metering_usage` | `read` on the account (any organization member, for the organization's account) |
 | `set_usage_limit`, `set_storage_quota` | `admin` on the account |
-| `record_model_usage` | the agent run's own credential |
+| `record_model_usage`, `model_completion` (the model gateway) | the agent run's own credential |
 
 Each read and each limit change is recorded in the central audit log; an agent's report is
 recorded in its workspace's audit.
@@ -205,6 +215,7 @@ recorded in its workspace's audit.
 | `invalid_input` at `/to` | `to` is not after `from`, or the period is too long for the granularity. |
 | `unauthorized` | You have no grant on that account, or (for `record_model_usage`) the credential is not an agent run's. |
 | **Near a Limit** | A dimension passed its warning percentage this month. Raise the limit or use less. |
+| An agent answers `usage_limit_reached` | The account used its monthly Model Tokens limit. An admin raises or removes it under Usage. |
 | Pushes answer 429 busy | Repository storage is at the limit. See [What Happens over the Limit](#what-happens-over-the-limit). |
 | A workspace shows **Not read** | It is not running or could not be read; its figures are left out, not counted as zero. |
 

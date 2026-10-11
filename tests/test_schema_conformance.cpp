@@ -412,6 +412,15 @@ TEST(SchemaConformance, EveryToolAndRequiredOutputUsesHttpContract) {
              -> std::expected<lake::api::Transcription, lake::api::ApiError> {
              return lake::api::Transcription{"schema words", 1.5, "gpt-4o-transcribe"};
          },
+         // A fake model provider: the model gateway never calls OpenAI in tests (lake#248).
+         .model_provider =
+             [](const lake::api::ModelProviderRequest&) {
+                 return lake::api::ModelProviderResponse{
+                     200,
+                     R"({"object":"chat.completion","model":"gpt-5.5","choices":[],)"
+                     R"("usage":{"prompt_tokens":3,"completion_tokens":1}})",
+                     {}};
+             },
          // Billing on (lake#564), so its capabilities are in the contract too.
          .billing = true,
          .store_root = root.string()});
@@ -449,6 +458,29 @@ TEST(SchemaConformance, EveryToolAndRequiredOutputUsesHttpContract) {
     stream["confirm_name"] = "schema-orders";
     http.call("delete_stream", stream);
     http.call("transcribe", {{"name", "memo.webm"}, {"audio_base64", "c3BlZWNo"}});
+    {
+        // The model gateway answers only an agent run's own credential (docs/api/model-gateway.md).
+        lake::control::AgentTask task;
+        task.id = lake::control::new_uuid_v4();
+        task.customer_id = customer.id;
+        task.agent = "agent-ask-orama";
+        task.kind = "turn";
+        task.workspace_id = experiments.id;
+        task.scopes = {"get_agent_task"};
+        task.requested_by_user_id = user.id;
+        checked(store->create_agent_task(task));
+        const std::string credential = "lat." + task.id + ".0123456789abcdef0123456789abcdef";
+        checked(store->claim_agent_task(
+            task.id, task.agent, lake::control::identity_crypto::sha256_hex(credential)));
+        const std::string operator_bearer = http.bearer;
+        http.bearer = credential;
+        http.call("model_completion",
+                  {{"endpoint", "chat/completions"},
+                   {"request",
+                    {{"model", "gpt-5.5"},
+                     {"messages", json::array({{{"role", "user"}, {"content", "hi"}}})}}}});
+        http.bearer = operator_bearer;
+    }
     const json transcript_scope{{"customer_id", customer.id}, {"workspace_id", experiments.id}};
     auto transcript_input = transcript_scope;
     transcript_input.update({{"title", "Schema call"}, {"source", "text"}, {"text", "words"}});

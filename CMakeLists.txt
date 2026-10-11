@@ -254,6 +254,7 @@ add_library(lake-core STATIC
   src/api/transcript_capabilities.cpp
   src/api/deletion_capabilities.cpp
   src/api/drives_capabilities.cpp
+  src/api/model_gateway.cpp
   src/api/transcription.cpp
   src/api/workspace_store_capabilities.cpp
   src/api/datasets.cpp
