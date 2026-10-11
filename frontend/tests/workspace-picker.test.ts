@@ -46,7 +46,7 @@ test("a group's header is the owner as written, with its kind and initial", () =
 test("the pill names the owner only when there is more than one", () => {
   assert.equal(showsOwner([mine]), false);
   assert.equal(showsOwner([mine, acme]), true);
-  assert.equal(pillOwner(mine), "Personal");
+  assert.equal(pillOwner(mine), "Your account");
   assert.equal(pillOwner(acme), "acme-research");
   assert.equal(pillTitle("Churn study", mine, viewer, false), "Churn study");
   assert.equal(pillTitle("Production", acme, viewer, true), "Production — acme-research (Organization)");
