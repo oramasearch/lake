@@ -159,7 +159,7 @@ export default function CommandCenter() {
     { label: "Datasets", value: sum(figures.map((f) => f?.datasets)), icon: Database, to: "/train/data" },
     { label: "Transcripts", value: sum(figures.map((f) => f?.transcripts)), icon: FileAudio, to: "/transcripts" },
     { label: "Projects", value: sum(figures.map((f) => f?.projects)), icon: FolderKanban, to: "/design/projects" },
-    { label: "Agents", value: sum(figures.map((f) => f?.agents)), icon: Bot, to: "/train/agents" },
+    { label: "Agents", value: sum(figures.map((f) => f?.agents)), icon: Bot, to: "/design/agents" },
     {
       label: "Runs",
       value: runs.length || (figures.some((f) => f?.runs) ? 0 : null),
@@ -340,7 +340,7 @@ export default function CommandCenter() {
                   <Button to="/train/data">Load data</Button>
                   <Button to="/transcripts">Add a transcript</Button>
                   <Button to="/design/opportunities">See opportunities</Button>
-                  <Button to="/train/agents">Build an agent</Button>
+                  <Button to="/design/agents">Design an agent</Button>
                   <Button to="/ship/apps">Ship an app</Button>
                   <Button to="/search">Search everything</Button>
                 </div>

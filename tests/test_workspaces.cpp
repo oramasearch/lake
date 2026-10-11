@@ -2302,6 +2302,68 @@ TEST(AgentRuns, ALaunchCredentialActsAsTheLauncherWithTheLaunchScopes) {
     EXPECT_FALSE(store.context_for(credential)) << "a stopped launch's credential stops too";
 }
 
+TEST(AgentRuns, ARunsKeyCarriesTheReadsOfItsAgentsSkillsAndNoChange) {
+    AgentRuns r;
+    const auto has = [](const std::vector<std::string>& scopes, std::string_view name) {
+        return std::ranges::find(scopes, name) != scopes.end();
+    };
+    // An agent with no skill: the scopes every run has, and nothing a skill adds.
+    r.w.caller->answers["get_agent"] = {{"id", "a-1"}, {"name", "Plain"}, {"runtime", "python"}};
+    const auto plain = r.call("launch_agent", {{"agent_id", "a-1"}});
+    ASSERT_TRUE(plain.ok) << plain.error.message;
+    EXPECT_EQ(r.store.get_agent_launch(plain.value["id"])->scopes,
+              lake::control::agent_launch_scopes);
+
+    // drives and usage (agent-runtime#7): their reads, never their changes, never another
+    // skill's reads.
+    r.w.caller->answers["get_agent"] = {{"id", "a-2"},
+                                        {"name", "Drive reader"},
+                                        {"runtime", "python"},
+                                        {"skills", {"drives", "usage", "not-a-skill"}}};
+    const auto launched = r.call("launch_agent", {{"agent_id", "a-2"}});
+    ASSERT_TRUE(launched.ok) << launched.error.message;
+    const auto scopes = r.store.get_agent_launch(launched.value["id"])->scopes;
+    for (const std::string& base : lake::control::agent_launch_scopes) {
+        EXPECT_TRUE(has(scopes, base)) << base;
+    }
+    EXPECT_TRUE(has(scopes, "drive_browse"));
+    EXPECT_TRUE(has(scopes, "read_drive_file"));
+    EXPECT_TRUE(has(scopes, "metering_usage"));
+    EXPECT_FALSE(has(scopes, "upload_drive_files")) << "a change is a proposal, never a scope";
+    EXPECT_FALSE(has(scopes, "delete_drive")) << "a change is a proposal, never a scope";
+    EXPECT_FALSE(has(scopes, "list_issues")) << "repositories is not granted";
+    EXPECT_FALSE(has(scopes, "read_secret"));
+
+    // A schedule's runs carry the same scopes as a launch of the same agent.
+    const auto scheduled =
+        r.call("schedule_agent", {{"agent_id", "a-2"}, {"trigger", "every Monday at 09:00"}});
+    ASSERT_TRUE(scheduled.ok) << scheduled.error.message;
+    EXPECT_EQ(r.store.get_agent_cron_schedule(scheduled.value["id"])->scopes, scopes);
+}
+
+TEST(AgentRuns, EverySkillLakeOffersIsOneAgentRuntimeDefines) {
+    // src/control/agent_skills.cpp is vendored from agent-runtime's skills.json; the original five
+    // come first, in Studio's order.
+    std::vector<std::string_view> names;
+    for (const auto& skill : lake::control::agent_skills()) {
+        names.push_back(skill.name);
+        EXPECT_FALSE(skill.label.empty()) << skill.name;
+    }
+    const std::vector<std::string_view> expected{"search",
+                                                 "generate-data",
+                                                 "train",
+                                                 "summarize",
+                                                 "call-api",
+                                                 "drives",
+                                                 "transcripts",
+                                                 "repositories",
+                                                 "datasets",
+                                                 "streams",
+                                                 "pipelines",
+                                                 "usage"};
+    EXPECT_EQ(names, expected);
+}
+
 TEST(AgentRuns, LaunchStopAndScheduleAPythonAgentButNeverANativeOne) {
     AgentRuns r;
     r.w.caller->answers["get_agent"] = {{"id", "a-1"}, {"name", "Watcher"}, {"runtime", "python"}};
@@ -2526,7 +2588,10 @@ TEST(AgentRuns, CreateAgentRefusesDefinitionFieldsZettaWouldDrop) {
         {{"capability", "create_agent"},
          {"input", python(json::array({{{"path", "main.py"}, {"contents", "print(1)"}}}))}});
     ASSERT_TRUE(made.ok) << made.error.message;
-    EXPECT_EQ(r.w.caller->calls.back().second["definition"]["files"][0]["contents"], "print(1)");
+    const auto sent = std::ranges::find_if(r.w.caller->calls | std::views::reverse,
+                                           [](const auto& call) { return call.first == "create_agent"; });
+    ASSERT_NE(sent, (r.w.caller->calls | std::views::reverse).end());
+    EXPECT_EQ(sent->second["definition"]["files"][0]["contents"], "print(1)");
 
     // Zetta's own refusal code is reported as lake's documented invalid_input.
     r.w.caller->failure = lake::control::ZettaControlError{"invalid_argument", "agent.name"};
@@ -3986,6 +4051,93 @@ TEST(Workspaces, CreateProjectSaysWhetherTheNameIsMissingOrTaken) {
     const auto other = r.call("workspace_act",
                               {{"capability", "create_project"}, {"input", {{"name", "churn"}}}});
     EXPECT_NE(other.error.code, "conflict") << "only the engine's name refusal is a clash";
+}
+
+// An agent's definition is versioned (lake#653): the engine keeps one record per agent and
+// overwrites it, so every create_agent and update_agent Lake makes, through workspace_act or the
+// named capability, keeps the definition it set as a sealed revision in the agent's workspace, and
+// list_agent_revisions answers them newest first; restoring one is update_agent with its definition.
+TEST(Workspaces, EveryAgentDefinitionIsKeptAsARevision) {
+    ReadyWorkspace r;
+    r.instance_kek = lake::test::test_instance_kek();
+    const json first{{"id", "a-1"},
+                     {"name", "Renewal watcher"},
+                     {"kind", "custom"},
+                     {"runtime", "native"},
+                     {"model", "/m/base"},
+                     {"purpose", "Flag renewals at risk"},
+                     {"manifesto", "Answer from company data only."},
+                     {"skills", json::array({"search"})},
+                     {"status", "idle"},
+                     {"versions", json::array()},
+                     {"created_at", "2026-10-01T00:00:00Z"},
+                     {"updated_at", "2026-10-01T00:00:00Z"}};
+    r.w.caller->answers["create_agent"] = first;
+    const auto created = r.call("create_agent",
+                                {{"name", "Renewal watcher"},
+                                 {"runtime", "native"},
+                                 {"purpose", "Flag renewals at risk"},
+                                 {"manifesto", "Answer from company data only."},
+                                 {"skills", json::array({"search"})}});
+    ASSERT_TRUE(created.ok) << created.error.message;
+    EXPECT_EQ(created.value["definition_revision"]["recorded"], true)
+        << created.value["definition_revision"].dump();
+    EXPECT_FALSE(r.sent("create_agent").value("model", std::string()).empty())
+        << "a native agent without a model gets the base model";
+
+    json second = first;
+    second["manifesto"] = "Be brief.";
+    second["skills"] = json::array({"search", "summarize"});
+    second["status"] = "running";
+    r.w.caller->answers["update_agent"] = second;
+    const auto updated = r.call(
+        "workspace_act",
+        {{"capability", "update_agent"},
+         {"input", {{"id", "a-1"}, {"manifesto", "Be brief."}, {"skills", json::array({"search", "summarize"})}}}});
+    ASSERT_TRUE(updated.ok) << updated.error.message;
+    EXPECT_EQ(updated.value["definition_revision"]["recorded"], true);
+
+    // Updated to native with an empty model (Design's "Orama base model"): Lake fills it in.
+    ASSERT_TRUE(r.call("update_agent", {{"id", "a-1"}, {"runtime", "native"}, {"model", ""}}).ok);
+    EXPECT_FALSE(r.sent("update_agent").value("model", std::string()).empty());
+
+    const auto listed = r.call("list_agent_revisions", {{"agent_id", "a-1"}});
+    ASSERT_TRUE(listed.ok) << listed.error.message;
+    EXPECT_EQ(listed.value["total"], 3);
+    const json& revisions = listed.value["revisions"];
+    ASSERT_EQ(revisions.size(), 3U);
+    EXPECT_EQ(revisions[0]["revision"], 3) << "newest first";
+    EXPECT_EQ(revisions[1]["revision"], 2);
+    EXPECT_EQ(revisions[1]["change"], "update");
+    EXPECT_EQ(revisions[1]["definition"]["manifesto"], "Be brief.");
+    EXPECT_EQ(revisions[2]["change"], "create");
+    EXPECT_EQ(revisions[2]["definition"]["manifesto"], "Answer from company data only.");
+    for (const char* field : {"id", "status", "versions", "created_at", "updated_at"}) {
+        EXPECT_FALSE(revisions[2]["definition"].contains(field)) << field << " is not designed";
+    }
+    EXPECT_EQ(r.call("list_agent_revisions", {{"agent_id", "a-1"}, {"limit", 1}})
+                  .value["revisions"]
+                  .size(),
+              1U);
+    EXPECT_EQ(r.call("list_agent_revisions", {{"agent_id", "a-2"}}).value["total"], 0)
+        << "another agent's revisions are its own";
+
+    // Sealed in the workspace's records, not in PostgreSQL.
+    bool sealed = false;
+    for (auto& [url, tables] : r.w.caller->topics.records) {
+        for (const auto& [key, row] : tables.rows("agent_revisions")) {
+            sealed = true;
+            EXPECT_EQ(row.dump().find("company data"), std::string::npos) << "sealed at rest";
+        }
+    }
+    EXPECT_TRUE(sealed);
+
+    // A revision that cannot be kept never fails the change, which has happened: it says so.
+    r.w.caller->answers["update_agent"] = {{"name", "Renewal watcher"}};
+    const auto unkept = r.call("update_agent", {{"id", "a-1"}, {"goal", "x"}});
+    ASSERT_TRUE(unkept.ok) << unkept.error.message;
+    EXPECT_EQ(unkept.value["definition_revision"]["recorded"], false);
+    EXPECT_EQ(r.call("list_agent_revisions", {{"agent_id", "a-1"}}).value["total"], 3);
 }
 
 // The decision a project should improve is lake's to keep (lake#577): the engine's project has no

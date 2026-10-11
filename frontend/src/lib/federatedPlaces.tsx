@@ -115,7 +115,7 @@ const RUNS: Record<PlaceId, { label: string; icon: LucideIcon; run: Place["run"]
       const value = await engine<{ agents?: Row[] }>(scope, "list_agents", {}, signal);
       return (value.agents ?? [])
         .filter((a) => a.kind !== "orama" && matches(q, a.name, a.id, a.purpose, a.description))
-        .map((a) => ({ key: a.id, title: String(a.name ?? a.id), detail: a.purpose ?? a.description ?? undefined, to: wsPath(scope, `/train/agent?id=${encodeURIComponent(a.id)}`) }));
+        .map((a) => ({ key: a.id, title: String(a.name ?? a.id), detail: a.purpose ?? a.description ?? undefined, to: wsPath(scope, `/design/agent?id=${encodeURIComponent(a.id)}`) }));
     },
   },
   models: {

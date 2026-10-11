@@ -25,8 +25,8 @@ event topics are created lazily with 24-hour/10,000-event retention. Existing ma
 their mutable retention settings reconciled. The bus cleanup logs obsolete exposed topics before
 dropping them; only configured `agent-tasks.*` remain. This is a cutover, not dual publication.
 
-There is no topic per turn. Streams lists the selected workspace's real topics and the space's
-per-agent task rows. Workspace event browsing does not filter other spaces' task IDs: other
+There is no topic per turn. Streams lists the selected workspace's real topics and the account's
+per-agent task rows. Workspace event browsing does not filter other accounts' task IDs: other
 workspaces' events are stored on different Zettas.
 
 ## A turn, end to end
@@ -162,7 +162,7 @@ It is shown in place of the agent's message until the agent's next event clears 
 - the agent's latest message;
 - its answer, and the finished phase.
 
-The record is keyed by the task id and found by its space, and it opens only in that workspace.
+The record is keyed by the task id and found by its account, and it opens only in that workspace.
 Lake assembles the task callers see from both halves, so `get_agent_task`, `receive_agent_events`,
 the claim reply and the pages answer exactly as before.
 

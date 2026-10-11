@@ -24,8 +24,8 @@ is shown under its canonical name. The start form defaults the objective to `hel
 offers those names (lake#463). An error names the field at fault when Zetta does, for example
 `/objective: required; …`. Project and state filters are in the URL. Starting an experiment shows its
 parameters and budgets in a confirmation dialog before `start_experiment` is called with
-`confirm: true`. Experiment and trial stop buttons are shown to writers; Promote to space administrators
-(`my_permissions` on the space: `write`, `admin`). No page shows a credential or contacts Zetta
+`confirm: true`. Experiment and trial stop buttons are shown to writers; Promote to account administrators
+(`my_permissions` on the account: `write`, `admin`). No page shows a credential or contacts Zetta
 directly.
 
 ## Words: Experiment, Trial and Run (lake#561)
@@ -96,7 +96,7 @@ ordinary `start_experiment` policy, validation, confirmation and audit path thro
 adapter.
 
 **What changed (lake#561).** The server's form checked the proposal digest against the stored task
-for the same person and space before starting the turn. That check now runs in the page against a
+for the same person and account before starting the turn. That check now runs in the page against a
 fresh read; `agent_turn` grants the experiment tools to a turn whose `confirmed_proposal` has an
 experiment, as it does for a REST or MCP caller.
 

@@ -58,13 +58,13 @@ existing setting is refused and produces the one `retention` event for that capa
 Pruning is intentionally absent: the database append-only trigger rejects update and delete
 operations on `audit_events`.
 
-The setting stays in `audit_retention` and governs the central log (lake#318): it is the space's
+The setting stays in `audit_retention` and governs the central log (lake#318): it is the account's
 policy, a control-plane row, and the central log is where its events are. A workspace's audit is
 the collection `lake_audit_events` of its Zetta, whose `retention_ms` is 0: it is kept until the
 workspace is deleted, which is never shorter than any setting, and is deleted with the workspace.
 `set_audit_retention` answers `workspace_audit_retention: "kept until the workspace is deleted"`.
 A finite workspace retention would be a new collection with a `retention_ms` at or above the
-space's setting, copied into (a collection's retention cannot change).
+account's setting, copied into (a collection's retention cannot change).
 
 ## Verify
 
@@ -149,7 +149,7 @@ capability and its input:
   organizations, memberships, teams, invitations, grants and policy objects, workspaces themselves,
   SSO and SCIM, account recovery and MFA, workload identity, certificates and ACME, the keystore,
   lake's identity, transparency, TUF and timestamping, the audit capabilities, and the reads that
-  span a space or the instance (`list_services`, `metering_usage`, `search`). Dynamic-secret
+  span an account or the instance (`list_services`, `metering_usage`, `search`). Dynamic-secret
   leases stay central too: each event is appended to lake's transparency log, which commits to the
   central chain when the call is made.
 - **The workspace's audit**: `workspace_act`, `workspace_query`, `workspace_sql` and every
@@ -170,7 +170,7 @@ row; no workspace is called). It stays central when:
   unknown or foreign `workspace_id`, no authority), or refused for want of authority (`denied`):
   authorization decisions are control-plane evidence, and a caller cannot write into a workspace
   it may not act in;
-- no live workspace of the call's space can be found: an object without a workspace, a deleted
+- no live workspace of the call's account can be found: an object without a workspace, a deleted
   workspace;
 - this lake has no workspace audit: no workspace Zettas are configured, so the server has no
   `AuditRecorder` and every event is central (local development and the single-store tests).
@@ -239,11 +239,11 @@ read; the rest is still answered.
 
 - `workspace_id`: that workspace's audit alone. `after_id` cannot be combined with it; it pages the
   central log.
-- `customer_id`: the central log and the audits of that space's live workspaces.
+- `customer_id`: the central log and the audits of that account's live workspaces.
 - `log: central`: the central log alone (the Organization page's events).
 - Otherwise, `audit` (operator only) reads the central log and every live workspace's audit;
-  `my_audit` reads the central log and the audits of the workspaces of the caller's own spaces,
-  and only the caller's own events from them. A workspace of another space is `unauthorized`.
+  `my_audit` reads the central log and the audits of the workspaces of the caller's own accounts,
+  and only the caller's own events from them. A workspace of another account is `unauthorized`.
 
 The workspaces are read concurrently, one `list_records` walk each, all in one round, and merged
 with the central events by instant, newest first unless `order` is `oldest`, at most `limit`, with
@@ -262,7 +262,7 @@ Migration `0063_audit_workspaces` records, in `workspace_assignments` (`object_t
 workspace action (the workspace capabilities, `push_change`, `reference_update`,
 `deployment_phase`) that was not refused for want of authority, whose workspace is named in its
 details (`workspace_id`, `repository_id`, `repository`) or found through its object (a repository,
-app, build, secret mount or agent task), and belongs to the event's space. `event_workspace`: it
+app, build, secret mount or agent task), and belongs to the event's account. `event_workspace`: it
 is copied there. `workspace_deleted`: its workspace is gone, and it stays central. Every other
 event stays central, and the migration reports the count: most capability events recorded before
 the split name only `capability/<name>`. Nothing is dropped, and `audit_events` stays append-only.

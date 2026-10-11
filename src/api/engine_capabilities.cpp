@@ -178,10 +178,10 @@ std::string lake_note(std::string_view engine) {
                "(predict for a model, search_index for an index).";
     }
     if (engine == "create_agent" || engine == "update_agent") {
-        return "A Python agent's `definition` is {source: zetta, instructions, entrypoint, files: "
-               "[{path, contents}]} or {source: lake, repository_id, revision, entrypoint}; Lake "
-               "refuses any other field. A native agent created without `model` runs Lake's base "
-               "model.";
+        return "A Python agent's `definition` is `{source: \"zetta\", instructions, entrypoint, "
+               "files: [{path, contents}]}` or `{source: \"lake\", repository_id, revision, "
+               "entrypoint}`; Lake refuses any other field. A native agent created without "
+               "`model_id` runs Lake's base model.";
     }
     if (engine == "create_project") {
         return "`decision` (optional) is the decision the project serves; Lake keeps it in the "

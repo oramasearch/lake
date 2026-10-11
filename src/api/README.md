@@ -144,6 +144,11 @@ are named this way; `workspace_call` answers an engine that does not know an all
 `not_supported`, saying it needs a newer Zetta. `drives_capabilities.cpp`'s `load_drive_model`
 reads a drive's model file as the caller and sends it to `register_model`
 ([`models.md`](../../docs/api/models.md#a-standalone-model-lake654)).
+[`engine-capabilities.md`](../../docs/api/engine-capabilities.md).
+After the engine accepts a `create_agent` or `update_agent`, `workspace_call` keeps the definition
+as a revision in the agent's workspace (`agent_revision_step`, lake#653) and answers
+`definition_revision`; `list_agent_revisions` (in `workspace_capabilities.cpp`) reads them. See
+[`train-agents.md`](../../docs/api/train-agents.md#definition-revisions).
 
 `experiment_capabilities.cpp` registers eleven space-scoped experiment/run operations using the
 closed contracts in `experiment_schemas.hpp`, and translates lake's experiment names to the engine's

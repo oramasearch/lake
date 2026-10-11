@@ -44,7 +44,7 @@ manifest and whether Git was requested; the returned archive is the download pay
 
 `POST /v1/import_repository` accepts `customer_id`, `workspace_id`, destination `name`, and
 `archive`. It requires write access to the destination customer. The new repository belongs to
-`workspace_id`, a live workspace of that customer's space (lake#315); the archive's own
+`workspace_id`, a live workspace of that customer's account (lake#315); the archive's own
 `workspace_id` records where it came from and is never reused. A missing or unknown workspace is
 `invalid_input` at `/workspace_id`. The source description and visibility are retained. A destination name collision or a failed liquid transfer leaves the import refused.
 

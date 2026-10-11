@@ -56,6 +56,12 @@ writes the allow-listed operations to `src/api/engine_openapi.json`, which the b
 - takes the engine's description, without its issue references and permission notes, with the
   names Lake gives renamed capabilities, and adds what Lake does beside it.
 
+The tool also applies Lake's wording rules (lake#647: never `space`, values such as `lake` and
+`zetta` in code spans) to the engine's text, as a fixed list of exact rewrites (`WORDING` in the
+tool), so the same engine document always gives the same snapshot and `--check` compares after
+them. Each rewrite matches a change made in Zetta's own descriptions; once the Zetta source
+carries it, the rewrite finds nothing.
+
 A capability the engine publishes no schema for is still registered, with a description that says
 so and its fields passed as sent; there is none today. Refresh after a Zetta change to the
 allow-listed capabilities:
@@ -66,7 +72,7 @@ tools/api/vendor-engine-openapi.py --zetta-source "$LAKE_ZETTA_SOURCE_DIR" --che
 ```
 
 Reads are `GET` with the input in the query string and also take a JSON body on `POST`
-(`post_alias`), since some take nested input (`validate_experiment`'s search space).
+(`post_alias`), since some take nested input (`validate_experiment`'s parameter ranges).
 
 ## Names
 

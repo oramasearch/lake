@@ -95,6 +95,14 @@ capability that already covered it. Each runs the `workspace_query`/`workspace_a
 where the engine's name collides or says too little (`gate` is `check_pipeline`, `run` is
 `start_run`, `search` is `search_workspace_index`). Those two stay, with an `enum` on `capability`.
 Not deployed. See `docs/api/engine-capabilities.md`.
+Agents are designed in Design → Agents and trained in Train → Agents (lake#653, no migration):
+Design → Agents (was Agent Library; `/design/agent-library` and `/train/agents/new` redirect) lists
+Orama's agents read-only beside the workspace's own, with New agent, Duplicate, Edit and the Agent
+Factory; every `create_agent` and `update_agent` the engine accepts is kept as a sealed, append-only
+`lake_agent_revisions` record in the workspace Zetta (`list_agent_revisions`); Train → Agents lists
+only agents with something to train, with performance, versions, promote and roll back, the
+training schedule and Launch experiment. The pages call the named engine capabilities. Not
+deployed. See `docs/api/train-agents.md`.
 
 Every future deployment image receives OCI revision and creation labels. The binary reports the
 same embedded revision through `GET /v1/server_info`; details are in

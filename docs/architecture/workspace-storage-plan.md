@@ -21,8 +21,8 @@ lake#514's cascade (migration `0065`); and lake#380, the workspace store and its
 needs liquid `8955519` or later). With every workspace switched, the records' retired tables and
 columns are dropped by migration `0070_drop_moved_tables` (lake#311,
 [schema.md](../control-plane/schema.md#drop-moved-tables-migration)), and the operator's
-`remove_space_store` removes a space's old store from lake's volume once every workspace of the
-space is switched ([workspace-store.md](workspace-store.md)); neither has run on dev yet. lake#381 keeps the search index beside the workspace store (no migration,
+`remove_space_store` removes an account's old store from lake's volume once every workspace of the
+account is switched ([workspace-store.md](workspace-store.md)); neither has run on dev yet. lake#381 keeps the search index beside the workspace store (no migration,
 [search.md](../api/search.md#where-the-index-lives-lake381-decision-54-s8)).
 Everything else here is not implemented yet. This page plans the moves that
 [workspace records](workspace-records.md) does not cover: the bytes on lake's store volume
@@ -45,7 +45,7 @@ except S12, where Steve chose cascade over refusal.
 | S3 | #380, #383 | Encrypt workspace liquid stores at rest? | **Yes**, with a per-workspace data key wrapped under a key derived from `LAKE_INSTANCE_KEK`; the workspace Zetta holds only ciphertext. | Plaintext stores (keeps chunk-delta compression). |
 | S4 | #383 | Split the registry? | **Yes.** Tenant OCI repositories (`<space>/<name>`, `<space>/cache/<name>`) move to the workspace; npm, Python, debuginfod and legacy one-component OCI stay with the instance. | Move everything, renaming instance packages. |
 | S5 | #383 | Where do a tenant image's blobs live? | **In the workspace's liquid store** as SHA-256 objects; manifests and tags are conditional records. | A separate area of the object capability. |
-| S6 | #383 | Do image addresses change? | **No.** `<space>/<name>` stays, through a content-free central route (space and name to workspace). | The workspace in the path. |
+| S6 | #383 | Do image addresses change? | **No.** `<space>/<name>` stays, through a content-free central route (account and name to workspace). | The workspace in the path. |
 | S7 | #382 | Do the transparency log, TUF and timestamp evidence stay with the instance? | **Yes**, named as an instance-level exception in the umbrella rule. | One log per workspace; the lake Zetta. |
 | S8 | #381 | Where does a workspace's search index live? | **Beside its liquid store**, as sealed objects, rebuilt rather than copied. | Zetta full-text over a workspace table; a lake-local cache. |
 | S9 | #384 | Are lake's process metrics and request logs workspace data? | **No: instance operations**, named as an exception in the umbrella rule. Logs carry route patterns, not raw paths; each workspace gets its own request series in its Zetta. | Every request's metrics and log line in its workspace Zetta. |
@@ -53,7 +53,7 @@ except S12, where Steve chose cascade over refusal.
 | S11 | #319 | Move or drop `repository_refs`? | **Dropped.** | Move it as a cache. |
 | S12 | all | What does deleting a workspace do to its repositories and images? | **Cascade** ([lake#514](https://github.com/oramasearch/lake/issues/514)): deleting a workspace deletes its repositories (live and tombstoned, cutting retention short) and its tenant images. Retained snapshots (S13) are the only copy left. | Refuse while the workspace holds repositories or images (the recommendation). |
 | S13 | all | Backups of workspace volumes? | **Scheduled CSI snapshots** of each workspace Zetta volume and of lake's store volume, desired in Postgres and taken by the operator, with one before the cutover ([orama-operator#260](https://github.com/oramasearch/orama-operator/issues/260)). | None until production. |
-| S14 | #315, #380 | The `liquid` repository's space has no workspace. | **Create a workspace for that space and assign the repository** ([lake#513](https://github.com/oramasearch/lake/issues/513)). | Delete it; leave it behind. |
+| S14 | #315, #380 | The `liquid` repository's account has no workspace. | **Create a workspace for that account and assign the repository** ([lake#513](https://github.com/oramasearch/lake/issues/513)). | Delete it; leave it behind. |
 
 ## Summary
 
@@ -61,10 +61,10 @@ except S12, where Steve chose cascade over refusal.
 |---|---|---|---|---|
 | #315 part 2 `repositories` | One row per repository | 10 rows (8 live and 1 tombstoned in one workspace, 1 unassigned) | split | Row stays as routing; `description` moves to `lake_repositories`. **Done** (migration `0064`); the column is dropped after the copy is verified |
 | #319 `repository_refs` | Copy of each liquid ref | 0 rows | workspace (unused) | **Dropped** (migration `0064`) |
-| #380 `<customer>/store` | Liquid objects and history of every repository, Drive, model and dataset | 18.3 MB in 2 customer stores, 10 repositories | workspace | One liquid store per workspace in the workspace Zetta's object capability. **Implemented** ([workspace-store.md](workspace-store.md), migration `0067`); each workspace is switched by `move_workspace_store`, and `remove_space_store` removes the space's old store once all its workspaces are |
+| #380 `<customer>/store` | Liquid objects and history of every repository, Drive, model and dataset | 18.3 MB in 2 customer stores, 10 repositories | workspace | One liquid store per workspace in the workspace Zetta's object capability. **Implemented** ([workspace-store.md](workspace-store.md), migration `0067`); each workspace is switched by `move_workspace_store`, and `remove_space_store` removes the account's old store once all its workspaces are |
 | #381 `<customer>/index` | Search catalogue, segments and manifest | none written | workspace | Sealed objects beside the workspace store; rebuilt. **Implemented** (no migration; `search/` objects in bucket `lake_store`) |
 | #382 transparency, TUF, timestamps | The instance's log, trust metadata and evidence | none written | instance | Stays with the instance. **Done** (no migration) |
-| #383 registry | OCI, npm, Python and debug artifacts | 561 MB: 38 blobs, 7 manifests, one space | split | Tenant images to the workspace store; instance registry stays. Phase A **done** (routes, manifests and tags as records, migration `0068`); phase B **done** in the source tree (blobs as objects of the workspace's liquid store, `copy_workspace_records` collection `oci_blobs`, no migration); the old tenant files in `prod/registry` are removed later, with approval |
+| #383 registry | OCI, npm, Python and debug artifacts | 561 MB: 38 blobs, 7 manifests, one account | split | Tenant images to the workspace store; instance registry stays. Phase A **done** (routes, manifests and tags as records, migration `0068`); phase B **done** in the source tree (blobs as objects of the workspace's liquid store, `copy_workspace_records` collection `oci_blobs`, no migration); the old tenant files in `prod/registry` are removed later, with approval |
 | #384 metrics and request logs | Process counters and stdout lines | nothing kept (no Prometheus or Loki on the cluster) | instance | Stays; plus a per-workspace request series. **Done** ([PR #521](https://github.com/oramasearch/lake/pull/521)) |
 
 ## What is on dev
@@ -76,10 +76,10 @@ Measured read-only on 2026-10-03 (`du` in pod `lake-prod-c7cd58699-95l5z`, `SELE
 | Path | Size | Contents |
 |---|---|---|
 | `6bb777ba-…/store` | 16 MB | packs 2.0 MB, liquid chunk index 5.7 MB, leases 7.9 MB |
-| `6bb777ba-…/repositories` | 40 KB | 9 repositories (8 live, 1 tombstoned), all assigned to that space's one workspace |
-| `da7cf099-…/store` | 2.3 MB | the `liquid` repository; its space has no workspace |
+| `6bb777ba-…/repositories` | 40 KB | 9 repositories (8 live, 1 tombstoned), all assigned to that account's one workspace |
+| `da7cf099-…/store` | 2.3 MB | the `liquid` repository; its account has no workspace |
 | `prod/registry/blobs` | 561 MB | 38 blobs |
-| `prod/registry/manifests` | 48 KB | 7 manifests: one space, `e2e-notes` and its build cache |
+| `prod/registry/manifests` | 48 KB | 7 manifests: one account, `e2e-notes` and its build cache |
 | `<customer>/index`, `prod/log`, `prod/registry/{npm,python,debug}` | absent | never written on dev |
 
 There are two Ready workspaces (`prod-ws-6bb777ba498a`, `prod-ws-787217d6ec44`), each a one-node
@@ -180,14 +180,14 @@ write past it is `507`.
 is [workspace-store.md](workspace-store.md), and the operator capability is
 [move_workspace_store](../api/workspace-store.md). Differences from this plan: the copy does not yet
 check the S13 snapshots (the desired state is migration `0069`; the move does not wait on it yet);
-the bucket quota is the space's storage quota and does not yet follow `workspaces.storage_gi`; it
+the bucket quota is the account's storage quota and does not yet follow `workspaces.storage_gi`; it
 needs liquid#332 (merged,
 liquid `8955519`), because liquid's index merge had rewritten runs in place.
 
-**Today.** `LAKE_STORE_ROOT/<customer>/store` is one libliquid store per space: packs, object map,
+**Today.** `LAKE_STORE_ROOT/<customer>/store` is one libliquid store per account: packs, object map,
 chunk index, leases and collector state. Beside it, `<customer>/repositories/<id>/` holds each
-repository's refs, journal, checkpoint and replication cursor. One store per space deduplicates
-across every repository, Drive, model and dataset of the space. Liquid pack frames are appended at
+repository's refs, journal, checkpoint and replication cursor. One store per account deduplicates
+across every repository, Drive, model and dataset of the account. Liquid pack frames are appended at
 remembered offsets; sealed packs are never rewritten.
 
 - **Writers:** lake, for `liquid push` (`/v1/repositories/<id>/sync/*`), Drive uploads and moves,
@@ -202,7 +202,7 @@ remembered offsets; sealed packs are never rewritten.
 **Target (S1).** One liquid store per workspace, opened by lake on a `store_backend` over the
 workspace Zetta's object capability, bucket `lake_store`. Every liquid key (`packs/…`, `index/…`,
 `leases/…`, `gc/…`, `keys/…`, and with the liquid change, `repositories/<id>/…`) is one object.
-The space no longer has a store; a repository's workspace (`repositories.workspace_id`) names its
+The account no longer has a store; a repository's workspace (`repositories.workspace_id`) names its
 store. With S3, the store is opened with a keyring whose one trust domain is the workspace.
 
 **Hot paths.**
@@ -236,7 +236,7 @@ lease, then the root.
 Deleting a workspace deletes its repositories, live and tombstoned, cutting their retention short.
 Lake closes the workspace's store and releases its bucket lease before it reports the deletion, and
 the operator's deletion of the namespace and its volume destroys the bytes. Before the switch, the
-collector reclaims the deleted repositories from the space's store, since their retention has
+collector reclaims the deleted repositories from the account's store, since their retention has
 ended. The central audit log records one event per destroyed repository, because the workspace's
 own audit chain goes with its Zetta. Retained snapshots are the only copy left.
 **Shipped (before the switch):** migration `0065_workspace_deletions` and the cascade in
@@ -252,7 +252,7 @@ and release its lease.
 2. **Plan** (`move_workspace_store`, an operator-invoked lake capability like
    `copy_workspace_records`, `mode: plan`): each workspace's repositories and their sizes;
    repositories with no workspace are reported and block.
-3. **Copy** (`mode: copy`): for each repository, liquid transfers its whole closure from the space's
+3. **Copy** (`mode: copy`): for each repository, liquid transfers its whole closure from the account's
    store into the workspace store with its refs, journal and checkpoint (the local form of
    `replicate_from`, content addressed, so a rerun sends only what is missing). Drive, models and
    datasets are repositories and move the same way. Objects no repository reaches stay behind.
@@ -262,10 +262,10 @@ and release its lease.
 5. **Switch** (`mode: switch`), per workspace: lake holds that workspace's repository requests,
    copies what arrived since step 3, verifies again, records the switch in a content-free central
    column (`workspaces.store_moved_at`), and answers the held requests from the new store.
-6. **Leave.** The space's old store stays read-only on the volume. Removing it needs Steve's yes
+6. **Leave.** The account's old store stays read-only on the volume. Removing it needs Steve's yes
    (the store volume rule), after the copy is verified on dev.
 
-Storage measurement for metering switches from a live `du` of the space's store to the bucket's
+Storage measurement for metering switches from a live `du` of the account's store to the bucket's
 `usage`, now per workspace.
 
 ### lake#381: the search index
@@ -276,7 +276,7 @@ in which search neither indexed nor returned a switched workspace's repositories
 
 **Before.** `<customer>/index/`: `blobs.json` (blob digest to UTF-8 file text), `segment-<repository>-<change>-<kind>-<ref>.json`
 (path-to-blob occurrences), `artifacts.json` and `manifest.json`. Lake loaded them into
-oramacore-cpp BM25F adapters per space and republished from memory. It is derived entirely from the
+oramacore-cpp BM25F adapters per account and republished from memory. It is derived entirely from the
 liquid store and holds file text in the clear.
 
 - **Writers:** lake, on release creation, `reindex_artifacts` (which a push runs) and history scans.
@@ -291,7 +291,7 @@ objects `search/<name>` in its store's bucket `lake_store`, beside the store:
 - **Where.** A prefix in `lake_store`, not a bucket `lake_search` as first planned: one lease and
   fence then cover the store and its index (a second bucket would need a lease of its own or take
   writes from any process), no key of its own is needed, and the index goes with the bucket. It
-  counts in the space's quota, and search writes only within the room the space's stored bytes leave
+  counts in the account's quota, and search writes only within the room the account's stored bytes leave
   after a tenth of the quota kept for liquid, stopping indexing rather than failing a push. Liquid never lists or writes
   under `search/`.
 - **Sealing.** Each object is AES-256-GCM under the workspace's data key (the store's cipher), its
@@ -311,17 +311,17 @@ objects `search/<name>` in its store's bucket `lake_store`, beside the store:
   search's own worker thread, never inside a request or on the maintenance thread: it reads each repository's branch tips, release
   snapshots (from the release records) and artifacts one repository at a time under the lane, and
   writes without the lane. Searches answer `building_workspaces` meanwhile; writes are applied after
-  it. A failure backs off from 15 s to 10 min. Nothing is copied from the space's index.
-- **Scope.** The `search` capability decides which spaces and workspaces the caller may reach before
+  it. A failure backs off from 15 s to 10 min. Nothing is copied from the account's index.
+- **Scope.** The `search` capability decides which accounts and workspaces the caller may reach before
   anything is lent, opened or rebuilt.
-- **The space's index.** A switch, and every start, drops from it what it holds of switched
+- **The account's index.** A switch, and every start, drops from it what it holds of switched
   workspaces' repositories and the history-scan blobs no segment references, and removes the
   directory once empty.
 - **Cascade (#514).** Deleting a workspace removes its `search/` objects while lake has its store
   open; otherwise they go with the workspace Zetta. A failed removal is logged and never holds the
   deletion up. Deleting a repository removes it from its workspace's index.
-- **API.** `search` keeps `customer` and gains an optional `workspace_id`; a space-wide search reads
-  the space's index and each switched workspace's, and lists the workspaces it could not read in
+- **API.** `search` keeps `customer` and gains an optional `workspace_id`; an account-wide search reads
+  the account's index and each switched workspace's, and lists the workspaces it could not read in
   `skipped_workspaces`. The required `workspace_id` and the `/w/<id>/` path are not done.
 
 **Migration.** None. On dev, a switched workspace's index is built on the maintenance thread after
@@ -398,7 +398,7 @@ lock's protection.
   last-writer-wins on tags.
 - **Uploads** are staged in the workspace bucket `lake_uploads` and become a store object at
   completion, after the digest check.
-- **Routing.** A central, content-free `oci_repository_routes` (space, repository name, workspace,
+- **Routing.** A central, content-free `oci_repository_routes` (account, repository name, workspace,
   created by) is written `if_absent` at a build's first push, from the build row's workspace;
   pulls resolve it before any workspace is read. App images keep their addresses.
 - **Workspace deletion** (S12, cascade): a workspace's routes are deleted with it, and its images
@@ -413,7 +413,7 @@ memory. The window cache of #380 serves repeated pulls of one layer across nodes
 pulls straight to the workspace Zetta is not proposed: it would expose each workspace Zetta to the
 nodes' network and move the pull-credential check out of lake.
 
-**Migration.** 561 MB on dev, one space. `move_workspace_store` copies each tenant blob referenced
+**Migration.** 561 MB on dev, one account. `move_workspace_store` copies each tenant blob referenced
 by a tenant manifest into the workspace store, verifies its SHA-256, writes the manifest and tag
 records, and writes the route. Cache repositories may be dropped instead (dev data) and rebuilt
 by the next build. Blobs no tenant manifest references stay behind. The instance registry has
@@ -437,7 +437,7 @@ concurrent pushes of one tag still end last-writer-wins. Blobs stay in `blobs/`,
 and a manifest may reference only blobs recorded in its workspace.
 The copy is `copy_workspace_records` (collection `oci_tags`), not `move_workspace_store`: `copy`
 (never `plan` or `verify`) routes what is unambiguous (route, then the one workspace whose apps or builds use the name, then the
-space's only live workspace), reports the rest, and writes and verifies each manifest and tag.
+account's only live workspace), reports the rest, and writes and verifies each manifest and tag.
 Not done in phase A: counting registry requests in a workspace's `lake_requests` series (#384).
 
 **Phase B done** (no migration). A tenant blob is an object of its workspace's liquid store, and
@@ -454,7 +454,7 @@ phase A recorded.
   write is `put_file` from a local file, so a bucket would still need a local file at completion.
   At completion into a switched workspace lake claims the file (no PATCH reaches it then), checks
   the SHA-256 in windows, streams the file into the workspace store with `put_file` under the
-  workspace's lane on the blocking pool, after the space's storage quota (`507 DENIED` past it),
+  workspace's lane on the blocking pool, after the account's storage quota (`507 DENIED` past it),
   writes the record and removes the file.
   A workspace not switched yet keeps phase A (bytes in `registry/blobs/`, a record without
   `object`).
@@ -526,7 +526,7 @@ through it is a follow-up. Drops are counted in
 ### lake#315 part 2: repository metadata
 
 **Today.** `repositories`: id, `customer_id`, `workspace_id` (immutable since `0051`), name
-(unique among a space's live repositories), description, visibility, `deleted_at`,
+(unique among an account's live repositories), description, visibility, `deleted_at`,
 `retention_until`, timestamps. Its policy object lives in `objects`.
 
 - **Writers:** lake (create, import, rename, visibility, delete), from people, agents and imports.
@@ -549,7 +549,7 @@ writes the record, `copy_workspace_records` copies and verifies, and a later mig
 `description` column.
 
 **Done** in migration `0064_repository_records`: the record is keyed by the repository and found by
-its space (`customer:<id>`) rather than by the repository, so a listing reads one `list_records` per
+its account (`customer:<id>`) rather than by the repository, so a listing reads one `list_records` per
 workspace. See [repositories.md](../api/repositories.md#where-the-description-lives-lake315-part-2)
 and the [cutover runbook](workspace-records.md#cutover-runbook-repository-descriptions-dev-cluster).
 
@@ -579,14 +579,14 @@ liquid; `updated_at` is gone.
 | 4 | [liquid#328](https://github.com/oramasearch/liquid/issues/328) | Copy a whole repository between two open stores (the copy step) | liquid#326 |
 | 5 | [orama-operator#259](https://github.com/oramasearch/orama-operator/issues/259) | Grow each workspace Zetta's volume from `workspaces.storage_gi` | nothing |
 | 6 | [orama-operator#260](https://github.com/oramasearch/orama-operator/issues/260) | Scheduled CSI snapshots of workspace volumes and the store volume (dev has the snapshot CRDs but no `VolumeSnapshotClass`) | nothing |
-| 7 | [lake#513](https://github.com/oramasearch/lake/issues/513) | A workspace for the `liquid` repository's space, and its assignment (S14). The workspace is created on dev; migration `0066_assign_unrouted_repositories` assigns the repository | nothing |
+| 7 | [lake#513](https://github.com/oramasearch/lake/issues/513) | A workspace for the `liquid` repository's account, and its assignment (S14). The workspace is created on dev; migration `0066_assign_unrouted_repositories` assigns the repository | nothing |
 | 8 | [lake#319](https://github.com/oramasearch/lake/issues/319) | Drop `repository_refs` (S11). **Done** (migration `0064`) | nothing |
 | 9 | [lake#315](https://github.com/oramasearch/lake/issues/315) | Part 2: `description` to `lake_repositories` (S10). **Done** (migration `0064`); the copy of the one unassigned row waits | lake#513 for the one unassigned row |
 | 10 | [lake#514](https://github.com/oramasearch/lake/issues/514) | Cascade workspace deletion (S12). Shipped before #380 and #383 (migration `0065`); the store and route steps are extension points | nothing; its store step follows #380 |
 | 11 | [lake#384](https://github.com/oramasearch/lake/issues/384) | Route patterns in request logs; the per-workspace `lake_requests` series (S9). **Done** ([PR #521](https://github.com/oramasearch/lake/pull/521)) | nothing |
 | 12 | [lake#382](https://github.com/oramasearch/lake/issues/382) | Stays with the instance (S7): the audit row, and the dynamic-secret leaf check. **Done** ([PR #519](https://github.com/oramasearch/lake/pull/519); no migration) | nothing |
 | 13 | [lake#383](https://github.com/oramasearch/lake/issues/383) | Phase A: the route table, manifests and tags as records. **Done** (migration `0068`, [PR #523](https://github.com/oramasearch/lake/pull/523)). Phase B: blobs in the workspace store | A: nothing; B: lake#380 |
-| 14 | [lake#380](https://github.com/oramasearch/lake/issues/380) | `ZettaObjectBackend`, per-workspace leases and lazy open, encryption, `move_workspace_store`, and `remove_space_store` for the space's old store once every workspace is switched ([API](../api/workspace-store.md#removing-the-spaces-store)). **Implemented** (migration `0067`) | 1–7, [liquid#332](https://github.com/oramasearch/liquid/issues/332) (merged) |
+| 14 | [lake#380](https://github.com/oramasearch/lake/issues/380) | `ZettaObjectBackend`, per-workspace leases and lazy open, encryption, `move_workspace_store`, and `remove_space_store` for the account's old store once every workspace is switched ([API](../api/workspace-store.md#removing-the-accounts-store)). **Implemented** (migration `0067`) | 1–7, [liquid#332](https://github.com/oramasearch/liquid/issues/332) (merged) |
 | 15 | [lake#381](https://github.com/oramasearch/lake/issues/381) | Search beside the workspace store, rebuilt (S8). **Implemented** (no migration) | lake#380 |
 
 The umbrella rule's exceptions for S7 and S9 are already in the bridge `CLAUDE.md`.

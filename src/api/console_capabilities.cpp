@@ -744,12 +744,12 @@ void register_console_capabilities(Registry& registry, std::string_view version)
         .title = "Who is signed in",
         .description =
             "Who is calling and how this Lake signs people in, for the web app: signed in or "
-            "not, operator or person, the person's identity, session and MFA state, the spaces "
-            "they can see with each space's live workspaces, the current space and workspace "
-            "(`workspace_id` when it is live in one of those spaces, else the space's only "
+            "not, operator or person, the person's identity, session and MFA state, the accounts "
+            "they can see with each account's live workspaces, the current account and workspace "
+            "(`workspace_id` when it is live in one of those accounts, else the account's only "
             "workspace), Clerk's publishable key and Frontend API host when Clerk signs people "
             "in, the browser origin, the agent model settings, and this Lake's version. Needs no "
-            "credential: a visitor gets `signed_in: false` and no spaces.",
+            "credential: a visitor gets `signed_in: false` and no accounts.",
         .input_schema =
             object_schema({{"workspace_id", string_schema()}, {"customer_id", string_schema()}}),
         .output_schema = viewer_schema(),
@@ -767,7 +767,7 @@ void register_console_capabilities(Registry& registry, std::string_view version)
         .description =
             "Whether you may take each of `actions` on one object, so a page shows only the "
             "buttons you can use. `object_type` and `object_id` name a policy object (`customer` "
-            "and a space id, `workspace` and a workspace id (its space's permissions, which "
+            "and an account id, `workspace` and a workspace id (its account's permissions, which "
             "also govern its drives), `repository` and a repository id, ...); `drive folder` "
             "names a repository by `object_id` and a folder by `path` at `ref` (default "
             "`main`), as the Drive capabilities authorize it. `promote` is `admin` on the object. "

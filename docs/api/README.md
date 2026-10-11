@@ -47,7 +47,7 @@ lake#452: [services.md](services.md) documents `list_services`' shared `status` 
 [workspaces.md](workspaces.md) the two `create_project` name refusals.
 
 lake#380: [workspace-store.md](workspace-store.md) documents the operator's `move_workspace_store`
-(plan, copy, verify, switch) and `remove_space_store` (the space's old store, once every workspace
+(plan, copy, verify, switch) and `remove_space_store` (the account's old store, once every workspace
 is switched); [sync.md](sync.md) and [replication.md](replication.md) where a
 switched workspace's repositories and replication cursors live; [metering.md](metering.md) how its
 storage is measured.
@@ -71,7 +71,7 @@ reads. `start_experiment` leaves a missing objective and budgets to Zetta under 
 and every experiment error keeps Zetta's `path`.
 
 [streams.md](streams.md) documents all nine topic/message operations on both REST POST and MCP,
-with closed input/output schemas, space permissions, system-topic refusal and bounded live reads.
+with closed input/output schemas, account permissions, system-topic refusal and bounded live reads.
 Every MCP tool carries all three annotations from one rule in `src/api/registry.cpp` (lake#594):
 `readOnlyHint` for a read or a call authorized as one (`predict`), the same rule `mcp_setup` uses
 for `writes`; `destructiveHint` only on a write that deletes, destroys, removes, revokes or drops
@@ -131,6 +131,15 @@ Database `ERROR:` and `DETAIL:` diagnostics are logged server-side and replaced 
 `ApiResult` is constructed. Capability handlers may provide a more specific product message and
 JSON pointer, such as repository-name conflicts at `/name`; REST and MCP therefore expose the
 same actionable error without schema names, SQL text or tenant identifiers from the database.
+A message, from the API layer or from the stores, transparency, audit and search code beneath it,
+calls the product **Lake** and never says `space`: it says the account, the workspace or the
+organization, whichever is true (decision 59, lake#647). Field names (`customer_id`), key-derivation
+and AEAD labels (`lake data key/…`), attestation types, pool ids and the `lake:v1` prefix keep
+their form. These pages follow the same rule in their own prose (lake#669): an account is you or
+an organization, and its id is `customer_id`. Capability, parameter and field names keep their
+form in code spans (`remove_space_store`, `convert_personal_space`, the `spaces` field of `viewer`).
+`Docs.DeveloperDocsNeverSaySpace` fails on `space` or `spaces` as a word in the prose of any
+`docs/api/*.md` or `docs/guide/*.md` file.
 
 Registry input validation descends through declared object properties and array `items`, checking
 types, required fields, `enum` values, numeric bounds (`minimum`, `maximum`, `exclusiveMinimum`,
@@ -221,7 +230,7 @@ and `Experiments.CompareRunsAnswersItsGetFormWithRepeatedKeysOrACommaList`
 | Capability | Kind | Input | Value | Page |
 |---|---|---|---|---|
 | `server_info` | read, **no auth** | — | `{name, node, version, revision, api, store, deployments}`; `revision` is the embedded full source commit or `unknown`; `deployments` says whether the platform mirror is configured ([platform.md](platform.md#a-lake-without-the-platform-mirror), lake#605) | [../deployment/production-2026-09-08.md](../deployment/production-2026-09-08.md) |
-| `viewer` | read, **no auth** | `workspace_id?`, `customer_id?` | who is signed in, their spaces and current workspace, Clerk, sign-up, origin, agent models, version | [web-app.md](web-app.md) |
+| `viewer` | read, **no auth** | `workspace_id?`, `customer_id?` | who is signed in, their accounts and current workspace, Clerk, sign-up, origin, agent models, version | [web-app.md](web-app.md) |
 | `my_permissions`, `list_packages`, `list_docs`, `get_doc`, `mcp_setup`, `resolve_model` | read (`list_docs`, `get_doc` and a public `resolve_model` need no credential) | see the page | permission flags, the Packages catalog, the Docs guides, Developer → MCP, a model's repository by name | [web-app.md](web-app.md) |
 | `latest_agent_task`, `render_pipeline` / `compile_pipeline` | read / action | `customer_id`, `workspace_id`, then `subject`, or `project` and `graph`, or `project` and `intent` | a project's background task, a pipeline drawn as SVG, a pipeline compiled from a description | [web-app.md](web-app.md) |
 | `send_ask_message`, `settle_ask_turn`, `confirm_ask_proposal`, `approve_agent_proposal` | action | `customer_id`, `workspace_id`, `conversation_id`, … | the Ask Orama and Agent Factory conversation, written only by lake | [ask-orama.md](ask-orama.md#capabilities-lake561) |
@@ -235,7 +244,7 @@ and `Experiments.CompareRunsAnswersItsGetFormWithRepeatedKeysOrACommaList`
 | `get_user` | read | `id` | user | [customers.md](customers.md) |
 | `create_user` | action | `taap_id?`, `email?`, `display_name?` | user | [customers.md](customers.md) |
 | `list_organizations` | read | `limit` | `{items: [organization]}` | [customers.md](customers.md) |
-| `get_organization` | read | `id` | organization, with its own space's `customer_id` (null when none) | [customers.md](customers.md) |
+| `get_organization` | read | `id` | organization, with its own account's `customer_id` (null when none) | [customers.md](customers.md) |
 | `create_organization` | action | `taap_id?`, `display_name?`, `customer_id?` | organization | [organizations.md](organizations.md) |
 | `delete_organization` | action, an owner | `organization_id`, `confirm` (its handle), `dry_run?` | what went, with counts; `409` naming the workspaces it still owns | [organizations.md](organizations.md#deleting-an-organization) |
 | `revoke_invitation`, `revoke_grant` | action, `admin` on the scope or object | `invitation_id` or `grant_id`, `dry_run?` | the invitation (now `revoked`) or the grant removed | [organizations.md](organizations.md#revoking-an-invitation), [policy.md](policy.md#revoking-a-grant) |
@@ -278,7 +287,7 @@ and `Experiments.CompareRunsAnswersItsGetFormWithRepeatedKeysOrACommaList`
 | `list_teams`, `get_team`, `create_team` | read/action | organization or team identifiers and fields | team(s) | [organizations.md](organizations.md) |
 | `list_memberships`, `get_membership`, `create_membership`, `set_member_role`, `remove_member` | read/action | scope (omit for your own), membership id, principal, role; lake signs the evidence (lake#602) | membership(s) or removal confirmation | [organizations.md](organizations.md) |
 | `list_invitations`, `create_invitation`, `accept_invitation` | read/action | scope (omit for your own), invitee, role, expiry or accepting principal | invitation or membership | [organizations.md](organizations.md) |
-| `create_organization_space`, `convert_personal_space`, `join_organization` | action | organization name and handle, your personal space, or an invitation addressed to you | organization space or membership | [organizations.md](organizations.md) |
+| `create_organization_space`, `convert_personal_space`, `join_organization` | action | organization name and handle, your personal account, or an invitation addressed to you | organization account or membership | [organizations.md](organizations.md) |
 | `list_objects`, `get_object`, `create_object` | read/action | graph identifiers, type, parent, `inherit` | object(s) | [policy.md](policy.md) |
 | `list_grants`, `create_grant` | read/action | object, principal, role; lake signs the evidence (lake#602) | grant(s); a created one with `attestation` | [policy.md](policy.md) |
 | `effective_access` | read | `object_id` | `{items: [effective access]}` | [policy.md](policy.md) |
@@ -303,6 +312,7 @@ and `Experiments.CompareRunsAnswersItsGetFormWithRepeatedKeysOrACommaList`
 | `transparency_consistency_proof` | public read | old and new checkpoint tree sizes | compact append-only audit path bound to the complete new checkpoint record | [transparency.md](transparency.md) |
 | `transparency_identity_scan` | public read | TAAP identity | checkpoint-verified matching attestations and scan measurements | [transparency.md](transparency.md) |
 | `list_agent_library` | read | none | the Agent Library: every specialized agent Orama ships, whether this lake runs it, and, only with `include_internal: true`, Orama's own tooling marked `internal` (never offered in Ask Orama) | [train-agents.md](train-agents.md) |
+| `list_agent_revisions` | read | customer, workspace, agent, optional limit | every revision of an agent's definition, newest first: its number, who made it and when, `create` or `update`, and the definition it set (lake#653); restore one with `update_agent` | [train-agents.md](train-agents.md#definition-revisions) |
 | `list_datasets` | read | customer | The workspace dataset catalogue with stable `<database>/<name>` ids (the form `get_dataset` takes) and `kind` (`data` or engine `result`) | [workspaces.md](workspaces.md) |
 | `list_runs` | read | customer, optional project/solution and limit | newest matching runs with status, reached stage and final error line | [workspaces.md](workspaces.md) |
 | `launch_agent`, `list_agent_launches`, `stop_agent_launch`, `schedule_agent`, `list_agent_schedules`, `unschedule_agent` | action / read | customer, agent, mode, input, cron or trigger | run, follow and stop Python agents on agent-runtime, and give them cron schedules (each a CronJob) | [agent-launches.md](agent-launches.md) |

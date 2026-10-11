@@ -9,7 +9,7 @@ works.
 
 Use a Clerk user that exists for testing, never someone else's account. On dev:
 
-| Email | Clerk user | lake space |
+| Email | Clerk user | lake account |
 |---|---|---|
 | `steve.sperandeo@gmail.com` | `user_3JpUKQFkOXWBelPZAiFWshP0OUH` | `grand-lantern-…` (personal), workspace `ws-6bb777ba498a` |
 
@@ -34,7 +34,7 @@ for that account; delete the file when you are done.
 ## 3a. Sign in by hand
 
 Open `https://lake.oramadev.net/sign-in?__clerk_ticket=<ticket>` in any browser. Clerk signs you
-in, and lake lands you on `/repositories`, where your own space is marked *(you)*.
+in, and lake lands you on `/repositories`, where your own account is marked *(you)*.
 
 ## 3b. Or run the scripted walkthrough
 
@@ -48,7 +48,7 @@ writes a numbered screenshot per step plus `log.json` to the output directory. T
 
 | Step | What it checks |
 |---|---|
-| Sign in | The ticket signs in through Clerk and lake redirects to `/repositories`; the page marks the viewer's own space |
+| Sign in | The ticket signs in through Clerk and lake redirects to `/repositories`; the page marks the viewer's own account |
 | Design → Projects | **Start your workspace** is offered, then *Preparing your workspace*, and within a few minutes the project form appears (the workspace is Ready) |
 | Create project | A project is created in the customer's workspace and its page opens |
 | Build pipeline | The description is captured as the project's intent and compiled into a pipeline |
