@@ -28,9 +28,13 @@ visible before anything is shared:
 
 The page shows its figures (who has access, active links, expired or revoked links) above the
 access table. Each delivery is a card whose button opens its form in a dialog; the header offers
-**Share with person** and **Create link** as well. The People and Organization controls both call `share_drive_folder` with the named TAAP identity,
-role, and attestation digest. An organization grant is made to that named identity; the table
-shows the identities that actually have effective access. The Link control calls
+**Share with person** and **Create link** as well. The People and Organization dialogs (lake#585)
+read `drive_share_people` and offer its people (or organizations) in a list under one field, **Person
+(email or handle)** or **Organization (handle)**; the person may also type an email or handle.
+They call `share_drive_folder` with `recipient` and the role, and nothing else: lake resolves the
+identity and signs the grant's attestation, so the dialog has no TAAP identity or digest field. A
+name lake cannot place comes back as the call's error under the field. An organization grant is
+made to that named identity; the table shows the identities that actually have effective access. The Link control calls
 `create_drive_share_link` with its role and required expiry, and shows the new link's address.
 
 Lake does not expose a passcode on `create_drive_share_link`. The form says that passcodes are not

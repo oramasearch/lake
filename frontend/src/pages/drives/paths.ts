@@ -216,3 +216,25 @@ export function expandTo(open: ReadonlySet<string>, path: string): Set<string> {
   for (const folder of ancestors(path)) next.add(folder);
   return next;
 }
+
+/* ------------------------------------------------------------------ datasets */
+
+/** The dataset format a drive file's name says (lake#593): csv for ".csv", jsonl for ".jsonl" or
+ * ".ndjson", or null when it is neither, which "Load as dataset" does not offer. */
+export function datasetFormat(name: string): "csv" | "jsonl" | null {
+  const lower = name.toLowerCase();
+  if (lower.endsWith(".csv")) return "csv";
+  if (lower.endsWith(".jsonl") || lower.endsWith(".ndjson")) return "jsonl";
+  return null;
+}
+
+/** A dataset name from a file's name, as SQL can query it: letters, digits and underscores,
+ * starting with a letter or underscore, at most 63 characters ("Churn 2026.csv" → "churn_2026"). */
+export function datasetName(fileName: string): string {
+  const dot = fileName.lastIndexOf(".");
+  const stem = (dot > 0 ? fileName.slice(0, dot) : fileName).toLowerCase();
+  let name = stem.replace(/[^a-z0-9_]+/g, "_").replace(/^_+|_+$/g, "").replace(/_+/g, "_");
+  if (!name) name = "dataset";
+  if (/^[0-9]/.test(name)) name = `_${name}`;
+  return name.slice(0, 63);
+}

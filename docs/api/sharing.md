@@ -8,9 +8,47 @@ be recalled; export or download performs the copy.
 
 ## Live grants and effective access
 
-`share_drive_folder` accepts `repository_id`, `ref`, a folder `path`, recipient TAAP id, role, and
-attestation digest. It creates the path policy object when needed, then writes an ordinary policy
-grant. The recipient sees the continuing live object. Other principals receive `unauthorized`.
+`share_drive_folder` accepts `repository_id`, `ref`, a folder `path`, the recipient and a `role`
+(`read`, `write` or `share`). It creates the path policy object when needed, then writes an
+ordinary policy grant. The recipient sees the continuing live object. Other principals receive
+`unauthorized`.
+
+### Naming the Recipient (lake#585)
+
+- **`recipient`**, for people: an email or a handle (`ana` or `@ana`), matched without regard to
+  case among the space's people. Those are what `drive_share_people` lists: the space's owner, and
+  for an organization the organization itself (by its handle) and every user who holds one of its
+  memberships, each with `taap_id`, `kind`, `display_name`, `email` and `handle` (their personal
+  space's name). Anyone else is `invalid_input` at `/recipient`, which says to invite them first.
+  `drive_share_people` needs `share` on the folder, as sharing does, so only someone who may share
+  sees the members' emails.
+- **`principal_taap_id`**, for programs: a TAAP identity, which lake must know as a user or an
+  organization (`principal_names`); an unknown one is `invalid_input` at `/principal_taap_id`.
+- Exactly one of the two (`invalid_input` at `/recipient` otherwise).
+
+### The Grant's Attestation (lake#585)
+
+The grant's `attestation_digest` is evidence of the grant, so lake makes it rather than taking a
+caller's word. For each share lake writes the statement
+
+`{type: "lake.drive.share/1", repository_id, object_id, node_id, path, principal_taap_id, role,
+granted_by, issuer}`
+
+signs its JSON with lake's own TAAP identity (`audit::sign_taap`, purpose `drive-share`, the same
+key and signing path as the audit stream), and keeps `sha256:<hex>` of the canonical JSON of
+`{statement, signer, signature}` on the grant. The answer and the `drive.folder.shared` audit event
+carry `attestation: {statement, signer, signature, digest}`, so anyone holding the audit can
+recompute the digest and check the signature against lake's identity document.
+
+The statement has no time in it and Ed25519 signatures are deterministic, so the same share under
+the same lake identity always has the same digest. `attestation_digest` is therefore optional, and
+accepted only when it equals that digest (a program repeating a share it made); any other value is
+`invalid_input` at `/attestation_digest`, saying lake makes the attestation. Before lake#585 the
+caller supplied the digest and lake stored whatever it was sent. Sharing what is already shared
+answers the existing grant with `existing: true` instead of `conflict`.
+
+After lake rotates its identity, a repeated share's digest differs; such a program leaves
+`attestation_digest` out.
 
 `drive_effective_access` calls the policy engine's `effective_access` function and returns each
 principal, role, allowed actions, source object, and `inherited` flag. The sharing page renders
@@ -111,6 +149,11 @@ use `drive.folder.shared`, `drive.share_link.created`, and `drive.share_link.rev
 
 ## Verification
 
+`Drive.SharingByEmailOrHandleIsAttestedByLake` shares by email (any case) and by handle among an
+organization's people, checks the lake-signed statement and its digest on the grant, accepts the
+answered digest for the same share (the existing grant), refuses a made-up digest and a digest for
+another role at `/attestation_digest`, refuses an outsider's email at `/recipient` and an unknown
+TAAP identity at `/principal_taap_id`, and accepts a known one.
 `Drive.FolderSharingMatchesAuthorizeAndLinksExpire` proves recipient visibility, outsider denial,
 effective-access agreement with `authorize`, a recipient's shared-with-me result, active-link
 resolution after a stable-node move, registry previews/downloads, OpenAPI/MCP discovery, MCP byte

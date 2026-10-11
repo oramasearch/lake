@@ -4735,8 +4735,7 @@ TEST(Drive, FolderSharingMatchesAuthorizeAndLinksExpire) {
                                            {"ref", "main"},
                                            {"path", "shared"},
                                            {"principal_taap_id", "taap:1:ed25519:recipient"},
-                                           {"role", "read"},
-                                           {"attestation_digest", "attestation-recipient"}});
+                                           {"role", "read"}});
     ASSERT_TRUE(shared.ok) << shared.error.message;
     const std::string folder_object = shared.value["object"]["id"];
 
@@ -4915,6 +4914,133 @@ TEST(Drive, FolderSharingMatchesAuthorizeAndLinksExpire) {
             "unauthorized");
         EXPECT_TRUE(surface.ctx.sync_response.empty());
     }
+}
+
+// lake#585: a person shares a folder with someone by email or handle, from the space's people;
+// lake writes and signs the grant's attestation, and a digest a caller makes up is refused.
+TEST(Drive, SharingByEmailOrHandleIsAttestedByLake) {
+    Surface surface;
+    RepositoryFixtureStore repository_store;
+    surface.ctx.sync_store = &repository_store;
+    const auto user = [&](const std::string& name) {
+        const ApiResult made = surface.call("create_user",
+                                            {{"taap_id", "taap:1:ed25519:" + name},
+                                             {"email", name + "@example.com"},
+                                             {"display_name", name}});
+        EXPECT_TRUE(made.ok) << made.error.message;
+        return made;
+    };
+    const ApiResult owner = user("owner");
+    const ApiResult ana = user("ana");
+    const ApiResult outsider = user("outsider");
+    ASSERT_TRUE(surface
+                    .call("create_customer",
+                          {{"customer_type", "individual"},
+                           {"user_id", ana.value["id"]},
+                           {"name", "ana-handle"}})
+                    .ok);
+    const ApiResult organization = surface.call(
+        "create_organization", {{"taap_id", "taap:1:ed25519:studio"}, {"display_name", "Studio"}});
+    ASSERT_TRUE(organization.ok) << organization.error.message;
+    const ApiResult customer = surface.call("create_customer",
+                                            {{"customer_type", "organization"},
+                                             {"organization_id", organization.value["id"]},
+                                             {"name", "studio"}});
+    ASSERT_TRUE(customer.ok) << customer.error.message;
+    for (const ApiResult* member : {&owner, &ana}) {
+        const ApiResult joined = surface.call("create_membership",
+                                              {{"organization_id", organization.value["id"]},
+                                               {"principal_type", "user"},
+                                               {"principal_id", member->value["id"]},
+                                               {"principal_taap_id", member->value["taap_id"]},
+                                               {"role", member == &owner ? "owner" : "member"},
+                                               {"attestation_digest", "sha512-256:membership"}});
+        ASSERT_TRUE(joined.ok) << joined.error.message;
+    }
+    const ApiResult repository = surface.call(
+        "create_repository",
+        {{"customer_id", customer.value["id"]},
+         {"workspace_id", lake::test::repository_workspace(surface.store, customer.value["id"])},
+         {"name", "drive"}});
+    ASSERT_TRUE(repository.ok) << repository.error.message;
+    const auto repository_object =
+        surface.store.find_policy_object("repository", repository.value["id"]);
+    ASSERT_TRUE(repository_object);
+    ASSERT_TRUE(surface.store.create_grant({"taap:1:ed25519:owner",
+                                            repository_object->id,
+                                            "admin",
+                                            "attestation-owner",
+                                            "admin",
+                                            "request-owner"}));
+    surface.ctx.operator_credential = false;
+    surface.ctx.acting_identity = "taap:1:ed25519:owner";
+    const json folder{
+        {"repository_id", repository.value["id"]}, {"ref", "main"}, {"path", "shared"}};
+    const auto with = [&](json extra) {
+        json input = folder;
+        input.update(extra);
+        return surface.call("share_drive_folder", input);
+    };
+
+    // The people a folder can be shared with by name: the organization and its members.
+    const ApiResult people = surface.call("drive_share_people", folder);
+    ASSERT_TRUE(people.ok) << people.error.message;
+    std::map<std::string, json> by_id;
+    for (const json& person : people.value["people"]) {
+        by_id[person["taap_id"]] = person;
+    }
+    ASSERT_TRUE(by_id.contains("taap:1:ed25519:ana"));
+    EXPECT_EQ(by_id["taap:1:ed25519:ana"]["email"], "ana@example.com");
+    EXPECT_EQ(by_id["taap:1:ed25519:ana"]["handle"], "ana-handle");
+    EXPECT_EQ(by_id[organization.value["taap_id"]]["kind"], "organization");
+    EXPECT_FALSE(by_id.contains("taap:1:ed25519:outsider"));
+
+    // By email, any case: lake resolves the person and signs the attestation itself.
+    const ApiResult shared = with({{"recipient", "Ana@Example.com"}, {"role", "read"}});
+    ASSERT_TRUE(shared.ok) << shared.error.message;
+    EXPECT_EQ(shared.value["grant"]["principal_taap_id"], "taap:1:ed25519:ana");
+    const std::string digest = shared.value["attestation"]["digest"];
+    EXPECT_TRUE(digest.starts_with("sha256:")) << digest;
+    EXPECT_EQ(shared.value["grant"]["attestation_digest"], digest);
+    EXPECT_EQ(shared.value["attestation"]["statement"]["principal_taap_id"], "taap:1:ed25519:ana");
+    EXPECT_EQ(shared.value["attestation"]["statement"]["role"], "read");
+    EXPECT_FALSE(shared.value["attestation"]["signature"].get<std::string>().empty());
+    EXPECT_EQ(shared.value["attestation"]["signer"],
+              shared.value["attestation"]["statement"]["issuer"]);
+
+    // The same share again, by handle and with the digest lake answered: the same grant.
+    const ApiResult again =
+        with({{"recipient", "@ana-handle"}, {"role", "read"}, {"attestation_digest", digest}});
+    ASSERT_TRUE(again.ok) << again.error.message;
+    EXPECT_EQ(again.value["existing"], true);
+    EXPECT_EQ(again.value["grant"]["id"], shared.value["grant"]["id"]);
+
+    // A made-up digest, or one for another role, is refused at its field.
+    const ApiResult made_up = with({{"recipient", "ana-handle"},
+                                    {"role", "write"},
+                                    {"attestation_digest", "sha256:" + std::string(64, 'a')}});
+    EXPECT_EQ(made_up.error.code, "invalid_input");
+    EXPECT_EQ(made_up.error.path, "/attestation_digest");
+    EXPECT_EQ(with({{"recipient", "ana-handle"}, {"role", "write"}, {"attestation_digest", digest}})
+                  .error.path,
+              "/attestation_digest");
+
+    // Someone outside the space is not found by email; a program names a TAAP id lake knows.
+    const ApiResult outside = with({{"recipient", "outsider@example.com"}, {"role", "read"}});
+    EXPECT_EQ(outside.error.code, "invalid_input");
+    EXPECT_EQ(outside.error.path, "/recipient");
+    const ApiResult unknown =
+        with({{"principal_taap_id", "taap:1:ed25519:nobody"}, {"role", "read"}});
+    EXPECT_EQ(unknown.error.path, "/principal_taap_id");
+    const ApiResult program =
+        with({{"principal_taap_id", "taap:1:ed25519:outsider"}, {"role", "read"}});
+    ASSERT_TRUE(program.ok) << program.error.message;
+    EXPECT_TRUE(program.value["attestation"]["digest"].get<std::string>().starts_with("sha256:"));
+    EXPECT_EQ(
+        with({{"recipient", "ana"}, {"principal_taap_id", "taap:1:ed25519:ana"}, {"role", "read"}})
+            .error.code,
+        "invalid_input");
+    EXPECT_EQ(with({{"role", "read"}}).error.code, "invalid_input");
 }
 
 TEST(Drive, ShareDownloadsEncodeAcrossBlockBoundaries) {

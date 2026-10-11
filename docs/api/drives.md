@@ -36,9 +36,10 @@ audited in the workspace's own log ([audit.md](audit.md#which-log)).
 | `begin_drive_upload` | action | `drive_id`, `parent_id?`, `path`, `size`, `content_type?`, `on_conflict?` | `{entry, block_size, max_chunk_bytes}` |
 | `append_drive_upload` | action | `drive_id`, `id`, `offset`, `content` (base64) | `{received, complete, size}` |
 | `finish_drive_upload` | action | `drive_id`, `id`, `sha256?` | the entry |
-| `upload_drive_entries` | action | `drive_id`, `parent_id?`, `on_conflict?`, `files: [{path, content, content_type?}]` | `{items: [entry]}` |
+| `upload_drive_entries` | action | `drive_id`, `parent_id?`, `on_conflict?`, `files: [{path` or `name, content, content_type?}]` | `{items: [entry]}` |
 | `read_drive_file` | read | `drive_id`, `id`, `offset?`, `length?` | `{id, name, size, content_type, sha256, offset, content_base64}` |
 | `recent_drive_entries` | read | `limit?` (1 to 100, default 20) | `{items: [{drive: {id, name}, entry}]}` |
+| `load_drive_dataset` | action | `drive_id`, `id`, `table_name`, `format?`, `if_exists?` | `upload_dataset`'s answer, with `source: {drive_id, id, name}` |
 
 A drive is `{id, name, storage, repository_id, created_by, created_at}`; `repository_id` is `null`
 except for a repository drive. An entry is `{id, drive_id, parent_id, kind, name, path, created_by,
@@ -74,7 +75,9 @@ drive refuses uploads.
 - `create_drive_folder_entry` makes each level of `path` that is missing (as `mkdir -p`) and
   answers the last; a level that is a file or shortcut is `conflict`.
 - `list_drive_entries` lists a folder's ready entries by `folder_id` (or a slash `path` from the
-  top; neither is the top), with the folders from the top down to it in `ancestors`.
+  top; neither is the top), with the folders from the top down to it in `ancestors`, and the
+  folder's unfinished uploads apart in `uploads`, each an entry with `age_seconds` and `expired`
+  ([below](#unfinished-uploads-expire-lake588)).
 - `move_drive_entry` changes `parent_id` (empty: the top) and/or `name` with a write conditional
   on the revision read, retried on a conflict. A folder never moves into itself. Only the record
   changes: a file's object is never copied.
@@ -110,19 +113,44 @@ A file is uploaded in three steps, or in one call when small:
 1. `begin_drive_upload` writes an `uploading` entry at `path` relative to `parent_id` (its folders
    made where missing), with a new opaque object key, and answers `block_size` (1 MiB) and
    `max_chunk_bytes` (8 MiB). `size` is the file's length, at most 64 GiB; `content_type` defaults
-   from the name's extension. An uploading entry is never listed, and its name is taken.
+   from the name's extension. The calls that follow take the answer's `entry.id` as `id`. An uploading entry is not
+   one of the folder's `items`; it is listed under `uploads`, and its name is taken until it
+   finishes, is deleted or expires.
 2. `append_drive_upload` sends bytes from `offset`, which is a multiple of `block_size`; every
    chunk but the last is a whole number of blocks, and no chunk runs past `size`. Chunks go in
    order. A chunk sent again (an answer lost) is accepted unchanged; one that does not continue
-   the object is `conflict` at `/offset`.
+   the object is `conflict` at `/offset`. The answer's `received` is how many bytes the object
+   holds now (read from its stored size, lake#588), not where this chunk ended, and `complete`
+   says whether that is all of `size`: a chunk resent after the last one answers `complete:
+   true`, so a client that trusts it finishes rather than sending everything again.
 3. `finish_drive_upload` reads the object back, block by block: it must hold exactly `size` bytes
    (else `conflict`, "the upload is not complete"), and their SHA-256 becomes the entry's `sha256`
    (`invalid_digest` at `/sha256` when one was sent and differs). The entry becomes `ready` and
    is listed. Finishing a finished upload answers it again.
 
 `upload_drive_entries` does all three for each file (at most 16 MiB decoded per call), in order.
+Its items take the same shape as `upload_drive_files`' (lake#587): `path` (relative, may name
+folders) or `name` (one name in the folder), `content`, and `content_type?`.
 
-`read_drive_file` answers up to 16 MiB of a ready file as base64. A browser downloads with
+### Unfinished Uploads Expire (lake#588)
+
+An upload not finished within 24 hours of its start (`drive_upload_expiry_us`, measured from the
+entry's `modified_us`, which is its start while it uploads) has expired:
+
+- `append_drive_upload` and `finish_drive_upload` refuse it (`conflict` at `/id`, "this upload
+  expired").
+- The next `begin_drive_upload` or `upload_drive_entries` into its folder removes every expired
+  upload there first, object before record, so the new file takes the name instead of
+  `name (2).ext`.
+- Until then `list_drive_entries` lists it under `uploads` with `expired: true`;
+  `delete_drive_entry` removes it at any time.
+
+Expiry is applied by the next write into the folder rather than a sweep, so an expired upload in a
+folder nobody writes to stays listed (and its object stays) until someone does or deletes it. The
+Drives page names a folder's unfinished uploads with their age and removes them on request.
+
+`read_drive_file` answers up to 16 MiB of a ready file as base64. `load_drive_dataset`
+([below](#a-drive-file-as-a-dataset-lake593)) loads one as a dataset. A browser downloads with
 `GET /drive/files/download?customer_id=&workspace_id=&drive_id=&id=[&inline=1]`
 ([http.md](../serving/http.md)): the route calls `get_drive_entry` as the caller (so the read is
 authorized and audited), then streams the plaintext 1 MiB at a time from the object, opening each
@@ -130,6 +158,45 @@ block as it goes; the file is never held whole. `inline=1` serves it `inline` on
 PDF, plain text, CSV, Markdown, audio and video; anything else is an attachment. Every download
 carries `X-Content-Type-Options: nosniff` and `Content-Security-Policy: sandbox; default-src
 'none'`, and its ETag is the SHA-256.
+
+## Two Families of Calls (lake#587)
+
+A drive's files are reached through the calls of the storage that keeps them, because the two
+storages are different things: a repository drive's files are a liquid repository's tree (every
+write a change, history, conflicts, per-folder policy), and a workspace-files drive's are records
+and objects with none of that.
+
+| Need | Repository drive (`drive_*`, by `repository_id`, `ref`, `path`) | Workspace-files or virtual drive (`*_drive_entry`, by `drive_id`, `id`) |
+|---|---|---|
+| List | `drive_browse` | `list_drive_entries` |
+| Folder | `create_drive_folder` (`path` + `name`) | `create_drive_folder_entry` (`path`, levels made) |
+| Upload | `upload_drive_files` | `upload_drive_entries`, or begin/append/finish |
+| Move | `move_drive_path` (`destination`) | `move_drive_entry` (`parent_id`, `name`) |
+| Delete | `delete_drive_path` | `delete_drive_entry` |
+| Read bytes | `download_drive_file` (`content_base64` up to 16 MiB, and `download_url`), `GET /drive/download` | `read_drive_file`, `GET /drive/files/download` |
+| History, sharing, previews | `drive_history`, `share_drive_folder`, `drive_preview`, … | none |
+
+What is shared: `create_drive`, `get_drive`, `list_drives`, `rename_drive`, `delete_drive` and
+`load_drive_dataset` take a drive of any kind; both upload calls take one item shape; and both
+download routes are in OpenAPI ([../serving/http.md](../serving/http.md)). A client holding a
+repository drive reads its `repository_id` from `get_drive` once. Making the `drive_*` calls also
+take `drive_id` was left out: they are the repository's own capabilities (shared with the
+repository's Files tab, its sharing links and the liquid drive client), authorized by repository
+path policy, and taking either key would give each two inputs for one thing. `list_drive_entries`
+on a repository drive says which call to use.
+
+## A Drive File as a Dataset (lake#593)
+
+`load_drive_dataset` loads a CSV or JSONL file of a drive into the workspace's datasets. `id` is
+the file: its entry id in a workspace-files drive, its path (on `main`) in a repository drive; a
+virtual drive is refused at `/drive_id`. `format` (`csv` or `jsonl`) comes from the file's name
+(`.csv`, `.jsonl`, `.ndjson`) when it is not sent, and anything else is `invalid_input` at
+`/format` before a byte is read. The call reads the bytes as the caller with `read_drive_file` or
+`download_drive_file` (so the drive's own authorization and audit apply), then calls the workspace's
+`upload_dataset` through `workspace_act` with `table_name`, `format`, `if_exists?` and the text;
+its errors come back at this call's fields (`/table_name`, and `/id` for the content). At most 16
+MiB (`size_invalid` at `/id`), as `upload_dataset` takes. Nothing is stored anywhere but the
+dataset. The Drives page offers it as **Load as dataset** on a CSV or JSONL file.
 
 ## How File Bytes Are Kept
 
@@ -159,7 +226,8 @@ holds the key; a move or rename never touches the object.
   of `lake_store`, which `lake_files` does not have.
 - **Removal.** Deleting a file deletes its object (durably) before its record, so a failure leaves
   a record whose object is gone, never an object no record names. An abandoned upload's object
-  stays until its entry is deleted.
+  stays until its entry is deleted, or until it has expired and another upload of its name comes
+  into its folder.
 
 **Known gap:** `lake_files` is created without a quota, and lake's storage quota and usage
 figures read the `lake_store` bucket, so workspace files are not counted against the space's
@@ -171,7 +239,7 @@ storage quota yet. The workspace Zetta's own volume is the bound.
 |---|---|
 | `invalid_input` | a name, path, media type, offset or target is invalid; a repository drive given to an entry capability; an upload to a virtual drive; `confirm_name` does not match |
 | `not_found` | no such drive, folder, entry or upload in this workspace; a checked shortcut target is gone |
-| `conflict` | a name taken; a folder level that is not a folder; a chunk out of order; an upload not complete; a finished upload sent more bytes |
+| `conflict` | a name taken; a folder level that is not a folder; a chunk out of order; an upload not complete; a finished upload sent more bytes; an expired upload |
 | `invalid_digest` | `finish_drive_upload`'s `sha256` differs from the bytes |
 | `size_invalid` | a chunk over 8 MiB, an inline upload or read over 16 MiB, a file over 64 GiB |
 | `not_supported` | this lake has no workspace Zetta object transport (no workspace files) |
@@ -189,6 +257,15 @@ storage quota yet. The workspace Zetta's own volume is the bound.
   `not_found`) and a streamed download of a 3 MiB file.
 - `SchemaConformance.EveryToolAndRequiredOutputUsesHttpContract` calls every capability above and
   validates its answer against its output schema.
+- `Drives.AResentChunkAnswersTheUploadAndAbandonedUploadsExpire` (lake#588): a resent chunk's
+  true `received` and `complete`, unfinished uploads under `uploads`, an expired one refusing
+  chunks and giving up its name, and `upload_drive_entries` taking `name`.
+- `DrivesHttp.ARepositoryDriveWriteIsSearchedDownloadedAndLoaded` (lake#584, lake#587, lake#593):
+  a drive write found by hot search, then moved and deleted; `download_drive_file`'s bytes, media
+  type and `download_url`, whose route serves `text/csv` with the file's name; both download routes
+  in OpenAPI; and `load_drive_dataset` sending the CSV to `upload_dataset`.
+  `DrivesHttp.AWorkspaceFileDownloadStreamsItsBytes` checks `Content-Disposition` and loads a JSONL
+  workspace file.
 
 ## Change It
 

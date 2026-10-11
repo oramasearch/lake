@@ -9780,6 +9780,26 @@ struct ApiServer::Impl {
                          "no-store");
     }
 
+    // The media types a browser shows as data and never runs as a page: the only ones a download
+    // is served as (inline on request for a workspace file); anything else is
+    // application/octet-stream.
+    static bool displayable_media_type(std::string_view type) {
+        static constexpr std::array types = std::to_array<std::string_view>({"image/png",
+                                                                             "image/jpeg",
+                                                                             "image/gif",
+                                                                             "image/webp",
+                                                                             "application/pdf",
+                                                                             "text/plain",
+                                                                             "text/csv",
+                                                                             "text/markdown",
+                                                                             "audio/mpeg",
+                                                                             "audio/mp4",
+                                                                             "audio/wav",
+                                                                             "video/mp4",
+                                                                             "video/webm"});
+        return std::ranges::find(types, type) != types.end();
+    }
+
     boost::http::route_task serve_drive_download(boost::http::route_params& route) {
         ApiContext context = context_for(route);
         const std::string repository_id = query_value(route, "repository_id");
@@ -9795,12 +9815,17 @@ struct ApiServer::Impl {
         }
         std::string filename = path_filename(path);
         std::ranges::replace(filename, '"', '_');
+        std::ranges::replace(filename, '\\', '_');
         std::ranges::replace(filename, '\r', '_');
         std::ranges::replace(filename, '\n', '_');
         route.res.set("content-disposition", "attachment; filename=\"" + filename + "\"");
+        // The file's own type when a browser only shows it (a CSV is text/csv, lake#587).
+        const std::string media_type = json_string(result.value, "media_type");
         co_return co_await send_bytes(route,
                                       boost::http::status::ok,
-                                      json_string(result.value, "media_type"),
+                                      displayable_media_type(media_type)
+                                          ? media_type
+                                          : std::string("application/octet-stream"),
                                       context.sync_response,
                                       "\"" + json_string(result.value, "blob") + "\"");
     }
@@ -9837,23 +9862,8 @@ struct ApiServer::Impl {
             co_return co_await serve_download_error(
                 route, context, ApiResult::failure(found.error().code, found.error().message));
         }
-        static constexpr std::array inline_types =
-            std::to_array<std::string_view>({"image/png",
-                                             "image/jpeg",
-                                             "image/gif",
-                                             "image/webp",
-                                             "application/pdf",
-                                             "text/plain",
-                                             "text/csv",
-                                             "text/markdown",
-                                             "audio/mpeg",
-                                             "audio/mp4",
-                                             "audio/wav",
-                                             "video/mp4",
-                                             "video/webm"});
         const bool show =
-            query_value(route, "inline") == "1" &&
-            std::ranges::find(inline_types, found->content_type) != inline_types.end();
+            query_value(route, "inline") == "1" && displayable_media_type(found->content_type);
         std::string filename = found->name;
         for (char& c : filename) {
             if (c == '"' || c == '\\' || c == '\r' || c == '\n') {

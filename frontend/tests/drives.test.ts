@@ -2,7 +2,7 @@
  * what a shortcut opens. `npm test`; the build runs it. */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { ancestors, chunkBySize, chunkRanges, cleanPath, driveSlug, expandTo, isWithin, joinPath, nameOf, parentOf, planMoves, planUpload, rangeSelect, sortEntries, validName } from "../src/pages/drives/paths.ts";
+import { ancestors, chunkBySize, chunkRanges, cleanPath, datasetFormat, datasetName, driveSlug, expandTo, isWithin, joinPath, nameOf, parentOf, planMoves, planUpload, rangeSelect, sortEntries, validName } from "../src/pages/drives/paths.ts";
 import { cleanTarget, storageLabel, targetHref, targetProblem } from "../src/pages/drives/targets.ts";
 
 test("drive paths", () => {
@@ -106,4 +106,17 @@ test("a shortcut's target is checked as lake checks it", () => {
   assert.equal(targetProblem({ kind: "url", url: "ftp://x" }), "A web address starts with http:// or https://.");
   assert.equal(targetProblem({ kind: "url", url: "https://x.test" }), null);
   assert.deepEqual(cleanTarget({ kind: "repository_path", repository_id: " r ", path: "/a/b/", id: "stray", url: "x" }), { kind: "repository_path", repository_id: "r", path: "a/b" });
+});
+
+test("Load as dataset is offered for CSV and JSONL files, under a name SQL can query (lake#593)", () => {
+  assert.equal(datasetFormat("churn.csv"), "csv");
+  assert.equal(datasetFormat("People.JSONL"), "jsonl");
+  assert.equal(datasetFormat("events.ndjson"), "jsonl");
+  assert.equal(datasetFormat("notes.md"), null);
+  assert.equal(datasetFormat("csv"), null);
+  assert.equal(datasetName("Churn 2026.csv"), "churn_2026");
+  assert.equal(datasetName("2026-q3.csv"), "_2026_q3");
+  assert.equal(datasetName("--.csv"), "dataset");
+  assert.equal(datasetName("a".repeat(80) + ".csv").length, 63);
+  assert.match(datasetName("Ünïcode name.jsonl"), /^[A-Za-z_][A-Za-z0-9_]{0,62}$/);
 });

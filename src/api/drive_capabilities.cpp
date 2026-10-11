@@ -1,13 +1,16 @@
 #include "lake/api/capabilities.hpp"
 
 #include <algorithm>
-#include <optional>
+#include <cctype>
 #include <chrono>
 #include <cstddef>
 #include <expected>
 #include <format>
 #include <iterator>
+#include <optional>
 #include <ranges>
+#include <set>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -17,10 +20,14 @@
 #include <openssl/hmac.h>
 
 #include "lake/api/drive.hpp"
+#include "lake/audit/audit.hpp"
+#include "lake/control/drive_files.hpp"
 #include "lake/control/drive_share_links.hpp"
+#include "lake/control/drives.hpp"
 #include "lake/control/policy.hpp"
 #include "lake/control/store.hpp"
 #include "lake/control/workspace_records.hpp"
+#include "lake/search/index.hpp"
 #include "workspace_records_api.hpp"
 
 namespace lake::api {
@@ -466,6 +473,20 @@ std::expected<void, ApiError> require_drive_write(const json& input, ApiContext&
     return {};
 }
 
+// A drive write is a change like a push's, so the search index follows it as it follows a push
+// (lake#584): the repository's branch tips are published again. A failure is recorded in the audit
+// details and never fails the write; search then names the repository's workspace as stale or
+// building until its worker catches up (docs/api/search.md).
+void follow_in_search(const control::Repository& repository, ApiContext& context) {
+    if (!context.search) {
+        return;
+    }
+    const auto indexed = context.search->reindex_artifacts(repository.customer_id, repository.id);
+    if (!indexed) {
+        context.audit_details["search_index"] = indexed.error().message;
+    }
+}
+
 ApiResult committed_drive_change(const control::Repository& repository,
                                  std::string_view audit_kind,
                                  std::string_view audit_path,
@@ -478,6 +499,7 @@ ApiResult committed_drive_change(const control::Repository& repository,
     context.audit_kind = std::string(audit_kind);
     context.audit_object = "repository/" + repository.id + "/path/" + std::string(audit_path);
     context.audit_details = {{"path", audit_path}, {"change", *committed}};
+    follow_in_search(repository, context);
     return ApiResult::success({{"change", *committed}, {"path", audit_path}});
 }
 
@@ -900,6 +922,234 @@ json share_links_input_schema() {
             {"additionalProperties", false}};
 }
 
+// The largest file download_drive_file answers inline, as read_drive_file does (16 MiB).
+constexpr std::size_t max_answer_bytes = 16 * 1024 * 1024;
+
+std::string encode_base64(std::span<const std::byte> bytes) {
+    std::string encoded((bytes.size() + 2) / 3 * 4, '\0');
+    // Keep each OpenSSL length within int, with padding only in the final block.
+    constexpr std::size_t block_size = 3 * 1024 * 1024;
+    for (std::size_t offset = 0; offset < bytes.size(); offset += block_size) {
+        const std::size_t length = std::min(block_size, bytes.size() - offset);
+        EVP_EncodeBlock(reinterpret_cast<unsigned char*>(encoded.data() + offset / 3 * 4),
+                        reinterpret_cast<const unsigned char*>(bytes.data() + offset),
+                        static_cast<int>(length));
+    }
+    return encoded;
+}
+
+// A query-string value, percent-encoded except for unreserved characters and "/".
+std::string url_component(std::string_view value) {
+    std::string out;
+    for (const char raw : value) {
+        const auto c = static_cast<unsigned char>(raw);
+        if (std::isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~' || c == '/') {
+            out.push_back(raw);
+        } else {
+            out += std::format("%{:02X}", c);
+        }
+    }
+    return out;
+}
+
+// One repository path: a file read or written, where browse's ordering means nothing.
+json drive_path_schema() {
+    return {{"type", "object"},
+            {"properties",
+             {{"repository_id", {{"type", "string"}}},
+              {"ref", {{"type", "string"}}},
+              {"path", {{"type", "string"}}}}},
+            {"required", json::array({"repository_id", "ref", "path"})},
+            {"additionalProperties", false}};
+}
+
+// ---- Sharing with a person (lake#585) ----
+
+// Someone a folder can be shared with: a member of the repository's space, or the space's own
+// owner (a person, or the organization itself).
+struct Recipient {
+    std::string taap_id;
+    std::string kind; // user or organization
+    std::string display_name;
+    std::string email;
+    std::string handle;
+};
+
+json recipient_json(const Recipient& recipient) {
+    return {{"taap_id", recipient.taap_id},
+            {"kind", recipient.kind},
+            {"display_name", recipient.display_name},
+            {"email", recipient.email},
+            {"handle", recipient.handle}};
+}
+
+std::string lowercase(std::string value) {
+    std::ranges::transform(
+        value, value.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return value;
+}
+
+// The people of the repository's space: its owner, and for an organization the organization and
+// every person who is a member of it (or of one of its teams), each with their handle.
+std::expected<std::vector<Recipient>, ApiError>
+space_people(ApiContext& context, const control::Repository& repository) {
+    const auto failure = [](const control::StoreError& error) {
+        return std::unexpected(ApiError{error.code, error.message, {}});
+    };
+    const auto customer = context.store->get_customer(repository.customer_id);
+    if (!customer) {
+        return failure(customer.error());
+    }
+    std::vector<Recipient> people;
+    std::set<std::string> seen;
+    const auto add_user = [&](const std::string& user_id) -> std::optional<ApiError> {
+        const auto user = context.store->get_user(user_id);
+        if (!user) {
+            return user.error().code == "not_found"
+                       ? std::nullopt
+                       : std::optional<ApiError>(
+                             ApiError{user.error().code, user.error().message, {}});
+        }
+        if (user->taap_id.empty() || !seen.insert(user->taap_id).second) {
+            return std::nullopt;
+        }
+        std::string handle;
+        if (const auto own = context.store->list_customers(10, user->id); own) {
+            for (const control::Customer& space : *own) {
+                if (space.customer_type == "individual") {
+                    handle = space.name;
+                    break;
+                }
+            }
+        }
+        people.push_back({user->taap_id, "user", user->display_name, user->email, handle});
+        return std::nullopt;
+    };
+    if (customer->customer_type == "individual") {
+        if (auto error = add_user(customer->user_id)) {
+            return std::unexpected(*error);
+        }
+        return people;
+    }
+    const auto organization = context.store->get_organization(customer->organization_id);
+    if (!organization) {
+        return failure(organization.error());
+    }
+    if (!organization->taap_id.empty() && seen.insert(organization->taap_id).second) {
+        people.push_back({organization->taap_id,
+                          "organization",
+                          organization->display_name,
+                          "",
+                          customer->name});
+    }
+    const auto members = context.store->list_memberships(customer->organization_id, "", 1000);
+    if (!members) {
+        return failure(members.error());
+    }
+    for (const control::Membership& member : *members) {
+        if (member.principal_type != "user") {
+            continue;
+        }
+        if (auto error = add_user(member.principal_id)) {
+            return std::unexpected(*error);
+        }
+    }
+    return people;
+}
+
+// The person `recipient` names: an email, a handle (with or without "@") or a TAAP id, among the
+// space's people.
+std::expected<Recipient, ApiError> resolve_recipient(ApiContext& context,
+                                                     const control::Repository& repository,
+                                                     std::string recipient) {
+    while (!recipient.empty() && std::isspace(static_cast<unsigned char>(recipient.front()))) {
+        recipient.erase(recipient.begin());
+    }
+    while (!recipient.empty() && std::isspace(static_cast<unsigned char>(recipient.back()))) {
+        recipient.pop_back();
+    }
+    if (recipient.empty()) {
+        return std::unexpected(
+            ApiError{"invalid_input", "name the person by their email or handle", "/recipient"});
+    }
+    const auto people = space_people(context, repository);
+    if (!people) {
+        return std::unexpected(people.error());
+    }
+    const bool by_email = recipient.find('@', 1) != std::string::npos;
+    const std::string wanted =
+        lowercase(recipient.starts_with('@') ? recipient.substr(1) : recipient);
+    for (const Recipient& person : *people) {
+        if (person.taap_id == recipient ||
+            (by_email && !person.email.empty() && lowercase(person.email) == wanted) ||
+            (!by_email && !person.handle.empty() && lowercase(person.handle) == wanted)) {
+            return person;
+        }
+    }
+    return std::unexpected(ApiError{
+        "invalid_input",
+        "no one in this space has that " + std::string(by_email ? "email" : "handle") +
+            ": share with a member of the space (drive_share_people lists them), or invite the "
+            "person to the space first",
+        "/recipient"});
+}
+
+// The statement lake signs for a live folder share, and the digest the grant keeps as its
+// evidence (lake#585). The statement names what the grant is (folder, stable node, person, role,
+// who shared it) and nothing about when, so lake's Ed25519 signature, which is deterministic, and
+// the digest over statement and signature are the same for the same share under the same lake
+// identity: a caller can send back the digest lake answered, never one of its own.
+struct ShareAttestation {
+    json statement;
+    std::string signer;
+    std::string signature;
+    std::string digest;
+};
+
+std::expected<ShareAttestation, ApiError> share_attestation(ApiContext& context,
+                                                            const DriveLocation& location,
+                                                            const std::string& principal_taap_id,
+                                                            const std::string& role) {
+    const audit::IdentityOptions options{.configured_seed = context.identity_seed,
+                                         .instance_kek = context.instance_kek};
+    const auto identity = audit::identity(*context.store, options);
+    if (!identity) {
+        return std::unexpected(
+            ApiError{identity.error().code.empty() ? "store_unavailable" : identity.error().code,
+                     "lake cannot sign the share's attestation: " + identity.error().message,
+                     {}});
+    }
+    ShareAttestation out;
+    out.signer = identity->taap_id;
+    out.statement = {{"type", "lake.drive.share/1"},
+                     {"repository_id", location.repository.id},
+                     {"object_id", location.object.id},
+                     {"node_id", location.node_id},
+                     {"path", location.path},
+                     {"principal_taap_id", principal_taap_id},
+                     {"role", role},
+                     {"granted_by", context.acting_identity},
+                     {"issuer", identity->taap_id}};
+    const std::string body = out.statement.dump();
+    const auto signature =
+        audit::sign_taap(*context.store,
+                         identity->taap_id,
+                         "drive-share",
+                         std::span(reinterpret_cast<const std::byte*>(body.data()), body.size()),
+                         options);
+    if (!signature) {
+        return std::unexpected(
+            ApiError{signature.error().code.empty() ? "store_unavailable" : signature.error().code,
+                     "lake could not sign the share's attestation: " + signature.error().message,
+                     {}});
+    }
+    out.signature = encode_base64(*signature);
+    const json signed_statement{
+        {"statement", out.statement}, {"signer", out.signer}, {"signature", out.signature}};
+    out.digest = "sha256:" + control::drive_sha256_hex(signed_statement.dump());
+    return out;
+}
+
 json drive_input_schema(bool path_required) {
     json required = json::array({"repository_id", "ref"});
     if (path_required) {
@@ -989,9 +1239,27 @@ void register_drive_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "download_drive_file",
         .title = "Download drive file",
-        .description = "Read one drive file as bytes with its digest and media type.",
-        .input_schema = drive_input_schema(true),
-        .output_schema = {{"type", "object"}},
+        .description =
+            "Read one repository-drive file: its bytes as base64 in `content_base64` for a file "
+            "of at most 16 MiB (null above that), with its digest, size and media type, and "
+            "`download_url`, the GET /drive/download address that streams any size to a "
+            "browser or a client holding the same credential. A workspace-files drive's file is "
+            "read with read_drive_file.",
+        .input_schema = drive_path_schema(),
+        .output_schema =
+            {{"type", "object"},
+             {"properties",
+              {{"path", {{"type", "string"}}},
+               {"blob", {{"type", "string"}}},
+               {"size", {{"type", "integer"}, {"minimum", 0}}},
+               {"media_type", {{"type", "string"}}},
+               {"content_base64",
+                {{"type", json::array({"string", "null"})}, {"contentEncoding", "base64"}}},
+               {"download_url", {{"type", "string"}}}}},
+             {"required",
+              json::array(
+                  {"path", "blob", "size", "media_type", "content_base64", "download_url"})},
+             {"additionalProperties", false}},
         .kind = CapabilityKind::Read,
         .object = "drive file",
         .action = "read",
@@ -1017,10 +1285,22 @@ void register_drive_capabilities(Registry& registry) {
             context.audit_kind = "drive.file.downloaded";
             context.audit_object = "repository/" + repository->id + "/path/" + file->path;
             context.audit_details = {{"blob", file->blob}, {"path", file->path}};
-            return ApiResult::success({{"path", file->path},
-                                       {"blob", file->blob},
-                                       {"size", file->size},
-                                       {"media_type", "application/octet-stream"}});
+            // The bytes travel in the answer up to the size read_drive_file answers (lake#587);
+            // a larger file is fetched from download_url, which streams it.
+            json content = nullptr;
+            if (context.sync_response.size() <= max_answer_bytes) {
+                content = encode_base64(context.sync_response);
+            }
+            return ApiResult::success(
+                {{"path", file->path},
+                 {"blob", file->blob},
+                 {"size", file->size},
+                 {"media_type", control::drive_media_type(file->path)},
+                 {"content_base64", std::move(content)},
+                 {"download_url",
+                  "/drive/download?repository_id=" + url_component(repository->id) +
+                      "&ref=" + url_component(input.at("ref").get<std::string>()) +
+                      "&path=" + url_component(file->path)}});
         }});
 
     registry.add(Capability{
@@ -1085,7 +1365,13 @@ void register_drive_capabilities(Registry& registry) {
                  {"items",
                   {{"type", "object"},
                    {"properties",
-                    {{"name",
+                    {{"path",
+                      {{"type", "string"},
+                       {"description",
+                        "Where the file goes, relative to the target folder; it may name folders "
+                        "(\"Q3/report.csv\"), as upload_drive_entries' `path` does. Send `path` "
+                        "or `name`."}}},
+                     {"name",
                       {{"type", "string"},
                        {"description", "A single file name within the target folder."}}},
                      {"content",
@@ -1093,8 +1379,13 @@ void register_drive_capabilities(Registry& registry) {
                        {"contentEncoding", "base64"},
                        {"description",
                         "File bytes encoded as padded base64; an empty string creates an empty "
-                        "file."}}}}},
-                   {"required", json::array({"name", "content"})},
+                        "file."}}},
+                     {"content_type",
+                      {{"type", "string"},
+                       {"description",
+                        "Accepted so one item shape fits both upload calls; a repository keeps no "
+                        "media type, which reads take from the file's name."}}}}},
+                   {"required", json::array({"content"})},
                    {"additionalProperties", false}}}}}}},
              {"required", json::array({"repository_id", "ref", "path", "files"})},
              {"additionalProperties", false}},
@@ -1115,11 +1406,21 @@ void register_drive_capabilities(Registry& registry) {
             std::vector<RepositoryWriteOperation> operations;
             for (std::size_t index = 0; index < input.at("files").size(); ++index) {
                 const json& value = input.at("files").at(index);
-                const std::string name = value.value("name", "");
-                if (!valid_path_name(name)) {
+                // One item shape for both upload calls (lake#587): `path`, which may name
+                // folders, or `name`, one file name.
+                const std::string field = "/files/" + std::to_string(index);
+                if (value.contains("path") == value.contains("name")) {
+                    return ApiResult::failure("invalid_input",
+                                              "send the file's `path` (or its `name`), not both",
+                                              field + "/path");
+                }
+                const bool by_path = value.contains("path");
+                const std::string name =
+                    by_path ? value.value("path", "") : value.value("name", "");
+                if (by_path ? !valid_drive_path(name) : !valid_path_name(name)) {
                     return ApiResult::failure("invalid_input",
                                               "uploaded file name is invalid",
-                                              "/files/" + std::to_string(index) + "/name");
+                                              field + (by_path ? "/path" : "/name"));
                 }
                 const auto contents = decode_base64(value.value("content", ""),
                                                     "/files/" + std::to_string(index) + "/content");
@@ -1477,6 +1778,7 @@ void register_drive_capabilities(Registry& registry) {
                                      {"path", path},
                                      {"resolution", resolution},
                                      {"value", resolved->value}};
+            follow_in_search(*repository, context);
             return ApiResult::success({{"conflict", resolved->conflict},
                                        {"value", resolved->value},
                                        {"change", resolved->change}});
@@ -1516,29 +1818,43 @@ void register_drive_capabilities(Registry& registry) {
             context.audit_details = {{"path", input.at("path")},
                                      {"source_change", input.at("change_id")},
                                      {"restored_change", restored->id}};
+            follow_in_search(*repository, context);
             return ApiResult::success(change_json(*restored));
         }});
 
     registry.add(Capability{
         .name = "share_drive_folder",
         .title = "Share drive folder",
-        .description = "Grant a named recipient a live folder with an explicit role.",
+        .description =
+            "Give a person (or an organization) a live grant on a folder, with a role. Name them "
+            "by `recipient`: their email or handle, one of the space's people (drive_share_people "
+            "lists them). A program may name a TAAP identity lake knows in `principal_taap_id` "
+            "instead. Lake writes and signs the grant's attestation itself and answers it with its "
+            "digest, which the grant keeps as evidence; `attestation_digest` is optional, and only "
+            "the digest lake answered for this same share is accepted.",
         .input_schema =
             {{"type", "object"},
              {"properties",
               {{"repository_id", {{"type", "string"}}},
                {"ref", {{"type", "string"}}},
                {"path", {{"type", "string"}}},
-               {"principal_taap_id", {{"type", "string"}}},
+               {"recipient",
+                {{"type", "string"},
+                 {"description",
+                  "The person's email or handle (\"@ana\" or \"ana\"), among the space's "
+                  "people."}}},
+               {"principal_taap_id",
+                {{"type", "string"},
+                 {"description",
+                  "For programs: a person's or organization's TAAP identity that lake knows. Send "
+                  "this or `recipient`."}}},
                {"role", {{"type", "string"}, {"enum", json::array({"read", "write", "share"})}}},
-               {"attestation_digest", {{"type", "string"}}}}},
-             {"required",
-              json::array({"repository_id",
-                           "ref",
-                           "path",
-                           "principal_taap_id",
-                           "role",
-                           "attestation_digest"})},
+               {"attestation_digest",
+                {{"type", "string"},
+                 {"description",
+                  "Optional. Lake makes the attestation; a digest sent must be the one lake "
+                  "answered for this same folder, person and role."}}}}},
+             {"required", json::array({"repository_id", "ref", "path", "role"})},
              {"additionalProperties", false}},
         .output_schema = {{"type", "object"}},
         .kind = CapabilityKind::Action,
@@ -1546,21 +1862,86 @@ void register_drive_capabilities(Registry& registry) {
         .action = "share",
         .resolve_object = drive_object,
         .handler = [](const json& input, ApiContext& context) {
+            if (input.contains("recipient") == input.contains("principal_taap_id")) {
+                return ApiResult::failure(
+                    "invalid_input",
+                    "name the person to share with: `recipient` (an email or handle), or, for a "
+                    "program, `principal_taap_id`",
+                    "/recipient");
+            }
             const auto location = ensure_folder_location(input, context);
             if (!location) {
                 return ApiResult::failure(
                     location.error().code, location.error().message, location.error().path);
             }
-            const auto grant =
-                context.store->create_grant(control::NewGrant{input.at("principal_taap_id"),
-                                                              location->object.id,
-                                                              input.at("role"),
-                                                              input.at("attestation_digest"),
-                                                              context.acting_identity,
-                                                              context.request_id});
+            Recipient recipient;
+            if (input.contains("recipient")) {
+                auto resolved = resolve_recipient(
+                    context, location->repository, input.at("recipient").get<std::string>());
+                if (!resolved) {
+                    return ApiResult::failure(
+                        resolved.error().code, resolved.error().message, resolved.error().path);
+                }
+                recipient = std::move(*resolved);
+            } else {
+                // The identity-level input is validated (lake#585): lake must know the identity.
+                const std::string taap_id = input.at("principal_taap_id");
+                const auto names = context.store->principal_names({taap_id});
+                if (!names) {
+                    return store_error(names.error());
+                }
+                if (!names->contains(taap_id)) {
+                    return ApiResult::failure("invalid_input",
+                                              "lake knows no person or organization with that "
+                                              "TAAP identity; name the person by `recipient` "
+                                              "(their email or handle) instead",
+                                              "/principal_taap_id");
+                }
+                recipient.taap_id = taap_id;
+                recipient.display_name = names->at(taap_id);
+            }
+            const std::string role = input.at("role");
+            const auto attestation = share_attestation(context, *location, recipient.taap_id, role);
+            if (!attestation) {
+                return ApiResult::failure(attestation.error().code, attestation.error().message);
+            }
+            if (input.contains("attestation_digest") &&
+                input.at("attestation_digest").get<std::string>() != attestation->digest) {
+                return ApiResult::failure(
+                    "invalid_input",
+                    "lake makes and signs a share's attestation itself: leave attestation_digest "
+                    "out. A digest is accepted only when it is the one lake answered for this same "
+                    "folder, person and role.",
+                    "/attestation_digest");
+            }
+            auto grant = context.store->create_grant(control::NewGrant{recipient.taap_id,
+                                                                       location->object.id,
+                                                                       role,
+                                                                       attestation->digest,
+                                                                       context.acting_identity,
+                                                                       context.request_id});
+            bool existing = false;
+            if (!grant && grant.error().code == "conflict") {
+                // Sharing again what is already shared answers the grant that is there.
+                const auto held =
+                    context.store->list_grants({location->object.id}, recipient.taap_id, 100);
+                if (held) {
+                    for (const control::Grant& item : *held) {
+                        if (item.role == role) {
+                            grant = item;
+                            existing = true;
+                            break;
+                        }
+                    }
+                }
+            }
             if (!grant) {
                 return store_error(grant.error());
             }
+            const json signed_statement{{"statement", attestation->statement},
+                                        {"signer", attestation->signer},
+                                        {"signature", attestation->signature},
+                                        {"digest", attestation->digest}};
             context.audit_customer_id = location->repository.customer_id;
             context.audit_kind = "drive.folder.shared";
             context.audit_object =
@@ -1568,11 +1949,69 @@ void register_drive_capabilities(Registry& registry) {
             context.audit_details = {{"delivery", "live"},
                                      {"node_id", location->node_id},
                                      {"path", location->path},
-                                     {"recipient", input.at("principal_taap_id")},
-                                     {"role", input.at("role")}};
+                                     {"recipient", recipient.taap_id},
+                                     {"role", role},
+                                     {"attestation", signed_statement}};
+            json person = recipient_json(recipient);
+            context.audit_details["existing"] = existing;
             return ApiResult::success({{"delivery", "live"},
                                        {"object", control::to_json(location->object)},
-                                       {"grant", control::to_json(*grant)}});
+                                       {"grant", control::to_json(*grant)},
+                                       {"existing", existing},
+                                       {"recipient", std::move(person)},
+                                       {"attestation", signed_statement}});
+        }});
+
+    registry.add(Capability{
+        .name = "drive_share_people",
+        .title = "People to Share With",
+        .description =
+            "The people a folder can be shared with by name: the repository's space's owner, and "
+            "for an organization the organization and its members, each with their TAAP identity, "
+            "display name, email and handle. share_drive_folder's `recipient` takes the email or "
+            "handle.",
+        .input_schema = drive_input_schema(true),
+        .output_schema =
+            {{"type", "object"},
+             {"properties",
+              {{"people",
+                {{"type", "array"},
+                 {"items",
+                  {{"type", "object"},
+                   {"properties",
+                    {{"taap_id", {{"type", "string"}}},
+                     {"kind",
+                      {{"type", "string"}, {"enum", json::array({"user", "organization"})}}},
+                     {"display_name", {{"type", "string"}}},
+                     {"email", {{"type", "string"}}},
+                     {"handle", {{"type", "string"}}}}},
+                   {"required",
+                    json::array({"taap_id", "kind", "display_name", "email", "handle"})},
+                   {"additionalProperties", false}}}}}}},
+             {"required", json::array({"people"})},
+             {"additionalProperties", false}},
+        .kind = CapabilityKind::Read,
+        .object = "drive folder",
+        .action = "share",
+        .resolve_object = drive_object,
+        .handler = [](const json& input, ApiContext& context) {
+            const auto repository = context.store->get_repository(input.at("repository_id"));
+            if (!repository) {
+                return store_error(repository.error());
+            }
+            const auto people = space_people(context, *repository);
+            if (!people) {
+                return ApiResult::failure(people.error().code, people.error().message);
+            }
+            json out = json::array();
+            for (const Recipient& person : *people) {
+                out.push_back(recipient_json(person));
+            }
+            context.audit_customer_id = repository->customer_id;
+            context.audit_kind = "drive.share_people.read";
+            context.audit_object = "repository/" + repository->id;
+            context.audit_details = {{"people", out.size()}};
+            return ApiResult::success({{"people", std::move(out)}});
         }});
 
     registry.add(Capability{

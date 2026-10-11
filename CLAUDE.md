@@ -55,6 +55,13 @@ file after `get_drive_entry` authorizes it. Shortcuts to repositories, repositor
 items and transcripts say when they break. Data → Drives is one file manager over a
 `DriveStorage` interface with three implementations. `lake_files` has no quota yet. Not deployed.
 See `docs/api/drives.md` and `docs/ui/drives.md`.
+The 2026-10-10 review's drive fixes follow (no migration): drive writes and pushes publish branch
+tips into a space's hot search index too (lake#584); a folder is shared by email or handle among
+the space's people (`drive_share_people`) and lake signs the grant's attestation, refusing a
+made-up digest (lake#585); `download_drive_file` answers the bytes and a `download_url` (lake#587);
+a resent chunk answers the true `received`, and unfinished uploads are listed and expire after
+24 hours (lake#588); `load_drive_dataset` loads a drive's CSV or JSONL file (lake#593); the web app
+retries a 503 read once (lake#573, `docs/ui/web-app.md#a-read-answered-503`).
 
 Every future deployment image receives OCI revision and creation labels. The binary reports the
 same embedded revision through `GET /v1/server_info`; details are in

@@ -20,6 +20,7 @@ import {
   ArrowDownAZ,
   ArrowUpAZ,
   ChevronRight,
+  Database,
   Download,
   ExternalLink,
   Eye,
@@ -47,9 +48,9 @@ import { useTrail } from "@/lib/trail";
 import { Banner, Button, Chip, Empty, ErrorBlock, Field, FormError, Meter, Page, SearchInput, Skeleton, Stat, StatRow, Toolbar, cx, fieldError } from "@/lib/ui";
 import { WorkspaceGate } from "@/components/WorkspaceGate";
 import { Menu, displaySize, driveHref as repositoryDriveHref } from "@/pages/repositories/forge";
-import { qs, useWorkspace, useWsPath } from "@/pages/train/workspace";
-import { rangeSelect, sortEntries, validName, type Direction, type SortKey, type UploadItem } from "./paths";
-import { storageFor, type Drive, type DriveStorage, type Item, type Listing, type Progress } from "./storage";
+import { qs, text, useWorkspace, useWsPath } from "@/pages/train/workspace";
+import { datasetFormat, datasetName, rangeSelect, sortEntries, validName, type Direction, type SortKey, type UploadItem } from "./paths";
+import { storageFor, type Drive, type DriveStorage, type Item, type Listing, type Progress, type Upload } from "./storage";
 import { STORAGE, storageLabel, targetHref, targetLabel } from "./targets";
 import { ShortcutDialog } from "./ShortcutDialog";
 import { FolderPicker } from "./FolderPicker";
@@ -96,7 +97,14 @@ function DriveLoader({ id }: { id: string }) {
   );
 }
 
-type Dialog = { kind: "folder" } | { kind: "shortcut" } | { kind: "rename"; item: Item } | { kind: "move"; items: Item[] } | { kind: "delete"; items: Item[] } | { kind: "drive" };
+type Dialog =
+  | { kind: "folder" }
+  | { kind: "shortcut" }
+  | { kind: "rename"; item: Item }
+  | { kind: "move"; items: Item[] }
+  | { kind: "delete"; items: Item[] }
+  | { kind: "drive" }
+  | { kind: "dataset"; item: Item };
 
 function DriveBrowser({ drive, customerId, workspaceId }: { drive: Drive; customerId: string; workspaceId: string }) {
   const [params, setParams] = useSearchParams();
@@ -299,6 +307,7 @@ function DriveBrowser({ drive, customerId, workspaceId }: { drive: Drive; custom
           {upload.error}
         </Banner>
       )}
+      {(listing.data?.uploads?.length ?? 0) > 0 && <UnfinishedUploads storage={storage} uploads={listing.data!.uploads!} />}
       {upload.refused.length > 0 && (
         <Banner tone="warn" title="Some files were not uploaded" action={<Button variant="ghost" onClick={upload.clear}>Dismiss</Button>}>
           {upload.refused.join(", ")}
@@ -429,6 +438,7 @@ function DriveBrowser({ drive, customerId, workspaceId }: { drive: Drive; custom
                           ...(storage.viewHref(item) ? [{ label: "View", icon: Eye, href: storage.viewHref(item)! }] : []),
                           ...(storage.downloadHref(item) ? [{ label: "Download", icon: Download, href: storage.downloadHref(item)! }] : []),
                           ...(drive.storage === "repository" && drive.repository_id ? [{ label: "History", icon: History, to: repositoryDriveHref("/drive/history", drive.repository_id, "main", item.key) }] : []),
+                          ...(item.kind === "file" && datasetFormat(item.name) ? [{ label: "Load as dataset", icon: Database, onSelect: () => setDialog({ kind: "dataset", item }) }] : []),
                           { label: "Rename", icon: Pencil, onSelect: () => setDialog({ kind: "rename", item }) },
                           { label: "Move", icon: FolderInput, onSelect: () => setDialog({ kind: "move", items: [item] }) },
                           { label: "Delete", icon: Trash2, danger: true, onSelect: () => setDialog({ kind: "delete", items: [item] }) },
@@ -460,6 +470,7 @@ function DriveBrowser({ drive, customerId, workspaceId }: { drive: Drive; custom
         />
       )}
       {dialog?.kind === "delete" && <Delete storage={storage} items={dialog.items} onClose={() => setDialog(null)} onDone={() => setSelected(new Set())} />}
+      {dialog?.kind === "dataset" && <LoadDataset drive={drive} item={dialog.item} customerId={customerId} workspaceId={workspaceId} onClose={() => setDialog(null)} />}
       {dialog?.kind === "drive" && (
         <DriveSettings
           drive={drive}
@@ -882,6 +893,121 @@ function DriveSettings({ drive, customerId, workspaceId, onClose, onDeleted }: {
           </Button>
         </div>
       </div>
+    </Modal>
+  );
+}
+
+/** Uploads begun here and never finished hold their names, so a new upload of the same name
+ * would be renamed (lake#588). They are named here with their age, and can be removed; lake also
+ * removes one 24 hours after it began, when another upload of its name arrives. */
+function UnfinishedUploads({ storage, uploads }: { storage: DriveStorage; uploads: Upload[] }) {
+  const toast = useToast();
+  const [busy, setBusy] = useState(false);
+  const age = (seconds: number) => (seconds < 3600 ? `${Math.max(1, Math.round(seconds / 60))} min` : `${Math.round(seconds / 3600)} h`);
+  return (
+    <Banner
+      tone="quiet"
+      title={uploads.length === 1 ? "1 Unfinished Upload" : `${uploads.length} Unfinished Uploads`}
+      action={
+        <Button
+          variant="ghost"
+          loading={busy}
+          onClick={async () => {
+            setBusy(true);
+            try {
+              for (const upload of uploads) await storage.remove({ key: upload.key, kind: "file", name: upload.name, path: upload.name, size: upload.size });
+              refreshAfterWrite();
+              toast(uploads.length === 1 ? "Unfinished upload removed" : "Unfinished uploads removed");
+            } finally {
+              setBusy(false);
+            }
+          }}
+        >
+          Remove
+        </Button>
+      }
+    >
+      {uploads.map((upload) => `${upload.name} (${upload.expired ? "expired" : `${age(upload.ageSeconds)} ago`})`).join(", ")}. An upload not finished
+      holds its name until it is removed, or until 24 hours after it began.
+    </Banner>
+  );
+}
+
+/** Load as dataset (lake#593): a CSV or JSONL file of the drive becomes a dataset of the
+ * workspace through load_drive_dataset, which reads the file and calls upload_dataset. */
+function LoadDataset({ drive, item, customerId, workspaceId, onClose }: { drive: Drive; item: Item; customerId: string; workspaceId: string; onClose: () => void }) {
+  const navigate = useNavigate();
+  const wsPath = useWsPath();
+  const [tableName, setTableName] = useState(datasetName(item.name));
+  const [rename, setRename] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<unknown>(null);
+  const format = datasetFormat(item.name) ?? "csv";
+  return (
+    <Modal
+      title={`Load ${item.name} as a Dataset`}
+      subtitle="The file's rows become a dataset of this workspace, for SQL and training."
+      onClose={onClose}
+      width={480}
+      footer={
+        <>
+          <Button onClick={onClose}>Cancel</Button>
+          <Button type="submit" form="drive-dataset" variant="primary" loading={busy} disabled={!/^[A-Za-z_][A-Za-z0-9_]{0,62}$/.test(tableName)}>
+            Load dataset
+          </Button>
+        </>
+      }
+    >
+      <form
+        id="drive-dataset"
+        className="stack"
+        onSubmit={async (e) => {
+          e.preventDefault();
+          setBusy(true);
+          setError(null);
+          try {
+            const result = await act("load_drive_dataset", {
+              customer_id: customerId,
+              workspace_id: workspaceId,
+              drive_id: drive.id,
+              id: item.key,
+              table_name: tableName,
+              format,
+              if_exists: rename ? "rename" : "fail",
+            });
+            onClose();
+            navigate(
+              wsPath(
+                `/train/data?${qs({
+                  customer_id: customerId,
+                  loaded: text(result, "table") || tableName,
+                  rows: typeof result.rows === "number" ? result.rows : 0,
+                  database: text(result, "database") || "datasets",
+                  format: text(result, "format") || format,
+                  renamed_from: text(result, "renamed_from"),
+                })}`,
+              ),
+            );
+          } catch (err) {
+            setError(err);
+          } finally {
+            setBusy(false);
+          }
+        }}
+      >
+        <FormError error={error} />
+        <Field label="Dataset name" required error={fieldError(error, "table_name")}>
+          <input value={tableName} onChange={(e) => setTableName(e.target.value)} autoFocus />
+          <small className="muted">Letters, digits and underscores, starting with a letter, so SQL can query it.</small>
+        </Field>
+        <label className="flex! items-start gap-2">
+          <input type="checkbox" checked={rename} onChange={(e) => setRename(e.target.checked)} />
+          <span>If the name is taken, save it under the next free name</span>
+        </label>
+        <Banner tone="quiet">
+          {format === "csv" ? "A CSV" : "A JSONL file"} of at most 16 MiB. A CSV row whose field count differs from the header is refused with its line number.
+        </Banner>
+      </form>
     </Modal>
   );
 }

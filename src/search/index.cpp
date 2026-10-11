@@ -1353,8 +1353,9 @@ struct Service::Impl {
         return true;
     }
 
-    // A workspace repository's branch tips as its references name them now: a reference that
-    // moved is published again, one that is gone is dropped, tag snapshots are kept.
+    // A repository's branch tips as its references name them now (in a workspace's index or a
+    // space's, lake#584): a reference that moved is published again, one that is gone is
+    // dropped, tag snapshots are kept.
     [[nodiscard]] static Result<void> publish_refs(liquid::repository& opened,
                                                    CustomerState& state,
                                                    const std::string& repository,
@@ -2644,14 +2645,28 @@ Result<ReindexResult> Service::reindex_artifacts(const std::string& customer,
                 if (const auto ensured = impl_->ensure_space(customer, *state); !ensured) {
                     return std::unexpected(ensured.error());
                 }
+                // A space's index follows every push and commit too (lake#584): the repository's
+                // branch tips are published again as its references name them now, as in a
+                // workspace's index below. Before, only a release or an explicit publication
+                // reached the space's hot index, so a drive write or a push never did.
+                auto next_active = state->data.active;
+                if (const auto published =
+                        Impl::publish_refs(*opened, state->data, repository, next_active);
+                    !published) {
+                    return std::unexpected(published.error());
+                }
                 auto next_artifacts = state->data.artifacts;
                 auto reindexed = Impl::reindex_into(*opened, state->data, repository, next_artifacts);
                 if (!reindexed) {
                     return std::unexpected(reindexed.error());
                 }
                 DirectoryStorage storage(impl_->index_path(customer));
-                if (const auto committed = Impl::commit(storage, state->data, state->data.active,
-                                                        std::move(next_artifacts), true, false);
+                if (const auto committed = Impl::commit(storage,
+                                                        state->data,
+                                                        std::move(next_active),
+                                                        std::move(next_artifacts),
+                                                        true,
+                                                        false);
                     !committed) {
                     return std::unexpected(committed.error());
                 }

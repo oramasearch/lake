@@ -75,6 +75,13 @@ std::uint64_t drive_file_sealed_offset(std::uint64_t index) {
     return index * (drive_file_block + drive_file_block_overhead);
 }
 
+std::uint64_t drive_file_plaintext_size(std::uint64_t sealed) {
+    const std::uint64_t whole = sealed / (drive_file_block + drive_file_block_overhead);
+    const std::uint64_t rest = sealed % (drive_file_block + drive_file_block_overhead);
+    return whole * drive_file_block +
+           (rest > drive_file_block_overhead ? rest - drive_file_block_overhead : 0);
+}
+
 std::uint64_t drive_file_sealed_size(std::uint64_t plaintext) {
     const std::uint64_t blocks = (plaintext + drive_file_block - 1) / drive_file_block;
     return plaintext + blocks * drive_file_block_overhead;
@@ -372,6 +379,22 @@ liquid::runtime::task<ZettaControlResult<std::string>> DriveFileStore::digest(st
         out += std::format("{:02x}", digest[index]);
     }
     co_return ZettaControlResult<std::string>(std::move(out));
+}
+
+liquid::runtime::task<ZettaControlResult<std::uint64_t>> DriveFileStore::received(std::string key) {
+    auto listed = co_await client_->list(key);
+    if (!listed) {
+        if (listed.error().code == liquid::errc::not_found) {
+            co_return ZettaControlResult<std::uint64_t>(std::uint64_t{0});
+        }
+        co_return ZettaControlResult<std::uint64_t>(std::unexpected(object_error(listed.error())));
+    }
+    for (const ObjectListEntry& object : *listed) {
+        if (object.key == key) {
+            co_return ZettaControlResult<std::uint64_t>(drive_file_plaintext_size(object.size));
+        }
+    }
+    co_return ZettaControlResult<std::uint64_t>(std::uint64_t{0});
 }
 
 liquid::runtime::task<ZettaControlResult<void>> DriveFileStore::remove(std::string key) {

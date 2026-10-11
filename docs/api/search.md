@@ -208,7 +208,14 @@ first use into oramacore-cpp's in-memory BM25F adapters. Content is indexed once
 built from the occurrence mappings selected for each query, so a tag or historical change cannot
 inherit paths from a different snapshot.
 
-Publication replaces the segment for a branch tip. Release creation publishes a
+Publication replaces the segment for a branch tip. Every push, every `commit_repository_files`
+and every drive write (`upload_drive_files`, `create_drive_folder`, `move_drive_path`,
+`delete_drive_path`, `restore_drive_version`, `resolve_conflict`) runs `reindex_artifacts`, which
+publishes the repository's branch tips again as its references name them now, in a space's index
+on lake's volume as in a workspace's (lake#584). Before lake#584 only a workspace's index did: a
+space's hot index held a branch only once something published it explicitly, so a file pushed or
+saved through a drive was found only by a history scan, and `stale_workspaces` and
+`building_workspaces` said nothing. Release creation publishes a
 `TagSnapshot` before recording the release: the same tag and change is idempotent, while attempting
 to move a tag to another change returns `conflict`. A request for that ref reads only its cold
 snapshot, even when a branch has the same name. The version 2 manifest and segments record the
@@ -291,6 +298,10 @@ cmake -S . -B build -G Ninja -DLAKE_BUILD_TESTS=ON \
 cmake --build build
 ctest --test-dir build --output-on-failure
 ```
+
+`DrivesHttp.ARepositoryDriveWriteIsSearchedDownloadedAndLoaded` (lake#584) writes a file through a
+repository drive of a space that is not switched and finds it with hot `search` at once, then
+finds it at its new path after `move_drive_path` and not at all after `delete_drive_path`.
 
 `Search.*` covers deduplication across repositories, reload from the persisted manifest, atomic
 publication, immutable tag-only results, a matching change among 1,000 scanned changes, batched

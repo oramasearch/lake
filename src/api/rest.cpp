@@ -308,6 +308,54 @@ openapi_document(const Registry& registry, std::string_view version, SchemaAudie
         {"responses",
          {{"200", {{"description", "a JSON-RPC 2.0 response"}}},
           {"202", {{"description", "a notification was accepted"}}}}}};
+    // The two drive download routes stream a file's bytes rather than answering JSON, so they are
+    // not capabilities; they are described here so a client finds them (lake#587). Each runs the
+    // capability named in its description as the caller, which authorizes and audits the read.
+    const auto download = [](std::string id,
+                             std::string summary,
+                             std::string description,
+                             nlohmann::json parameters) {
+        nlohmann::json operation{{"operationId", std::move(id)},
+                                 {"summary", std::move(summary)},
+                                 {"description", std::move(description)},
+                                 {"tags", nlohmann::json::array({"download"})},
+                                 {"parameters", nlohmann::json::array()}};
+        for (const auto& [name, required] : parameters.items()) {
+            operation["parameters"].push_back({{"name", name},
+                                               {"in", "query"},
+                                               {"required", required.get<bool>()},
+                                               {"schema", {{"type", "string"}}}});
+        }
+        operation["responses"] = {
+            {"200",
+             {{"description",
+               "the file's bytes, with Content-Disposition naming the file and an ETag of its "
+               "digest"},
+              {"content",
+               {{"application/octet-stream",
+                 {{"schema", {{"type", "string"}, {"format", "binary"}}}}}}}}},
+            {"302", {{"description", "no credential: redirected to /sign-in"}}},
+            {"4XX", error_response("not found, or not allowed to read the file")}};
+        return operation;
+    };
+    paths["/drive/download"]["get"] =
+        download("drive_download",
+                 "Download a repository-drive file",
+                 "Streams one file of a repository drive as an attachment, authorized and audited "
+                 "by download_drive_file (`ref` defaults to main).",
+                 {{"repository_id", true}, {"ref", false}, {"path", true}});
+    paths["/drive/files/download"]["get"] =
+        download("drive_files_download",
+                 "Download a workspace file",
+                 "Streams one file of a workspace-files drive, 1 MiB at a time, after "
+                 "get_drive_entry authorizes and audits the read. `inline=1` shows images, PDF, "
+                 "text, CSV, Markdown, audio and video in the browser; anything else is an "
+                 "attachment.",
+                 {{"customer_id", true},
+                  {"workspace_id", true},
+                  {"drive_id", true},
+                  {"id", true},
+                  {"inline", false}});
     document["paths"] = std::move(paths);
     return document;
 }
