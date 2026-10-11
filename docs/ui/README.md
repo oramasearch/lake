@@ -38,7 +38,9 @@ pip, git, API clients) never gets the app.
 `frontend/src/components/Shell.tsx` frames every page except the bare ones (sign-in, sign-up,
 operator sign-in, passkey sign-in and the public share pages).
 
-- **The rail** lists lake's groups in order: the top items, Design, Train, Ship, then Organization
+- **The rail** lists lake's groups in order: the top items (for a signed-in person the **Home**
+  group: **Ask Orama** at `/`, then **Dashboard** at `/dashboard`; lake#600), Data, Design, Train,
+  Ship, then Organization
   for an account or Administration for the operator, then Developer. The items come from `NAV` in
   `frontend/src/routes.tsx`, and the viewer matrix is in [front-door.md](front-door.md#navigation).
   The current group is open; the others show their name and open their first page. The rail
@@ -55,10 +57,21 @@ operator sign-in, passkey sign-in and the public share pages).
   transition (none while the edge is dragged, none under reduced motion), and **Back to the side**
   returns it; expanded, the conversation and its message box share one centred 880px column, and the
   panel stays above the shell bar (z-index 35) so its own head is never covered. **Open as a page**
-  opens the same conversation on `/ask`. Before, this was a docked iframe of the server's Ask page. Its
+  opens the same conversation on the Ask Orama home (`/`, about the page it came from). Before, this
+  was a docked iframe of the server's Ask page. Its
   message box has the microphone (dictation, `components/dictation/Dictate.tsx`) and **From your
   phone**; a page can open it about something (`openAsk`, `lib/ask.ts`), as the transcript page
   does.
+- **The Ask Orama home** (`/`, `pages/ask/AskHome.tsx`, lake#600) is where a signed-in person
+  lands. It is the panel's conversation (`pages/ask/thread.ts`, the same `sessionStorage` entry)
+  across the page's width, in one centred 880px column like the expanded panel, with the message box
+  at the foot. Empty, it greets the person and offers up to four starting questions drawn from the
+  workspace's datasets, projects and runs (`list_datasets`, `list_projects`, `list_runs`;
+  `starterQuestions` in `pages/ask/home.ts`); pressing one asks it. While it is open the top bar's
+  **Ask Orama** opens no panel: it puts the cursor in the message box, and a panel that was open
+  closes. A link's `conversation`, `task` and `agent` go into the shared conversation and leave the
+  address; `from` stays, shown as *About the page …* until dismissed. The operator and visitors
+  keep the landing ([front-door.md](front-door.md)).
 - **On a phone** the top bar is compact, Ask Orama is a full-screen conversation, a `Modal sheet`
   fills the screen with its actions above the keyboard, and every page fits 390 px:
   [mobile-web.md](mobile-web.md).
@@ -86,7 +99,8 @@ Files are under `frontend/src/pages/`.
 
 | Route | File | Shows | Capabilities |
 |---|---|---|---|
-| `/` | `home/HomePage.tsx` | what lake is for and the viewer's next step ([front-door.md](front-door.md)) | `viewer` |
+| `/` | `home/HomePage.tsx`, `ask/AskHome.tsx` | a signed-in person: Ask Orama, full page (lake#600); the operator and visitors: what lake is for and their next step ([front-door.md](front-door.md)); `/?ws=` (an old Command Center link) opens `/dashboard` | `viewer`; signed in, the Ask Orama capabilities below and engine `list_datasets`, `list_projects`, `list_runs` |
+| `/dashboard` | `home/CommandCenter.tsx` | Home → Dashboard: the whole platform at a glance across the chosen workspaces (`?ws=`), what needs attention, each workspace's figures, recent activity | `workspace_status`, `workspace_sql`, `list_transcripts`, `list_apps`, engine `list_projects`, `list_agents`, `list_runs`, `list_models`, `list_indexes` |
 | `/sign-in`, `/sign-up`, `/mfa`, `/passkey-sign-in` | `account/SignInPage.tsx`, `SignUpPage.tsx`, `MfaPage.tsx`, `PasskeySignInPage.tsx` | lake's own sign-in and sign-up, or Clerk's (`account/ClerkSignIn.tsx`); see [identity.md](identity.md) | `sign_in_password`, `verify_mfa`, `start_oauth`, `sign_up_password`, `begin_passkey_sign_in`, `sign_in_passkey`, `enroll_mfa`, `disable_mfa` |
 | `/login` | `account/LoginPage.tsx` | the operator-token form, posted to `POST /session` | none |
 | `/settings`, `/sessions`, `/passkeys`, `/tokens` | `account/SettingsPage.tsx`, `SessionsPage.tsx`, `PasskeysPage.tsx`, `TokensPage.tsx` | profile, sessions and devices, passkeys, tokens ([settings.md](settings.md#personal-settings)) | `list_sessions`, `revoke_session`, `list_devices`, `revoke_device`, `begin_passkey_registration`, `register_passkey`, `create_token` |
@@ -144,7 +158,7 @@ Workspaces)
 | `/deployments` | `apps/DeploymentsPage.tsx` | every environment across readable repositories | `list_repositories`, `list_environments` |
 | `/services` | `ship/ServicesPage.tsx` | the space's databases, streams and engines | `list_services`, `list_service_kinds`, `create_service`, `delete_service`, `service_connection` |
 | `/workspaces` | `workspaces/WorkspacesPage.tsx` | a customer's workspaces with phase and storage, New workspace and deletion in dialogs ([workspace-selection.md](workspace-selection.md#the-workspaces-page)) | `list_workspaces`, `create_workspace`, `delete_workspace` |
-| `/ask` | `ask/AskPage.tsx` | Ask Orama, full page ([../api/ask-orama.md](../api/ask-orama.md)) | `send_ask_message`, `settle_ask_turn`, `confirm_ask_proposal`, `get_ask_conversation`, `get_agent_task`, `list_agent_library` |
+| `/ask`, `/w/<id>/ask` | `ask/AskRedirect.tsx` | the old Ask Orama page's address: opens the home (`/`) with its query, less `customer_id`; `/w/<id>/ask` first makes `<id>` the current workspace ([../api/ask-orama.md](../api/ask-orama.md)) | none; the home calls `send_ask_message`, `settle_ask_turn`, `confirm_ask_proposal`, `get_ask_conversation`, `get_agent_task`, `list_agent_library` |
 
 **Organization and administration** ([settings.md](settings.md), [identity.md](identity.md))
 

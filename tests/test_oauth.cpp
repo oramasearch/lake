@@ -450,6 +450,8 @@ TEST(OAuth, AuthorizationCodePkceOidcAndCachedJwks) {
         lake_port, std::stoi(provider.issuer().substr(provider.issuer().rfind(':') + 1)));
     const std::string first_callback = request(lake_port, "GET", callback_target(first_location));
     ASSERT_NE(first_callback.find(" 302 "), std::string::npos) << first_callback;
+    // Nothing named a page: the account lands on the home, Ask Orama (lake#600).
+    EXPECT_EQ(response_header(first_callback, "Location"), "/");
     EXPECT_TRUE(provider.pkce_verified());
     EXPECT_EQ(provider.jwks_requests(), 1);
     const std::string cookie = response_header(first_callback, "Set-Cookie");

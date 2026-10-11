@@ -8,11 +8,11 @@ import { Button, Field, fieldError, Form, Notice, Page } from "@/lib/ui";
 import { useSession } from "@/lib/session";
 import { AuthFrame, useSignedInRedirect } from "./AuthFrame";
 import { ClerkSignIn } from "./ClerkSignIn";
-import { leaveFor, messageOf, NO_WORKSPACE, returnQuery, returnTarget } from "./signIn";
+import { landingAfterSignIn, leaveFor, messageOf, NO_WORKSPACE, returnQuery, returnTarget } from "./signIn";
 
 export default function SignInPage() {
   const { viewer } = useSession();
-  const signedIn = useSignedInRedirect((administrator, clerk) => (administrator || clerk ? "/repositories" : "/sessions"));
+  const signedIn = useSignedInRedirect((administrator) => landingAfterSignIn(administrator));
   if (signedIn) return null;
   if (viewer.clerk.enabled) return <ClerkSignIn mode="sign-in" />;
   return <NativeSignIn />;
@@ -53,7 +53,7 @@ function PasswordPanel() {
     setError(null);
     try {
       await act("sign_in_password", { email, password, device_name: deviceName }, NO_WORKSPACE);
-      leaveFor(returnTarget(location.search, "/sessions"));
+      leaveFor(returnTarget(location.search, landingAfterSignIn(false)));
     } catch (e) {
       if (e instanceof ApiError && e.code === "mfa_required") setMfa(true);
       else setError(e);
@@ -65,7 +65,7 @@ function PasswordPanel() {
     setError(null);
     try {
       await act("verify_mfa", { email, password, code, device_name: deviceName }, NO_WORKSPACE);
-      leaveFor(returnTarget(location.search, "/sessions"));
+      leaveFor(returnTarget(location.search, landingAfterSignIn(false)));
     } catch (e) {
       setError(e);
       setBusy(false);

@@ -1,6 +1,6 @@
 # Ask Orama
 
-Ask Orama is the assistant at the top of every page. Ask it anything about your lake in plain words:
+Ask Orama is lake's home page and the assistant at the top of every page. Ask it anything about your lake in plain words:
 your repositories, projects, data, runs, models, services and agents. It answers from what you are
 allowed to read, proposes every change for you to confirm, and brings in another agent when that
 agent does the job better.
@@ -25,11 +25,21 @@ agent does the job better.
 
 ## Open Ask Orama
 
-- Press **Ask Orama** in the top bar. It opens beside the page, in the current workspace, and knows
-  which page you asked from. Drag its edge to resize it (or use the arrow keys on the handle;
-  double-click resets it).
-- The **Full view** button opens the same conversation as a full page (`/ask`).
-- The **Start a new conversation** button begins another.
+- **Home → Ask Orama** (`/`) is where you land when you sign in or open lake: the conversation
+  across the page, in your current workspace. While it is empty it greets you and suggests up to
+  four questions from what the workspace holds: a run that failed, a dataset, a project, the latest
+  run's findings, or the first steps when the workspace is new. Press one to ask it. **Home →
+  Dashboard** (`/dashboard`) is the platform at a glance.
+- On any other page, press **Ask Orama** in the top bar. It opens beside the page, in the current
+  workspace, and knows which page you asked from. Drag its edge to resize it (or use the arrow keys
+  on the handle; double-click resets it). On the Ask Orama home the same button puts the cursor in
+  the message box instead of opening a second conversation.
+- The panel and the home show **the same conversation**. **Expand over the page** widens the panel;
+  **Open as a page** takes the conversation to the home, still about the page you opened it from
+  (*About the page …*, which you can dismiss).
+- The **Start a new conversation** button (**New conversation** on the home) begins another.
+- An old `/ask` link, or **Talk to this agent in Ask Orama** on an agent's page, opens the home with
+  that conversation or that agent.
 - On a phone, Ask Orama fills the screen ([Using Lake on a Phone](/docs/phone)).
 
 Ask Orama needs a workspace. With none selected it says so and links to **Ship → Workspaces**.

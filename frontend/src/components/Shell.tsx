@@ -2,7 +2,9 @@
  * (Design, Train, Ship, Organization or Administration) with the current group open and its pages
  * listed beneath on a hairline, Docs and Developer at its foot, then the signed-in person and the
  * collapse control; a slim top bar with the breadcrumb, the space and workspace picker, search
- * (⌘K or /), the theme switch and Ask Orama. Collapsible to icons; below 1024px the rail is an
+ * (⌘K or /), the theme switch and Ask Orama. A signed-in person's home (`/`) is Ask Orama itself
+ * (lake#600): there the top bar's Ask Orama button opens no panel but puts the cursor in the home's
+ * message box, and an open panel closes. Collapsible to icons; below 1024px the rail is an
  * off-canvas drawer. G then a group's letter jumps to it.
  *
  * On a phone (docs/ui/mobile-web.md) the top bar is compact: the breadcrumb shows its last level,
@@ -43,7 +45,8 @@ import { ScreenBoundary } from "./ScreenBoundary";
 import { WorkspacePicker } from "./WorkspacePicker";
 import { LakeMark } from "./LakeMark";
 import { resizingAsk, useAskWidth } from "@/lib/askWidth";
-import { onOpenAsk, type AskRequest } from "@/lib/ask";
+import { focusAsk, onOpenAsk, type AskRequest } from "@/lib/ask";
+import { isAskHome } from "@/pages/ask/home";
 import { PHONE_QUERY } from "@/lib/phoneSheet";
 
 // Ask Orama loads the first time it is opened, so the shell carries no Markdown or conversation code.
@@ -54,6 +57,7 @@ const JUMPS: Record<string, SectionKey> = { r: "data", d: "design", t: "train", 
 
 /** Each group's icon, and the icons of the ungrouped items at the top. */
 const SECTION_ICONS: Partial<Record<SectionKey, LucideIcon>> = {
+  home: Home,
   data: Database,
   design: Compass,
   train: FlaskConical,
@@ -142,18 +146,29 @@ export function Shell({ children }: { children: ReactNode }) {
   const [theme, toggleTheme] = useTheme();
   const trailState = useTrailState();
   const signedInPerson = viewer.signed_in && !viewer.administrator;
+  // The Ask Orama home: the conversation is the page, so the panel never opens over it (lake#600).
+  const askHome = isAskHome(location.pathname, viewer);
   const rail = collapsed && wide;
   const [askWidth, setAskWidth] = useAskWidth();
   const viewport = useViewportWidth();
   // Ask Orama pushes the page aside only while the page keeps room to read; narrower, it lies over
   // the page, which keeps its own layout (rev-os's assistant rule).
-  const askPushes = ask && !askExpanded && viewport >= 1280 && viewport - (rail ? 60 : 232) - askWidth >= 900;
+  const askPushes = ask && !askHome && !askExpanded && viewport >= 1280 && viewport - (rail ? 60 : 232) - askWidth >= 900;
 
   useEffect(() => {
     setDrawer(false);
     // On a phone Ask Orama covers the page: a link in it that navigates closes it, so the page shows.
     if (matchMedia(PHONE_QUERY).matches) setAsk(false);
   }, [location.pathname]);
+
+  // Arriving at the Ask Orama home (the panel's "Open as a page", the rail) closes the panel: the
+  // home shows the same conversation.
+  useEffect(() => {
+    if (askHome) {
+      setAsk(false);
+      setAskRequest(null);
+    }
+  }, [askHome]);
 
   // A page opens Ask Orama about something (the transcript page's "Ask Orama about this").
   useEffect(() => {
@@ -255,6 +270,10 @@ export function Shell({ children }: { children: ReactNode }) {
     const now = performance.now();
     if (isRepeat(askToggledAt.current, now, e.detail)) return;
     askToggledAt.current = now;
+    if (askHome) {
+      focusAsk();
+      return;
+    }
     setAsk((a) => !a);
   };
 
@@ -315,7 +334,7 @@ export function Shell({ children }: { children: ReactNode }) {
   };
 
   return (
-    <div className="min-h-screen bg-canvas" data-shell data-ask={ask ? "open" : undefined}>
+    <div className="min-h-screen bg-canvas" data-shell data-ask={ask && !askHome ? "open" : undefined}>
       <div className="brand-strip fixed inset-x-0 top-0 z-40" />
       <a className="skip-link" href="#main-content">
         Skip to content
@@ -393,7 +412,7 @@ export function Shell({ children }: { children: ReactNode }) {
             >
               {theme === "dark" ? <Sun size={16} /> : <Moon size={16} />}
             </button>
-            <SessionActions onAsk={toggleAsk} askOpen={ask} />
+            <SessionActions onAsk={toggleAsk} askOpen={ask && !askHome} />
           </header>
           <main id="main-content" tabIndex={-1}>
             <ScreenBoundary>
@@ -402,7 +421,7 @@ export function Shell({ children }: { children: ReactNode }) {
           </main>
         </div>
       </div>
-      {ask && signedInPerson && (
+      {ask && signedInPerson && !askHome && (
         <Suspense fallback={null}>
           <AskPanel
             onClose={() => {

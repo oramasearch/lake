@@ -4,12 +4,12 @@ import { useState } from "react";
 import { useLocation } from "react-router-dom";
 import { Page } from "@/lib/ui";
 import { AuthFrame, useSignedInRedirect } from "./AuthFrame";
-import { leaveFor, messageOf, returnTarget } from "./signIn";
+import { landingAfterSignIn, leaveFor, messageOf, returnTarget } from "./signIn";
 import { signInWithPasskey } from "./webauthn";
 
 export default function PasskeySignInPage() {
   const location = useLocation();
-  const signedIn = useSignedInRedirect((administrator) => (administrator ? "/repositories" : "/sessions"));
+  const signedIn = useSignedInRedirect((administrator) => landingAfterSignIn(administrator));
   const [deviceName, setDeviceName] = useState("browser");
   const [status, setStatus] = useState("");
   const [busy, setBusy] = useState(false);
@@ -19,7 +19,7 @@ export default function PasskeySignInPage() {
     setStatus("");
     try {
       await signInWithPasskey(deviceName);
-      leaveFor(returnTarget(location.search, "/sessions"));
+      leaveFor(returnTarget(location.search, landingAfterSignIn(false)));
     } catch (e) {
       setStatus(messageOf(e));
       setBusy(false);

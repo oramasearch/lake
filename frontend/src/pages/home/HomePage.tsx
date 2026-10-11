@@ -1,17 +1,21 @@
-/** Home (`/`): what lake is for, and the next step for this viewer. The landing copy is pinned by
- * docs/ui/front-door.md (`WebUi.FrontDoorDocQuotesTheRenderedHomePage`); keep its bold quotes
- * word for word. */
-import { Link } from "react-router-dom";
+/** Home (`/`): Ask Orama for a signed-in person (lake#600); for a visitor and the operator, what lake
+ * is for and their next step. An old Command Center link (`/?ws=`) opens the Dashboard. The landing
+ * copy is pinned by docs/ui/front-door.md (`WebApp.FrontDoorDocQuotesTheHomePage`); keep its bold
+ * quotes word for word. */
+import { Link, Navigate, useLocation } from "react-router-dom";
 import { useSession } from "@/lib/session";
 import { useTrail } from "@/lib/trail";
 import { Actions, Button, Page } from "@/lib/ui";
 import { INVITATION_NOTE } from "@/pages/account/signIn";
-import CommandCenter from "./CommandCenter";
+import AskHome from "@/pages/ask/AskHome";
+import { homeView } from "@/pages/ask/home";
 
 export default function HomePage() {
   const { viewer } = useSession();
-  // A signed-in person sees the platform at a glance (CommandCenter); visitors see the landing.
-  if (viewer.signed_in && !viewer.administrator) return <CommandCenter />;
+  const { search } = useLocation();
+  const home = homeView(viewer, search);
+  if (home.view === "redirect") return <Navigate to={home.to} replace />;
+  if (home.view === "ask") return <AskHome />;
   return <Landing />;
 }
 

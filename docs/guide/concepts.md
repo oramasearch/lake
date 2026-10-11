@@ -81,7 +81,7 @@ MCP tools take.
 | **Agent Library** | The agents Orama provides: Ask Orama, the Project Agent, ApplicationAgent, ExperimentsAgent, Auto-Suggest and AgentCreator. **Design → Agent Library** lists them and whether each runs on your lake. |
 | **Agent Factory** | Building a new agent in a conversation with AgentCreator. |
 | **Proposal** | A change an agent wants to make, shown in full. Nothing changes until you confirm it. |
-| **Ask Orama** | The agent in the top bar of every page. It answers from what you can read and hands work to other agents. See [Ask Orama](/docs/ask-orama). |
+| **Ask Orama** | lake's home page, and the agent in the top bar of every page. It answers from what you can read and hands work to other agents. See [Ask Orama](/docs/ask-orama). |
 
 ### Ship
 

@@ -3,6 +3,8 @@
  * `viewer` read) starts again as the new session. */
 import { ApiError } from "@/lib/api";
 
+export { landingAfterSignIn } from "@/pages/ask/home";
+
 /** web_ui_invitation_note: Clerk's sign-up is restricted while lake is in development. */
 export const INVITATION_NOTE = "Accounts are added by invitation while lake is in development.";
 

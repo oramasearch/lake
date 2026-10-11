@@ -1,4 +1,5 @@
-/** Home for a signed-in person: the whole platform at a glance, like rev-os's Command Center.
+/** Home → Dashboard (`/dashboard`): the whole platform at a glance, like rev-os's Command Center.
+ * It was the home until Ask Orama took `/` (lake#600); an old `/?ws=` link opens it.
  *
  * A workspace multi-select (`?ws=<id>,<id>`, "All workspaces" by default; remembered in this
  * browser) chooses what the figures add up: repositories, datasets, transcripts, projects, agents,
@@ -105,8 +106,8 @@ function runState(run: Row): string {
 }
 
 export default function CommandCenter() {
-  useTrail([{ label: "Home" }], "Home");
-  const { viewer, workspaces } = useSession();
+  useTrail([{ label: "Home", to: "/" }, { label: "Dashboard" }], "Dashboard");
+  const { workspaces } = useSession();
   const [params] = useSearchParams();
   const navigate = useNavigate();
 
@@ -131,7 +132,7 @@ export default function CommandCenter() {
     } catch {
       /* storage blocked */
     }
-    navigate(next.length ? `/?ws=${next.map(encodeURIComponent).join(",")}` : "/", { replace: true });
+    navigate(next.length ? `/dashboard?ws=${next.map(encodeURIComponent).join(",")}` : "/dashboard", { replace: true });
   };
   const toggle = (id: string) => {
     const current = all ? [] : chosenIds;
@@ -221,12 +222,11 @@ export default function CommandCenter() {
     ...servicesDown.slice(0, 6).map((s, i) => ({ key: `svc-${s.name ?? i}`, tone: "bad" as const, title: `Service ${s.name} needs attention`, detail: s.status_reason ?? s.status, to: "/services" })),
   ];
 
-  const name = viewer.display_name?.split(" ")[0];
 
   return (
     <Page
       eyebrow="Home"
-      title={name ? `Welcome back, ${name}` : "Home"}
+      title="Dashboard"
       sub="Everything in lake at a glance: what you have, what is running, and what needs you."
       actions={
         <>

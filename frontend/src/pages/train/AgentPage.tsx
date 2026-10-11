@@ -47,7 +47,7 @@ export default function AgentPage() {
       sub={found ? text(agent.data, "purpose") || undefined : undefined}
       actions={
         found ? (
-          <Button variant="primary" to={ws(`/ask?${qs({ customer_id: customerId, agent: id })}`)}>
+          <Button variant="primary" to={`/?${qs({ agent: id })}`}>
             <MessageSquare size={14} aria-hidden /> Talk to this agent in Ask Orama
           </Button>
         ) : null
@@ -156,10 +156,8 @@ function AgentContent({ agent }: { agent: Row }) {
 }
 
 function AskButton({ id }: { id: string }) {
-  const ws = useWsPath();
-  const { customerId } = useWorkspace();
   return (
-    <Button to={ws(`/ask?${qs({ customer_id: customerId, agent: id })}`)}>
+    <Button to={`/?${qs({ agent: id })}`}>
       <MessageSquare size={14} aria-hidden /> Talk in Ask Orama
     </Button>
   );
