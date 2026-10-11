@@ -19,6 +19,7 @@ import { screens as ship } from "@/pages/ship/routes";
 import { screens as streams } from "@/pages/streams/routes";
 import { screens as train } from "@/pages/train/routes";
 import { screens as transcripts } from "@/pages/transcripts/routes";
+import { screens as usage } from "@/pages/usage/routes";
 import { screens as workspaces } from "@/pages/workspaces/routes";
 
 export type { Screen, SectionKey, Audience, NavItem };
@@ -42,6 +43,7 @@ export const SCREENS: Screen[] = [
   ...ask,
   ...organizations,
   ...admin,
+  ...usage,
   ...home,
 ].sort((a, b) => (a.path === "*" ? 1 : b.path === "*" ? -1 : 0));
 
@@ -102,12 +104,14 @@ export const NAV: NavItem[] = [
   { section: "ship", path: "/workspaces", label: "Workspaces", icon: "api", audience: AO },
   { section: "organization", path: "/organizations", label: "Organizations", icon: "organization", audience: ["account"] },
   { section: "organization", path: "/secret-mounts", label: "Secrets", icon: "secrets", audience: ["account"] },
-  { section: "organization", path: "/metering", label: "Usage", icon: "metering", audience: ["account"] },
+  // Usage over time across a person's workspaces (lake#564); /metering is its repository usage by hour.
+  { section: "organization", path: "/usage", label: "Usage", icon: "metering", audience: ["account"] },
   { section: "organization", path: "/activity", label: "Activity", icon: "audit", audience: ["account"] },
   { section: "administration", path: "/customers", label: "Customers", icon: "customers", audience: ["operator"] },
   { section: "administration", path: "/organizations", label: "Organizations", icon: "organization", audience: ["operator"] },
   { section: "administration", path: "/applications", label: "Applications", icon: "api", audience: ["operator"] },
-  { section: "administration", path: "/metering", label: "Usage", icon: "metering", audience: ["operator"] },
+  // The operator's usage across every account (lake#564).
+  { section: "administration", path: "/usage/accounts", label: "Usage", icon: "metering", audience: ["operator"] },
   { section: "administration", path: "/secret-mounts", label: "Secrets", icon: "secrets", audience: ["operator"] },
   { section: "administration", path: "/audit", label: "Audit", icon: "audit", audience: ["operator"] },
   { section: "developer", path: "/developer/api", label: "API", icon: "api", audience: AO },

@@ -8,8 +8,8 @@
  * workspace's own numbers, and the person's recent activity. Every figure comes from the read its
  * own page uses, per workspace, at once; a workspace whose Zetta is not ready is counted as such
  * and its engine reads are not made. */
-import { type ReactNode, useMemo } from "react";
-import { Link, useNavigate, useSearchParams } from "react-router-dom";
+import { type ReactNode } from "react";
+import { Link } from "react-router-dom";
 import { useQueries, useQuery } from "@tanstack/react-query";
 import {
   AlertTriangle,
@@ -19,6 +19,7 @@ import {
   Database,
   FileAudio,
   FolderKanban,
+  Gauge,
   Layers,
   type LucideIcon,
   Play,
@@ -32,6 +33,8 @@ import { useSession, type WorkspaceChoice } from "@/lib/session";
 import { useTrail } from "@/lib/trail";
 import { Button, Card, Empty, Page, Skeleton, Status, cx } from "@/lib/ui";
 import { relative } from "@/lib/format";
+import { useWorkspaceSelection, WorkspaceToggles } from "@/components/WorkspaceToggles";
+import { usageLink } from "@/pages/usage/usage";
 
 const STORE = "lake-home-workspaces";
 
@@ -108,37 +111,8 @@ function runState(run: Row): string {
 export default function CommandCenter() {
   useTrail([{ label: "Home", to: "/" }, { label: "Dashboard" }], "Dashboard");
   const { workspaces } = useSession();
-  const [params] = useSearchParams();
-  const navigate = useNavigate();
-
-  const chosenIds = useMemo(() => {
-    const fromUrl = params.get("ws");
-    if (fromUrl) return fromUrl.split(",").filter((id) => workspaces.some((w) => w.id === id));
-    try {
-      const stored = JSON.parse(localStorage.getItem(STORE) ?? "null");
-      if (Array.isArray(stored)) return stored.filter((id: unknown) => typeof id === "string" && workspaces.some((w) => w.id === id));
-    } catch {
-      /* storage blocked */
-    }
-    return [];
-  }, [params, workspaces]);
-  const all = chosenIds.length === 0 || chosenIds.length === workspaces.length;
-  const chosen = all ? workspaces : workspaces.filter((w) => chosenIds.includes(w.id));
-
-  const choose = (ids: string[]) => {
-    const next = ids.length === workspaces.length ? [] : ids;
-    try {
-      localStorage.setItem(STORE, JSON.stringify(next));
-    } catch {
-      /* storage blocked */
-    }
-    navigate(next.length ? `/dashboard?ws=${next.map(encodeURIComponent).join(",")}` : "/dashboard", { replace: true });
-  };
-  const toggle = (id: string) => {
-    const current = all ? [] : chosenIds;
-    const next = current.includes(id) ? current.filter((x) => x !== id) : [...current, id];
-    choose(next.length ? next : []);
-  };
+  const selection = useWorkspaceSelection(workspaces, STORE);
+  const { chosen, all, chosenIds } = selection;
 
   const perWorkspace = useQueries({
     queries: chosen.map((w) => ({
@@ -230,6 +204,9 @@ export default function CommandCenter() {
       sub="Everything in lake at a glance: what you have, what is running, and what needs you."
       actions={
         <>
+          <Button to={usageLink({ workspaces: all ? [] : chosenIds })}>
+            <Gauge size={14} aria-hidden /> Usage
+          </Button>
           <Button to="/train/data">Load data</Button>
           <Button to="/design/projects" variant="primary">
             New project
@@ -244,15 +221,7 @@ export default function CommandCenter() {
         </Empty>
       ) : (
         <>
-          <fieldset className="m-0 mb-4 border-0 p-0">
-            <legend className="label mb-2">Workspaces</legend>
-            <div className="flex flex-wrap items-center gap-1.5">
-              <WorkspaceToggle on={all} onChange={() => choose([])} label="All workspaces" count={workspaces.length} />
-              {workspaces.map((w) => (
-                <WorkspaceToggle key={w.id} on={!all && chosenIds.includes(w.id)} onChange={() => toggle(w.id)} label={w.name} />
-              ))}
-            </div>
-          </fieldset>
+          <WorkspaceToggles workspaces={workspaces} selection={selection} />
 
           <div className="mb-5 grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-5">
             {stats.map((s) => (
@@ -381,23 +350,5 @@ export default function CommandCenter() {
         </>
       )}
     </Page>
-  );
-}
-
-function WorkspaceToggle({ on, onChange, label, count }: { on: boolean; onChange: () => void; label: string; count?: number }) {
-  return (
-    <label
-      className={cx(
-        "inline-flex cursor-pointer items-center gap-1.5 rounded-full border px-3 py-1 text-[12.5px] transition-colors select-none",
-        on ? "border-action bg-action-soft text-action" : "border-rule bg-surface text-ink-2 hover:border-action",
-      )}
-    >
-      <input type="checkbox" className="sr-only" checked={on} onChange={onChange} />
-      <span aria-hidden className={cx("inline-flex h-3.5 w-3.5 items-center justify-center rounded-[3px] border text-[10px]", on ? "border-action bg-action text-on-action" : "border-rule")}>
-        {on ? "✓" : ""}
-      </span>
-      {label}
-      {count !== undefined && <span className="font-mono text-[10.5px] opacity-80">{count}</span>}
-    </label>
   );
 }
