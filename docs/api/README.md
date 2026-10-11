@@ -6,6 +6,9 @@ where `LAKE_BILLING` is (Orama Cloud): `billing_plans`, `set_billing_plan`, `bil
 `record_invoice_payment` and `void_invoice`, the `PaymentProvider` interface with its manual
 implementation (no provider chosen yet), and the switch that leaves them absent on an enterprise
 install.
+lake#623: [billing.md](billing.md#price-list) carries Orama Cloud's price list (Free, Team and
+Business), each unit price with its reference rate, date and margin, worked bills, and when to
+revisit it.
 lake#561: [drives.md](drives.md) documents drives (repository, workspace files, virtual) and workspace files in the workspace Zetta. [transcripts.md](transcripts.md) documents speech-to-text (`transcribe`) and the
 workspace transcripts kept in the workspace Zetta (`create_transcript`, `list_transcripts`,
 `get_transcript`, `update_transcript`, `delete_transcript`), the audio never kept.
