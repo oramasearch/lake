@@ -74,6 +74,8 @@ function PipelineBody({ project, graphName }: { project: string; graphName: stri
   const step = params.get("step") ?? "";
   const taskId = params.get("task") ?? "";
   const [shown, setShown] = useState<Shown>({});
+  const scope = useScope();
+  const audit = useSubmit();
 
   const read = useWq<J>("get_graph", { project, graph: graphName });
   const runs = useWq<J>("list_runs");
@@ -133,7 +135,23 @@ function PipelineBody({ project, graphName }: { project: string; graphName: stri
           Build a pipeline with a methodology that runs, or ask the Project Agent to change it.
         </Banner>
       )}
-      {shown.gate && <GatePanel gate={shown.gate} heading="Checks" />}
+      {shown.gate && (
+        <>
+          <GatePanel
+            gate={shown.gate}
+            heading="Checks"
+            auditing={audit.busy}
+            onAudit={() =>
+              void audit.run(async () => {
+                // zetta#1240: every check, the ones that did not apply included, for an audit.
+                const gate = await wa<J>(scope, "gate", { project, graph: graph.name, include_not_applicable: true });
+                setShown({ gate });
+              })
+            }
+          />
+          <FormError error={audit.error} />
+        </>
+      )}
       {shown.deploy && (
         <>
           <Banner tone="ok" title="Deployed">

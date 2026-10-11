@@ -60,7 +60,10 @@ again every 3 seconds.
 2. Under **What should it predict or answer?**, name the dataset and the column, for example
    *Predict the churned column of accounts from plan, monthly_spend and support_tickets*.
 3. Optionally choose a dataset under **From data**: the pipeline's first connect step then reads
-   it, and the pipeline opens with that dataset chosen for its run.
+   it, and the pipeline opens with that dataset chosen for its run. With a dataset chosen, pick the
+   column it **Predicts** and the column **Each row is about** (an account, say): the steps are then
+   named from your data, such as *Load subscriptions* and *Train downgraded model*, rather than the
+   template's churn names.
 4. Optionally choose a **Methodology** to get that methodology's own pipeline. Only the
    methodologies your workspace's engine runs are listed.
 5. Press **Build pipeline**.
@@ -71,9 +74,12 @@ again every 3 seconds.
 {"customer_id": "<customer id>", "workspace_id": "<workspace id>", "project": "retention", "intent": "Predict the churned column of accounts", "dataset": "datasets.accounts"}
 ```
 
-Add `"methodology": "M-3"` to choose one. The answer names the new pipeline as `graph`, named from
-your description's first words, and `template`, the template its steps started from: rename the
-steps to fit your data. The MCP tool is `compile_pipeline`.
+Add `"label_column": "churned"` and `"entity_column": "account_id"` to name the steps from those
+columns, and `"methodology": "M-3"` to choose a methodology. Lake passes the dataset's source and
+table and those columns to the engine's compiler as hints. The answer names the new pipeline as
+`graph`, named from your description's first words, and `template`, the template its steps started
+from. Without a dataset the steps keep the template's names: rename them to fit your data. The MCP
+tool is `compile_pipeline`.
 
 A pipeline whose methodology does not train yet says *This Pipeline Trains Nothing Yet* instead of
 pretending to train. A methodology the engine cannot run is refused with `not_supported`, naming
@@ -165,8 +171,10 @@ Send `edits`, a list of such edits, to apply several as one save, all or nothing
 A changed pipeline needs **Approve** again before it runs.
 
 1. **Approve**: the engine verifies and runs only an approved pipeline.
-2. **Check**: runs the correctness checks without running anything, and shows every check with its
-   reason.
+2. **Check**: runs the correctness checks without running anything, and shows each check that
+   applied with its reason. The checks that did not apply to this pipeline are counted under the
+   table (*107 checks did not apply*) rather than shown as passes; **List them for an audit** lists
+   them too, marked *did not apply*.
 3. **Check and run**: choose the dataset under **Train on**, keep **Hold out for measuring** at
    0.2 (a fifth of the rows kept out of training to measure the model; 0 measures nothing), name
    the model under **Model name** (it defaults to the project and pipeline), and run. A passing
@@ -182,7 +190,10 @@ Approve is `approve_plan` inside `workspace_act`:
 {"customer_id": "<customer id>", "workspace_id": "<workspace id>", "capability": "approve_plan", "input": {"project": "retention", "graph": "<pipeline name>"}}
 ```
 
-Check is `gate` and Deploy is `deploy`, with the same `input`. Check and run is one call:
+Check is `gate` and Deploy is `deploy`, with the same `input`. The gate answers `applied` and
+`not_applicable` counts and lists only the applied checks; add `"include_not_applicable": true` to
+the gate's `input` to list every check, each that did not apply with status `not_applicable`.
+Check and run is one call:
 
 `POST /v1/run_pipeline`
 

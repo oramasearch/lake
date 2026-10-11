@@ -2065,6 +2065,78 @@ TEST(AgentRuns, ABuiltPipelineSaysWhichTemplateItStartedFrom) {
     EXPECT_FALSE(older.value.contains("template"));
 }
 
+// zetta#1246 (lake#615): compile_pipeline passes the chosen dataset's source and table and the
+// label and entity columns to the compiler as hints, so the steps are named from the data. A
+// connect step the engine already pointed is left as the engine named it; an older engine's step
+// is still pointed and renamed by lake.
+TEST(AgentRuns, ABuiltPipelineIsFittedToTheChosenDataset) {
+    AgentRuns r;
+    const auto sent = [&](const std::string& capability) {
+        for (auto call = r.w.caller->calls.rbegin(); call != r.w.caller->calls.rend(); ++call) {
+            if (call->first == capability) {
+                return call->second;
+            }
+        }
+        return json(nullptr);
+    };
+    r.w.caller->answers["capture_intent"] = {{"input_id", "in-1"}};
+    r.w.caller->answers["compile_intent"] = {{"name", "Predict downgrades"},
+                                             {"template", "the M-1 churn template"}};
+    const auto graph_with = [](json attributes) {
+        return json{{"graph_id", "g-1"},
+                    {"name", "Predict downgrades"},
+                    {"project", "retention"},
+                    {"approval", "proposed"},
+                    {"nodes",
+                     json::array({{{"id", "load_customers"},
+                                   {"kind", "connect"},
+                                   {"name", "Load subscriptions"},
+                                   {"attributes", std::move(attributes)}},
+                                  {{"id", "train"}, {"kind", "model"}, {"name", "Train"}}})},
+                    {"edges", json::array()}};
+    };
+    r.w.caller->answers["get_graph"] =
+        graph_with({{"source", "billing"}, {"table", "subscriptions"}});
+    r.w.caller->answers["save_graph"] = {{"graph_id", "g-1"}, {"name", "Predict downgrades"}};
+    const json input{{"project", "retention"},
+                     {"intent", "Predict which subscriptions downgrade"},
+                     {"dataset", "billing.subscriptions"},
+                     {"label_column", "downgraded"},
+                     {"entity_column", "account_id"}};
+    const auto built = r.call("compile_pipeline", input);
+    ASSERT_TRUE(built.ok) << built.error.message;
+    EXPECT_EQ(built.value["graph"], "Predict downgrades");
+    EXPECT_EQ(sent("compile_intent")["hints"],
+              json({{"source", "billing"},
+                    {"table", "subscriptions"},
+                    {"label_column", "downgraded"},
+                    {"entity_column", "account_id"}}));
+    EXPECT_TRUE(std::ranges::none_of(r.w.caller->calls, [](const auto& call) {
+        return call.first == "save_graph";
+    })) << "the engine already reads the table and named the step from it";
+
+    // An engine that ignores the hints: lake points and names the connect step itself.
+    r.w.caller->answers["get_graph"] = graph_with(json::object());
+    const auto older = r.call("compile_pipeline", input);
+    ASSERT_TRUE(older.ok) << older.error.message;
+    const json saved = sent("save_graph");
+    ASSERT_TRUE(saved.is_object());
+    EXPECT_EQ(saved["nodes"][0]["attributes"]["table"], "subscriptions");
+    EXPECT_EQ(saved["nodes"][0]["name"], "Load billing.subscriptions");
+
+    // Without a dataset or columns nothing is hinted, so the template keeps its own names.
+    const auto bare = r.call("compile_pipeline", {{"project", "retention"}, {"intent", "Churn"}});
+    ASSERT_TRUE(bare.ok) << bare.error.message;
+    EXPECT_FALSE(sent("compile_intent").contains("hints"));
+    // A dataset with no columns named: the source and table alone.
+    const auto table_only =
+        r.call("compile_pipeline",
+               {{"project", "retention"}, {"intent", "Churn"}, {"dataset", "subscriptions"}});
+    ASSERT_TRUE(table_only.ok) << table_only.error.message;
+    EXPECT_EQ(sent("compile_intent")["hints"],
+              json({{"source", "datasets"}, {"table", "subscriptions"}}));
+}
+
 TEST(AgentRuns, ScheduleTimeZonesAreIanaNames) {
     using lake::control::checked_time_zone;
     EXPECT_EQ(checked_time_zone("Etc/UTC"), "Etc/UTC");
