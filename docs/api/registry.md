@@ -264,10 +264,15 @@ Phase B is `tests/test_registry_store.cpp`, a real lake server with workspace st
 (push and pull of a three-layer image, GET and HEAD, only ciphertext in the bucket, nothing in
 `blobs/` or `uploads/`, a repeated layer stored once, usage counted once),
 `RegistryStore.AChunkedUploadLandsInTheStoreAndAWrongDigestIsRefused`,
-`RegistryStore.ALargeLayerIsStreamedNeverHeldWhole` (a 304 MiB layer pulled while the resident set
-grows by less than 128 MiB; on glibc each reading first calls `malloc_trim`, so freed pages glibc
-keeps for reuse are not counted: about 110 MiB is held at the peak, the 64 MiB window cache and the
-windows in flight, lake#547),
+`RegistryStore.ALargeLayerIsStreamedNeverHeldWhole` (a 304 MiB layer pulled while the bytes the
+process holds in live allocations grow by less than 128 MiB; freed pages the allocator keeps for
+reuse are not counted. On glibc each reading is the resident set after `malloc_trim`, and about
+110 MiB is held at the peak, the 64 MiB window cache and the windows in flight, lake#547. On macOS
+each reading is the bytes in use in every malloc zone (`malloc_zone_statistics`), because the
+resident set there also counts pages malloc freed and kept: with six pulls at once it grew by 29 to
+136 MiB, and by 142 MiB once under `ctest -j 6`, while the bytes in use grew by 6 to 10 MiB,
+lake#616. The test then holds 64 MiB and checks that the measure rises by at least 48 MiB, so it
+cannot pass by seeing nothing),
 `RegistryStore.ABlobOfAnotherWorkspaceOrSpaceIsRefused`,
 `RegistryStore.TheCopyMovesInstanceBlobsIntoTheirStoresAndVerifiesThem` (plan, copy, rerun,
 verify, a missing, a corrupt and an unswitched blob unresolved, and pulls after the registry files

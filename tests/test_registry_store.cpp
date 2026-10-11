@@ -15,7 +15,7 @@
 #include <unistd.h>
 
 #if defined(__APPLE__)
-#include <mach/mach.h>
+#include <malloc/malloc.h>
 #endif
 #if defined(__GLIBC__)
 #include <malloc.h>
@@ -80,22 +80,22 @@ std::string layer_bytes(std::size_t size, std::uint64_t seed) {
     return output;
 }
 
-// The resident set size of this process now. On glibc, freed memory is first returned from every
-// arena (malloc_trim), so the figure is what the process holds, not pages glibc keeps for reuse:
-// without it a pull that held about 110 MiB at its peak (lake's 64 MiB window cache and the
-// windows in flight) read as 142 to 149 MiB on Linux CI (lake#547).
-std::uint64_t resident_bytes() {
+// The bytes this process holds in live allocations now, not freed pages its allocator keeps for
+// reuse. On glibc that is the resident set after malloc_trim returns freed memory from every arena:
+// without the trim a pull that held about 110 MiB at its peak (lake's 64 MiB window cache and the
+// windows in flight) read as 142 to 149 MiB on Linux CI (lake#547). On macOS it is the bytes in
+// use in every malloc zone. The resident set there also counts pages malloc freed and kept, and
+// the physical footprint counts the freed blocks malloc caches: with six of these pulls at once the
+// resident set grew by 29 to 136 MiB, the footprint by 0 to 5 MiB (and once by 209 MiB under
+// ctest -j 6 beside a build), and the bytes in use by 6 to 10 MiB (lake#616).
+std::uint64_t held_bytes() {
 #if defined(__GLIBC__)
     ::malloc_trim(0);
 #endif
 #if defined(__APPLE__)
-    mach_task_basic_info info{};
-    mach_msg_type_number_t count = MACH_TASK_BASIC_INFO_COUNT;
-    if (task_info(mach_task_self(), MACH_TASK_BASIC_INFO, reinterpret_cast<task_info_t>(&info),
-                  &count) != KERN_SUCCESS) {
-        return 0;
-    }
-    return info.resident_size;
+    malloc_statistics_t stats{};
+    malloc_zone_statistics(nullptr, &stats);
+    return stats.size_in_use;
 #else
     std::ifstream statm("/proc/self/statm");
     std::uint64_t pages = 0, resident = 0;
@@ -612,7 +612,8 @@ TEST(RegistryStore, AChunkedUploadLandsInTheStoreAndAWrongDigestIsRefused) {
 }
 
 // A 300 MiB layer is pushed in 16 MiB chunks and pulled back without lake holding it: the pull's
-// resident set grows by far less than the layer while the client hashes it as it arrives.
+// memory the process holds grows by far less than the layer while the client hashes it as it
+// arrives.
 TEST(RegistryStore, ALargeLayerIsStreamedNeverHeldWhole) {
     RegistryRig rig;
     ASSERT_NO_FATAL_FAILURE(rig.SetUp());
@@ -644,12 +645,12 @@ TEST(RegistryStore, ALargeLayerIsStreamedNeverHeldWhole) {
     ASSERT_EQ(rig.publish("tenant-one/large", "v1", RegistryRig::manifest(config, {{digest, offset}})).status,
               201U);
 
-    const std::uint64_t before = resident_bytes();
+    const std::uint64_t before = held_bytes();
     std::atomic<std::uint64_t> peak{before};
     std::atomic<bool> pulling{true};
     std::thread sampler([&] {
         while (pulling.load()) {
-            peak.store(std::max(peak.load(), resident_bytes()));
+            peak.store(std::max(peak.load(), held_bytes()));
             std::this_thread::sleep_for(2ms);
         }
     });
@@ -664,10 +665,19 @@ TEST(RegistryStore, ALargeLayerIsStreamedNeverHeldWhole) {
     EXPECT_EQ(received.finish(), digest);
     const std::uint64_t growth = peak.load() > before ? peak.load() - before : 0;
     EXPECT_LT(growth, std::uint64_t{128} * 1024 * 1024)
-        << "the pull grew the resident set by " << growth / (1024 * 1024) << " MiB for a "
+        << "the pull grew the memory lake holds by " << growth / (1024 * 1024) << " MiB for a "
         << offset / (1024 * 1024) << " MiB layer";
-    std::cout << "[ large layer ] " << offset / (1024 * 1024) << " MiB pulled; resident growth "
+    std::cout << "[ large layer ] " << offset / (1024 * 1024) << " MiB pulled; held memory grew by "
               << growth / (1024 * 1024) << " MiB\n";
+
+    // The measure is not blind: 64 MiB written and kept raises it by about that much.
+    const std::uint64_t idle = held_bytes();
+    std::vector<char> kept(std::size_t{64} * 1024 * 1024, 1);
+    asm volatile("" : : "r"(kept.data()) : "memory");
+    const std::uint64_t holding = held_bytes();
+    EXPECT_GT(holding, idle + std::uint64_t{48} * 1024 * 1024)
+        << "64 MiB held raised the measure by only "
+        << (holding > idle ? holding - idle : 0) / (1024 * 1024) << " MiB";
 }
 
 // A blob belongs to the workspace it was pushed into: another workspace of the same space, or
