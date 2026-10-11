@@ -2263,10 +2263,11 @@ void register_identity_capabilities(Registry& registry) {
         .title = "Delete an organization",
         .description =
             "Delete an organization, which cannot be undone: its teams, members, invitations, "
-            "SSO providers, federation issuers and every access grant on it and its space. It is "
-            "refused while the organization's space still has workspaces, which the refusal names "
+            "SSO providers, federation issuers and every access grant on it and its account. It is "
+            "refused while the organization's account still has workspaces, which the refusal "
+            "names "
             "(delete them first with delete_workspace). Only an owner can delete it. `confirm` "
-            "must be its handle (its id when it has no space). `dry_run: true` deletes nothing "
+            "must be its handle (its id when it has no account). `dry_run: true` deletes nothing "
             "and lists what would go, with counts and any workspaces in the way.",
         .input_schema = {{"type", "object"},
                          {"properties",
@@ -5375,8 +5376,8 @@ void register_policy_capabilities(Registry& registry) {
         .title = "Revoke a grant",
         .description =
             "Remove one access grant (list_grants names them). A grant that comes with a "
-            "membership is removed with it (remove_member), and the last admin grant on a space "
-            "is kept so the space always has an administrator. `dry_run: true` changes nothing "
+            "membership is removed with it (remove_member), and the last admin grant on an account "
+            "is kept so the account always has an administrator. `dry_run: true` changes nothing "
             "and answers the grant that would be revoked.",
         .input_schema = {{"type", "object"},
                          {"properties",

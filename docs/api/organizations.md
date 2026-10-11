@@ -127,10 +127,10 @@ membership's organization or team and are recorded by the registry audit path.
 `delete_organization {organization_id, confirm, dry_run?}` (lake#645, migration
 `0076_organization_deletion`) deletes an organization. Only an owner of the organization (an
 organization-scope `owner` membership) or the instance operator may; `admin` on the organization
-is checked first, as for every action on it. `confirm` must be its handle (its space's name), or
-its id when it has no space.
+is checked first, as for every action on it. `confirm` must be its handle (its account's name), or
+its id when it has no account.
 
-It is **refused while the organization's space still has a workspace** that is not deleted: the
+It is **refused while the organization's account still has a workspace** that is not deleted: the
 `409 conflict` names each one, and the person deletes them first with `delete_workspace`, which
 removes their Zettas and everything in them. `dry_run: true` deletes nothing and answers
 `{organization_id, display_name, customer_id, handle, workspaces, counts, dry_run, deleted}`:
@@ -138,9 +138,9 @@ removes their Zettas and everything in them. `dry_run: true` deletes nothing and
 memberships, invitations, SSO providers, federation issuers, secret mount routes, policy objects
 and grants would go. Without a dry run, one transaction removes those (and the organization's
 recovery attempts and the leases of its mounts), deletes the policy objects of the organization
-and its space (their children and every grant on them go with them), and marks the
+and its account (their children and every grant on them go with them), and marks the
 `organizations` and `customers` rows `deleted_at`. The rows stay because the central audit chain
-names the space; from then on no read or list answers them, nobody holds access to the space,
+names the account; from then on no read or list answers them, nobody holds access to the account,
 and its handle stays retired. The event is central (`organization.delete`, with the counts).
 Lake Console's organization page carries it ([../ui/deletion.md](../ui/deletion.md)).
 

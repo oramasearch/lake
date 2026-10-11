@@ -57,7 +57,7 @@ sharing view required by the product design.
 `create_grant` does, and removes that one grant; the answer is the grant as it was, with
 `dry_run`. Two grants are kept, each `409 conflict` with the reason: one a membership carries
 (the same principal and attestation digest as a membership), which goes with the membership
-(`remove_member`), and the last `admin` grant on a space (`customer` object), so a space always
+(`remove_member`), and the last `admin` grant on an account (`customer` object), so an account always
 has an administrator. The event is central (`grant.revoke`, naming the principal, object and
 role).
 

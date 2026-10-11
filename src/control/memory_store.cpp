@@ -6509,7 +6509,7 @@ Result<OrganizationDeletion> InMemoryStore::delete_organization(const std::strin
         }
         return std::unexpected(StoreError{
             "conflict",
-            "the organization's space still has workspaces; delete them first: " + names});
+            "the organization's account still has workspaces; delete them first: " + names});
     }
     std::erase_if(teams_, of_organization);
     std::erase_if(memberships_, of_organization);
@@ -6585,7 +6585,8 @@ Result<Grant> InMemoryStore::revoke_grant(const std::string& id, bool dry_run) {
                                              other.role == "admin";
                                   }) == 1) {
         return std::unexpected(StoreError{
-            "conflict", "this is the space's last admin grant; grant admin to someone else first"});
+            "conflict",
+            "this is the account's last admin grant; grant admin to someone else first"});
     }
     const Grant revoked = *grant;
     if (!dry_run) {

@@ -190,8 +190,8 @@ the operator must vendor the schema, select `workload_resources_guard` and repor
 (orama-operator#288).
 See `docs/api/metering.md#resources` and `docs/api/billing.md#price-list`.
 Deleting and revoking follow (lake#645, migration `0076_organization_deletion`): `delete_organization`
-(an owner; refused while its space has workspaces, which it names; the organization and its space
-are marked `deleted_at`, never erased, because the central audit chain names the space),
+(an owner; refused while its account has workspaces, which it names; the organization and its account
+are marked `deleted_at`, never erased, because the central audit chain names the account),
 `revoke_invitation`, `revoke_grant`, `delete_secret_mount` (every record out of the mount's workspace
 Zetta before its route), `delete_dataset`, `delete_model`, `delete_run`, `delete_index` (the workspace
 engine's deletes, zetta#1257; `not_supported` from an older engine) and `delete_ask_conversation`,

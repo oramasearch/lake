@@ -16,9 +16,9 @@ OpenAPI, MCP), and each:
 
 | Capability | Input | What goes | Log | Contract |
 |---|---|---|---|---|
-| `delete_organization` | `organization_id`, `confirm` (its handle), `dry_run?` | its teams, members, invitations, SSO providers, federation issuers, secret mount routes, and every grant on it and its space; refused while its space has workspaces, which the refusal names | central | [organizations.md](organizations.md#deleting-an-organization) |
+| `delete_organization` | `organization_id`, `confirm` (its handle), `dry_run?` | its teams, members, invitations, SSO providers, federation issuers, secret mount routes, and every grant on it and its account; refused while its account has workspaces, which the refusal names | central | [organizations.md](organizations.md#deleting-an-organization) |
 | `revoke_invitation` | `invitation_id`, `dry_run?` | a pending invitation, which becomes `revoked` | central | [organizations.md](organizations.md#revoking-an-invitation) |
-| `revoke_grant` | `grant_id`, `dry_run?` | one grant; not one a membership carries, nor a space's last admin grant | central | [policy.md](policy.md#revoking-a-grant) |
+| `revoke_grant` | `grant_id`, `dry_run?` | one grant; not one a membership carries, nor an account's last admin grant | central | [policy.md](policy.md#revoking-a-grant) |
 | `delete_secret_mount` | `mount_id`, `confirm` (its name), `dry_run?` | every secret and version, named key, data key and lease of the mount, its name claim and its record, then its route and policy object | workspace | [secrets.md](secrets.md#deleting-a-mount) |
 | `delete_dataset` | `customer_id`, `workspace_id`, `id` (`<database>/<dataset>`), `dry_run?` | the dataset's table, rows and every search index on it | workspace | [models.md](models.md#deleting-from-a-workspace) |
 | `delete_model` | … `id` (or `model_id`) | a trained model, no longer served; its run is kept | workspace | [models.md](models.md#deleting-from-a-workspace) |
@@ -28,9 +28,9 @@ OpenAPI, MCP), and each:
 
 ## Why an organization is marked, not erased
 
-The central audit chain names the organization's space (`audit_events.customer_id`, `ON DELETE
+The central audit chain names the organization's account (`audit_events.customer_id`, `ON DELETE
 RESTRICT`), and an audit event is never rewritten. So `delete_organization` removes everything the
-organization holds and every way to reach it, and marks the `organizations` row and its space's
+organization holds and every way to reach it, and marks the `organizations` row and its account's
 `customers` row deleted (migration `0076_organization_deletion`, `deleted_at`). Lake never lists or
 reads a deleted one again: `get_organization`, `organization_customer`, `get_customer` answer
 `not_found`, and the lists leave them out. The handle stays retired. Its workspaces were deleted

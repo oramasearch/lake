@@ -111,7 +111,7 @@ deletes one of the caller's conversations in that workspace: every message recor
 the workspace Zetta by key. Only the person who had it can, because a conversation is found by its
 id and its person; another person's id finds nothing (`not_found` at `/conversation_id`). The
 answer is `{conversation_id, messages, first_message, dry_run, deleted}`; `dry_run: true` removes
-nothing. The agent tasks the conversation started stay in Agent Tasks, the space's task history.
+nothing. The agent tasks the conversation started stay in Agent Tasks, the account's task history.
 The event goes to the workspace's audit chain. Lake Console offers it beside New conversation
 ([../ui/deletion.md](../ui/deletion.md)).
 

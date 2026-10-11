@@ -12,7 +12,7 @@ used from its space's index; `search::Service::drop_workspace` removes a deleted
 search index (lake#381).
 
 `OrganizationDeletion` (`store.hpp`, lake#645) is what `Store::delete_organization` removes or,
-with `dry_run`, would remove: the organization, its space's id and handle, the live workspaces that
+with `dry_run`, would remove: the organization, its account's id and handle, the live workspaces that
 refuse it, and counts per kind. `Store` also gains `revoke_invitation`, `get_grant`,
 `revoke_grant` and `delete_secret_mount_route` ([deletion.md](../../../docs/api/deletion.md)).
 

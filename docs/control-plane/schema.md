@@ -899,7 +899,7 @@ statements against this schema.
 - `organizations.deleted_at` and `customers.deleted_at` (null while live). `delete_organization`
   removes the organization's teams, memberships, invitations, SSO providers, federation issuers,
   recovery attempts, secret mount and lease routes, and the policy objects of the organization
-  and its space with every grant on them, then sets both. The rows stay, marked, because
+  and its account with every grant on them, then sets both. The rows stay, marked, because
   `audit_events.customer_id` is `ON DELETE RESTRICT` and an audit event is never rewritten; every
   read and list of organizations and customers leaves a marked row out.
 

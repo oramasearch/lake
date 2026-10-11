@@ -338,8 +338,8 @@ only; usage stays in each workspace Zetta. Nothing is dropped; idempotent. The l
 resources before rollout. See [schema.md](../docs/control-plane/schema.md#workload-resources-migration).
 
 Migration `0076_organization_deletion` (lake#645) adds `deleted_at` to `organizations` and
-`customers`, set by `delete_organization` once the organization's space has no workspace and
-everything it held is removed; the rows stay because the central audit chain names the space, and
+`customers`, set by `delete_organization` once the organization's account has no workspace and
+everything it held is removed; the rows stay because the central audit chain names the account, and
 lake never reads a marked one again. Nothing is dropped; idempotent. The latest guard is
 `organization_deletion_guard`; the operator must vendor this schema and select that guard before
 rollout. See [schema.md](../docs/control-plane/schema.md#organization-deletion-migration).

@@ -8064,7 +8064,8 @@ public:
                 }
                 return std::unexpected(StoreError{
                     "conflict",
-                    "the organization's space still has workspaces; delete them first: " + names});
+                    "the organization's account still has workspaces; delete them first: " +
+                        names});
             }
             tx.exec_params("DELETE FROM secret_lease_routes WHERE mount_id IN (SELECT mount_id "
                            "FROM secret_mount_routes WHERE " +
@@ -8164,7 +8165,7 @@ public:
             if (!last.empty() && last[0][0].as<bool>()) {
                 return std::unexpected(StoreError{
                     "conflict",
-                    "this is the space's last admin grant; grant admin to someone else first"});
+                    "this is the account's last admin grant; grant admin to someone else first"});
             }
             if (!dry_run) {
                 tx.exec_params("DELETE FROM grants WHERE id = $1::uuid", id);
