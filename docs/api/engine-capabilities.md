@@ -56,7 +56,7 @@ writes the allow-listed operations to `src/api/engine_openapi.json`, which the b
 - takes the engine's description, without its issue references and permission notes, with the
   names Lake gives renamed capabilities, and adds what Lake does beside it.
 
-The tool also applies Lake's wording rules (lake#647: never "space", values such as `lake` and
+The tool also applies Lake's wording rules (lake#647: never `space`, values such as `lake` and
 `zetta` in code spans) to the engine's text, as a fixed list of exact rewrites (`WORDING` in the
 tool), so the same engine document always gives the same snapshot and `--check` compares after
 them. Each rewrite matches a change made in Zetta's own descriptions; once the Zetta source
