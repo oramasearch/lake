@@ -347,7 +347,7 @@ audit::Result<audit::Identity> InMemoryStore::current_lake_identity() {
             return identity;
         }
     }
-    return std::unexpected(audit::Error{"not_found", "no lake identity exists"});
+    return std::unexpected(audit::Error{"not_found", "no Lake identity exists"});
 }
 
 audit::Result<audit::Identity> InMemoryStore::lake_identity_by_taap_id(const std::string& taap_id) {
@@ -357,14 +357,14 @@ audit::Result<audit::Identity> InMemoryStore::lake_identity_by_taap_id(const std
             return identity;
         }
     }
-    return std::unexpected(audit::Error{"not_found", "no lake identity for " + taap_id});
+    return std::unexpected(audit::Error{"not_found", "no Lake identity for " + taap_id});
 }
 
 audit::Result<void> InMemoryStore::create_lake_identity(const audit::Identity& identity) {
     std::lock_guard lock(mutex_);
     for (const audit::Identity& existing : identities_) {
         if (existing.current || existing.taap_id == identity.taap_id) {
-            return std::unexpected(audit::Error{"conflict", "a lake identity already exists"});
+            return std::unexpected(audit::Error{"conflict", "a Lake identity already exists"});
         }
     }
     identities_.push_back(identity);
@@ -381,7 +381,7 @@ audit::Result<void> InMemoryStore::rotate_lake_identity(const audit::Identity& p
             return {};
         }
     }
-    return std::unexpected(audit::Error{"conflict", "the lake identity changed before rotation"});
+    return std::unexpected(audit::Error{"conflict", "the Lake identity changed before rotation"});
 }
 
 Result<void> InMemoryStore::append_audit_event(const audit::Event& event) {
@@ -706,7 +706,7 @@ Result<OciRepositoryRoute> InMemoryStore::create_oci_repository_route(
     if (workspace == workspaces_.end() || workspace->customer_id != customer_id ||
         workspace->desired == "deleted") {
         return std::unexpected(
-            StoreError{"invalid_input", "workspace_id must name a live workspace of this space"});
+            StoreError{"invalid_input", "workspace_id must name a live workspace of this account"});
     }
     const auto existing = std::ranges::find_if(oci_repository_routes_, [&](const auto& route) {
         return route.customer_id == customer_id && route.name == name;
@@ -759,7 +759,7 @@ InMemoryStore::delete_oci_repository_route(const std::string& customer_id, const
         if (workspace == workspaces_.end() || workspace->customer_id != customer_id ||
             workspace->desired == "deleted") {
             return std::unexpected(StoreError{
-                "invalid_input", "workspace_id must name a live workspace of this space"});
+                "invalid_input", "workspace_id must name a live workspace of this account"});
         }
     }
     std::vector<std::string> names{name};
@@ -1112,7 +1112,7 @@ Result<WebApp> InMemoryStore::authorize_web_app(const std::string& app_id,
         return std::unexpected(StoreError{"not_found", "no protected app " + app_id});
     }
     if (!user_can_access_web_app_locked(*app, user_id)) {
-        return std::unexpected(StoreError{"unauthorized", "user is not a member of this space"});
+        return std::unexpected(StoreError{"unauthorized", "user is not a member of this account"});
     }
     return *app;
 }
@@ -1200,7 +1200,7 @@ Result<WebApp> InMemoryStore::create_web_app(const NewWebApp& input) {
             return workspace.id == input.workspace_id && workspace.customer_id == input.customer_id &&
                    workspace.desired != "deleted";
         })) {
-        return std::unexpected(StoreError{"invalid_input", "workspace_id must name a workspace Zetta in this space"});
+        return std::unexpected(StoreError{"invalid_input", "workspace_id must name a workspace Zetta in this account"});
     }
     if (std::ranges::none_of(customers_, [&](const Customer& customer) {
             return customer.id == input.customer_id;
@@ -1399,7 +1399,7 @@ Result<Build> InMemoryStore::create_build(const NewBuild& input) {
             return workspace.id == input.workspace_id && workspace.customer_id == input.customer_id &&
                    workspace.desired != "deleted";
         })) {
-        return std::unexpected(StoreError{"invalid_input", "workspace_id must name a workspace Zetta in this space"});
+        return std::unexpected(StoreError{"invalid_input", "workspace_id must name a workspace Zetta in this account"});
     }
     if (std::ranges::none_of(customers_, [&](const Customer& customer) {
             return customer.id == input.customer_id;
@@ -1833,7 +1833,7 @@ Result<AgentTask> InMemoryStore::create_agent_task(const AgentTask& in) {
             return workspace.id == in.workspace_id && workspace.customer_id == in.customer_id &&
                    workspace.desired != "deleted";
         })) {
-        return std::unexpected(StoreError{"invalid_input", "workspace_id must name a workspace Zetta in this space"});
+        return std::unexpected(StoreError{"invalid_input", "workspace_id must name a workspace Zetta in this account"});
     }
     if (in.agent.empty() || in.scopes.empty()) {
         return std::unexpected(StoreError{"invalid_input", "agent task is invalid"});
@@ -2528,7 +2528,7 @@ Result<Customer> InMemoryStore::organization_customer(const std::string& organiz
     for (const auto& c : customers_)
         if (!organization_id.empty() && c.organization_id == organization_id)
             return c;
-    return std::unexpected(StoreError{"not_found", "no space for organization " + organization_id});
+    return std::unexpected(StoreError{"not_found", "no account for organization " + organization_id});
 }
 
 } // namespace lake::control
@@ -4336,7 +4336,7 @@ Result<Repository> InMemoryStore::create_repository(const NewRepository& in) {
                    workspace.desired != "deleted";
         })) {
         return std::unexpected(
-            StoreError{"invalid_input", "workspace_id must name a workspace in this space"});
+            StoreError{"invalid_input", "workspace_id must name a workspace in this account"});
     }
     for (const auto& r : repositories_) {
         if (r.customer_id == in.customer_id && r.name == in.name && r.deleted_at.empty()) {
@@ -5118,7 +5118,7 @@ Result<OrganizationSpace> InMemoryStore::convert_personal_space(const ConvertPer
     std::lock_guard lock(mutex_);
     if (in.owner_user_id.empty() || in.owner_taap_id.empty()) {
         return std::unexpected(StoreError{
-            "invalid_input", "a personal space is converted by the person who owns it"});
+            "invalid_input", "a person's own account is converted by the person who owns it"});
     }
     if (std::ranges::none_of(users_, [&](const User& row) {
             return row.id == in.owner_user_id && row.taap_id == in.owner_taap_id;
@@ -5132,17 +5132,17 @@ Result<OrganizationSpace> InMemoryStore::convert_personal_space(const ConvertPer
     }
     if (customer->customer_type != "individual") {
         return std::unexpected(
-            StoreError{"conflict", "this space already belongs to an organization"});
+            StoreError{"conflict", "this account already belongs to an organization"});
     }
     if (customer->user_id != in.owner_user_id) {
         return std::unexpected(StoreError{
-            "unauthorized", "only the person whose personal space this is can convert it"});
+            "unauthorized", "only the person whose own account this is can convert it"});
     }
     const auto customer_object = std::ranges::find_if(policy_objects_, [&](const PolicyObject& row) {
         return row.object_type == "customer" && row.external_id == in.customer_id;
     });
     if (customer_object == policy_objects_.end()) {
-        return std::unexpected(StoreError{"store_error", "the space's policy object is missing"});
+        return std::unexpected(StoreError{"store_error", "the account's policy object is missing"});
     }
     const std::string customer_object_id = customer_object->id;
     std::string fresh_handle;
@@ -5771,7 +5771,7 @@ Result<SecretMountRoute> InMemoryStore::create_secret_mount_route(const SecretMo
     if (workspace == workspaces_.end() || workspace->customer_id != input.customer_id ||
         workspace->desired == "deleted") {
         return std::unexpected(
-            StoreError{"invalid_input", "workspace_id must name a live workspace of this space"});
+            StoreError{"invalid_input", "workspace_id must name a live workspace of this account"});
     }
     if (input.mount_id.empty() ||
         std::ranges::any_of(secret_mount_routes_, [&](const SecretMountRoute& route) {

@@ -868,7 +868,7 @@ void register_application_capabilities(Registry& registry) {
         .title = "Register application",
         .description =
             "Create an application user pool and its first Ed25519 JWT key, in one workspace of "
-            "the space: that workspace's Zetta holds the application's settings (name, origins, "
+            "the account: that workspace's Zetta holds the application's settings (name, origins, "
             "redirect URIs, theme), signing keys, webhooks, users, organizations, lifecycle "
             "events and webhook delivery attempts. The workspace never changes.",
         .input_schema =
@@ -948,7 +948,7 @@ void register_application_capabilities(Registry& registry) {
         .name = "list_applications",
         .title = "List applications",
         .description =
-            "List the applications a space has registered to sign its own users in through Lake.",
+            "List the applications an account has registered to sign its own users in through Lake.",
         .input_schema = application_list_input,
         .output_schema = items_schema(),
         .kind = CapabilityKind::Read,

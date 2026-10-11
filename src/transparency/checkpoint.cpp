@@ -431,7 +431,7 @@ Result<json> CheckpointService::publish(const json& checkpoint,
     std::unique_lock lock(impl_->mutex);
     if (!impl_->valid_instance) {
         return std::unexpected(
-            Error{"invalid_input", "lake instance name is not a safe path component"});
+            Error{"invalid_input", "Lake instance name is not a safe path component"});
     }
     const auto configured = validate_log_configuration(impl_->configuration);
     if (!configured) {
@@ -547,7 +547,7 @@ Result<json> CheckpointService::adopt(const json& record) {
     std::unique_lock lock(impl_->mutex);
     if (!impl_->valid_instance) {
         return std::unexpected(
-            Error{"invalid_input", "lake instance name is not a safe path component"});
+            Error{"invalid_input", "Lake instance name is not a safe path component"});
     }
     if (!record.is_object() || !record.contains("checkpoint") ||
         !record.at("checkpoint").is_object() || !record.contains("checkpoint_hash_sha256") ||
@@ -672,7 +672,7 @@ Result<json> CheckpointService::current() const {
     std::unique_lock lock(impl_->mutex);
     if (!impl_->valid_instance) {
         return std::unexpected(
-            Error{"invalid_input", "lake instance name is not a safe path component"});
+            Error{"invalid_input", "Lake instance name is not a safe path component"});
     }
     return read_json(impl_->directory / "current.json");
 }
@@ -681,7 +681,7 @@ Result<json> CheckpointService::at_tree_size(std::uint64_t tree_size) const {
     std::unique_lock lock(impl_->mutex);
     if (!impl_->valid_instance) {
         return std::unexpected(
-            Error{"invalid_input", "lake instance name is not a safe path component"});
+            Error{"invalid_input", "Lake instance name is not a safe path component"});
     }
     std::error_code error;
     if (!std::filesystem::exists(impl_->directory, error)) {
