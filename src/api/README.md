@@ -90,6 +90,16 @@ workspace Zetta's `lake_requests` series every `request_series_flush_interval`, 
 `ApiServer::stop` flushes it once more. `route_guard.hpp`'s `handler_exception` line no longer logs
 the path. See [telemetry](../../docs/serving/telemetry.md#request-logs).
 
+Usage over time (lake#564): `record_request` also adds each routed capability call to
+`usage_recorder.cpp`'s `UsageRecorder` (`calls`, `api` or `mcp`), as `predict` adds a model's
+answered predictions and `create_transcript` the audio's seconds or tokens; `ApiServer::drain`
+flushes it every `usage_flush_interval` and, as the store root's owner, schedules
+`usage_capabilities.cpp`'s `sample_usage` (stored bytes, instance and volume time, new build results)
+every `usage_sample_interval`. `usage_capabilities.cpp` registers `usage_over_time`, `usage_limits`,
+`set_usage_limit` and `record_model_usage`; `metering_capabilities.cpp`'s `queue_repository_builds`
+is the build-record queueing the sample shares with `metering_usage`. See
+[metering](../../docs/api/metering.md#usage-over-time).
+
 `datasets.cpp` holds the workspace dataset rules lake applies on top of Zetta (lake#447): engine
 result databases, SQL-queryable names, CSV row checks with line numbers, and the one
 `<database>/<name>` id. `workspace_query`/`workspace_act` apply them to `list_datasets`,

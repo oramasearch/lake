@@ -458,6 +458,20 @@ parse_openai_transcription(int status, std::string_view body, std::string_view m
                usage.contains("seconds") && usage.at("seconds").is_number()) {
         out.seconds = usage.at("seconds").get<double>();
     }
+    // gpt-4o-transcribe counts tokens instead (lake#564): kept for the workspace's usage.
+    if (const nlohmann::json usage = parsed.value("usage", nlohmann::json());
+        usage.is_object() && usage.value("type", std::string()) == "tokens") {
+        const auto tokens = [&](const char* name) -> std::optional<std::uint64_t> {
+            const nlohmann::json value = usage.value(name, nlohmann::json());
+            if (value.is_number_unsigned() ||
+                (value.is_number_integer() && value.get<std::int64_t>() >= 0)) {
+                return value.get<std::uint64_t>();
+            }
+            return std::nullopt;
+        };
+        out.input_tokens = tokens("input_tokens");
+        out.output_tokens = tokens("output_tokens");
+    }
     return out;
 }
 

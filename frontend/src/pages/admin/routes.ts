@@ -17,7 +17,7 @@ export const screens: Screen[] = [
   { path: "/secret-mounts", title: "Secrets", section: "organization", nav: true, icon: "secrets", owns: ["/secrets", "/encryption-keys"], component: lazyPage(() => import("./SecretMountsPage")) },
   { path: "/secrets", title: "Secrets", section: "organization", component: lazyPage(() => import("./SecretsPage")) },
   { path: "/encryption-keys", title: "Encryption Keys", section: "organization", component: lazyPage(() => import("./EncryptionKeysPage")) },
-  { path: "/metering", title: "Usage", section: "organization", nav: true, icon: "metering", component: lazyPage(() => import("./MeteringPage")) },
+  { path: "/metering", title: "Repository Usage", section: "organization", component: lazyPage(() => import("./MeteringPage")) },
   { path: "/activity", title: "Activity", section: "organization", nav: true, icon: "audit", audience: ["account"], component: Audit },
   { path: "/audit", title: "Audit", section: "administration", nav: true, icon: "audit", audience: ["operator"], component: Audit },
   { path: "/transparency", title: "Transparency Monitor", section: "none", audience: ["visitor", "account", "operator"], component: lazyPage(() => import("./TransparencyPage")) },

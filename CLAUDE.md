@@ -143,6 +143,17 @@ needs `admin` on the customer, hangs the mount under `customer → environment s
 claims its name for `customer:<id>`, and stores a NULL organization in its route. Not deployed; the
 operator must vendor the schema and select `secret_mount_owners_guard`. See
 `docs/api/secrets.md#who-owns-a-mount-lake561`.
+Usage over time follows (lake#564, migration `0072_usage_limits`): every dimension of a workspace's
+usage is kept in its workspace Zetta, the counter `lake_usage` (API and MCP calls, model
+predictions, speech-to-text seconds, model tokens, instance and volume seconds) and the gauge
+`lake_storage` (repositories, images, workspace data, transcripts, drive files), an hour a bucket for
+400 days, written by the bounded `UsageRecorder` the owner loop flushes and sampled every fifteen
+minutes by the store root's owner. `usage_over_time` adds the chosen workspaces up by hour, day or
+month with breakdowns by workspace and kind; `usage_limits` and `set_usage_limit` keep content-free
+per-dimension limits in `customer_usage_limits` (storage's stays the enforced quota; the others
+warn); `record_model_usage` takes an agent's own credential. Usage is a dashboard in the web app. No
+billing: no price, plan, invoice or ledger. Not deployed; the operator must vendor the schema and
+select `usage_limits_guard`. See `docs/api/metering.md#usage-over-time`.
 Dynamic-secret leases follow (lake#362, migration `0058`): each lease is a sealed record in its
 mount's workspace, and PostgreSQL keeps only `secret_lease_routes` (lease → mount, workspace, and
 `due_at`), the content-free route and due index. Renew, revoke and the owner loop's expiry pass
@@ -598,7 +609,7 @@ one adapter TU) and the pure renderers in `include/zetta/api/web_ui.hpp`.
 - **Schema.** `db/schema.sql` is the source of truth; the operator carries a byte-identical
   vendored copy at `internal/controller/assets/lake-schema.sql` and applies it per Lake as an
   owned `PostgresSchema` (one transaction, guarded on the table the **newest** migration creates,
-  `secret_mount_owners_guard` in the source tree, versioned by content hash).
+  `usage_limits_guard` in the source tree, versioned by content hash).
   Change the schema HERE, then copy it into the operator in the same change; the operator's test
   checks the copy carries the source-of-truth header. Migrations are single-shot today
   (incremental migrations are the PostgresSchema follow-up), so until then a schema change means

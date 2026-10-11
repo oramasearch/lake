@@ -294,6 +294,17 @@ struct ClerkIdentity {
 };
 // A service a customer runs on the Lake's cluster (docs/control-plane/services.md): lake writes
 // the desired fields, the operator the status fields.
+// A usage limit on one dimension of a customer's usage (migration 0072, lake#564,
+// docs/api/metering.md#limits): `limit` in the dimension's unit, per UTC calendar month for a
+// counted dimension, and a warning from `warn_percent` of it. Storage's limit is the enforced
+// repository storage quota (customer_storage_quotas); every other limit warns and is not enforced.
+// A content-free number about the account, like the storage quota; never a price.
+struct UsageLimit {
+    std::string customer_id, dimension;
+    std::uint64_t limit = 0;
+    int warn_percent = 80;
+    std::string updated_at;
+};
 struct ManagedService {
     std::string id, customer_id, kind, name, slug;
     bool is_default = false;
@@ -1381,6 +1392,10 @@ public:
     virtual Result<StaleAgentTasks> stale_agent_tasks(std::chrono::seconds republish_after) = 0;
     virtual Result<std::uint64_t> set_storage_quota(const std::string& customer_id,
                                                     std::uint64_t quota_bytes) = 0;
+    // The customer's usage limits (migration 0072, lake#564), by dimension; not_found for an
+    // unknown customer. set_usage_limit replaces one; a `limit` of 0 removes it.
+    virtual Result<std::vector<UsageLimit>> usage_limits(const std::string& customer_id) = 0;
+    virtual Result<UsageLimit> set_usage_limit(const UsageLimit& limit) = 0;
 
     virtual Result<PkiAuthorityRecord> create_pki_authority(const NewPkiAuthorityRecord& value,
                                                             const std::string& instance_kek) = 0;

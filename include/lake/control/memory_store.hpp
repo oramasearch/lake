@@ -270,6 +270,8 @@ public:
     Result<void> set_agent_task_status(const std::string& id,
                                        std::string phase,
                                        std::string credential_sha256 = {});
+    Result<std::vector<UsageLimit>> usage_limits(const std::string& customer_id) override;
+    Result<UsageLimit> set_usage_limit(const UsageLimit& limit) override;
     Result<std::uint64_t> set_storage_quota(const std::string& customer_id,
                                             std::uint64_t quota_bytes) override;
     Result<PkiAuthorityRecord> create_pki_authority(const NewPkiAuthorityRecord& value,
@@ -447,6 +449,7 @@ private:
     std::vector<audit::Event> audit_events_;
     std::vector<std::pair<std::string, int>> audit_retentions_;
     std::map<std::string, std::uint64_t> storage_quotas_;
+    std::map<std::pair<std::string, std::string>, UsageLimit> usage_limits_;
     std::vector<ManagedService> services_;
     std::vector<Workspace> workspaces_;
     std::vector<WorkspaceDeletion> workspace_deletions_;

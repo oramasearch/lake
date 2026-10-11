@@ -119,6 +119,9 @@ workspace, and `transfer_repository` is no longer part of `Store`.
 `lake_metering_usage` hourly transfer counters, added to with a conditional write, and the
 `lake_metering_build_records` per-result records, written `if_absent`. `store.hpp` has no
 metering store methods: the retired tables and their legacy reads are gone (migration `0070`).
+`store.hpp`'s `UsageLimit`, `usage_limits` and `set_usage_limit` are an account's per-dimension
+usage limits (migration `0072_usage_limits`, lake#564): content-free configuration; the usage stays
+in workspace Zettas.
 `application_credential_records.hpp` holds the application's credentials in its workspace (lake#352,
 lake#355): the key ring codec (one record per application, every key in version order, one
 current; `rotate_application_signing_keys` writes it with `if_revision` and rereads on a conflict)

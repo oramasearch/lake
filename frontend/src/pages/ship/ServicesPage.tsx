@@ -53,6 +53,7 @@ import {
   type Tone,
 } from "@/lib/ui";
 import { qs, secondsSince, spokenDuration, text, useAsync, wq } from "../train/workspace";
+import { formatValue, usageLink, usageOf, windows, type Reading } from "../usage/usage";
 import { CopyMono } from "./parts";
 
 const SUB = "The databases, streams and engines your workspaces run on lake, each its own, with its data kept apart from every other customer's.";
@@ -187,6 +188,14 @@ function Services({ customerId, creating, setCreating }: { customerId: string; c
     queryFn: ({ signal }) => wq<{ connections?: Row[] }>({ customerId, workspaceId: workspace }, "list_connections", {}, signal),
     enabled: !!workspace && listed.isSuccess,
   });
+  // What each service used this month, from its workspace's usage (lake#564).
+  const month = windows("month").current;
+  const usage = useRead<Reading>(
+    listed.isSuccess ? "usage_over_time" : null,
+    { customer_id: customerId, dimensions: ["instances", "volumes"], from: month.from, to: month.to, granularity: "month" },
+    { workspace: null, staleTime: 300_000 },
+  );
+  const usedBy = (id: string) => usageOf(usage.data, [{ dimension: "instances", breakdown: "by_object", keys: [id] }, { dimension: "volumes", breakdown: "by_object", keys: [id] }]);
   const [shown, setShown] = useState<Row | null>(null);
   const [deleting, setDeleting] = useState<Row | null>(null);
   const [needle, setNeedle] = useState("");
@@ -299,6 +308,21 @@ function Services({ customerId, creating, setCreating }: { customerId: string; c
                       {text(service, "instances")} × {text(service, "storage_gi")} GiB
                     </span>
                   ),
+                },
+                {
+                  key: "month",
+                  label: "This Month",
+                  sort: (s) => usedBy(text(s, "id"))[0]?.value ?? 0,
+                  render: (service) => {
+                    if (!usage.data) return <span className="text-ink-3">—</span>;
+                    const [instances, volumes] = usedBy(text(service, "id"));
+                    return (
+                      <Link to={usageLink({ dimension: "instances" })} className="block font-mono text-[12.5px] whitespace-nowrap tabular-nums text-inherit no-underline hover:underline">
+                        {formatValue(instances.value, instances.unit)}
+                        <div className="text-[11.5px] text-ink-3">{formatValue(volumes.value, volumes.unit)}</div>
+                      </Link>
+                    );
+                  },
                 },
                 {
                   key: "status",

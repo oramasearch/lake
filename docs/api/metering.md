@@ -4,7 +4,9 @@
 repository transfer and repository build compute, kept in each repository's workspace Zetta since
 lake#348 and lake#349, plus a current `summary` of repository storage that adds
 container images, workspace data, image builds, and workspace runs (training included). The same
-report is the Usage page, `GET /metering?customer_id=<uuid>`.
+report is the repository usage page, `GET /metering?customer_id=<uuid>`. Usage over time, every
+dimension per workspace with limits and the Usage dashboard, follows
+([below](#usage-over-time), lake#564); it keeps no price, plan or bill.
 
 Until lake#444 the report covered only repository bytes and repository build results, so a space
 holding 12,000-row datasets, trained models and built images showed a few kilobytes and zero
@@ -113,9 +115,167 @@ repository build time at the configured prices; repository storage, images, imag
 workspaces are measured but not priced. How usage is billed is not decided, and this report does
 not decide it.
 
+## Usage over time
+
+**Status: implemented (lake#564), not deployed.** Every dimension of a workspace's usage is kept
+over time in that workspace's own Zetta, and `usage_over_time` adds it up across the workspaces a
+person chooses, by hour, day or month. This is usage tracking and its visualization only: lake keeps
+no price, plan, invoice or ledger for it. Billing is not designed yet (the umbrella rule leaves
+billing data without a home until Steve decides, and decision 55 left whether billing reads
+workspace records or keeps its own store open), so nothing here decides it.
+
+### Where it lives
+
+Two series in each workspace Zetta's labelled time series (zetta `docs/data/time-series.md`), one
+bucket an hour, kept 400 days, created by lake on first write:
+
+| Series | Kind | Labels | Written by |
+|---|---|---|---|
+| `lake_usage` | counter | `dimension`, and by dimension `kind`, `agent`, `launch_id`, `model`, `object_id` | the request path and the owner loop's sample, through the bounded `UsageRecorder` |
+| `lake_storage` | gauge (`last`) | `kind` | the owner loop's sample |
+
+The request path only adds to an in-memory value for (workspace, metric, hour, labels)
+(`UsageRecorder`, `include/lake/api/usage_recorder.hpp`); the owner loop writes the values with
+`record_metric` every ten seconds (`ServerOptions::usage_flush_interval`), at once when half of
+`usage_max_pending` (8,192) is held, and once more on stop. It holds at most that many values: an
+increment of a value already held merges and a reading replaces an older reading of its hour; a new
+value beyond the bound is dropped and counted; values added together (a turn's input and output
+tokens) are kept or dropped together. A failed write is kept for the next flush; a deleted or
+unknown workspace's values are dropped, and a workspace that defines a series differently refuses
+that series alone. The counter is approximate like the request series: a crash loses the last
+interval and a write whose answer was lost may count twice. Nothing goes to lake's PostgreSQL or
+the lake Zetta. Telemetry: [`../serving/telemetry.md`](../serving/telemetry.md#the-workspace-usage-series).
+
+### Dimensions
+
+Each dimension has one unit. When billing is designed, a price is set per dimension `name` and
+multiplies its `unit`; that mapping is the extension point and does not exist yet
+(`usage_dimensions()`, `src/api/usage_recorder.cpp`).
+
+| Dimension | Unit | Kinds | Where it comes from |
+|---|---|---|---|
+| `storage` | bytes, the latest reading of each period | `repositories`, `images`, `workspace_data`, `transcripts`, `drive_files` | the owner loop's sample, below |
+| `transfer` | bytes | `in`, `out` | the exact hourly repository transfer records (`lake_metering_usage`, above) |
+| `build_compute` | seconds | `repository`, `image` | the repository build records (above) and the operator's finished image builds, at the hour each finished |
+| `run_compute` | seconds | `run` | the workspace's runs (`list_runs`), training and experiment trials included, at the time each last changed |
+| `speech` | seconds | `transcript` | the audio length of each transcript made from audio (`create_transcript`), rounded up, when the speech-to-text model reports it (`whisper-1`); `gpt-4o-transcribe` reports tokens instead, which count as its `model_tokens` |
+| `calls` | calls | `api`, `mcp` | every capability call routed to the workspace, the same attribution as `lake_requests` ([telemetry](../serving/telemetry.md#the-workspace-request-series)), answered or refused |
+| `predictions` | calls | — (`object_id` is the model) | each answered `predict` of a model the workspace has |
+| `model_tokens` | tokens | `input`, `output` (also `agent`, `launch_id`, `model`) | what an agent reports with `record_model_usage` (below), and the tokens a speech-to-text model reports for a transcript (`model` only) |
+| `instances` | instance-seconds | the service kind (`zetta`, `postgres`, …) or `app` (`object_id` is the service or app) | the owner loop's sample of running services and apps |
+| `volumes` | GiB-seconds | `service`, `store` (`object_id`) | the owner loop's sample of running services' and stores' volumes |
+
+### What the sampler reads
+
+Every `usage_sample_interval` (fifteen minutes) the store root's owner, and only it, so two lakes
+never count one service twice, samples every live workspace on its maintenance thread
+(`sample_usage`, `src/api/usage_capabilities.cpp`):
+
+- **Repository storage.** A space with one live workspace: the space's whole store (the same figure
+  `metering_usage` reports). With several: each repository's unique bytes in its workspace, so a
+  file two workspaces' repositories share counts in both.
+- **Container images.** The unique bytes of the images routed to the workspace, each digest once
+  per workspace (`tenant_image_bytes`).
+- **Workspace data, transcripts and drive files.** `list_datasets` `size_bytes`, the text of the
+  workspace's transcripts, and the size of each finished file of its `files` drives. A workspace
+  that is not ready is skipped, never sampled as zero.
+- **Instance and volume time.** For each service and store the operator reports `Ready`, and each
+  app that is running and ready, the seconds since the last sample (at most two intervals, so a gap
+  while no lake owned the store root is not counted) times its instances, replicas and GiB. The
+  workspace's own engine is a service, and counts.
+- **Build results.** Repository build results that finished since a little before the last sample
+  are queued for their workspace records, so `build_compute` does not wait for a `metering_usage`
+  read.
+
+### Not measured
+
+`usage_over_time` names these in `not_measured` whenever the dimension is asked for:
+
+- CPU and memory of services, stores and apps: the operator does not report them
+  ([lake#612](https://github.com/oramasearch/lake/issues/612)).
+- Model tokens are counted only when an agent reports them; agent-runtime and the library agents do
+  not yet ([lake#248](https://github.com/oramasearch/lake/issues/248)).
+- Speech-to-text for dictation outside a transcript (`transcribe`) belongs to no workspace
+  ([lake#613](https://github.com/oramasearch/lake/issues/613)).
+- Model files and indexes inside a workspace, whose size the workspace does not report.
+- Usage before this change: the series start empty, and nothing is copied into them.
+
+### `usage_over_time`
+
+```json
+{"customer_id":"<uuid>","workspace_ids":["<uuid>"],"dimensions":["storage","calls"],
+ "from":"2026-10-01T00:00:00Z","to":"2026-11-01T00:00:00Z","granularity":"day"}
+```
+
+`workspace_ids` defaults to every live workspace of the account; each must be one, or the call is
+refused `invalid_input` at `/workspace_ids/<n>` (another account's workspace is refused, never
+read). `dimensions` defaults to all. `from` is rounded down and `to` up to whole UTC periods; at
+most 2,400 hours, 1,100 days or 36 months. Hours are read from the workspace a step an hour; days
+and months a step a day, a month adding up its days (a reading takes its latest day). Each
+workspace's five reads (the two series, its runs, its transfer and build records) run at once.
+
+The answer: `periods` (each period's start), and for each dimension `title`, `unit`, `aggregation`
+(`sum` or `last`), `total` (a counter's sum; a reading's latest period), `points` (one value per
+period, added up across the workspaces; a reading's periods without data are `null`),
+`by_workspace` and `by_kind` (`key`, `total`, `points`, largest first), `by_agent`, `by_launch` and
+`by_model` for `model_tokens`, and `by_object` for `instances`, `volumes` and `predictions`.
+`workspaces[]` says which workspaces were read and why one was not; a workspace that could not be
+read never counts as zero. It needs `read` on the customer and is audited centrally as
+`metering.usage_over_time.read`. The existing `metering_usage` is unchanged.
+
+### Limits
+
+`set_usage_limit {customer_id, dimension, limit, warn_percent?}` (needs `admin` on the customer,
+audited as `metering.limit.set`) sets the account's limit on one dimension in its unit; `0` removes
+it. Limits are rows of `customer_usage_limits` (migration `0072_usage_limits`), content-free account
+configuration like the storage quota. **Storage's limit is the repository storage quota**:
+`set_usage_limit` with `storage` sets `set_storage_quota`'s quota, still enforced on new repository
+writes (below), and keeps its warning percentage. Every other limit is per UTC calendar month and
+warns without refusing anything; enforcing one is an extension point for when plans are decided.
+
+`usage_limits {customer_id}` answers each limit with what is used (storage: the repository bytes
+the quota is enforced against; any other: this month's total across the account's workspaces),
+`percent`, `state` (`ok`, `warning` from `warn_percent`, default 80, `over` from 100%, or
+`not_measured`), `enforced` and `period` (`now` or `month`), and a `warnings` sentence for each one
+warning or over. It needs `read` on the customer and is audited as `metering.limits.read`.
+
+### Model tokens
+
+`record_model_usage {model_name, input_tokens, output_tokens, task_id?}` is how an agent reports the
+tokens one of its turns or runs spent. Only an agent's own credential may call it: a task (`lat.`),
+launch (`lal.`) or schedule (`las.`) credential, or a library agent's bus credential naming its
+`task_id`. Lake adds both counts together to the usage of the workspace the task, launch or schedule
+runs in, labelled with the agent's name, the run's id (`launch_id`) and `model_name`, and audits it
+in that workspace. Anyone else is refused `unauthorized`. agent-runtime and the library agents do not
+call it yet ([lake#248](https://github.com/oramasearch/lake/issues/248)).
+
+### Verify
+
+`tests/test_usage.cpp`: `UsageRecorder.*` (one value per workspace, hour and labels, nothing written
+on add, hour buckets, the 400-day definitions, a reading keeping its latest, the bound, values added
+together dropped together, a failed write kept, deleted and refusing workspaces dropped);
+`UsageOverTime.*` (two workspaces added up by day, one workspace, hours rounded out, months adding
+their days, readings taking their latest; another account's workspace, unknown dimensions, a
+backwards or too long window, and a stranger refused; each model's answered predictions);
+`UsageLimits.*` (a warning at 80%, over at 100%, storage's limit is the quota, `0` removes);
+`RecordModelUsage.*` (a launch credential's tokens in its workspace by agent, launch and model; a
+person refused); `UsageSample.*` (stored bytes by kind, instance and volume seconds of a running
+service and none for a pending one, a transcript's audio seconds rounded up).
+`HttpServer.RequestLogsNameRoutesAndEachWorkspaceGetsItsOwnRequestSeries` counts calls through a
+real server and writes them only at stop. `SchemaConformance.*` validates the three readable
+capabilities' answers over REST and MCP.
+
+### Change
+
+A new dimension is a row in `usage_dimensions()` and an increment where lake sees it (or a reading
+in `sample_usage`); `read_usage` folds it in by name. Keep labels bounded by what the workspace
+holds: never a row's content, a raw path or a caller's free text.
+
 ## The Usage page
 
-`/metering` (Usage in the sidebar, the Usage tab of an organization) shows the summary in plain
+Usage in the sidebar is the dashboard at `/usage` over `usage_over_time` and `usage_limits`
+([`../ui/usage.md`](../ui/usage.md)). `/metering` (linked from it as repository usage by hour, and the
+Usage tab of an organization) shows the summary in plain
 units: byte sizes in B/KiB/MiB/GiB, compute as seconds, minutes and hours, hours as
 `YYYY-MM-DD HH:MM UTC`, and an estimated charge in the configured currency with two decimals. With
 no transfer or compute price configured it says there is no charge to show instead of printing

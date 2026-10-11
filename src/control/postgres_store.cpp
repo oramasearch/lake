@@ -5445,6 +5445,67 @@ public:
         });
     }
 
+    Result<std::vector<UsageLimit>> usage_limits(const std::string& customer_id) override {
+        return with_tx<std::vector<UsageLimit>>(
+            [&](pqxx::work& tx) -> Result<std::vector<UsageLimit>> {
+                const pqxx::result customers =
+                    tx.exec_params("SELECT 1 FROM customers WHERE id = $1::uuid", customer_id);
+                if (customers.empty()) {
+                    return std::unexpected(StoreError{"not_found", "no customer " + customer_id});
+                }
+                const pqxx::result rows = tx.exec_params(
+                    "SELECT dimension, limit_value, warn_percent, "
+                    "to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') "
+                    "FROM customer_usage_limits WHERE customer_id = $1::uuid ORDER BY dimension",
+                    customer_id);
+                std::vector<UsageLimit> limits;
+                for (const auto& row : rows) {
+                    limits.push_back({customer_id,
+                                      row[0].as<std::string>(),
+                                      row[1].as<std::uint64_t>(),
+                                      row[2].as<int>(),
+                                      row[3].as<std::string>()});
+                }
+                return limits;
+            });
+    }
+
+    Result<UsageLimit> set_usage_limit(const UsageLimit& limit) override {
+        if (limit.dimension.empty() || limit.warn_percent < 1 || limit.warn_percent > 100) {
+            return std::unexpected(StoreError{"invalid_input",
+                                              "a dimension and a warning "
+                                              "percentage from 1 to 100 are "
+                                              "required"});
+        }
+        return with_tx<UsageLimit>([&](pqxx::work& tx) -> Result<UsageLimit> {
+            const pqxx::result customers =
+                tx.exec_params("SELECT 1 FROM customers WHERE id = $1::uuid", limit.customer_id);
+            if (customers.empty()) {
+                return std::unexpected(StoreError{"not_found", "no customer " + limit.customer_id});
+            }
+            if (limit.limit == 0) {
+                tx.exec_params("DELETE FROM customer_usage_limits WHERE customer_id = $1::uuid "
+                               "AND dimension = $2",
+                               limit.customer_id,
+                               limit.dimension);
+                return limit;
+            }
+            const pqxx::result rows = tx.exec_params(
+                "INSERT INTO customer_usage_limits (customer_id, dimension, limit_value, "
+                "warn_percent) VALUES ($1::uuid, $2, $3, $4) ON CONFLICT (customer_id, dimension) "
+                "DO UPDATE SET limit_value = EXCLUDED.limit_value, warn_percent = "
+                "EXCLUDED.warn_percent, updated_at = now() RETURNING "
+                "to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')",
+                limit.customer_id,
+                limit.dimension,
+                limit.limit,
+                limit.warn_percent);
+            UsageLimit stored = limit;
+            stored.updated_at = rows[0][0].as<std::string>();
+            return stored;
+        });
+    }
+
     Result<IssuedSession> sign_up_password(const NewPasswordUser& in) override {
         if (in.pool_id.empty() || in.email.empty() || in.password.size() < 12) {
             return std::unexpected(StoreError{

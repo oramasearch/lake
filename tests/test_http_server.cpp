@@ -3424,6 +3424,10 @@ TEST(HttpServer, RequestLogsNameRoutesAndEachWorkspaceGetsItsOwnRequestSeries) {
     EXPECT_EQ(workspaces.records(other).metric_total("lake_requests"), 1) << statuses[3];
     EXPECT_EQ(home_series.metric_total("lake_requests", {{"route", "/v1/server_info"}}), 0);
     EXPECT_EQ(home_series.metric_total("lake_requests", {{"route", "/:package"}}), 0);
-    // Nothing reached the workspace on the request path: only the flush at stop wrote.
-    EXPECT_EQ(std::ranges::count(home_series.calls, std::string("record_metric")), 1);
+    // Nothing reached the workspace on the request path: only the flush at stop wrote, once for
+    // `lake_requests` and once for the same calls in `lake_usage` (lake#564).
+    EXPECT_EQ(std::ranges::count(home_series.calls, std::string("record_metric")), 2);
+    // Every capability call routed to the workspace is one call: the two reads and the sync pull.
+    EXPECT_EQ(home_series.metric_total("lake_usage", {{"dimension", "calls"}, {"kind", "api"}}), 3);
+    EXPECT_EQ(home_series.metric_total("lake_usage", {{"dimension", "calls"}, {"kind", "mcp"}}), 0);
 }

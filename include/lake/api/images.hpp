@@ -1,5 +1,8 @@
 #pragma once
 
+#include <map>
+#include <set>
+
 #include <cstdint>
 #include <expected>
 #include <optional>
@@ -67,6 +70,11 @@ struct ImageBytes {
     std::uint64_t bytes = 0;
     std::uint64_t stored_bytes = 0;
     std::vector<std::string> unmeasured;
+    // `bytes` split by the workspace whose routes name the image, each digest once per workspace
+    // (lake#564): a digest two workspaces' images share counts in both, so the split can add up
+    // to more than `bytes`. A workspace that could not be read is absent.
+    std::map<std::string, std::uint64_t> workspace_bytes;
+    std::set<std::string> unmeasured_workspaces;
 };
 liquid::runtime::task<ImageBytes> tenant_image_bytes(ApiContext& context,
                                                      std::string customer_id);

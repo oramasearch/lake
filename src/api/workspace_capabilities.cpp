@@ -19,6 +19,7 @@
 #include "lake/api/oauth.hpp"
 #include "lake/api/pipeline.hpp"
 #include "lake/api/request_recorder.hpp"
+#include "lake/api/usage_recorder.hpp"
 #include "lake/api/workspace_deletion.hpp"
 #include "lake/control/agent_bus.hpp"
 #include "lake/control/agent_library.hpp"
@@ -1786,6 +1787,14 @@ void register_predict_capability(Registry& registry) {
                     input.value("model_id", std::string()),
                     result.ok ? 200 : (code != nullptr ? code->status : 500),
                     elapsed_ms);
+            }
+            // The model's answered predictions over time, for what serving it costs (lake#564).
+            if (context.usage_recorder != nullptr && known && result.ok) {
+                context.usage_recorder->add(
+                    input.value("workspace_id", context.workspace_id),
+                    "predictions",
+                    1,
+                    {{"object_id", input.value("model_id", std::string())}});
             }
             co_return result;
         },

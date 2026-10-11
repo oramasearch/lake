@@ -156,6 +156,16 @@ service.
 
 Audit kinds: `agent.launch`, `agent.stop`, `agent.schedule`, `agent.unschedule`, `agent.turn`.
 
+## Model Tokens (lake#564)
+
+A launch, a schedule's run or a background turn reports the model tokens it spent with
+`record_model_usage {model_name, input_tokens, output_tokens}`, using its own credential (a library
+agent adds `task_id` with its bus credential). Lake counts them in the workspace the run belongs to,
+by agent, run and model; the Usage dashboard and the agent's page show them
+([metering](metering.md#model-tokens)). The capability is not in a launch's scopes because it needs
+none: lake authorizes it by the credential's kind and finds the run from it. agent-runtime and the
+library agents do not call it yet ([lake#248](https://github.com/oramasearch/lake/issues/248)).
+
 ## Configuration
 
 | Variable | Meaning |

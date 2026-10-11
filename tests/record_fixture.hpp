@@ -42,7 +42,7 @@ public:
     std::map<std::string, std::function<void(RecordTables&)>> before_delete;
 
     // The labelled time series (zetta#1231, zetta docs/data/time-series.md) as lake's request
-    // series uses it: counters only, every point kept as recorded.
+    // series uses it: counters and gauges, every point kept as recorded.
     struct Metric {
         json definition;
         std::vector<json> points; // {labels, value, at_ms}
@@ -118,10 +118,16 @@ public:
         const auto from_ms = input.value("from_ms", std::int64_t{0});
         const auto to_ms = input.value("to_ms", std::numeric_limits<std::int64_t>::max());
         const auto step_ms = input.value("step_ms", std::int64_t{0});
+        // A gauge answers each step's latest reading (`last`, its default aggregate); a counter
+        // the sum.
+        const bool last = found->second.definition.value("kind", std::string()) == "gauge" &&
+                          input.value("aggregate", std::string("last")) == "last";
         struct Series {
             json labels = json::object();
             double total = 0;
+            std::int64_t total_at = std::numeric_limits<std::int64_t>::min();
             std::map<std::int64_t, double> steps;
+            std::map<std::int64_t, std::int64_t> step_at;
         };
         std::map<std::string, Series> series;
         for (const auto& point : found->second.points) {
@@ -143,8 +149,20 @@ public:
             auto& entry = series[labels.dump()];
             entry.labels = labels;
             const double value = point.at("value").get<double>();
+            const std::int64_t step = step_ms > 0 ? at_ms - (at_ms - from_ms) % step_ms : from_ms;
+            if (last) {
+                if (at_ms >= entry.total_at) {
+                    entry.total = value;
+                    entry.total_at = at_ms;
+                }
+                if (!entry.step_at.contains(step) || at_ms >= entry.step_at[step]) {
+                    entry.steps[step] = value;
+                    entry.step_at[step] = at_ms;
+                }
+                continue;
+            }
             entry.total += value;
-            entry.steps[step_ms > 0 ? at_ms - (at_ms - from_ms) % step_ms : from_ms] += value;
+            entry.steps[step] += value;
         }
         json rows = json::array();
         for (const auto& [ignored, entry] : series) {
@@ -154,7 +172,9 @@ public:
             }
             rows.push_back({{"labels", entry.labels}, {"total", entry.total}, {"points", points}});
         }
-        return json{{"metric", found->second.definition}, {"aggregate", "sum"}, {"series", rows}};
+        return json{{"metric", found->second.definition},
+                    {"aggregate", last ? "last" : "sum"},
+                    {"series", rows}};
     }
 
     control::ZettaControlResult<json> run(std::string_view capability, const json& input) {

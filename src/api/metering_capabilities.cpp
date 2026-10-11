@@ -455,6 +455,28 @@ std::expected<std::string, ApiError> customer_object(const json& input, ApiConte
 
 } // namespace
 
+std::expected<std::size_t, std::string> queue_repository_builds(ApiContext& context,
+                                                                const std::string& customer_id,
+                                                                std::string_view since_hour) {
+    if (!context.store || !context.sync_store || !context.metering_recorder) {
+        return std::size_t{0};
+    }
+    std::size_t without_workspace = 0;
+    auto results = repository_builds(customer_id, context, without_workspace);
+    if (!results) {
+        return std::unexpected(results.error().error.message);
+    }
+    std::size_t queued = 0;
+    for (RepositoryBuild& result : *results) {
+        if (result.workspace_id.empty() || result.build.hour < since_hour) {
+            continue;
+        }
+        context.metering_recorder->add_build(result.workspace_id, std::move(result.build));
+        ++queued;
+    }
+    return queued;
+}
+
 void register_metering_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "set_storage_quota",
