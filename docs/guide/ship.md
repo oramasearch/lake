@@ -231,9 +231,15 @@ curl -s -H "Authorization: Bearer $LAKE_SEARCH_KEY" \
 | `query` | yes | The text to search for. |
 | `field` | no | Limit the search to one indexed field. |
 | `top_k` | no | How many hits, 1 to 100 (default 10). |
+| `fields` | no | Which of the index's fields each hit carries (default: all of them). `[]` (over REST, `fields=` with no value) returns ids and scores only. A field the index does not hold is refused, and the message lists the index's fields. |
 
-The answer's `hits` are `{id, score}`, best first. Lake checks the key, checks that the index is
-published, runs the search in your workspace and records the query.
+The answer's `hits` are `{id, score, fields}`, best first. `fields` holds the matched row's values,
+which is what you show in your search box; `id` is the workspace's internal row id, not a column of
+your table. Lake checks the key, checks that the index is published, runs the search in your
+workspace and records the query.
+
+For an index over `account_id` and `plan`, each hit's `fields` holds that row's `account_id` and
+`plan`. Ask for some fields only with `&fields=plan` (repeat it, or comma-separate, for more).
 
 ## Limits
 

@@ -1061,8 +1061,30 @@ TEST(Workspaces, SearchIndexAnswersOnlyForAPublishedIndex) {
     EXPECT_EQ(w.caller->calls.back().second["target"], "i-1");
     EXPECT_EQ(w.caller->calls.back().second["field"], "body");
     EXPECT_EQ(w.caller->calls.back().second["top_k"], 3);
+    EXPECT_FALSE(w.caller->calls.back().second.contains("fields"))
+        << "no `fields`: the engine's default, every field the index holds";
     EXPECT_EQ(registry.find("search_index")->kind, lake::api::CapabilityKind::Read)
         << "GET /v1/search_index for outside callers";
+
+    // zetta#1243 (lake#596, lake#615): each hit carries the matched row's fields, and `fields`
+    // picks which; [] asks for ids and scores only.
+    w.caller->answers["search"] = {
+        {"hits",
+         json::array({{{"id", "doc-7"},
+                       {"score", 2.5},
+                       {"fields", {{"title", "Renewal risk"}, {"plan", "enterprise"}}}}})}};
+    const auto with_fields = search({{"fields", json::array({"title", "plan"})}});
+    ASSERT_TRUE(with_fields.ok) << with_fields.error.message;
+    EXPECT_EQ(w.caller->calls.back().second["fields"], json::array({"title", "plan"}));
+    EXPECT_EQ(with_fields.value["hits"][0]["fields"]["title"], "Renewal risk");
+    const auto ids_only = search({{"fields", json::array()}});
+    ASSERT_TRUE(ids_only.ok) << ids_only.error.message;
+    EXPECT_EQ(w.caller->calls.back().second["fields"], json::array());
+    const std::string described = registry.find("search_index")->description;
+    EXPECT_NE(described.find("{id, score, fields}"), std::string::npos) << described;
+    EXPECT_EQ(described.find("lake#596"), std::string::npos) << "the hit carries fields now";
+    const json output = registry.find("search_index")->output_schema;
+    EXPECT_TRUE(output["properties"]["hits"]["items"]["properties"].contains("fields"));
 }
 
 TEST(Workspaces, PredictAnswersOnlyThroughAPublishedModel) {

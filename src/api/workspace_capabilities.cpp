@@ -1613,18 +1613,34 @@ void register_search_capabilities(Registry& registry) {
         .title = "Search a published index",
         .description = "Search one published search index in the customer's workspace. `query` is "
                        "the text, `field` optionally limits it to one indexed field, `top_k` caps "
-                       "the hits (default 10). Answers `hits` as {id, score}, best first: `id` is "
-                       "the workspace's internal id of the matched row, not a column of the table, "
-                       "and the hit carries no row fields yet (lake#596, which waits on the "
-                       "workspace engine). An index that is not published is refused; publish it "
-                       "with workspace_act expose_index.",
+                       "the hits (default 10), and `fields` picks which of the index's fields each "
+                       "hit carries (default all of them; [] for ids and scores only; a field the "
+                       "index does not hold is refused). Answers `hits` as {id, score, fields}, "
+                       "best first: `fields` holds the matched row's values, which is what a "
+                       "caller shows; `id` is the workspace's internal id of the row, not a column "
+                       "of the table. An index that is not published is refused; publish it with "
+                       "workspace_act expose_index.",
         .input_schema = customer_input_schema(
             {{"index_id", {{"type", "string"}}},
              {"query", {{"type", "string"}}},
              {"field", {{"type", "string"}}},
+             {"fields",
+              {{"type", "array"},
+               {"items", {{"type", "string"}, {"minLength", 1}}},
+               {"maxItems", 100}}},
              {"top_k", {{"type", "integer"}, {"minimum", 1}, {"maximum", 100}}}},
             json::array({"index_id", "query"})),
-        .output_schema = {{"type", "object"}},
+        .output_schema = {{"type", "object"},
+                          {"properties",
+                           {{"hits",
+                             {{"type", "array"},
+                              {"items",
+                               {{"type", "object"},
+                                {"properties",
+                                 {{"id", {{"type", "string"}}},
+                                  {"score", {{"type", "number"}}},
+                                  {"fields", {{"type", "object"}}}}},
+                                {"required", json::array({"id", "score"})}}}}}}}},
         .kind = CapabilityKind::Read,
         .object = "customer",
         .action = "read",
@@ -1654,6 +1670,11 @@ void register_search_capabilities(Registry& registry) {
                         {"top_k", input.value("top_k", 10)}};
             if (const std::string field = input.value("field", std::string()); !field.empty()) {
                 search["field"] = field;
+            }
+            // Which of the index's fields each hit carries (zetta#1243); the engine's default is
+            // all of them, and it refuses a field the index does not hold.
+            if (const auto fields = input.find("fields"); fields != input.end()) {
+                search["fields"] = *fields;
             }
             auto found =
                 co_await call_workspace(context, customer, "search", true, std::move(search));
