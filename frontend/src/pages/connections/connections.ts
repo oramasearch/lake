@@ -133,8 +133,9 @@ export function datasetNameFor(table: string): string {
   return (cleaned || "dataset").slice(0, 63);
 }
 
-/** Where an old Data → Datasets link goes now (lake#651): `?browse=<connection>` opens that
- * connection, `#connections` the Connections page. Null when the link is a Datasets link still.
+/** Where an old Data → Datasets link goes now: `?browse=<connection>` opens that connection and
+ * `#connections` the Connections page (lake#651); `#storage` opens Drives → Storage (lake#656).
+ * Null when the link is a Datasets link still.
  * The answer is workspace-local; the page prefixes `/w/<id>`. */
 export function movedFromDatasets(search: string, hash: string): string | null {
   const params = new URLSearchParams(search);
@@ -142,5 +143,6 @@ export function movedFromDatasets(search: string, hash: string): string | null {
   if (browse) return connectionPath(browse);
   const anchor = hash.replace(/^#/, "");
   if (anchor === "connections" || anchor === "connection") return CONNECTIONS_PATH;
+  if (anchor === "storage") return "/drives?tab=storage";
   return null;
 }

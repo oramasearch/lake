@@ -160,7 +160,7 @@ ranges, and verify the digest from the completed file; [`builds.md`](builds.md) 
 
 [`services.md`](services.md) defines a customer's managed services, and [`storage.md`](storage.md)
 a customer's stores (buckets, filesystems, network filesystems and volumes; a cluster volume in
-phase 1, lake#196), with their capabilities and the Train → Data → Storage panel.
+phase 1, lake#196), with their capabilities and the Data → Drives → Storage tab (lake#656), and store drives that browse a bucket or filesystem in place.
 [`web-apps.md`](web-apps.md) defines customer-scoped Ship app creation, direct-zone hosts,
 platform-reserved names, deployment, lifecycle, authentication, environment, attach/detach
 bindings, logs, events and the read-only app registry pull token. It is separate from identity

@@ -84,7 +84,7 @@ after the services:
   Every capability but `list_store_providers` takes the workspace (from the `/w/<id>/` URL, the
   agent task, or the input) and sees only that workspace's stores; another workspace's store is
   `not_found`.
-- **Train → Data → Storage**: the stores with type, provider, status and endpoint; *New storage*
+- **Data → Drives → Storage** (lake#656; before, Train → Data → Storage): the stores with type, provider, status and endpoint; *New storage*
   (type and provider as one choice of the available pairs, name, size); *Show connection*; delete
   with typed confirmation.
 

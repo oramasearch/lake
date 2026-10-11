@@ -3,11 +3,11 @@
 A **dataset** is a table in your workspace: the data its pipelines train on, its search indexes
 cover and its agents read. Every dataset lives in the workspace it was loaded into; another workspace never sees it.
 
-Open **Data → Datasets** to see them. The page has three figures (Datasets, Run outputs, Stores),
-the datasets table and the **Storage** card. Its header has **Query with SQL** and **Load data**,
-which appear once the workspace is ready. The databases the workspace reads are on **Data →
-Connections** ([Connections](/docs/connections)); an old link to Datasets' connections opens that
-page.
+Open **Data → Datasets** to see them. The page has two figures (Datasets, Run outputs) and the
+datasets table. Its header has **Query with SQL** and **Load data**, which appear once the
+workspace is ready. The databases the workspace reads are on **Data → Connections**
+([Connections](/docs/connections)), and storage is the **Storage** tab of **Data → Drives**; an old
+link to Datasets' connections or storage opens those pages.
 
 There are three ways to bring data in, all under **Load data**:
 
@@ -208,28 +208,9 @@ columns.
 
 ## Storage
 
-The **Storage** card (*Buckets, Filesystems and Volumes*) holds storage for your services, private
-to this workspace. It shows whether or not the workspace is ready.
-
-1. Press **New storage**.
-2. Choose **Type and provider**. Today one pair is offered: **Volume — cluster disk**. The others
-   are listed, disabled, with the reason they are not offered.
-3. Enter a **Name** (lowercase letters, digits and `-`, starting with a letter, at most 31
-   characters) and a **Size (GiB)** from 1 to 100 (default 10).
-4. Press **Create storage**. The card checks again every 3 seconds while a store is changing; it reads *Waiting
-   for the operator*, then *Connecting*, then Ready.
-5. Once Ready, **Show connection** shows what a service mounts to use it. It is shown once and
-   not stored by Lake.
-
-`POST /v1/create_store`
-
-```json
-{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "type": "volume", "provider": "cluster", "name": "scratch", "size_gi": 10}
-```
-
-`list_stores` lists them, `store_connection` reads a Ready store's connection, and `delete_store`
-deletes one when `confirm` is its exact name (**Delete** on the card). Deleting a store deletes the data in it, which
-cannot be recovered; the page asks you to type the name first.
+Storage (buckets, filesystems and volumes for your services) is the **Storage** tab of **Data →
+Drives** ([Drives](/docs/drives#storage), [Services and Storage](/docs/services#storage)). An old
+link to Datasets' Storage card opens that tab.
 
 ## Permissions
 
@@ -259,7 +240,6 @@ members hold `read` unless they were granted more ([Grants and Effective Access]
 | `invalid_input` at `/statement` | The query does not start with `SELECT` or `WITH` (the message quotes how it starts), or holds several statements. |
 | *This workspace requires an approval before it reaches an outside database* | The workspace enforces consent for outside sources, which Lake cannot give (`consent_required`). |
 | `workspace_not_ready` | The workspace is starting. Wait until **Ship → Workspaces** shows it Ready, or press **Start** on the page. |
-| *Connecting* on a store for a long time | The operator has made it but its connection has not reached Lake yet. |
 | `unauthorized` | You have `read` but not `write` on the account; ask an owner or admin. |
 
 ## Related Pages

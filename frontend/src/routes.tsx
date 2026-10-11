@@ -172,6 +172,9 @@ export function navigableScreens(session: Pick<Session, "viewer">): Screen[] {
       out.push({ ...screen, title: item.label, section: item.section });
     }
   }
+  // Storage is a tab of Drives (lake#656); Go to finds it by its own name.
+  const storage = SCREENS.find((s) => s.path === "/storage");
+  if (storage && session.viewer.signed_in && seen.has("/drives")) out.push(storage);
   if (session.viewer.signed_in && !session.viewer.administrator) {
     for (const path of ["/settings", "/sessions", "/tokens"]) {
       const screen = SCREENS.find((s) => s.path === path);

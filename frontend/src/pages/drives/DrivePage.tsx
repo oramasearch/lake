@@ -873,7 +873,9 @@ function Delete({ storage, items, onClose, onDone }: { storage: DriveStorage; it
       ? "This writes a new change without it. Earlier versions stay in the repository's history and can be restored."
       : items.every((item) => item.kind === "shortcut")
         ? "Only the shortcut goes; what it points at stays where it is."
-        : `Workspace files have no history: this cannot be undone.${folders ? " A folder goes with everything in it." : ""}`;
+        : storage.drive.storage === "store"
+          ? `This deletes it from the storage itself, which keeps no history: this cannot be undone.${folders ? " A folder goes with everything in it." : ""}`
+          : `Workspace files have no history: this cannot be undone.${folders ? " A folder goes with everything in it." : ""}`;
   return (
     <Modal
       title={`Delete ${what}?`}
@@ -963,7 +965,9 @@ function DriveSettings({ drive, customerId, workspaceId, onClose, onDeleted }: {
               ? "The drive goes; its repository stays, with every file and its history. Delete the repository from its own page."
               : drive.storage === "virtual"
                 ? "Its folders and shortcuts go; what they point at stays where it is."
-                : "Every folder and file in it is deleted and cannot be restored."}
+                : drive.storage === "store"
+                  ? "The drive goes; the storage it opens stays, with every file in it. Delete the storage from Drives → Storage."
+                  : "Every folder and file in it is deleted and cannot be restored."}
           </p>
           <Field label={`Type “${drive.name}” to confirm`}>
             <input value={typed} onChange={(e) => setTyped(e.target.value)} />
