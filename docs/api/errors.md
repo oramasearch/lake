@@ -42,7 +42,7 @@ Every capability answers a failure the same way on REST and MCP:
 | `gate_blocked` | 409 | A pipeline gate refused the run; the message names the failing check. |
 | `invalid_chain` | 409 | The audit log's hash chain is broken: an event is missing or was changed. |
 | `size_invalid` | 413 | The request body is larger than the limit. |
-| `engine_error` | 502 | The workspace engine could not complete the call; the message is its. |
+| `engine_error` | 422 | The workspace engine or the outside service refused the call; the message is its. |
 | `not_supported` | 501 | This lake or its workspace engine cannot do what was asked yet. |
 | `quota_exceeded` | 507 | The customer's storage quota is full; existing content stays readable. |
 | `store_error` | 500 | The server failed; the message says what failed. |
@@ -55,7 +55,24 @@ Every capability answers a failure the same way on REST and MCP:
 | `rate_limited` | 429 | Too many requests from this caller, or in all, are waiting; retry. Sent with `Retry-After: 1` when a long poll finds the long-request caps full ([http](../serving/http.md#connections-and-workers), lake#534). |
 
 `not_supported` was 500, `engine_error` 500, `quota_exceeded` 500, and a missing or rejected
-credential 403 `unauthorized` before lake#450.
+credential 403 `unauthorized` before lake#450. `engine_error` was 502 from lake#450 until lake#572.
+
+### No code answers 502 or 504
+
+lake is reached through Cloudflare, which answers an origin's `502` or `504` with its own HTML page
+("Error 502: Bad gateway … the origin web server returned an invalid or incomplete response"), so a
+REST caller never saw lake's JSON body and could not tell a typo in SQL from an outage (lake#572).
+Cloudflare passes `500`, `501` and `503` bodies through unchanged, and every 4xx. So:
+
+- `engine_error` is `422`: the workspace engine refused the call (`table "x" does not exist`, a SQL
+  parse error) or an outside service refused it (OpenAI could not transcribe the audio). The caller
+  can change the input; it is not lake's fault.
+- An engine that cannot be reached is `store_unavailable` (`503`); lake's own faults stay `500`.
+- An identity application's OAuth callback answers `503` when the provider's token or user
+  endpoint fails.
+
+`ApiErrors.NoCodeAnswersAStatusCloudflareReplaces` (`tests/test_api.cpp`) fails if a documented code
+is given `502` or `504`. See [http](../serving/http.md#statuses-behind-cloudflare).
 
 ## 401: missing, invalid or expired
 

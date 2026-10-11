@@ -213,7 +213,7 @@ Each capability's page in [Docs](/docs) and its OpenAPI operation name the input
 | `rate_limited` | 429 | Too many long requests are waiting; retry after `Retry-After`. |
 | `store_error`, `corrupt`, `io`, `crypto_error` | 500 | The server failed; the message says what. |
 | `not_supported` | 501 | This lake or its workspace engine cannot do this yet. |
-| `engine_error` | 502 | The workspace engine could not complete the call; the message is its own. |
+| `engine_error` | 422 | The workspace engine or an outside service refused the call (a SQL typo, unreadable audio); the message is its own. |
 | `store_unavailable`, `busy` | 503 | A dependency is unreachable or busy; retry. |
 | `workspace_not_ready` | 503 | The workspace exists but is not ready. |
 | `quota_exceeded` | 507 | Your storage quota is full; what is stored stays readable. |

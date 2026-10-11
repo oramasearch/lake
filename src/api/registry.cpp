@@ -103,7 +103,11 @@ constexpr std::array<ErrorCode, 30> documented_error_codes{{
      409,
      "The audit log's hash chain is broken: an event is missing or was changed."},
     {"size_invalid", 413, "The request body is larger than the limit."},
-    {"engine_error", 502, "The workspace engine could not complete the call; the message is its."},
+    // 422, not 502: Cloudflare replaces a 502 or 504 body with its own page (lake#572), and the
+    // engine refusing a call (a typo in SQL, a corrupt audio file) is not an outage.
+    {"engine_error",
+     422,
+     "The workspace engine or the outside service refused the call; the message is its."},
     {"not_supported", 501, "This lake or its workspace engine cannot do what was asked yet."},
     {"quota_exceeded",
      507,

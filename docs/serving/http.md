@@ -264,6 +264,29 @@ writes nothing for it. Lake pins `oramasearch/beast2` branch `orama-main`, whose
 suppresses the former `read_header error: end of stream` line. The carrier and its update procedure
 are recorded in [`../build/dependencies.md`](../build/dependencies.md).
 
+## Statuses Behind Cloudflare
+
+lake on `lake.oramadev.net` is reached through Cloudflare. Cloudflare answers an origin's `502` or
+`504` with its own HTML page (*"Error 502: Bad gateway … The origin web server returned an invalid
+or incomplete response"*) and drops lake's body; it passes `500`, `501` and `503` and every 4xx
+through unchanged (Cloudflare's *Custom Errors* and *Error 502/504* pages). Until lake#572 lake
+answered `engine_error` with `502`, so a REST caller who mistyped a SQL table, or uploaded audio
+OpenAI could not read, got Cloudflare's page telling them to retry in 60 seconds, while MCP (always
+`200` with the error inside) showed the real message.
+
+The rule, enforced by `ApiErrors.NoCodeAnswersAStatusCloudflareReplaces`:
+
+- **lake never answers `502` or `504` itself.** `engine_error` (the workspace engine or an outside
+  service refused the call) is `422`; an unreachable dependency is `503` (`store_unavailable`);
+  lake's own faults are `500`. The OAuth callback's provider failures are `503`.
+- A `502` or `504` a caller sees therefore came from a proxy, not from lake: lake was unreachable,
+  closed the connection (see [Handler exceptions](#handler-exceptions)), or a long call (a long
+  transcription) passed Cloudflare's 100-second origin timeout. lake's request log has no `502`.
+
+How to verify: `curl -s -w '%{http_code}\n' -H 'Authorization: Bearer <key>'
+'https://<host>/v1/workspace_sql?customer_id=<c>&workspace_id=<w>&statement=SELECT%20*%20FROM%20datasets.no_such_table%20LIMIT%201'`
+answers `422` with `{"ok":false,"error":{"code":"engine_error","message":"table \"no_such_table\" does not exist",…}}`.
+
 ## Handler exceptions
 
 Beast2 closes the connection when a route handler's task ends in an exception: the client sees a

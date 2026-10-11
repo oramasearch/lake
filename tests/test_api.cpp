@@ -7159,12 +7159,27 @@ TEST(ApiErrors, OtherSpellingsAndUnknownCodesBecomeDocumentedOnes) {
     EXPECT_EQ(rest_status(ApiResult::failure("unauthorized", "x")), 403);
     EXPECT_EQ(rest_status(ApiResult::failure("method_not_allowed", "x")), 405);
     EXPECT_EQ(rest_status(ApiResult::failure("not_approved", "x")), 409);
-    EXPECT_EQ(rest_status(ApiResult::failure("engine_error", "x")), 502);
+    EXPECT_EQ(rest_status(ApiResult::failure("engine_error", "x")), 422);
     EXPECT_EQ(rest_status(ApiResult::failure("workspace_not_ready", "x")), 503);
     // The OpenAPI error envelope enumerates exactly the documented codes.
     const json schema = lake::api::error_envelope_schema();
     EXPECT_EQ(schema["properties"]["error"]["properties"]["code"]["enum"].size(),
               lake::api::error_codes().size());
+}
+
+// Cloudflare answers a 502 or 504 from lake with its own page, so a REST caller would never see
+// lake's error (lake#572). No documented code may answer either.
+TEST(ApiErrors, NoCodeAnswersAStatusCloudflareReplaces) {
+    for (const auto& code : lake::api::error_codes()) {
+        EXPECT_NE(code.status, 502) << code.code;
+        EXPECT_NE(code.status, 504) << code.code;
+    }
+    const ApiResult refused =
+        ApiResult::failure("engine_error", "table \"no_such_table\" does not exist");
+    EXPECT_EQ(rest_status(refused), 422);
+    const json body = lake::api::rest_envelope(refused);
+    EXPECT_EQ(body["error"]["code"], "engine_error");
+    EXPECT_EQ(body["error"]["message"], "table \"no_such_table\" does not exist");
 }
 
 TEST(ApiErrors, RestSaysWhetherACredentialIsMissingInvalidOrExpired) {

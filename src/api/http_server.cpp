@@ -9571,12 +9571,12 @@ struct ApiServer::Impl {
         if (!token_response.error.empty() || token_response.status < 200 ||
             token_response.status >= 300) {
             co_return co_await oauth_error(
-                route, http::status::bad_gateway, "OAuth token exchange failed");
+                route, http::status::service_unavailable, "OAuth token exchange failed");
         }
         const nlohmann::json token = nlohmann::json::parse(token_response.body, nullptr, false);
         if (token.is_discarded()) {
             co_return co_await oauth_error(
-                route, http::status::bad_gateway, "OAuth token response was invalid");
+                route, http::status::service_unavailable, "OAuth token response was invalid");
         }
 
         control::OAuthIdentity identity;
@@ -9588,7 +9588,7 @@ struct ApiServer::Impl {
             const std::string access_token = token.value("access_token", "");
             if (access_token.empty()) {
                 co_return co_await oauth_error(
-                    route, http::status::bad_gateway, "GitHub did not return an access token");
+                    route, http::status::service_unavailable, "GitHub did not return an access token");
             }
             const OutboundResponse user_response =
                 outbound_http.request({"GET",
@@ -9601,7 +9601,7 @@ struct ApiServer::Impl {
             if (!user_response.error.empty() || user_response.status < 200 ||
                 user_response.status >= 300 || user.is_discarded() || !user.contains("id")) {
                 co_return co_await oauth_error(
-                    route, http::status::bad_gateway, "GitHub user verification failed");
+                    route, http::status::service_unavailable, "GitHub user verification failed");
             }
             identity.subject = user["id"].is_string() ? user["id"].get<std::string>()
                                                       : std::to_string(user["id"].get<long long>());
