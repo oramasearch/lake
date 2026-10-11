@@ -9,12 +9,14 @@
 #include <array>
 #include <cctype>
 #include <expected>
+#include <optional>
 #include <regex>
 #include <string>
 #include <string_view>
 #include <vector>
 
 #include "lake/api/capabilities.hpp"
+#include "lake/control/policy.hpp"
 
 namespace lake::api {
 
@@ -159,6 +161,9 @@ constexpr auto entity_fields = std::to_array<EntityField>({
     {"expose_index", "index"},
     {"unexpose_index", "index"},
     {"get_job", "job_id"},
+    // An agent's model: a model id, a checkpoint or a Hugging Face repository id.
+    {"create_agent", "model"},
+    {"update_agent", "model"},
 });
 
 // What Lake adds to or checks in an engine call, said beside the engine's own description.
@@ -199,6 +204,9 @@ std::string lake_note(std::string_view engine) {
                "catalogue solution's governed foundation into a project, as Start as a Project "
                "does.";
     }
+    if (engine == "get_agent" || engine == "agent_training_status") {
+        return "`id` is the agent's id, as list_agents answers it.";
+    }
     if (engine == "get_experiment") {
         return "The solutions holdout experiment, not a training experiment (get_experiment).";
     }
@@ -234,6 +242,10 @@ std::string lake_terms(std::string text) {
         copied = static_cast<std::size_t>(at->position() + at->length());
     }
     text = renamed + text.substr(copied);
+    // A person runs experiments; study is only the engine's word (lake#561).
+    text = std::regex_replace(text, std::regex(R"(\bstudies\b)"), "experiments");
+    text = std::regex_replace(text, std::regex(R"(\bstudy\b)"), "experiment");
+    text = std::regex_replace(text, std::regex(R"(\bStudy\b)"), "Experiment");
     for (const auto& [from, to] : std::to_array<std::pair<std::string_view, std::string_view>>({
              {"on every node of the cluster", "across the workspace"},
              {"on every node", "across the workspace"},
@@ -315,6 +327,27 @@ std::expected<std::string, ApiError> customer_object(const json& input, ApiConte
     return object->id;
 }
 
+// What the registry checks for any other capability, for a list that authorizes its own
+// candidates: `read` on the account.
+std::optional<ApiResult> refuse_unless_reader(const json& input, ApiContext& context) {
+    const auto object = customer_object(input, context);
+    if (!object) {
+        return ApiResult::failure(object.error().code, object.error().message, object.error().path);
+    }
+    if (context.acting_identity == "admin") {
+        return std::nullopt;
+    }
+    const auto decision = control::authorize(
+        *context.store, context.acting_identity, *object, "read", context.authorization_cache);
+    if (!decision) {
+        return ApiResult::failure(decision.error().code, decision.error().message);
+    }
+    if (!decision->allowed) {
+        return ApiResult::failure("unauthorized", "principal is not allowed to read the customer");
+    }
+    return std::nullopt;
+}
+
 // A capability's title: the engine's summary, or its name said as words.
 std::string title_of(const EngineName& name, const json& operation) {
     if (name.engine == name.lake) {
@@ -378,7 +411,8 @@ void register_engine_capabilities(Registry& registry) {
         if (const std::string note = lake_note(engine); !note.empty()) {
             description += " " + note;
         }
-        if (name.engine != name.lake) {
+        // Lake never names a study, not even as the engine's name (lake#561).
+        if (name.engine != name.lake && !engine.contains("stud")) {
             description += " The engine calls it " + engine +
                            (read ? "; workspace_query" : "; workspace_act") +
                            " takes that name too.";
@@ -396,9 +430,28 @@ void register_engine_capabilities(Registry& registry) {
             .object = "customer",
             .action = read ? "read" : "write",
             .resolve_object = customer_object,
-            .async_handler = [engine, read](const json& input,
-                                            ApiContext& context) -> liquid::runtime::task<ApiResult> {
+            // Lake's list capabilities authorize their own candidates; an engine list's one
+            // candidate is the account, read below exactly as the registry would.
+            .authorizes_candidates = name.lake.starts_with("list_"),
+            .async_handler = [engine, read, list = name.lake.starts_with("list_")](
+                                 const json& input,
+                                 ApiContext& context) -> liquid::runtime::task<ApiResult> {
+                if (list) {
+                    if (auto refused = refuse_unless_reader(input, context)) {
+                        co_return std::move(*refused);
+                    }
+                }
                 json arguments = input;
+                // The engine's spelling of the entity (`model`), where Lake publishes `model_id`.
+                if (const auto entity =
+                        std::ranges::find(entity_fields, engine, &EntityField::engine);
+                    entity != entity_fields.end() && !entity->field.ends_with("_id")) {
+                    const std::string field(entity->field);
+                    if (arguments.contains(field + "_id")) {
+                        arguments[field] = std::move(arguments[field + "_id"]);
+                        arguments.erase(field + "_id");
+                    }
+                }
                 json call{{"customer_id", arguments.at("customer_id")},
                           {"workspace_id", arguments.at("workspace_id")},
                           {"capability", engine}};

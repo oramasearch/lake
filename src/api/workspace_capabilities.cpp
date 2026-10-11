@@ -2578,6 +2578,11 @@ void register_dataset_catalog_capability(Registry& registry) {
         .authorizes_candidates = true,
         .async_handler = [](const json& input,
                             ApiContext& context) -> liquid::runtime::task<ApiResult> {
+            // A list authorizes its own candidates: the account's, read as any other workspace
+            // read is (lake#650 found this one answering any signed-in person).
+            if (auto refused = refuse_unless_reader(input, context)) {
+                co_return std::move(*refused);
+            }
             if (!context.workspaces) {
                 co_return unavailable();
             }

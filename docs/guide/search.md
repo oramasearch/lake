@@ -166,10 +166,10 @@ Each place is the capability its own page reads:
 - **Projects, agents and models**: `workspace_query` with the engine read `list_projects`,
   `list_agents` or `list_models`:
 
-`POST /v1/workspace_query`
+`POST /v1/list_projects`
 
 ```json
-{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "capability": "list_projects", "input": {}}
+{"customer_id": "<customer id>", "workspace_id": "<workspace id>"}
 ```
 
 - **Drives**: `search_drives` with `q`, and `drive_id` to search one drive:

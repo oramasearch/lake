@@ -67,13 +67,13 @@ workspace you mean. Details: [Workspaces](/docs/workspaces).
    `accounts` (letters, digits and underscores, starting with a letter).
 3. Press **Upload**. The page says how many rows arrived and links to the new dataset.
 
-- REST: `POST /v1/workspace_act` with this body:
+- REST: `POST /v1/upload_dataset` with this body:
 
 ```json
-{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "capability": "upload_dataset", "input": {"table_name": "accounts", "format": "csv", "content": "account,plan,churned\na1,pro,false\n"}}
+{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "table_name": "accounts", "format": "csv", "content": "account,plan,churned\na1,pro,false\n"}
 ```
 
-- MCP: `workspace_act` with the same input.
+- MCP: `upload_dataset` with the same input.
 
 Other ways in (a database you connect, generated data, read-only SQL): [Datasets and Loading
 Data](/docs/load-data). Recordings and meeting notes go to **Data → Transcripts**
@@ -87,13 +87,13 @@ Data](/docs/load-data). Recordings and meeting notes go to **Data → Transcript
    week*.
 3. Press **Create project**. The project opens.
 
-- REST: `POST /v1/workspace_act` with this body:
+- REST: `POST /v1/create_project` with this body:
 
 ```json
-{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "capability": "create_project", "input": {"name": "retention", "description": "Keep accounts from churning", "decision": "Which accounts customer success calls first each week"}}
+{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "name": "retention", "description": "Keep accounts from churning", "decision": "Which accounts customer success calls first each week"}
 ```
 
-- MCP: `workspace_act` with the same input.
+- MCP: `create_project` with the same input.
 
 A name already in use answers `conflict`. More: [AI Projects and Pipelines](/docs/design).
 
@@ -106,12 +106,12 @@ A name already in use answers `conflict`. More: [AI Projects and Pipelines](/doc
 3. Press **Build pipeline**. The pipeline opens, drawn as steps joined by arrows.
 4. Press **Approve**. A pipeline must be approved before it runs, and again after any change.
 
-Through the API the same steps are `workspace_act` calls: `capture_intent` with `{project, text}`,
-then `compile_intent` with `{project, input_id}`, then `approve_plan` with `{project, graph}`. For
-example, approving:
+Through the API the same steps are `capture_intent` with `{project, text}`, then `compile_intent`
+with `{project, input_id}`, then `approve_pipeline` with `{project, graph}`. For example, approving
+with `POST /v1/approve_pipeline`:
 
 ```json
-{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "capability": "approve_plan", "input": {"project": "retention", "graph": "<pipeline name>"}}
+{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "project": "retention", "graph": "<pipeline name>"}
 ```
 
 To change the pipeline, use **Ask the Project Agent** on its page: it proposes edits you review,

@@ -134,10 +134,10 @@ Details: [Datasets and Loading Data](/docs/load-data).
 A dataset name that already exists answers `conflict` and nothing is loaded. Tick *If the name is
 taken, save it under the next free name* to have it saved as `accounts_2`; the page then says it was
 renamed. Through the API, add `"if_exists": "rename"` to the upload's `input`, for example
-`POST /v1/workspace_act`:
+`POST /v1/upload_dataset`:
 
 ```json
-{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "capability": "upload_dataset", "input": {"table_name": "accounts", "format": "csv", "content": "id,plan\n1,pro\n", "if_exists": "rename"}}
+{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "table_name": "accounts", "format": "csv", "content": "id,plan\n1,pro\n", "if_exists": "rename"}
 ```
 
 The answer's `renamed_from` says what you asked for. A project name that is taken is refused the same

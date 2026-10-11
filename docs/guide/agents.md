@@ -58,9 +58,9 @@ for **Confirm and start experiment**.
 a frontier model) and a card per agent with its purpose, its trigger or *Conversation*, its model and
 what it may do. Search, or filter by **Conversation only** and **Runs on its own**.
 
-- REST: `POST /v1/workspace_query` with
-  `{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "capability": "list_agents", "input": {}}`
-- MCP: `workspace_query`, with the same input. The engine read `get_agent`, with the agent's `id`
+- REST: `POST /v1/list_agents` with
+  `{"customer_id": "<customer id>", "workspace_id": "<workspace id>"}`
+- MCP: `list_agents`, with the same input. The engine read `get_agent`, with the agent's `id`
   in `input`, reads one.
 
 ## Create an Agent
@@ -83,9 +83,9 @@ On the page, a frontier-model agent with a trigger also gets its first schedule.
 base-model agent is kept on the agent but does not run it. Over REST or MCP, `create_agent` only
 creates the agent: add its schedule with `schedule_agent` ([Schedule It](#schedule-it)).
 
-- REST: `POST /v1/workspace_act` with
-  `{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "capability": "create_agent", "input": {"name": "Weekly churn digest", "purpose": "Summarize which accounts are most at risk", "runtime": "python", "model_name": "gpt-4o", "skills": ["search"], "trigger": "every monday at 09:00", "definition": {"source": "zetta", "instructions": "# Weekly churn digest", "files": [], "entrypoint": ""}}}`
-- MCP: `workspace_act`, with the same input.
+- REST: `POST /v1/create_agent` with
+  `{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "name": "Weekly churn digest", "purpose": "Summarize which accounts are most at risk", "runtime": "python", "model_name": "gpt-4o", "skills": ["search"], "trigger": "every monday at 09:00", "definition": {"source": "zetta", "instructions": "# Weekly churn digest", "files": [], "entrypoint": ""}}`
+- MCP: `create_agent`, with the same input.
 
 A frontier agent's `definition` is `source` `zetta` with `instructions`, `entrypoint` and `files`
 (each `path` and `contents`), or `source` `lake` with `repository_id`, `revision` and `entrypoint`.
@@ -196,9 +196,9 @@ A base-model agent that has training shows a **Training** tab with its training 
 On the agent's page choose **Delete agent**, type its name and confirm. The agent is deleted, and its
 schedules with it.
 
-- REST: `POST /v1/workspace_act` with
-  `{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "capability": "delete_agent", "input": {"id": "<agent id>"}}`
-- MCP: `workspace_act`.
+- REST: `POST /v1/delete_agent` with
+  `{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "id": "<agent id>"}`
+- MCP: `delete_agent`.
 
 ## Permissions
 

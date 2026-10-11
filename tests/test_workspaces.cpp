@@ -4436,6 +4436,32 @@ TEST(EngineCapabilities, ANamedCallReachesTheWorkspaceEngineAsWorkspaceActDoes) 
     ASSERT_FALSE(unknown.ok);
     EXPECT_EQ(unknown.error.path, "/colour") << "the engine's schema is enforced";
 
+    // Another account's person reads none of it, lists included (they authorize their own
+    // candidates) and actions alike.
+    const auto stranger = store.sign_in_clerk(minted("stranger"));
+    ASSERT_TRUE(stranger);
+    const auto stranger_principal = store.context_for(stranger->secret);
+    for (const std::string name : {"list_projects", "get_project", "create_project", "list_datasets"}) {
+        lake::api::ApiContext context;
+        context.store = &store;
+        context.workspaces = w.service.get();
+        context.authorized = true;
+        context.acting_user_id = stranger_principal->user_id;
+        context.acting_identity = stranger_principal->taap_id;
+        context.request_id = lake::control::new_uuid_v4();
+        const json input{{"customer_id", w.customer_id},
+                         {"workspace_id", w.workspace_id()},
+                         {"name", "retention"}};
+        auto completed = liquid::runtime::block_on(registry.call_async(
+            name, name.starts_with("list_") ? json{{"customer_id", w.customer_id},
+                                                 {"workspace_id", w.workspace_id()}}
+                                          : input,
+            context));
+        ASSERT_TRUE(completed);
+        EXPECT_FALSE(completed->ok) << name << " answered another account's person";
+        EXPECT_EQ(completed->error.code, "unauthorized") << name;
+    }
+
     // A credential that may call workspace_query may call the named reads, not the actions.
     session = true;
     scopes = {"workspace_query"};

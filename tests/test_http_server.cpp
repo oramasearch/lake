@@ -1253,7 +1253,7 @@ TEST_P(HttpResponseIsolation, AnMcpKeyWorksOverMcp) {
     ASSERT_TRUE(skill.starts_with("HTTP/1.1 200")) << skill.substr(0, 200);
     EXPECT_EQ(response_header(skill, "content-disposition"), "attachment; filename=SKILL.md");
     EXPECT_NE(skill.find("name: lake"), std::string::npos);
-    EXPECT_NE(skill.find("approve_plan"), std::string::npos);
+    EXPECT_NE(skill.find("approve_pipeline"), std::string::npos);
     const std::string developer = connection->request("GET", "/developer/mcp/skill");
     EXPECT_TRUE(developer.starts_with("HTTP/1.1 200")) << developer.substr(0, 200);
 }
