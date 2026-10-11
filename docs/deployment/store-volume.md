@@ -65,7 +65,7 @@ What is on the store volume, and how each part is written:
 | `<customer>/repositories/<id>/` (refs, journal, checkpoint, replication cursor) | libliquid repository on the customer store handle, opened once and cached; cursor via a fixed `.tmp` name | **unsafe**: cached state, shared temporary name |
 | Drive content | a liquid repository in the customer store | **unsafe**, as the store |
 | Models and datasets | liquid sync into the customer store | **unsafe**, as the store |
-| `<customer>/index/` (search segments and manifest of unswitched workspaces' repositories) | `search::Service`, per-space state loaded once and republished from memory | **unsafe**: a publication drops the other process's segments. A switched workspace's index is not here: it is beside its store in its workspace Zetta, written under the store's lease fence (lake#381, [search.md](../api/search.md#where-the-index-lives-lake381-decision-54-s8)) |
+| `<customer>/index/` (search segments and manifest of unswitched workspaces' repositories) | `search::Service`, per-account state loaded once and republished from memory | **unsafe**: a publication drops the other process's segments. A switched workspace's index is not here: it is beside its store in its workspace Zetta, written under the store's lease fence (lake#381, [search.md](../api/search.md#where-the-index-lives-lake381-decision-54-s8)) |
 | `<node>/registry/` OCI blobs | uploads under unique ids, blobs renamed into content-addressed paths | safe in the test (444 manifests, 888 blobs, no loss) |
 | `<node>/registry/` manifests, tags, npm and Python indexes | write-then-rename; npm and Python indexes are read-modify-write under an in-process mutex | tags: last writer wins; **package indexes: lost update** |
 | `<node>/log/` transparency tiles and `tree.json` | `flock` on `append.lock`, state re-read under the lock | safe in the test (1,692 appends, tree rebuilt from its entries) |
@@ -149,7 +149,7 @@ reachable while it waits.
    announcement (A may still need any of them), takes each one at once and opens the store while A
    finishes draining. A drains (at most 20 s), closes its other stores and releases the
    root.
-5. B takes the root within one retry (at most 100 ms), opens the space stores and the pre-opened
+5. B takes the root within one retry (at most 100 ms), opens the account stores and the pre-opened
    workspaces' repositories, and answers the requests it held.
 
 A request that reaches B in step 2 waits for at most preStop + drain, about 35 s in the worst
@@ -196,7 +196,7 @@ The operator also vendors the byte-identical `db/schema.sql` asset. Migration
 A switched workspace's repositories no longer live on this volume: they are one liquid store in
 bucket `lake_store` of the workspace's own Zetta, encrypted with the workspace's data key
 ([architecture/workspace-store.md](../architecture/workspace-store.md)). The volume keeps the
-space stores (read-only for a switched workspace's repositories, never removed by the move), the
+account stores (read-only for a switched workspace's repositories, never removed by the move), the
 search indexes, the registry and the instance's transparency data, all still under
 `.lake-owner.lock`.
 

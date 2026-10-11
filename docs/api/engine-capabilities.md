@@ -66,7 +66,7 @@ tools/api/vendor-engine-openapi.py --zetta-source "$LAKE_ZETTA_SOURCE_DIR" --che
 ```
 
 Reads are `GET` with the input in the query string and also take a JSON body on `POST`
-(`post_alias`), since some take nested input (`validate_experiment`'s search space).
+(`post_alias`), since some take nested input (`validate_experiment`'s parameter ranges).
 
 ## Names
 

@@ -6,7 +6,7 @@ tracker calls one: it tries settings across many trials, each a run with its own
 the best model. The Zetta engine calls the same thing a *study*; lake translates at its boundary
 ([Names](#names)). Lake's `get_experiment` is distinct from the solutions holdout experiment that
 `workspace_query`'s engine read `get_experiment` returns. The browser, REST clients and MCP clients
-use the same registry, space policy, validation and signed audit. No browser receives a workspace
+use the same registry, account policy, validation and signed audit. No browser receives a workspace
 credential.
 
 The contract is Zetta `dev` revision `a1d74b2186bf609fc40b6e06b8d6cdf522a1174b`, as deployed in
@@ -19,14 +19,14 @@ checkout; only its client transport is compiled. No engine implementation is ven
 Every operation accepts `POST /v1/<name>` with a JSON body. The MCP tool has exactly the same
 name and input/output schemas. Reads also retain GET compatibility and remain `readOnlyHint:true`.
 `customer_id` and `workspace_id` are required for every call: `customer_id` resolves the selected
-space's policy object before any workspace request, and `workspace_id` names the workspace whose
-Zetta holds the experiment (lake#439: the examples below carry both). Calls use that space's Lake-held service credential. Capability-scoped
+account's policy object before any workspace request, and `workspace_id` names the workspace whose
+Zetta holds the experiment (lake#439: the examples below carry both). Calls use that account's Lake-held service credential. Capability-scoped
 tokens must include the specific tool name. Objects are closed, including typed artifacts and
 pattern-restricted scalar parameter/metric dictionaries.
 
 List capabilities follow the registry's candidate-authorization contract: their handlers resolve
-and authorize the required parent space before listing experiments, runs or trials. An unauthorized
-space never reaches a workspace caller, including through list operations.
+and authorize the required parent account before listing experiments, runs or trials. An unauthorized
+account never reaches a workspace caller, including through list operations.
 
 | Capability and MCP tool | Permission | Engine operations |
 |---|---|---|
@@ -42,7 +42,7 @@ space never reaches a workspace caller, including through list operations.
 | `stop_experiment_trial` | write, `confirm:true` | `stop_trial` |
 | `promote_trial` | admin, `confirm:true` | `promote_trial` |
 
-Promotion intentionally requires space administration, separate from permission to spend compute
+Promotion intentionally requires account administration, separate from permission to spend compute
 on training. Start, stop and promote all reject missing or false confirmation. The engine's study
 actions on `workspace_act` and the workspace agent adapter (`create_study`, `stop_study`,
 `stop_trial`, `promote_trial`) delegate to these registered operations; they cannot bypass
@@ -123,7 +123,7 @@ operations above, retaining customer policy, confirmation and audit checks.
 Initial proposal request (`POST /v1/agent_turn`; MCP tool `agent_turn`):
 
 ```json
-{"customer_id":"space-id","workspace_id":"workspace-id","agent":"agent-experiments","kind":"experiment","message":"Tune retention for validation AUC with four trials."}
+{"customer_id":"account-id","workspace_id":"workspace-id","agent":"agent-experiments","kind":"experiment","message":"Tune retention for validation AUC with four trials."}
 ```
 ```json
 {"task_id":"task-id","status":"pending"}
@@ -135,7 +135,7 @@ experiment write is present on that task credential. The reviewed object is sent
 proposed it (`proposal_task_id`) and the digest the person reviewed (`proposal_sha256`):
 
 ```json
-{"customer_id":"space-id","workspace_id":"workspace-id","agent":"agent-experiments","kind":"experiment","message":"Confirm and start the reviewed experiment proposal.","proposal_task_id":"task-id","proposal_sha256":"<proposal_sha256 from get_agent_task>","context":{"confirmed_proposal":{"kind":"proposal","confirm":true,"study":{"name":"Retention Tuning","project":"retention","pipeline":"training","dataset":"accounts","methodology":"M-1","objective":{"metric":"held_out_auc","direction":"maximize","validation_split":"validation"},"budgets":{"max_trials":4,"max_parallel_trials":1,"max_wall_time_ms":60000,"cost_cap":5}},"explanations":{"objective":"Use held-out AUC."}}}}
+{"customer_id":"account-id","workspace_id":"workspace-id","agent":"agent-experiments","kind":"experiment","message":"Confirm and start the reviewed experiment proposal.","proposal_task_id":"task-id","proposal_sha256":"<proposal_sha256 from get_agent_task>","context":{"confirmed_proposal":{"kind":"proposal","confirm":true,"study":{"name":"Retention Tuning","project":"retention","pipeline":"training","dataset":"accounts","methodology":"M-1","objective":{"metric":"held_out_auc","direction":"maximize","validation_split":"validation"},"budgets":{"max_trials":4,"max_parallel_trials":1,"max_wall_time_ms":60000,"cost_cap":5}},"explanations":{"objective":"Use held-out AUC."}}}}
 ```
 ```json
 {"task_id":"confirmed-task-id","status":"pending"}
@@ -161,18 +161,18 @@ omitted. Project and state filters apply to both collections. Trial Run IDs, inc
 identified by the engine's `params["study.id"]`, are excluded from the standalone list.
 
 ```json
-{"customer_id":"space-id","workspace_id":"workspace-id","project":"retention","state":"running"}
+{"customer_id":"account-id","workspace_id":"workspace-id","project":"retention","state":"running"}
 ```
 ```json
 {"experiments":[],"runs":[]}
 ```
 
 `get_experiment` (MCP: `get_experiment`) returns the complete experiment, including the objective,
-search space, budgets, spent cost, trial states and promoted model. This abbreviated
+parameter ranges to search, budgets, spent cost, trial states and promoted model. This abbreviated
 response shows the key fields; `spec` and trial records are complete in actual responses.
 
 ```json
-{"customer_id":"space-id","workspace_id":"workspace-id","experiment_id":"experiment-id"}
+{"customer_id":"account-id","workspace_id":"workspace-id","experiment_id":"experiment-id"}
 ```
 ```json
 {"id":"experiment-id","spec":{"name":"Retention Tuning","project":"retention"},"status":"running","created":"2026-09-28T18:20:00Z","updated":"2026-09-28T18:20:01Z","trials":[],"spent_cost":0,"stop_reason":"","promoted_model":""}
@@ -182,7 +182,7 @@ response shows the key fields; `spec` and trial records are complete in actual r
 `pruned`, `failed` or `complete`. Objective is absent until the engine has a value.
 
 ```json
-{"customer_id":"space-id","workspace_id":"workspace-id","experiment_id":"experiment-id","state":"complete"}
+{"customer_id":"account-id","workspace_id":"workspace-id","experiment_id":"experiment-id","state":"complete"}
 ```
 ```json
 {"experiment_id":"experiment-id","trials":[{"number":1,"run":"run-id","params":{"learning_rate":0.1},"state":"complete","objective":0.83,"seed":1139,"cost":0.5,"intermediate":[{"step":1,"value":0.8}],"reason":"","model":"model-id"}]}
@@ -192,7 +192,7 @@ response shows the key fields; `spec` and trial records are complete in actual r
 importance, parallel-coordinate rows and the ranked leaderboard with confidence bounds.
 
 ```json
-{"customer_id":"space-id","workspace_id":"workspace-id","experiment_id":"experiment-id"}
+{"customer_id":"account-id","workspace_id":"workspace-id","experiment_id":"experiment-id"}
 ```
 ```json
 {"best_trial":null,"optimization_history":[],"parameter_importances":[],"parallel_coordinates":[],"leaderboard":[]}
@@ -217,7 +217,7 @@ description promises exactly that (lake#615); the run page draws them (see
 [the UI page](../ui/experiments.md)).
 
 ```json
-{"customer_id":"space-id","workspace_id":"workspace-id","run_id":"run-id","names":["train.loss"],"max_points":500}
+{"customer_id":"account-id","workspace_id":"workspace-id","run_id":"run-id","names":["train.loss"],"max_points":500}
 ```
 ```json
 {"run":"run-id","params":{"learning_rate":0.1},"summary":{"train.loss":{"final":0.4,"final_step":10,"best":0.4,"best_step":10,"direction":"min"}},"series":[{"name":"train.loss","points":[{"step":10,"value":0.4,"time":"2026-09-28T18:20:11Z"}]}],"artifacts":[]}
@@ -229,7 +229,7 @@ engine's exact-step alignment without invented missing points. `details` contain
 params, series, summaries and artifacts for relative/wall-time views and parameter differences.
 
 ```json
-{"customer_id":"space-id","workspace_id":"workspace-id","runs":["run-a","run-b"],"names":["train.loss"]}
+{"customer_id":"account-id","workspace_id":"workspace-id","runs":["run-a","run-b"],"names":["train.loss"]}
 ```
 ```json
 {"runs":["run-a","run-b"],"metrics":[],"details":[{"run":"run-a","params":{},"summary":{},"series":[],"artifacts":[]},{"run":"run-b","params":{},"summary":{},"series":[],"artifacts":[]}]}
@@ -256,7 +256,7 @@ and an exact `id`. It first resolves the record in the selected workspace, then 
 to 1. REST and MCP both support the same bounded asynchronous long poll.
 
 ```json
-{"customer_id":"space-id","workspace_id":"workspace-id","kind":"run","id":"run-id","from_sequence":10,"wait_ms":10000,"max_events":100}
+{"customer_id":"account-id","workspace_id":"workspace-id","kind":"run","id":"run-id","from_sequence":10,"wait_ms":10000,"max_events":100}
 ```
 ```json
 {"events":[{"sequence":10,"id":"event-id","encoding":"json","payload":"{\"step\":10}"}],"next_sequence":11}
@@ -282,7 +282,7 @@ defaults. Budgets, conditional parameters, samplers, pruners and released DP met
 engine contract. A `test` validation split is rejected before the workspace call.
 
 `name` and `methodology` are always required. With `from_defaults: true`, Zetta fills the
-methodology's search space and a missing objective (`held_out_auc`, `maximize`, the `validation`
+methodology's parameter ranges and a missing objective (`held_out_auc`, `maximize`, the `validation`
 split) and budgets (10 trials, 2 in parallel, 10 minutes, no cost cap), field by field, so
 `objective`, `budgets` and each of their fields may be omitted. Without it, Lake refuses a missing
 `objective` or `budgets` at `/objective` or `/budgets` before the workspace call (lake#463).
@@ -297,7 +297,7 @@ Every experiment capability passes a Zetta error's `path` through unchanged, so
 names the field to repair.
 
 ```json
-{"customer_id":"space-id","workspace_id":"workspace-id","name":"Retention Tuning","project":"retention","pipeline":"training","dataset":"accounts","methodology":"M-1","objective":{"metric":"held_out_auc","direction":"maximize","validation_split":"validation"},"from_defaults":true,"sampler":"tpe","pruner":"asha","budgets":{"max_trials":10,"max_wall_time_ms":60000,"max_parallel_trials":1,"cost_cap":5},"seed":1138,"confirm":true}
+{"customer_id":"account-id","workspace_id":"workspace-id","name":"Retention Tuning","project":"retention","pipeline":"training","dataset":"accounts","methodology":"M-1","objective":{"metric":"held_out_auc","direction":"maximize","validation_split":"validation"},"from_defaults":true,"sampler":"tpe","pruner":"asha","budgets":{"max_trials":10,"max_wall_time_ms":60000,"max_parallel_trials":1,"cost_cap":5},"seed":1138,"confirm":true}
 ```
 
 Its response is the complete experiment returned by `get_experiment`, with the resolved `spec`,
@@ -311,7 +311,7 @@ new `id`, `status:"running"`, initially empty `trials`, zero `spent_cost`, times
 `stop_experiment` (MCP: `stop_experiment`) cooperatively stops an experiment and its active trials.
 
 ```json
-{"customer_id":"space-id","workspace_id":"workspace-id","experiment_id":"experiment-id","confirm":true}
+{"customer_id":"account-id","workspace_id":"workspace-id","experiment_id":"experiment-id","confirm":true}
 ```
 ```json
 {"experiment_id":"experiment-id","status":"stopped","reason":"stopped by caller"}
@@ -321,7 +321,7 @@ new `id`, `status:"running"`, initially empty `trials`, zero `spent_cost`, times
 experiment.
 
 ```json
-{"customer_id":"space-id","workspace_id":"workspace-id","experiment_id":"experiment-id","run_id":"run-id","confirm":true}
+{"customer_id":"account-id","workspace_id":"workspace-id","experiment_id":"experiment-id","run_id":"run-id","confirm":true}
 ```
 ```json
 {"experiment_id":"experiment-id","run":"run-id","state":"failed"}
@@ -332,7 +332,7 @@ trial. It does not copy model weights. The page displays the exact experiment an
 explicit confirmation before making the request.
 
 ```json
-{"customer_id":"space-id","workspace_id":"workspace-id","experiment_id":"experiment-id","run_id":"run-id","confirm":true}
+{"customer_id":"account-id","workspace_id":"workspace-id","experiment_id":"experiment-id","run_id":"run-id","confirm":true}
 ```
 ```json
 {"experiment_id":"experiment-id","run":"run-id","model":"model-id","project":"retention"}
@@ -340,7 +340,7 @@ explicit confirmation before making the request.
 
 ## Verification and Changes
 
-`Experiments.*` verifies space authorization, confirmation and alias refusal, bounds, DP behavior,
+`Experiments.*` verifies account authorization, confirmation and alias refusal, bounds, DP behavior,
 service-credential proxying, audit targets, REST/MCP input and output schema parity, a successful
 call per transport per operation, and the agents' guide naming the live read and the confirmation
 (`Experiments.AgentDocsNameTheLiveReadAndTheConfirmation`).

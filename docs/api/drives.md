@@ -9,7 +9,7 @@ drives are the places it keeps files. Each drive keeps its files one of three wa
 | `files` | workspace files: records and sealed objects in the workspace Zetta | none | the entry capabilities below |
 | `virtual` | folders and shortcuts only | none | the entry capabilities below, without uploads |
 
-A drive is one sealed record in `lake_drives` of its workspace Zetta, found by its space; its
+A drive is one sealed record in `lake_drives` of its workspace Zetta, found by its account; its
 folders, files and shortcuts (a `files` or `virtual` drive's) are sealed records in
 `lake_drive_entries`, found by drive ([workspace-records.md](../architecture/workspace-records.md)).
 Nothing about a drive is in PostgreSQL. Deleting the workspace deletes them with its Zetta.
@@ -17,7 +17,7 @@ Nothing about a drive is in PostgreSQL. Deleting the workspace deletes them with
 ## Capabilities
 
 Every capability takes `customer_id` and `workspace_id` (`Registry::call` checks the workspace is
-the space's) and authorizes on the space: reads need `read`, actions `write`. Every call is
+the account's) and authorizes on the account: reads need `read`, actions `write`. Every call is
 audited in the workspace's own log ([audit.md](audit.md#which-log)).
 
 | Capability | Kind | Input (besides `customer_id`, `workspace_id`) | Output |
@@ -100,7 +100,7 @@ drive refuses uploads.
 | `transcript` | `id` | the transcript exists in this workspace |
 | `dataset`, `agent`, `model` | `id` | not checked |
 | `project` | `name` | not checked |
-| `url` | `url` (`http://` or `https://`, no space, `"`, `<` or `>`) | not checked |
+| `url` | `url` (`http://` or `https://`, no whitespace, `"`, `<` or `>`) | not checked |
 
 `create_drive_shortcut` refuses a checked target that is not there (`not_found` at `/target`).
 Every listing and `get_drive_entry` checks again and answers `status`: `ok`, `broken` (with
@@ -233,7 +233,7 @@ it, a read failure) is listed in `skipped` with the reason and never fails the c
 the repository's own: a person who sees a repository folder only through a shared link finds
 nothing of it here.
 
-Like `list_drive_entries`, the read authorizes `read` on the space before it reads, and its audit
+Like `list_drive_entries`, the read authorizes `read` on the account before it reads, and its audit
 event (in the workspace's log) records the `drive_id` searched and the number of matches, never the
 query.
 
@@ -269,7 +269,7 @@ holds the key; a move or rename never touches the object.
   into its folder.
 
 **Known gap:** `lake_files` is created without a quota, and lake's storage quota and usage
-figures read the `lake_store` bucket, so workspace files are not counted against the space's
+figures read the `lake_store` bucket, so workspace files are not counted against the account's
 storage quota yet. The workspace Zetta's own volume is the bound.
 
 ## Errors
@@ -291,12 +291,12 @@ storage quota yet. The workspace Zetta's own volume is the bound.
   and workspace); chunked writes, retries, a lost answer, out-of-order and short objects, any-range
   reads; a workspace-files drive end to end (folders from an upload path, chunked upload, finish,
   moves without copying, rename/replace/refuse, recursive delete, recent files, drive delete);
-  another space refused; a virtual drive's shortcuts going broken; the audit routing; and over
+  another account refused; a virtual drive's shortcuts going broken; the audit routing; and over
   HTTP, a repository drive's `main` from creation (a bare repository's `drive_browse` is
   `not_found`) and a streamed download of a 3 MiB file.
 - `Drives.SearchFindsDrivesFoldersFilesAndShortcutsByName`: matches across a workspace-files and a
   virtual drive in either case, with their paths, sizes and shortcut status; an unfinished upload
-  never found; a limit with `truncated`; one drive; another workspace; another space refused.
+  never found; a limit with `truncated`; one drive; another workspace; another account refused.
   `DrivesHttp.SearchFindsTheNamesOfARepositoryDrivesPaths`: a repository drive's folder and file
   paths, without the folder marker.
 - `SchemaConformance.EveryToolAndRequiredOutputUsesHttpContract` calls every capability above and

@@ -9,7 +9,7 @@ decision 54 S1-S3 and the [plan](../architecture/workspace-storage-plan.md#lake3
 
 `move_workspace_store` is an operator capability (operator bearer only; every other caller is
 `unauthorized`; `src/api/workspace_store_capabilities.cpp`). It moves one workspace's repositories
-from its space's liquid store on lake's volume (`LAKE_STORE_ROOT/<space>/store`) into the workspace's
+from its account's liquid store on lake's volume (`LAKE_STORE_ROOT/<space>/store`) into the workspace's
 own encrypted store in its workspace Zetta. It is not an MCP tool for people or agents in practice:
 the registry renders it everywhere, but only the operator credential passes.
 
@@ -19,7 +19,7 @@ POST /v1/move_workspace_store
 ```
 
 Every answer carries `workspace_id`, `customer_id`, `mode`, `store_moved_at` (null until the switch)
-and `unassigned`: the repositories of the space without a workspace. Any unassigned repository blocks
+and `unassigned`: the repositories of the account without a workspace. Any unassigned repository blocks
 `copy`, `verify` and `switch` with `409 conflict` (lake#513 assigns them).
 
 | Mode | Does | Answers |
@@ -28,18 +28,18 @@ and `unassigned`: the repositories of the space without a workspace. Any unassig
 | `copy` | Copies each repository with liquid's `repository::transfer` (liquid#328): every reachable object keeping its digest, its lease records, then its state keys with `LIQUID_REPO` last. A rerun copies only what is missing. Refused once the workspace is switched. | `repositories` (one transfer report each), `complete` |
 | `verify` | Writes nothing. Compares every reachable object and every state key in both stores. | `repositories` with `differences`, `complete` |
 | `provision` | Repairs a workspace switched before a switch created the store of a workspace with no repository (lake#383 phase B), which has `store_moved_at` but no store, so `create_repository` there answers `corrupt`. Creates its bucket and data key only when **all** hold: the workspace is switched; no repository row names it, live or tombstoned (a row tombstoned with its retention ended at its deletion, which is how a creation the missing store refused rolls back, does not count and is listed in `refused_creations`); no `lake_oci_blobs` record names a store object; and its bucket `lake_store` is absent or empty. Otherwise `409 conflict` naming what exists (the repositories, the count of stored image blobs, or the count of objects in the bucket), and nothing is written. A bucket whose store already opens with its key is left as it is (`created: false`), so a repeated call is a no-op. Not `unassigned`-blocked. | `created`, `objects`, `refused_creations` |
-| `switch` | Refuses the workspace's and its space's repository requests and repository creation in the workspace with `503 store_unavailable` (`Retry-After`) while it runs, lists the workspace's repositories under that hold, copies what arrived since `copy`, verifies each repository again, creates in the workspace store each one the space store never held, and only when all are complete sets `workspaces.store_moved_at`; from then on the workspace's repositories are served from its store. Requests for other workspaces' stores are not held. A repeated switch answers `switched: true` and changes nothing. A completed switch then drops from the space's search index on lake's volume what it holds of the switched repositories (lake#381); the workspace's own index is built beside its store on its first search. | `repositories`, `switched`, `store_moved_at`, `space_index_repositories_dropped` (or `space_index_error`) |
+| `switch` | Refuses the workspace's and its account's repository requests and repository creation in the workspace with `503 store_unavailable` (`Retry-After`) while it runs, lists the workspace's repositories under that hold, copies what arrived since `copy`, verifies each repository again, creates in the workspace store each one the account store never held, and only when all are complete sets `workspaces.store_moved_at`; from then on the workspace's repositories are served from its store. Requests for other workspaces' stores are not held. A repeated switch answers `switched: true` and changes nothing. A completed switch then drops from the account's search index on lake's volume what it holds of the switched repositories (lake#381); the workspace's own index is built beside its store on its first search. | `repositories`, `switched`, `store_moved_at`, `space_index_repositories_dropped` (or `space_index_error`) |
 
-A transfer report has `repository_id`, `absent` (the space store never held it: nothing to copy),
+A transfer report has `repository_id`, `absent` (the account store never held it: nothing to copy),
 `complete`, `objects`, `objects_present`, `objects_written`, `bytes_written`, `state_written`,
 `leases_written`, `missing` (digests a record names that the source lacks too) and `differences`
 (`subject`, `reason`).
 
 **What the move does not do.**
 
-- It never writes the space's store, and never removes it. The store stays on the volume read-only
-  after the switch; [`remove_space_store`](#removing-the-spaces-store) removes it once every
-  workspace of the space is switched.
+- It never writes the account's store, and never removes it. The store stays on the volume read-only
+  after the switch; [`remove_space_store`](#removing-the-accounts-store) removes it once every
+  workspace of the account is switched.
 - An interrupted `copy` leaves no `LIQUID_REPO` for the repository in the workspace store, and lake
   reopens the workspace store before the next use, which liquid's recovery requires. Run `copy`
   again.
@@ -51,8 +51,8 @@ A transfer report has `repository_id`, `absent` (the space store never held it: 
   before the switch and never written is created empty in the workspace store by the switch.
 - After the switch a missing workspace store, data key or repository answers `corrupt` (500); lake
   never creates an empty one in its place.
-- `copy` and `verify` refuse only the workspace's own requests while they run; the space's other
-  workspaces wait at most one repository's copy. `switch` refuses the space's requests too.
+- `copy` and `verify` refuse only the workspace's own requests while they run; the account's other
+  workspaces wait at most one repository's copy. `switch` refuses the account's requests too.
 - Once switched, the workspace's search index lives beside its store as sealed `search/` objects and
   is rebuilt from its repositories on first use; releases made before the switch keep no tag
   snapshot there ([search.md](search.md#where-the-index-lives-lake381-decision-54-s8)).
@@ -67,29 +67,29 @@ store; only one that never held anything is.
 `mode`, and `created` for `provision`): it is an operator action on the instance, classified central in
 `src/api/audit_routing.cpp`.
 
-## Removing the space's store
+## Removing the account's store
 
 `remove_space_store` is an operator capability too (operator bearer only; every other caller is
-`unauthorized`). It removes a space's old store from lake's volume once nothing is served from it.
+`unauthorized`). It removes an account's old store from lake's volume once nothing is served from it.
 
 ```json
 POST /v1/remove_space_store
 {"customer_id": "<space uuid>", "dry_run": true | false}
 ```
 
-`dry_run` defaults to `false`. `customer_id` must be the UUID of an existing space (`invalid_input`
+`dry_run` defaults to `false`. `customer_id` must be the UUID of an existing account (`invalid_input`
 at `/customer_id` for anything else, including the instance's own directory name, `workspaces` or a
-path; `not_found` for an unknown space).
+path; `not_found` for an unknown account).
 
-It answers `409 conflict`, removing nothing, dry run included, while the space's store is still
+It answers `409 conflict`, removing nothing, dry run included, while the account's store is still
 needed. The message names each of:
 
-- a workspace of the space that is not deleted and has no `store_moved_at`;
-- a repository of the space without a workspace, live or tombstoned (lake#513 assigns them);
+- a workspace of the account that is not deleted and has no `store_moved_at`;
+- a repository of the account without a workspace, live or tombstoned (lake#513 assigns them);
 - a live repository of a deleted workspace (a deleted workspace is never switched, so its live
   repositories were never moved).
 
-Otherwise it answers `customer_id` (the space) and:
+Otherwise it answers `customer_id` (the account) and:
 
 ```json
 {"dry_run": false, "removed": true, "bytes": 123456,
@@ -104,22 +104,22 @@ Otherwise it answers `customer_id` (the space) and:
   and removes nothing (`removed: false`). Because it holds nothing, a file that appears or vanishes
   while it counts (an unswitched workspace's request) is skipped rather than answered as `io`, so
   its bytes are what was there at that moment.
-- **A removal** refuses new requests for the space's store with `503 store_unavailable`
-  (`Retry-After`), as a switch does, and waits for the admitted ones under the space's lane. It
+- **A removal** refuses new requests for the account's store with `503 store_unavailable`
+  (`Retry-After`), as a switch does, and waits for the admitted ones under the account's lane. It
   checks the precondition again under that hold, so a workspace created meanwhile is seen, closes
-  the space store (releasing liquid's owner lock), forgets the space's open space-store
+  the account store (releasing liquid's owner lock), forgets the account's open account-store
   repositories and routes, and deletes exactly `<LAKE_STORE_ROOT>/<space>/store` and
   `<LAKE_STORE_ROOT>/<space>/repositories`. It never touches the instance's directory
   (`<LAKE_STORE_ROOT>/<node name>`: the registry, the transparency log), `<LAKE_STORE_ROOT>/workspaces`,
-  another space or anything else under the space's directory. If `<LAKE_STORE_ROOT>/<space>`
+  another account or anything else under the account's directory. If `<LAKE_STORE_ROOT>/<space>`
   itself, or either of the two directories, is a symbolic link or not a directory, the call is
   refused with `conflict` (dry run included) and nothing is removed.
-- The precondition reads every repository of the space: the listing grows until it comes back
+- The precondition reads every repository of the account: the listing grows until it comes back
   short, so no fixed limit cuts it off.
 - Switched workspaces are not held: their requests go to their own stores throughout.
-- **A workspace created later** in the space and not switched is served, as any unswitched
-  workspace is, from the space's store, which lake opens on first use and liquid creates empty. Its
-  repositories are new, so nothing is lost; the space store then exists again and
+- **A workspace created later** in the account and not switched is served, as any unswitched
+  workspace is, from the account's store, which lake opens on first use and liquid creates empty. Its
+  repositories are new, so nothing is lost; the account store then exists again and
   `remove_space_store` is refused until that workspace is moved and switched too.
 
 **Audit.** Each call is one central audit event (`workspace_store.remove_space_store`, details
@@ -133,7 +133,7 @@ Otherwise it answers `customer_id` (the space) and:
 2. Snapshot `lake-prod-store` and each workspace Zetta's volume.
 3. For each workspace: `plan`, then `copy`, then `verify` until `complete`, then `switch`.
 4. Check the workspace's repository pages, a `liquid pull`, and a push; `store_moved_at` is set.
-5. Leave `LAKE_STORE_ROOT/<space>/store` in place until every workspace of the space is switched
+5. Leave `LAKE_STORE_ROOT/<space>/store` in place until every workspace of the account is switched
    and Steve approves removing it; then run `remove_space_store` with `dry_run: true`, check the
    paths and bytes, and run it again with `dry_run: false`.
 

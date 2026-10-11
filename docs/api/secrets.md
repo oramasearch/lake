@@ -69,15 +69,15 @@ the same name live side by side in one workspace.
 
 ## Where secrets live (lake#328-#332)
 
-`create_secret_mount` requires `workspace_id`: a live workspace of `customer_id`'s space. It is
+`create_secret_mount` requires `workspace_id`: a live workspace of `customer_id`'s account. It is
 recorded once and never changes. There is no default workspace and no fallback: an omitted,
 malformed or unknown `workspace_id` is `invalid_input` at `/workspace_id`, and a workspace of
-another space is `invalid_input` at `/customer_id`. A space may hold mounts in several workspaces,
+another account is `invalid_input` at `/customer_id`. An account may hold mounts in several workspaces,
 and a mount name is unique within its workspace and organization (`conflict` at `/name`).
 
 Every other capability names the mount, and the mount names its workspace, so none of them takes
 `workspace_id`: lake reads the mount's route and works only in that workspace, through the
-workspace caller, which checks the workspace's space and readiness on every call. A workspace that
+workspace caller, which checks the workspace's account and readiness on every call. A workspace that
 is not ready answers `workspace_not_ready`; a deleted workspace took its mounts with it.
 
 | Where | What |
@@ -87,7 +87,7 @@ is not ready answers `workspace_not_ready`; a deleted workspace took its mounts 
 | `lake_secrets_versions` | One record per version: the existing AES-256-GCM ciphertext, soft-delete and destroy instants |
 | `lake_secrets_encryption_keys` | One record per named key: its id (which every transit ciphertext names), current version, derivation parent |
 | `lake_secrets_data_keys` | One record per data key version: the mount's data key and each named-key version, wrapped by the customer KEK, with the KEK version that wraps it |
-| PostgreSQL `secret_mount_routes` | Mount id → space, owning organization (NULL for an account's mount, migration `0071`), workspace. No name, value or key: dispatch only |
+| PostgreSQL `secret_mount_routes` | Mount id → account, owning organization (NULL for an account's mount, migration `0071`), workspace. No name, value or key: dispatch only |
 | PostgreSQL `objects` | The mount's policy object, under `organization → environment` or, for an account's mount, `customer → environment` |
 | PostgreSQL `keystore` | The customer KEK, wrapped by `LAKE_INSTANCE_KEK` (lake#324 governs its own move) |
 
@@ -110,7 +110,7 @@ conflict, so a destroy is never undone by a write computed from an older copy. D
 the record without its ciphertext; the history record remains. A later put never reuses a number.
 
 **Customer KEK rotation** (`rotate_customer_kek`) makes a new KEK current and keeps the replaced
-one until every data key in every workspace of the space that holds a mount has been rewrapped at
+one until every data key in every workspace of the account that holds a mount has been rewrapped at
 the revision read; then it forgets the old one. A workspace that is not ready stops the rotation
 with `workspace_not_ready`: data keys there stay readable under the kept KEK, and the next
 rotation finishes the earlier one before it starts. A data key written while a rotation runs is
@@ -141,7 +141,7 @@ organization mounts work as before.
 
 ## Migration and cutover (lake#328-#332)
 
-Migration `0057_secret_workspaces` adds `secret_mount_routes`, gives each mount of a space with
+Migration `0057_secret_workspaces` adds `secret_mount_routes`, gives each mount of an account with
 exactly one live workspace that workspace (`sole_workspace`) and its route, and reports every other
 mount as `needs_selection`. A mount's entries, versions, keys and data keys go where it goes and
 have no assignment rows of their own. It also keeps the previous customer KEK in `keystore`
@@ -223,7 +223,7 @@ hour.
 | Where | What |
 |---|---|
 | Workspace Zetta, `lake_secrets_dynamic_leases` | One record per lease, keyed by the lease id, in its mount's workspace: mount, role, the sealed value (null once revoked or expired), expiry, revocation and expiry instants, renewals |
-| PostgreSQL `secret_lease_routes` | Lease id → mount, space, workspace, and `due_at`: when the expiry loop must next look at the lease. No role, value or ciphertext: dispatch only |
+| PostgreSQL `secret_lease_routes` | Lease id → mount, account, workspace, and `due_at`: when the expiry loop must next look at the lease. No role, value or ciphertext: dispatch only |
 
 A lease belongs to its mount's workspace; neither changes. Renew and revoke name only the lease, so
 lake reads the lease's route to find the mount (whose route decides authorization, from PostgreSQL
@@ -293,14 +293,14 @@ never appears in a URL, a log or browser storage.
 
 | Test | Covers |
 |---|---|
-| `Stores/WorkspaceRecordStores.SecretMountsBelongToAnAccountOrAnOrganization/{Memory,Postgres}` | lake#561: a person with only an individual account creates a mount without an organization (route without organization, policy object under `customer → secrets/<customer>`), puts, reads and lists a secret, creates a key and encrypts and decrypts with it; another person is refused create, read, write, list, get and key calls and lists nothing; an organization inside the account owns a mount of the same name in the same workspace without a collision, each owner's duplicate is `conflict` at `/name`, the organization's route and environment are as before; an organization of another space is `invalid_input` at `/organization_id`; a KEK rotation; on PostgreSQL, migration `0071` (nullable column, NULL route, guard) |
+| `Stores/WorkspaceRecordStores.SecretMountsBelongToAnAccountOrAnOrganization/{Memory,Postgres}` | lake#561: a person with only an individual account creates a mount without an organization (route without organization, policy object under `customer → secrets/<customer>`), puts, reads and lists a secret, creates a key and encrypts and decrypts with it; another person is refused create, read, write, list, get and key calls and lists nothing; an organization inside the account owns a mount of the same name in the same workspace without a collision, each owner's duplicate is `conflict` at `/name`, the organization's route and environment are as before; an organization of another account is `invalid_input` at `/organization_id`; a KEK rotation; on PostgreSQL, migration `0071` (nullable column, NULL route, guard) |
 | `SecretsCapabilities.ListSecretsAnswersNamesAndStateNeverValues` | `list_secrets`: name order, current version, times and deleted/destroyed state, no value in the answer, `prefix`, the cursor walking every name once, `limit` bounds, an unknown mount, read-only and candidate-authorizing, classified as workspace audit, an ungranted caller refused and audited before any workspace call |
 | `SecretsCapabilities.*` | The capability contract on workspace records: history, delete/undelete/destroy, number reuse, a stopped put completed by the next, transit, KEK rotation finished after a workspace was not ready, dynamic leases, denial and audit, an ungranted list reaching no workspace |
-| `Stores/WorkspaceRecordStores.SecretsLiveInTheirMountsWorkspace/{Memory,Postgres}` | Two spaces with two workspaces each, records sealed only at their own endpoint and absent from PostgreSQL, duplicate names, missing, malformed, unknown and foreign `workspace_id`, unknown `mount_id`, another space's person, a record copied elsewhere not opening, a workspace not ready, KEK rotation across workspaces, workspace deletion |
+| `Stores/WorkspaceRecordStores.SecretsLiveInTheirMountsWorkspace/{Memory,Postgres}` | Two accounts with two workspaces each, records sealed only at their own endpoint and absent from PostgreSQL, duplicate names, missing, malformed, unknown and foreign `workspace_id`, unknown `mount_id`, another account's person, a record copied elsewhere not opening, a workspace not ready, KEK rotation across workspaces, workspace deletion |
 | `Stores/WorkspaceRecordStores.TheOneShotCopyMovesSecretsIntoTheirMountsWorkspace/{Memory,Postgres}` | The five collections: plan, copy, rerun, verify, legacy ciphertexts read and decrypted through the capabilities, a later put, undelete and KEK rotation accepted, `needs_selection` resolved, `workspace_deleted` not blocking, tamper detection, operator only |
 | `PostgresSecrets.MigrationRecordsEachMountsOwnerAndRoute` | Migration 0057 on a rerun: outcomes, routes, the dropped foreign key, immutable routes, a reviewed assignment, late mounts, every child row following its mount |
 | `PostgresCapabilities.SecretsAndEncryptionRoundTrip`, `IdentityExit.*` | The round trip against the numbered schema with nothing but the route in PostgreSQL; leases on a workspace mount |
 | `SecretsCapabilities.DynamicLeasesLiveInTheMountsWorkspace`, `…ARenewalRacingARevocationOrAnExpiryCannotReviveTheLease`, `…TheExpiryLoopReadsOnlyTheWorkspacesOfDueLeases`, `…ARenewalThatBeatsTheExpiryLoopIsKept`, `…TheServersOwnerLoopSettlesDueLeases` | Leases (lake#362): a sealed record and a content-free route, renewal moving the due index, revocation erasing the value and settling the route, malformed and unknown `lease_id`; a renewal racing a revocation or an expiry refused, an expiry pass racing a renewal keeping it; the pass reading no workspace without a due lease, holding claims, a not-ready and a deleted workspace, a route without a record kept while fresh; the server tick |
-| `Stores/WorkspaceRecordStores.DynamicLeasesLiveInTheirMountsWorkspace/{Memory,Postgres}`, `…TheOneShotCopyMovesDynamicLeasesIntoTheirMountsWorkspace/{Memory,Postgres}`, `PostgresSecrets.LeaseRoutesAreAContentFreeDueIndex` | Two spaces with two workspaces each, records only at their own endpoint and none in PostgreSQL, another space's person refused before any workspace call, a record copied elsewhere, not ready, expiry in its own workspace, an abandoned route removed, workspace deletion; the copy (plan, copy, rerun, verify, renewal and expiry after the copy, `needs_selection` resolved, tamper detection, operator only); migration 0058, the claim and hold, settled routes never due again, the legacy listing |
+| `Stores/WorkspaceRecordStores.DynamicLeasesLiveInTheirMountsWorkspace/{Memory,Postgres}`, `…TheOneShotCopyMovesDynamicLeasesIntoTheirMountsWorkspace/{Memory,Postgres}`, `PostgresSecrets.LeaseRoutesAreAContentFreeDueIndex` | Two accounts with two workspaces each, records only at their own endpoint and none in PostgreSQL, another account's person refused before any workspace call, a record copied elsewhere, not ready, expiry in its own workspace, an abandoned route removed, workspace deletion; the copy (plan, copy, rerun, verify, renewal and expiry after the copy, `needs_selection` resolved, tamper detection, operator only); migration 0058, the claim and hold, settled routes never due again, the legacy listing |
 
 The pure page renderer test checks escaping and absence of secret values.

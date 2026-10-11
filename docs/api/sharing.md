@@ -16,10 +16,10 @@ ordinary policy grant. The recipient sees the continuing live object. Other prin
 ### Naming the Recipient (lake#585)
 
 - **`recipient`**, for people: an email or a handle (`ana` or `@ana`), matched without regard to
-  case among the space's people. Those are what `drive_share_people` lists: the space's owner, and
+  case among the account's people. Those are what `drive_share_people` lists: the account's owner, and
   for an organization the organization itself (by its handle) and every user who holds one of its
   memberships, each with `taap_id`, `kind`, `display_name`, `email` and `handle` (their personal
-  space's name). Anyone else is `invalid_input` at `/recipient`, which says to invite them first.
+  account's name). Anyone else is `invalid_input` at `/recipient`, which says to invite them first.
   `drive_share_people` needs `share` on the folder, as sharing does, so only someone who may share
   sees the members' emails.
 - **`principal_taap_id`**, for programs: a TAAP identity, which lake must know as a user or an
@@ -71,7 +71,7 @@ of that Zetta's `lake_drive_share_links` collection
 ([workspace records](../architecture/workspace-records.md)). The record holds the repository,
 folder object, stable node id, path, role, token digest, expiry, creator and revocation. The
 workspace is chosen by the caller and never by default: `workspace_id` must name a live workspace
-of the repository's space, or the call is `invalid_input` at `/workspace_id`. Ownership is
+of the repository's account, or the call is `invalid_input` at `/workspace_id`. Ownership is
 immutable. The record is sealed to its workspace and key, so a copy in another workspace does not
 open, and a link can only be revoked or listed through the workspace that holds it.
 
@@ -84,7 +84,7 @@ open, and a link can only be revoked or listed through the workspace that holds 
 
 A recipient may not be signed in and may hold only the token, so the token routes itself: it is
 `<workspace id>.<link id>.<secret>`. Resolving it reads the workspace's row in the multitenancy
-tables (which space owns it, and whether it is live), then reads the one record by key from that
+tables (which account owns it, and whether it is live), then reads the one record by key from that
 workspace's Zetta, and compares the token's digest with the sealed one in constant time. No central
 lookup is needed, and none holds link content. A token that names another workspace or link, or
 has another secret, is `not_found` at `/token` without saying which.
@@ -164,7 +164,7 @@ resolution after a stable-node move, registry previews/downloads, OpenAPI/MCP di
 delivery, scope refusals even with an operator context, revocation, and expiry.
 `Drive.ShareDownloadsEncodeAcrossBlockBoundaries` checks binary bytes and padding across the
 base64 encoder block boundary. `Drive.ShareLinksLiveOnlyInTheWorkspaceThatHoldsThem` covers two
-spaces with two workspaces each: the record only at its workspace's endpoint and sealed, missing,
+accounts with two workspaces each: the record only at its workspace's endpoint and sealed, missing,
 malformed, unknown and foreign `workspace_id`, least-privilege callers, forged tokens and a sealed
 record moved to another workspace, a workspace that is not ready, revocation and its conflict, and
 workspace deletion. `PostgresDriveShareLinks.MigrationRecordsOwnersAndContentFreeRoutes` covers

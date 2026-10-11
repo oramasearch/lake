@@ -1,9 +1,9 @@
 # Workspace Selection and Navigation
 
-**What.** Design, Train, Ship and Ask Orama work in one workspace of one space, and the page URL
+**What.** Design, Train, Ship and Ask Orama work in one workspace of one account, and the page URL
 says which: `/w/<workspace_id>/design/projects`. The top bar's picker changes it. Everything else
 (repositories, organizations, account pages, Services, Deployments, Workspaces) is outside `/w/`
-and names its space or workspace in its own input.
+and names its account or workspace in its own input.
 
 **Why the URL.** The address is the whole context: it can be bookmarked, shared and opened in two
 tabs at once with two workspaces, and the capability calls a page makes follow from it. Before
@@ -23,7 +23,7 @@ form into `/w/<id>/`; both are gone.
 
 `resolveWorkspace` in `lib/workspacePicker.ts`, called by `lib/session.tsx` (lake#638):
 
-- the URL's `/w/<id>` when it is live in one of the person's spaces;
+- the URL's `/w/<id>` when it is live in one of the person's accounts;
 - else the `viewer` read's `workspace_id` when live, else the remembered one when live, else the
   person's own first workspace, else the first workspace any organization of theirs has.
 
@@ -56,14 +56,14 @@ It is navigation memory only:
 - it chooses where an unprefixed workspace link goes, and which workspace the rail's links open
   from a page outside `/w/`;
 - it is sent as `workspace_id` to the `viewer` read, which accepts it only when it is live in one
-  of the caller's spaces and otherwise answers that space's only workspace, or none
+  of the caller's accounts and otherwise answers that account's only workspace, or none
   ([../api/web-app.md](../api/web-app.md#viewer));
 - it never scopes an API call and is never a credential. Clearing it changes nothing a capability
   does.
 
 ## The picker
 
-`components/WorkspacePicker.tsx`, shown to a signed-in viewer with at least one space; its rules
+`components/WorkspacePicker.tsx`, shown to a signed-in viewer with at least one account; its rules
 are pure functions in `lib/workspacePicker.ts` (lake#638).
 
 - **The pill** names the current workspace first, in full where it fits. When the viewer has more
@@ -108,7 +108,7 @@ it, and it can be renamed from Workspaces ([../api/workspaces.md](../api/workspa
 ## A workspace that is not ready
 
 `components/WorkspaceGate.tsx` wraps Design, Train and Ship content. It reads `workspace_status`
-and shows why the page is unavailable (no space, no workspace control plane, a failed status
+and shows why the page is unavailable (no account, no workspace control plane, a failed status
 read), that the workspace Zetta is being prepared (checked again every 15 seconds), that it
 failed, or **Start** when it was never started (`start_workspace`). The Agent Library shows
 whether or not the workspace is ready, because it is lake's, not the workspace's.

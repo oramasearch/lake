@@ -8,10 +8,10 @@ Without Clerk, a new person's first repository takes these steps in the web app 
    identity command reference, and asks for email, display name, a password of at least 12
    characters, a device name and the public identity document printed by
    `liquid identity show --document`. The private key never leaves the client.
-2. **Create account** calls `sign_up_password`, which provisions the person's own space and sets
+2. **Create account** calls `sign_up_password`, which provisions the person's own account and sets
    the HttpOnly `lake_session` cookie. A malformed document is refused with the recovery message
    below and creates nothing. The page then opens `/repositories`.
-3. A repository belongs to one workspace (lake#315). While the space has none, the create form
+3. A repository belongs to one workspace (lake#315). While the account has none, the create form
    says so and links **Workspaces**, where the person creates one (`create_workspace`).
 4. **Create a Repository** on `/repositories` chooses the workspace, a name and an optional
    description, and calls `create_repository` (private). The repository home opens.
@@ -63,7 +63,7 @@ native Liquid binary supplied the documented identity export command.
    override was present. Since lake#348 the report has no hourly rows before any transfer or
    build (`items` is empty), and storage is `summary.storage.repositories_bytes`, measured live;
    the recorded run and the SQL below predate that.
-6. Since lake#315 a repository belongs to a workspace: a space without one is sent to
+6. Since lake#315 a repository belongs to a workspace: an account without one is sent to
    **Workspaces** first, and the form then chooses the workspace instead of the customer. The
    recorded run below predates that. In **Create a repository**, keep the personal customer, enter `my-first-repository`, and
    optionally describe it. Select **Create repository**. The form calls the registry capability
