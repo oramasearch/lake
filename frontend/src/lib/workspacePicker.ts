@@ -33,7 +33,7 @@ export function ownerName(space: PickerSpace, viewer: PickerViewer): string {
 
 /** The owner's name in the pill, beside the workspace name: short, since the menu says the rest. */
 export function pillOwner(space: PickerSpace): string {
-  return space.personal ? "Personal" : space.label?.trim() || space.name;
+  return space.personal ? "Your account" : space.label?.trim() || space.name;
 }
 
 /** The letter in an owner's avatar: its first letter or digit, upper-cased. */

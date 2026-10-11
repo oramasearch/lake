@@ -68,7 +68,7 @@ are pure functions in `lib/workspacePicker.ts` (lake#638).
 
 - **The pill** names the current workspace first, in full where it fits. When the viewer has more
   than one owner (their account and an organization, or several organizations) the owner follows,
-  muted: *Personal* for their own account, else the organization's name. A name cut short keeps the
+  muted: *Your account* for their own account, else the organization's name. A name cut short keeps the
   whole of it in the tooltip (`Production — acme-research (Organization)`). At phone width the pill
   shows the workspace name alone, cut to fit, and its menu is a sheet across the screen.
 - **The menu** groups the workspaces by owner. Each group's header is an initial, a small kind label
