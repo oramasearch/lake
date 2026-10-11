@@ -81,8 +81,8 @@ The level 1 Secrets stay where they are. In order:
 3. **The operator** (`helm upgrade`, per orama-operator `docs/development.md`). A `helm upgrade` also
    reconciles Prod 2: afterwards confirm the `OramaCloudV1` in `orama-prod2` is still `Ready`.
 4. **Use it.** A person keeps the secret in a mount of the app's workspace and names it on the app,
-   never handling the value outside lake: Data → Secrets (or `create_secret_mount`, then
-   `put_secret`), then the app's Settings → Environment with the mount, secret and field. The
+   never handling the value outside lake: the Secrets pages (`/secret-mounts`,
+   [../ui/secrets.md](../ui/secrets.md)), or `create_secret_mount` then `put_secret`, then the app's Settings → Environment with the mount, secret and field. The
    `LakeSealedSecret` appears in `lake` within a reconcile, and the app rolls once it is delivered.
 5. **Removing an old Kubernetes Secret** is a person's call, made only after the app reads from the
    store. None exists on dev today.
