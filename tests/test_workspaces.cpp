@@ -3056,7 +3056,7 @@ TEST(AgentRuns, AProjectAgentReplyIncludesTheQuestionAndAnswer) {
               std::string::npos);
 }
 
-TEST(AgentRuns, ExperimentsAgentGrantsEachTurnOnlyItsStudyOperations) {
+TEST(AgentRuns, ExperimentsAgentGrantsEachTurnOnlyItsExperimentOperations) {
     AgentRuns r;
     auto& config = const_cast<lake::control::WorkspaceConfig&>(r.w.service->config());
     config.agent_endpoints = {{"agent-experiments", "http://experiments:8080"}};
@@ -3093,19 +3093,20 @@ TEST(AgentRuns, ExperimentsAgentGrantsEachTurnOnlyItsStudyOperations) {
               "/train/experiments?customer_id=" + r.w.customer_id + "&task=" + first->id +
                   "#experiment-proposal");
 
-    const auto confirmed = r.call("agent_turn",
-                                  {{"agent", "agent-experiments"},
-                                   {"kind", "experiment"},
-                                   {"message", "Confirm and start the reviewed study proposal."},
-                                   {"proposal_task_id", first->id},
-                                   {"proposal_sha256", review.value["proposal_sha256"]},
-                                   {"context", {{"confirmed_proposal", proposal}}}});
+    const auto confirmed =
+        r.call("agent_turn",
+               {{"agent", "agent-experiments"},
+                {"kind", "experiment"},
+                {"message", "Confirm and start the reviewed experiment proposal."},
+                {"proposal_task_id", first->id},
+                {"proposal_sha256", review.value["proposal_sha256"]},
+                {"context", {{"confirmed_proposal", proposal}}}});
     ASSERT_TRUE(confirmed.ok) << confirmed.error.message;
     const auto second = r.task(confirmed.value["task_id"]);
     ASSERT_TRUE(second);
     EXPECT_NE(std::ranges::find(second->scopes, "workspace_act"), second->scopes.end());
     EXPECT_NE(std::ranges::find(second->scopes, "create_study"), second->scopes.end());
-    EXPECT_NE(std::ranges::find(second->scopes, "start_study"), second->scopes.end());
+    EXPECT_NE(std::ranges::find(second->scopes, "start_experiment"), second->scopes.end());
     EXPECT_EQ(std::ranges::find(second->scopes, "stop_trial"), second->scopes.end());
     const std::string confirmed_credential =
         "lat." + second->id + ".0123456789abcdef0123456789abcdef";
@@ -3130,15 +3131,16 @@ TEST(AgentRuns, ExperimentsAgentGrantsEachTurnOnlyItsStudyOperations) {
          {"input", {{"study", "study-one"}, {"run", "trial-1"}}}});
     EXPECT_EQ(refused.error.code, "unauthorized");
 
-    const auto status = r.call(
-        "agent_turn",
-        {{"agent", "agent-experiments"},
-         {"kind", "experiment_status"},
-         {"message", "Watch study-one"},
-         {"context", {{"study", "study-one"}}}});
+    const auto status = r.call("agent_turn",
+                               {{"agent", "agent-experiments"},
+                                {"kind", "experiment_status"},
+                                {"message", "Watch study-one"},
+                                {"context", {{"experiment_id", "study-one"}}}});
     ASSERT_TRUE(status.ok) << status.error.message;
     const auto status_task = r.task(status.value["task_id"]);
     ASSERT_TRUE(status_task);
+    // A lake caller names the experiment; ExperimentsAgent reads the engine's `study` (lake#561).
+    EXPECT_EQ(status_task->body["context"]["study"], "study-one");
     EXPECT_NE(std::ranges::find(status_task->scopes, "stop_trial"),
               status_task->scopes.end());
     EXPECT_NE(std::ranges::find(status_task->scopes, "stop_experiment_trial"),
@@ -3196,6 +3198,8 @@ TEST(AgentRuns, ExperimentsAgentGrantsEachTurnOnlyItsStudyOperations) {
         {{"capability", "promote_trial"},
          {"input", {{"study", "study-one"}, {"run", "trial-1"}}}});
     ASSERT_TRUE(promoted.ok) << promoted.error.message;
+    EXPECT_EQ(promoted.value["study"], "study-one")
+        << "workspace_act answers in the engine's names";
 
     EXPECT_EQ(r.call("agent_turn",
                      {{"agent", "agent-experiments"},

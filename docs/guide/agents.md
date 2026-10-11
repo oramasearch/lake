@@ -26,7 +26,7 @@ on this lake*).
 | **Ask Orama** | Answers from what you can read and proposes changes for you to confirm; hands work to the other agents | **Ask Orama** in the top bar of every page |
 | **Project Agent** | Builds pipelines and proposes changes to them | **Ask the Project Agent** on a pipeline; a solution's foundation |
 | **ApplicationAgent** | Proposes and builds data apps | **Ship → Apps** |
-| **ExperimentsAgent** | Proposes editable training studies, follows trials and explains results | **Train → Experiments** |
+| **ExperimentsAgent** | Proposes editable training experiments, follows their trials and explains results | **Train → Experiments** |
 | **Auto-Suggest** | Suggests projects worth building from your data | **Design → Opportunities** |
 | **AgentCreator** | Designs a new agent with you | **Train → Agents → Build with the Agent Factory** |
 
@@ -36,8 +36,8 @@ Agents marked *Orama internal* are Orama's own test tooling and are never offere
 - MCP: `list_agent_library`. It takes no input and answers each agent with `deployed` and `status`.
 
 The library agents that propose changes never make them on their own: the Project Agent's edits wait
-for **Apply**, ApplicationAgent's app for **Confirm and deploy**, and ExperimentsAgent's study for
-**Confirm and start study**.
+for **Apply**, ApplicationAgent's app for **Confirm and deploy**, and ExperimentsAgent's experiment
+for **Confirm and start experiment**.
 
 ## Concepts
 

@@ -93,7 +93,7 @@ workspace Zetta, and lake's control store keeps none of them. It carries no pric
 | `storage.total_bytes` | The three above added. |
 | `compute.repository_build_seconds` | The sum of `compute_seconds` in the returned hourly rows. |
 | `compute.image_build_seconds`, `image_builds` | Finished image builds (`Succeeded`, `Failed`, `Cancelled`) from `created_at` to the operator's final `updated_at`, each rounded up to a second. The build row has no start time, so time spent queued is included and the page says so. |
-| `compute.workspace_run_seconds`, `workspace_runs` | Every Zetta run in each workspace (`list_runs`), training and study trials included, from `created` to `updated`, each rounded up to a second. A run without both timestamps counts nothing. |
+| `compute.workspace_run_seconds`, `workspace_runs` | Every Zetta run in each workspace (`list_runs`), training and experiment trials included, from `created` to `updated`, each rounded up to a second. A run without both timestamps counts nothing. |
 | `compute.total_seconds` | The three compute figures added. |
 | `workspaces[]` | Per workspace: `name`, `measured`, `data_bytes`, `datasets`, `run_seconds`, `runs`, and the reason in `message` when it could not be read. |
 | `not_measured[]` | Plain sentences for what this report could not include: repository storage over time (only its current size is measured), a workspace that is not running or whose metering records could not be read, repositories without a workspace, a workspace whose image tags could not be read, no workspaces on this lake, and model files and indexes inside a workspace, whose size Zetta does not report yet. |

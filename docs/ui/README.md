@@ -53,7 +53,9 @@ operator sign-in, passkey sign-in and the public share pages).
   brand strip to the bottom of the window, its 48px head level with the shell bar (lake#567).
   **Expand over the page** widens it in place across everything but the rail, with a 200ms width
   transition (none while the edge is dragged, none under reduced motion), and **Back to the side**
-  returns it. **Open as a page** opens the same conversation on `/ask`. Before, this was a docked iframe of the server's Ask page. Its
+  returns it; expanded, the conversation and its message box share one centred 880px column, and the
+  panel stays above the shell bar (z-index 35) so its own head is never covered. **Open as a page**
+  opens the same conversation on `/ask`. Before, this was a docked iframe of the server's Ask page. Its
   message box has the microphone (dictation, `components/dictation/Dictate.tsx`) and **From your
   phone**; a page can open it about something (`openAsk`, `lib/ask.ts`), as the transcript page
   does.
@@ -114,7 +116,7 @@ Files are under `frontend/src/pages/`.
 | `/shared-with-me` | `repositories/SharedWithMePage.tsx` | folders shared with the viewer | `drive_shared_with_me` |
 | `/share/:token`, `/share/:token/preview` | `repositories/SharePage.tsx`, `SharePreviewPage.tsx` | a folder or file opened through a link, signed out | `resolve_drive_share_link`, `preview_drive_share_link` |
 | `/models/:namespace/:id`, `/models/:id` | `admin/ModelPage.tsx` | a model repository's storage, provenance, files and revisions | `resolve_model`, `get_model` |
-| `/search` | `search/SearchPage.tsx` | one query across the places the person ticks (`?q=&in=`): Repositories, Code (ranked, substring or regex, with its options), Datasets, Transcripts, Projects, Agents, Models and Docs, searched side by side and grouped by place; the choice is remembered in this browser, and `?query=` still opens code search | `list_repositories`, `search`, `workspace_sql`, `list_transcripts`, `workspace_query` (`list_projects`, `list_agents`, `list_models`), `list_docs` (`q`) |
+| `/search` | `search/SearchPage.tsx` | one query across the places the person ticks (`?q=&in=`): Repositories, Code (ranked, substring or regex, with its options), Datasets, Transcripts, Projects, Agents, Models, Drives and Docs, searched side by side and grouped by place; the choice is remembered in this browser, and `?query=` still opens code search | `list_repositories`, `search`, `workspace_sql`, `list_transcripts`, `workspace_query` (`list_projects`, `list_agents`, `list_models`), `search_drives`, `list_docs` (`q`) |
 
 **Design, Train and Ship** (all under `/w/<workspace_id>/` except Deployments, Services and
 Workspaces)
@@ -130,10 +132,10 @@ Workspaces)
 | `/design/agent-library` | `design/AgentLibraryPage.tsx` | the agents Orama provides, as cards (search, filter by availability) | `list_agent_library` |
 | `/train/agents`, `/train/agent`, `/train/agents/new` | `train/AgentsPage.tsx`, `AgentPage.tsx`, `FactoryPage.tsx` | the space's agents, one agent, the Agent Factory | `schedule_agent`, `unschedule_agent`, `launch_agent`, `stop_agent_launch`, `list_agent_launches`, `list_agent_schedules`, `approve_agent_proposal`; engine `list_agents`, `create_agent`, `get_agent`, `update_agent`, `delete_agent`, `agent_training_status` |
 | `/train/data`, `/train/dataset`, `/train/query` | `train/DataPage.tsx`, `DatasetPage.tsx`, `QueryPage.tsx` | load data, connections, datasets, storage; one dataset; read-only SQL | `list_stores`, `create_store`, `delete_store`, `store_connection`, `list_services`, `connect_service`, `workspace_sql`; engine connection, dataset and generator calls |
-| `/drives`, `/drives/drive?id=&folder=` | `drives/DrivesPage.tsx`, `DrivePage.tsx`, `NewDrive.tsx`, `FolderPicker.tsx`, `ShortcutDialog.tsx` | Data → Drives: the workspace's drives and recent files; one drive as a file manager over its storage (uploads of files and folders, selection, drag to move, shortcuts, drive settings) ([drives.md](drives.md)) | `list_drives`, `get_drive`, `create_drive`, `rename_drive`, `delete_drive`, `recent_drive_entries`, the entry and upload capabilities, or `drive_browse` and the drive_* writes for a repository drive |
+| `/drives`, `/drives/drive?id=&folder=` | `drives/DrivesPage.tsx`, `DrivePage.tsx`, `NewDrive.tsx`, `FolderPicker.tsx`, `ShortcutDialog.tsx` | Data → Drives: the workspace's drives and recent files; one drive as a file manager over its storage (uploads of files and folders, selection, drag to move, shortcuts, search of the whole drive, drive settings) ([drives.md](drives.md)) | `list_drives`, `get_drive`, `create_drive`, `rename_drive`, `delete_drive`, `recent_drive_entries`, `search_drives`, the entry and upload capabilities, or `drive_browse` and the drive_* writes for a repository drive |
 | `/transcripts`, `/transcript?id=` | `transcripts/TranscriptsPage.tsx`, `TranscriptPage.tsx`, `NewTranscript.tsx` | Data → Transcripts: record, upload or paste a transcript; search, read, edit, copy, delete, Ask Orama about it ([transcripts.md](transcripts.md)) | `list_transcripts`, `get_transcript`, `create_transcript`, `update_transcript`, `delete_transcript`, `transcribe` |
 | `/train/runs`, `/train/run` | `train/RunsPage.tsx`, `RunPage.tsx` | pipeline runs; one run's report, lineage, log and trace | engine `list_runs`, `list_studies`, `get_run`, `get_run_report`, `list_traces` |
-| `/train/experiments`, `/train/experiment`, `/train/experiment/run`, `/train/experiments/compare` | `experiments/*.tsx` | studies and runs with live charts ([experiments.md](experiments.md)) | see experiments.md |
+| `/train/experiments`, `/train/experiment`, `/train/experiment/run`, `/train/experiments/compare` | `experiments/*.tsx` | experiments and runs with live charts ([experiments.md](experiments.md)) | see experiments.md |
 | `/train/streams`, `/train/stream` | `streams/StreamsPage.tsx`, `TopicPage.tsx` | topics and messages ([streams.md](streams.md)) | see streams.md |
 | `/ship/models` | `ship/ModelsPage.tsx` | trained models and their prediction endpoints | engine `list_models`, `expose_model`, `unexpose_model` |
 | `/ship/indexes`, `/ship/index` | `ship/IndexesPage.tsx`, `IndexPage.tsx` | search indexes, one index, search it | `search_index`, `create_token`; engine `list_indexes`, `create_index`, `get_index`, `expose_index`, `unexpose_index` |

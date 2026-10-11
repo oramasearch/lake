@@ -32,11 +32,13 @@ instance administrator's desired state for each workspace Zetta's volume size an
 snapshots of those volumes and of lake's store volume; [workspaces.md](workspaces.md#capabilities)
 the storage fields a workspace row gains.
 
-[experiments.md](experiments.md) documents eleven training study, trial, run-metric, comparison
-and bounded-live-read capabilities, with identical REST POST/MCP schemas and confirmed actions,
-plus the `agent_turn` contract used for ExperimentsAgent proposals. These names are distinct from
-the solutions holdout `get_experiment` operation. `start_study` leaves a missing objective and
-budgets to Zetta under `from_defaults`, and every experiment error keeps Zetta's `path`.
+[experiments.md](experiments.md) documents eleven training experiment, trial, run-metric,
+comparison and bounded-live-read capabilities, with identical REST POST/MCP schemas and confirmed
+actions, plus the `agent_turn` contract used for ExperimentsAgent proposals. Lake says experiment
+and `experiment_id` where the engine says study (lake#561, [names](experiments.md#names)); lake's
+`get_experiment` is distinct from the solutions holdout `get_experiment` that `workspace_query`
+reads. `start_experiment` leaves a missing objective and budgets to Zetta under `from_defaults`,
+and every experiment error keeps Zetta's `path`.
 
 [streams.md](streams.md) documents all nine topic/message operations on both REST POST and MCP,
 with closed input/output schemas, space permissions, system-topic refusal and bounded live reads.
@@ -190,7 +192,7 @@ and `Experiments.CompareRunsAnswersItsGetFormWithRepeatedKeysOrACommaList`
 | `transcribe` | action, any signed-in caller | `name`, `audio_base64`, `language?` | `{text, seconds?, model}`: speech-to-text through OpenAI with lake's key; keeps nothing; `not_supported` without `LAKE_OPENAI_API_KEY` | [transcripts.md](transcripts.md) |
 | `create_transcript`, `list_transcripts`, `get_transcript`, `update_transcript`, `delete_transcript` | action / read / read / action / action | `customer_id`, `workspace_id`, then `title`, `source`, `text` or `audio_base64`; `q`, `limit`, `cursor`; or `id` | a transcript kept as a sealed `lake_transcripts` record in the workspace Zetta (the audio never kept), a searchable page of them, or `{deleted: true}` | [transcripts.md](transcripts.md) |
 | `create_drive`, `list_drives`, `get_drive`, `rename_drive`, `delete_drive` | action / read / read / action / action | `customer_id`, `workspace_id`, then `name`, `storage`, `repository_id?` or `repository_name?`; or `id` (`confirm_name` to delete) | a drive kept as a sealed `lake_drives` record in the workspace Zetta; a new repository drive gets its first change at once; deleting never deletes a repository | [drives.md](drives.md) |
-| `list_drive_entries`, `get_drive_entry`, `create_drive_folder_entry`, `create_drive_shortcut`, `move_drive_entry`, `delete_drive_entry`, `begin_drive_upload`, `append_drive_upload`, `finish_drive_upload`, `upload_drive_entries`, `read_drive_file`, `recent_drive_entries` | reads and actions | `customer_id`, `workspace_id`, `drive_id`, … | a workspace-files or virtual drive's folders, files and shortcuts; file bytes sealed in the workspace Zetta's `lake_files` bucket, uploaded in 1 MiB-aligned chunks | [drives.md](drives.md) |
+| `list_drive_entries`, `get_drive_entry`, `create_drive_folder_entry`, `create_drive_shortcut`, `move_drive_entry`, `delete_drive_entry`, `begin_drive_upload`, `append_drive_upload`, `finish_drive_upload`, `upload_drive_entries`, `read_drive_file`, `recent_drive_entries`, `search_drives` | reads and actions | `customer_id`, `workspace_id`, `drive_id`, … | a workspace-files or virtual drive's folders, files and shortcuts; file bytes sealed in the workspace Zetta's `lake_files` bucket, uploaded in 1 MiB-aligned chunks; names found across every drive, a repository drive's paths at `main` included | [drives.md](drives.md) |
 | `list_users` | read | `limit` (≤1000, default 100) | `{items: [user]}` | [customers.md](customers.md) |
 | `get_user` | read | `id` | user | [customers.md](customers.md) |
 | `create_user` | action | `taap_id?`, `email?`, `display_name?` | user | [customers.md](customers.md) |

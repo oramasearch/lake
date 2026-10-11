@@ -7331,6 +7331,9 @@ TEST(ApiNaming, OneNamePerConceptAcrossCapabilities) {
                                                           {"get_run_metrics", "run_id"},
                                                           {"stop_experiment_trial", "run_id"},
                                                           {"promote_trial", "run_id"},
+                                                          {"promote_trial", "experiment_id"},
+                                                          {"get_experiment", "experiment_id"},
+                                                          {"stop_experiment", "experiment_id"},
                                                           {"get_customer", "customer_id"}}) {
         EXPECT_TRUE(has(capability, field)) << capability << " names it " << field;
     }
@@ -7343,6 +7346,9 @@ TEST(ApiNaming, OneNamePerConceptAcrossCapabilities) {
                 EXPECT_TRUE(schema.value("deprecated", false))
                     << capability->name << " takes `" << field << "`; use `" << field << "_id`";
             }
+            // An experiment is the engine's study; lake never names it so (lake#561).
+            EXPECT_EQ(field.find("study"), std::string::npos)
+                << capability->name << " takes `" << field << "`; use `experiment_id`";
         }
     }
 }
@@ -7359,6 +7365,12 @@ TEST(ApiDescriptions, EveryCapabilitySaysWhatItDoesForAPerson) {
                                   "after explicit confirmation in this space"}) {
             EXPECT_EQ(text.find(vague), std::string::npos) << capability->name << ": " << text;
         }
+        // A person runs experiments; "study" is only the engine's name, in a code span such as
+        // `validate_study` (lake#561).
+        static const std::regex study(R"((^|[^_`.-])\b[Ss]tud(y|ies)\b(?![_-]))");
+        EXPECT_FALSE(std::regex_search(text, study))
+            << capability->name << " says study: \"" << text << "\"";
+        EXPECT_FALSE(std::regex_search(capability->title, study)) << capability->name;
         const auto [previous, inserted] = seen.emplace(text, capability->name);
         EXPECT_TRUE(inserted) << capability->name << " shares its description with "
                               << previous->second << ": \"" << text << "\"";

@@ -697,20 +697,42 @@ void register_workspace_call(Registry& registry, bool read) {
                     co_return *refused;
                 }
             }
+            // The engine's study actions are lake's confirmed experiment capabilities (lake#561):
+            // the call speaks the engine's names in and out (`study`, `run`), and lake's
+            // capability takes `experiment_id` and `run_id`.
             const std::map<std::string, std::string> study_actions = {
-                {"create_study", "start_study"}, {"stop_study", "stop_study"},
-                {"stop_trial", "stop_experiment_trial"}, {"promote_trial", "promote_trial"}};
+                {"create_study", "start_experiment"},
+                {"stop_study", "stop_experiment"},
+                {"stop_trial", "stop_experiment_trial"},
+                {"promote_trial", "promote_trial"}};
             if (!read && study_actions.contains(capability)) {
                 auto arguments = input.value("input", json::object());
                 if (agent_task && agent_task->agent == "agent-experiments" &&
                     has_scope(context, capability)) {
                     arguments["confirm"] = true;
                 }
+                if (capability != "create_study" && arguments.contains("study") &&
+                    !arguments.contains("experiment_id")) {
+                    arguments["experiment_id"] = std::move(arguments["study"]);
+                    arguments.erase("study");
+                }
                 arguments["customer_id"] = input.at("customer_id");
                 arguments["workspace_id"] = input.at("workspace_id");
                 const auto result = co_await context.registry->call_async(
                     study_actions.at(capability), arguments, context);
-                co_return result ? *result : ApiResult::failure("store_error", result.error().message);
+                if (!result) {
+                    co_return ApiResult::failure("store_error", result.error().message);
+                }
+                ApiResult answer = *result;
+                if (answer.ok && answer.value.is_object() &&
+                    answer.value.contains("experiment_id")) {
+                    answer.value["study"] = std::move(answer.value["experiment_id"]);
+                    answer.value.erase("experiment_id");
+                }
+                if (!answer.ok && answer.error.path.starts_with("/experiment_id")) {
+                    answer.error.path = "/study" + answer.error.path.substr(14);
+                }
+                co_return answer;
             }
             json arguments = input.value("input", json::object());
             const json sent = arguments;
@@ -2570,9 +2592,9 @@ ApiResult called(std::expected<ApiResult, liquid::error> completed) {
 // checks it here rather than trusting the caller's copy (lake#561): it must be the proposal in the
 // answer of `proposal_task_id`, a finished turn of the same agent and kind that the caller may
 // follow, and `proposal_sha256` must be that proposal's digest (get_agent_task returns it), so a
-// proposal that changed since the person saw it is refused. ExperimentsAgent's study is the one
-// part the person may edit; everything else is the stored proposal. A public app also needs
-// `context.confirm_public`. Answers the proposal the turn carries.
+// proposal that changed since the person saw it is refused. ExperimentsAgent's `study` (the
+// experiment) is the one part the person may edit; everything else is the stored proposal. A public
+// app also needs `context.confirm_public`. Answers the proposal the turn carries.
 liquid::runtime::task<ApiResult>
 verified_confirmed_proposal(const json& input, ApiContext& context, std::string_view agent) {
     const bool experiments = agent == "agent-experiments";
@@ -2620,7 +2642,7 @@ verified_confirmed_proposal(const json& input, ApiContext& context, std::string_
         const json study = offered.is_object() ? offered.value("study", json()) : json();
         if (!study.is_object()) {
             co_return ApiResult::failure("invalid_input",
-                                         "The edited study proposal must be a JSON object.",
+                                         "The edited experiment proposal must be a JSON object.",
                                          "/context/confirmed_proposal/study");
         }
         json unedited = offered;
@@ -5014,6 +5036,12 @@ void register_agent_run_capabilities(Registry& registry) {
                     }
                     body["kind"] = task_kind;
                     body["context"] = input.value("context", json::object());
+                    // A lake caller names the experiment `experiment_id`; ExperimentsAgent reads
+                    // the engine's `study` (lake#561).
+                    if (body["context"].is_object() && body["context"].contains("experiment_id") &&
+                        !body["context"].contains("study")) {
+                        body["context"]["study"] = body["context"]["experiment_id"];
+                    }
                     lake_url = config.internal_url + "/w/" + input.at("workspace_id").get<std::string>() +
                                "/workspaces/" + customer_id + "/zetta";
                     if (task_kind == "experiment") {
@@ -5032,7 +5060,7 @@ void register_agent_run_capabilities(Registry& registry) {
                             body["context"]["confirmed_proposal"] = confirmed.value;
                             scopes.push_back("workspace_act");
                             scopes.push_back("create_study");
-                            scopes.push_back("start_study");
+                            scopes.push_back("start_experiment");
                         }
                     } else if (task_kind == "experiment_status") {
                         scopes.insert(scopes.end(),

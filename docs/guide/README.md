@@ -67,10 +67,14 @@ may wrap across source lines.
   is the id of the account that owns the workspaces (theirs, or their organization's). Code spans
   and blocks may name fields and quote server messages. `Docs.GuidesSpeakOfWorkspaces` checks the
   prose, and the banned word "seam".
+- Speak of **experiments**, as an AI experiment tracker does. The guides never say "study" to a
+  reader; it is the engine's name, which only code spans may quote (`study-events.*`,
+  ExperimentsAgent's `study` field). An experiment's attempts are **trials**, each a training
+  **run**. `Docs.GuidesSpeakOfExperiments` checks the prose (lake#561).
 - Headings are Title Case (lake's rule, `docs/ui/design-system.md` → *Capitalization*).
 - Keep Ship's ApplicationAgent steps explicit about reviewing the exact proposal before any write.
-- Keep Train's ExperimentsAgent steps explicit about editing and confirming the exact study before
-  it starts.
+- Keep Train's ExperimentsAgent steps explicit about editing and confirming the exact experiment
+  before it starts.
 - Name held-out metrics as the run report does (`held_out_auc`, …), and lead a run's report with
   its held-out score.
 - A new page is a new `.md` here **and** its slug in a section of `GUIDE_SECTIONS`; the first line

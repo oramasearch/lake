@@ -23,8 +23,8 @@ happens. A header action that needs the workspace (Load data, New agent) shows o
 
 `workspace.tsx` holds the calls and helpers the pages share (`wq`, `wa`, `useWq`, `useSpaceRead`,
 `timeAgo`, `useWorkspaceReady`); `agents.tsx` what the agent pages say about an agent and the Agent
-Library; `datasets.tsx` the lean dataset list and `ObjectTable`; `RunsPage.tsx` the run and study
-helpers the Run and Models pages share.
+Library; `datasets.tsx` the lean dataset list and `ObjectTable`; `RunsPage.tsx` the run and experiment
+helpers the Run and Models pages share (`useExperimentRefs`, `TrialSubject`).
 
 ## Run Report Evidence and Load Data (lake#581, lake#582)
 

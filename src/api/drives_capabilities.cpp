@@ -12,6 +12,7 @@
 #include <optional>
 #include <set>
 #include <string>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -1644,6 +1645,220 @@ liquid::runtime::task<ApiResult> recent_drive_entries(const json& input, ApiCont
     co_return ApiResult::success({{"items", std::move(items)}});
 }
 
+// ---- Search ----
+
+constexpr std::size_t default_search = 50;
+
+// ASCII letters in lower case; other bytes (UTF-8 included) compare as they are.
+std::string folded(std::string_view text) {
+    std::string out(text);
+    std::ranges::transform(out, out.begin(), [](unsigned char c) {
+        return static_cast<char>(c >= 'A' && c <= 'Z' ? c - 'A' + 'a' : c);
+    });
+    return out;
+}
+
+std::string parent_of(std::string_view path) {
+    const std::size_t slash = path.rfind('/');
+    return slash == std::string_view::npos ? std::string() : std::string(path.substr(0, slash));
+}
+
+std::string name_of(std::string_view path) {
+    const std::size_t slash = path.rfind('/');
+    return std::string(slash == std::string_view::npos ? path : path.substr(slash + 1));
+}
+
+// A repository's tree at `main`, read off the server thread, or why it could not be read.
+struct RepositoryPaths {
+    std::vector<RepositoryTreeEntry> entries;
+    std::string problem;
+};
+
+liquid::runtime::task<RepositoryPaths> repository_paths(ApiContext& context,
+                                                        const std::string& repository_id) {
+    if (!context.sync_store) {
+        co_return RepositoryPaths{{}, "this lake has no repository store"};
+    }
+    const auto repository = context.store->get_repository(repository_id);
+    if (!repository) {
+        co_return RepositoryPaths{{},
+                                  repository.error().code == "not_found"
+                                      ? std::string("its repository is gone")
+                                      : repository.error().message};
+    }
+    if (!repository->deleted_at.empty()) {
+        co_return RepositoryPaths{{}, "its repository was deleted"};
+    }
+    if (!may_read_repository(context, repository_id)) {
+        co_return RepositoryPaths{{}, "you cannot read its repository"};
+    }
+    SyncStore* store = context.sync_store;
+    const control::Repository found = *repository;
+    auto read = co_await blocking_call(
+        [store, found] { return store->repository_tree(found.customer_id, found.id, "main"); },
+        [](std::string message) -> SyncStoreResult<std::vector<RepositoryTreeEntry>> {
+            return std::unexpected(SyncStoreError{"store_unavailable", std::move(message)});
+        });
+    if (!read) {
+        co_return RepositoryPaths{{}, read.error().message};
+    }
+    co_return RepositoryPaths{std::move(*read), {}};
+}
+
+RepositoryPaths awaited_paths(std::expected<RepositoryPaths, liquid::error> completed) {
+    return completed ? std::move(*completed) : RepositoryPaths{{}, completed.error().message};
+}
+
+// Drive and item names that contain `q`, ignoring the case of A to Z, across the workspace's drives
+// (or one): each drive's entries are read once, a repository drive's tree at `main` once.
+liquid::runtime::task<ApiResult> search_drives(const json& input, ApiContext& context) {
+    if (!context.store) {
+        co_return ApiResult::failure("store_unavailable", "workspaces are not configured");
+    }
+    if (auto refused = authorize_space_read(input, context)) {
+        co_return *refused;
+    }
+    const std::string needle = folded(input.at("q").get<std::string>());
+    if (needle.empty()) {
+        co_return ApiResult::failure("invalid_input", "type something to search for", "/q");
+    }
+    const std::string customer_id = input.at("customer_id");
+    auto records = workspace_records(context, customer_id, input.at("workspace_id"));
+    if (!records) {
+        co_return failed(records.error());
+    }
+    auto drives = control::settled(co_await control::list_drives(*records, customer_id));
+    if (!drives) {
+        co_return failed(drives.error());
+    }
+    const std::string only = input.value("drive_id", std::string());
+    if (!only.empty()) {
+        std::erase_if(*drives, [&](const control::Drive& drive) { return drive.id != only; });
+        if (drives->empty()) {
+            co_return ApiResult::failure(
+                "not_found", "no such drive in this workspace", "/drive_id");
+        }
+        context.audit_details["drive_id"] = only;
+    }
+    const std::size_t limit = input.value("limit", default_search);
+    const auto matches = [&](std::string_view name) {
+        return folded(name).find(needle) != std::string::npos;
+    };
+    const auto drive_ref = [](const control::Drive& drive) {
+        return json{{"id", drive.id},
+                    {"name", drive.name},
+                    {"storage", drive.storage},
+                    {"repository_id",
+                     drive.repository_id.empty() ? json(nullptr) : json(drive.repository_id)}};
+    };
+
+    // Every match is kept (bounded by what the drives hold) so the order does not depend on the
+    // order the drives were read in; shortcuts are checked only for the matches answered.
+    struct Hit {
+        json item;
+        const control::DriveEntry* shortcut = nullptr;
+    };
+    std::vector<Hit> hits;
+    std::vector<control::DriveTree> trees;
+    trees.reserve(drives->size());
+    json skipped = json::array();
+    for (const control::Drive& drive : *drives) {
+        if (matches(drive.name)) {
+            hits.push_back({{{"drive", drive_ref(drive)},
+                             {"kind", "drive"},
+                             {"id", nullptr},
+                             {"parent_id", nullptr},
+                             {"name", drive.name},
+                             {"path", ""},
+                             {"folder", ""}}});
+        }
+        if (drive.storage == "repository") {
+            RepositoryPaths read =
+                awaited_paths(co_await repository_paths(context, drive.repository_id));
+            if (!read.problem.empty()) {
+                skipped.push_back(
+                    {{"drive", drive_ref(drive)}, {"reason", std::move(read.problem)}});
+                continue;
+            }
+            for (const RepositoryTreeEntry& entry : read.entries) {
+                const std::string name = name_of(entry.path);
+                if (entry.path.empty() || name == ".lake-folder" ||
+                    (entry.kind != "tree" && entry.kind != "blob") || !matches(name)) {
+                    continue;
+                }
+                json item{{"drive", drive_ref(drive)},
+                          {"kind", entry.kind == "tree" ? "folder" : "file"},
+                          {"id", nullptr},
+                          {"parent_id", nullptr},
+                          {"name", name},
+                          {"path", entry.path},
+                          {"folder", parent_of(entry.path)}};
+                if (entry.kind == "blob") {
+                    item["size"] = entry.size;
+                }
+                hits.push_back({std::move(item)});
+            }
+            continue;
+        }
+        auto listed =
+            control::settled(co_await control::list_drive_entries(*records, customer_id, drive.id));
+        if (!listed) {
+            co_return failed(listed.error());
+        }
+        const control::DriveTree& tree = trees.emplace_back(std::move(*listed));
+        for (const control::DriveEntry& entry : tree.entries()) {
+            if (entry.state != "ready" || !matches(entry.name)) {
+                continue;
+            }
+            json item{
+                {"drive", drive_ref(drive)},
+                {"kind", entry.kind},
+                {"id", entry.id},
+                {"parent_id", entry.parent_id.empty() ? json(nullptr) : json(entry.parent_id)},
+                {"name", entry.name},
+                {"path", tree.path(entry.id)},
+                {"folder", tree.path(entry.parent_id)}};
+            if (entry.kind == "file") {
+                item["size"] = entry.size;
+                item["content_type"] = entry.content_type;
+                item["modified_at"] = control::record_instant(entry.modified_us);
+            }
+            if (entry.kind == "shortcut") {
+                item["target"] = entry.target;
+            }
+            hits.push_back({std::move(item), entry.kind == "shortcut" ? &entry : nullptr});
+        }
+    }
+    const auto rank = [](const json& item) { return item.at("kind") == "drive" ? 0 : 1; };
+    std::ranges::stable_sort(hits, [&](const Hit& a, const Hit& b) {
+        const auto key = [&](const Hit& hit) {
+            return std::tuple(rank(hit.item),
+                              hit.item.at("drive").at("name").get<std::string>(),
+                              hit.item.at("path").get<std::string>());
+        };
+        return key(a) < key(b);
+    });
+    const bool truncated = hits.size() > limit;
+    if (truncated) {
+        hits.resize(limit);
+    }
+    ShortcutChecker checker(context, *records, customer_id);
+    json items = json::array();
+    for (Hit& hit : hits) {
+        if (hit.shortcut != nullptr) {
+            const Status status = status_of(co_await checker.check(hit.shortcut->target));
+            hit.item["status"] = status.status;
+            if (!status.reason.empty()) {
+                hit.item["reason"] = status.reason;
+            }
+        }
+        items.push_back(std::move(hit.item));
+    }
+    context.audit_details["matches"] = items.size();
+    co_return ApiResult::success(
+        {{"items", std::move(items)}, {"truncated", truncated}, {"skipped", std::move(skipped)}});
+}
+
 } // namespace
 
 void register_drives_capabilities(Registry& registry) {
@@ -1915,6 +2130,53 @@ void register_drives_capabilities(Registry& registry) {
                    json::array({"items"})),
          recent_drive_entries,
          true);
+    const json drive_ref =
+        object_of({{"id", string_schema()},
+                   {"name", string_schema()},
+                   {"storage", {{"type", "string"}, {"enum", {"repository", "files", "virtual"}}}},
+                   {"repository_id", {{"type", json::array({"string", "null"})}}}},
+                  json::array({"id", "name", "storage", "repository_id"}));
+    const json nullable_string{{"type", json::array({"string", "null"})}};
+    read(
+        "search_drives",
+        "Search Drives",
+        "Find drives, folders, files and shortcuts whose name contains `q` (A to Z in either "
+        "case) across the workspace's drives, or one `drive_id`: workspace-files and virtual "
+        "drives by their items' names, repository drives by the names of the paths at `main`. "
+        "Each match names its drive and folder path; drives first, then by drive and path.",
+        workspace_input({{"q", {{"type", "string"}, {"minLength", 1}, {"maxLength", 255}}},
+                         {"drive_id", string_schema()},
+                         {"limit", {{"type", "integer"}, {"minimum", 1}, {"maximum", 200}}}},
+                        json::array({"q"})),
+        object_of(
+            {{"items",
+              {{"type", "array"},
+               {"items",
+                object_of(
+                    {{"drive", drive_ref},
+                     {"kind",
+                      {{"type", "string"}, {"enum", {"drive", "folder", "file", "shortcut"}}}},
+                     {"id", nullable_string},
+                     {"parent_id", nullable_string},
+                     {"name", string_schema()},
+                     {"path", string_schema()},
+                     {"folder", string_schema()},
+                     {"size", {{"type", "integer"}, {"minimum", 0}}},
+                     {"content_type", string_schema()},
+                     {"modified_at", string_schema()},
+                     {"target", {{"type", "object"}}},
+                     {"status", {{"type", "string"}, {"enum", {"ok", "broken", "unknown"}}}},
+                     {"reason", string_schema()}},
+                    json::array({"drive", "kind", "id", "parent_id", "name", "path", "folder"}))}}},
+             {"truncated", {{"type", "boolean"}}},
+             {"skipped",
+              {{"type", "array"},
+               {"items",
+                object_of({{"drive", drive_ref}, {"reason", string_schema()}},
+                          json::array({"drive", "reason"}))}}}},
+            json::array({"items", "truncated", "skipped"})),
+        search_drives,
+        true);
 }
 
 liquid::runtime::task<control::ZettaControlResult<WorkspaceFile>>

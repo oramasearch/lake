@@ -80,6 +80,34 @@ the repository**, which open the repository's own pages.
 Every REST call above takes `customer_id` and `workspace_id` with the drive's `drive_id`; a
 repository drive's calls take its `repository_id` and `ref` (`main`) instead.
 
+## Find a File
+
+Type in the box above the list (*Search this drive…*). The items of the open folder are filtered
+as you type; a moment later, **Elsewhere in This Drive** lists every folder, file and shortcut of
+the drive whose name holds what you typed, each with the path of the folder it is in. Press a name
+to open it, or the path under it to open its folder. Names match anywhere in them, ignoring
+capitals; file contents are not searched.
+
+To look in every drive of the workspace at once, use **Data → Search** with **Drives** ticked
+([Search](/docs/search#drives)).
+
+REST: `search_drives` is a read, so it is a `GET` with its inputs as query parameters:
+
+`GET /v1/search_drives?customer_id=<customer id>&workspace_id=<workspace id>&drive_id=<drive id>&q=report`
+
+Leave out `drive_id` to search every drive of the workspace. MCP: `search_drives`, with the same
+inputs as JSON:
+
+```json
+{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "q": "report", "limit": 20}
+```
+
+Each match names its drive, what it is (`drive`, `folder`, `file` or `shortcut`), its `path` and the
+`folder` it is in; a file adds its size, a shortcut what it opens and whether it is broken. A
+repository drive is searched by the names of its paths on `main`, with no modified time. The answer
+lists the first `limit` matches (50 by default, at most 200), says whether more matched
+(`truncated`), and names any repository drive it could not read (`skipped`) with the reason.
+
 ## Add a Shortcut
 
 1. In a workspace-files or virtual drive, press **New shortcut**.
@@ -109,6 +137,7 @@ with `confirm_name`. MCP: the same names.
   file back and records its SHA-256.
 - An upload left unfinished is never listed; delete it with `delete_drive_entry` by its id, or
   start it again.
+- Search matches names only, never what is inside a file; letters A to Z match in either case.
 - A drive's names are unique in the workspace, an item's within its folder. An upload whose name
   is taken in the folder gets the next free name (`notes (2).txt`) unless the call asks to
   `replace` or `refuse`.
