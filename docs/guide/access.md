@@ -12,7 +12,7 @@ Access**.
 | **Object** | Something access is granted on: an account (the owner of workspaces), an organization, a team, a member, a repository, a path in a repository, an environment, a secret mount or a secret. Each object has one parent. |
 | **Action** | What a call does to an object: `read`, `write`, `admin`, `deploy`, `review` or `share`. |
 | **Role** | What a grant gives. `read` permits read; `write` permits read and write; `deploy`, `review` and `share` permit read plus their own action; `admin` permits all six. |
-| **Grant** | One role on one object for one principal (a person's TAAP identity), backed by the digest of a signed attestation and the identity of whoever granted it. |
+| **Grant** | One role on one object for one principal (a person's TAAP identity), backed by the digest of an attestation lake signed and the identity of whoever granted it. |
 | **Direct grant** | A grant attached to the object itself. |
 | **Inherited access** | Access that comes from a grant on an object above it, such as the organization above a team, or the account above a repository. |
 | **Inheritance cut** | An object can stop inheritance (`inherit` false). Grants on that object still count; grants above it do not. |
@@ -98,12 +98,15 @@ There is no form for this in the web app: grants are made by memberships, sharin
 need `admin` on the object.
 
 - REST: `POST /v1/create_grant` with
-  `{"principal_taap_id": "<TAAP identity>", "object_id": "<object id>", "role": "read", "attestation_digest": "<attestation digest>"}`.
+  `{"principal_taap_id": "<TAAP identity>", "object_id": "<object id>", "role": "read"}`.
 - MCP: `create_grant` with the same input.
 
 `role` must be one the object's type allows (see the table above); anything else is refused with
-`invalid_input`. `attestation_digest` names the signed attestation that justifies the grant, kept
-with it as evidence.
+`invalid_input`. lake writes and signs the grant's attestation itself and keeps its digest with the
+grant as evidence; the answer carries it as `attestation` (`statement`, `signer`, `signature`,
+`digest`), so anyone can recompute the digest and check the signature. `attestation_digest` is
+optional and only for repeating a call: lake accepts only the digest it answered for that same
+grant, and refuses any other at `/attestation_digest`.
 
 ## Check What You Can Do
 
@@ -145,6 +148,7 @@ call; the person's grants still decide which objects. A token never does more th
 | `unauthorized` (403) | Your credential is valid but no grant reaches the object with that action. Check **Effective Access** for the object, or ask an admin. |
 | `not_found` | The object does not exist, or you may not see it. Lake does not tell the two apart for objects you cannot read. |
 | `invalid_input` on `create_grant` | The role is not allowed on that object type, or a field is missing. |
+| `invalid_input` at `/attestation_digest` | The call sent a digest lake did not make for this grant. Leave `attestation_digest` out: lake signs the grant's attestation itself. |
 | Access you expected is not inherited | An object between the grant and the target cuts inheritance. Look for the cut on the **Effective Access** page's source column. |
 | A removed member still appears | Their access came from another grant too, such as a direct grant or a second membership. |
 

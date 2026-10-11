@@ -28,6 +28,7 @@
 #include "lake/control/store.hpp"
 #include "lake/control/workspace_records.hpp"
 #include "lake/search/index.hpp"
+#include "lake_attestation.hpp"
 #include "repository_people.hpp"
 #include "workspace_records_api.hpp"
 
@@ -1021,55 +1022,22 @@ std::expected<Recipient, ApiError> resolve_recipient(ApiContext& context,
 // who shared it) and nothing about when, so lake's Ed25519 signature, which is deterministic, and
 // the digest over statement and signature are the same for the same share under the same lake
 // identity: a caller can send back the digest lake answered, never one of its own.
-struct ShareAttestation {
-    json statement;
-    std::string signer;
-    std::string signature;
-    std::string digest;
-};
-
-std::expected<ShareAttestation, ApiError> share_attestation(ApiContext& context,
-                                                            const DriveLocation& location,
-                                                            const std::string& principal_taap_id,
-                                                            const std::string& role) {
-    const audit::IdentityOptions options{.configured_seed = context.identity_seed,
-                                         .instance_kek = context.instance_kek};
-    const auto identity = audit::identity(*context.store, options);
-    if (!identity) {
-        return std::unexpected(
-            ApiError{identity.error().code.empty() ? "store_unavailable" : identity.error().code,
-                     "lake cannot sign the share's attestation: " + identity.error().message,
-                     {}});
-    }
-    ShareAttestation out;
-    out.signer = identity->taap_id;
-    out.statement = {{"type", "lake.drive.share/1"},
-                     {"repository_id", location.repository.id},
-                     {"object_id", location.object.id},
-                     {"node_id", location.node_id},
-                     {"path", location.path},
-                     {"principal_taap_id", principal_taap_id},
-                     {"role", role},
-                     {"granted_by", context.acting_identity},
-                     {"issuer", identity->taap_id}};
-    const std::string body = out.statement.dump();
-    const auto signature =
-        audit::sign_taap(*context.store,
-                         identity->taap_id,
-                         "drive-share",
-                         std::span(reinterpret_cast<const std::byte*>(body.data()), body.size()),
-                         options);
-    if (!signature) {
-        return std::unexpected(
-            ApiError{signature.error().code.empty() ? "store_unavailable" : signature.error().code,
-                     "lake could not sign the share's attestation: " + signature.error().message,
-                     {}});
-    }
-    out.signature = encode_base64(*signature);
-    const json signed_statement{
-        {"statement", out.statement}, {"signer", out.signer}, {"signature", out.signature}};
-    out.digest = "sha256:" + control::drive_sha256_hex(signed_statement.dump());
-    return out;
+// The share's statement, signed by lake (lake#585, `lake_attestation.hpp`).
+std::expected<LakeAttestation, ApiError> share_attestation(ApiContext& context,
+                                                           const DriveLocation& location,
+                                                           const std::string& principal_taap_id,
+                                                           const std::string& role) {
+    return sign_lake_attestation(context,
+                                 {{"type", "lake.drive.share/1"},
+                                  {"repository_id", location.repository.id},
+                                  {"object_id", location.object.id},
+                                  {"node_id", location.node_id},
+                                  {"path", location.path},
+                                  {"principal_taap_id", principal_taap_id},
+                                  {"role", role},
+                                  {"granted_by", context.acting_identity}},
+                                 "drive-share",
+                                 "the share");
 }
 
 json drive_input_schema(bool path_required) {
@@ -1827,14 +1795,9 @@ void register_drive_capabilities(Registry& registry) {
             if (!attestation) {
                 return ApiResult::failure(attestation.error().code, attestation.error().message);
             }
-            if (input.contains("attestation_digest") &&
-                input.at("attestation_digest").get<std::string>() != attestation->digest) {
+            if (auto supplied = check_supplied_digest(input, *attestation, "a share"); !supplied) {
                 return ApiResult::failure(
-                    "invalid_input",
-                    "lake makes and signs a share's attestation itself: leave attestation_digest "
-                    "out. A digest is accepted only when it is the one lake answered for this same "
-                    "folder, person and role.",
-                    "/attestation_digest");
+                    supplied.error().code, supplied.error().message, supplied.error().path);
             }
             auto grant = context.store->create_grant(control::NewGrant{recipient.taap_id,
                                                                        location->object.id,
@@ -1860,10 +1823,7 @@ void register_drive_capabilities(Registry& registry) {
             if (!grant) {
                 return store_error(grant.error());
             }
-            const json signed_statement{{"statement", attestation->statement},
-                                        {"signer", attestation->signer},
-                                        {"signature", attestation->signature},
-                                        {"digest", attestation->digest}};
+            const json signed_statement = attestation->to_json();
             context.audit_customer_id = location->repository.customer_id;
             context.audit_kind = "drive.folder.shared";
             context.audit_object =

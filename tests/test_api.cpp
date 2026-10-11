@@ -51,6 +51,7 @@
 #include "lake/api/web_ui.hpp"
 #include "lake/audit/audit.hpp"
 #include "lake/control/apps.hpp"
+#include "lake/control/drive_files.hpp"
 #include "lake/control/drive_share_links.hpp"
 #include "lake/control/handles.hpp"
 #include "lake/control/identity_crypto.hpp"
@@ -573,6 +574,117 @@ TEST(Metering, CustomerQuotaCapabilityOverridesTheProcessDefault) {
     EXPECT_TRUE(usage.value.at("over_quota"));
 }
 
+// create_membership, accept_invitation and create_grant sign their own attestation and keep its
+// digest as the evidence; a digest that is not lake's is refused at its field and writes nothing
+// (lake#602).
+TEST(Organizations, GrantsAndMembershipsKeepTheDigestOfAStatementLakeSigned) {
+    Surface surface;
+    const ApiResult user = surface.call("create_user",
+                                        {{"taap_id", "taap:1:ed25519:attested"},
+                                         {"email", "attested@example.com"},
+                                         {"display_name", "Attested"}});
+    const ApiResult organization =
+        surface.call("create_organization", {{"display_name", "Attested"}});
+    ASSERT_TRUE(user.ok) << user.error.message;
+    ASSERT_TRUE(organization.ok) << organization.error.message;
+    const auto recomputed = [](const json& attestation) {
+        return "sha256:" + lake::control::drive_sha256_hex(json{
+                               {"statement", attestation["statement"]},
+                               {"signer", attestation["signer"]},
+                               {"signature",
+                                attestation["signature"]}}.dump());
+    };
+
+    // A membership: a made-up digest is refused and nothing is written; without one, lake signs.
+    const json membership_input{{"organization_id", organization.value["id"]},
+                                {"principal_type", "user"},
+                                {"principal_id", user.value["id"]},
+                                {"principal_taap_id", user.value["taap_id"]},
+                                {"role", "member"}};
+    json made_up = membership_input;
+    made_up["attestation_digest"] = "sha512-256:membership";
+    const ApiResult refused = surface.call("create_membership", made_up);
+    EXPECT_EQ(refused.error.code, "invalid_input");
+    EXPECT_EQ(refused.error.path, "/attestation_digest");
+    EXPECT_NE(refused.error.message.find("leave attestation_digest out"), std::string::npos);
+    const ApiResult none =
+        surface.call("list_memberships", {{"organization_id", organization.value["id"]}});
+    ASSERT_TRUE(none.ok) << none.error.message;
+    EXPECT_TRUE(none.value["items"].empty()) << "a refused digest writes nothing";
+    const ApiResult membership = surface.call("create_membership", membership_input);
+    ASSERT_TRUE(membership.ok) << membership.error.message;
+    const json& signed_membership = membership.value["attestation"];
+    const std::string membership_digest = signed_membership["digest"];
+    EXPECT_TRUE(membership_digest.starts_with("sha256:")) << membership_digest;
+    EXPECT_EQ(membership.value["attestation_digest"], membership_digest);
+    EXPECT_EQ(recomputed(signed_membership), membership_digest);
+    EXPECT_EQ(signed_membership["statement"]["type"], "lake.org_membership/1");
+    EXPECT_EQ(signed_membership["statement"]["role"], "member");
+    EXPECT_EQ(signed_membership["statement"]["principal_taap_id"], "taap:1:ed25519:attested");
+    EXPECT_EQ(signed_membership["statement"]["granted_by"], "admin");
+    EXPECT_EQ(signed_membership["signer"], signed_membership["statement"]["issuer"]);
+    EXPECT_FALSE(signed_membership["signature"].get<std::string>().empty());
+    const ApiResult read = surface.call("get_membership", {{"id", membership.value["id"]}});
+    ASSERT_TRUE(read.ok) << read.error.message;
+    EXPECT_EQ(read.value["attestation_digest"], membership_digest);
+
+    // A grant on the organization: the same rule, and lake's own digest is accepted.
+    const auto object = surface.store.find_policy_object("organization", organization.value["id"]);
+    ASSERT_TRUE(object) << object.error().message;
+    const json grant_input{{"principal_taap_id", "taap:1:ed25519:reader"},
+                           {"object_id", object->id},
+                           {"role", "read"}};
+    json made_up_grant = grant_input;
+    made_up_grant["attestation_digest"] = "sha512-256:grant";
+    const ApiResult refused_grant = surface.call("create_grant", made_up_grant);
+    EXPECT_EQ(refused_grant.error.code, "invalid_input");
+    EXPECT_EQ(refused_grant.error.path, "/attestation_digest");
+    const ApiResult grant = surface.call("create_grant", grant_input);
+    ASSERT_TRUE(grant.ok) << grant.error.message;
+    const json& signed_grant = grant.value["attestation"];
+    EXPECT_EQ(grant.value["attestation_digest"], signed_grant["digest"]);
+    EXPECT_EQ(recomputed(signed_grant), signed_grant["digest"].get<std::string>());
+    EXPECT_EQ(signed_grant["statement"]["type"], "lake.grant/1");
+    EXPECT_EQ(signed_grant["statement"]["object_id"], object->id);
+    // The digest lake answered names this grant only: for another role it is refused; for the same
+    // grant it passes the check and the store answers that the grant exists.
+    json other_role = grant_input;
+    other_role["role"] = "write";
+    other_role["attestation_digest"] = signed_grant["digest"];
+    EXPECT_EQ(surface.call("create_grant", other_role).error.path, "/attestation_digest");
+    json repeated = grant_input;
+    repeated["attestation_digest"] = signed_grant["digest"];
+    EXPECT_EQ(surface.call("create_grant", repeated).error.code, "conflict");
+
+    // An invitation accepted on someone's behalf: the statement names the invitation and its role.
+    const ApiResult guest = surface.call("create_user",
+                                         {{"taap_id", "taap:1:ed25519:guest"},
+                                          {"email", "guest@example.com"},
+                                          {"display_name", "Guest"}});
+    ASSERT_TRUE(guest.ok) << guest.error.message;
+    const ApiResult invitation = surface.call("create_invitation",
+                                              {{"organization_id", organization.value["id"]},
+                                               {"invitee_type", "email"},
+                                               {"invitee", "guest@example.com"},
+                                               {"role", "admin"},
+                                               {"expires_at", "2999-01-01T00:00:00Z"}});
+    ASSERT_TRUE(invitation.ok) << invitation.error.message;
+    const json accept_input{{"invitation_id", invitation.value["id"]},
+                            {"principal_type", "user"},
+                            {"principal_id", guest.value["id"]},
+                            {"principal_taap_id", guest.value["taap_id"]}};
+    json made_up_accept = accept_input;
+    made_up_accept["attestation_digest"] = "sha512-256:accepted";
+    EXPECT_EQ(surface.call("accept_invitation", made_up_accept).error.path, "/attestation_digest");
+    const ApiResult accepted = surface.call("accept_invitation", accept_input);
+    ASSERT_TRUE(accepted.ok) << accepted.error.message;
+    const json& signed_accept = accepted.value["attestation"];
+    EXPECT_EQ(accepted.value["attestation_digest"], signed_accept["digest"]);
+    EXPECT_EQ(recomputed(signed_accept), signed_accept["digest"].get<std::string>());
+    EXPECT_EQ(signed_accept["statement"]["invitation_id"], invitation.value["id"]);
+    EXPECT_EQ(signed_accept["statement"]["role"], "admin");
+}
+
 TEST(Organizations, MemberMutationCapabilitiesUseTheRegistry) {
     Surface surface;
     const ApiResult first = surface.call("create_user",
@@ -594,8 +706,7 @@ TEST(Organizations, MemberMutationCapabilitiesUseTheRegistry) {
                              {"principal_type", "user"},
                              {"principal_id", user.value.at("id")},
                              {"principal_taap_id", user.value.at("taap_id")},
-                             {"role", role},
-                             {"attestation_digest", "sha512-256:membership"}});
+                             {"role", role}});
     };
     const ApiResult first_membership = create(first, "owner");
     const ApiResult second_membership = create(second, "owner");
@@ -5017,8 +5128,7 @@ TEST(Drive, SharingByEmailOrHandleIsAttestedByLake) {
                                                {"principal_type", "user"},
                                                {"principal_id", member->value["id"]},
                                                {"principal_taap_id", member->value["taap_id"]},
-                                               {"role", member == &owner ? "owner" : "member"},
-                                               {"attestation_digest", "sha512-256:membership"}});
+                                               {"role", member == &owner ? "owner" : "member"}});
         ASSERT_TRUE(joined.ok) << joined.error.message;
     }
     const ApiResult repository = surface.call(

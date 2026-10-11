@@ -195,8 +195,7 @@ void check_membership(HttpEvidence& http, const json& user) {
                                        {"principal_type", "user"},
                                        {"principal_id", user.at("id")},
                                        {"principal_taap_id", user.at("taap_id")},
-                                       {"role", "member"},
-                                       {"attestation_digest", "sha512-256:schema-membership"}});
+                                       {"role", "member"}});
     http.call("remove_member", {{"id", membership.at("id")}});
 }
 

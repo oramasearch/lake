@@ -1,6 +1,7 @@
 #include "lake/api/capabilities.hpp"
 #include "lake/api/images.hpp"
 #include "audit_logs.hpp"
+#include "lake_attestation.hpp"
 #include "repository_records_api.hpp"
 #include "lake/api/audit_routing.hpp"
 #include "lake/api/metering_recorder.hpp"
@@ -1139,6 +1140,16 @@ json team_schema() {
               {"created_at", {{"type", "string"}}},
               {"updated_at", {{"type", "string"}}}}}};
 }
+// The statement lake signed for a grant or membership it just wrote (lake#602); only the create
+// calls answer it.
+json attestation_schema() {
+    return {{"type", "object"},
+            {"properties",
+             {{"statement", {{"type", "object"}}},
+              {"signer", {{"type", "string"}}},
+              {"signature", {{"type", "string"}}},
+              {"digest", {{"type", "string"}}}}}};
+}
 json membership_schema() {
     return {{"type", "object"},
             {"properties",
@@ -1152,7 +1163,8 @@ json membership_schema() {
               {"attestation_digest", {{"type", "string"}}},
               {"granted_by_taap_id", {{"type", "string"}}},
               {"created_at", {{"type", "string"}}},
-              {"updated_at", {{"type", "string"}}}}}};
+              {"updated_at", {{"type", "string"}}},
+              {"attestation", attestation_schema()}}}};
 }
 json invitation_schema() {
     return {{"type", "object"},
@@ -1192,7 +1204,8 @@ json grant_schema() {
               {"attestation_digest", {{"type", "string"}}},
               {"granted_by_taap_id", {{"type", "string"}}},
               {"created_at", {{"type", "string"}}},
-              {"updated_at", {{"type", "string"}}}}}};
+              {"updated_at", {{"type", "string"}}},
+              {"attestation", attestation_schema()}}}};
 }
 json list_schema(json item) {
     return {{"type", "object"},
@@ -1709,6 +1722,25 @@ template <class T> ApiResult one_result(control::Result<T> row) {
     if (!row)
         return from_store_error(row.error());
     return ApiResult::success(control::to_json(*row));
+}
+
+ApiResult attestation_failure(const ApiError& error) {
+    return ApiResult::failure(error.code, error.message, error.path);
+}
+
+// A grant or membership written with the attestation lake signed for it (lake#602): the answer is
+// the row plus `attestation: {statement, signer, signature, digest}`, and the audit event carries
+// the same.
+template <class T>
+ApiResult
+attested_result(control::Result<T> row, const LakeAttestation& attestation, ApiContext& context) {
+    if (!row) {
+        return from_store_error(row.error());
+    }
+    json value = control::to_json(*row);
+    value["attestation"] = attestation.to_json();
+    context.audit_details["attestation"] = attestation.to_json();
+    return ApiResult::success(std::move(value));
 }
 
 bool known_token_scope(const std::string& scope, const Registry* registry) {
@@ -4629,8 +4661,9 @@ void register_organization_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "create_membership",
         .title = "Create membership",
-        .description = "Grant owner, admin, or member in an organization or team "
-                       "using TAAP evidence.",
+        .description = "Grant owner, admin, or member in an organization or team. Lake signs the "
+                       "membership's attestation itself and keeps its digest as evidence; "
+                       "attestation_digest is optional and accepted only when it is lake's.",
         .input_schema =
             {{"type", "object"},
              {"properties",
@@ -4647,8 +4680,7 @@ void register_organization_capabilities(Registry& registry) {
                            "principal_type",
                            "principal_id",
                            "principal_taap_id",
-                           "role",
-                           "attestation_digest"})},
+                           "role"})},
              {"additionalProperties", false}},
         .output_schema = membership_schema(),
         .kind = CapabilityKind::Action,
@@ -4656,16 +4688,40 @@ void register_organization_capabilities(Registry& registry) {
         .action = "admin",
         .resolve_object = scope_object,
         .handler = [](const json& in, ApiContext& ctx) {
-            return one_result(
+            if (!ctx.store) {
+                return no_store();
+            }
+            const auto attestation =
+                sign_lake_attestation(ctx,
+                                      {{"type", "lake.org_membership/1"},
+                                       {"organization_id", in.at("organization_id")},
+                                       {"team_id", in.value("team_id", "")},
+                                       {"principal_type", in.at("principal_type")},
+                                       {"principal_id", in.at("principal_id")},
+                                       {"principal_taap_id", in.at("principal_taap_id")},
+                                       {"role", in.at("role")},
+                                       {"granted_by", ctx.acting_identity}},
+                                      "org-membership",
+                                      "the membership");
+            if (!attestation) {
+                return attestation_failure(attestation.error());
+            }
+            if (auto supplied = check_supplied_digest(in, *attestation, "a membership");
+                !supplied) {
+                return attestation_failure(supplied.error());
+            }
+            return attested_result(
                 ctx.store->create_membership(control::NewMembership{in.at("organization_id"),
                                                                     in.value("team_id", ""),
                                                                     in.at("principal_type"),
                                                                     in.at("principal_id"),
                                                                     in.at("principal_taap_id"),
                                                                     in.at("role"),
-                                                                    in.at("attestation_digest"),
+                                                                    attestation->digest,
                                                                     ctx.acting_identity,
-                                                                    ctx.request_id}));
+                                                                    ctx.request_id}),
+                *attestation,
+                ctx);
         }});
     registry.add(
         Capability{.name = "get_membership",
@@ -4802,36 +4858,65 @@ void register_organization_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "accept_invitation",
         .title = "Accept invitation",
-        .description = "Accept a pending invitation into an attested membership.",
-        .input_schema = {{"type", "object"},
-                         {"properties",
-                          {{"invitation_id", {{"type", "string"}}},
-                           {"principal_type",
-                            {{"type", "string"}, {"enum", json::array({"user", "workload"})}}},
-                           {"principal_id", {{"type", "string"}}},
-                           {"principal_taap_id", {{"type", "string"}}},
-                           {"attestation_digest", {{"type", "string"}}}}},
-                         {"required",
-                          json::array({"invitation_id",
-                                       "principal_type",
-                                       "principal_id",
-                                       "principal_taap_id",
-                                       "attestation_digest"})},
-                         {"additionalProperties", false}},
+        .description = "Accept a pending invitation into a membership. Lake signs the membership's "
+                       "attestation itself; attestation_digest is optional and accepted only when "
+                       "it is lake's.",
+        .input_schema =
+            {{"type", "object"},
+             {"properties",
+              {{"invitation_id", {{"type", "string"}}},
+               {"principal_type",
+                {{"type", "string"}, {"enum", json::array({"user", "workload"})}}},
+               {"principal_id", {{"type", "string"}}},
+               {"principal_taap_id", {{"type", "string"}}},
+               {"attestation_digest", {{"type", "string"}}}}},
+             {"required",
+              json::array(
+                  {"invitation_id", "principal_type", "principal_id", "principal_taap_id"})},
+             {"additionalProperties", false}},
         .output_schema = membership_schema(),
         .kind = CapabilityKind::Action,
         .object = "invitation scope",
         .action = "admin",
         .resolve_object = invitation_object,
         .handler = [](const json& in, ApiContext& ctx) {
-            return one_result(
+            if (!ctx.store) {
+                return no_store();
+            }
+            const auto invitation = ctx.store->get_invitation(in.at("invitation_id"));
+            if (!invitation) {
+                return from_store_error(invitation.error());
+            }
+            const auto attestation =
+                sign_lake_attestation(ctx,
+                                      {{"type", "lake.org_membership/1"},
+                                       {"invitation_id", invitation->id},
+                                       {"organization_id", invitation->organization_id},
+                                       {"team_id", invitation->team_id},
+                                       {"principal_type", in.at("principal_type")},
+                                       {"principal_id", in.at("principal_id")},
+                                       {"principal_taap_id", in.at("principal_taap_id")},
+                                       {"role", invitation->role},
+                                       {"granted_by", ctx.acting_identity}},
+                                      "org-membership",
+                                      "the membership");
+            if (!attestation) {
+                return attestation_failure(attestation.error());
+            }
+            if (auto supplied = check_supplied_digest(in, *attestation, "a membership");
+                !supplied) {
+                return attestation_failure(supplied.error());
+            }
+            return attested_result(
                 ctx.store->accept_invitation(control::AcceptInvitation{in.at("invitation_id"),
                                                                        in.at("principal_type"),
                                                                        in.at("principal_id"),
                                                                        in.at("principal_taap_id"),
-                                                                       in.at("attestation_digest"),
+                                                                       attestation->digest,
                                                                        ctx.acting_identity,
-                                                                       ctx.request_id}));
+                                                                       ctx.request_id}),
+                *attestation,
+                ctx);
         }});
 
     // ---- organizations a person runs themselves ----
@@ -5079,7 +5164,10 @@ void register_policy_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "create_grant",
         .title = "Create grant",
-        .description = "Grant a policy role on an object using a TAAP attestation digest.",
+        .description =
+            "Grant a policy role on an object. Lake signs the grant's attestation itself "
+            "and keeps its digest as evidence; attestation_digest is optional and "
+            "accepted only when it is lake's.",
         .input_schema =
             {{"type", "object"},
              {"properties",
@@ -5089,8 +5177,7 @@ void register_policy_capabilities(Registry& registry) {
                 {{"type", "string"},
                  {"enum", json::array({"read", "write", "admin", "deploy", "review", "share"})}}},
                {"attestation_digest", {{"type", "string"}}}}},
-             {"required",
-              json::array({"principal_taap_id", "object_id", "role", "attestation_digest"})},
+             {"required", json::array({"principal_taap_id", "object_id", "role"})},
              {"additionalProperties", false}},
         .output_schema = grant_schema(),
         .kind = CapabilityKind::Action,
@@ -5098,12 +5185,33 @@ void register_policy_capabilities(Registry& registry) {
         .action = "admin",
         .resolve_object = direct_object("object_id"),
         .handler = [](const json& in, ApiContext& ctx) {
-            return one_result(ctx.store->create_grant(control::NewGrant{in.at("principal_taap_id"),
-                                                                        in.at("object_id"),
-                                                                        in.at("role"),
-                                                                        in.at("attestation_digest"),
-                                                                        ctx.acting_identity,
-                                                                        ctx.request_id}));
+            if (!ctx.store) {
+                return no_store();
+            }
+            const auto attestation =
+                sign_lake_attestation(ctx,
+                                      {{"type", "lake.grant/1"},
+                                       {"object_id", in.at("object_id")},
+                                       {"principal_taap_id", in.at("principal_taap_id")},
+                                       {"role", in.at("role")},
+                                       {"granted_by", ctx.acting_identity}},
+                                      "grant",
+                                      "the grant");
+            if (!attestation) {
+                return attestation_failure(attestation.error());
+            }
+            if (auto supplied = check_supplied_digest(in, *attestation, "a grant"); !supplied) {
+                return attestation_failure(supplied.error());
+            }
+            return attested_result(
+                ctx.store->create_grant(control::NewGrant{in.at("principal_taap_id"),
+                                                          in.at("object_id"),
+                                                          in.at("role"),
+                                                          attestation->digest,
+                                                          ctx.acting_identity,
+                                                          ctx.request_id}),
+                *attestation,
+                ctx);
         }});
     registry.add(Capability{
         .name = "effective_access",
