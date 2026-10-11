@@ -6,8 +6,9 @@ import type { ComponentType, LazyExoticComponent } from "react";
 /** Who may see a page in the rail: V visitor, A signed-in account holder, O the operator. */
 export type Audience = "visitor" | "account" | "operator";
 
-/** The rail's groups, in order. "top" items have no group label. */
-export type SectionKey = "top" | "data" | "design" | "train" | "ship" | "organization" | "administration" | "developer" | "account" | "none";
+/** The rail's groups, in order. "top" items have no group label; "home" is a signed-in person's
+ * Home group (Ask Orama, Dashboard). */
+export type SectionKey = "top" | "home" | "data" | "design" | "train" | "ship" | "organization" | "administration" | "developer" | "account" | "none";
 
 export type Screen = {
   /** The router pattern, without the `/w/:workspaceId` prefix. Keep lake's existing URL and query

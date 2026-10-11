@@ -478,3 +478,88 @@ html[data-resizing-ask] .ask-panel {
   max-width: 880px;
   margin-inline: auto;
 }
+
+/* The Ask Orama home (lake#600): the conversation fills the page below the shell bar, in one centred
+   readable column like the expanded panel, its message box at the foot. */
+.ask-home {
+  display: flex;
+  flex-direction: column;
+  height: calc(100dvh - 50px);
+}
+.ask-home-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: var(--lake-space-6, 24px) var(--lake-space-4, 16px);
+}
+.ask-home-foot {
+  border-top: var(--lake-border-width) solid var(--lake-border-subtle);
+  padding: var(--lake-space-3, 12px) var(--lake-space-4, 16px) calc(var(--lake-space-3, 12px) + env(safe-area-inset-bottom));
+  background: var(--lake-surface);
+}
+.ask-home :is(.ask-home-scroll, .ask-home-foot) > * {
+  max-width: 880px;
+  margin-inline: auto;
+}
+.ask-home-welcome {
+  margin: 8vh 0 var(--lake-space-6, 24px);
+}
+.ask-home-welcome .eyebrow,
+.ask-home-bar .eyebrow {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.ask-home-welcome h1 {
+  margin: 0 0 var(--lake-space-2, 8px);
+}
+.ask-home-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--lake-space-3, 12px);
+  margin-bottom: var(--lake-space-3, 12px);
+}
+.ask-home-from {
+  display: flex;
+  align-items: center;
+  gap: var(--lake-space-2, 8px);
+  margin: 0 0 var(--lake-space-2, 8px);
+}
+.ask-starter-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 260px), 1fr));
+  gap: var(--lake-space-2, 8px);
+}
+/* The message box takes the column's width (lake.css caps a form.stack at 36rem). */
+.ask-home form.ask-composer {
+  max-width: none;
+}
+.ask-starter {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  height: auto;
+  min-height: 56px;
+  white-space: normal;
+  line-height: 1.4;
+  border: var(--lake-border-width) solid var(--lake-border-subtle);
+  border-radius: 6px;
+  padding: var(--lake-space-3, 12px);
+  color: var(--lake-text-primary);
+  background: var(--lake-surface);
+  text-align: left;
+  font-weight: var(--lake-weight-regular);
+  cursor: pointer;
+  transition: border-color 120ms;
+}
+.ask-starter:hover:not(:disabled),
+.ask-starter:focus-visible {
+  border-color: var(--lake-action, currentColor);
+}
+.ask-starter-loading {
+  background: var(--lake-raised, transparent);
+  cursor: default;
+}

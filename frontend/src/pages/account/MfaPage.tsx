@@ -9,7 +9,7 @@ import { useToast } from "@/lib/toast";
 import { useTrail } from "@/lib/trail";
 import { ShieldCheck } from "lucide-react";
 import { Banner, Button, Card, CopyBlock, Field, fieldError, Form, Notice, Page, Split, Status } from "@/lib/ui";
-import { leaveFor, messageOf, NO_WORKSPACE, returnTarget } from "./signIn";
+import { landingAfterSignIn, leaveFor, messageOf, NO_WORKSPACE, returnTarget } from "./signIn";
 import "@/styles/account.css";
 
 export default function MfaPage() {
@@ -135,7 +135,7 @@ function Challenge() {
     setError(null);
     try {
       await act("verify_mfa", { email, password, code, device_name: deviceName }, NO_WORKSPACE);
-      leaveFor(returnTarget(location.search, "/sessions"));
+      leaveFor(returnTarget(location.search, landingAfterSignIn(false)));
     } catch (e) {
       setError(e);
       setBusy(false);

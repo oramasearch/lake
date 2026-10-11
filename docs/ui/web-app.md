@@ -37,7 +37,7 @@ Orama design tokens, the same IBM Plex faces and the same component classes the 
 | `src/lib/session.tsx` | `useSession()`: the `viewer` read (who is signed in, the operator, the spaces and their workspaces, Clerk), the current workspace and space. |
 | `src/lib/trail.tsx` | `useTrail([...])` sets a page's breadcrumb; `entityCrumb` shortens ids. |
 | `src/lib/format.ts` | Dates (a date-only value keeps its day in every time zone), numbers, `bytes`, `shortId`. |
-| `src/routes.tsx`, `src/routes/types.ts` | The route registry. Each page group owns `src/pages/<group>/routes.ts`; `routes.tsx` joins them and holds the rail (`NAV`) in lake's order. |
+| `src/routes.tsx`, `src/routes/types.ts`, `src/routes/nav.ts` | The route registry. Each page group owns `src/pages/<group>/routes.ts`; `routes.tsx` joins them and holds the rail (`NAV`) in lake's order. `nav.ts` holds the rules that need no page code: the Home group (`HOME_NAV`) and which rail item a path makes current (`currentNavIn`), tested by `tests/home.test.ts`. |
 | `src/components/Shell.tsx` | The rail, top bar, breadcrumb, workspace picker, Go to (⌘K or `/`), theme switch, Ask Orama panel and account menu ([README.md](README.md#the-shell)). |
 | `src/components/WorkspaceGate.tsx` | The gate a Design, Train or Ship page shows while its workspace Zetta is not ready: why, Start, or the page. |
 | `src/lib/markdown.tsx` | Markdown with lake's heading anchors; raw HTML stays text. |
@@ -45,7 +45,8 @@ Orama design tokens, the same IBM Plex faces and the same component classes the 
 | `src/lib/dictation.ts`, `src/components/dictation/Dictate.tsx`, `src/components/phone/FromYourPhone.tsx` | The microphone (`useRecorder`, `DictateButton`, `RecordingBar`) sending to `transcribe`, and the help for bringing a recording from a phone. |
 | `src/lib/transcripts.ts`, `src/pages/transcripts/` | Data → Transcripts ([transcripts.md](transcripts.md)). |
 | `src/pages/drives/` | Data → Drives: `storage.ts` (the `DriveStorage` interface and its three implementations), `paths.ts` and `targets.ts` (pure, tested by `tests/drives.test.ts`) ([drives.md](drives.md)). |
-| `src/lib/ask.ts`, `src/components/follow.tsx` | `openAsk` (a page opens Ask Orama about something) and `useFollow` (a conversation follows new answers unless the person scrolled up). |
+| `src/lib/ask.ts`, `src/components/follow.tsx` | `openAsk` (a page opens Ask Orama about something), `focusAsk` (the top bar's Ask Orama on the home puts the cursor in its message box) and `useFollow` (a conversation follows new answers unless the person scrolled up). |
+| `src/pages/ask/` | Ask Orama: `AskHome.tsx` (the home of a signed-in person, `/`), `thread.ts` (the conversation the home and the panel share), `conversation.tsx` (messages, proposals, the message box), `home.ts` (what `/` shows each viewer, old `/ask` and `/?ws=` links, a link's hand-over, the starting questions; pure, tested by `tests/home.test.ts`) and `AskRedirect.tsx` (`/ask` to `/`). |
 
 ## The look
 
@@ -189,7 +190,7 @@ Nothing stored in the browser is a credential or an API default.
 | `lake-rail` | `localStorage` | whether the rail is collapsed |
 | `lake-workspace` | `localStorage` | the last workspace opened under `/w/<id>/`; navigation memory only ([workspace-selection.md](workspace-selection.md)) |
 | `lake-app-events:<app>`, `lake-build-events:<build>` | `localStorage` | the next event sequence to read, so reopening an app resumes |
-| `lake-ask-panel:<workspace>` | `sessionStorage` | the Ask Orama panel's conversation, task and agent for this tab |
+| `lake-ask-panel:<workspace>` | `sessionStorage` | the Ask Orama conversation, task and agent for this tab, shared by the panel and the home (`/`) |
 | `lake-chunk-reload` | `sessionStorage` | when the page last reloaded for a missing chunk |
 | `lake-speech-to-text` | `sessionStorage` | `off` once lake answered `not_supported` to a transcription: the microphones stay hidden for the tab |
 
