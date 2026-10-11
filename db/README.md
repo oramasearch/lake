@@ -328,3 +328,11 @@ Migration `0074_payment_provider` (lake#620, decision 57) adds Stripe's records:
 states and URLs only: no key and no card. Nothing is dropped; idempotent. The latest guard is
 `payment_provider_guard`; the operator must vendor this schema and select that guard before
 rollout. See [schema.md](../docs/control-plane/schema.md#payment-provider-migration).
+
+Migration `0075_workload_resources` (lake#643) adds `workload_resources`, the resources the Orama
+operator schedules each workload with (CPU millicores, memory, GPUs, GPU class and GPU memory,
+written only by the operator), and a `class` on `billing_plan_prices` (now keyed by plan,
+dimension and class) and `billing_invoice_lines`, so GPU time can carry a rate per class. Numbers
+only; usage stays in each workspace Zetta. Nothing is dropped; idempotent. The latest guard is
+`workload_resources_guard`; the operator must vendor this schema, select that guard and report the
+resources before rollout. See [schema.md](../docs/control-plane/schema.md#workload-resources-migration).
