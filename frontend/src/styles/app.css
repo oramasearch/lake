@@ -310,34 +310,60 @@ button:disabled:hover {
 
 .palette {
   width: 100%;
-  max-width: 38rem;
+  max-width: 40rem;
+  display: flex;
+  flex-direction: column;
+  max-height: 80vh;
   overflow: hidden;
   border: var(--lake-border-width) solid var(--lake-border-subtle);
   border-radius: var(--lake-overlay-radius);
   background: var(--lake-overlay);
   box-shadow: var(--lake-shadow-dialog);
 }
+/* The query, with its icon and a close control (the only one a phone has). */
+.palette-input {
+  display: flex;
+  align-items: center;
+  gap: var(--lake-space-2);
+  padding: 0 var(--lake-space-3) 0 var(--lake-space-4);
+  border-bottom: var(--lake-border-width) solid var(--lake-border-subtle);
+}
 .palette input {
+  flex: 1;
+  min-width: 0;
   width: 100%;
   min-height: var(--lake-control-lg);
   border: 0;
-  border-bottom: var(--lake-border-width) solid var(--lake-border-subtle);
   border-radius: 0;
-  padding: 0 var(--lake-space-4);
+  padding: 0;
+  background: transparent;
   font-size: var(--lake-text-16);
 }
 .palette input:focus-visible {
   outline: none;
+  border: 0;
+  box-shadow: none;
+}
+.palette .palette-close {
+  min-height: 0;
+  border: 0;
+  padding: 0;
+  background: transparent;
 }
 .palette ul {
-  max-height: 55vh;
+  flex: 1;
+  min-height: 0;
+  max-height: 60vh;
   overflow: auto;
   margin: 0;
   padding: var(--lake-space-1) 0;
   list-style: none;
 }
 .palette-group {
-  padding: var(--lake-space-2) var(--lake-space-4) var(--lake-space-1);
+  display: flex;
+  align-items: center;
+  gap: var(--lake-space-2);
+  padding: var(--lake-space-3) var(--lake-space-4) var(--lake-space-1);
   color: var(--lake-text-tertiary);
   font-size: var(--lake-text-11);
   font-weight: var(--lake-weight-semibold);
@@ -349,6 +375,7 @@ button:disabled:hover {
   align-items: center;
   justify-content: space-between;
   gap: var(--lake-space-3);
+  min-width: 0;
   padding: var(--lake-space-2) var(--lake-space-4);
   color: var(--lake-text-primary);
   cursor: pointer;
@@ -357,7 +384,60 @@ button:disabled:hover {
   background: var(--lake-selected);
 }
 .palette-item small {
+  flex-shrink: 0;
   color: var(--lake-text-tertiary);
+}
+/* A place's hit: its title, then a muted line saying where it lives or what around it matched. */
+.palette-hit {
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: flex-start;
+  gap: 1px;
+}
+.palette-title {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: var(--lake-space-2);
+}
+.palette-where {
+  overflow: hidden;
+  color: var(--lake-text-tertiary);
+  font-size: var(--lake-text-12);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.palette-note {
+  padding: var(--lake-space-1) var(--lake-space-4) var(--lake-space-2);
+  color: var(--lake-text-tertiary);
+  font-size: var(--lake-text-12);
+}
+.palette-all {
+  margin-top: var(--lake-space-1);
+  border-top: var(--lake-border-width) solid var(--lake-border-subtle);
+  color: var(--lake-action);
+}
+/* On a phone the search is the whole screen, its results filling what the keyboard leaves. */
+@media (max-width: 47.99rem) {
+  .overlay-center:has(> .palette) {
+    padding: 0;
+  }
+  .overlay-center > .palette {
+    max-width: none;
+    height: 100dvh;
+    max-height: none;
+    border: 0;
+    border-radius: 0;
+  }
+  .overlay-center > .palette ul {
+    max-height: none;
+  }
+  .palette-item {
+    min-height: 44px;
+  }
+  .palette-foot {
+    display: none;
+  }
 }
 
 /* ---------------------------------------------------------------- session ended */

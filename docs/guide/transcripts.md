@@ -201,6 +201,6 @@ recordings transcribe well within it. Split a long recording, or upload its text
 
 - [Using Lake on a Phone](/docs/phone)
 - [Ask Orama](/docs/ask-orama)
-- [Search](/docs/search): transcripts are one of the places it looks
+- [Search](/docs/search): transcripts are one of the places it looks, in every workspace you have, from the top bar's search box too
 - [Workspaces](/docs/workspaces)
 - [Security Model](/docs/security)

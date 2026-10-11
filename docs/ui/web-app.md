@@ -55,7 +55,7 @@ The app follows rev-os's visual language on lake's own colours and type (Steve, 
 - a 2px brand strip;
 - a 232px rail of lake's groups with lucide icons, where the current group is open and lists its
   pages on a hairline;
-- a slim, blurred top bar with the breadcrumb, a workspace pill, a search box (⌘K) and Ask Orama;
+- a slim, blurred top bar with the breadcrumb, a workspace pill, a search box (⌘K) that searches everything ([README.md](README.md), lake#633) and Ask Orama;
 - mono uppercase kickers for eyebrows, section titles, table heads and field labels;
 - 6px hairline cards and tables;
 - 32px controls;
