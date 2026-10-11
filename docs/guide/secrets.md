@@ -109,6 +109,9 @@ already exists becomes that secret's next version, checked the same way.
   `{"mount_id": "<mount id>", "name": "database/password", "value": {"password": "<the password>"}}`.
 - MCP: `put_secret`.
 
+The answer is the new version's metadata (`version`, `created_at`, `custom_metadata`), never the
+value, so a script's log or an agent's transcript does not keep it. Read it back with `read_secret`.
+
 The first write is version 1; each later write adds the next version. Two optional fields:
 
 - `custom_metadata`, an object kept with the secret (non-empty metadata replaces what was there;

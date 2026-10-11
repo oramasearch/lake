@@ -420,7 +420,9 @@ void register_static_secret_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "put_secret",
         .title = "Put secret",
-        .description = "Create a new immutable version of a key-value secret.",
+        .description = "Create a new immutable version of a key-value secret. Answers the new "
+                       "version's metadata (version, times, custom_metadata), never the value: "
+                       "read_secret is the one call that returns a value.",
         .input_schema = mount_input({{"name", {{"type", "string"}}},
                                      {"value", {{"type", "object"}}},
                                      {"custom_metadata", {{"type", "object"}}},
@@ -441,10 +443,14 @@ void register_static_secret_capabilities(Registry& registry) {
             auto result = control::settled(
                 co_await mount.put({input.at("mount_id"), input.at("name"), input.at("value"),
                                     input.value("custom_metadata", json::object()), *check}));
-            if (result) {
-                context.audit_details["version"] = result->version;
+            if (!result) {
+                co_return secret_records_failure(result.error());
             }
-            co_return one_result(result);
+            context.audit_details["version"] = result->version;
+            // Never the value (lake#590): a tool's answer lands in agent transcripts and logs.
+            json written = control::to_json(*result);
+            written.erase("value");
+            co_return ApiResult::success(std::move(written));
         })});
     registry.add(Capability{
         .name = "read_secret",

@@ -97,6 +97,10 @@ TEST_F(SecretsCapabilities, VersionHistoryDeleteUndeleteAndDestroy) {
                                   {"custom_metadata", {{"owner", "payments"}}}});
     ASSERT_TRUE(first.ok) << first.error.message;
     EXPECT_EQ(first.value.at("version"), 1);
+    // put_secret answers metadata only; read_secret is the one call with a value (lake#590).
+    EXPECT_FALSE(first.value.contains("value")) << first.value.dump();
+    EXPECT_EQ(first.value.dump().find("first"), std::string::npos) << first.value.dump();
+    EXPECT_EQ(first.value.at("name"), "database");
     const ApiResult second = call("put_secret",
                                   {{"mount_id", mount_id},
                                    {"name", "database"},
