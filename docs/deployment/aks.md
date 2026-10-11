@@ -129,6 +129,15 @@ whose values come from a Kubernetes Secret through `valueFrom.secretKeyRef`, nev
 CR. The schema must first carry `0074_payment_provider` (guard `payment_provider_guard`), and
 billing must be on (above).
 
+**On this cluster today** (2026-10-11, Steve: *"set the stripe keys (blank or xxx by default)"*):
+the Secret `lake-prod-stripe` exists in namespace `lake` with **blank** `secret_key` and
+`webhook_secret`, and `Lake/prod` already carries both `spec.env` entries pointing at it (step 3
+below is done). Blank keys leave lake on the manual provider, and `server_info` says so
+(`"payment_provider": "manual"`). To turn Stripe on, set the two values (step 2, with
+`--dry-run=client -o yaml | kubectl apply -f -`, since the Secret exists) and roll lake
+(`kubectl rollout restart deployment/lake-prod -n lake`). Then register the webhook (step 1) and
+check (step 4).
+
 1. **Stripe.** In the Stripe dashboard, in test mode first: Developers → API keys, the secret key
    (`sk_test_...`), or a restricted key with write access to Customers, Invoices and Invoice Items.
    Developers → Webhooks → Add endpoint: `https://lake.oramadev.net/billing/stripe/webhook` (on
