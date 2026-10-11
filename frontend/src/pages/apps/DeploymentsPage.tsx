@@ -1,15 +1,17 @@
 /** Ship → Deployments (web_ui.cpp web_ui_deployments; serve_deployments_page): every environment
  * across the repositories the viewer can open, read per repository as the server did, with their
  * figures, a search and a phase filter. A repository whose environments cannot be read is
- * skipped. */
+ * skipped. `server_info` says first whether Deployments are set up, so a lake without them is
+ * asked once, not once per repository (lake#605, `deployments.ts`). */
 import { useState } from "react";
 import { Link } from "react-router-dom";
 import { useQueries } from "@tanstack/react-query";
 import { FolderGit2, Globe, Rocket } from "lucide-react";
-import { read, useList, type Row } from "@/lib/api";
+import { read, useList, useRead, type Row } from "@/lib/api";
 import { isNotSetUp } from "@/lib/errors";
 import { relative } from "@/lib/format";
 import { type Column, DataTable, Empty, ErrorBlock, FilterChips, Mono, Page, SearchInput, Skeleton, Stat, StatRow, Status, toneOf, Toolbar } from "@/lib/ui";
+import { asksRepository, deploymentsSetUp, type ServerInfo } from "./deployments";
 import { abbreviated, repositoryName, StaleBanner, text, UrlText, type Repository } from "./shared";
 
 type Environments = { items?: Row[]; stale_since?: string | null };
@@ -18,11 +20,20 @@ type Deployment = { repository: Repository; environment: Row };
 const SUB = "Every environment across the repositories you can open: what is running, which change it runs, and where it is served.";
 
 export default function DeploymentsPage() {
-  const repositories = useList<Repository>("list_repositories", { limit: 500 }, { pick: "items", workspace: null });
+  const info = useRead<ServerInfo>("server_info", undefined, { workspace: null });
+  // A failed `server_info` says nothing: the first repository is then asked alone.
+  const setUp = deploymentsSetUp(info.data);
+  const off = setUp === false;
+  const repositories = useList<Repository>(off || info.isLoading ? null : "list_repositories", { limit: 500 }, { pick: "items", workspace: null });
+  const firstId = repositories.data?.[0]?.id;
+  // The same query as the first entry below (one key, one request), read here so the others can
+  // wait for its answer when `server_info` does not say.
+  const first = useRead<Environments>(firstId ? "list_environments" : null, { repository_id: firstId }, { workspace: null });
   const environments = useQueries({
-    queries: (repositories.data ?? []).map((repository) => ({
+    queries: (repositories.data ?? []).map((repository, index) => ({
       queryKey: ["list_environments", "", { repository_id: repository.id }],
       queryFn: ({ signal }: { signal: AbortSignal }) => read<Environments>("list_environments", { repository_id: repository.id }, { workspace: null, signal }),
+      enabled: asksRepository(index, setUp, first),
     })),
   });
   const [search, setSearch] = useState("");
@@ -47,7 +58,14 @@ export default function DeploymentsPage() {
   }
   const phases = [...phaseCounts].map(([id, count]) => ({ id, label: id.replace(/[_-]+/g, " "), count }));
 
-  if (repositories.isLoading) {
+  if (off) {
+    return (
+      <Page eyebrow="Ship" title="Deployments" sub={SUB}>
+        <NotSetUp />
+      </Page>
+    );
+  }
+  if (info.isLoading || repositories.isLoading) {
     return (
       <Page eyebrow="Ship" title="Deployments" sub={SUB}>
         <Skeleton />

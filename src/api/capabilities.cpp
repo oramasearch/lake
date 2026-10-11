@@ -1966,7 +1966,8 @@ void register_server_info(Registry& registry, std::string_view version) {
     registry.add(Capability{
         .name = "server_info",
         .title = "Server info",
-        .description = "Name, node, version and API level of this lake. No authentication.",
+        .description = "Name, node, version and API level of this lake, and whether Deployments "
+                       "are set up on it. No authentication.",
         .input_schema = {{"type", "object"},
                          {"properties", json::object()},
                          {"additionalProperties", false}},
@@ -1977,7 +1978,8 @@ void register_server_info(Registry& registry, std::string_view version) {
                             {"version", {{"type", "string"}}},
                             {"revision", {{"type", "string"}}},
                             {"api", {{"type", "string"}}},
-                            {"store", {{"type", "string"}}}}}},
+                            {"store", {{"type", "string"}}},
+                            {"deployments", {{"type", "boolean"}}}}}},
         .kind = CapabilityKind::Read,
         .requires_auth = false,
         .object = "server",
@@ -1989,7 +1991,12 @@ void register_server_info(Registry& registry, std::string_view version) {
                                        {"version", version_string},
                                        {"revision", build_revision_string()},
                                        {"api", "v1"},
-                                       {"store", ctx.store ? ctx.store->kind() : "none"}});
+                                       {"store", ctx.store ? ctx.store->kind() : "none"},
+                                       // Whether the platform mirror is configured: without it
+                                       // every Deployments read answers `not_supported`, so a
+                                       // page asks this once instead of every repository
+                                       // (lake#605).
+                                       {"deployments", ctx.platform != nullptr}});
         }});
 }
 

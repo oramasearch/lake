@@ -33,7 +33,10 @@ The pages follow the console's rich layout (`docs/ui/web-app.md`, *The look*):
   package is a card with its versions as chips and its install command in a copy block.
 - **Deployments** and a repository's **Environments** show figures, a search and a phase filter,
   and rows with the phase as a state chip and relative times. **Environment** is a Split.
-  Deleting a domain now asks once.
+  Deleting a domain now asks once. Deployments reads `server_info` first: on a lake whose
+  `deployments` is `false` it shows "Deployments Are Not Set Up on This Lake" after that one call
+  and asks no repository (lake#605, `apps/deployments.ts`,
+  [platform.md](../api/platform.md#a-lake-without-the-platform-mirror)).
 - **Logs** follows in a terminal panel.
 
 `apps/shared.tsx` holds the group's parts: `QueryTabs`/`useQueryTab`, `Terminal` and
