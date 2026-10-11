@@ -268,4 +268,28 @@ std::string transcript_excerpt(const std::string& text, std::size_t length) {
     return line;
 }
 
+std::string
+transcript_excerpt_around(const std::string& text, const std::string& query, std::size_t length) {
+    const std::string needle = folded(query);
+    const std::size_t at = needle.empty() ? std::string::npos : folded(text).find(needle);
+    if (at == std::string::npos) {
+        return transcript_excerpt(text, length);
+    }
+    const std::size_t lead = length / 3;
+    std::size_t start = at > lead ? at - lead : 0;
+    if (start > 0) {
+        // Start at a word when one begins within the lead; else at a character.
+        const std::size_t space = text.find_first_of(" \n\r\t", start);
+        if (space != std::string::npos && space < at) {
+            start = space + 1;
+        } else {
+            while (start > 0 && (static_cast<unsigned char>(text[start]) & 0xC0) == 0x80) {
+                --start;
+            }
+        }
+    }
+    std::string line = transcript_excerpt(text.substr(start), length);
+    return start > 0 ? "…" + line : line;
+}
+
 } // namespace lake::control
