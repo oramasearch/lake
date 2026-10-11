@@ -405,13 +405,13 @@ std::string experiment_description(const std::string& name) {
 std::string experiment_title(std::string_view name) {
     static const std::map<std::string_view, std::string_view> titles = {
         {"list_experiments", "List experiments"},
-        {"get_experiment_study", "Get an experiment"},
+        {"get_experiment", "Get an experiment"},
         {"list_experiment_trials", "List an experiment's trials"},
         {"get_experiment_analysis", "Analyze an experiment"},
         {"get_run_metrics", "Get a run's metrics"},
         {"compare_runs", "Compare runs"},
-        {"start_study", "Start an experiment"},
-        {"stop_study", "Stop an experiment"},
+        {"start_experiment", "Start an experiment"},
+        {"stop_experiment", "Stop an experiment"},
         {"stop_experiment_trial", "Stop a trial"},
         {"promote_trial", "Promote a trial"},
         {"tail_experiment_events", "Follow an experiment's events"},
