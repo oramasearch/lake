@@ -1,33 +1,50 @@
 # Search
 
-**Data → Search** looks for one query across the places you choose: your repositories, the code
-in them, the datasets and transcripts of your workspace, its projects, agents, models and drives,
-and these Docs. Every place is searched at once and the results come back grouped by place, each group with
-its count.
+lake searches everything you can open: your repositories, the code in them, the datasets,
+transcripts, projects, agents, models and drives of every workspace you have, and these Docs.
+There are two ways in: the **Search** box in the top bar, for a quick look as you type, and
+**Data → Search**, for every result with the places you choose.
+
+## Search From the Top Bar
+
+1. Click **Search** in the top bar, or press **⌘K** (Ctrl K) or `/` anywhere outside a text box.
+   On a phone, tap the magnifier; the search fills the screen.
+2. Type. **Go to** lists the pages and workspaces whose names match, at once. Under it, each place
+   shows its best few results with your words marked and a muted line saying where each lives:
+   the drive and folder of a file, the workspace when you have several, and for a transcript the
+   words around the match.
+3. Places fill in as they answer. One still searching says *Searching…*; one that failed says so
+   in its own group, and the others are unaffected. A place with nothing to show is left out.
+4. Use ↑ and ↓ to move across groups and Enter to open the result, or click it.
+5. **See all results** (or ⌘ Enter) opens **Data → Search** with the same words and every place on.
+   With no page matching, Enter does the same.
+
+Try it with words you said in a meeting: typing *churn is up* finds every transcript, in any of
+your workspaces, whose text says it.
 
 ## What It Searches
 
-| Place | What matches | Needs a workspace |
+| Place | What matches | Where |
 |---|---|---|
-| **Repositories** | the name, description and owner of every repository you can open | no |
-| **Code** | the files in your repositories, ranked, as a substring or as a regular expression | no |
-| **Datasets** | dataset and database names in the workspace | yes |
-| **Transcripts** | the title and text of the workspace's transcripts | yes |
-| **Projects** | project names, descriptions and decisions | yes |
-| **Agents** | the workspace's own agents by name, id and purpose | yes |
-| **Models** | trained models by name, id and methodology | yes |
-| **Drives** | the names of the workspace's drives and of the folders, files and shortcuts in them | yes |
-| **Docs** | the title and text of every Docs page | no |
+| **Repositories** | the name, description and owner of every repository you can open | everywhere |
+| **Code** | the files in your repositories, ranked, as a substring or as a regular expression | everywhere |
+| **Datasets** | dataset and database names | every workspace |
+| **Transcripts** | the title and the whole text of each transcript | every workspace |
+| **Projects** | project names, descriptions and decisions | every workspace |
+| **Agents** | your own agents by name, id and purpose | every workspace |
+| **Models** | trained models by name, id and methodology | every workspace |
+| **Drives** | the names of drives and of the folders, files and shortcuts in them | every workspace |
+| **Docs** | the title and text of every Docs page | everywhere |
 
-The places that need a workspace search the workspace selected in the top bar. With none selected,
-the page says *Choose a workspace in the top bar to search its datasets, transcripts, projects,
-agents, models and drives*, and still searches the rest.
+The workspace places search every workspace you have, not only the one selected in the top bar.
+When you have more than one, each result names its workspace. A workspace that could not be
+searched (stopped, or starting) is named under the results of the others.
 
 A place that fails or is unavailable says so in its own group and never hides the others.
 
-## Search Everything
+## Search Everything on One Page
 
-1. Open **Data → Search**.
+1. Open **Data → Search** (or **See all results** in the top bar's search).
 2. Type in the box (*Search everything you chose below…*) and press Enter.
 3. Under **Search in**, tick the places to search. **Everything** ticks them all; **Code only**
    leaves just code search.
@@ -137,7 +154,8 @@ Each place is the capability its own page reads:
 
 - **Repositories**: `list_repositories`, filtered by name.
 - **Transcripts**: `list_transcripts` with `q`, which matches the title or the text, ignoring
-  case:
+  case. Each answer's `excerpt` is then the text around the match. Ask each workspace in turn to
+  search them all, as the top bar does:
   `GET /v1/list_transcripts?customer_id=<customer id>&workspace_id=<workspace id>&q=renewal`
 - **Datasets**: `workspace_sql` over the catalogue table:
 
@@ -164,8 +182,7 @@ Each place is the capability its own page reads:
   policy check as opening the repository: a private repository you cannot read never appears.
 - Signed-out visitors cannot use Search; they can browse public repositories from
   **Data → Repositories**.
-- Workspace places read the workspace selected in the top bar, with `read` on the account that owns
-  it.
+- Workspace places read every workspace you have, each with `read` on the account that owns it.
 - A search key or API token needs the `search` capability (or the read capability of the place) in
   its scope.
 

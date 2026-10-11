@@ -160,10 +160,13 @@ json transcript_json(const control::Transcript& transcript, AuthorNames& names) 
             {"created_by_name", names(transcript.created_by)}};
 }
 
-json summary_json(const control::Transcript& transcript, AuthorNames& names) {
+// A row of list_transcripts. With a query, its excerpt is the text around the match (lake#633).
+json summary_json(const control::Transcript& transcript,
+                  AuthorNames& names,
+                  const std::string& query = std::string()) {
     return {{"id", transcript.id},
             {"title", transcript.title},
-            {"excerpt", control::transcript_excerpt(transcript.text)},
+            {"excerpt", control::transcript_excerpt_around(transcript.text, query)},
             {"source", transcript.source},
             {"seconds", seconds_json(transcript.seconds)},
             {"created_at", transcript.created_at},
@@ -435,8 +438,8 @@ liquid::runtime::task<ApiResult> list_transcripts(const json& input, ApiContext&
     if (!listed) {
         co_return failed(listed.error());
     }
-    const control::TranscriptPage page =
-        control::page_transcripts(*listed, input.value("q", std::string()), limit, cursor);
+    const std::string query = input.value("q", std::string());
+    const control::TranscriptPage page = control::page_transcripts(*listed, query, limit, cursor);
     if (!page.cursor_found) {
         co_return ApiResult::failure(
             "invalid_input", "cursor names no transcript of this list", "/cursor");
@@ -444,7 +447,7 @@ liquid::runtime::task<ApiResult> list_transcripts(const json& input, ApiContext&
     json items = json::array();
     AuthorNames names(context);
     for (const control::Transcript& transcript : page.items) {
-        items.push_back(summary_json(transcript, names));
+        items.push_back(summary_json(transcript, names, query));
     }
     json out{{"transcripts", std::move(items)}, {"total", page.total}};
     if (!page.next_cursor.empty()) {
@@ -598,8 +601,9 @@ void register_transcript_capabilities(Registry& registry) {
         .title = "List Transcripts",
         .description = "The workspace's transcripts, newest first, each with an excerpt and its "
                        "author's name. `q` keeps those whose title or text contains it, ignoring "
-                       "case; `cursor` is the `next_cursor` of the page before; `total` counts "
-                       "every transcript `q` keeps, on every page.",
+                       "case, and its excerpt is then the text around the match; `cursor` is "
+                       "the `next_cursor` of the page before; `total` counts every transcript "
+                       "`q` keeps, on every page.",
         .input_schema =
             workspace_input({{"q", string_schema()},
                              {"limit", {{"type", "integer"}, {"minimum", 1}, {"maximum", 100}}},

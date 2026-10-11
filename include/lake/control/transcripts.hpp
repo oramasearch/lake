@@ -94,4 +94,13 @@ TranscriptPage page_transcripts(const std::vector<Transcript>& transcripts,
 // The first `length` bytes of `text` as one line, cut at a UTF-8 boundary, with "…" when cut.
 std::string transcript_excerpt(const std::string& text, std::size_t length = 200);
 
+// About `length` bytes of `text` as one line around the first match of `query` (ignoring case,
+// ASCII), so a search shows why a transcript was found (lake#633): it starts at a word up to a
+// third of `length` before the match, with a leading "…" when it does not start at the top, and
+// ends as transcript_excerpt does. No query, or a query the text does not hold (the title
+// matched), answers transcript_excerpt(text, length).
+std::string transcript_excerpt_around(const std::string& text,
+                                      const std::string& query,
+                                      std::size_t length = 200);
+
 } // namespace lake::control

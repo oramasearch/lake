@@ -263,6 +263,28 @@ TEST(Transcripts, AnExcerptIsOneLineCutAtACharacter) {
         << "a UTF-8 sequence is never split";
 }
 
+TEST(Transcripts, ASearchExcerptIsTheTextAroundTheMatch) {
+    using lake::control::transcript_excerpt_around;
+    const std::string text = "Opening remarks went long. " + std::string(300, 'x') +
+                             " Then Dana said churn is up in the basic plan, so we act.\n\nMore.";
+    const std::string around = transcript_excerpt_around(text, "CHURN is up", 80);
+    EXPECT_EQ(around.rfind("…", 0), 0U) << "it does not start at the top: " << around;
+    EXPECT_NE(around.find("churn is up in the basic plan"), std::string::npos) << around;
+    EXPECT_EQ(around.find("Opening"), std::string::npos);
+    EXPECT_EQ(around.substr(std::string("…").size(), 5), "Then ") << "it starts at a word";
+    EXPECT_EQ(transcript_excerpt_around("short text with churn", "churn", 200),
+              "short text with churn")
+        << "a match near the top keeps the top, with no ellipsis";
+    EXPECT_EQ(transcript_excerpt_around(text, "", 40), lake::control::transcript_excerpt(text, 40))
+        << "no query: the start";
+    EXPECT_EQ(transcript_excerpt_around(text, "not here", 40),
+              lake::control::transcript_excerpt(text, 40))
+        << "a title-only match: the start";
+    const std::string unicode = std::string(100, 'a') + "\xC3\xA9\xC3\xA9\xC3\xA9needle";
+    const std::string cut = transcript_excerpt_around(unicode, "needle", 17);
+    EXPECT_EQ(cut, "…\xC3\xA9\xC3\xA9\xC3\xA9needle") << "a UTF-8 sequence is never split: " << cut;
+}
+
 TEST(Transcripts, TranscriptAuditGoesToTheWorkspaceAndTranscribeStaysCentral) {
     using lake::api::AuditLog;
     for (const std::string name : {"create_transcript",

@@ -59,7 +59,11 @@ too.
 
 - Each item carries a one-line `excerpt` of the text (200 bytes, never splitting a character), not
   the text.
-- `q` keeps the transcripts whose title or text contains it, ignoring ASCII case.
+- `q` keeps the transcripts whose title or text contains it, ignoring ASCII case. When the text
+  holds `q`, the `excerpt` is the text around its first match instead of the start: from a word up
+  to a third of the excerpt before it, with a leading `…` (lake#633,
+  `control::transcript_excerpt_around`). Search and the top bar's search show and mark it. A query
+  only the title holds keeps the start of the text.
 - `limit` is 1 to 100, default 50.
 - `next_cursor` is present when more follow. Pass it as `cursor` for the next page. A cursor that
   names no transcript of the list is `invalid_input` at `/cursor`.

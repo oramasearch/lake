@@ -4,200 +4,24 @@
  * place that fails or is unavailable says so without hiding the others. The choice of places is
  * the URL (and this browser remembers it).
  *
+ * The places, their reads and the hits live in `@/lib/federatedPlaces`, which the top bar's search
+ * uses too (lake#633). Workspace places (datasets, transcripts, projects, agents, models, drives)
+ * are searched in every workspace the person has, each hit naming its workspace when there are
+ * several.
+ *
  * Code search keeps its options (branch or tag, exact change, complete history, an artifact) under
  * "Code options". The old `?query=` address still opens with code search. */
-import { type ReactNode, useEffect, useMemo, useState } from "react";
-import { Link, useNavigate, useSearchParams } from "react-router-dom";
-import { useQueries, type UseQueryResult } from "@tanstack/react-query";
-import { BookMarked, BookOpen, Bot, Boxes, Code2, Database, FileAudio, FolderKanban, HardDrive, type LucideIcon, Search as SearchIcon } from "lucide-react";
-import { ApiError, postRead, read, type Row } from "@/lib/api";
-import { useSession } from "@/lib/session";
+import { useEffect, useMemo, useState } from "react";
+import { useNavigate, useSearchParams } from "react-router-dom";
+import { type UseQueryResult } from "@tanstack/react-query";
+import { Search as SearchIcon } from "lucide-react";
 import { Chip, Empty, ErrorBlock, Page, Skeleton, cx } from "@/lib/ui";
 import { Highlight } from "@/components/Highlight";
-import { matchIcon } from "@/pages/drives/MatchLink";
-import { matchLink, matchWhere, type SearchDrivesResult } from "@/pages/drives/search";
-
-/** One result. A string title shows the match marked. `to` is a page of the app; `href` a URL the
- * browser opens itself (a file, in a new tab when `newTab`, saved when `download`). */
-type Hit = {
-  key: string;
-  title: ReactNode;
-  detail?: ReactNode;
-  to?: string;
-  href?: string;
-  newTab?: boolean;
-  download?: boolean;
-  icon?: LucideIcon;
-  iconClass?: string;
-};
-type Place = {
-  id: string;
-  label: string;
-  icon: LucideIcon;
-  /** Needs a workspace (the session's current one). */
-  workspace?: boolean;
-  run: (q: string, scope: Scope, options: CodeOptions, signal: AbortSignal) => Promise<Hit[]>;
-};
-type Scope = { customerId: string; workspaceId: string };
-type CodeOptions = { ref: string; change: string; history: boolean; repository: string };
+import { HitLink, PLACES, unavailable, useFederatedSearch, useSearchScopes, type CodeOptions, type Place, type PlaceAnswer } from "@/lib/federatedPlaces";
 
 const STORE = "lake-search-places";
 
-function matches(q: string, ...fields: unknown[]): boolean {
-  const needle = q.toLowerCase();
-  return fields.some((f) => typeof f === "string" && f.toLowerCase().includes(needle));
-}
-
-function wsPath(scope: Scope, path: string): string {
-  return `/w/${encodeURIComponent(scope.workspaceId)}${path}`;
-}
-
-function engine<T>(scope: Scope, capability: string, input: Row, signal: AbortSignal) {
-  return postRead<T>("workspace_query", { customer_id: scope.customerId, workspace_id: scope.workspaceId, capability, input }, { workspace: null, signal });
-}
-
-/** Every place Search can look, in the order they are shown. */
-const PLACES: Place[] = [
-  {
-    id: "repositories",
-    label: "Repositories",
-    icon: BookMarked,
-    run: async (q, _scope, _o, signal) => {
-      const value = await read<{ items?: Row[] }>("list_repositories", { limit: 500 }, { workspace: null, signal });
-      return (value.items ?? [])
-        .filter((r) => matches(q, r.name, r.description, r.customer_name, r.owner))
-        .map((r) => ({ key: r.id, title: `${r.customer_name ?? r.owner ?? ""}${r.customer_name || r.owner ? "/" : ""}${r.name}`, detail: r.description, to: `/repository?id=${encodeURIComponent(r.id)}` }));
-    },
-  },
-  {
-    id: "code",
-    label: "Code",
-    icon: Code2,
-    run: async (q, _scope, o, signal) => {
-      const value = await read<{ items?: Row[] }>(
-        "search",
-        { query: q, limit: 100, repository: o.repository, ref: o.ref, change: o.change, history: o.history ? true : undefined },
-        { workspace: null, signal },
-      );
-      return (value.items ?? []).map((h, i) => ({
-        key: `${h.repository}:${h.path}:${h.line}:${i}`,
-        title: (
-          <>
-            <span className="text-ink-3">{`${h.customer}/${h.repository}`}</span> <code>{h.path}</code>
-            {h.line ? <span className="text-ink-3">:{h.line}</span> : null}
-          </>
-        ),
-        detail: h.snippet ? <code className="whitespace-pre-wrap">{h.snippet}</code> : undefined,
-        // A hit names its repository by id when the index holds one; it opens the repository.
-        to: /^[0-9a-f-]{36}$/.test(String(h.repository)) ? `/repository?id=${encodeURIComponent(h.repository)}` : undefined,
-      }));
-    },
-  },
-  {
-    id: "datasets",
-    label: "Datasets",
-    icon: Database,
-    workspace: true,
-    run: async (q, scope, _o, signal) => {
-      const value = await read<{ rows?: Row[] }>(
-        "workspace_sql",
-        { customer_id: scope.customerId, workspace_id: scope.workspaceId, statement: "SELECT database, dataset FROM system.datasets" },
-        { workspace: null, signal },
-      );
-      return (value.rows ?? [])
-        .filter((r) => matches(q, r.dataset, r.database))
-        .map((r) => ({ key: `${r.database}.${r.dataset}`, title: r.dataset, detail: r.database, to: wsPath(scope, `/train/dataset?name=${encodeURIComponent(r.dataset)}`) }));
-    },
-  },
-  {
-    id: "transcripts",
-    label: "Transcripts",
-    icon: FileAudio,
-    workspace: true,
-    run: async (q, scope, _o, signal) => {
-      const value = await read<{ transcripts?: Row[] }>("list_transcripts", { customer_id: scope.customerId, workspace_id: scope.workspaceId, q, limit: 50 }, { workspace: null, signal });
-      return (value.transcripts ?? []).map((t) => ({ key: t.id, title: t.title, detail: t.excerpt, to: wsPath(scope, `/transcript?id=${encodeURIComponent(t.id)}`) }));
-    },
-  },
-  {
-    id: "projects",
-    label: "Projects",
-    icon: FolderKanban,
-    workspace: true,
-    run: async (q, scope, _o, signal) => {
-      const value = await engine<{ projects?: Row[] }>(scope, "list_projects", {}, signal);
-      return (value.projects ?? [])
-        .filter((p) => matches(q, p.name, p.description, p.decision))
-        .map((p) => ({ key: p.name, title: p.name, detail: p.description, to: wsPath(scope, `/design/project?name=${encodeURIComponent(p.name)}`) }));
-    },
-  },
-  {
-    id: "agents",
-    label: "Agents",
-    icon: Bot,
-    workspace: true,
-    run: async (q, scope, _o, signal) => {
-      const value = await engine<{ agents?: Row[] }>(scope, "list_agents", {}, signal);
-      return (value.agents ?? [])
-        .filter((a) => a.kind !== "orama" && matches(q, a.name, a.id, a.purpose, a.description))
-        .map((a) => ({ key: a.id, title: a.name ?? a.id, detail: a.purpose ?? a.description, to: wsPath(scope, `/train/agent?id=${encodeURIComponent(a.id)}`) }));
-    },
-  },
-  {
-    id: "models",
-    label: "Models",
-    icon: Boxes,
-    workspace: true,
-    run: async (q, scope, _o, signal) => {
-      const value = await engine<{ models?: Row[] }>(scope, "list_models", {}, signal);
-      return (value.models ?? [])
-        // A model opens its training page, which links to serving it (lake#599).
-        .filter((m) => matches(q, m.name, m.id, m.kind, m.pipeline_name, m.project_name))
-        .map((m) => ({ key: m.id ?? m.name, title: m.name ?? m.id, detail: [m.kind, m.pipeline_name || "no pipeline", m.project_name].filter(Boolean).join(" · "), to: wsPath(scope, `/train/model?id=${encodeURIComponent(m.id ?? "")}`) }));
-    },
-  },
-  {
-    id: "drives",
-    label: "Drives",
-    icon: HardDrive,
-    workspace: true,
-    // One read: search_drives matches drive, folder, file and shortcut names in every drive of the
-    // workspace, a repository drive's paths at main included (lake#561).
-    run: async (q, scope, _o, signal) => {
-      const value = await read<SearchDrivesResult>("search_drives", { customer_id: scope.customerId, workspace_id: scope.workspaceId, q, limit: 100 }, { workspace: null, signal });
-      return (value.items ?? []).map((m) => {
-        const link = matchLink(m, scope);
-        const { icon, className } = matchIcon(m);
-        return {
-          key: `${m.drive.id}:${m.kind}:${m.id ?? m.path}`,
-          title: m.name,
-          detail: matchWhere(m),
-          icon,
-          iconClass: className,
-          ...("to" in link ? { to: link.workspace ? wsPath(scope, link.to) : link.to } : { href: link.href, newTab: link.newTab, download: link.download }),
-        };
-      });
-    },
-  },
-  {
-    id: "docs",
-    label: "Docs",
-    icon: BookOpen,
-    // One read: list_docs searches every guide's title, headings and text, and says which heading
-    // to open (lake#561).
-    run: async (q, _scope, _o, signal) => {
-      const list = await read<{ pages?: Row[] }>("list_docs", { q }, { workspace: null, signal });
-      return (list.pages ?? []).map((p) => ({
-        key: `${p.slug}#${p.anchor ?? ""}`,
-        title: p.title,
-        detail: p.excerpt,
-        to: `/docs/${encodeURIComponent(p.slug)}${p.anchor ? `#${p.anchor}` : ""}`,
-      }));
-    },
-  },
-];
-
-const ALL = PLACES.map((p) => p.id);
+const ALL: string[] = PLACES.map((p) => p.id);
 
 function recalled(): string[] {
   try {
@@ -212,7 +36,6 @@ function recalled(): string[] {
 export default function SearchPage() {
   const [params] = useSearchParams();
   const navigate = useNavigate();
-  const { workspaceId, workspace, space, viewer } = useSession();
   // The old code-search address (`?query=`) keeps working.
   const legacy = params.get("query");
   const q = (params.get("q") ?? legacy ?? "").trim();
@@ -227,7 +50,7 @@ export default function SearchPage() {
     history: params.get("history") === "1",
     repository: params.get("repository") ?? "",
   };
-  const scope: Scope = { customerId: workspace?.customer_id ?? space?.id ?? viewer.customer_id ?? "", workspaceId: workspaceId ?? "" };
+  const scopes = useSearchScopes();
   const [draft, setDraft] = useState(q);
   useEffect(() => {
     setDraft(q);
@@ -255,16 +78,8 @@ export default function SearchPage() {
   };
 
   const chosen = PLACES.filter((p) => places.includes(p.id));
-  const results = useQueries({
-    queries: chosen.map((place) => ({
-      queryKey: ["search-place", place.id, q, place.workspace ? scope : null, place.id === "code" ? options : null],
-      queryFn: ({ signal }: { signal: AbortSignal }) => place.run(q, scope, options, signal),
-      enabled: !!q && (!place.workspace || (!!scope.workspaceId && !!scope.customerId)),
-      staleTime: 30_000,
-      retry: false,
-    })),
-  });
-  const total = results.reduce((n, r) => n + (r.data?.length ?? 0), 0);
+  const results = useFederatedSearch(q, chosen, scopes, options);
+  const total = results.reduce((n, r) => n + (r.data?.hits.length ?? 0), 0);
 
   return (
     <Page eyebrow="Data" title="Search" sub="One search across your repositories, code, datasets, transcripts, projects, agents, models, drives and the docs. Choose where to look.">
@@ -298,7 +113,7 @@ export default function SearchPage() {
           {PLACES.map((place) => {
             const on = places.includes(place.id);
             const r = results[chosen.findIndex((c) => c.id === place.id)];
-            const count = on && q && r?.data ? r.data.length : undefined;
+            const count = on && q && r?.data ? r.data.hits.length : undefined;
             return (
               <label
                 key={place.id}
@@ -321,12 +136,14 @@ export default function SearchPage() {
         </div>
         {chosen.some((p) => p.workspace) && (
           <p className="muted mt-2 mb-0 text-[12.5px]">
-            {scope.workspaceId ? (
+            {scopes.length > 1 ? (
+              <>Datasets, transcripts, projects, agents, models and drives are searched in all {scopes.length} of your workspaces.</>
+            ) : scopes.length === 1 ? (
               <>
-                Datasets, transcripts, projects, agents, models and drives are searched in the workspace <strong>{workspace?.name ?? "chosen above"}</strong>.
+                Datasets, transcripts, projects, agents, models and drives are searched in the workspace <strong>{scopes[0].name}</strong>.
               </>
             ) : (
-              <>Choose a workspace in the top bar to search its datasets, transcripts, projects, agents, models and drives.</>
+              <>Create a workspace to search its datasets, transcripts, projects, agents, models and drives.</>
             )}
           </p>
         )}
@@ -345,7 +162,7 @@ export default function SearchPage() {
           </p>
           <div className="space-y-4">
             {chosen.map((place, i) => (
-              <PlaceResults key={place.id} place={place} text={q} q={results[i]} needsWorkspace={!!place.workspace && !scope.workspaceId} />
+              <PlaceResults key={place.id} place={place} text={q} q={results[i]} needsWorkspace={place.workspace && !scopes.length} />
             ))}
           </div>
         </>
@@ -354,9 +171,9 @@ export default function SearchPage() {
   );
 }
 
-function PlaceResults({ place, text, q, needsWorkspace }: { place: Place; text: string; q: UseQueryResult<Hit[]>; needsWorkspace: boolean }) {
-  const hits = q.data ?? [];
-  const unavailable = q.error instanceof ApiError && (q.error.code === "unknown_capability" || q.error.code === "not_supported" || q.error.status === 404);
+function PlaceResults({ place, text, q, needsWorkspace }: { place: Place; text: string; q: UseQueryResult<PlaceAnswer>; needsWorkspace: boolean }) {
+  const hits = q.data?.hits ?? [];
+  const failed = q.data?.failed ?? [];
   return (
     <section className="overflow-hidden rounded-[6px] border border-hairline bg-surface">
       <header className="flex items-center gap-2 border-b border-hairline bg-raised px-4 py-2">
@@ -366,49 +183,53 @@ function PlaceResults({ place, text, q, needsWorkspace }: { place: Place; text: 
       </header>
       <div>
         {needsWorkspace ? (
-          <p className="muted m-0 px-4 py-3 text-[13px]">Choose a workspace to search {place.label.toLowerCase()}.</p>
+          <p className="muted m-0 px-4 py-3 text-[13px]">Create a workspace to search {place.label.toLowerCase()}.</p>
         ) : q.isLoading ? (
           <div className="px-4">
             <Skeleton lines={2} />
           </div>
-        ) : unavailable ? (
+        ) : unavailable(q.error) ? (
           <p className="muted m-0 px-4 py-3 text-[13px]">Searching {place.label.toLowerCase()} is not available on this lake yet.</p>
         ) : q.isError ? (
           <div className="p-3">
             <ErrorBlock error={q.error} retry={() => void q.refetch()} what={place.label.toLowerCase()} />
           </div>
         ) : !hits.length ? (
-          <p className="muted m-0 px-4 py-3 text-[13px]">No matches.</p>
+          <p className="muted m-0 px-4 py-3 text-[13px]">{failed.length ? "No matches in the workspaces that answered." : "No matches."}</p>
         ) : (
           <ul className="m-0 list-none p-0">
             {hits.slice(0, 50).map((hit) => (
               <li key={hit.key} className="border-b border-hairline px-4 py-2.5 last:border-b-0 hover:bg-raised/60">
                 <div className="flex min-w-0 items-center gap-2 text-[13.5px] font-medium">
-                  {hit.icon && <hit.icon size={14} aria-hidden className={cx("shrink-0", hit.iconClass)} />}
-                  <HitTitle hit={hit} text={text} />
+                  {hit.icon ? <HitIcon hit={hit} /> : null}
+                  <span className="min-w-0 flex-1">
+                    <HitLink hit={hit} text={text} />
+                  </span>
+                  {hit.workspace && <span className="shrink-0 text-[11.5px] font-normal text-ink-3">{hit.workspace}</span>}
                 </div>
-                {hit.detail && <div className="mt-0.5 line-clamp-2 text-[12.5px] text-ink-2">{hit.detail}</div>}
+                {hit.detail && (
+                  <div className="mt-0.5 line-clamp-2 text-[12.5px] text-ink-2">
+                    {hit.detailCode ? <code className="whitespace-pre-wrap">{hit.detail}</code> : <Highlight text={hit.detail} q={text} />}
+                  </div>
+                )}
               </li>
             ))}
             {hits.length > 50 && <li className="px-4 py-2 text-[12.5px] text-ink-3">{hits.length - 50} more; narrow the search to see them.</li>}
           </ul>
+        )}
+        {failed.length > 0 && (
+          <p className="muted m-0 border-t border-hairline px-4 py-2 text-[12.5px]">
+            Could not search {failed.map((f) => f.workspace).join(", ")}: {failed[0].message}
+          </p>
         )}
       </div>
     </section>
   );
 }
 
-function HitTitle({ hit, text }: { hit: Hit; text: string }) {
-  const title = typeof hit.title === "string" ? <Highlight text={hit.title} q={text} /> : hit.title;
-  if (hit.to) return <Link to={hit.to}>{title}</Link>;
-  if (hit.href) {
-    return (
-      <a href={hit.href} {...(hit.newTab ? { target: "_blank", rel: "noopener noreferrer" } : {})} {...(hit.download ? { download: "" } : {})}>
-        {title}
-      </a>
-    );
-  }
-  return <>{title}</>;
+function HitIcon({ hit }: { hit: { icon?: unknown; iconClass?: string } }) {
+  const Icon = hit.icon as Place["icon"];
+  return <Icon size={14} aria-hidden className={cx("shrink-0", hit.iconClass)} />;
 }
 
 /** Code search's own options: a repository, a branch or tag, an exact change, complete history. */

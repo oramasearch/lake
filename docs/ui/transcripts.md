@@ -9,7 +9,7 @@ the same phone. The pages are in `frontend/src/pages/transcripts/`; the phone me
 
 | Route | File | Shows |
 |---|---|---|
-| `/w/<id>/transcripts?q=` | `TranscriptsPage.tsx` | figures (how many, recorded length, latest), search by text, one card per transcript: title, date, excerpt, source chip, length, who added it; **Show more** pages by cursor; **New transcript** |
+| `/w/<id>/transcripts?q=` | `TranscriptsPage.tsx` | figures (how many, recorded length, latest), search by text, one card per transcript: title, date, excerpt (the text around the match while searching, lake#633), source chip, length, who added it; **Show more** pages by cursor; **New transcript** |
 | `/w/<id>/transcripts?new=1` | the same | opens New Transcript at once |
 | `/w/<id>/transcript?id=<id>` | `TranscriptPage.tsx` | the title and text, figures (words, length, source, recorded), **Ask Orama about this**, **Copy**, **Edit**, **Delete** |
 

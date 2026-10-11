@@ -907,6 +907,31 @@ TEST_P(WorkspaceRecordStores, TranscriptsLiveInTheirWorkspaceAndKeepNoAudio) {
               "not_found");
     EXPECT_EQ(list(first, 0, json::object()).value["transcripts"].size(), 2U);
 
+    // A search finds a word deep in the text, and its excerpt is the text around it (lake#633).
+    const auto long_call = t.call(
+        first,
+        "create_transcript",
+        in(first,
+           0,
+           {{"title", "Quarterly review"},
+            {"source", "text"},
+            {"text", std::string(400, 'a') + " Dana: churn is up in the basic plan. Next."}}));
+    ASSERT_TRUE(long_call.ok) << long_call.error.message;
+    listed = list(first, 0, {{"q", "Churn is up"}});
+    ASSERT_EQ(listed.value["transcripts"].size(), 1U);
+    EXPECT_EQ(listed.value["transcripts"][0]["id"], long_call.value["id"]);
+    const std::string excerpt = listed.value["transcripts"][0]["excerpt"];
+    EXPECT_NE(excerpt.find("churn is up in the basic plan"), std::string::npos) << excerpt;
+    EXPECT_EQ(excerpt.rfind("…", 0), 0U) << excerpt;
+    EXPECT_EQ(list(first, 0, json::object())
+                  .value["transcripts"][0]["excerpt"]
+                  .get<std::string>()
+                  .rfind("aaa", 0),
+              0U)
+        << "without a query the excerpt is the start";
+    EXPECT_TRUE(list(first, 1, {{"q", "churn"}}).value["transcripts"].empty())
+        << "each workspace answers for itself; Search asks every workspace";
+
     // Another space is refused before any workspace is read.
     for (const std::string capability : {"list_transcripts",
                                          "get_transcript",

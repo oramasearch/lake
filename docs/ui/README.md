@@ -49,9 +49,24 @@ operator sign-in, passkey sign-in and the public share pages).
   collapses to icons (remembered in `localStorage["lake-rail"]`). Below 1024 px it is an
   off-canvas drawer opened from the menu button.
 - **The top bar** holds the space and workspace picker ([workspace-selection.md](workspace-selection.md)),
-  the breadcrumb ([breadcrumb.md](breadcrumb.md)), **Go to…** (⌘K or `/`), the theme switch, Ask
+  the breadcrumb ([breadcrumb.md](breadcrumb.md)), **Search** (⌘K or `/`), the theme switch, Ask
   Orama and the account menu. **G** then **D**, **T**, **S**, **O** or **A** jumps to that group's
   first page.
+- **The top bar's search searches everything** (`components/CommandPalette.tsx`, lake#633). As the
+  person types it shows **Go to** (pages and workspaces, filtered at once) and then every place
+  Data → Search covers: repositories, code, datasets, transcripts, projects, agents, models, drives
+  and docs, each place's best four hits with the match marked and a muted second line saying where
+  it lives (a transcript's is the text around the match). Workspace places are searched in every
+  workspace the person has, and a hit names its workspace when there are several. Places are asked
+  from two characters, 180 ms after typing stops; each place fills in as it answers, a slow place
+  shows *Searching…* without holding the others, a failed one shows one muted line in its group, a
+  place that found nothing is left out, and a stale query is cancelled. ↑ ↓ move across groups, ↵ opens the item as Data → Search would, and ⌘↵
+  or **See all results** opens `/search?q=…&in=<every place>`. Until the person moves, ↵ opens the
+  first page of Go to, or, with none, See all results, so a choice never jumps while places answer.
+  On a phone it fills the screen. The places, their reads and the hits are `lib/federatedPlaces.tsx`,
+  shared with Data → Search (one query cache, so See all opens with the answers already there); the
+  rows, ranking, workspace merging and excerpts are `lib/federated.ts`, tested by
+  `tests/federated.test.ts`.
 - **Ask Orama** opens beside the page (`components/AskPanel.tsx`) in the current workspace. The
   conversation is kept per workspace for the browser tab (`sessionStorage`). The panel runs from the
   brand strip to the bottom of the window, its 48px head level with the shell bar (lake#567).
@@ -132,7 +147,7 @@ Files are under `frontend/src/pages/`.
 | `/shared-with-me` | `repositories/SharedWithMePage.tsx` | folders shared with the viewer | `drive_shared_with_me` |
 | `/share/:token`, `/share/:token/preview` | `repositories/SharePage.tsx`, `SharePreviewPage.tsx` | a folder or file opened through a link, signed out | `resolve_drive_share_link`, `preview_drive_share_link` |
 | `/models/:namespace/:id`, `/models/:id` | `admin/ModelPage.tsx` | a model repository's storage, provenance, files and revisions | `resolve_model`, `get_model` |
-| `/search` | `search/SearchPage.tsx` | one query across the places the person ticks (`?q=&in=`): Repositories, Code (ranked, substring or regex, with its options), Datasets, Transcripts, Projects, Agents, Models, Drives and Docs, searched side by side and grouped by place; the choice is remembered in this browser, and `?query=` still opens code search | `list_repositories`, `search`, `workspace_sql`, `list_transcripts`, `workspace_query` (`list_projects`, `list_agents`, `list_models`), `search_drives`, `list_docs` (`q`) |
+| `/search` | `search/SearchPage.tsx`, `lib/federatedPlaces.tsx`, `lib/federated.ts` | one query across the places the person ticks (`?q=&in=`): Repositories, Code (ranked, substring or regex, with its options), Datasets, Transcripts, Projects, Agents, Models, Drives and Docs, searched side by side and grouped by place; workspace places in every workspace the person has, each hit naming its workspace when there are several and a workspace that failed named under the others (lake#633); a transcript shows the text around the match; the choice is remembered in this browser, and `?query=` still opens code search. The top bar's search runs the same places | `list_repositories`, `search`, `workspace_sql`, `list_transcripts`, `workspace_query` (`list_projects`, `list_agents`, `list_models`), `search_drives`, `list_docs` (`q`) |
 
 **Design, Train and Ship** (all under `/w/<workspace_id>/` except Deployments, Services and
 Workspaces)
