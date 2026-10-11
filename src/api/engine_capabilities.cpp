@@ -465,6 +465,12 @@ void register_engine_capabilities(Registry& registry) {
                         arguments.erase(field + "_id");
                     }
                 }
+                // An uploaded dataset's text comes into the workspace: its transfer in (lake#658).
+                const std::uint64_t uploaded =
+                    engine == "upload_dataset" && arguments.value("content", json()).is_string()
+                        ? arguments.at("content").get_ref<const std::string&>().size()
+                        : 0;
+                const std::string workspace_id = arguments.at("workspace_id");
                 json call{{"customer_id", arguments.at("customer_id")},
                           {"workspace_id", arguments.at("workspace_id")},
                           {"capability", engine}};
@@ -476,6 +482,9 @@ void register_engine_capabilities(Registry& registry) {
                     co_return ApiResult::failure("store_error", awaited.error().message);
                 }
                 ApiResult result = std::move(*awaited);
+                if (result.ok && uploaded > 0) {
+                    record_workspace_transfer(context, workspace_id, uploaded, 0);
+                }
                 // workspace_query and workspace_act point below `/input`; here the fields are the
                 // capability's own.
                 if (!result.ok && result.error.path.starts_with("/input")) {

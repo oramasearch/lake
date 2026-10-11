@@ -86,6 +86,20 @@ const std::vector<CapabilityMeter>& capability_meters() {
         {"start_experiment", {"cpu", "ram", "gpu", "vram"}, "its trials, in the engine"},
         {"start_solution", {"cpu", "ram", "gpu", "vram"}, "its first run, in the engine"},
         {"load_drive_dataset", {"storage"}, "the dataset, in the engine's databases"},
+        // The engine's own capabilities, named in Lake (lake#650): their work and what they keep
+        // are the workspace engine's CPU, RAM, GPU and storage.
+        {"train_model", {"cpu", "ram", "gpu", "vram", "storage"},
+         "training in the engine; the model, in its storage"},
+        {"start_run", {"cpu", "ram", "gpu", "vram", "storage"},
+         "the run in the engine; its artifacts, in its storage"},
+        {"run_solution", {"cpu", "ram", "gpu", "vram", "storage"}, "as start_run"},
+        {"deploy_pipeline", {"cpu", "ram", "gpu", "vram"}, "the deployed pipeline, in the engine"},
+        {"create_index", {"cpu", "ram", "storage"}, "built in the engine; kept in its storage"},
+        {"create_dataset_from_query", {"cpu", "ram", "storage"},
+         "the query in the engine; the dataset, in its storage"},
+        {"upload_dataset", {"transfer", "storage"}, "the rows, in the engine's databases"},
+        {"load_drive_model", {"storage"}, "the model, in the engine's storage"},
+        {"import_n8n", {"storage"}, "the workflow, kept as a project artifact"},
         {"create_stream", {"storage"}, "its topic's bytes, in the engine's streams"},
         {"publish_stream_message", {"storage"}, "as create_stream"},
         {"publish_agent_event", {"storage"}, "the event, in the workspace's topic"},
@@ -188,6 +202,15 @@ const std::vector<std::pair<std::string_view, std::string_view>>& calls_only_cap
         // Search runs in lake's own process over indexes lake keeps: a call.
         {"search", "lake's repository search; the index is in the repositories' storage"},
         {"search_drives", "lake's drive search"},
+        // Engine reads and records (lake#650): a workspace member's own scoring and searching run
+        // on the workspace engine, whose CPU, RAM and GPU are billed; the served routes, predict
+        // and search_index, are what is priced per request.
+        {"score", "scoring in the workspace engine, billed as its CPU, RAM and GPU"},
+        {"search_workspace_index", "searching in the workspace engine, billed as its CPU and RAM"},
+        {"create_project", "a project record"},
+        {"create_connection", "a connection record; its loads are datasets in storage"},
+        {"create_agent", "an agent record; its serving is the engine's CPU, RAM and GPU"},
+        {"record_outcome", "an outcome record in the engine's ledger"},
     };
     return calls;
 }

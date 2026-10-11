@@ -1097,3 +1097,21 @@ TEST(UsageOverTime, AddsTransferOutsideSyncAndSaysWhatIsNotBilled) {
     EXPECT_NE(read.value["not_measured"].dump().find("lake#661"), std::string::npos)
         << "app traffic is named until the operator reports it";
 }
+
+// lake#658: a dataset uploaded through the engine's upload_dataset is the workspace's transfer in.
+TEST(UsageOverTime, AnUploadedDatasetIsTransferIn) {
+    UsageRig rig;
+    rig.workspaces.zetta->answers["upload_dataset"] = {{"table", "orders"}, {"rows", 2}};
+    const std::string csv = "id,total\n1,10\n2,20\n";
+    const auto uploaded = rig.call("upload_dataset",
+                                   {{"customer_id", rig.customer},
+                                    {"workspace_id", rig.home},
+                                    {"table_name", "orders"},
+                                    {"format", "csv"},
+                                    {"content", csv}});
+    ASSERT_TRUE(uploaded.ok) << uploaded.error.message;
+    flush(rig.recorder);
+    EXPECT_EQ(rig.workspaces.records(rig.home).metric_total(
+                  "lake_usage", {{"dimension", "transfer"}, {"kind", "in"}}),
+              static_cast<double>(csv.size()));
+}
