@@ -7997,37 +7997,25 @@ struct ApiServer::Impl {
         // Billing only where it is on (LAKE_BILLING, lake#564): off, its capabilities are absent.
         if (options.billing) {
             payments = options.payment_providers;
-            if (!payments && options.billing_secrets.empty()) {
-                payments = fixed_payment_providers(
-                    manual_payment_provider(options.billing_instructions),
-                    "Card payment is not set up: this lake has no billing secret mount "
-                    "(LAKE_BILLING_SECRETS).");
-            } else if (!payments) {
-                // Stripe over the server's outbound client, with the keys read from lake's own
-                // secret store at use (docs/api/billing.md#where-the-keys-live).
+            if (!payments) {
+                // Stripe over the server's outbound client with the keys lake was started with,
+                // else the manual provider and why (docs/api/billing.md#where-the-keys-live).
                 const std::string base = options.stripe_api_base;
-                payments = secret_payment_providers(
-                    {.mount_id = options.billing_secrets,
-                     .secret_name = "stripe",
-                     .instructions = options.billing_instructions,
-                     .ttl = std::chrono::seconds(60),
-                     .stripe = [this,
-                                base](const StripeKeys& keys) -> std::shared_ptr<PaymentProvider> {
-                         if (!stripe_secret_key_shape(keys.secret_key) ||
-                             !stripe_webhook_secret_shape(keys.webhook_secret)) {
-                             return nullptr;
-                         }
-                         return stripe_payment_provider(
-                             keys,
-                             [this](const StripeRequest& request) {
-                                 OutboundResponse response = outbound_http.request(
-                                     {request.method, request.url, request.body, request.headers});
-                                 return StripeResponse{response.status,
-                                                       std::move(response.body),
-                                                       std::move(response.error)};
-                             },
-                             base);
-                     }});
+                payments = environment_payment_providers(
+                    options.stripe_keys,
+                    options.billing_instructions,
+                    [this, base](const StripeKeys& keys) -> std::shared_ptr<PaymentProvider> {
+                        return stripe_payment_provider(
+                            keys,
+                            [this](const StripeRequest& request) {
+                                OutboundResponse response = outbound_http.request(
+                                    {request.method, request.url, request.body, request.headers});
+                                return StripeResponse{response.status,
+                                                      std::move(response.body),
+                                                      std::move(response.error)};
+                            },
+                            base);
+                    });
             }
             register_billing_capabilities(registry, payments);
         }

@@ -860,8 +860,8 @@ pull request before a lake with this change is rolled.
   received; primary key provider and event id): every provider event applied, written in the
   transaction that moves the invoice, so a second delivery changes nothing.
 
-No key, card or workspace content is kept: the Stripe keys live in lake's secret store, a sealed
-secret mount in a workspace Zetta. Nothing is dropped; idempotent; guard `payment_provider_guard`.
+No key, card or workspace content is kept: the Stripe keys are lake's own platform credentials,
+environment variables of the hosting platform (lake#628). Nothing is dropped; idempotent; guard `payment_provider_guard`.
 The operator vendors the schema and selects that guard in its own pull request before a lake with
 this change is rolled.
 

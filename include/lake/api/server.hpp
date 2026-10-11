@@ -5,6 +5,7 @@
 #include <string>
 #include <vector>
 
+#include "lake/api/billing.hpp"
 #include "lake/api/registry.hpp"
 #include "lake/transparency/checkpoint.hpp"
 
@@ -166,13 +167,13 @@ struct ServerOptions {
     // Cloud). Off, as on an enterprise install, the billing capabilities are not registered, so
     // REST, OpenAPI, MCP, the web app's billing pages and the billing Docs guide are absent; usage
     // tracking is unaffected. `payment_providers` says how invoices are paid (tests inject one);
-    // null: Stripe with the keys in the secret mount `billing_secrets` (LAKE_BILLING_SECRETS,
-    // secret `stripe`, read at use, decision 57, lake#620), else the manual provider with
-    // `billing_instructions` (LAKE_BILLING_INSTRUCTIONS). `stripe_api_base` is Stripe's API origin
-    // (a fake's in tests).
+    // null: Stripe with `stripe_keys` (LAKE_STRIPE_SECRET_KEY, LAKE_STRIPE_WEBHOOK_SECRET: lake's
+    // own platform credentials, environment variables of the hosting platform, never a user's
+    // secret store; decision 57, lake#628), else the manual provider with `billing_instructions`
+    // (LAKE_BILLING_INSTRUCTIONS). `stripe_api_base` is Stripe's API origin (a fake's in tests).
     bool billing = false;
     std::shared_ptr<PaymentProviders> payment_providers;
-    std::string billing_secrets;
+    StripeKeys stripe_keys;
     std::string billing_instructions;
     std::string stripe_api_base = "https://api.stripe.com";
     // The operator-provided PersistentVolume mount. Customer stores live at

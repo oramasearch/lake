@@ -547,143 +547,130 @@ TEST(StripeBilling, TheManualProviderTakesNoNotices) {
     EXPECT_EQ(account.value["provider"]["reason"], "no mount");
 }
 
-// A provider source the test can point elsewhere after the capabilities are registered.
-struct SwappableProviders final : lake::api::PaymentProviders {
-    std::shared_ptr<lake::api::PaymentProviders> target;
-    liquid::runtime::task<
-        std::expected<std::shared_ptr<lake::api::PaymentProvider>, lake::api::ApiError>>
-    current(lake::api::ApiContext& context, bool refresh) override {
-        auto got = co_await target->current(context, refresh);
-        if (!got) {
-            co_return std::expected<std::shared_ptr<lake::api::PaymentProvider>,
-                                    lake::api::ApiError>(
-                std::unexpected(lake::api::ApiError{"store_error", got.error().message, {}}));
-        }
-        co_return std::move(*got);
-    }
-    lake::api::PaymentStatus status() const override {
-        return target->status();
-    }
-};
-
-// The keys in lake's own secret store: a mount of the operator's account, read as the operator.
-TEST(StripeBilling, KeysComeFromTheSecretStoreWithRotationAndFallBackToManual) {
+// Lake's own Stripe keys are platform environment variables (lake#628), read once at start: set,
+// unset, half set or malformed, and a change that takes a restart.
+TEST(StripeBilling, KeysComeFromTheEnvironmentAndAChangeTakesARestart) {
     FakeStripe stripe;
     int built = 0;
-    lake::api::SecretPaymentConfig config;
-    config.instructions = "Pay by wire.";
-    config.ttl = std::chrono::seconds(3600); // only a refresh reads again
-    config.stripe =
+    const lake::api::StripeProviderFactory factory =
         [&](const lake::api::StripeKeys& keys) -> std::shared_ptr<lake::api::PaymentProvider> {
         ++built;
-        if (!lake::api::stripe_secret_key_shape(keys.secret_key) ||
-            !lake::api::stripe_webhook_secret_shape(keys.webhook_secret)) {
-            return nullptr;
-        }
         return lake::api::stripe_payment_provider(keys, stripe.http(), "https://stripe.test");
     };
-    // The mount does not exist yet: its id is configured before it is created.
-    config.mount_id = lake::control::new_uuid_v4();
-    auto missing = lake::api::secret_payment_providers(config);
-    auto swappable = std::make_shared<SwappableProviders>();
-    swappable->target = missing;
-    StripeRig rig(swappable);
-    auto ctx = rig.context();
-    auto first = liquid::runtime::block_on(missing->current(ctx));
-    ASSERT_TRUE(first && *first);
-    EXPECT_EQ((**first)->name(), "manual");
-    EXPECT_NE(missing->status().reason.find("does not exist"), std::string::npos)
-        << missing->status().reason;
-    const auto viewer = rig.call("viewer", json::object());
-    ASSERT_TRUE(viewer.ok) << viewer.error.message;
-    EXPECT_EQ(viewer.value["billing_payment"]["provider"], "manual");
-    EXPECT_EQ(viewer.value["billing_payment"]["online_payment"], false);
-    const auto info = rig.call("server_info", json::object());
-    EXPECT_EQ(info.value["billing"], true);
-    EXPECT_EQ(info.value["payment_provider"], "manual");
-    EXPECT_EQ(info.value["online_payment"], false);
+    const std::string key(test_key);
+    const std::string webhook(test_webhook);
 
-    // The operator makes the mount in a workspace of its own account and puts the secret.
-    const auto mount =
-        rig.call("create_secret_mount",
-                 {{"customer_id", rig.customer}, {"workspace_id", rig.home}, {"name", "billing"}});
-    ASSERT_TRUE(mount.ok) << mount.error.message;
-    config.mount_id = mount.value["id"];
-    auto providers = lake::api::secret_payment_providers(config);
-    swappable->target = providers;
-    ctx = rig.context();
-    auto empty = liquid::runtime::block_on(providers->current(ctx));
-    ASSERT_TRUE(empty && *empty);
-    EXPECT_EQ((**empty)->name(), "manual");
-    EXPECT_NE(providers->status().reason.find("no live `stripe` secret"), std::string::npos)
-        << providers->status().reason;
+    // Unset, half set or malformed: the manual provider, and a reason that names the variable,
+    // never a value; Stripe is never built.
+    struct Case {
+        lake::api::StripeKeys keys;
+        std::string reason;
+    };
+    const std::vector<Case> manual_cases = {
+        {{"", ""}, "LAKE_STRIPE_SECRET_KEY and LAKE_STRIPE_WEBHOOK_SECRET are not set"},
+        {{key, ""}, "LAKE_STRIPE_WEBHOOK_SECRET is not set"},
+        {{"", webhook}, "LAKE_STRIPE_SECRET_KEY is not set"},
+        {{"pk_test_publishable000001", webhook}, "LAKE_STRIPE_SECRET_KEY is not a Stripe secret key"},
+        {{key, "not-a-webhook-secret-0001"}, "LAKE_STRIPE_WEBHOOK_SECRET is not a Stripe webhook"},
+    };
+    for (const Case& c : manual_cases) {
+        SCOPED_TRACE(c.reason);
+        auto providers = lake::api::environment_payment_providers(c.keys, "Pay by wire.", factory);
+        StripeRig rig(providers);
+        auto ctx = rig.context();
+        auto current = liquid::runtime::block_on(providers->current(ctx));
+        ASSERT_TRUE(current && *current);
+        EXPECT_EQ((**current)->name(), "manual");
+        EXPECT_NE(providers->status().reason.find(c.reason), std::string::npos)
+            << providers->status().reason;
+        EXPECT_EQ(built, 0);
+        const auto viewer = rig.call("viewer", json::object());
+        ASSERT_TRUE(viewer.ok) << viewer.error.message;
+        EXPECT_EQ(viewer.value["billing_payment"]["provider"], "manual");
+        EXPECT_EQ(viewer.value["billing_payment"]["online_payment"], false);
+        EXPECT_FALSE(viewer.value["billing_payment"].contains("checked_at"));
+        const auto info = rig.call("server_info", json::object());
+        EXPECT_EQ(info.value["billing"], true);
+        EXPECT_EQ(info.value["payment_provider"], "manual");
+        EXPECT_EQ(info.value["online_payment"], false);
+        const auto account = rig.call("billing_account", {{"customer_id", rig.customer}});
+        ASSERT_TRUE(account.ok) << account.error.message;
+        EXPECT_EQ(account.value["provider"]["name"], "manual");
+        for (const std::string& value : {c.keys.secret_key, c.keys.webhook_secret}) {
+            if (!value.empty()) {
+                EXPECT_EQ(account.value.dump().find(value), std::string::npos);
+                EXPECT_EQ(viewer.value.dump().find(value), std::string::npos);
+                EXPECT_EQ(providers->status().reason.find(value), std::string::npos);
+            }
+        }
+        // A notice is not for the manual provider.
+        EXPECT_EQ(rig.signed_notice(event("evt_manual", "invoice.paid", "in_1")).status, 404);
+    }
 
-    // Half the keys is still the manual provider.
-    ASSERT_TRUE(rig.call("put_secret",
-                         {{"mount_id", config.mount_id},
-                          {"name", "stripe"},
-                          {"value", {{"secret_key", std::string(test_key)}}}})
-                    .ok);
-    auto half = liquid::runtime::block_on(providers->current(ctx, true));
-    ASSERT_TRUE(half && *half);
-    EXPECT_EQ((**half)->name(), "manual");
-    EXPECT_NE(providers->status().reason.find("webhook_secret"), std::string::npos);
-
-    ASSERT_TRUE(rig.call("put_secret",
-                         {{"mount_id", config.mount_id},
-                          {"name", "stripe"},
-                          {"value",
-                           {{"secret_key", std::string(test_key)},
-                            {"webhook_secret", std::string(test_webhook)}}}})
-                    .ok);
-    auto stripe_now = liquid::runtime::block_on(providers->current(ctx, true));
-    ASSERT_TRUE(stripe_now && *stripe_now);
-    EXPECT_EQ((**stripe_now)->name(), "stripe");
-    EXPECT_EQ(providers->status().key_version, 2U);
+    // Both keys set: Stripe, built once, and no key in anything lake says.
+    auto providers = lake::api::environment_payment_providers({key, webhook}, {}, factory);
+    EXPECT_EQ(built, 1);
+    StripeRig rig(providers);
+    EXPECT_EQ(providers->status().provider, "stripe");
+    EXPECT_TRUE(providers->status().online_payment);
     EXPECT_TRUE(providers->status().reason.empty());
-    const int reads = built;
-    // Cached: no read until the time to live passes or a refresh is asked for.
-    auto cached = liquid::runtime::block_on(providers->current(ctx));
-    ASSERT_TRUE(cached && *cached);
-    EXPECT_EQ(built, reads);
-    // The keys never appear in what lake says about the provider.
+    const auto info = rig.call("server_info", json::object());
+    EXPECT_EQ(info.value["payment_provider"], "stripe");
+    EXPECT_EQ(info.value["online_payment"], true);
     const auto described = rig.call("billing_account", {{"customer_id", rig.customer}});
     ASSERT_TRUE(described.ok) << described.error.message;
     EXPECT_EQ(described.value["provider"]["name"], "stripe");
-    EXPECT_EQ(described.value.dump().find(test_key), std::string::npos);
-    EXPECT_EQ(rig.call("viewer", json::object()).value.dump().find(test_webhook),
-              std::string::npos);
-
+    EXPECT_EQ(described.value.dump().find(key), std::string::npos);
+    EXPECT_EQ(info.value.dump().find(key), std::string::npos);
+    EXPECT_EQ(rig.call("viewer", json::object()).value.dump().find(webhook), std::string::npos);
     const auto issued =
         rig.call("issue_invoice", {{"customer_id", rig.customer}, {"period", rig.period}});
     ASSERT_TRUE(issued.ok) << issued.error.message;
-
-    // Rotation: a new webhook secret is put; a notice signed with it is checked again with the
-    // newest keys and accepted, although the cached ones are still within their time to live.
-    const std::string rotated = "whsec_lake620rotated000002";
-    ASSERT_TRUE(
-        rig.call("put_secret",
-                 {{"mount_id", config.mount_id},
-                  {"name", "stripe"},
-                  {"value", {{"secret_key", std::string(test_key)}, {"webhook_secret", rotated}}}})
-            .ok);
-    const auto accepted = rig.signed_notice(event("evt_rotated", "invoice.paid", "in_1"), rotated);
-    EXPECT_EQ(accepted.status, 200) << accepted.body.dump();
+    EXPECT_EQ(rig.signed_notice(event("evt_first", "invoice.paid", "in_1")).status, 200);
     EXPECT_EQ(rig.store->get_invoice(issued.value["id"])->state, "paid");
-    EXPECT_EQ(providers->status().key_version, 3U);
-    // The old secret no longer verifies.
-    EXPECT_EQ(rig.signed_notice(event("evt_old", "invoice.paid", "in_1")).status, 400);
+    EXPECT_EQ(built, 1);
 
-    // The secret removed: back to the manual provider, which says why.
-    ASSERT_TRUE(rig.call("delete_secret_versions",
-                         {{"mount_id", config.mount_id},
-                          {"name", "stripe"},
-                          {"versions", json::array({1, 2, 3})}})
-                    .ok);
-    auto removed = liquid::runtime::block_on(providers->current(ctx, true));
-    ASSERT_TRUE(removed && *removed);
-    EXPECT_EQ((**removed)->name(), "manual");
-    EXPECT_FALSE(providers->status().reason.empty());
+    // Rotation is a restart with the new value: the new lake accepts a notice signed with the
+    // new webhook secret and refuses one signed with the old.
+    const std::string rotated = "whsec_lake628rotated000002";
+    auto restarted = lake::api::environment_payment_providers({key, rotated}, {}, factory);
+    StripeRig after(restarted);
+    EXPECT_EQ(after.signed_notice(event("evt_old", "invoice.paid", "in_1")).status, 400);
+    const auto unmatched = after.signed_notice(event("evt_new", "invoice.paid", "in_1"), rotated);
+    EXPECT_EQ(unmatched.status, 200) << unmatched.body.dump();
+}
+
+// The server reads the keys from its options, which main fills from LAKE_STRIPE_SECRET_KEY and
+// LAKE_STRIPE_WEBHOOK_SECRET; server_info says which provider is in use.
+TEST(StripeBilling, TheServerChoosesTheProviderFromItsKeys) {
+    for (const bool keys : {false, true}) {
+        SCOPED_TRACE(keys ? "keys set" : "keys unset");
+        lake::api::ServerOptions options;
+        options.port = 0;
+        options.store = std::make_shared<lake::control::InMemoryStore>();
+        options.admin_token = "stripe-env-operator";
+        options.instance_kek = std::string(kek);
+        options.billing = true;
+        if (keys) {
+            options.stripe_keys = {std::string(test_key), std::string(test_webhook)};
+        }
+        lake::api::ApiServer server(options);
+        ASSERT_TRUE(server.start()) << server.reason();
+        liquid::http1::request_options request;
+        request.url = std::format("http://127.0.0.1:{}/v1/server_info", server.port());
+        request.method = "GET";
+        const auto answered = lake::test::http_request(std::move(request));
+        ASSERT_TRUE(answered);
+        ASSERT_EQ(answered->status, 200U);
+        const std::string body(reinterpret_cast<const char*>(answered->body.data()),
+                               answered->body.size());
+        const json value = json::parse(body)["value"];
+        EXPECT_EQ(value["payment_provider"], keys ? "stripe" : "manual");
+        EXPECT_EQ(value["online_payment"], keys);
+        EXPECT_EQ(body.find(test_key), std::string::npos);
+        EXPECT_EQ(body.find(test_webhook), std::string::npos);
+        server.stop();
+    }
 }
 
 TEST(StripeBilling, TheWebhookRouteAnswersOnlyWhereTheLakeBills) {

@@ -7,13 +7,13 @@
 // policy-checked and audited in the central log (decision 52): billing is account configuration.
 
 #include "lake/api/billing.hpp"
+#include "lake/api/stripe.hpp"
 
 #include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <format>
 #include <limits>
-#include <mutex>
 #include <optional>
 #include <set>
 #include <string>
@@ -579,11 +579,6 @@ std::expected<control::Invoice, ApiResult> invoice_named(ApiContext& context, co
 // ------------------------------------------------------------------------------------------------
 // Where the provider comes from.
 
-std::string utc_now() {
-    return std::format("{:%Y-%m-%dT%H:%M:%SZ}",
-                       std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now()));
-}
-
 using ProviderOr = std::expected<std::shared_ptr<PaymentProvider>, ApiError>;
 
 class FixedPaymentProviders final : public PaymentProviders {
@@ -606,121 +601,6 @@ public:
 private:
     std::shared_ptr<PaymentProvider> provider_;
     PaymentStatus status_;
-};
-
-// The Stripe keys in lake's own secret store (docs/api/billing.md#where-the-keys-live): read with
-// read_secret as the operator, kept for `ttl`, never logged; the manual provider, with a reason,
-// while the mount, the secret or a key is missing.
-class SecretPaymentProviders final : public PaymentProviders {
-public:
-    explicit SecretPaymentProviders(SecretPaymentConfig config)
-        : config_(std::move(config)), manual_(manual_payment_provider(config_.instructions)) {}
-
-    liquid::runtime::task<std::expected<std::shared_ptr<PaymentProvider>, ApiError>>
-    current(ApiContext& context, bool refresh) override {
-        {
-            std::lock_guard lock(mutex_);
-            if (!refresh && cached_ && std::chrono::steady_clock::now() - fetched_ < config_.ttl) {
-                co_return ProviderOr(cached_);
-            }
-        }
-        if (context.registry == nullptr) {
-            co_return ProviderOr(std::unexpected(
-                ApiError{"store_unavailable", "no registry to read the billing secret", {}}));
-        }
-        // The keys are read as the operator: the account looking at its bill has no grant on the
-        // operator's mount, and must not need one.
-        ApiContext inner = context;
-        inner.authorized = true;
-        inner.operator_credential = true;
-        inner.session_credential = false;
-        inner.acting_identity = "admin";
-        inner.authentication_method = "billing_provider";
-        inner.workspace_id.clear();
-        inner.path_workspace_id.clear();
-        auto read = co_await context.registry->call_async(
-            "read_secret", {{"mount_id", config_.mount_id}, {"name", config_.secret_name}}, inner);
-        std::optional<ApiResult> answer;
-        if (read) {
-            answer = std::move(*read);
-        }
-        if (!answer || (!answer->ok && answer->error.code != "not_found" &&
-                        answer->error.code != "invalid_input")) {
-            // The secret's workspace did not answer: keep using what was read before, if anything.
-            std::lock_guard lock(mutex_);
-            if (cached_) {
-                co_return ProviderOr(cached_);
-            }
-            co_return ProviderOr(std::unexpected(
-                ApiError{"store_unavailable",
-                         "lake could not read the billing secret: " +
-                             (answer ? answer->error.message : read.error().message),
-                         {}}));
-        }
-        if (!answer->ok) {
-            co_return ProviderOr(use_manual(
-                answer->error.path == "/mount_id"
-                    ? "the billing secret mount (LAKE_BILLING_SECRETS) does not "
-                      "exist"
-                    : "the billing secret mount has no live `" + config_.secret_name + "` secret"));
-        }
-        const json value = answer->value.value("value", json::object());
-        const std::uint64_t version = answer->value.value("version", std::uint64_t{0});
-        StripeKeys keys{value.is_object() ? value.value("secret_key", "") : "",
-                        value.is_object() ? value.value("webhook_secret", "") : ""};
-        if (keys.secret_key.empty() || keys.webhook_secret.empty()) {
-            co_return ProviderOr(
-                use_manual("the `" + config_.secret_name +
-                           "` secret needs both `secret_key` and `webhook_secret`"));
-        }
-        if (!config_.stripe) {
-            co_return ProviderOr(use_manual("this lake has no Stripe client"));
-        }
-        auto provider = config_.stripe(keys);
-        if (!provider) {
-            co_return ProviderOr(
-                use_manual("the `" + config_.secret_name + "` secret's keys are malformed"));
-        }
-        std::lock_guard lock(mutex_);
-        cached_ = provider;
-        fetched_ = std::chrono::steady_clock::now();
-        status_ = {std::string(provider->name()),
-                   std::string(provider->title()),
-                   true,
-                   {},
-                   utc_now(),
-                   version};
-        co_return ProviderOr(provider);
-    }
-
-    PaymentStatus status() const override {
-        std::lock_guard lock(mutex_);
-        return status_;
-    }
-
-private:
-    std::shared_ptr<PaymentProvider> use_manual(std::string reason) {
-        std::lock_guard lock(mutex_);
-        // The manual provider is cached too, so a missing secret is not read on every call; a
-        // secret put later is picked up within `ttl`.
-        cached_ = manual_;
-        fetched_ = std::chrono::steady_clock::now();
-        status_ = {std::string(manual_->name()),
-                   std::string(manual_->title()),
-                   false,
-                   "Card payment is not set up: " + std::move(reason) + ".",
-                   utc_now(),
-                   0};
-        return manual_;
-    }
-
-    SecretPaymentConfig config_;
-    std::shared_ptr<PaymentProvider> manual_;
-    mutable std::mutex mutex_;
-    std::shared_ptr<PaymentProvider> cached_;
-    std::chrono::steady_clock::time_point fetched_{};
-    PaymentStatus status_{
-        "manual", "Invoice only", false, "The billing secret has not been read yet.", {}, 0};
 };
 
 ApiResult from_api_error(const ApiError& error) {
@@ -800,8 +680,7 @@ json payment_status_json(const ApiContext& context) {
     return {{"provider", status.provider},
             {"title", status.title},
             {"online_payment", status.online_payment},
-            {"reason", status.reason},
-            {"checked_at", status.checked_at}};
+            {"reason", status.reason}};
 }
 
 std::uint64_t price_of(std::uint64_t billable, std::uint64_t unit_micros, std::uint64_t per) {
@@ -861,8 +740,35 @@ std::shared_ptr<PaymentProviders> fixed_payment_providers(std::shared_ptr<Paymen
     return std::make_shared<FixedPaymentProviders>(std::move(provider), std::move(reason));
 }
 
-std::shared_ptr<PaymentProviders> secret_payment_providers(SecretPaymentConfig config) {
-    return std::make_shared<SecretPaymentProviders>(std::move(config));
+std::shared_ptr<PaymentProviders> environment_payment_providers(const StripeKeys& keys,
+                                                                std::string instructions,
+                                                                const StripeProviderFactory& stripe) {
+    const auto manual = [&](std::string reason) {
+        return fixed_payment_providers(manual_payment_provider(std::move(instructions)),
+                                       "Card payment is not set up: " + std::move(reason) + ".");
+    };
+    if (keys.secret_key.empty() && keys.webhook_secret.empty()) {
+        return manual("LAKE_STRIPE_SECRET_KEY and LAKE_STRIPE_WEBHOOK_SECRET are not set");
+    }
+    if (keys.secret_key.empty()) {
+        return manual("LAKE_STRIPE_SECRET_KEY is not set");
+    }
+    if (keys.webhook_secret.empty()) {
+        return manual("LAKE_STRIPE_WEBHOOK_SECRET is not set");
+    }
+    // The shapes are checked here, so a mistyped value never reaches Stripe; the message names the
+    // variable, never its value.
+    if (!stripe_secret_key_shape(keys.secret_key)) {
+        return manual("LAKE_STRIPE_SECRET_KEY is not a Stripe secret key (sk_ or rk_)");
+    }
+    if (!stripe_webhook_secret_shape(keys.webhook_secret)) {
+        return manual("LAKE_STRIPE_WEBHOOK_SECRET is not a Stripe webhook secret (whsec_)");
+    }
+    std::shared_ptr<PaymentProvider> provider = stripe ? stripe(keys) : nullptr;
+    if (!provider) {
+        return manual("this lake has no Stripe client");
+    }
+    return fixed_payment_providers(std::move(provider));
 }
 
 liquid::runtime::task<NoticeOutcome> receive_payment_notice(PaymentProviders& providers,

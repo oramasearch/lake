@@ -107,8 +107,9 @@ through the registry as the same caller. `console_capabilities.cpp`'s `viewer` a
 and `list_docs`/`get_doc` leave out the Billing guide where billing is off. See
 [billing](../../docs/api/billing.md). `stripe.cpp` is the Stripe provider (lake#620, decision 57):
 form-encoded REST calls with an Idempotency-Key through the server's outbound client, and the
-webhook signature check with OpenSSL's HMAC; the payment provider in use is resolved at every call
-from the secret mount `LAKE_BILLING_SECRETS` names, and `http_server.cpp` serves
+webhook signature check with OpenSSL's HMAC; the payment provider is chosen at start from
+`LAKE_STRIPE_SECRET_KEY` and `LAKE_STRIPE_WEBHOOK_SECRET` (`environment_payment_providers`, lake#628:
+lake's own keys are platform environment variables, never a user's secret store), and `http_server.cpp` serves
 `POST /billing/stripe/webhook` through `receive_payment_notice`.
 
 `datasets.cpp` holds the workspace dataset rules lake applies on top of Zetta (lake#447): engine
