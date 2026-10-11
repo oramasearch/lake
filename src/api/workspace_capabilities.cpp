@@ -1436,8 +1436,11 @@ void register_search_capabilities(Registry& registry) {
         .title = "Search a published index",
         .description = "Search one published search index in the customer's workspace. `query` is "
                        "the text, `field` optionally limits it to one indexed field, `top_k` caps "
-                       "the hits (default 10). Answers hits as {id, score}. An index that is not "
-                       "published is refused; publish it with workspace_act expose_index.",
+                       "the hits (default 10). Answers `hits` as {id, score}, best first: `id` is "
+                       "the workspace's internal id of the matched row, not a column of the table, "
+                       "and the hit carries no row fields yet (lake#596, which waits on the "
+                       "workspace engine). An index that is not published is refused; publish it "
+                       "with workspace_act expose_index.",
         .input_schema = customer_input_schema(
             {{"index_id", {{"type", "string"}}},
              {"query", {{"type", "string"}}},
