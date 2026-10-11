@@ -2,7 +2,7 @@
  * with figures and a toolbar, Load data (upload, generate, pull from a connection) in a drawer, the
  * workspace's connections and its storage. Every form handler of /train/data/* is a capability call
  * here. */
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { Cable, Database, HardDrive, Plus, Sparkles, Table2, Terminal, Upload as UploadIcon } from "lucide-react";
 import { act, type Row } from "@/lib/api";
@@ -19,6 +19,7 @@ import {
   Empty,
   ErrorBlock,
   Field,
+  FilePicker,
   FilterChips,
   Form,
   Mono,
@@ -482,6 +483,17 @@ function LoadData({ onClose, onAddConnection }: { onClose: () => void; onAddConn
   const [tab, setTab] = useState<"upload" | "generate" | "pull">("upload");
   const connections = useWq<{ connections?: Row[] }>("list_connections");
   const generators = useWq<{ generators?: Row[] }>("list_dataset_generators");
+  // The primary action sits in the drawer's footer, as in every other drawer (lake#582); each tab's
+  // form says whether it is busy, and a tab with nothing to act on shows no action.
+  const [busy, setBusy] = useState(false);
+  const action =
+    tab === "upload"
+      ? { form: "load-upload", label: "Upload", icon: UploadIcon }
+      : tab === "generate" && (generators.data?.generators ?? []).length > 0
+        ? { form: "load-generate", label: "Generate", icon: Sparkles }
+        : tab === "pull" && (connections.data?.connections ?? []).length > 0
+          ? { form: "load-pull", label: "Pull dataset", icon: null }
+          : null;
   return (
     <Drawer
       title="Load Data"
@@ -489,9 +501,17 @@ function LoadData({ onClose, onAddConnection }: { onClose: () => void; onAddConn
       onClose={onClose}
       width={560}
       footer={
-        <Link to="/docs/load-data" className="mr-auto self-center text-[12.5px]">
-          How loading data works
-        </Link>
+        <>
+          <Link to="/docs/load-data" className="mr-auto self-center text-[12.5px]">
+            How loading data works
+          </Link>
+          <Button onClick={onClose}>Cancel</Button>
+          {action && (
+            <Button variant="primary" type="submit" form={action.form} loading={busy}>
+              {action.icon && <action.icon size={14} aria-hidden />} {action.label}
+            </Button>
+          )}
+        </>
       }
     >
       <StateTabs
@@ -504,7 +524,7 @@ function LoadData({ onClose, onAddConnection }: { onClose: () => void; onAddConn
           { value: "pull", label: "From a connection" },
         ]}
       />
-      {tab === "upload" && <Upload onClose={onClose} />}
+      {tab === "upload" && <Upload onClose={onClose} onBusy={setBusy} />}
       {tab === "generate" && (
         <Query q={generators} what="dataset generators">
           {(value) =>
@@ -513,7 +533,7 @@ function LoadData({ onClose, onAddConnection }: { onClose: () => void; onAddConn
                 This workspace offers no dataset generators.
               </Empty>
             ) : (
-              <Generate generators={value.generators ?? []} onDone={onClose} />
+              <Generate generators={value.generators ?? []} onDone={onClose} onBusy={setBusy} />
             )
           }
         </Query>
@@ -526,7 +546,7 @@ function LoadData({ onClose, onAddConnection }: { onClose: () => void; onAddConn
                 Connect the database your data lives in, then pull a table from it.
               </Empty>
             ) : (
-              <Pull connections={value.connections ?? []} onDone={onClose} />
+              <Pull connections={value.connections ?? []} onDone={onClose} onBusy={setBusy} />
             )
           }
         </Query>
@@ -535,17 +555,21 @@ function LoadData({ onClose, onAddConnection }: { onClose: () => void; onAddConn
   );
 }
 
-function Upload({ onClose }: { onClose: () => void }) {
+function Upload({ onClose, onBusy }: { onClose: () => void; onBusy: (busy: boolean) => void }) {
   const scope = useWorkspace();
   const navigate = useNavigate();
   const ws = useWsPath();
   const upload = useAsync();
+  useEffect(() => {
+    onBusy(upload.busy);
+  }, [upload.busy, onBusy]);
   const [file, setFile] = useState<File | null>(null);
   const [format, setFormat] = useState("");
   const [tableName, setTableName] = useState("");
   const [rename, setRename] = useState(false);
   return (
     <Form
+      id="load-upload"
       error={upload.error}
       onSubmit={() =>
         upload.run(async () => {
@@ -570,10 +594,17 @@ function Upload({ onClose }: { onClose: () => void }) {
         })
       }
     >
-      <label>
-        File (CSV or JSONL, up to 16 MiB)
-        <input type="file" name="file" required accept=".csv,.jsonl,.ndjson,text/csv" onChange={(e) => setFile(e.target.files?.[0] ?? null)} />
-      </label>
+      <div>
+        <span className="mb-1 block">File</span>
+        <FilePicker
+          file={file}
+          onFile={setFile}
+          name="file"
+          accept=".csv,.jsonl,.ndjson,text/csv"
+          prompt="Choose a CSV or JSONL file, or drop it here"
+          hint="Up to 16 MiB"
+        />
+      </div>
       <label>
         Format
         <select name="format" value={format} onChange={(e) => setFormat(e.target.value)}>
@@ -592,25 +623,24 @@ function Upload({ onClose }: { onClose: () => void }) {
         <span>If the name is taken, save it under the next free name (accounts_2)</span>
       </label>
       <Banner tone="quiet">Otherwise a taken name is refused, and a CSV row whose field count differs from the header is refused with its line number.</Banner>
-      <div>
-        <Button variant="primary" type="submit" loading={upload.busy}>
-          <UploadIcon size={14} aria-hidden /> Upload
-        </Button>
-      </div>
     </Form>
   );
 }
 
-function Pull({ connections, onDone }: { connections: Row[]; onDone: () => void }) {
+function Pull({ connections, onDone, onBusy }: { connections: Row[]; onDone: () => void; onBusy: (busy: boolean) => void }) {
   const scope = useWorkspace();
   const toast = useToast();
   const pull = useAsync();
+  useEffect(() => {
+    onBusy(pull.busy);
+  }, [pull.busy, onBusy]);
   const [connection, setConnection] = useState(text(connections[0], "name"));
   const [query, setQuery] = useState("");
   const [tableName, setTableName] = useState("");
   const [maxRows, setMaxRows] = useState("");
   return (
     <Form
+      id="load-pull"
       error={pull.error}
       onSubmit={() =>
         pull.run(async () => {
@@ -663,23 +693,22 @@ function Pull({ connections, onDone }: { connections: Row[]; onDone: () => void 
         At most this many rows
         <input name="max_rows" inputMode="numeric" placeholder="100000" value={maxRows} onChange={(e) => setMaxRows(e.target.value)} />
       </label>
-      <div>
-        <Button variant="primary" type="submit" loading={pull.busy}>
-          Pull dataset
-        </Button>
-      </div>
     </Form>
   );
 }
 
-function Generate({ generators, onDone }: { generators: Row[]; onDone: () => void }) {
+function Generate({ generators, onDone, onBusy }: { generators: Row[]; onDone: () => void; onBusy: (busy: boolean) => void }) {
   const scope = useWorkspace();
   const toast = useToast();
   const generate = useAsync();
+  useEffect(() => {
+    onBusy(generate.busy);
+  }, [generate.busy, onBusy]);
   const [kind, setKind] = useState(text(generators[0], "kind"));
   const [variants, setVariants] = useState("");
   return (
     <Form
+      id="load-generate"
       error={generate.error}
       onSubmit={() =>
         generate.run(async () => {
@@ -706,11 +735,6 @@ function Generate({ generators, onDone }: { generators: Row[]; onDone: () => voi
         Variants per subject
         <input name="variants_per_subject" type="number" min={1} max={50} placeholder="4" value={variants} onChange={(e) => setVariants(e.target.value)} />
       </label>
-      <div>
-        <Button variant="primary" type="submit" loading={generate.busy}>
-          <Sparkles size={14} aria-hidden /> Generate
-        </Button>
-      </div>
     </Form>
   );
 }
