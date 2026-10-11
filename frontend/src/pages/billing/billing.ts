@@ -13,8 +13,11 @@ export type Account = {
   current: Subscription | null;
   next: Subscription | null;
   history: { effective_from: string; plan_id: string }[];
-  provider: { name: string; title: string; records_payments_by_hand: boolean };
+  provider: Provider;
 };
+/** How invoices are paid (lake#620): Stripe, or invoice only with `reason` saying why card payment is
+ * not set up. */
+export type Provider = { name: string; title: string; records_payments_by_hand: boolean; online_payment?: boolean; reason?: string };
 export type Line = { kind: "plan" | "usage"; dimension: string; description: string; unit: string; quantity: number; included: number; billable: number; unit_micros: number; per: number; amount_micros: number };
 export type Invoice = {
   id: string;
@@ -33,6 +36,10 @@ export type Invoice = {
   issued_at: string;
   paid_at: string;
   voided_at: string;
+  /** Where the account pays (Stripe's hosted invoice page); empty for an invoice paid outside lake. */
+  payment_url?: string;
+  /** The provider's own state of the invoice: open, paid, payment_failed, void. */
+  provider_status?: string;
   lines: Line[];
 };
 export type Bill = {
@@ -149,4 +156,43 @@ export function priceInput(row: { dimension: string; price: string; per: string;
 export function microsOf(amount: string): number | null {
   const value = Number(amount);
   return amount.trim() !== "" && Number.isFinite(value) && value >= 0 ? Math.round(value * 1_000_000) : null;
+}
+
+/** Whether a person can pay `invoice` on its provider's page (lake#620): it is due and has an HTTPS
+ * payment page. */
+export function payOnline(invoice: Pick<Invoice, "state" | "payment_url">): string | null {
+  const url = invoice.payment_url ?? "";
+  return invoice.state === "due" && /^https:\/\/[^\s]+$/.test(url) ? url : null;
+}
+
+/** Whether an operator records `invoice`'s payment by hand: only an invoice issued by the manual
+ * provider. A Stripe invoice is paid through Stripe. */
+export function recordedByHand(invoice: Pick<Invoice, "provider">): boolean {
+  return invoice.provider === "manual";
+}
+
+/** A provider's state of an invoice in words, and its chip tone. */
+export function providerStatus(status: string | undefined): { label: string; tone: "warning" | "success" | "neutral" | "danger" } | null {
+  switch (status ?? "") {
+    case "":
+      return null;
+    case "open":
+      return { label: "Awaiting payment", tone: "warning" };
+    case "paid":
+      return { label: "Paid", tone: "success" };
+    case "payment_failed":
+      return { label: "Payment failed", tone: "danger" };
+    case "void":
+      return { label: "Void", tone: "neutral" };
+    case "draft":
+      return { label: "Draft", tone: "neutral" };
+    default:
+      return { label: status!.replace(/_/g, " "), tone: "neutral" };
+  }
+}
+
+/** The Payment figure on the Billing page: the provider and how an invoice is paid. */
+export function paymentSummary(provider: Provider): { value: string; sub: string } {
+  if (!provider.records_payments_by_hand) return { value: provider.title, sub: `pay each invoice on ${provider.title}'s page` };
+  return { value: provider.title, sub: provider.reason ? "card payment is not set up" : "Orama records each payment" };
 }

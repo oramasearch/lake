@@ -844,6 +844,27 @@ writes these tables only where `LAKE_BILLING` is on; elsewhere they stay empty. 
 idempotent; guard `billing_guard`. The operator vendors the schema and selects that guard in its own
 pull request before a lake with this change is rolled.
 
+## Payment provider migration
+
+`0074_payment_provider` (lake#620, decision 57) adds what Stripe needs
+([`../api/billing.md#stripe`](../api/billing.md#stripe)):
+
+- `billing_accounts` (customer, `provider`, `provider_customer_id`, created; primary key customer and
+  provider; cascading with the customer): the account's billing row, holding its Stripe customer id
+  (`cus_...`). Written once; a second write keeps the first id;
+- `billing_invoices.payment_url` (Stripe's hosted invoice page, at most 2048 characters) and
+  `provider_status` (`open`, `paid`, `payment_failed`, `void`), both empty for the manual provider,
+  and the partial index `billing_invoices_by_provider_reference` on (`provider`,
+  `provider_reference`) for the webhook's lookup;
+- `billing_payment_events` (`provider`, `event_id`, `event_type`, `reference`, `invoice_id`,
+  received; primary key provider and event id): every provider event applied, written in the
+  transaction that moves the invoice, so a second delivery changes nothing.
+
+No key, card or workspace content is kept: the Stripe keys live in lake's secret store, a sealed
+secret mount in a workspace Zetta. Nothing is dropped; idempotent; guard `payment_provider_guard`.
+The operator vendors the schema and selects that guard in its own pull request before a lake with
+this change is rolled.
+
 ## Repository workspaces migration
 
 `0051_repository_workspaces` adds `repositories.workspace_id` (references `workspaces`, index

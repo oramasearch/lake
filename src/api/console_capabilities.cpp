@@ -131,6 +131,7 @@ json viewer_schema() {
          {"config",
           object_schema({{"frontier_model", string_schema()}}, json::array({"frontier_model"}))},
          {"billing", {{"type", "boolean"}}},
+         {"billing_payment", {{"type", json::array({"object", "null"})}}},
          {"version", string_schema()},
          {"revision", string_schema()}},
         json::array({"signed_in",
@@ -184,6 +185,9 @@ ApiResult viewer(const json& input, ApiContext& context, const std::string& vers
         {"config", {{"frontier_model", ""}}},
         // Whether this lake bills (LAKE_BILLING, lake#564): the web app shows Billing only then.
         {"billing", billing_registered(context.registry)},
+        // How invoices are paid there (Stripe, or invoice only and why; lake#620); null when it
+        // does not bill.
+        {"billing_payment", payment_status_json(context)},
         {"version", version},
         {"revision", std::string(build_revision_string())}};
     if (!context.authorized || context.store == nullptr) {

@@ -43,7 +43,7 @@ class FederationIssuerPolicy;
 // closes the stores and releases the owner lock. docs/deployment/store-volume.md has the contract.
 namespace lake::api {
 
-class PaymentProvider; // lake/api/billing.hpp
+class PaymentProviders; // lake/api/billing.hpp
 
 struct ServerOptions {
     std::string listen_address = "127.0.0.1";
@@ -161,11 +161,16 @@ struct ServerOptions {
     // Billing (lake#564, decision 56, docs/api/billing.md): on only where LAKE_BILLING=on (Orama
     // Cloud). Off, as on an enterprise install, the billing capabilities are not registered, so
     // REST, OpenAPI, MCP, the web app's billing pages and the billing Docs guide are absent; usage
-    // tracking is unaffected. `payment_provider` collects invoices; null is the manual provider
-    // with `billing_instructions` (LAKE_BILLING_INSTRUCTIONS).
+    // tracking is unaffected. `payment_providers` says how invoices are paid (tests inject one);
+    // null: Stripe with the keys in the secret mount `billing_secrets` (LAKE_BILLING_SECRETS,
+    // secret `stripe`, read at use, decision 57, lake#620), else the manual provider with
+    // `billing_instructions` (LAKE_BILLING_INSTRUCTIONS). `stripe_api_base` is Stripe's API origin
+    // (a fake's in tests).
     bool billing = false;
-    std::shared_ptr<PaymentProvider> payment_provider;
+    std::shared_ptr<PaymentProviders> payment_providers;
+    std::string billing_secrets;
     std::string billing_instructions;
+    std::string stripe_api_base = "https://api.stripe.com";
     // The operator-provided PersistentVolume mount. Customer stores live at
     // <root>/<customer id>/store and instance log objects at
     // <root>/<node name>/log. Empty disables data-plane storage.

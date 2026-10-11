@@ -437,12 +437,13 @@ struct FakeProvider final : lake::api::PaymentProvider {
         return "Fake";
     }
     std::expected<lake::api::PaymentRequest, std::string>
-    request_payment(const lake::control::Invoice& invoice) override {
+    request_payment(const lake::api::PaymentAccount&,
+                    const lake::control::Invoice& invoice) override {
         ++requests;
         if (refuse) {
             return std::unexpected(std::string("card declined"));
         }
-        return lake::api::PaymentRequest{"fake-" + invoice.period, "Pay at the fake page."};
+        return lake::api::PaymentRequest{"fake-" + invoice.period, "Pay at the fake page.", {}, {}};
     }
     bool records_payments_by_hand() const override {
         return false;

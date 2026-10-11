@@ -157,6 +157,10 @@ the row.
 Both stores keep billing records (migration `0073_billing`, lake#564): plans with their prices,
 each account's plan by month, and invoices with their lines; one invoice an account and month
 that is not void, and only a due invoice becomes paid or void.
+They keep the payment provider's records too (migration `0074_payment_provider`, lake#620): the
+provider's customer id for each account, kept once (`billing_accounts`), an invoice's `payment_url`
+and `provider_status`, and `apply_payment_event`, which records a provider's event id and moves the
+invoice it names in one transaction, only while it is due, so an event is never applied twice.
 `application_credential_records.cpp` keeps an application's signing keys and webhooks in its
 workspace (lake#352, lake#355). The stores no longer write or read `auth_app_signing_keys` or
 `auth_app_webhooks`: they envelope and open the credentials with the keystore

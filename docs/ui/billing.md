@@ -18,8 +18,15 @@ Usage is tracked as usual.") with a link to Usage. Usage pages are unchanged eve
 | Path | File | What it shows | Capabilities |
 |---|---|---|---|
 | `/billing?customer_id=` | `billing/BillingPage.tsx` | Figures (plan, this month so far, due, payment), **This Month So Far** (the bill's lines and total, a warning naming any workspace whose usage could not be read), **Choose a Plan** (a card per plan with its fee and prices; **Choose <plan>** confirms what the choice does: start now, change next month, or stay and cancel a change), **Invoices** (month, number, total, state) and **Not Measured Yet**. The account is the current workspace's; the operator passes `customer_id` and has **Issue an invoice** (a month that has ended). | `billing_account`, `billing_plans`, `bill_preview`, `list_invoices`, `choose_billing_plan`, `issue_invoice` |
-| `/billing/invoices/:invoiceId?customer_id=` | `billing/InvoicePage.tsx` | One invoice: its lines as issued and total, a side card (number, month, plan, issued, state, paid or voided, reference), **How to Pay** while due, the note, and **Print**. The operator has **Record payment** (reference, note) and **Void** (why), both on a due invoice. | `get_invoice`, `record_invoice_payment`, `void_invoice` |
+| `/billing/invoices/:invoiceId?customer_id=` | `billing/InvoicePage.tsx` | One invoice: its lines as issued and total, a side card (number, month, plan, issued, state, paid or voided, reference, and **Stripe**: Stripe's state of it), **Pay with Stripe** (Stripe's hosted invoice page, `payment_url`) and **How to Pay** while due, **The Last Payment Failed** after a failed payment, the note, and **Print**. The operator has **Void** (why; voids it in Stripe too) on a due invoice, and **Record payment** (reference, note) only on an invoice paid outside lake (provider `manual`). | `get_invoice`, `record_invoice_payment`, `void_invoice` |
 | `/billing/plans` | `billing/PlansPage.tsx` | The operator's price list, retired plans included: fee, usage prices with what is included, offered or retired. **New plan** and each plan's name open a drawer: id (fixed once saved), name, description, monthly fee, currency, order, offered, and a price row per dimension (price in the currency, per how many units, included a month). | `billing_plans` (`include_retired`), `set_billing_plan` |
+
+The **Payment** figure on `/billing` names the provider (`billing_account.provider`): **Stripe**, "pay
+each invoice on Stripe's page", or **Invoice only**. When the manual provider is in use because
+Stripe's keys are not in lake's secret store, an **Invoice Only** banner says so: the operator sees
+the reason (`provider.reason`), an account sees "Card payment is not set up on this lake yet"
+(lake#620). `payOnline` shows **Pay with Stripe** only for a due invoice with an `https://` page;
+`recordedByHand`, `providerStatus` and `paymentSummary` are the other rules, in `billing.ts`.
 
 Amounts are millionths of the currency in the API; the pages show them to the cent, keeping
 fractions of a cent only under one unit (a price of $0.0004 a call). Quantities use Usage's units

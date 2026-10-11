@@ -147,6 +147,7 @@ struct MeteringConfig {
 };
 
 class Registry;
+class PaymentProviders; // lake/api/billing.hpp
 
 // Repository-store work never runs on the server's thread (lake#380): a workspace's store is in
 // its workspace Zetta, and a slow or hung Zetta, a lease wait or a switch must hold up only the
@@ -420,6 +421,9 @@ struct ApiContext {
     // calls, speech-to-text seconds and model tokens are added here, off the request path. Null:
     // nothing is recorded.
     UsageRecorder* usage_recorder = nullptr;
+    // How invoices are paid where billing is on (docs/api/billing.md#payment-providers): `viewer`
+    // and `server_info` report its status. Null: billing is off.
+    std::shared_ptr<PaymentProviders> payments;
 };
 
 using CapabilityHandler =

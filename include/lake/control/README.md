@@ -126,7 +126,11 @@ in workspace Zettas.
 `billing_plans`, `put_billing_plan`, `billing_subscriptions`, `set_billing_subscription`,
 `create_invoice`, `list_invoices`, `get_invoice` and `set_invoice_state`, are billing records
 (migration `0073_billing`, lake#564, decision 56): control-plane multitenancy; usage stays in
-workspace Zettas and an invoice line keeps only the quantity billed.
+workspace Zettas and an invoice line keeps only the quantity billed. `PaymentEvent`,
+`PaymentEventResult`, `billing_provider_customer`, `set_billing_provider_customer` and
+`apply_payment_event` are the payment provider's records (migration `0074_payment_provider`,
+lake#620, decision 57): the provider's customer per account and its notices, applied once by event
+id.
 `application_credential_records.hpp` holds the application's credentials in its workspace (lake#352,
 lake#355): the key ring codec (one record per application, every key in version order, one
 current; `rotate_application_signing_keys` writes it with `if_revision` and rereads on a conflict)

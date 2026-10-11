@@ -3,7 +3,7 @@
  * rail that shows Billing only where the lake bills. `npm test`; the build runs it. */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { choiceOf, choiceSentence, includedLabel, invoiceTone, microsOf, monthLabel, months, money, owed, priceInput, priceLabel, quantityLabel } from "../src/pages/billing/billing.ts";
+import { choiceOf, choiceSentence, includedLabel, invoiceTone, microsOf, monthLabel, months, money, owed, paymentSummary, payOnline, priceInput, priceLabel, providerStatus, quantityLabel, recordedByHand } from "../src/pages/billing/billing.ts";
 import { billingVisible } from "../src/routes/nav.ts";
 
 test("an amount is in its currency, to the cent unless a price has fractions of one", () => {
@@ -79,4 +79,32 @@ test("Billing is in the rail only where the lake bills", () => {
   assert.equal(billingVisible({ billing: true }, { billing: false }), false);
   assert.equal(billingVisible({ billing: true }, {}), false);
   assert.equal(billingVisible({}, { billing: false }), true);
+});
+
+test("a due Stripe invoice is paid on Stripe's page; others are not", () => {
+  const url = "https://invoice.stripe.com/i/acct_1/test_abc";
+  assert.equal(payOnline({ state: "due", payment_url: url }), url);
+  assert.equal(payOnline({ state: "paid", payment_url: url }), null, "a paid invoice has nothing to pay");
+  assert.equal(payOnline({ state: "void", payment_url: url }), null);
+  assert.equal(payOnline({ state: "due", payment_url: "" }), null, "an invoice paid outside lake");
+  assert.equal(payOnline({ state: "due" }), null);
+  assert.equal(payOnline({ state: "due", payment_url: "javascript:alert(1)" }), null, "only an https page");
+  assert.equal(payOnline({ state: "due", payment_url: "http://invoice.stripe.com/i/x" }), null);
+  assert.equal(recordedByHand({ provider: "manual" }), true);
+  assert.equal(recordedByHand({ provider: "stripe" }), false);
+});
+
+test("Stripe's state of an invoice reads in words", () => {
+  assert.equal(providerStatus(""), null);
+  assert.equal(providerStatus(undefined), null);
+  assert.deepEqual(providerStatus("open"), { label: "Awaiting payment", tone: "warning" });
+  assert.deepEqual(providerStatus("payment_failed"), { label: "Payment failed", tone: "danger" });
+  assert.deepEqual(providerStatus("paid"), { label: "Paid", tone: "success" });
+  assert.deepEqual(providerStatus("uncollectible"), { label: "uncollectible", tone: "neutral" });
+});
+
+test("the Payment figure names the provider and says when card payment is not set up", () => {
+  assert.deepEqual(paymentSummary({ name: "stripe", title: "Stripe", records_payments_by_hand: false, online_payment: true, reason: "" }), { value: "Stripe", sub: "pay each invoice on Stripe's page" });
+  assert.deepEqual(paymentSummary({ name: "manual", title: "Invoice only", records_payments_by_hand: true, reason: "Card payment is not set up: no mount." }), { value: "Invoice only", sub: "card payment is not set up" });
+  assert.deepEqual(paymentSummary({ name: "manual", title: "Invoice only", records_payments_by_hand: true }), { value: "Invoice only", sub: "Orama records each payment" });
 });

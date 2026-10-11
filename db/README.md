@@ -319,3 +319,11 @@ account and month, a total and its payment state; at most one that is not void) 
 Zetta; no workspace content is kept. Nothing is dropped; idempotent. The latest guard is
 `billing_guard`; the operator must vendor this schema and select that guard before rollout. See
 [schema.md](../docs/control-plane/schema.md#billing-migration).
+
+Migration `0074_payment_provider` (lake#620, decision 57) adds Stripe's records:
+`billing_accounts` (an account's customer id at a payment provider, kept once),
+`billing_invoices.payment_url` and `provider_status`, an index on the provider's invoice id, and
+`billing_payment_events` (each provider event applied, by event id, so none is applied twice). Ids,
+states and URLs only: no key and no card. Nothing is dropped; idempotent. The latest guard is
+`payment_provider_guard`; the operator must vendor this schema and select that guard before
+rollout. See [schema.md](../docs/control-plane/schema.md#payment-provider-migration).

@@ -342,6 +342,21 @@ struct Invoice {
     std::string provider, provider_reference, instructions, note;
     std::string issued_at, paid_at, voided_at;
     std::vector<InvoiceLine> lines;
+    // Where the account pays (Stripe's hosted invoice page) and the provider's own state of the
+    // invoice (`open`, `paid`, `payment_failed`, `void`), migration 0074. Empty for manual.
+    std::string payment_url, provider_status;
+};
+// A payment provider's notice (a Stripe webhook event, migration 0074), applied once per
+// (provider, event_id): `state` moves a due invoice (`paid`, `void`; empty keeps it) and
+// `provider_status` is kept on it.
+struct PaymentEvent {
+    std::string provider, event_id, event_type, reference, state, provider_status, note;
+};
+struct PaymentEventResult {
+    bool duplicate = false; // the event id was applied before; nothing changed
+    bool matched = false;   // an invoice of this provider has `reference`
+    bool changed = false;   // the invoice's state or provider_status changed
+    Invoice invoice;        // the invoice after the event, when matched
 };
 struct ManagedService {
     std::string id, customer_id, kind, name, slug;
@@ -1457,6 +1472,18 @@ public:
                                               const std::string& state,
                                               const std::string& provider_reference,
                                               const std::string& note) = 0;
+    // Payment providers (migration 0074, lake#620): the provider's id for an account
+    // (billing_accounts; "" when it has none, not_found for an unknown customer), kept once:
+    // set_billing_provider_customer answers the id already kept when there is one. A payment event
+    // is applied once per (provider, event_id) in one transaction: recorded, then the invoice of
+    // that provider with `reference` moves only while it is due.
+    virtual Result<std::string> billing_provider_customer(const std::string& customer_id,
+                                                          const std::string& provider) = 0;
+    virtual Result<std::string>
+    set_billing_provider_customer(const std::string& customer_id,
+                                  const std::string& provider,
+                                  const std::string& provider_customer_id) = 0;
+    virtual Result<PaymentEventResult> apply_payment_event(const PaymentEvent& event) = 0;
 
     virtual Result<PkiAuthorityRecord> create_pki_authority(const NewPkiAuthorityRecord& value,
                                                             const std::string& instance_kek) = 0;

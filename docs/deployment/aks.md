@@ -107,6 +107,57 @@ kubectl --context orama-production-cluster-01 patch lake prod --type json -p '[
 
 Removing the entry turns billing off at the next roll; the billing rows stay in PostgreSQL.
 
+## Stripe
+
+Stripe is lake's payment provider (decision 57, lake#620,
+[`../api/billing.md#stripe`](../api/billing.md#stripe)). **Its keys live in lake's own secret store,
+never in a Kubernetes Secret or in `spec.env`**: a secret becomes a Kubernetes Secret only when a
+deployment, app or service has to mount it, and lake reads its own keys from a secret mount in a
+workspace Zetta at use. The schema must first carry `0074_payment_provider` (guard
+`payment_provider_guard`), and billing must be on (above).
+
+1. **Stripe.** In the Stripe dashboard, in test mode first: Developers → API keys, the secret key
+   (`sk_test_...`), or a restricted key with write access to Customers, Invoices and Invoice Items.
+   Developers → Webhooks → Add endpoint: `https://lake.oramadev.net/billing/stripe/webhook` (on
+   lake.live, `https://lake.live/billing/stripe/webhook`), events `invoice.paid`,
+   `invoice.payment_failed` and `invoice.voided`; its signing secret is the `whsec_...` value.
+2. **The mount.** Signed in as the operator (the admin bearer, or the web app's Administration),
+   create a secret mount in a workspace of the operator's account and put the secret `stripe`:
+
+   ```sh
+   LAKE=https://lake.oramadev.net
+   curl -sS -H "Authorization: Bearer $LAKE_ADMIN_TOKEN" -H 'Content-Type: application/json' \
+     "$LAKE/v1/create_secret_mount" \
+     -d '{"customer_id": "<operator account id>", "workspace_id": "<operator workspace id>", "name": "billing"}'
+   curl -sS -H "Authorization: Bearer $LAKE_ADMIN_TOKEN" -H 'Content-Type: application/json' \
+     "$LAKE/v1/put_secret" \
+     -d '{"mount_id": "<mount id>", "name": "stripe", "value": {"secret_key": "<sk_test_...>", "webhook_secret": "<whsec_...>"}}'
+   ```
+
+   The same is Administration → Secrets, the mount, **New secret**. `put_secret` answers the
+   version's metadata, never the value. Keep the keys out of shell history (read them with
+   `read -s`) and out of every file.
+3. **Point lake at the mount.** Only the mount's id goes into the CR:
+
+   ```sh
+   kubectl --context orama-production-cluster-01 patch lake prod --type json -p '[
+     {"op": "add", "path": "/spec/env/-", "value": {"name": "LAKE_BILLING_SECRETS", "value": "<mount id>"}}]'
+   ```
+
+4. **Check.** `GET /v1/server_info` answers `"payment_provider": "stripe"` once lake has read the
+   keys (Billing opened once, or any billing call); the Billing page's Payment figure says Stripe.
+   Issue a test-mode invoice, open it, **Pay with Stripe** with a Stripe test card (4242 4242 4242
+   4242), and the invoice turns paid when Stripe's `invoice.paid` arrives. Stripe's dashboard shows
+   each delivery and lake's answer.
+
+**Rotating** a key: put a new version of `stripe` (step 2's `put_secret`). Lake reads it within a
+minute, and at the first notice whose signature fails. Roll the webhook secret in Stripe ("Roll
+secret", which keeps the old one valid for a while) and put the new `whsec_` at once. **Turning it
+off:** delete the secret's versions or unset `LAKE_BILLING_SECRETS`; lake falls back to the manual
+provider and the Billing page says card payment is not set up. Invoices already issued through
+Stripe stay payable there, and Stripe's notices are answered `404` until the keys return, so Stripe
+retries them for three days.
+
 ## Runbook
 
 **Roll a new lake image.** Release an immutable CI-built image (see

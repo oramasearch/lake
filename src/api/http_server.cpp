@@ -12,6 +12,7 @@
 #include "lake/api/metering_recorder.hpp"
 #include "lake/api/request_recorder.hpp"
 #include "lake/api/server.hpp"
+#include "lake/api/stripe.hpp"
 #include "lake/api/usage_recorder.hpp"
 #include "lake/thread.hpp"
 
@@ -7146,6 +7147,8 @@ struct ApiServer::Impl {
     // The registry is fixed for the life of the process, so its MCP tool list is too (lake#441).
     std::string mcp_tool_digest;
     mutable OutboundHttpClient outbound_http;
+    // How invoices are paid where billing is on (docs/api/billing.md#payment-providers).
+    std::shared_ptr<PaymentProviders> payments;
     // Speech-to-text (docs/api/transcripts.md): the injected one, else OpenAI over outbound_http
     // when a key is configured, else empty.
     Transcriber transcriber;
@@ -7993,10 +7996,40 @@ struct ApiServer::Impl {
         register_core_capabilities(registry, version_string());
         // Billing only where it is on (LAKE_BILLING, lake#564): off, its capabilities are absent.
         if (options.billing) {
-            register_billing_capabilities(
-                registry,
-                options.payment_provider ? options.payment_provider
-                                         : manual_payment_provider(options.billing_instructions));
+            payments = options.payment_providers;
+            if (!payments && options.billing_secrets.empty()) {
+                payments = fixed_payment_providers(
+                    manual_payment_provider(options.billing_instructions),
+                    "Card payment is not set up: this lake has no billing secret mount "
+                    "(LAKE_BILLING_SECRETS).");
+            } else if (!payments) {
+                // Stripe over the server's outbound client, with the keys read from lake's own
+                // secret store at use (docs/api/billing.md#where-the-keys-live).
+                const std::string base = options.stripe_api_base;
+                payments = secret_payment_providers(
+                    {.mount_id = options.billing_secrets,
+                     .secret_name = "stripe",
+                     .instructions = options.billing_instructions,
+                     .ttl = std::chrono::seconds(60),
+                     .stripe = [this,
+                                base](const StripeKeys& keys) -> std::shared_ptr<PaymentProvider> {
+                         if (!stripe_secret_key_shape(keys.secret_key) ||
+                             !stripe_webhook_secret_shape(keys.webhook_secret)) {
+                             return nullptr;
+                         }
+                         return stripe_payment_provider(
+                             keys,
+                             [this](const StripeRequest& request) {
+                                 OutboundResponse response = outbound_http.request(
+                                     {request.method, request.url, request.body, request.headers});
+                                 return StripeResponse{response.status,
+                                                       std::move(response.body),
+                                                       std::move(response.error)};
+                             },
+                             base);
+                     }});
+            }
+            register_billing_capabilities(registry, payments);
         }
         openapi_body = openapi_document(registry, version_string()).dump();
         agent_openapi_body =
@@ -8359,6 +8392,7 @@ struct ApiServer::Impl {
             "/identity/sign-up",
             "/identity/sign-in",
             "/identity/clerk-session",
+            "/billing/stripe/webhook",
             "/identity/mfa/verify",
             "/identity/mfa/enroll",
             "/identity/mfa/disable",
@@ -8502,6 +8536,7 @@ struct ApiServer::Impl {
         ctx.external_origin = options.external_origin;
         ctx.clerk_publishable_key = options.clerk_publishable_key;
         ctx.transcriber = transcriber;
+        ctx.payments = payments;
         ctx.object_transport = object_transport;
         ctx.artifact_catalog = [this] {
             nlohmann::json catalog = artifacts.catalog();
@@ -9530,6 +9565,51 @@ struct ApiServer::Impl {
     // template token once. It is verified against the instance JWKS (RS256, iss, aud = lake,
     // exp/nbf/iat), then the same session, audit and cookie path as OAuth sign-in runs. Failures
     // return to the sign-in page with a message rather than an API error.
+    // POST /billing/stripe/webhook (docs/api/billing.md#webhooks, lake#620): Stripe's payment
+    // notices. Unauthenticated: the Stripe-Signature HMAC is the credential, checked with the
+    // webhook secret from lake's secret store. 404 where this lake does not bill or takes no
+    // notices.
+    boost::http::route_task serve_payment_notice(boost::http::route_params& route) {
+        namespace http = boost::http;
+        if (!payments) {
+            co_return co_await send_text(route,
+                                         http::status::not_found,
+                                         error_body("not_found", "this lake does not bill"),
+                                         "application/json; charset=utf-8",
+                                         "no-store");
+        }
+        auto [read_error, body] = co_await read_string_body(route, std::size_t{1024} * 1024);
+        if (read_error) {
+            if (body_is_too_large(read_error)) {
+                co_return co_await send_text(
+                    route,
+                    http::status::payload_too_large,
+                    error_body("size_invalid", "a notice is at most 1 MiB"),
+                    "application/json; charset=utf-8",
+                    "no-store");
+            }
+            co_return http::route_error(read_error);
+        }
+        const std::string signature = route.req.count("stripe-signature") == 0
+                                          ? std::string()
+                                          : std::string(route.req.at("stripe-signature"));
+        ApiContext context = context_for(route);
+        context.registry = &registry;
+        auto outcome = co_await receive_payment_notice(*payments, context, body, signature);
+        if (!outcome) {
+            co_return co_await send_text(route,
+                                         http::status::service_unavailable,
+                                         error_body("store_error", outcome.error().message),
+                                         "application/json; charset=utf-8",
+                                         "no-store");
+        }
+        co_return co_await send_text(route,
+                                     static_cast<http::status>(outcome->status),
+                                     outcome->body.dump(),
+                                     "application/json; charset=utf-8",
+                                     "no-store");
+    }
+
     boost::http::route_task serve_clerk_session(boost::http::route_params& route) {
         namespace http = boost::http;
         // redirect() takes views and runs when awaited, so the location lives in this frame.
@@ -13312,6 +13392,12 @@ bool ApiServer::start() {
               [&impl](http::route_params& route) -> http::route_task {
                   return impl.observe_request(
                       route, "/llms-full.txt", impl.serve_llms(route, true));
+              });
+    add_route(http::method::post,
+              "/billing/stripe/webhook",
+              [&impl](http::route_params& route) -> http::route_task {
+                  return impl.observe_request(
+                      route, "/billing/stripe/webhook", impl.serve_payment_notice(route));
               });
     add_route(http::method::post,
               "/identity/clerk-session",

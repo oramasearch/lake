@@ -1,11 +1,13 @@
 #include "lake/api/capabilities.hpp"
-#include "lake/api/images.hpp"
+
 #include "audit_logs.hpp"
-#include "lake_attestation.hpp"
-#include "repository_records_api.hpp"
 #include "lake/api/audit_routing.hpp"
+#include "lake/api/billing.hpp"
+#include "lake/api/images.hpp"
 #include "lake/api/metering_recorder.hpp"
 #include "lake/version.hpp"
+#include "lake_attestation.hpp"
+#include "repository_records_api.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -2011,24 +2013,35 @@ void register_server_info(Registry& registry, std::string_view version) {
                             {"revision", {{"type", "string"}}},
                             {"api", {{"type", "string"}}},
                             {"store", {{"type", "string"}}},
-                            {"deployments", {{"type", "boolean"}}}}}},
+                            {"deployments", {{"type", "boolean"}}},
+                            {"billing", {{"type", "boolean"}}},
+                            {"payment_provider", {{"type", json::array({"string", "null"})}}},
+                            {"online_payment", {{"type", "boolean"}}}}}},
         .kind = CapabilityKind::Read,
         .requires_auth = false,
         .object = "server",
         .action = "read",
         .resolve_object = global_object,
         .handler = [version_string](const json&, ApiContext& ctx) {
-            return ApiResult::success({{"name", "lake"},
-                                       {"node", ctx.node_name},
-                                       {"version", version_string},
-                                       {"revision", build_revision_string()},
-                                       {"api", "v1"},
-                                       {"store", ctx.store ? ctx.store->kind() : "none"},
-                                       // Whether the platform mirror is configured: without it
-                                       // every Deployments read answers `not_supported`, so a
-                                       // page asks this once instead of every repository
-                                       // (lake#605).
-                                       {"deployments", ctx.platform != nullptr}});
+            const json payment = payment_status_json(ctx);
+            return ApiResult::success(
+                {{"name", "lake"},
+                 {"node", ctx.node_name},
+                 {"version", version_string},
+                 {"revision", build_revision_string()},
+                 {"api", "v1"},
+                 {"store", ctx.store ? ctx.store->kind() : "none"},
+                 // Whether the platform mirror is configured: without it
+                 // every Deployments read answers `not_supported`, so a
+                 // page asks this once instead of every repository
+                 // (lake#605).
+                 {"deployments", ctx.platform != nullptr},
+                 // Whether this lake bills and how invoices are paid
+                 // (lake#620): the manual provider when Stripe's keys are
+                 // not in the billing secret.
+                 {"billing", billing_registered(ctx.registry)},
+                 {"payment_provider", payment.is_null() ? json(nullptr) : payment["provider"]},
+                 {"online_payment", !payment.is_null() && payment["online_payment"] == true}});
         }});
 }
 
