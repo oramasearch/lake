@@ -434,8 +434,8 @@ void register_static_secret_capabilities(Registry& registry) {
         .action = "write",
         .resolve_object = mount_object("secret"),
         .resolves_operator_audit_target = true,
-        .async_handler = on_mount([](const json& input, ApiContext& context,
-                                     MountSecrets& mount) -> liquid::runtime::task<ApiResult> {
+        .async_handler = on_mount([](const json& input, ApiContext& context, MountSecrets& mount)
+                                      -> liquid::runtime::task<ApiResult> {
             auto check = optional_version(input, "check_and_set");
             if (!check) {
                 co_return refused(check.error());

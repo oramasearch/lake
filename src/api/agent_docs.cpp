@@ -378,8 +378,8 @@ const std::vector<Flow>& flows() {
            "`name`, `storage: \"files\"`; answers the drive and its `id` (the `drive_id` of later "
            "calls)"},
           {"upload_drive_entries",
-           "`drive_id`, `files: [{path, content: <base64>}]` (16 MiB in all; larger files go through "
-           "begin_drive_upload, append_drive_upload, finish_drive_upload)"},
+           "`drive_id`, `files: [{path, content: <base64>}]` (16 MiB in all; larger files go "
+           "through begin_drive_upload, append_drive_upload, finish_drive_upload)"},
           {"list_drive_entries", "`drive_id`, optional `path`: a folder's files and folders"},
           {"read_drive_file", "`drive_id`, `id`: the file's bytes as `content_base64`"}}},
         {"Keep a secret",

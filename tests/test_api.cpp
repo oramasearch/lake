@@ -7232,10 +7232,10 @@ TEST(ApiErrors, ABrokenConstraintIsSaidAsItsRuleAtItsField) {
     EXPECT_EQ(named.error.message,
               "repository_name is 1 to 256 lowercase letters, digits and hyphens, starting and "
               "ending with a letter or digit");
-    const ApiResult unnamed = ApiResult::failure(
-        "invalid_input",
-        "ERROR:  new row for relation \"grants\" violates check constraint "
-        "\"grants_attestation_check\"");
+    const ApiResult unnamed =
+        ApiResult::failure("invalid_input",
+                           "ERROR:  new row for relation \"grants\" violates check constraint "
+                           "\"grants_attestation_check\"");
     EXPECT_EQ(unnamed.error.path, "/attestation_digest");
     EXPECT_TRUE(unnamed.error.message.starts_with("attestation_digest is required"));
     const ApiResult taken = ApiResult::failure(
@@ -7473,9 +7473,9 @@ TEST(WebApp, PermissionsDocsMcpAndPackagesAreCapabilities) {
     const auto workspace =
         s.store.create_workspace({customer_id, "analytics", "dev", "taap:1:ed25519:web-owner"});
     ASSERT_TRUE(workspace);
-    const ApiResult on_workspace = s.call(
-        "my_permissions",
-        {{"object_type", "workspace"}, {"object_id", workspace->id}, {"actions", every}});
+    const ApiResult on_workspace =
+        s.call("my_permissions",
+               {{"object_type", "workspace"}, {"object_id", workspace->id}, {"actions", every}});
     ASSERT_TRUE(on_workspace.ok) << on_workspace.error.message;
     EXPECT_EQ(on_workspace.value["allowed"]["write"], true);
     const ApiResult on_drive =
@@ -7580,9 +7580,8 @@ TEST(WebApp, PermissionsDocsMcpAndPackagesAreCapabilities) {
         std::string body(
             std::ranges::find(guide, page["slug"].get<std::string>(), &WebUiGuidePage::slug)
                 ->markdown);
-        std::ranges::transform(body, body.begin(), [](unsigned char c) {
-            return static_cast<char>(std::tolower(c));
-        });
+        std::ranges::transform(
+            body, body.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
         EXPECT_NE(body.find("csv"), std::string::npos) << page["slug"];
         EXPECT_NE(body.find("upload"), std::string::npos) << page["slug"];
     }

@@ -162,8 +162,9 @@ ApiResult workspace_failure(const control::ZettaControlError& error,
 // (`add_dataset`, a bare `approve_plan`) named as the call that does.
 std::string engine_words_in_lake_terms(std::string text);
 // The `enum` the engine's OpenAPI document declares for one input field of one capability.
-std::optional<nlohmann::json>
-engine_input_enum(const nlohmann::json& openapi, std::string_view capability, std::string_view field);
+std::optional<nlohmann::json> engine_input_enum(const nlohmann::json& openapi,
+                                                std::string_view capability,
+                                                std::string_view field);
 // Zetta's OpenAPI document reduced to the allow-listed paths, rebased under `base` (the agent
 // path of one workspace), so a client deriving its tools from it sees exactly what it may call.
 nlohmann::json workspace_openapi(const nlohmann::json& document, std::string_view base);

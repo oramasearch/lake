@@ -128,8 +128,7 @@ json viewer_schema() {
          {"external_origin", string_schema()},
          {"public_host", string_schema()},
          {"config",
-          object_schema(
-              {{"frontier_model", string_schema()}}, json::array({"frontier_model"}))},
+          object_schema({{"frontier_model", string_schema()}}, json::array({"frontier_model"}))},
          {"version", string_schema()},
          {"revision", string_schema()}},
         json::array({"signed_in",
@@ -277,9 +276,18 @@ constexpr std::string_view permission_actions[] = {
 // repository) the Drive capabilities authorize, every other type the object of that type and id.
 // The object types my_permissions takes (lake#594): the policy objects (db/schema.sql
 // objects_type_check), a workspace (its space's permissions) and a drive folder.
-const std::vector<std::string> permission_object_types = {
-    "customer", "workspace", "organization", "team", "member", "repository", "path",
-    "environment", "secret_mount", "secret", "application", "drive folder"};
+const std::vector<std::string> permission_object_types = {"customer",
+                                                          "workspace",
+                                                          "organization",
+                                                          "team",
+                                                          "member",
+                                                          "repository",
+                                                          "path",
+                                                          "environment",
+                                                          "secret_mount",
+                                                          "secret",
+                                                          "application",
+                                                          "drive folder"};
 
 std::expected<std::string, ApiError> permission_object(const json& input, ApiContext& context) {
     const std::string type = input.at("object_type");
@@ -303,7 +311,8 @@ std::expected<std::string, ApiError> permission_object(const json& input, ApiCon
         }
         const auto space = context.store->find_policy_object("customer", workspace->customer_id);
         if (!space) {
-            return std::unexpected(ApiError{space.error().code, space.error().message, "/object_id"});
+            return std::unexpected(
+                ApiError{space.error().code, space.error().message, "/object_id"});
         }
         return space->id;
     }
@@ -738,7 +747,8 @@ void register_console_capabilities(Registry& registry, std::string_view version)
             "and a space id, `workspace` and a workspace id (its space's permissions, which "
             "also govern its drives), `repository` and a repository id, ...); `drive folder` "
             "names a repository by `object_id` and a folder by `path` at `ref` (default "
-            "`main`), as the Drive capabilities authorize it. `promote` is `admin` on the object. It never "
+            "`main`), as the Drive capabilities authorize it. `promote` is `admin` on the object. "
+            "It never "
             "replaces the check each capability makes itself.",
         .input_schema =
             object_schema({{"object_type",
@@ -812,10 +822,10 @@ void register_console_capabilities(Registry& registry, std::string_view version)
             "ignored), best match first, each saying what matched, the anchor of the heading to "
             "open and an excerpt. Read one with get_doc by its `slug`. Public.",
         .input_schema = object_schema({{"q", string_schema()}}),
-        .output_schema = object_schema(
-            {{"pages", {{"type", "array"}, {"items", doc_page_schema()}}},
-             {"sections", string_array_schema()}},
-            json::array({"pages", "sections"})),
+        .output_schema =
+            object_schema({{"pages", {{"type", "array"}, {"items", doc_page_schema()}}},
+                           {"sections", string_array_schema()}},
+                          json::array({"pages", "sections"})),
         .kind = CapabilityKind::Read,
         .requires_auth = false,
         .object = "server",

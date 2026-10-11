@@ -161,9 +161,9 @@ std::expected<std::string, ApiError> repository_content_object(const json& input
                                                                ApiContext& context) {
     const std::string id = repository_reference(input);
     if (id.empty()) {
-        return std::unexpected(ApiError{
-            "invalid_input", "repository_id is required (or the older id or repository)",
-            "/repository_id"});
+        return std::unexpected(ApiError{"invalid_input",
+                                        "repository_id is required (or the older id or repository)",
+                                        "/repository_id"});
     }
     if (context.store == nullptr) {
         return std::unexpected(
@@ -5250,9 +5250,10 @@ std::expected<search::Query, ApiError> search_scope(const json& input, ApiContex
         }
         if (customers->size() >= static_cast<std::size_t>(page)) {
             // No cursor for this list: refused rather than searched in part.
-            return std::unexpected(ApiError{"invalid_input",
-                                            "too many spaces to search them all; name a customer_id",
-                                            "/customer_id"});
+            return std::unexpected(
+                ApiError{"invalid_input",
+                         "too many spaces to search them all; name a customer_id",
+                         "/customer_id"});
         }
         std::vector<std::string> objects;
         std::map<std::string, std::string> space_of_object;
@@ -5305,29 +5306,31 @@ void register_search_capability(Registry& registry) {
         .action = "read",
         .resolve_object = global_object,
         .authorizes_candidates = true,
-        .handler = [](const json& input, ApiContext& context) {
-            if (!context.search) {
-                return no_search();
-            }
-            if (!context.store) {
-                return no_store();
-            }
-            auto scope = search_scope(input, context);
-            if (!scope) {
-                return ApiResult::failure(scope.error().code, scope.error().message,
-                                          scope.error().path);
-            }
-            auto result = context.search->query(*scope, context.acting_identity, *context.store);
-            if (result) {
-                context.audit_object =
-                    input.value("repository", "").empty()
-                        ? "repository/search"
-                        : "repository/" + input.at("repository").get<std::string>();
-                context.audit_details = {{"mode", search::to_string(result->mode)},
-                                         {"scanned_changes", result->scanned_changes}};
-            }
-            return search_result(std::move(result));
-        },
+        .handler =
+            [](const json& input, ApiContext& context) {
+                if (!context.search) {
+                    return no_search();
+                }
+                if (!context.store) {
+                    return no_store();
+                }
+                auto scope = search_scope(input, context);
+                if (!scope) {
+                    return ApiResult::failure(
+                        scope.error().code, scope.error().message, scope.error().path);
+                }
+                auto result =
+                    context.search->query(*scope, context.acting_identity, *context.store);
+                if (result) {
+                    context.audit_object =
+                        input.value("repository", "").empty()
+                            ? "repository/search"
+                            : "repository/" + input.at("repository").get<std::string>();
+                    context.audit_details = {{"mode", search::to_string(result->mode)},
+                                             {"scanned_changes", result->scanned_changes}};
+                }
+                return search_result(std::move(result));
+            },
         // Every other capability names a space `customer_id` (lake#591).
         .input_aliases = {{"customer", "customer_id"}}});
     registry.add(Capability{

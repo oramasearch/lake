@@ -3653,7 +3653,8 @@ TEST(Workspaces, NamingEngineRefusalsCarryThePathAndLakeCodes) {
                  {{"application/json",
                    {{"schema",
                      {{"properties",
-                       {{"format", {{"type", "string"}, {"enum", {"csv", "jsonl"}}}}}}}}}}}}}}}}}}}}};
+                       {{"format",
+                         {{"type", "string"}, {"enum", {"csv", "jsonl"}}}}}}}}}}}}}}}}}}}}};
     const auto listed = r.call(
         "workspace_act",
         {{"capability", "upload_dataset"},
@@ -3666,16 +3667,16 @@ TEST(Workspaces, NamingEngineRefusalsCarryThePathAndLakeCodes) {
         "invalid_argument",
         "validation failed for additional property 'name': instance invalid as per false-schema"};
     r.w.caller->failure_for = "create_index";
-    const auto unexpected = r.call(
-        "workspace_act",
-        {{"capability", "create_index"}, {"input", {{"table", "t"}, {"name", "x"}}}});
+    const auto unexpected =
+        r.call("workspace_act",
+               {{"capability", "create_index"}, {"input", {{"table", "t"}, {"name", "x"}}}});
     EXPECT_EQ(unexpected.error.code, "invalid_input");
     EXPECT_EQ(unexpected.error.path, "/input/name");
     EXPECT_EQ(unexpected.error.message, "unexpected field name");
     r.w.caller->failure = lake::control::ZettaControlError{
         "not_found", "no table 't' (load the table first with add_dataset)"};
-    const auto named = r.call(
-        "workspace_act", {{"capability", "create_index"}, {"input", {{"table", "t"}}}});
+    const auto named =
+        r.call("workspace_act", {{"capability", "create_index"}, {"input", {{"table", "t"}}}});
     EXPECT_NE(named.error.message.find("workspace_act upload_dataset"), std::string::npos)
         << named.error.message;
     EXPECT_EQ(named.error.message.find("add_dataset"), std::string::npos);
@@ -3693,8 +3694,8 @@ TEST(Workspaces, NamingEngineRefusalsCarryThePathAndLakeCodes) {
 // says how to make one (lake#591), though the step behind it is a workspace_act call.
 TEST(Workspaces, CompilePipelinePointsAtItsOwnProjectField) {
     ReadyWorkspace r;
-    r.w.caller->failure = lake::control::ZettaControlError{
-        "not_found", "no project named 'churn' (or with that id)"};
+    r.w.caller->failure =
+        lake::control::ZettaControlError{"not_found", "no project named 'churn' (or with that id)"};
     r.w.caller->failure_for = "capture_intent";
     const auto missing =
         r.call("compile_pipeline", {{"project", "churn"}, {"intent", "Predict churn"}});

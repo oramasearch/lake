@@ -755,7 +755,6 @@ std::string stream_description(const std::string& name) {
     return found == descriptions.end() ? std::string() : found->second;
 }
 
-
 // A human title for each operation (lake#594): OpenAPI's summary and the MCP tool's title.
 std::string stream_title(std::string_view name) {
     static const std::map<std::string_view, std::string_view> titles = {

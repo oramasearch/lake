@@ -5303,8 +5303,7 @@ engine_input_enum(const json& openapi, std::string_view capability, std::string_
         }
         for (const json& parameter : operation.value("parameters", json::array())) {
             if (parameter.is_object() && parameter.value("name", std::string()) == field) {
-                if (const json values =
-                        parameter.value(json::json_pointer("/schema/enum"), json());
+                if (const json values = parameter.value(json::json_pointer("/schema/enum"), json());
                     values.is_array()) {
                     return std::optional<json>(std::in_place, values);
                 }
@@ -5957,11 +5956,11 @@ void register_workspace_capabilities(Registry& registry) {
             properties["dry_run"] = {{"type", "boolean"}};
         }
         // A human title for each (lake#594); the raw id was shown as the title before.
-        const std::string title = listing                          ? "List workspaces"
-                                  : operation == "get_workspace"   ? "Get a workspace"
-                                  : creating                       ? "Create a workspace"
-                                  : updating                       ? "Update a workspace"
-                                                                   : "Delete a workspace";
+        const std::string title = listing                        ? "List workspaces"
+                                  : operation == "get_workspace" ? "Get a workspace"
+                                  : creating                     ? "Create a workspace"
+                                  : updating                     ? "Update a workspace"
+                                                                 : "Delete a workspace";
         registry.add(Capability{
             .name = operation,
             .title = title,
@@ -6159,9 +6158,8 @@ void register_workspace_capabilities(Registry& registry) {
                     context.workspaces ? context.workspaces->config().agent_endpoints : none);
                 // Internal tooling only when asked (lake#594).
                 if (!input.value("include_internal", false) && library.contains("agents")) {
-                    std::erase_if(library["agents"].get_ref<json::array_t&>(), [](const json& agent) {
-                        return agent.value("internal", false);
-                    });
+                    std::erase_if(library["agents"].get_ref<json::array_t&>(),
+                                  [](const json& agent) { return agent.value("internal", false); });
                 }
                 return ApiResult::success(std::move(library));
             }});

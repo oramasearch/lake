@@ -183,9 +183,8 @@ bool sql_name(std::string_view name) {
     if (name.empty() || std::isdigit(static_cast<unsigned char>(name.front())) != 0) {
         return false;
     }
-    return std::ranges::all_of(name, [](unsigned char c) {
-        return std::isalnum(c) != 0 || c == '_';
-    });
+    return std::ranges::all_of(name,
+                               [](unsigned char c) { return std::isalnum(c) != 0 || c == '_'; });
 }
 
 void annotate_one(nlohmann::json& dataset) {

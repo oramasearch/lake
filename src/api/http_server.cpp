@@ -9587,8 +9587,9 @@ struct ApiServer::Impl {
         if (provider_name == "github") {
             const std::string access_token = token.value("access_token", "");
             if (access_token.empty()) {
-                co_return co_await oauth_error(
-                    route, http::status::service_unavailable, "GitHub did not return an access token");
+                co_return co_await oauth_error(route,
+                                               http::status::service_unavailable,
+                                               "GitHub did not return an access token");
             }
             const OutboundResponse user_response =
                 outbound_http.request({"GET",

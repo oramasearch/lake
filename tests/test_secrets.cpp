@@ -140,7 +140,8 @@ TEST_F(SecretsCapabilities, VersionHistoryDeleteUndeleteAndDestroy) {
         call("read_secret", {{"mount_id", mount_id}, {"name", "database"}, {"version", 9}});
     EXPECT_EQ(no_version.error.message, "secret database has no version 9");
     EXPECT_EQ(no_version.error.path, "/version");
-    const ApiResult no_history = call("secret_metadata", {{"mount_id", mount_id}, {"name", "nope"}});
+    const ApiResult no_history =
+        call("secret_metadata", {{"mount_id", mount_id}, {"name", "nope"}});
     EXPECT_EQ(no_history.error.path, "/name");
     ASSERT_TRUE(call("undelete_secret_versions",
                      {{"mount_id", mount_id}, {"name", "database"}, {"versions", {1}}})

@@ -449,17 +449,17 @@ SecretTask<control::SecretVersion> MountSecrets::read(std::string name, std::uin
     const auto record = *stored ? control::SecretVersionCodec::decode(**stored) : std::nullopt;
     if (!record || record->mount_id != mount_id || record->name != name ||
         record->version != selected) {
-        co_return failure<control::SecretVersion>(
-            "not_found",
-            "secret " + name + " has no version " + std::to_string(selected),
-            version == 0 ? "/name" : "/version");
+        co_return failure<control::SecretVersion>("not_found",
+                                                  "secret " + name + " has no version " +
+                                                      std::to_string(selected),
+                                                  version == 0 ? "/name" : "/version");
     }
     const std::string at = version == 0 ? "/name" : "/version";
     if (!record->destroyed_at.empty()) {
-        co_return failure<control::SecretVersion>(
-            "not_found",
-            "version " + std::to_string(selected) + " of secret " + name + " was destroyed",
-            at);
+        co_return failure<control::SecretVersion>("not_found",
+                                                  "version " + std::to_string(selected) +
+                                                      " of secret " + name + " was destroyed",
+                                                  at);
     }
     if (!record->deleted_at.empty()) {
         co_return failure<control::SecretVersion>(
@@ -596,10 +596,10 @@ SecretTask<control::SecretMetadata> MountSecrets::change(std::string name,
         }
         const auto record = *stored ? control::SecretVersionCodec::decode(**stored) : std::nullopt;
         if (!record || record->mount_id != mount_id || record->name != name) {
-            co_return failure<control::SecretMetadata>(
-                "not_found",
-                "secret " + name + " has no version " + std::to_string(version),
-                "/versions");
+            co_return failure<control::SecretMetadata>("not_found",
+                                                       "secret " + name + " has no version " +
+                                                           std::to_string(version),
+                                                       "/versions");
         }
         if (action == control::SecretVersionAction::Undelete && !record->destroyed_at.empty()) {
             co_return failure<control::SecretMetadata>(
@@ -650,10 +650,10 @@ SecretTask<control::SecretMetadata> MountSecrets::change(std::string name,
             co_return Result(std::unexpected(changed.error()));
         }
         if (!*changed) {
-            co_return failure<control::SecretMetadata>(
-                "not_found",
-                "secret " + name + " has no version " + std::to_string(version),
-                "/versions");
+            co_return failure<control::SecretMetadata>("not_found",
+                                                       "secret " + name + " has no version " +
+                                                           std::to_string(version),
+                                                       "/versions");
         }
     }
     auto touched = control::settled(co_await rewrite(

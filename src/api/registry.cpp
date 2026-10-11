@@ -109,9 +109,7 @@ constexpr std::array<ConstraintRule, 17> constraint_rules{{
     {"grants_principal_object_role_unique",
      "principal_taap_id",
      "already holds this role here: the item is already shared with that person in that role"},
-    {"memberships_scope_principal_unique",
-     "principal_id",
-     "is already a member here"},
+    {"memberships_scope_principal_unique", "principal_id", "is already a member here"},
     {"invitations_expiry_check", "expires_in_seconds", "must be in the future"},
     {"audit_retention_floor_check", "retention_days", "is at least 400 days"},
 }};
@@ -270,10 +268,15 @@ bool named_with(const Capability& capability, std::initializer_list<std::string_
 } // namespace
 
 bool capability_destroys(const Capability& capability) {
-    return capability_writes(capability) &&
-           named_with(capability,
-                      {"delete_", "destroy_", "remove_", "revoke_", "drop_", "purge_", "unroute_",
-                       "scim_delete_"});
+    return capability_writes(capability) && named_with(capability,
+                                                       {"delete_",
+                                                        "destroy_",
+                                                        "remove_",
+                                                        "revoke_",
+                                                        "drop_",
+                                                        "purge_",
+                                                        "unroute_",
+                                                        "scim_delete_"});
 }
 
 bool capability_idempotent(const Capability& capability) {
@@ -282,9 +285,20 @@ bool capability_idempotent(const Capability& capability) {
     }
     // Each sets a value or removes something by name: a second identical call finds it done.
     return named_with(capability,
-                      {"set_", "unset_", "upsert_", "scim_upsert_", "scim_patch_", "delete_",
-                       "destroy_", "remove_", "revoke_", "drop_", "purge_", "settle_",
-                       "unexpose_", "update_"});
+                      {"set_",
+                       "unset_",
+                       "upsert_",
+                       "scim_upsert_",
+                       "scim_patch_",
+                       "delete_",
+                       "destroy_",
+                       "remove_",
+                       "revoke_",
+                       "drop_",
+                       "purge_",
+                       "settle_",
+                       "unexpose_",
+                       "update_"});
 }
 
 ApiResult ApiResult::success(nlohmann::json output) {
