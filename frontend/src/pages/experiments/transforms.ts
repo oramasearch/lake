@@ -89,6 +89,39 @@ export function metricLabel(name: unknown): string {
   return ALIASES[metricKey(name)] ?? name;
 }
 
+/** The held-out scores each run recorded (zetta#1239: `held_out_*` in its metric summary), one row
+ * per run, and the run that scored best on each (lower is better for losses and errors). A run
+ * without one has `null`; a metric no run recorded is left out. */
+export type HeldOutScores = { metrics: string[]; rows: { run: string; values: (number | null)[] }[]; best: (string | null)[] };
+export function heldOutScores(details: RunDetail[]): HeldOutScores {
+  const visible = details.filter((run) => !run.metrics_suppressed);
+  const finalOf = (run: RunDetail, name: string): number | null => {
+    const value = run.summary?.[name]?.final;
+    return typeof value === "number" && Number.isFinite(value) ? value : null;
+  };
+  const metrics = [...new Set(visible.flatMap((run) => Object.keys(run.summary ?? {}).filter((name) => name.startsWith("held_out_"))))]
+    .filter((name) => visible.some((run) => finalOf(run, name) !== null))
+    .sort((a, b) => heldOutOrder(a) - heldOutOrder(b) || a.localeCompare(b));
+  const rows = visible.map((run) => ({ run: run.run, values: metrics.map((name) => finalOf(run, name)) }));
+  const best = metrics.map((name, column) => {
+    if (name === "held_out_rows" || rows.length < 2) return null;
+    const lower = /loss|error|rmse|mae|mape/.test(name);
+    let winner: { run: string; value: number } | null = null;
+    for (const row of rows) {
+      const value = row.values[column];
+      if (value === null) continue;
+      if (!winner || (lower ? value < winner.value : value > winner.value)) winner = { run: row.run, value };
+    }
+    return winner?.run ?? null;
+  });
+  return { metrics, rows, best };
+}
+
+function heldOutOrder(name: string): number {
+  const index = METRIC_NAMES.findIndex(([canonical]) => canonical === name);
+  return index === -1 ? (name === "held_out_rows" ? 99 : 50) : index;
+}
+
 /** A recorded value as text: strings as they are, everything else as JSON; absent reads "—". */
 export function cell(value: unknown): string {
   if (value === undefined || value === null) return "—";

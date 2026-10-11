@@ -329,11 +329,12 @@ std::string experiment_description(const std::string& name) {
          "Read what a study learned: the best trial, the optimization history, which "
          "parameters mattered, and a leaderboard with confidence bounds."},
         {"get_run_metrics",
-         "Read one run's metric curves, parameters, summary and charts (confusion matrix, "
-         "ROC, calibration) to judge how it trained."},
+         "Read one run's metric curves, parameters and summary to judge how it trained; the "
+         "summary holds its held-out scores (held_out_auc and the like) once training recorded "
+         "them. `artifacts` lists the evaluation charts a trainer logged, often none."},
         {"compare_runs",
-         "Compare two to eight runs metric by metric on aligned steps; leave `names` out to "
-         "compare every metric they share."},
+         "Compare two to eight runs metric by metric on aligned steps, held-out scores "
+         "included; leave `names` out to compare every metric they share."},
         {"start_study",
          "Start a training study that tries settings within your budgets and keeps the best "
          "model; needs `confirm: true` from the person."},
