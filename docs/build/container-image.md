@@ -81,5 +81,6 @@ against the BuildKit pod; it clears every cache, this one included.
 The web app is built in its own Node 22 stage (`frontend`) and embedded with
 `-DLAKE_FRONTEND_DIST`; see [docs/ui/web-app.md](../ui/web-app.md). The stage copies `frontend/` and also
 `assets/catalogue-icons/`, because the frontend's test suite (run by `npm run build`) checks that the
-exported icon copies match the source (lake#639); a test that reads another folder needs it copied here
-too.
+exported icon copies match the source (lake#639), and `src/api/engine_openapi.json`, because the agents
+test checks the vendored skills against the engine's `create_agent` schema (lake#653). A test that reads
+another file outside `frontend/` needs it copied here too.

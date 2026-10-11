@@ -31,6 +31,8 @@ RUN npm ci --no-audit --no-fund
 COPY frontend/ ./
 # The icon test checks the website's exported copy (lake#639), which lives beside frontend/.
 COPY assets/catalogue-icons/ /assets/catalogue-icons/
+# The agents test checks the vendored skills against the engine's create_agent schema (lake#653).
+COPY src/api/engine_openapi.json /src/api/engine_openapi.json
 RUN npm run build
 
 # ---------- build stage ----------
