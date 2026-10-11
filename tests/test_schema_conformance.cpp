@@ -153,7 +153,8 @@ void check_uploads(HttpEvidence& http, const std::string& repository) {
     const std::vector<std::pair<json, std::string>> malformed{
         {json::array({1}), "/files/0"},
         {json::array({nullptr}), "/files/0"},
-        {json::array({json::object()}), "/files/0/name"},
+        // `path` or `name` (lake#587): the content is the one field every item needs.
+        {json::array({json::object()}), "/files/0/content"},
         {json::array({{{"name", "sample.txt"}}}), "/files/0/content"},
         {json::array({{{"name", 1}, {"content", ""}}}), "/files/0/name"},
         {json::array({{{"name", "sample.txt"}, {"content", 1}}}), "/files/0/content"},
@@ -503,6 +504,11 @@ TEST(SchemaConformance, EveryToolAndRequiredOutputUsesHttpContract) {
     http.call("get_drive_entry", entry_id);
     http.call("read_drive_file", entry_id);
     http.call("recent_drive_entries", transcript_scope);
+    auto search_input = transcript_scope;
+    search_input["q"] = "notes";
+    http.call("search_drives", search_input);
+    http.read("search_drives",
+              "?customer_id=" + customer.id + "&workspace_id=" + experiments.id + "&q=report");
     auto shortcut_input = drive_scope;
     shortcut_input.update(
         {{"name", "Orama"}, {"target", {{"kind", "url"}, {"url", "https://orama.test/"}}}});
@@ -530,6 +536,10 @@ TEST(SchemaConformance, EveryToolAndRequiredOutputUsesHttpContract) {
         "create_drive_folder",
         {{"repository_id", repository.id}, {"ref", "main"}, {"path", ""}, {"name", "shared"}});
     check_uploads(http, repository.id);
+    http.call("download_drive_file",
+              {{"repository_id", repository.id}, {"ref", "main"}, {"path", "shared/sample.txt"}});
+    http.call("drive_share_people",
+              {{"repository_id", repository.id}, {"ref", "main"}, {"path", "shared"}});
     const auto link = http.call("create_drive_share_link",
                                 {{"repository_id", repository.id},
                                  {"workspace_id", experiments.id},

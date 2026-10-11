@@ -29,19 +29,29 @@ inline std::vector<std::pair<std::string, ExperimentJson>> experiment_calls(
     using json = ExperimentJson;
     auto start = experiment_start_input();
     start["customer_id"] = customer;
-    const json study = {{"customer_id", customer}, {"study", "study-one"}};
-    auto confirmed = study;
+    // Lake's names (lake#561); the fake caller below answers the engine's study operations.
+    const json experiment = {{"customer_id", customer}, {"experiment_id", "study-one"}};
+    auto confirmed = experiment;
     confirmed["confirm"] = true;
     auto trial = confirmed;
     trial["run"] = "trial-1";
-    std::vector<std::pair<std::string, json>> calls{{"start_study", start}, {"list_experiments", {{"customer_id", customer}}},
-        {"get_experiment_study", study}, {"list_experiment_trials", study},
-        {"get_experiment_analysis", study},
+    std::vector<std::pair<std::string, json>> calls{
+        {"start_experiment", start},
+        {"list_experiments", {{"customer_id", customer}}},
+        {"get_experiment", experiment},
+        {"list_experiment_trials", experiment},
+        {"get_experiment_analysis", experiment},
         {"get_run_metrics", {{"customer_id", customer}, {"run", "run-a"}}},
         {"compare_runs", {{"customer_id", customer}, {"runs", {"run-a", "run-b"}}}},
-        {"tail_experiment_events", {{"customer_id", customer}, {"kind", "study"},
-            {"id", "study-one"}, {"wait_ms", 100}, {"max_events", 10}}},
-        {"promote_trial", trial}, {"stop_experiment_trial", trial}, {"stop_study", confirmed}};
+        {"tail_experiment_events",
+         {{"customer_id", customer},
+          {"kind", "experiment"},
+          {"id", "study-one"},
+          {"wait_ms", 100},
+          {"max_events", 10}}},
+        {"promote_trial", trial},
+        {"stop_experiment_trial", trial},
+        {"stop_experiment", confirmed}};
     for (auto& [name, input] : calls) {
         input["workspace_id"] = workspace;
     }
@@ -226,7 +236,9 @@ public:
             co_return json{{"studies", {study}}};
         }
         if (input.contains("study") && input.at("study") != study.at("id")) {
-            co_return fail("not_found");
+            // The engine's words; lake says experiment (lake#561).
+            co_return control::ZettaControlResult<json>(std::unexpected(control::ZettaControlError{
+                "not_found", "no study named '" + input.at("study").get<std::string>() + "'"}));
         }
         if (capability == "create_study" && input.value("name", "") == "Rejected By Zetta") {
             // Zetta reports the field at fault on every create_study error (zetta#1217).

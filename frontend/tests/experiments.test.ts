@@ -5,7 +5,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { ema, heldOutScores, metricData, nextCursor, parameterDiff, type RunDetail } from "../src/pages/experiments/transforms.ts";
+import { canCompare, chosenRuns, ema, heldOutScores, metricData, nextCursor, parameterDiff, type RunDetail } from "../src/pages/experiments/transforms.ts";
 
 const points = [
   { step: 1, value: 4, time: "2026-09-28T00:00:00Z" },
@@ -81,4 +81,16 @@ test("held-out scores line up per run, with the best marked (zetta#1239)", () =>
   assert.deepEqual(scores.best, ["r2", "r2", null], "AUC higher is better, log loss lower; rows are not a score");
   assert.deepEqual(heldOutScores([details[2]]), { metrics: [], rows: [{ run: "r3", values: [] }], best: [] });
   assert.deepEqual(heldOutScores([details[0]]).best, [null, null, null], "one run has nothing to beat");
+});
+
+test("Compare Runs compares only two to eight chosen runs (lake#576)", () => {
+  assert.deepEqual(chosenRuns(""), []);
+  assert.deepEqual(chosenRuns(null), []);
+  assert.deepEqual(chosenRuns("a"), ["a"]);
+  assert.deepEqual(chosenRuns(" a , b,,a "), ["a", "b"]);
+  assert.equal(canCompare(chosenRuns("")), false);
+  assert.equal(canCompare(chosenRuns("a")), false);
+  assert.equal(canCompare(chosenRuns("a,a")), false, "the same run twice is one run");
+  assert.equal(canCompare(chosenRuns("a,b")), true);
+  assert.equal(canCompare(chosenRuns("a,b,c,d,e,f,g,h,i")), false);
 });

@@ -12,12 +12,13 @@ by OpenAI with lake's own key, and **the audio is never kept**.
 |---|---|---|---|
 | `transcribe` | action, any signed-in caller | `{name, audio_base64, language?}` | `{text, seconds?, model}` |
 | `create_transcript` | action, `write` on the space | `{customer_id, workspace_id, title, text?, audio_base64?, audio_name?, language?, source, recorded_at?}` | the transcript |
-| `list_transcripts` | read, `read` on the space | `{customer_id, workspace_id, q?, limit?, cursor?}` | `{transcripts: [{id, title, excerpt, source, seconds, created_at, created_by}], next_cursor?}` |
+| `list_transcripts` | read, `read` on the space | `{customer_id, workspace_id, q?, limit?, cursor?}` | `{transcripts: [{id, title, excerpt, source, seconds, created_at, created_by, created_by_name}], total, next_cursor?}` |
 | `get_transcript` | read, `read` on the space | `{customer_id, workspace_id, id}` | the transcript |
 | `update_transcript` | action, `write` on the space | `{customer_id, workspace_id, id, title?, text?}` | the transcript |
 | `delete_transcript` | action, `write` on the space | `{customer_id, workspace_id, id}` | `{deleted: true}` |
 
-A transcript is `{id, title, text, source, seconds, language, recorded_at, created_at, created_by}`:
+A transcript is `{id, title, text, source, seconds, language, recorded_at, created_at, created_by,
+created_by_name}`:
 
 - `source` is `recording`, `upload` or `text`, as the person chose.
 - `seconds` is the audio's length when the speech-to-text model reports it, otherwise `null`.
@@ -27,6 +28,9 @@ A transcript is `{id, title, text, source, seconds, language, recorded_at, creat
 - `recorded_at` is when it was said, as the person gave it (an RFC 3339 date or instant), otherwise
   `null`.
 - `created_by` is the user id of the person who added it, or the operator's identity.
+- `created_by_name` is that person's display name, else their email, read from the control store
+  where identity lives (lake#579); `null` for an author lake has no user for, such as an operator
+  credential. A page shows it, or "you" for the person viewing, and never the id.
 - `created_at` is when lake stored it.
 
 `create_transcript` needs `text` or `audio_base64`:
@@ -154,8 +158,8 @@ which is not built.
 | Code | When |
 |---|---|
 | `not_supported` (501) | No speech-to-text on this lake: "Speech-to-text is not configured on this lake." |
-| `engine_error` (502) | OpenAI refused or failed. The message is plain: "OpenAI could not transcribe the audio: <OpenAI's message>", "OpenAI is busy or over its quota; try again shortly (HTTP 429)", or "could not reach OpenAI for speech-to-text: …". A refused key (401/403) says so and never echoes OpenAI's message, which can quote part of the key. |
-| `invalid_input` (400) | Not base64, an empty audio, a missing or long title, neither text nor audio (`/text`), no speech heard in the audio, an unknown `source`, a bad `language`, `recorded_at` or `cursor`. |
+| `engine_error` (422) | OpenAI refused or failed. The message is plain: "OpenAI could not transcribe the audio: <OpenAI's message>", "OpenAI is busy or over its quota; try again shortly (HTTP 429)", or "could not reach OpenAI for speech-to-text: …". A refused key (401/403) says so and never echoes OpenAI's message, which can quote part of the key. |
+| `invalid_input` (400) | A file name whose extension is not audio or video (`memo.txt is not audio or video: send .webm, .mp4, …`, at `/name` or `/audio_name`; lake#594), not sent to OpenAI. Not base64, an empty audio, a missing or long title, neither text nor audio (`/text`), no speech heard in the audio, an unknown `source`, a bad `language`, `recorded_at` or `cursor`. |
 | `size_invalid` (413) | Audio over 25 MiB, or text over 400,000 bytes. |
 | `not_found` (404) | No such transcript in this workspace (`/id`). |
 | `unauthorized` (403) | No `read`/`write` on the space, or a scoped key without the capability. |
@@ -183,3 +187,16 @@ which is not built.
 - A new transcript field is added to `TranscriptCodec` (`src/control/transcripts.cpp`) with a
   default in `decode`, which keeps schema version 1. Then update `transcript_json` and its output
   schema in `src/api/transcript_capabilities.cpp`, and this page.
+
+## Counting Transcripts (lake#574)
+
+`list_transcripts` answers `total`: every transcript `q` keeps in the workspace, on every page, not
+only the page's own rows. `limit` is 1 to 100; a larger one is `400 invalid_input` at `/limit`. A
+caller that wants only the count asks for `limit: 1` and reads `total`, as Home's Transcripts figure
+does. Home asked for `limit: 500` before, which answered 400, and showed "—".
+
+Verify: `GET /v1/list_transcripts?customer_id=<space>&workspace_id=<workspace>&limit=1` answers
+`{"transcripts": [<the newest>], "total": <n>, "next_cursor": ...}`.
+`WorkspaceRecordStores.TranscriptsLiveInTheirWorkspaceAndKeepNoAudio`
+(`tests/test_workspace_records.cpp`) and `Transcripts.PagesFilterIgnoringCaseAndFollowTheCursor`
+cover `total` and `created_by_name`.

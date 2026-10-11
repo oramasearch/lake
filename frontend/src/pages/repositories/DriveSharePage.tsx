@@ -289,7 +289,8 @@ function FolderSharing({ id, refName, path, workspaceId }: { id: string; refName
           path={path}
           heading={delivery === "person" ? "Share with a Person" : "Share with an Organization"}
           text={deliveries.find((d) => d.key === delivery)!.text}
-          principalLabel={delivery === "person" ? "Person's TAAP identity" : "Organization TAAP identity"}
+          kind={delivery === "person" ? "user" : "organization"}
+          principalLabel={delivery === "person" ? "Person (email or handle)" : "Organization (handle)"}
           roleLabel={delivery === "person" ? "What they can do" : "What it can do"}
           button={delivery === "person" ? "Share with person" : "Share with organization"}
           onClose={() => setDelivery(null)}
@@ -320,11 +321,17 @@ const ROLES = [
   ["share", "Share — browse and create shares"],
 ] as const;
 
-/** People and Organization (serve_drive_share_direct): a live grant on the folder, in a dialog. */
+/** A person who can be named in a share: drive_share_people (lake#585). */
+type Person = { taap_id: string; kind: "user" | "organization"; display_name: string; email: string; handle: string };
+
+/** People and Organization: a live grant on the folder, in a dialog. The person is named by email
+ * or handle, picked from the space's people (drive_share_people); lake resolves their identity
+ * and writes and signs the grant's attestation itself (lake#585). */
 function DirectShare({
   id,
   refName,
   path,
+  kind,
   heading,
   text,
   principalLabel,
@@ -335,6 +342,7 @@ function DirectShare({
   id: string;
   refName: string;
   path: string;
+  kind: Person["kind"];
   heading: string;
   text: string;
   principalLabel: string;
@@ -343,11 +351,13 @@ function DirectShare({
   onClose: () => void;
 }) {
   const toast = useToast();
-  const [principal, setPrincipal] = useState("");
+  const people = useForgeRead<{ people: Person[] }>("drive_share_people", { repository_id: id, ref: refName, path });
+  const [recipient, setRecipient] = useState("");
   const [role, setRole] = useState("read");
-  const [digest, setDigest] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const choices = (people.data?.people ?? []).filter((person) => person.kind === kind);
+  const listId = `drive-share-people-${kind}`;
   return (
     <Modal
       title={heading}
@@ -356,7 +366,7 @@ function DirectShare({
       footer={
         <>
           <Button onClick={onClose}>Cancel</Button>
-          <Button type="submit" form="drive-share-direct" variant="primary" loading={busy}>
+          <Button type="submit" form="drive-share-direct" variant="primary" loading={busy} disabled={!recipient.trim()}>
             {button}
           </Button>
         </>
@@ -370,7 +380,7 @@ function DirectShare({
           setBusy(true);
           setError(null);
           try {
-            await forgeAct("share_drive_folder", { repository_id: id, ref: refName, path, principal_taap_id: principal, role, attestation_digest: digest });
+            await forgeAct("share_drive_folder", { repository_id: id, ref: refName, path, recipient: recipient.trim(), role });
             toast("Folder shared");
             onClose();
           } catch (err) {
@@ -386,7 +396,28 @@ function DirectShare({
           </p>
         )}
         <Field label={principalLabel} required>
-          <input value={principal} onChange={(e) => setPrincipal(e.target.value)} autoFocus />
+          <input
+            value={recipient}
+            onChange={(e) => setRecipient(e.target.value)}
+            list={listId}
+            placeholder={kind === "user" ? "ana@example.com or @ana" : "@studio"}
+            autoComplete="off"
+            autoFocus
+          />
+          <datalist id={listId}>
+            {choices.map((person) => (
+              <option key={person.taap_id} value={person.email || (person.handle ? `@${person.handle}` : person.taap_id)}>
+                {[person.display_name, person.handle ? `@${person.handle}` : ""].filter(Boolean).join(" · ")}
+              </option>
+            ))}
+          </datalist>
+          <small className="muted">
+            {people.isLoading
+              ? "Loading the people of this space…"
+              : choices.length
+                ? `Choose one of the ${choices.length} ${kind === "user" ? "people" : "organizations"} of this space, or type an email or handle.`
+                : "Type the email or handle of someone in this space."}
+          </small>
         </Field>
         <Field label={roleLabel}>
           <select value={role} onChange={(e) => setRole(e.target.value)}>
@@ -397,9 +428,7 @@ function DirectShare({
             ))}
           </select>
         </Field>
-        <Field label="Attestation digest" required>
-          <input value={digest} onChange={(e) => setDigest(e.target.value)} />
-        </Field>
+        <Banner tone="quiet">Lake records the share as a signed statement and keeps its digest on the grant as evidence.</Banner>
       </form>
     </Modal>
   );

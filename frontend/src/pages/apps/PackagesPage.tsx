@@ -8,6 +8,7 @@ import { read, useRead, type Row } from "@/lib/api";
 import { useSession } from "@/lib/session";
 import { Card, Chip, CopyBlock, Empty, ErrorBlock, Page, SearchInput, Skeleton, Stat, StatRow, Status, Toolbar } from "@/lib/ui";
 import { pause, QueryTabs, streamHref, Terminal, useQueryTab, useWorkspaceLink } from "./shared";
+import { stopsPolling } from "@/lib/errors";
 
 type Catalog = { available?: boolean; origin?: string; npm?: Row[]; python?: Row[]; oci?: Row[] };
 type Package = { name: string; versions: string[] };
@@ -189,8 +190,10 @@ function BuildRow({ build, customerId, workspaceId }: { build: Row; customerId: 
           }
           next = Math.max(next, Number(value.next_sequence) || next);
           await pause(250, signal);
-        } catch {
-          // A later poll retries a transient failure, after a pause.
+        } catch (error) {
+          // A later poll retries a transient failure, after a pause; an answer asking again
+          // cannot change ends the follow (lib/errors.ts, lake#575).
+          if (signal.aborted || stopsPolling(error)) break;
           await pause(2000, signal);
         }
       }

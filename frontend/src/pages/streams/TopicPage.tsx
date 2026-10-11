@@ -190,7 +190,7 @@ function TopicView() {
       async () => {
         parseJson(form.payload ?? "", "Payload");
         const result = await act<Row>("publish_stream_message", { ...scope, payload: form.payload });
-        if (!result.accepted) throw new Error("Zetta did not accept the message. Check the topic limits and overflow policy.");
+        if (!result.accepted) throw new Error("The workspace did not accept the message. Check the topic limits and overflow policy.");
         element.reset();
         return result;
       },
@@ -265,7 +265,7 @@ function TopicView() {
             <Card label="Topic" title={<span className="break-all font-mono text-[13px]">{topic}</span>}>
               <KeyValue
                 rows={[
-                  ["Zetta", zetta === "bus" ? "Lake bus" : "Workspace Zetta"],
+                  ["Lives in", zetta === "bus" ? "Lake bus" : "This workspace"],
                   ["Kind", system ? "System (browse-only)" : "Topic"],
                   ["Next sequence", <span key="n" className="font-mono">{String(messages.data?.next_sequence ?? "")}</span>],
                   ["Subscribers", <span key="s" className="font-mono">{subscriptions.length}</span>],

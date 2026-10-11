@@ -150,6 +150,19 @@ liquid::runtime::task<ZettaControlResult<void>> remove_drive_entry(WorkspaceReco
                                                                    std::string drive_id,
                                                                    std::string id);
 
+// The media type a file name's extension suggests (text/csv for "a.csv"), or
+// application/octet-stream; for workspace files uploaded without one and repository files, which
+// keep none (lake#587).
+std::string drive_media_type(std::string_view name);
+
+// An upload not finished within this time of its start expires (lake#588): it no longer counts as
+// holding its name, the next upload of that name in its folder removes it (object, then record),
+// and it takes no more chunks. Before it expires, list_drive_entries lists it under `uploads`.
+inline constexpr std::int64_t drive_upload_expiry_us = 24LL * 60 * 60 * 1'000'000;
+// Whether `entry` is an unfinished upload started (modified_us) at least drive_upload_expiry_us
+// before `now_us`.
+bool drive_upload_expired(const DriveEntry& entry, std::int64_t now_us);
+
 // The folder structure over a drive's entries, read once (pure).
 class DriveTree {
 public:
@@ -160,6 +173,10 @@ public:
     }
     // Adds an entry just written, so later lookups see it.
     void add(DriveEntry entry);
+    // Forgets an entry just removed.
+    void remove(std::string_view id);
+    // The unfinished uploads in a folder ("" for the top).
+    std::vector<const DriveEntry*> uploads(std::string_view parent_id) const;
     const DriveEntry* find(std::string_view id) const;
     // The listed (not uploading) children of a folder ("" for the top).
     std::vector<const DriveEntry*> children(std::string_view parent_id) const;

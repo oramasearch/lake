@@ -3,8 +3,10 @@
 #include "lake/control/store.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <format>
+#include <map>
 #include <utility>
 
 namespace lake::control {
@@ -479,6 +481,65 @@ DriveTree::DriveTree(std::vector<DriveEntry> entries) : entries_(std::move(entri
 
 void DriveTree::add(DriveEntry entry) {
     entries_.push_back(std::move(entry));
+}
+
+void DriveTree::remove(std::string_view id) {
+    std::erase_if(entries_, [&](const DriveEntry& entry) { return entry.id == id; });
+}
+
+std::vector<const DriveEntry*> DriveTree::uploads(std::string_view parent_id) const {
+    std::vector<const DriveEntry*> out;
+    for (const DriveEntry& entry : entries_) {
+        if (entry.parent_id == parent_id && entry.kind == "file" && entry.state == "uploading") {
+            out.push_back(&entry);
+        }
+    }
+    return out;
+}
+
+std::string drive_media_type(std::string_view name) {
+    static const std::map<std::string, std::string, std::less<>> types{
+        {"txt", "text/plain"},
+        {"md", "text/markdown"},
+        {"csv", "text/csv"},
+        {"tsv", "text/tab-separated-values"},
+        {"json", "application/json"},
+        {"jsonl", "application/x-ndjson"},
+        {"ndjson", "application/x-ndjson"},
+        {"pdf", "application/pdf"},
+        {"png", "image/png"},
+        {"jpg", "image/jpeg"},
+        {"jpeg", "image/jpeg"},
+        {"gif", "image/gif"},
+        {"webp", "image/webp"},
+        {"svg", "image/svg+xml"},
+        {"mp3", "audio/mpeg"},
+        {"m4a", "audio/mp4"},
+        {"wav", "audio/wav"},
+        {"mp4", "video/mp4"},
+        {"webm", "video/webm"},
+        {"zip", "application/zip"},
+        {"html", "text/html"},
+        {"xml", "application/xml"},
+        {"parquet", "application/vnd.apache.parquet"},
+        {"xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"},
+        {"docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"},
+        {"pptx", "application/vnd.openxmlformats-officedocument.presentationml.presentation"}};
+    const std::size_t dot = name.rfind('.');
+    if (dot == std::string_view::npos) {
+        return "application/octet-stream";
+    }
+    std::string extension(name.substr(dot + 1));
+    std::ranges::transform(extension, extension.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    const auto found = types.find(extension);
+    return found == types.end() ? std::string("application/octet-stream") : found->second;
+}
+
+bool drive_upload_expired(const DriveEntry& entry, std::int64_t now_us) {
+    return entry.kind == "file" && entry.state == "uploading" &&
+           now_us - entry.modified_us >= drive_upload_expiry_us;
 }
 
 const DriveEntry* DriveTree::find(std::string_view id) const {

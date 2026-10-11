@@ -13,6 +13,11 @@ the same phone. The pages are in `frontend/src/pages/transcripts/`; the phone me
 | `/w/<id>/transcripts?new=1` | the same | opens New Transcript at once |
 | `/w/<id>/transcript?id=<id>` | `TranscriptPage.tsx` | the title and text, figures (words, length, source, recorded), **Ask Orama about this**, **Copy**, **Edit**, **Delete** |
 
+The figure "Transcripts" is lake's `total`, so it counts every transcript, not only those loaded.
+"Who added it" is `created_by_name`, or "you" when the viewer added it (`authorLabel`,
+`lib/transcripts.ts`, lake#579); with no name it names no one, never the raw user id. Home's
+Transcripts figure reads the same `total` with `limit: 1` (lake#574).
+
 Both are workspace pages (`workspace: true`): their unprefixed addresses open the current workspace,
 and both sit behind the `WorkspaceGate`. One transcript is `/transcript?id=`, the address style of
 lake's other detail pages (`/train/dataset`, `/repository?id=`), so it is linkable and `isWorkspacePath`

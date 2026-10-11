@@ -180,3 +180,18 @@ TEST(Docs, GuidesSpeakOfWorkspaces) {
         EXPECT_FALSE(std::regex_search(prose, banned)) << page.slug;
     }
 }
+
+// A person runs an AI training experiment, as an experiment tracker says it, never a "study"
+// (Steve, 2026-10-10, lake#561). The engine's names (`study-events.*`, ExperimentsAgent's `study`
+// field) appear only in code spans and blocks, which the prose leaves out.
+TEST(Docs, GuidesSpeakOfExperiments) {
+    const std::regex study(R"re(\bstud(y|ies)\b)re", std::regex::icase);
+    for (const auto& page : lake::api::web_ui_guide()) {
+        const std::string prose = prose_of(page.markdown);
+        std::smatch found;
+        EXPECT_FALSE(std::regex_search(prose, found, study))
+            << page.slug << " says \"" << found.str() << "\" near: "
+            << prose.substr(static_cast<std::size_t>(std::max<long>(0, found.position() - 40)),
+                            100);
+    }
+}

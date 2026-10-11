@@ -32,6 +32,12 @@ bool valid_handle(const std::string& name) {
     return !name.empty() && name.size() <= 256 && std::regex_match(name, handle_pattern());
 }
 
+std::string handle_rule(std::string_view field) {
+    return std::string(field) +
+           " is 1 to 256 lowercase letters, digits and hyphens, starting and ending with a letter "
+           "or digit";
+}
+
 std::string generate_handle() {
     thread_local std::mt19937_64 rng{std::random_device{}()};
     std::uniform_int_distribution<std::size_t> adjective(0, adjectives.size() - 1);

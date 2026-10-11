@@ -32,16 +32,24 @@ instance administrator's desired state for each workspace Zetta's volume size an
 snapshots of those volumes and of lake's store volume; [workspaces.md](workspaces.md#capabilities)
 the storage fields a workspace row gains.
 
-[experiments.md](experiments.md) documents eleven training study, trial, run-metric, comparison
-and bounded-live-read capabilities, with identical REST POST/MCP schemas and confirmed actions,
-plus the `agent_turn` contract used for ExperimentsAgent proposals. These names are distinct from
-the solutions holdout `get_experiment` operation. `start_study` leaves a missing objective and
-budgets to Zetta under `from_defaults`, and every experiment error keeps Zetta's `path`.
+[experiments.md](experiments.md) documents eleven training experiment, trial, run-metric,
+comparison and bounded-live-read capabilities, with identical REST POST/MCP schemas and confirmed
+actions, plus the `agent_turn` contract used for ExperimentsAgent proposals. Lake says experiment
+and `experiment_id` where the engine says study (lake#561, [names](experiments.md#names)); lake's
+`get_experiment` is distinct from the solutions holdout `get_experiment` that `workspace_query`
+reads. `start_experiment` leaves a missing objective and budgets to Zetta under `from_defaults`,
+and every experiment error keeps Zetta's `path`.
 
 [streams.md](streams.md) documents all nine topic/message operations on both REST POST and MCP,
 with closed input/output schemas, space permissions, system-topic refusal and bounded live reads.
-Read tools advertise `readOnlyHint`; writes conservatively advertise `destructiveHint`. Streams reads
-retain GET and add POST without changing their read classification.
+Every MCP tool carries all three annotations from one rule in `src/api/registry.cpp` (lake#594):
+`readOnlyHint` for a read or a call authorized as one (`predict`), the same rule `mcp_setup` uses
+for `writes`; `destructiveHint` only on a write that deletes, destroys, removes, revokes or drops
+(`delete_*`, `destroy_*`, `remove_*`, `revoke_*`, `drop_*`, `purge_*`, …), so a client warns before
+those alone; and `idempotentHint` on reads and on writes a second identical call leaves as they
+were (`set_*`, `update_*`, the deletes, `settle_ask_turn`, …). Every operation has a human title,
+OpenAPI's `summary` and the tool's `title` (`Mcp.EveryToolHasAHumanTitleAndOnlyDeletesAreDestructive`).
+Streams reads retain GET and add POST without changing their read classification.
 
 The [sync protocol](sync.md) also backs the repository page's configured-origin clone/push
 instructions. The [private-instance proof](../deployment/private-install.md) executes those
@@ -57,7 +65,8 @@ every pipeline list (lake#438).
 **Shape.** lake exposes JSON capabilities three ways, the way Zetta does: REST under `/v1`, an
 OpenAPI 3.1 document at `GET /v1/openapi.json`, and MCP at `POST /mcp`. One capability registry
 (`include/lake/api/registry.hpp`) is the single source all three read: a capability is a name,
-a kind (`read` → `GET /v1/<name>`, input in the query string; `action` → `POST /v1/<name>`,
+a kind (`read` → `GET /v1/<name>`, input in the query string, each value coerced by its declared
+type ([arrays in a query string](#arrays-in-a-query-string)); `action` → `POST /v1/<name>`,
 input as the JSON body), an input schema, an output schema, an authorization object and action,
 an object resolver, and a handler. REST and MCP go through the same `Registry::call` or coroutine
 `Registry::call_async`, so they
@@ -145,6 +154,29 @@ bindings, logs, events and the read-only app registry pull token. It is separate
 bases, cancellation, status, public digest pull references, retained progress and build-scoped
 credentials.
 
+## Arrays in a query string
+
+A read's query values are coerced by the input schema (`rest_input_from_query`,
+`src/api/rest.cpp`): an integer, number or boolean property from its text, an object from JSON.
+An **array** input (`compare_runs.runs`, `my_permissions.actions`, `get_run_metrics.names`, and any
+other) takes, in any mix (lake#576):
+
+- repeated keys, as OpenAPI declares them (`style: form`, `explode: true`):
+  `GET /v1/compare_runs?customer_id=<space>&workspace_id=<workspace>&runs=<r1>&runs=<r2>`;
+- a comma list:
+  `GET /v1/compare_runs?customer_id=<space>&workspace_id=<workspace>&runs=<r1>,<r2>`;
+- a JSON array, URL-encoded:
+  `GET /v1/compare_runs?customer_id=<space>&workspace_id=<workspace>&runs=%5B%22<r1>%22,%22<r2>%22%5D`.
+
+Each item is coerced by the array's `items` type (`steps=1,2` is `[1, 2]` for integer items), and
+an empty value adds nothing, so `runs=` is `[]` and the schema's `minItems` says what is missing.
+An item that itself holds a comma can be sent only in the JSON form, or with `POST` and a JSON body.
+Before lake#576 only the JSON form worked and repeated keys answered `400` (`expected type
+"array"`), so the GET form of every read with an array input could not be called as OpenAPI
+described it. `Rest.ArrayInputsDecodeFromRepeatedKeysCommaListsAndJsonArrays` (`tests/test_api.cpp`)
+and `Experiments.CompareRunsAnswersItsGetFormWithRepeatedKeysOrACommaList`
+(`tests/test_experiments.cpp`) cover it.
+
 ## Operational routes
 
 | Route | Contract |
@@ -166,7 +198,7 @@ credentials.
 | `transcribe` | action, any signed-in caller | `name`, `audio_base64`, `language?` | `{text, seconds?, model}`: speech-to-text through OpenAI with lake's key; keeps nothing; `not_supported` without `LAKE_OPENAI_API_KEY` | [transcripts.md](transcripts.md) |
 | `create_transcript`, `list_transcripts`, `get_transcript`, `update_transcript`, `delete_transcript` | action / read / read / action / action | `customer_id`, `workspace_id`, then `title`, `source`, `text` or `audio_base64`; `q`, `limit`, `cursor`; or `id` | a transcript kept as a sealed `lake_transcripts` record in the workspace Zetta (the audio never kept), a searchable page of them, or `{deleted: true}` | [transcripts.md](transcripts.md) |
 | `create_drive`, `list_drives`, `get_drive`, `rename_drive`, `delete_drive` | action / read / read / action / action | `customer_id`, `workspace_id`, then `name`, `storage`, `repository_id?` or `repository_name?`; or `id` (`confirm_name` to delete) | a drive kept as a sealed `lake_drives` record in the workspace Zetta; a new repository drive gets its first change at once; deleting never deletes a repository | [drives.md](drives.md) |
-| `list_drive_entries`, `get_drive_entry`, `create_drive_folder_entry`, `create_drive_shortcut`, `move_drive_entry`, `delete_drive_entry`, `begin_drive_upload`, `append_drive_upload`, `finish_drive_upload`, `upload_drive_entries`, `read_drive_file`, `recent_drive_entries` | reads and actions | `customer_id`, `workspace_id`, `drive_id`, … | a workspace-files or virtual drive's folders, files and shortcuts; file bytes sealed in the workspace Zetta's `lake_files` bucket, uploaded in 1 MiB-aligned chunks | [drives.md](drives.md) |
+| `list_drive_entries`, `get_drive_entry`, `create_drive_folder_entry`, `create_drive_shortcut`, `move_drive_entry`, `delete_drive_entry`, `begin_drive_upload`, `append_drive_upload`, `finish_drive_upload`, `upload_drive_entries`, `read_drive_file`, `recent_drive_entries`, `search_drives` | reads and actions | `customer_id`, `workspace_id`, `drive_id`, … | a workspace-files or virtual drive's folders, files and shortcuts; file bytes sealed in the workspace Zetta's `lake_files` bucket, uploaded in 1 MiB-aligned chunks; names found across every drive, a repository drive's paths at `main` included | [drives.md](drives.md) |
 | `list_users` | read | `limit` (≤1000, default 100) | `{items: [user]}` | [customers.md](customers.md) |
 | `get_user` | read | `id` | user | [customers.md](customers.md) |
 | `create_user` | action | `taap_id?`, `email?`, `display_name?` | user | [customers.md](customers.md) |
@@ -232,7 +264,7 @@ credentials.
 | `transparency_proof_bundle` | public read | leaf index | identity, trust configuration, current checkpoint, all committed tiles, and one inclusion proof for offline verification | [transparency.md](transparency.md) |
 | `transparency_consistency_proof` | public read | old and new checkpoint tree sizes | compact append-only audit path bound to the complete new checkpoint record | [transparency.md](transparency.md) |
 | `transparency_identity_scan` | public read | TAAP identity | checkpoint-verified matching attestations and scan measurements | [transparency.md](transparency.md) |
-| `list_agent_library` | read | none | the Agent Library: every specialized agent Orama ships, whether this lake runs it, and `internal` for Orama's own tooling (never offered in Ask Orama) | [train-agents.md](train-agents.md) |
+| `list_agent_library` | read | none | the Agent Library: every specialized agent Orama ships, whether this lake runs it, and, only with `include_internal: true`, Orama's own tooling marked `internal` (never offered in Ask Orama) | [train-agents.md](train-agents.md) |
 | `list_datasets` | read | customer | The workspace dataset catalogue with stable `<database>/<name>` ids (the form `get_dataset` takes) and `kind` (`data` or engine `result`) | [workspaces.md](workspaces.md) |
 | `list_runs` | read | customer, optional project/solution and limit | newest matching runs with status, reached stage and final error line | [workspaces.md](workspaces.md) |
 | `launch_agent`, `list_agent_launches`, `stop_agent_launch`, `schedule_agent`, `list_agent_schedules`, `unschedule_agent` | action / read | customer, agent, mode, input, cron or trigger | run, follow and stop Python agents on agent-runtime, and give them cron schedules (each a CronJob) | [agent-launches.md](agent-launches.md) |

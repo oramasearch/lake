@@ -33,6 +33,9 @@ inline constexpr std::uint64_t drive_file_block_overhead = 12 + 16;
 std::uint64_t drive_file_sealed_size(std::uint64_t plaintext);
 // Where block `index` starts in the object.
 std::uint64_t drive_file_sealed_offset(std::uint64_t index);
+// The plaintext bytes an object of `sealed` stored bytes holds: whole sealed blocks, and a last one
+// that holds more than its overhead.
+std::uint64_t drive_file_plaintext_size(std::uint64_t sealed);
 // A new opaque object key.
 std::string new_drive_file_key();
 
@@ -86,6 +89,9 @@ public:
     liquid::runtime::task<ZettaControlResult<std::string>> digest(std::string key,
                                                                   std::uint64_t size);
     liquid::runtime::task<ZettaControlResult<void>> remove(std::string key);
+    // How many plaintext bytes the object holds now, from its stored size (lake#588): what an
+    // upload has received, whatever chunk was just sent. Zero when there is no object yet.
+    liquid::runtime::task<ZettaControlResult<std::uint64_t>> received(std::string key);
 
 private:
     std::shared_ptr<ZettaObjectClient> client_;

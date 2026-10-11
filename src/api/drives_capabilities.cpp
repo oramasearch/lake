@@ -12,6 +12,7 @@
 #include <optional>
 #include <set>
 #include <string>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -160,41 +161,7 @@ std::string encode_base64(std::string_view bytes) {
 
 // The media type a file name suggests, for a file uploaded without one.
 std::string media_type_for(std::string_view name) {
-    static const std::map<std::string, std::string, std::less<>> types{
-        {"txt", "text/plain"},
-        {"md", "text/markdown"},
-        {"csv", "text/csv"},
-        {"tsv", "text/tab-separated-values"},
-        {"json", "application/json"},
-        {"pdf", "application/pdf"},
-        {"png", "image/png"},
-        {"jpg", "image/jpeg"},
-        {"jpeg", "image/jpeg"},
-        {"gif", "image/gif"},
-        {"webp", "image/webp"},
-        {"svg", "image/svg+xml"},
-        {"mp3", "audio/mpeg"},
-        {"m4a", "audio/mp4"},
-        {"wav", "audio/wav"},
-        {"mp4", "video/mp4"},
-        {"webm", "video/webm"},
-        {"zip", "application/zip"},
-        {"html", "text/html"},
-        {"xml", "application/xml"},
-        {"parquet", "application/vnd.apache.parquet"},
-        {"xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"},
-        {"docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"},
-        {"pptx", "application/vnd.openxmlformats-officedocument.presentationml.presentation"}};
-    const std::size_t dot = name.rfind('.');
-    if (dot == std::string_view::npos) {
-        return "application/octet-stream";
-    }
-    std::string extension(name.substr(dot + 1));
-    std::ranges::transform(extension, extension.begin(), [](unsigned char c) {
-        return static_cast<char>(std::tolower(c));
-    });
-    const auto found = types.find(extension);
-    return found == types.end() ? std::string("application/octet-stream") : found->second;
+    return control::drive_media_type(name);
 }
 
 bool valid_media_type(std::string_view type) {
@@ -328,6 +295,16 @@ json entry_schema() {
                           "modified_by",
                           "modified_at"})},
             {"additionalProperties", false}};
+}
+
+// An unfinished upload as list_drive_entries lists it: the entry, its age and whether it expired.
+json upload_schema() {
+    json schema = entry_schema();
+    schema["properties"]["age_seconds"] = {{"type", "integer"}, {"minimum", 0}};
+    schema["properties"]["expired"] = {{"type", "boolean"}};
+    schema["required"].push_back("age_seconds");
+    schema["required"].push_back("expired");
+    return schema;
 }
 
 json target_schema() {
@@ -950,13 +927,26 @@ liquid::runtime::task<ApiResult> list_drive_entries(const json& input, ApiContex
         }
         items.push_back(std::move(item));
     }
+    // Unfinished uploads are not items, but they hold their names until they finish or expire
+    // (lake#588), so they are listed apart, with their age, for a person or client to finish or
+    // delete them (delete_drive_entry by id).
+    json uploads = json::array();
+    const std::int64_t now = now_us();
+    for (const control::DriveEntry* upload : tree.uploads(folder_id)) {
+        json item = entry_json(*upload, base.empty() ? upload->name : base + "/" + upload->name);
+        const std::int64_t age = std::max<std::int64_t>(0, now - upload->modified_us);
+        item["age_seconds"] = age / 1'000'000;
+        item["expired"] = control::drive_upload_expired(*upload, now);
+        uploads.push_back(std::move(item));
+    }
     context.audit_details["folder_id"] = folder_id;
     co_return ApiResult::success(
         {{"drive", drive_json(opened.drive)},
          {"folder_id", folder_id.empty() ? json(nullptr) : json(folder_id)},
          {"path", base},
          {"ancestors", std::move(ancestors)},
-         {"items", std::move(items)}});
+         {"items", std::move(items)},
+         {"uploads", std::move(uploads)}});
 }
 
 liquid::runtime::task<ApiResult> get_drive_entry(const json& input, ApiContext& context) {
@@ -1173,6 +1163,7 @@ struct Begun {
 
 liquid::runtime::task<Begun> begin_file(Opened& opened,
                                         control::DriveTree& tree,
+                                        control::DriveFileStore& store,
                                         std::string parent_id,
                                         const std::string& relative_path,
                                         std::uint64_t size,
@@ -1201,6 +1192,26 @@ liquid::runtime::task<Begun> begin_file(Opened& opened,
         co_return Begun{std::nullopt, {}, made.failure};
     }
     parent_id = made.folder_id;
+    // Expired uploads in the folder go first (lake#588), object before record, so an upload
+    // abandoned a day ago no longer holds its name.
+    std::vector<control::DriveEntry> expired;
+    for (const control::DriveEntry* upload : tree.uploads(parent_id)) {
+        if (control::drive_upload_expired(*upload, now_us())) {
+            expired.push_back(*upload);
+        }
+    }
+    for (const control::DriveEntry& upload : expired) {
+        auto removed = control::settled(co_await store.remove(upload.object_key));
+        if (!removed) {
+            co_return Begun{std::nullopt, {}, failed(removed.error(), field)};
+        }
+        auto forgotten = control::settled(co_await control::remove_drive_entry(
+            *opened.records, opened.drive.customer_id, opened.drive.id, upload.id));
+        if (!forgotten) {
+            co_return Begun{std::nullopt, {}, failed(forgotten.error(), field)};
+        }
+        tree.remove(upload.id);
+    }
     std::string replaces;
     if (const control::DriveEntry* existing = tree.child(parent_id, name)) {
         if (on_conflict == "refuse") {
@@ -1349,6 +1360,7 @@ liquid::runtime::task<ApiResult> begin_drive_upload(const json& input, ApiContex
     }
     Begun begun = awaited(co_await begin_file(opened,
                                               *read.tree,
+                                              *files.store,
                                               parent_id,
                                               input.at("path"),
                                               input.at("size"),
@@ -1393,6 +1405,12 @@ liquid::runtime::task<ApiResult> append_drive_upload(const json& input, ApiConte
     if (entry.state != "uploading") {
         co_return ApiResult::failure("conflict", "this upload is finished", "/id");
     }
+    if (control::drive_upload_expired(entry, now_us())) {
+        co_return ApiResult::failure("conflict",
+                                     "this upload expired: it was not finished within 24 hours of "
+                                     "its start; begin it again",
+                                     "/id");
+    }
     auto content = decode_base64(input.at("content").get<std::string>(), "/content");
     if (!content) {
         co_return ApiResult::failure(
@@ -1424,8 +1442,16 @@ liquid::runtime::task<ApiResult> append_drive_upload(const json& input, ApiConte
         co_return failed(written.error());
     }
     context.audit_details["entry_id"] = entry.id;
+    // What the object holds now, not where this chunk ended (lake#588): a chunk sent again after
+    // later ones (an answer lost, a client starting over) answers how much the upload has, so a
+    // client that trusts `complete` finishes instead of sending everything again.
+    auto received = control::settled(co_await files.store->received(entry.object_key));
+    if (!received) {
+        co_return failed(received.error());
+    }
+    const std::uint64_t held = std::max<std::uint64_t>(*received, offset + content->size());
     co_return ApiResult::success(
-        {{"received", offset + content->size()}, {"complete", last}, {"size", entry.size}});
+        {{"received", held}, {"complete", held == entry.size}, {"size", entry.size}});
 }
 
 liquid::runtime::task<ApiResult> finish_drive_upload(const json& input, ApiContext& context) {
@@ -1440,6 +1466,12 @@ liquid::runtime::task<ApiResult> finish_drive_upload(const json& input, ApiConte
     Files files = file_store(context, opened.drive.customer_id, input.at("workspace_id"));
     if (files.failure) {
         co_return *files.failure;
+    }
+    if (control::drive_upload_expired(*found.entry, now_us())) {
+        co_return ApiResult::failure("conflict",
+                                     "this upload expired: it was not finished within 24 hours of "
+                                     "its start; begin it again",
+                                     "/id");
     }
     Finished finished = awaited(co_await finish_file(
         opened, *files.store, *found.entry, input.value("sha256", std::string()), actor(context)));
@@ -1460,9 +1492,25 @@ liquid::runtime::task<ApiResult> upload_drive_entries(const json& input, ApiCont
         co_return ApiResult::failure("invalid_input", "at least one file is required", "/files");
     }
     std::vector<std::string> contents;
+    std::vector<std::string> paths;
     std::uint64_t total = 0;
     for (std::size_t index = 0; index < list.size(); ++index) {
         const std::string field = "/files/" + std::to_string(index);
+        // One item shape for both upload calls (lake#587): `path`, or `name` for one file name.
+        const json& item = list.at(index);
+        if (item.contains("path") == item.contains("name")) {
+            co_return ApiResult::failure("invalid_input",
+                                         "send the file's `path` (or its `name`), not both",
+                                         field + "/path");
+        }
+        if (item.contains("name") &&
+            item.at("name").get<std::string>().find('/') != std::string::npos) {
+            co_return ApiResult::failure("invalid_input",
+                                         "a name is one file name; send folders in `path`",
+                                         field + "/name");
+        }
+        paths.push_back(item.contains("path") ? item.at("path").get<std::string>()
+                                              : item.at("name").get<std::string>());
         auto decoded = decode_base64(list.at(index).value("content", ""), field + "/content");
         if (!decoded) {
             co_return ApiResult::failure(
@@ -1512,8 +1560,9 @@ liquid::runtime::task<ApiResult> upload_drive_entries(const json& input, ApiCont
         const std::string field = "/files/" + std::to_string(index);
         Begun begun = awaited(co_await begin_file(opened,
                                                   *read.tree,
+                                                  *files.store,
                                                   parent_id,
-                                                  list.at(index).at("path"),
+                                                  paths[index],
                                                   contents[index].size(),
                                                   list.at(index).value("content_type", ""),
                                                   on_conflict,
@@ -1644,6 +1693,329 @@ liquid::runtime::task<ApiResult> recent_drive_entries(const json& input, ApiCont
     co_return ApiResult::success({{"items", std::move(items)}});
 }
 
+// ---- A drive file as a dataset (lake#593) ----
+
+// Loads a CSV or JSONL file of a drive (a workspace file by `id`, or a repository drive's file by
+// its path in `id`) as a dataset of the workspace, through the same capabilities a person would
+// call: read_drive_file or download_drive_file for the bytes (authorized and audited as reads of
+// the drive), then the workspace's upload_dataset through workspace_act. Nothing is copied
+// anywhere else, and at most 16 MiB is loaded, as upload_dataset takes.
+liquid::runtime::task<ApiResult> load_drive_dataset(const json& input, ApiContext& context) {
+    Opened opened = awaited(co_await open_drive(input, context, false));
+    if (opened.failure) {
+        co_return *opened.failure;
+    }
+    const std::string customer_id = input.at("customer_id");
+    const std::string workspace_id = input.at("workspace_id");
+    const std::string id = input.at("id");
+    if (opened.drive.storage == "virtual") {
+        co_return ApiResult::failure(
+            "invalid_input",
+            "a virtual drive holds shortcuts only; open the file where it lives",
+            "/drive_id");
+    }
+    // The file's name decides its format, so a file that is neither CSV nor JSONL is refused
+    // before its bytes are read.
+    std::string name = id.substr(id.rfind('/') == std::string::npos ? 0 : id.rfind('/') + 1);
+    if (opened.drive.storage == "files") {
+        ApiResult entry = called_as(co_await call_as(context,
+                                                     "get_drive_entry",
+                                                     {{"customer_id", customer_id},
+                                                      {"workspace_id", workspace_id},
+                                                      {"drive_id", opened.drive.id},
+                                                      {"id", id}}));
+        if (!entry.ok) {
+            co_return ApiResult::failure(entry.error.code, entry.error.message, "/id");
+        }
+        if (entry.value.value("kind", "") != "file" || entry.value.value("state", "") != "ready") {
+            co_return ApiResult::failure("not_found", "no such file in this drive", "/id");
+        }
+        name = entry.value.value("name", std::string());
+        if (entry.value.value("size", std::uint64_t{0}) > max_inline_bytes) {
+            co_return ApiResult::failure(
+                "size_invalid", "a dataset is loaded from a file of at most 16 MiB", "/id");
+        }
+    }
+    std::string format = input.value("format", std::string());
+    if (format.empty()) {
+        const std::string type = control::drive_media_type(name);
+        format = type == "text/csv" ? "csv" : type == "application/x-ndjson" ? "jsonl" : "";
+    }
+    if (format != "csv" && format != "jsonl") {
+        co_return ApiResult::failure("invalid_input",
+                                     "a dataset is loaded from a CSV or JSONL file; name its "
+                                     "`format` when its name does not say",
+                                     "/format");
+    }
+    ApiResult read =
+        opened.drive.storage == "repository"
+            ? called_as(co_await call_as(
+                  context,
+                  "download_drive_file",
+                  {{"repository_id", opened.drive.repository_id}, {"ref", "main"}, {"path", id}}))
+            : called_as(co_await call_as(context,
+                                         "read_drive_file",
+                                         {{"customer_id", customer_id},
+                                          {"workspace_id", workspace_id},
+                                          {"drive_id", opened.drive.id},
+                                          {"id", id}}));
+    if (!read.ok) {
+        co_return ApiResult::failure(read.error.code, read.error.message, "/id");
+    }
+    if (!read.value.contains("content_base64") || !read.value.at("content_base64").is_string() ||
+        read.value.value("size", std::uint64_t{0}) > max_inline_bytes) {
+        co_return ApiResult::failure(
+            "size_invalid", "a dataset is loaded from a file of at most 16 MiB", "/id");
+    }
+    auto bytes = decode_base64(read.value.at("content_base64").get<std::string>(), "/id");
+    if (!bytes) {
+        co_return ApiResult::failure("corrupt", "the file's bytes did not decode", "/id");
+    }
+    json dataset{{"table_name", input.at("table_name")},
+                 {"format", format},
+                 {"content", bytes_text(*bytes)}};
+    if (input.contains("if_exists")) {
+        dataset["if_exists"] = input.at("if_exists");
+    }
+    ApiResult loaded = called_as(co_await call_as(context,
+                                                  "workspace_act",
+                                                  {{"customer_id", customer_id},
+                                                   {"workspace_id", workspace_id},
+                                                   {"capability", "upload_dataset"},
+                                                   {"input", std::move(dataset)}}));
+    if (!loaded.ok) {
+        // upload_dataset's own fields are this call's fields of the same name.
+        std::string path = loaded.error.path;
+        if (path.starts_with("/input/")) {
+            path = path.substr(6);
+        }
+        if (path == "/content") {
+            path = "/id";
+        }
+        co_return ApiResult::failure(loaded.error.code, loaded.error.message, path);
+    }
+    json value = loaded.value.is_object() ? loaded.value : json{{"result", loaded.value}};
+    value["source"] = {{"drive_id", opened.drive.id}, {"id", id}, {"name", name}};
+    context.audit_details["drive_id"] = opened.drive.id;
+    context.audit_details["id"] = id;
+    context.audit_details["format"] = format;
+    co_return ApiResult::success(std::move(value));
+}
+
+// ---- Search ----
+
+constexpr std::size_t default_search = 50;
+
+// ASCII letters in lower case; other bytes (UTF-8 included) compare as they are.
+std::string folded(std::string_view text) {
+    std::string out(text);
+    std::ranges::transform(out, out.begin(), [](unsigned char c) {
+        return static_cast<char>(c >= 'A' && c <= 'Z' ? c - 'A' + 'a' : c);
+    });
+    return out;
+}
+
+std::string parent_of(std::string_view path) {
+    const std::size_t slash = path.rfind('/');
+    return slash == std::string_view::npos ? std::string() : std::string(path.substr(0, slash));
+}
+
+std::string name_of(std::string_view path) {
+    const std::size_t slash = path.rfind('/');
+    return std::string(slash == std::string_view::npos ? path : path.substr(slash + 1));
+}
+
+// A repository's tree at `main`, read off the server thread, or why it could not be read.
+struct RepositoryPaths {
+    std::vector<RepositoryTreeEntry> entries;
+    std::string problem;
+};
+
+liquid::runtime::task<RepositoryPaths> repository_paths(ApiContext& context,
+                                                        const std::string& repository_id) {
+    if (!context.sync_store) {
+        co_return RepositoryPaths{{}, "this lake has no repository store"};
+    }
+    const auto repository = context.store->get_repository(repository_id);
+    if (!repository) {
+        co_return RepositoryPaths{{},
+                                  repository.error().code == "not_found"
+                                      ? std::string("its repository is gone")
+                                      : repository.error().message};
+    }
+    if (!repository->deleted_at.empty()) {
+        co_return RepositoryPaths{{}, "its repository was deleted"};
+    }
+    if (!may_read_repository(context, repository_id)) {
+        co_return RepositoryPaths{{}, "you cannot read its repository"};
+    }
+    SyncStore* store = context.sync_store;
+    const control::Repository found = *repository;
+    auto read = co_await blocking_call(
+        [store, found] { return store->repository_tree(found.customer_id, found.id, "main"); },
+        [](std::string message) -> SyncStoreResult<std::vector<RepositoryTreeEntry>> {
+            return std::unexpected(SyncStoreError{"store_unavailable", std::move(message)});
+        });
+    if (!read) {
+        co_return RepositoryPaths{{}, read.error().message};
+    }
+    co_return RepositoryPaths{std::move(*read), {}};
+}
+
+RepositoryPaths awaited_paths(std::expected<RepositoryPaths, liquid::error> completed) {
+    return completed ? std::move(*completed) : RepositoryPaths{{}, completed.error().message};
+}
+
+// Drive and item names that contain `q`, ignoring the case of A to Z, across the workspace's drives
+// (or one): each drive's entries are read once, a repository drive's tree at `main` once.
+liquid::runtime::task<ApiResult> search_drives(const json& input, ApiContext& context) {
+    if (!context.store) {
+        co_return ApiResult::failure("store_unavailable", "workspaces are not configured");
+    }
+    if (auto refused = authorize_space_read(input, context)) {
+        co_return *refused;
+    }
+    const std::string needle = folded(input.at("q").get<std::string>());
+    if (needle.empty()) {
+        co_return ApiResult::failure("invalid_input", "type something to search for", "/q");
+    }
+    const std::string customer_id = input.at("customer_id");
+    auto records = workspace_records(context, customer_id, input.at("workspace_id"));
+    if (!records) {
+        co_return failed(records.error());
+    }
+    auto drives = control::settled(co_await control::list_drives(*records, customer_id));
+    if (!drives) {
+        co_return failed(drives.error());
+    }
+    const std::string only = input.value("drive_id", std::string());
+    if (!only.empty()) {
+        std::erase_if(*drives, [&](const control::Drive& drive) { return drive.id != only; });
+        if (drives->empty()) {
+            co_return ApiResult::failure(
+                "not_found", "no such drive in this workspace", "/drive_id");
+        }
+        context.audit_details["drive_id"] = only;
+    }
+    const std::size_t limit = input.value("limit", default_search);
+    const auto matches = [&](std::string_view name) {
+        return folded(name).find(needle) != std::string::npos;
+    };
+    const auto drive_ref = [](const control::Drive& drive) {
+        return json{{"id", drive.id},
+                    {"name", drive.name},
+                    {"storage", drive.storage},
+                    {"repository_id",
+                     drive.repository_id.empty() ? json(nullptr) : json(drive.repository_id)}};
+    };
+
+    // Every match is kept (bounded by what the drives hold) so the order does not depend on the
+    // order the drives were read in; shortcuts are checked only for the matches answered.
+    struct Hit {
+        json item;
+        const control::DriveEntry* shortcut = nullptr;
+    };
+    std::vector<Hit> hits;
+    std::vector<control::DriveTree> trees;
+    trees.reserve(drives->size());
+    json skipped = json::array();
+    for (const control::Drive& drive : *drives) {
+        if (matches(drive.name)) {
+            hits.push_back({{{"drive", drive_ref(drive)},
+                             {"kind", "drive"},
+                             {"id", nullptr},
+                             {"parent_id", nullptr},
+                             {"name", drive.name},
+                             {"path", ""},
+                             {"folder", ""}}});
+        }
+        if (drive.storage == "repository") {
+            RepositoryPaths read =
+                awaited_paths(co_await repository_paths(context, drive.repository_id));
+            if (!read.problem.empty()) {
+                skipped.push_back(
+                    {{"drive", drive_ref(drive)}, {"reason", std::move(read.problem)}});
+                continue;
+            }
+            for (const RepositoryTreeEntry& entry : read.entries) {
+                const std::string name = name_of(entry.path);
+                if (entry.path.empty() || name == ".lake-folder" ||
+                    (entry.kind != "tree" && entry.kind != "blob") || !matches(name)) {
+                    continue;
+                }
+                json item{{"drive", drive_ref(drive)},
+                          {"kind", entry.kind == "tree" ? "folder" : "file"},
+                          {"id", nullptr},
+                          {"parent_id", nullptr},
+                          {"name", name},
+                          {"path", entry.path},
+                          {"folder", parent_of(entry.path)}};
+                if (entry.kind == "blob") {
+                    item["size"] = entry.size;
+                }
+                hits.push_back({std::move(item)});
+            }
+            continue;
+        }
+        auto listed =
+            control::settled(co_await control::list_drive_entries(*records, customer_id, drive.id));
+        if (!listed) {
+            co_return failed(listed.error());
+        }
+        const control::DriveTree& tree = trees.emplace_back(std::move(*listed));
+        for (const control::DriveEntry& entry : tree.entries()) {
+            if (entry.state != "ready" || !matches(entry.name)) {
+                continue;
+            }
+            json item{
+                {"drive", drive_ref(drive)},
+                {"kind", entry.kind},
+                {"id", entry.id},
+                {"parent_id", entry.parent_id.empty() ? json(nullptr) : json(entry.parent_id)},
+                {"name", entry.name},
+                {"path", tree.path(entry.id)},
+                {"folder", tree.path(entry.parent_id)}};
+            if (entry.kind == "file") {
+                item["size"] = entry.size;
+                item["content_type"] = entry.content_type;
+                item["modified_at"] = control::record_instant(entry.modified_us);
+            }
+            if (entry.kind == "shortcut") {
+                item["target"] = entry.target;
+            }
+            hits.push_back({std::move(item), entry.kind == "shortcut" ? &entry : nullptr});
+        }
+    }
+    const auto rank = [](const json& item) { return item.at("kind") == "drive" ? 0 : 1; };
+    std::ranges::stable_sort(hits, [&](const Hit& a, const Hit& b) {
+        const auto key = [&](const Hit& hit) {
+            return std::tuple(rank(hit.item),
+                              hit.item.at("drive").at("name").get<std::string>(),
+                              hit.item.at("path").get<std::string>());
+        };
+        return key(a) < key(b);
+    });
+    const bool truncated = hits.size() > limit;
+    if (truncated) {
+        hits.resize(limit);
+    }
+    ShortcutChecker checker(context, *records, customer_id);
+    json items = json::array();
+    for (Hit& hit : hits) {
+        if (hit.shortcut != nullptr) {
+            const Status status = status_of(co_await checker.check(hit.shortcut->target));
+            hit.item["status"] = status.status;
+            if (!status.reason.empty()) {
+                hit.item["reason"] = status.reason;
+            }
+        }
+        items.push_back(std::move(hit.item));
+    }
+    context.audit_details["matches"] = items.size();
+    co_return ApiResult::success(
+        {{"items", std::move(items)}, {"truncated", truncated}, {"skipped", std::move(skipped)}});
+}
+
 } // namespace
 
 void register_drives_capabilities(Registry& registry) {
@@ -1747,7 +2119,9 @@ void register_drives_capabilities(Registry& registry) {
          "List a Drive Folder",
          "The folders, files and shortcuts in one folder of a workspace-files or virtual drive: "
          "`folder_id`, or a slash `path` from the top; neither is the top. Each shortcut carries "
-         "`status`: ok, broken (with a reason) or unknown when lake cannot check its kind.",
+         "`status`: ok, broken (with a reason) or unknown when lake cannot check its kind. "
+         "`uploads` lists the folder's unfinished uploads with `age_seconds`: each holds its name "
+         "until it is finished, deleted (delete_drive_entry) or expires 24 hours after it began.",
          workspace_input({{"drive_id", string_schema()},
                           {"folder_id", string_schema()},
                           {"path", string_schema()}},
@@ -1760,8 +2134,9 @@ void register_drives_capabilities(Registry& registry) {
                       {"items",
                        object_of({{"id", string_schema()}, {"name", string_schema()}},
                                  json::array({"id", "name"}))}}},
-                    {"items", {{"type", "array"}, {"items", entry_schema()}}}},
-                   json::array({"drive", "folder_id", "path", "ancestors", "items"})),
+                    {"items", {{"type", "array"}, {"items", entry_schema()}}},
+                    {"uploads", {{"type", "array"}, {"items", upload_schema()}}}},
+                   json::array({"drive", "folder_id", "path", "ancestors", "items", "uploads"})),
          list_drive_entries,
          true);
     read("get_drive_entry",
@@ -1816,8 +2191,9 @@ void register_drives_capabilities(Registry& registry) {
            "Begin a file upload",
            "Start uploading one file into a workspace-files drive. `path` is relative to "
            "`parent_id` (or the top) and may name folders (\"Trip/Day 1/photo.jpg\"), made where "
-           "missing. Send its bytes with append_drive_upload, then finish_drive_upload; the file "
-           "is listed only once finished.",
+           "missing. Send its bytes with append_drive_upload, then finish_drive_upload, each "
+           "with `id` set to the answer's `entry.id`; the file is listed only once finished. An "
+           "upload not finished within 24 hours expires and frees its name.",
            workspace_input({{"drive_id", string_schema()},
                             {"parent_id", string_schema()},
                             {"path", string_schema()},
@@ -1834,7 +2210,8 @@ void register_drives_capabilities(Registry& registry) {
            "Send a chunk of an upload",
            "Send the bytes of an upload from `offset`, at most 8 MiB per chunk. Every chunk but "
            "the last is a whole number of MiB (block_size). Sending a chunk again after a lost "
-           "answer changes nothing.",
+           "answer changes nothing. The answer's `received` is how many bytes the upload holds "
+           "now and `complete` whether that is all of them, whichever chunk was sent.",
            workspace_input({{"drive_id", string_schema()},
                             {"id", string_schema()},
                             {"offset", {{"type", "integer"}, {"minimum", 0}}},
@@ -1862,7 +2239,8 @@ void register_drives_capabilities(Registry& registry) {
     action("upload_drive_entries",
            "Upload small files",
            "Upload small files into a workspace-files drive in one call (at most 16 MiB in all), "
-           "each at a relative `path` whose folders are made where missing.",
+           "each at a relative `path` whose folders are made where missing (or a `name` in the "
+           "folder: the same item shape as upload_drive_files).",
            workspace_input(
                {{"drive_id", string_schema()},
                 {"parent_id", string_schema()},
@@ -1871,9 +2249,10 @@ void register_drives_capabilities(Registry& registry) {
                  {{"type", "array"},
                   {"items",
                    object_of({{"path", string_schema()},
+                              {"name", string_schema()},
                               {"content", {{"type", "string"}, {"contentEncoding", "base64"}}},
                               {"content_type", string_schema()}},
-                             json::array({"path", "content"}))}}}},
+                             json::array({"content"}))}}}},
                json::array({"drive_id", "files"})),
            object_of({{"items", {{"type", "array"}, {"items", entry_schema()}}}},
                      json::array({"items"})),
@@ -1898,6 +2277,21 @@ void register_drives_capabilities(Registry& registry) {
              json::array(
                  {"id", "name", "size", "content_type", "sha256", "offset", "content_base64"})),
          read_drive_file);
+    action("load_drive_dataset",
+           "Load a drive file as a dataset",
+           "Load a CSV or JSONL file of a drive into the workspace as a dataset, as "
+           "upload_dataset does with a file sent from a browser. `id` is the file: its entry id "
+           "in a workspace-files drive, its path in a repository drive (on main). `format` is csv "
+           "or jsonl, from the file's name when not sent; `table_name` and `if_exists` are "
+           "upload_dataset's. At most 16 MiB.",
+           workspace_input({{"drive_id", string_schema()},
+                            {"id", string_schema()},
+                            {"table_name", string_schema()},
+                            {"format", {{"type", "string"}, {"enum", {"csv", "jsonl"}}}},
+                            {"if_exists", {{"type", "string"}, {"enum", {"fail", "rename"}}}}},
+                           json::array({"drive_id", "id", "table_name"})),
+           {{"type", "object"}},
+           load_drive_dataset);
     read("recent_drive_entries",
          "Recent Files",
          "The workspace files changed most recently across the workspace's workspace-files "
@@ -1915,6 +2309,53 @@ void register_drives_capabilities(Registry& registry) {
                    json::array({"items"})),
          recent_drive_entries,
          true);
+    const json drive_ref =
+        object_of({{"id", string_schema()},
+                   {"name", string_schema()},
+                   {"storage", {{"type", "string"}, {"enum", {"repository", "files", "virtual"}}}},
+                   {"repository_id", {{"type", json::array({"string", "null"})}}}},
+                  json::array({"id", "name", "storage", "repository_id"}));
+    const json nullable_string{{"type", json::array({"string", "null"})}};
+    read(
+        "search_drives",
+        "Search Drives",
+        "Find drives, folders, files and shortcuts whose name contains `q` (A to Z in either "
+        "case) across the workspace's drives, or one `drive_id`: workspace-files and virtual "
+        "drives by their items' names, repository drives by the names of the paths at `main`. "
+        "Each match names its drive and folder path; drives first, then by drive and path.",
+        workspace_input({{"q", {{"type", "string"}, {"minLength", 1}, {"maxLength", 255}}},
+                         {"drive_id", string_schema()},
+                         {"limit", {{"type", "integer"}, {"minimum", 1}, {"maximum", 200}}}},
+                        json::array({"q"})),
+        object_of(
+            {{"items",
+              {{"type", "array"},
+               {"items",
+                object_of(
+                    {{"drive", drive_ref},
+                     {"kind",
+                      {{"type", "string"}, {"enum", {"drive", "folder", "file", "shortcut"}}}},
+                     {"id", nullable_string},
+                     {"parent_id", nullable_string},
+                     {"name", string_schema()},
+                     {"path", string_schema()},
+                     {"folder", string_schema()},
+                     {"size", {{"type", "integer"}, {"minimum", 0}}},
+                     {"content_type", string_schema()},
+                     {"modified_at", string_schema()},
+                     {"target", {{"type", "object"}}},
+                     {"status", {{"type", "string"}, {"enum", {"ok", "broken", "unknown"}}}},
+                     {"reason", string_schema()}},
+                    json::array({"drive", "kind", "id", "parent_id", "name", "path", "folder"}))}}},
+             {"truncated", {{"type", "boolean"}}},
+             {"skipped",
+              {{"type", "array"},
+               {"items",
+                object_of({{"drive", drive_ref}, {"reason", string_schema()}},
+                          json::array({"drive", "reason"}))}}}},
+            json::array({"items", "truncated", "skipped"})),
+        search_drives,
+        true);
 }
 
 liquid::runtime::task<control::ZettaControlResult<WorkspaceFile>>

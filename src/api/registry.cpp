@@ -57,6 +57,63 @@ std::string product_store_message(std::string_view code) {
     return "the control-plane store could not complete the request";
 }
 
+// A database constraint the caller's input can break, said as the rule and the field (lake#592).
+// `field` is the input the rule is about when the caller's path does not already name one; the
+// message is written with the field the caller sent, so create_drive's `repository_name` and
+// create_repository's `name` each read as their own.
+struct ConstraintRule {
+    std::string_view constraint;
+    std::string_view field;
+    std::string_view rule; // follows "<field> "
+};
+
+constexpr std::array<ConstraintRule, 17> constraint_rules{{
+    {"repository_name_format",
+     "name",
+     "is 1 to 256 lowercase letters, digits and hyphens, starting and ending with a letter or "
+     "digit"},
+    {"customer_name_format",
+     "name",
+     "is 1 to 256 lowercase letters, digits and hyphens, starting and ending with a letter or "
+     "digit"},
+    {"team_name_format",
+     "name",
+     "is 1 to 256 lowercase letters, digits and hyphens, starting and ending with a letter or "
+     "digit"},
+    {"teams_name_format",
+     "name",
+     "is 1 to 256 lowercase letters, digits and hyphens, starting and ending with a letter or "
+     "digit"},
+    {"service_name_format",
+     "name",
+     "is 1 to 31 lowercase letters, digits and hyphens, starting with a letter"},
+    {"store_name_format",
+     "name",
+     "is 1 to 31 lowercase letters, digits and hyphens, starting with a letter"},
+    {"app_name_format",
+     "name",
+     "is 1 to 31 lowercase letters, digits and hyphens, starting with a letter and not ending "
+     "with a hyphen"},
+    {"grants_role_check",
+     "role",
+     "is one of \"read\", \"write\", \"admin\", \"deploy\", \"review\", \"share\""},
+    {"memberships_role_check", "role", "is one of \"owner\", \"admin\", \"member\""},
+    {"invitations_role_check", "role", "is one of \"owner\", \"admin\", \"member\""},
+    {"invitations_invitee_type_check", "invitee_type", "is one of \"email\", \"handle\""},
+    {"grants_attestation_check",
+     "attestation_digest",
+     "is required: the digest of the signed statement that records this grant"},
+    {"memberships_attestation_check",
+     "attestation_digest",
+     "is required: the digest of the signed statement that records this membership"},
+    {"grants_principal_object_role_unique",
+     "principal_taap_id",
+     "already holds this role here: the item is already shared with that person in that role"},
+    {"memberships_scope_principal_unique", "principal_id", "is already a member here"},
+    {"invitations_expiry_check", "expires_in_seconds", "must be in the future"},
+    {"audit_retention_floor_check", "retention_days", "is at least 400 days"},
+}};
+
 void log_database_diagnostic(std::string_view code, std::string_view message) {
     const nlohmann::json entry = {
         {"event", "api_store_error"}, {"code", code}, {"detail", message}};
@@ -103,7 +160,11 @@ constexpr std::array<ErrorCode, 30> documented_error_codes{{
      409,
      "The audit log's hash chain is broken: an event is missing or was changed."},
     {"size_invalid", 413, "The request body is larger than the limit."},
-    {"engine_error", 502, "The workspace engine could not complete the call; the message is its."},
+    // 422, not 502: Cloudflare replaces a 502 or 504 body with its own page (lake#572), and the
+    // engine refusing a call (a typo in SQL, a corrupt audio file) is not an outage.
+    {"engine_error",
+     422,
+     "The workspace engine or the outside service refused the call; the message is its."},
     {"not_supported", 501, "This lake or its workspace engine cannot do what was asked yet."},
     {"quota_exceeded",
      507,
@@ -193,6 +254,53 @@ const ErrorCode* find_error_code(std::string_view code) {
     return found == documented_error_codes.end() ? nullptr : &*found;
 }
 
+bool capability_writes(const Capability& capability) {
+    return capability.kind == CapabilityKind::Action && capability.action != "read" &&
+           capability.name != "workspace_query";
+}
+
+namespace {
+bool named_with(const Capability& capability, std::initializer_list<std::string_view> prefixes) {
+    return std::ranges::any_of(prefixes, [&](std::string_view prefix) {
+        return std::string_view(capability.name).starts_with(prefix);
+    });
+}
+} // namespace
+
+bool capability_destroys(const Capability& capability) {
+    return capability_writes(capability) && named_with(capability,
+                                                       {"delete_",
+                                                        "destroy_",
+                                                        "remove_",
+                                                        "revoke_",
+                                                        "drop_",
+                                                        "purge_",
+                                                        "unroute_",
+                                                        "scim_delete_"});
+}
+
+bool capability_idempotent(const Capability& capability) {
+    if (!capability_writes(capability)) {
+        return true;
+    }
+    // Each sets a value or removes something by name: a second identical call finds it done.
+    return named_with(capability,
+                      {"set_",
+                       "unset_",
+                       "upsert_",
+                       "scim_upsert_",
+                       "scim_patch_",
+                       "delete_",
+                       "destroy_",
+                       "remove_",
+                       "revoke_",
+                       "drop_",
+                       "purge_",
+                       "settle_",
+                       "unexpose_",
+                       "update_"});
+}
+
 ApiResult ApiResult::success(nlohmann::json output) {
     ApiResult result;
     result.ok = true;
@@ -207,8 +315,22 @@ ApiResult ApiResult::failure(std::string code, std::string message, std::string 
         message = code.empty() ? message : code + ": " + message;
         code = "store_error";
     }
-    if (contains_database_diagnostic(message)) {
+    const bool diagnostic = contains_database_diagnostic(message);
+    if (diagnostic) {
         log_database_diagnostic(code, message);
+    }
+    // PostgreSQL names the constraint in its diagnostic and the in-memory store in its message;
+    // either way the caller gets the rule and the field, never the constraint's name.
+    const auto rule = std::ranges::find_if(constraint_rules, [&](const ConstraintRule& known) {
+        return message.contains(known.constraint);
+    });
+    if (rule != constraint_rules.end()) {
+        if (path.empty()) {
+            path = "/" + std::string(rule->field);
+        }
+        const std::string field = path.substr(path.find_last_of('/') + 1);
+        message = field + " " + std::string(rule->rule);
+    } else if (diagnostic) {
         message = product_store_message(code);
     }
     ApiResult result;
@@ -602,7 +724,16 @@ CallState prepare_call(std::shared_ptr<const Capability> capability,
         context.workspace_id = input.at("workspace_id").is_string()
             ? input.at("workspace_id").get<std::string>() : std::string();
     }
-    if (entry.requires_auth && !context.authorized && !entry.allows_anonymous_public_read) {
+    // A bearer key lake rejected is refused on lake's own public reads too (`viewer`,
+    // `server_info`, the Docs, the capabilities whose object is the server): a script with a
+    // mistyped key learns so at once instead of reading `signed_in: false` (lake#594). A
+    // browser's stale session cookie is still a visitor, and the capabilities that verify their
+    // own bearer (the agent bus, SCIM providers) are left to do so.
+    const bool rejected_bearer = !context.authorized && !context.credential_rejection.empty() &&
+                                 context.authentication_method == "bearer" &&
+                                 entry.object == "server";
+    if ((entry.requires_auth && !context.authorized && !entry.allows_anonymous_public_read) ||
+        rejected_bearer) {
         state.result = unauthenticated(context);
         state.proceed = false;
     } else if (ApiResult validation = validate_input(entry, input); !validation.ok) {

@@ -17,8 +17,9 @@ bool contains_any(std::string_view name, std::initializer_list<std::string_view>
 
 // workspace_query is registered as an action (it runs through the workspace's allow-list) but it
 // only reads; a read-only key includes it.
+// The same rule as MCP's readOnlyHint (lake#594), so `predict` is a read in both.
 bool writes(const Capability& capability) {
-    return capability.kind == CapabilityKind::Action && capability.name != "workspace_query";
+    return capability_writes(capability);
 }
 
 struct GroupRule {
@@ -30,16 +31,17 @@ struct GroupRule {
 constexpr std::array group_rules{
     GroupRule{
         "Experiments",
-        "Read training studies, run metrics, comparisons and bounded live events in a space. "
-        "These tools are distinct from the solutions holdout get_experiment. Start and stop "
-        "require write permission and the person's confirmation; promote_trial requires "
-        "space administration and confirmation. Curves are suppressed for differential privacy.",
+        "Read training experiments (each trial is one run of its settings), run metrics, "
+        "comparisons and bounded live events in a workspace. get_experiment is distinct from "
+        "the solutions holdout experiment that workspace_query's get_experiment reads. Start and "
+        "stop require write permission and the person's confirmation; promote_trial requires "
+        "admin on the account and confirmation. Curves are suppressed for differential privacy.",
         [](std::string_view n) {
-            return n == "list_experiments" || n == "get_experiment_study" ||
+            return n == "list_experiments" || n == "get_experiment" ||
                    n == "list_experiment_trials" || n == "get_experiment_analysis" ||
                    n == "tail_experiment_events" || n == "stop_experiment_trial" ||
-                   n == "get_run_metrics" || n == "compare_runs" || n == "start_study" ||
-                   n == "stop_study" || n == "promote_trial";
+                   n == "get_run_metrics" || n == "compare_runs" || n == "start_experiment" ||
+                   n == "stop_experiment" || n == "promote_trial";
         }},
     GroupRule{"Transcripts",
               "What people said, added to a workspace from a recording, an uploaded audio or "
@@ -339,10 +341,10 @@ const std::vector<Flow>& flows() {
          "Train from a dataset, read the report, publish the model and score new rows.",
          {{"workspace_act",
            "`capability: \"create_project\"`, `input: {name, description, intent}`"},
-          {"workspace_act",
-           "`capability: \"capture_intent\"`, `input: {project, text: <what to predict>}`, then "
-           "`capability: \"compile_intent\"`, `input: {project, input_id}`: a pipeline built from "
-           "the sentence"},
+          {"compile_pipeline",
+           "`project`, `intent: <what to predict>`, `dataset: \"datasets.<name>\"`: a pipeline "
+           "built from the sentence (one call; the Train Docs use the same); answers its "
+           "`graph`"},
           {"workspace_act", "`capability: \"approve_plan\"`, `input: {project, graph}`"},
           {"run_pipeline",
            "`dataset_path: \"datasets.<name>\"`, `holdout_fraction: 0.2`, `model_name`; answers "
@@ -370,6 +372,34 @@ const std::vector<Flow>& flows() {
            "`type: \"volume\"`, `provider: \"cluster\"`, a `name`; optional `size_gi`"},
           {"list_stores", "poll until the store is `Ready`"},
           {"store_connection", "the claim, namespace, size and storage class to mount"}}},
+        {"Keep files in a drive",
+         "A drive is a workspace's file manager: workspace files (`storage: \"files\"`), a liquid "
+         "repository with history, or folders of shortcuts (virtual).",
+         {{"create_drive",
+           "`name`, `storage: \"files\"`; answers the drive and its `id` (the `drive_id` of later "
+           "calls)"},
+          {"upload_drive_entries",
+           "`drive_id`, `files: [{path, content: <base64>}]` (16 MiB in all; larger files go "
+           "through begin_drive_upload, append_drive_upload, finish_drive_upload)"},
+          {"list_drive_entries", "`drive_id`, optional `path`: a folder's files and folders"},
+          {"read_drive_file", "`drive_id`, `id`: the file's bytes as `content_base64`"}}},
+        {"Keep a secret",
+         "A secret is a versioned key-value object in a mount of one workspace; values are sealed "
+         "and only read_secret returns one.",
+         {{"create_secret_mount", "`customer_id`, `workspace_id`, `name` (a lowercase handle)"},
+          {"put_secret",
+           "`mount_id`, `name: \"database/password\"`, `value: {password: …}`; answers the new "
+           "version's metadata, never the value"},
+          {"list_secrets", "`mount_id`, optional `prefix`: names and versions, never values"},
+          {"read_secret", "`mount_id`, `name`, optional `version`: the value"}}},
+        {"Keep a transcript",
+         "A transcript is searchable text of what was said, from pasted text, captions or audio; "
+         "the audio is never kept.",
+         {{"create_transcript",
+           "`title`, `source: \"text\"` with `text` (or `\"upload\"` with a .vtt/.srt's "
+           "text, or `audio_base64` and `audio_name` to transcribe it first)"},
+          {"list_transcripts", "optional `q` searches titles and text"},
+          {"get_transcript", "`id`: the whole text"}}},
         {"Search a published index",
          "A search index is BM25F over a dataset; outside callers can search it once it is "
          "published.",

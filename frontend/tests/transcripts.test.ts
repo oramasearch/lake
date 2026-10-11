@@ -2,7 +2,7 @@
  * one. `npm test`; the build runs it. */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { ASK_CONTEXT_CHARS, excerptOf, recordingTitle, sourceLabel, titleFromFile, titleFromText, transcriptAskPage, wordCount } from "../src/lib/transcripts.ts";
+import { ASK_CONTEXT_CHARS, authorLabel, excerptOf, recordingTitle, sourceLabel, titleFromFile, titleFromText, transcriptAskPage, wordCount } from "../src/lib/transcripts.ts";
 
 test("how a transcript was made, in words", () => {
   assert.equal(sourceLabel("recording"), "Recorded");
@@ -55,4 +55,13 @@ test("Ask Orama is told the transcript's id, title and text, cut at the limit", 
   const long = transcriptAskPage({ id: "t2", title: "Long", text: "x".repeat(ASK_CONTEXT_CHARS + 500) });
   assert.ok(long.transcript.startsWith("x".repeat(ASK_CONTEXT_CHARS)));
   assert.match(long.transcript, /only its first 20000 characters are included/);
+});
+
+test("a transcript names its author, never by id (lake#579)", () => {
+  const row = { created_by: "c344bffe-50b7-4369-8018-022091f13b3c", created_by_name: "Ana Diaz" };
+  assert.equal(authorLabel(row, "c344bffe-50b7-4369-8018-022091f13b3c"), "you");
+  assert.equal(authorLabel(row, "someone-else"), "Ana Diaz");
+  assert.equal(authorLabel(row, undefined), "Ana Diaz");
+  assert.equal(authorLabel({ created_by: "c344bffe-50b7-4369-8018-022091f13b3c", created_by_name: null }, "x"), "");
+  assert.equal(authorLabel({ created_by: "admin" }, "x"), "");
 });

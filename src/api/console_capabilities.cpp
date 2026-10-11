@@ -128,9 +128,7 @@ json viewer_schema() {
          {"external_origin", string_schema()},
          {"public_host", string_schema()},
          {"config",
-          object_schema(
-              {{"base_agent_model", string_schema()}, {"frontier_model", string_schema()}},
-              json::array({"base_agent_model", "frontier_model"}))},
+          object_schema({{"frontier_model", string_schema()}}, json::array({"frontier_model"}))},
          {"version", string_schema()},
          {"revision", string_schema()}},
         json::array({"signed_in",
@@ -179,7 +177,7 @@ ApiResult viewer(const json& input, ApiContext& context, const std::string& vers
              {"password_sign_up", !clerk.has_value()},
              {"external_origin", public_origin(context)},
              {"public_host", context.public_host},
-             {"config", {{"base_agent_model", ""}, {"frontier_model", ""}}},
+             {"config", {{"frontier_model", ""}}},
              {"version", version},
              {"revision", std::string(build_revision_string())}};
     if (!context.authorized || context.store == nullptr) {
@@ -188,8 +186,9 @@ ApiResult viewer(const json& input, ApiContext& context, const std::string& vers
     const control::WorkspaceConfig defaults;
     const control::WorkspaceConfig& config =
         context.workspaces != nullptr ? context.workspaces->config() : defaults;
-    out["config"] = {{"base_agent_model", config.base_agent_model},
-                     {"frontier_model", config.frontier_model}};
+    // The base model's path on the workspace's volume is lake's own (lake#594); create_agent
+    // fills it in for a native agent.
+    out["config"] = {{"frontier_model", config.frontier_model}};
     if (!context.operator_credential && !context.acting_user_id.empty()) {
         out["user_id"] = context.acting_user_id;
         out["taap_id"] = context.acting_identity;
@@ -275,6 +274,21 @@ constexpr std::string_view permission_actions[] = {
 
 // The policy object a my_permissions call is about: a drive folder is the nearest folder (or the
 // repository) the Drive capabilities authorize, every other type the object of that type and id.
+// The object types my_permissions takes (lake#594): the policy objects (db/schema.sql
+// objects_type_check), a workspace (its space's permissions) and a drive folder.
+const std::vector<std::string> permission_object_types = {"customer",
+                                                          "workspace",
+                                                          "organization",
+                                                          "team",
+                                                          "member",
+                                                          "repository",
+                                                          "path",
+                                                          "environment",
+                                                          "secret_mount",
+                                                          "secret",
+                                                          "application",
+                                                          "drive folder"};
+
 std::expected<std::string, ApiError> permission_object(const json& input, ApiContext& context) {
     const std::string type = input.at("object_type");
     const std::string id = input.at("object_id");
@@ -288,6 +302,31 @@ std::expected<std::string, ApiError> permission_object(const json& input, ApiCon
                                       {"ref", input.value("ref", std::string("main"))},
                                       {"path", input.value("path", std::string())}},
                                      context);
+    }
+    // A workspace and its drives are authorized on the space that owns them (lake#594).
+    if (type == "workspace") {
+        const auto workspace = context.store->get_workspace(id);
+        if (!workspace || workspace->desired == "deleted") {
+            return std::unexpected(ApiError{"not_found", "no workspace " + id, "/object_id"});
+        }
+        const auto space = context.store->find_policy_object("customer", workspace->customer_id);
+        if (!space) {
+            return std::unexpected(
+                ApiError{space.error().code, space.error().message, "/object_id"});
+        }
+        return space->id;
+    }
+    if (type == "drive") {
+        return std::unexpected(ApiError{
+            "invalid_input",
+            "a drive is authorized on its workspace: send object_type workspace and the drive's "
+            "workspace_id as object_id",
+            "/object_type"});
+    }
+    if (std::ranges::find(permission_object_types, type) == permission_object_types.end()) {
+        return std::unexpected(ApiError{"invalid_input",
+                                        "expected one of " + json(permission_object_types).dump(),
+                                        "/object_type"});
     }
     const auto object = context.store->find_policy_object(type, id);
     if (!object) {
@@ -511,6 +550,14 @@ ApiResult list_docs(const json& input) {
     if (q.size() > 200) {
         return ApiResult::failure("invalid_input", "q is at most 200 characters", "/q");
     }
+    std::vector<std::string> words;
+    for (std::size_t at = 0; at < q.size();) {
+        const std::size_t end = std::min(q.find(' ', at), q.size());
+        if (end > at) {
+            words.push_back(q.substr(at, end - at));
+        }
+        at = end + 1;
+    }
     json sections = json::array();
     std::vector<std::pair<int, json>> pages;
     for (const WebUiGuidePage& page : web_ui_guide()) {
@@ -527,21 +574,32 @@ ApiResult list_docs(const json& input) {
             }
         }
         int rank = 0;
-        if (!q.empty()) {
+        if (!words.empty()) {
             const std::string body = ascii_lower(page.markdown);
+            // Every word, in any order (lake#594): "upload a csv" finds the page that says
+            // "Upload … a CSV file".
+            const auto has_all = [&](const std::string& text) {
+                return std::ranges::all_of(words, [&](const std::string& word) {
+                    return text.find(word) != std::string::npos;
+                });
+            };
             const auto in_heading = std::ranges::find_if(headings, [&](const DocHeading& heading) {
-                return heading.level > 1 && ascii_lower(heading.text).find(q) != std::string::npos;
+                return heading.level > 1 && has_all(ascii_lower(heading.text));
             });
             // The body after the title line, so a title match is not also the first text match.
             const std::size_t after_title = std::min(body.find('\n'), body.size());
-            const std::size_t hit = body.find(q, after_title);
-            if (ascii_lower(page.title).find(q) != std::string::npos) {
+            // The text match: the whole query where it appears as written, else the first word.
+            std::size_t hit = body.find(q, after_title);
+            if (hit == std::string::npos && has_all(body)) {
+                hit = body.find(words.front(), after_title);
+            }
+            if (has_all(ascii_lower(page.title))) {
                 item["match"] = "title";
             } else if (in_heading != headings.end()) {
                 item["match"] = "heading";
                 item["anchor"] = in_heading->anchor;
                 rank = 1;
-            } else if (hit != std::string::npos) {
+            } else if (hit != std::string::npos && has_all(body)) {
                 item["match"] = "text";
                 rank = 2;
                 for (const DocHeading& heading : headings) {
@@ -568,11 +626,11 @@ ApiResult list_docs(const json& input) {
 
 ApiResult get_doc(const json& input) {
     const std::vector<WebUiGuidePage>& pages = web_ui_guide();
-    const std::string slug = input.value("page", std::string());
+    const std::string slug = input.value("slug", std::string());
     const auto found =
         slug.empty() ? pages.begin() : std::ranges::find(pages, slug, &WebUiGuidePage::slug);
     if (found == pages.end()) {
-        return ApiResult::failure("not_found", "there is no Docs page " + slug, "/page");
+        return ApiResult::failure("not_found", "there is no Docs page " + slug, "/slug");
     }
     json out{{"slug", found->slug},
              {"title", found->title},
@@ -686,12 +744,19 @@ void register_console_capabilities(Registry& registry, std::string_view version)
         .description =
             "Whether you may take each of `actions` on one object, so a page shows only the "
             "buttons you can use. `object_type` and `object_id` name a policy object (`customer` "
-            "and a space id, `repository` and a repository id, ...); `drive folder` names a "
-            "repository by `object_id` and a folder by `path` at `ref` (default `main`), as the "
-            "Drive capabilities authorize it. `promote` is `admin` on the object. It never "
+            "and a space id, `workspace` and a workspace id (its space's permissions, which "
+            "also govern its drives), `repository` and a repository id, ...); `drive folder` "
+            "names a repository by `object_id` and a folder by `path` at `ref` (default "
+            "`main`), as the Drive capabilities authorize it. `promote` is `admin` on the object. "
+            "It never "
             "replaces the check each capability makes itself.",
         .input_schema =
-            object_schema({{"object_type", string_schema()},
+            object_schema({{"object_type",
+                            {{"type", "string"},
+                             {"description",
+                              "customer, workspace, organization, team, member, repository, "
+                              "path, environment, secret_mount, secret, application or drive "
+                              "folder"}}},
                            {"object_id", string_schema()},
                            {"actions",
                             {{"type", "array"},
@@ -753,13 +818,14 @@ void register_console_capabilities(Registry& registry, std::string_view version)
             "The Docs guides in reading order, each by its slug, title, section (the group the "
             "Docs navigation shows it under) and its headings (level 2 and 3, each with the "
             "anchor that links to it), plus the sections in order. With `q`, only the guides "
-            "whose title, headings or text contain it (case ignored), best match first, each "
-            "saying what matched, the anchor of the heading to open and an excerpt. Public.",
+            "whose title, headings or text contain every word of it, in any order (case "
+            "ignored), best match first, each saying what matched, the anchor of the heading to "
+            "open and an excerpt. Read one with get_doc by its `slug`. Public.",
         .input_schema = object_schema({{"q", string_schema()}}),
-        .output_schema = object_schema(
-            {{"pages", {{"type", "array"}, {"items", doc_page_schema()}}},
-             {"sections", string_array_schema()}},
-            json::array({"pages", "sections"})),
+        .output_schema =
+            object_schema({{"pages", {{"type", "array"}, {"items", doc_page_schema()}}},
+                           {"sections", string_array_schema()}},
+                          json::array({"pages", "sections"})),
         .kind = CapabilityKind::Read,
         .requires_auth = false,
         .object = "server",
@@ -771,10 +837,10 @@ void register_console_capabilities(Registry& registry, std::string_view version)
     registry.add(Capability{
         .name = "get_doc",
         .title = "Read a Docs page",
-        .description = "One Docs guide as Markdown, by its slug (`page`; absent is the first, "
-                       "Getting Started), with its section and the previous and next guides in "
-                       "reading order. Public.",
-        .input_schema = object_schema({{"page", string_schema()}}),
+        .description = "One Docs guide as Markdown, by the `slug` list_docs answers (absent is "
+                       "the first, Getting Started), with its section and the previous and next "
+                       "guides in reading order. `page` is the deprecated name of `slug`. Public.",
+        .input_schema = object_schema({{"slug", string_schema()}}),
         .output_schema = object_schema({{"slug", string_schema()},
                                         {"title", string_schema()},
                                         {"section", string_schema()},
@@ -787,7 +853,9 @@ void register_console_capabilities(Registry& registry, std::string_view version)
         .object = "server",
         .action = "read",
         .resolve_object = no_object,
-        .handler = [](const json& input, ApiContext&) { return get_doc(input); }});
+        .handler = [](const json& input, ApiContext&) { return get_doc(input); },
+        // list_docs answers `slug`, so get_doc takes it (lake#591).
+        .input_aliases = {{"page", "slug"}}});
     registry.add(Capability{
         .name = "mcp_setup",
         .title = "MCP setup",

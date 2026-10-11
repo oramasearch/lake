@@ -280,6 +280,7 @@ constexpr std::array workspace = std::to_array<std::string_view>({
     "drive_effective_access",
     "drive_history",
     "drive_preview",
+    "drive_share_people",
     "edit_pipeline",
     "encrypt",
     "environment_logs",
@@ -299,8 +300,8 @@ constexpr std::array workspace = std::to_array<std::string_view>({
     "get_drive_entry",
     "get_encryption_key",
     "get_environment",
+    "get_experiment",
     "get_experiment_analysis",
-    "get_experiment_study",
     "get_model",
     "get_pipeline",
     "get_repository",
@@ -350,6 +351,7 @@ constexpr std::array workspace = std::to_array<std::string_view>({
     "list_transcripts",
     "list_webhook_deliveries",
     "list_webhooks",
+    "load_drive_dataset",
     "map_review_anchors",
     "move_drive_entry",
     "move_drive_path",
@@ -398,6 +400,7 @@ constexpr std::array workspace = std::to_array<std::string_view>({
     "run_pipeline",
     "scale_app",
     "schedule_agent",
+    "search_drives",
     "search_index",
     "secret_metadata",
     "send_ask_message",
@@ -413,12 +416,12 @@ constexpr std::array workspace = std::to_array<std::string_view>({
     "sign",
     "stage_repository_file",
     "start_app",
+    "start_experiment",
     "start_solution",
-    "start_study",
     "stop_agent_launch",
     "stop_app",
+    "stop_experiment",
     "stop_experiment_trial",
-    "stop_study",
     "store_connection",
     "suspend_application_user",
     "tail_experiment_events",
@@ -579,6 +582,11 @@ std::vector<std::string> workspace_audit_actions() {
     std::vector<std::string> actions(workspace.begin(), workspace.end());
     for (const std::string_view direct : {"deployment_phase", "push_change", "reference_update"}) {
         actions.emplace_back(direct);
+    }
+    // Workspace events recorded before lake#561 renamed these experiment capabilities
+    // (get_experiment, start_experiment, stop_experiment) keep their names.
+    for (const std::string_view renamed : {"get_experiment_study", "start_study", "stop_study"}) {
+        actions.emplace_back(renamed);
     }
     std::ranges::sort(actions);
     return actions;

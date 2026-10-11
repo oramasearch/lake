@@ -221,6 +221,7 @@ add_library(lake-core STATIC
   src/control/ask_messages.cpp
   src/control/opportunities.cpp
   src/control/transcripts.cpp
+  src/control/project_decisions.cpp
   src/control/drives.cpp
   src/control/drive_files.cpp
   src/control/stream_owners.cpp

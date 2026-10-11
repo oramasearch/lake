@@ -8,7 +8,8 @@ import type { Row } from "@/lib/api";
 import { entityCrumb, useTrail } from "@/lib/trail";
 import { Banner, Button, Card, Chip, ErrorBlock, KeyValue, Mono, Query, Split, Stat, Status } from "@/lib/ui";
 import { WorkspaceFrame, cellText, qs, text, timeAgo, useWorkspace, useWorkspaceState, useWq, useWsPath } from "./workspace";
-import { ObjectTable, RunSubject, TrialSubject, UNFINISHED, runStatusTone, useStudies, when } from "./RunsPage";
+import { ObjectTable, RunSubject, TrialSubject, UNFINISHED, runStatusTone, useExperimentRefs, when } from "./RunsPage";
+import { evidenceOf } from "./evidence";
 
 export default function RunPage() {
   const [params] = useSearchParams();
@@ -66,12 +67,12 @@ export default function RunPage() {
 }
 
 function RunBody({ run, id }: { run: Row; id: string }) {
-  const studies = useStudies();
+  const experiments = useExperimentRefs();
   const status = text(run, "status");
   const finished = !UNFINISHED.has(status);
   const report = useWq<Row>("get_run_report", { run_id: id }, { enabled: finished });
   const traces = useWq<Row>("list_traces", { limit: 500 });
-  const trial = studies.byRun.get(text(run, "id"));
+  const trial = experiments.byRun.get(text(run, "id"));
   const created = text(run, "created");
 
   const said: string[] = [];
@@ -238,7 +239,12 @@ function ReportPanel({ report }: { report: Row }) {
         </div>
       )}
       {section("drivers", "What the Model Leans On", "A weight is what the model relied on, not a cause.")}
-      {section("at_risk", "Most at Risk", "")}
+      {Array.isArray(report.at_risk) && report.at_risk.length > 0 && (
+        <div className="mt-5 space-y-2">
+          <h3 className="m-0">Most at Risk</h3>
+          <AtRiskTable rows={report.at_risk as Row[]} />
+        </div>
+      )}
       {section("caveats", "Do Not Read These as Results", "")}
       {section("missing", "What This Run Cannot Tell You", "")}
       <details className="mt-5">
@@ -246,6 +252,61 @@ function ReportPanel({ report }: { report: Row }) {
         <pre>{JSON.stringify(report, null, 2)}</pre>
       </details>
     </Card>
+  );
+}
+
+/** The ranked at-risk rows with their evidence in words (lake#581): the row's values as
+ * "feature = value" chips and its top reasons with their effect, never the raw JSON. */
+function AtRiskTable({ rows }: { rows: Row[] }) {
+  return (
+    <div className="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th scope="col">Rank</th>
+            <th scope="col">Entity</th>
+            <th scope="col" className="text-right">
+              Risk
+            </th>
+            <th scope="col">Evidence</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((row, i) => {
+            const { values, reasons } = evidenceOf(row.evidence);
+            return (
+              <tr key={i}>
+                <td className="font-mono">{cellText(row.rank)}</td>
+                <td className="font-mono">{cellText(row.entity)}</td>
+                <td className="text-right font-mono">{typeof row.risk === "number" ? row.risk.toFixed(3) : cellText(row.risk)}</td>
+                <td>
+                  {values.length > 0 && (
+                    <div className="flex flex-wrap gap-1">
+                      {values.map((v) => (
+                        <Chip key={v.name}>
+                          {v.name} = <span className="font-mono">{v.value}</span>
+                        </Chip>
+                      ))}
+                    </div>
+                  )}
+                  {reasons.length > 0 && (
+                    <ol className="mt-1 mb-0 pl-4 text-[12.5px] text-ink-2">
+                      {reasons.map((r) => (
+                        <li key={r.reason}>
+                          <span className="font-medium text-ink">{r.reason}</span>
+                          {r.label && <> {r.label}</>}
+                        </li>
+                      ))}
+                    </ol>
+                  )}
+                  {values.length === 0 && reasons.length === 0 && <span className="text-ink-3">—</span>}
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
   );
 }
 

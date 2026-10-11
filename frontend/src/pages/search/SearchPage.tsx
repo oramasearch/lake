@@ -1,4 +1,4 @@
-/** Search (`/search?q=&in=repositories,code,datasets,…`): one query across the places a person
+/** Search (`/search?q=&in=repositories,code,datasets,drives,…`): one query across the places a person
  * chooses with checkboxes. Each place is searched through the capability its own page reads, at
  * once and side by side; results come back grouped by place, each group with its count, and a
  * place that fails or is unavailable says so without hiding the others. The choice of places is
@@ -9,12 +9,27 @@
 import { type ReactNode, useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { useQueries, type UseQueryResult } from "@tanstack/react-query";
-import { BookMarked, BookOpen, Bot, Boxes, Code2, Database, FileAudio, FolderKanban, type LucideIcon, Search as SearchIcon } from "lucide-react";
+import { BookMarked, BookOpen, Bot, Boxes, Code2, Database, FileAudio, FolderKanban, HardDrive, type LucideIcon, Search as SearchIcon } from "lucide-react";
 import { ApiError, postRead, read, type Row } from "@/lib/api";
 import { useSession } from "@/lib/session";
 import { Chip, Empty, ErrorBlock, Page, Skeleton, cx } from "@/lib/ui";
+import { Highlight } from "@/components/Highlight";
+import { matchIcon } from "@/pages/drives/MatchLink";
+import { matchLink, matchWhere, type SearchDrivesResult } from "@/pages/drives/search";
 
-type Hit = { key: string; title: ReactNode; detail?: ReactNode; to?: string; href?: string };
+/** One result. A string title shows the match marked. `to` is a page of the app; `href` a URL the
+ * browser opens itself (a file, in a new tab when `newTab`, saved when `download`). */
+type Hit = {
+  key: string;
+  title: ReactNode;
+  detail?: ReactNode;
+  to?: string;
+  href?: string;
+  newTab?: boolean;
+  download?: boolean;
+  icon?: LucideIcon;
+  iconClass?: string;
+};
 type Place = {
   id: string;
   label: string;
@@ -141,6 +156,29 @@ const PLACES: Place[] = [
     },
   },
   {
+    id: "drives",
+    label: "Drives",
+    icon: HardDrive,
+    workspace: true,
+    // One read: search_drives matches drive, folder, file and shortcut names in every drive of the
+    // workspace, a repository drive's paths at main included (lake#561).
+    run: async (q, scope, _o, signal) => {
+      const value = await read<SearchDrivesResult>("search_drives", { customer_id: scope.customerId, workspace_id: scope.workspaceId, q, limit: 100 }, { workspace: null, signal });
+      return (value.items ?? []).map((m) => {
+        const link = matchLink(m, scope);
+        const { icon, className } = matchIcon(m);
+        return {
+          key: `${m.drive.id}:${m.kind}:${m.id ?? m.path}`,
+          title: m.name,
+          detail: matchWhere(m),
+          icon,
+          iconClass: className,
+          ...("to" in link ? { to: link.workspace ? wsPath(scope, link.to) : link.to } : { href: link.href, newTab: link.newTab, download: link.download }),
+        };
+      });
+    },
+  },
+  {
     id: "docs",
     label: "Docs",
     icon: BookOpen,
@@ -228,7 +266,7 @@ export default function SearchPage() {
   const total = results.reduce((n, r) => n + (r.data?.length ?? 0), 0);
 
   return (
-    <Page eyebrow="Data" title="Search" sub="One search across your repositories, code, datasets, transcripts, projects, agents, models and the docs. Choose where to look.">
+    <Page eyebrow="Data" title="Search" sub="One search across your repositories, code, datasets, transcripts, projects, agents, models, drives and the docs. Choose where to look.">
       <form
         className="mb-3 flex flex-wrap items-center gap-2"
         onSubmit={(e) => {
@@ -284,10 +322,10 @@ export default function SearchPage() {
           <p className="muted mt-2 mb-0 text-[12.5px]">
             {scope.workspaceId ? (
               <>
-                Datasets, transcripts, projects, agents and models are searched in the workspace <strong>{workspace?.name ?? "chosen above"}</strong>.
+                Datasets, transcripts, projects, agents, models and drives are searched in the workspace <strong>{workspace?.name ?? "chosen above"}</strong>.
               </>
             ) : (
-              <>Choose a workspace in the top bar to search its datasets, transcripts, projects, agents and models.</>
+              <>Choose a workspace in the top bar to search its datasets, transcripts, projects, agents, models and drives.</>
             )}
           </p>
         )}
@@ -306,7 +344,7 @@ export default function SearchPage() {
           </p>
           <div className="space-y-4">
             {chosen.map((place, i) => (
-              <PlaceResults key={place.id} place={place} q={results[i]} needsWorkspace={!!place.workspace && !scope.workspaceId} />
+              <PlaceResults key={place.id} place={place} text={q} q={results[i]} needsWorkspace={!!place.workspace && !scope.workspaceId} />
             ))}
           </div>
         </>
@@ -315,7 +353,7 @@ export default function SearchPage() {
   );
 }
 
-function PlaceResults({ place, q, needsWorkspace }: { place: Place; q: UseQueryResult<Hit[]>; needsWorkspace: boolean }) {
+function PlaceResults({ place, text, q, needsWorkspace }: { place: Place; text: string; q: UseQueryResult<Hit[]>; needsWorkspace: boolean }) {
   const hits = q.data ?? [];
   const unavailable = q.error instanceof ApiError && (q.error.code === "unknown_capability" || q.error.code === "not_supported" || q.error.status === 404);
   return (
@@ -344,7 +382,10 @@ function PlaceResults({ place, q, needsWorkspace }: { place: Place; q: UseQueryR
           <ul className="m-0 list-none p-0">
             {hits.slice(0, 50).map((hit) => (
               <li key={hit.key} className="border-b border-hairline px-4 py-2.5 last:border-b-0 hover:bg-raised/60">
-                <div className="text-[13.5px] font-medium">{hit.to ? <Link to={hit.to}>{hit.title}</Link> : hit.title}</div>
+                <div className="flex min-w-0 items-center gap-2 text-[13.5px] font-medium">
+                  {hit.icon && <hit.icon size={14} aria-hidden className={cx("shrink-0", hit.iconClass)} />}
+                  <HitTitle hit={hit} text={text} />
+                </div>
                 {hit.detail && <div className="mt-0.5 line-clamp-2 text-[12.5px] text-ink-2">{hit.detail}</div>}
               </li>
             ))}
@@ -354,6 +395,19 @@ function PlaceResults({ place, q, needsWorkspace }: { place: Place; q: UseQueryR
       </div>
     </section>
   );
+}
+
+function HitTitle({ hit, text }: { hit: Hit; text: string }) {
+  const title = typeof hit.title === "string" ? <Highlight text={hit.title} q={text} /> : hit.title;
+  if (hit.to) return <Link to={hit.to}>{title}</Link>;
+  if (hit.href) {
+    return (
+      <a href={hit.href} {...(hit.newTab ? { target: "_blank", rel: "noopener noreferrer" } : {})} {...(hit.download ? { download: "" } : {})}>
+        {title}
+      </a>
+    );
+  }
+  return <>{title}</>;
 }
 
 /** Code search's own options: a repository, a branch or tag, an exact change, complete history. */

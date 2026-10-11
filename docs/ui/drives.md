@@ -11,7 +11,7 @@ or as shortcuts only ([../api/drives.md](../api/drives.md)). The pages are works
 | Path | File | What it shows | Capabilities |
 |---|---|---|---|
 | `/drives` | `DrivesPage.tsx`, `NewDrive.tsx` | four figures (drives, and each kind), a filter and kind chips, a card per drive, **Recent Files**; **New drive** opens a drawer | `list_drives`, `recent_drive_entries`, `create_drive`, `list_repositories` |
-| `/drives/drive?id=&folder=[&focus=]` | `DrivePage.tsx`, `FolderPicker.tsx`, `ShortcutDialog.tsx` | one drive as a file manager; `folder` is the folder's key (a path in a repository drive, an entry id otherwise); `focus` (a shortcut to an item) opens the folder that holds it and selects it | `get_drive`, then the drive's storage (below), `get_drive_entry`, `rename_drive`, `delete_drive` |
+| `/drives/drive?id=&folder=[&focus=]` | `DrivePage.tsx`, `FolderPicker.tsx`, `ShortcutDialog.tsx`, `search.ts`, `MatchLink.tsx` | one drive as a file manager; `folder` is the folder's key (a path in a repository drive, an entry id otherwise); `focus` (a shortcut to an item) opens the folder that holds it and selects it | `get_drive`, then the drive's storage (below), `get_drive_entry`, `search_drives`, `rename_drive`, `delete_drive` |
 
 The rail's **Drives** item sits under Data after Repositories and owns `/drives/drive`.
 
@@ -25,7 +25,7 @@ implementation:
 
 | Implementation | Item key | Calls |
 |---|---|---|
-| `RepositoryStorage` | path | `drive_browse`, `create_drive_folder`, `upload_drive_files`, `move_drive_path`, `delete_drive_path` on `main`, unscoped; files open in `/drive/preview` and download from `/drive/download` |
+| `RepositoryStorage` | path | `drive_browse`, `create_drive_folder`, `upload_drive_files`, `move_drive_path`, `delete_drive_path` on `main`, unscoped; files open in `/drive/preview` and download from `/drive/download` (the `download_url` `download_drive_file` answers) |
 | `FilesStorage` | entry id | `list_drive_entries`, `create_drive_folder_entry`, `upload_drive_entries` (files up to 4 MiB, several per call, at most 12 MiB a call), `begin_drive_upload` / `append_drive_upload` (8 MiB pieces at block boundaries) / `finish_drive_upload` (larger files), `move_drive_entry`, `delete_drive_entry`, `create_drive_shortcut`; files download from `/drive/files/download`, and open in the browser with `inline=1` for the media types it shows safely (`INLINE_TYPES`) |
 | `VirtualStorage` | entry id | as `FilesStorage`, without uploads |
 
@@ -51,13 +51,46 @@ A workspace-files upload sends each file at its relative path and lake makes the
   dataset, project, agent or model by name and a web address typed. `targets.ts` checks the target
   as lake does (`targetProblem`), sends only its kind's fields (`cleanTarget`), and maps each
   shortcut to the page it opens (`targetHref`); a broken shortcut shows a **Broken** chip with the
-  reason and no link.
+  reason and no link. Choosing a target suggests the shortcut's name; focusing **Name** selects the
+  suggestion, so typing replaces it rather than appending to it, and once the person has typed a
+  name a new target leaves it alone (`nameAfterTarget`, `selectsOnFocus`, lake#580).
+- **Load as dataset** (lake#593). A CSV or JSONL file's menu (`datasetFormat` in `paths.ts`)
+  opens `LoadDataset`: a dataset name started from the file's name (`datasetName`) and the
+  take-the-next-free-name box; it calls `load_drive_dataset` with the drive and the item's key and
+  opens **Data → Datasets** with the loaded banner, as an upload there does. Both repository and
+  workspace-files drives offer it.
+- **Unfinished uploads** (lake#588). A workspace-files folder whose listing has `uploads` shows a
+  quiet **Unfinished Uploads** banner naming each with its age (or "expired"); **Remove** deletes
+  them with `delete_drive_entry`. They hold their names until removed or, after 24 hours, until
+  the next upload of the name.
+- **Search.** The toolbar's box (*Search this drive…*) filters the open folder's items as each
+  letter is typed, the instant first step. Once typing settles (250 ms) it also calls
+  `search_drives {drive_id, q}` and lists, under the folder, **Elsewhere in This Drive**: every
+  match outside the open folder with its icon, its name with the match marked, and a muted line
+  with the drive and folder path (which opens that folder), plus a file's size and time. A folder
+  match opens in place; a file and a shortcut open as their row would. A repository drive is
+  searched by its paths at `main`; one that cannot be read says why.
 - **Deletes** name their consequence: a repository keeps history; workspace files have none; a
   shortcut's target stays. **Drive settings** renames the drive and deletes it once its name is
   typed.
 
+## In Data → Search
+
+Search's **Drives** place (`frontend/src/pages/search/SearchPage.tsx`, on by default with the
+others, `?in=…,drives,…`) calls `search_drives` in the workspace chosen in the top bar. Each row
+shows the kind's icon (`matchIcon`: drive, folder, file, shortcut, red when broken), the name with
+the match marked (`components/Highlight.tsx`, as the Docs reader marks one) and a muted line with
+the drive and folder path (`matchWhere`). `matchLink` (`search.ts`) decides where a row goes: a
+drive or folder opens `/drives/drive?id=&folder=` (a folder's key is its path in a repository
+drive, its id otherwise); a file opens the repository preview (`/drive/preview`), or a workspace
+file in the browser with `inline=1` when it is one of `INLINE_TYPES` and downloads otherwise; a
+shortcut opens its target (`targetHref`), or, when broken, the folder that holds it with the
+shortcut selected (`focus`).
+
 ## Verify
 
 `frontend/tests/drives.test.ts` covers paths, names, sorting, range selection, the upload and move
-plans, upload chunks, and what each shortcut opens. `npx tsc --noEmit -p .`, `npm test` and
+plans, upload chunks, what each shortcut opens, which files load as datasets under which name, and
+where each search match opens (`matchLink`,
+`matchWhere`, `folderKey`, `parentKey`). `npx tsc --noEmit -p .`, `npm test` and
 `npm run build` from `frontend/`.

@@ -172,3 +172,16 @@ export const INLINE_TYPES = new Set([
   "video/mp4",
   "video/webm",
 ]);
+
+/** The New shortcut name a person has not typed yet (lake#580): choosing a target fills it in, and
+ * focusing it selects it, so typing replaces the suggestion instead of appending to it. Once typed,
+ * the name is the person's and a new target leaves it alone. */
+export function nameAfterTarget(current: string, typed: boolean, suggested: string | undefined): string {
+  if (typed) return current;
+  return suggested ?? current;
+}
+
+/** Whether focusing the Name field selects its text: only a suggestion nobody has typed over. */
+export function selectsOnFocus(name: string, typed: boolean): boolean {
+  return !typed && name.length > 0;
+}

@@ -11,7 +11,8 @@ import { date } from "@/lib/format";
 import { Banner, Button, Card, Chip, Empty, ErrorBlock, Page, Skeleton, Stat, StatRow, SearchInput, Toolbar } from "@/lib/ui";
 import { useToast } from "@/lib/toast";
 import { NOT_CONFIGURED, spokenLength } from "@/lib/dictation";
-import { excerptOf, sourceLabel, type TranscriptRow } from "@/lib/transcripts";
+import { authorLabel, excerptOf, sourceLabel, type TranscriptRow } from "@/lib/transcripts";
+import { useSession } from "@/lib/session";
 import { useSpeechToText } from "@/components/dictation/Dictate";
 import { WorkspaceGate } from "@/components/WorkspaceGate";
 import { qs, useWorkspace, useWsPath } from "@/pages/train/workspace";
@@ -19,7 +20,7 @@ import { NewTranscript } from "./NewTranscript";
 
 const PAGE = 50;
 
-type ListAnswer = { transcripts?: TranscriptRow[]; next_cursor?: string | null };
+type ListAnswer = { transcripts?: TranscriptRow[]; next_cursor?: string | null; total?: number };
 
 /** `q`, settled for a moment before it is searched. */
 function useSettled(value: string, ms = 300): string {
@@ -60,6 +61,8 @@ export default function TranscriptsPage() {
   });
   const rows = useMemo(() => list.data?.pages.flatMap((p) => p.transcripts ?? []) ?? [], [list.data]);
   const more = !!list.hasNextPage;
+  // Every transcript the search keeps, counted by lake on each page (lake#574).
+  const total = list.data?.pages[0]?.total;
   const recorded = rows.reduce((sum, r) => sum + (r.seconds ?? 0), 0);
   const latest = rows[0]?.created_at;
 
@@ -78,7 +81,7 @@ export default function TranscriptsPage() {
           </Banner>
         )}
         <StatRow cols={3}>
-          <Stat label="Transcripts" icon={FileAudio} value={list.isLoading ? "…" : `${rows.length}${more ? "+" : ""}`} sub={q ? `matching “${q}”` : "in this workspace"} />
+          <Stat label="Transcripts" icon={FileAudio} value={list.isLoading ? "…" : total ?? `${rows.length}${more ? "+" : ""}`} sub={q ? `matching “${q}”` : "in this workspace"} />
           <Stat label="Recorded" icon={Mic} value={recorded ? spokenLength(recorded) : "—"} sub="of audio, in this list" />
           <Stat label="Latest" icon={CalendarClock} value={latest ? date(latest) : "—"} sub={rows[0]?.title ?? "nothing yet"} />
         </StatRow>
@@ -131,6 +134,8 @@ export default function TranscriptsPage() {
 }
 
 function TranscriptCard({ row, to }: { row: TranscriptRow; to: string }) {
+  const { viewer } = useSession();
+  const author = authorLabel(row, viewer.user_id);
   const excerpt = excerptOf(row);
   const length = spokenLength(row.seconds);
   return (
@@ -144,7 +149,7 @@ function TranscriptCard({ row, to }: { row: TranscriptRow; to: string }) {
         <div className="mt-2 flex flex-wrap items-center gap-1.5">
           <Chip tone={row.source === "recording" ? "action" : "neutral"}>{sourceLabel(row.source)}</Chip>
           {length && <Chip>{length}</Chip>}
-          {row.created_by && <span className="truncate text-[12px] text-ink-3">by {row.created_by}</span>}
+          {author && <span className="truncate text-[12px] text-ink-3">by {author}</span>}
         </div>
       </div>
     </Card>

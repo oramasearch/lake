@@ -49,6 +49,32 @@ The same upload through the API is `upload_dataset` inside `workspace_act`:
 - The answer's `id` (`datasets/<name>`) is the id other calls take.
 - From an AI agent, the MCP tool `workspace_act` takes the same JSON.
 
+## Load a File from a Drive
+
+A CSV or JSONL file kept in a drive loads without leaving lake.
+
+1. Open **Data → Drives**, open the drive and go to the file's folder.
+2. In the file's menu (**⋯**) choose **Load as dataset**.
+3. Check the **Dataset name** (it starts from the file's name, as SQL can query it) and tick *If the
+   name is taken, save it under the next free name* if you want that.
+4. Press **Load dataset**. The page opens **Data → Datasets** with the banner that says what
+   arrived.
+
+Through the API it is one call for either kind of drive. `id` is the file's id in a
+workspace-files drive and its path in a repository drive:
+
+`POST /v1/load_drive_dataset`
+
+```json
+{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "drive_id": "<drive id>", "id": "reports/churn.csv", "table_name": "churn"}
+```
+
+- `format` is `csv` or `jsonl`, taken from the file's name when you leave it out.
+- `if_exists` is `upload_dataset`'s: `"rename"` takes the next free name.
+- The answer is `upload_dataset`'s, with `source` naming the drive file.
+- At most 16 MiB, as an upload. From an AI agent, the MCP tool `load_drive_dataset` takes the same
+  JSON.
+
 ### Name Rules
 
 - A dataset name is letters, digits and underscores, starts with a letter or an underscore, is at
@@ -280,6 +306,7 @@ members hold `read` unless they were granted more ([Grants and Effective Access]
 
 - [Getting Started](/docs)
 - [Workspaces](/docs/workspaces)
+- [Drives](/docs/drives): keep files, and load a CSV from one
 - [Services and Storage](/docs/services)
 - [AI Projects and Pipelines](/docs/design): train on a dataset
 - [Search](/docs/search)

@@ -63,6 +63,12 @@ Open a drive from its card. The path above the list opens any folder above this 
 - **Rename** and **Delete** are in each item's menu. Deleting a folder deletes everything in it.
   In a workspace-files or virtual drive this cannot be undone; in a repository drive it is a new
   change, and earlier versions stay in history.
+- **Load as dataset.** A CSV or JSONL file's menu has **Load as dataset**: name the dataset, tick
+  whether a taken name may become the next free one, and press **Load dataset**. Lake reads the
+  file where it is and loads it into the workspace's datasets; the page opens **Data → Datasets**
+  with what arrived ([Datasets and Loading Data](/docs/load-data#load-a-file-from-a-drive)).
+- **Search.** Files written into a repository drive (uploaded, moved, made in a new folder) are
+  found by **Search** at once, as files pushed with `liquid push` are.
 
 For a repository drive, the drive's menu also has **History**, **Share this folder** and **Open
 the repository**, which open the repository's own pages.
@@ -73,12 +79,48 @@ the repository**, which open the repository's own pages.
 | New folder | `create_drive_folder_entry` (`path` may name several levels) | `create_drive_folder` |
 | Upload small files | `upload_drive_entries` (at most 16 MiB a call) | `upload_drive_files` |
 | Upload a large file | `begin_drive_upload`, `append_drive_upload` (8 MiB pieces), `finish_drive_upload` | — |
-| Read a file | `read_drive_file` (16 MiB a call), or `GET /drive/files/download` | `download_drive_file`, or `GET /drive/download` |
+| Read a file | `read_drive_file` (16 MiB a call), or `GET /drive/files/download` | `download_drive_file` (the bytes up to 16 MiB, and a `download_url`), or `GET /drive/download` |
 | Move or rename | `move_drive_entry` (`parent_id`, `name`) | `move_drive_path` |
 | Delete | `delete_drive_entry` | `delete_drive_path` |
+| Load as dataset | `load_drive_dataset` (`id` is the file's id) | `load_drive_dataset` (`id` is the file's path) |
 
 Every REST call above takes `customer_id` and `workspace_id` with the drive's `drive_id`; a
-repository drive's calls take its `repository_id` and `ref` (`main`) instead.
+repository drive's calls take its `repository_id` and `ref` (`main`) instead: read it from the
+drive with `get_drive`. `load_drive_dataset` takes the drive itself for either kind. Both upload
+calls take the same items: a `path` relative to the folder (it may name folders, such as
+`Q3/report.csv`) or a `name` in the folder, the bytes as base64 in `content`, and an optional
+`content_type`.
+
+Both download addresses are in the OpenAPI document. A download saves under the file's name, and a
+CSV, text, PDF or image arrives as its own type.
+
+## Find a File
+
+Type in the box above the list (*Search this drive…*). The items of the open folder are filtered
+as you type; a moment later, **Elsewhere in This Drive** lists every folder, file and shortcut of
+the drive whose name holds what you typed, each with the path of the folder it is in. Press a name
+to open it, or the path under it to open its folder. Names match anywhere in them, ignoring
+capitals; file contents are not searched.
+
+To look in every drive of the workspace at once, use **Data → Search** with **Drives** ticked
+([Search](/docs/search#drives)).
+
+REST: `search_drives` is a read, so it is a `GET` with its inputs as query parameters:
+
+`GET /v1/search_drives?customer_id=<customer id>&workspace_id=<workspace id>&drive_id=<drive id>&q=report`
+
+Leave out `drive_id` to search every drive of the workspace. MCP: `search_drives`, with the same
+inputs as JSON:
+
+```json
+{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "q": "report", "limit": 20}
+```
+
+Each match names its drive, what it is (`drive`, `folder`, `file` or `shortcut`), its `path` and the
+`folder` it is in; a file adds its size, a shortcut what it opens and whether it is broken. A
+repository drive is searched by the names of its paths on `main`, with no modified time. The answer
+lists the first `limit` matches (50 by default, at most 200), says whether more matched
+(`truncated`), and names any repository drive it could not read (`skipped`) with the reason.
 
 ## Add a Shortcut
 
@@ -107,8 +149,14 @@ with `confirm_name`. MCP: the same names.
   repository drive has all three.
 - One upload of a workspace file is at most 64 GiB. A finished upload is checked: lake reads the
   file back and records its SHA-256.
-- An upload left unfinished is never listed; delete it with `delete_drive_entry` by its id, or
-  start it again.
+- An upload left unfinished is not a file in the list, but it keeps its name: the folder shows
+  **Unfinished Uploads** with each one's age, and **Remove** deletes them. `list_drive_entries`
+  answers them under `uploads` (with `age_seconds`), and `delete_drive_entry` removes one by its
+  id. Lake also lets one go 24 hours after it began: it takes no more pieces, and the next upload
+  of its name in that folder removes it and takes the name.
+- A piece sent again is accepted, and `append_drive_upload` always answers how many bytes the
+  upload holds (`received`) and whether that is all of them (`complete`).
+- Search matches names only, never what is inside a file; letters A to Z match in either case.
 - A drive's names are unique in the workspace, an item's within its folder. An upload whose name
   is taken in the folder gets the next free name (`notes (2).txt`) unless the call asks to
   `replace` or `refuse`.
@@ -128,12 +176,17 @@ sharing ([Grants and Effective Access](/docs/access)).
   the missing pieces, in order, then finish again.
 - **"this chunk does not continue the upload"**: a piece was sent out of order. Send each piece at
   the offset where the previous one ended; a piece sent twice is accepted.
+- **"this upload expired"**: it was not finished within 24 hours of its start. Upload the file
+  again.
+- **"a dataset is loaded from a CSV or JSONL file"**: **Load as dataset** reads files ending
+  `.csv`, `.jsonl` or `.ndjson`, of at most 16 MiB.
 - **"this lake keeps no workspace files"**: this lake has no workspace Zetta. Use a repository
   drive.
 
 ## Related Pages
 
 - [Repositories](/docs/repositories)
+- [Datasets and Loading Data](/docs/load-data)
 - [Sharing and Shared with Me](/docs/sharing)
 - [Transcripts and Speech-to-Text](/docs/transcripts)
 - [Workspaces](/docs/workspaces)

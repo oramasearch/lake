@@ -3632,6 +3632,70 @@ TEST(Rest, PathsMethodsAndQueryCoercion) {
     EXPECT_EQ(rest_status(ApiResult::failure("store_unavailable", "")), 503);
 }
 
+// A GET read's array input (lake#576): repeated keys, a comma list and a JSON array all decode
+// as the array, each item coerced by the declared item type.
+TEST(Rest, ArrayInputsDecodeFromRepeatedKeysCommaListsAndJsonArrays) {
+    Surface s;
+    const auto permissions = s.registry.find("my_permissions");
+    ASSERT_NE(permissions, nullptr);
+    EXPECT_EQ(rest_input_from_query(*permissions, {{"actions", "read"}, {"actions", "admin"}})
+                  .at("actions"),
+              json::array({"read", "admin"}));
+    EXPECT_EQ(rest_input_from_query(*permissions, {{"actions", "read,admin"}}).at("actions"),
+              json::array({"read", "admin"}));
+    EXPECT_EQ(
+        rest_input_from_query(*permissions, {{"actions", R"(["read","admin"])"}}).at("actions"),
+        json::array({"read", "admin"}));
+    EXPECT_EQ(rest_input_from_query(*permissions, {{"actions", "read"}}).at("actions"),
+              json::array({"read"}));
+    EXPECT_EQ(rest_input_from_query(*permissions, {{"actions", ""}}).at("actions"), json::array());
+    Capability numbers{
+        .name = "numbers",
+        .input_schema = {
+            {"type", "object"},
+            {"properties", {{"steps", {{"type", "array"}, {"items", {{"type", "integer"}}}}}}}}};
+    EXPECT_EQ(rest_input_from_query(numbers, {{"steps", "1,2"}, {"steps", "3"}}).at("steps"),
+              json::array({1, 2, 3}));
+}
+
+// lake#594: a newcomer reads every operation by a human title, and an MCP client warns only before
+// a delete or destroy.
+TEST(Mcp, EveryToolHasAHumanTitleAndOnlyDeletesAreDestructive) {
+    lake::api::Registry registry;
+    lake::api::register_core_capabilities(registry, "0.0.1");
+    std::vector<std::string> untitled;
+    for (const auto& capability : registry.list()) {
+        if (capability->transport != CapabilityTransport::Json) {
+            continue;
+        }
+        if (capability->title.empty() || capability->title == capability->name ||
+            capability->title.contains('_')) {
+            untitled.push_back(capability->name + " (" + capability->title + ")");
+        }
+    }
+    EXPECT_TRUE(untitled.empty()) << json(untitled).dump();
+    const json tools = lake::api::mcp_tools(registry, lake::api::SchemaAudience::Caller);
+    const auto tool = [&](std::string_view name) {
+        return *std::ranges::find_if(tools, [&](const json& t) { return t["name"] == name; });
+    };
+    EXPECT_EQ(tool("create_drive")["annotations"]["destructiveHint"], false);
+    EXPECT_EQ(tool("create_drive")["annotations"]["readOnlyHint"], false);
+    EXPECT_EQ(tool("delete_workspace")["annotations"]["destructiveHint"], true);
+    EXPECT_EQ(tool("destroy_secret_versions")["annotations"]["destructiveHint"], true);
+    EXPECT_EQ(tool("set_member_role")["annotations"]["idempotentHint"], true);
+    EXPECT_EQ(tool("create_drive")["annotations"]["idempotentHint"], false);
+    EXPECT_EQ(tool("list_drives")["annotations"]["readOnlyHint"], true);
+    // predict is a read in tools/list and in mcp_setup alike.
+    EXPECT_EQ(tool("predict")["annotations"]["readOnlyHint"], true);
+    EXPECT_FALSE(lake::api::capability_writes(*registry.find("predict")));
+    // workspace_sql also takes POST with a JSON body, so a long statement need not fit a URL.
+    const json doc = openapi_document(registry, "0.0.1");
+    EXPECT_TRUE(doc["paths"]["/v1/workspace_sql"].contains("get"));
+    EXPECT_TRUE(doc["paths"]["/v1/workspace_sql"].contains("post"));
+    // Every operation's summary is its human title.
+    EXPECT_EQ(doc["paths"]["/v1/delete_workspace"]["post"]["summary"], "Delete a workspace");
+}
+
 TEST(Rest, OpenApiCoversEveryCapability) {
     Surface s;
     const json doc = openapi_document(s.registry, "0.0.1");
@@ -4735,8 +4799,7 @@ TEST(Drive, FolderSharingMatchesAuthorizeAndLinksExpire) {
                                            {"ref", "main"},
                                            {"path", "shared"},
                                            {"principal_taap_id", "taap:1:ed25519:recipient"},
-                                           {"role", "read"},
-                                           {"attestation_digest", "attestation-recipient"}});
+                                           {"role", "read"}});
     ASSERT_TRUE(shared.ok) << shared.error.message;
     const std::string folder_object = shared.value["object"]["id"];
 
@@ -4915,6 +4978,133 @@ TEST(Drive, FolderSharingMatchesAuthorizeAndLinksExpire) {
             "unauthorized");
         EXPECT_TRUE(surface.ctx.sync_response.empty());
     }
+}
+
+// lake#585: a person shares a folder with someone by email or handle, from the space's people;
+// lake writes and signs the grant's attestation, and a digest a caller makes up is refused.
+TEST(Drive, SharingByEmailOrHandleIsAttestedByLake) {
+    Surface surface;
+    RepositoryFixtureStore repository_store;
+    surface.ctx.sync_store = &repository_store;
+    const auto user = [&](const std::string& name) {
+        const ApiResult made = surface.call("create_user",
+                                            {{"taap_id", "taap:1:ed25519:" + name},
+                                             {"email", name + "@example.com"},
+                                             {"display_name", name}});
+        EXPECT_TRUE(made.ok) << made.error.message;
+        return made;
+    };
+    const ApiResult owner = user("owner");
+    const ApiResult ana = user("ana");
+    const ApiResult outsider = user("outsider");
+    ASSERT_TRUE(surface
+                    .call("create_customer",
+                          {{"customer_type", "individual"},
+                           {"user_id", ana.value["id"]},
+                           {"name", "ana-handle"}})
+                    .ok);
+    const ApiResult organization = surface.call(
+        "create_organization", {{"taap_id", "taap:1:ed25519:studio"}, {"display_name", "Studio"}});
+    ASSERT_TRUE(organization.ok) << organization.error.message;
+    const ApiResult customer = surface.call("create_customer",
+                                            {{"customer_type", "organization"},
+                                             {"organization_id", organization.value["id"]},
+                                             {"name", "studio"}});
+    ASSERT_TRUE(customer.ok) << customer.error.message;
+    for (const ApiResult* member : {&owner, &ana}) {
+        const ApiResult joined = surface.call("create_membership",
+                                              {{"organization_id", organization.value["id"]},
+                                               {"principal_type", "user"},
+                                               {"principal_id", member->value["id"]},
+                                               {"principal_taap_id", member->value["taap_id"]},
+                                               {"role", member == &owner ? "owner" : "member"},
+                                               {"attestation_digest", "sha512-256:membership"}});
+        ASSERT_TRUE(joined.ok) << joined.error.message;
+    }
+    const ApiResult repository = surface.call(
+        "create_repository",
+        {{"customer_id", customer.value["id"]},
+         {"workspace_id", lake::test::repository_workspace(surface.store, customer.value["id"])},
+         {"name", "drive"}});
+    ASSERT_TRUE(repository.ok) << repository.error.message;
+    const auto repository_object =
+        surface.store.find_policy_object("repository", repository.value["id"]);
+    ASSERT_TRUE(repository_object);
+    ASSERT_TRUE(surface.store.create_grant({"taap:1:ed25519:owner",
+                                            repository_object->id,
+                                            "admin",
+                                            "attestation-owner",
+                                            "admin",
+                                            "request-owner"}));
+    surface.ctx.operator_credential = false;
+    surface.ctx.acting_identity = "taap:1:ed25519:owner";
+    const json folder{
+        {"repository_id", repository.value["id"]}, {"ref", "main"}, {"path", "shared"}};
+    const auto with = [&](json extra) {
+        json input = folder;
+        input.update(extra);
+        return surface.call("share_drive_folder", input);
+    };
+
+    // The people a folder can be shared with by name: the organization and its members.
+    const ApiResult people = surface.call("drive_share_people", folder);
+    ASSERT_TRUE(people.ok) << people.error.message;
+    std::map<std::string, json> by_id;
+    for (const json& person : people.value["people"]) {
+        by_id[person["taap_id"]] = person;
+    }
+    ASSERT_TRUE(by_id.contains("taap:1:ed25519:ana"));
+    EXPECT_EQ(by_id["taap:1:ed25519:ana"]["email"], "ana@example.com");
+    EXPECT_EQ(by_id["taap:1:ed25519:ana"]["handle"], "ana-handle");
+    EXPECT_EQ(by_id[organization.value["taap_id"]]["kind"], "organization");
+    EXPECT_FALSE(by_id.contains("taap:1:ed25519:outsider"));
+
+    // By email, any case: lake resolves the person and signs the attestation itself.
+    const ApiResult shared = with({{"recipient", "Ana@Example.com"}, {"role", "read"}});
+    ASSERT_TRUE(shared.ok) << shared.error.message;
+    EXPECT_EQ(shared.value["grant"]["principal_taap_id"], "taap:1:ed25519:ana");
+    const std::string digest = shared.value["attestation"]["digest"];
+    EXPECT_TRUE(digest.starts_with("sha256:")) << digest;
+    EXPECT_EQ(shared.value["grant"]["attestation_digest"], digest);
+    EXPECT_EQ(shared.value["attestation"]["statement"]["principal_taap_id"], "taap:1:ed25519:ana");
+    EXPECT_EQ(shared.value["attestation"]["statement"]["role"], "read");
+    EXPECT_FALSE(shared.value["attestation"]["signature"].get<std::string>().empty());
+    EXPECT_EQ(shared.value["attestation"]["signer"],
+              shared.value["attestation"]["statement"]["issuer"]);
+
+    // The same share again, by handle and with the digest lake answered: the same grant.
+    const ApiResult again =
+        with({{"recipient", "@ana-handle"}, {"role", "read"}, {"attestation_digest", digest}});
+    ASSERT_TRUE(again.ok) << again.error.message;
+    EXPECT_EQ(again.value["existing"], true);
+    EXPECT_EQ(again.value["grant"]["id"], shared.value["grant"]["id"]);
+
+    // A made-up digest, or one for another role, is refused at its field.
+    const ApiResult made_up = with({{"recipient", "ana-handle"},
+                                    {"role", "write"},
+                                    {"attestation_digest", "sha256:" + std::string(64, 'a')}});
+    EXPECT_EQ(made_up.error.code, "invalid_input");
+    EXPECT_EQ(made_up.error.path, "/attestation_digest");
+    EXPECT_EQ(with({{"recipient", "ana-handle"}, {"role", "write"}, {"attestation_digest", digest}})
+                  .error.path,
+              "/attestation_digest");
+
+    // Someone outside the space is not found by email; a program names a TAAP id lake knows.
+    const ApiResult outside = with({{"recipient", "outsider@example.com"}, {"role", "read"}});
+    EXPECT_EQ(outside.error.code, "invalid_input");
+    EXPECT_EQ(outside.error.path, "/recipient");
+    const ApiResult unknown =
+        with({{"principal_taap_id", "taap:1:ed25519:nobody"}, {"role", "read"}});
+    EXPECT_EQ(unknown.error.path, "/principal_taap_id");
+    const ApiResult program =
+        with({{"principal_taap_id", "taap:1:ed25519:outsider"}, {"role", "read"}});
+    ASSERT_TRUE(program.ok) << program.error.message;
+    EXPECT_TRUE(program.value["attestation"]["digest"].get<std::string>().starts_with("sha256:"));
+    EXPECT_EQ(
+        with({{"recipient", "ana"}, {"principal_taap_id", "taap:1:ed25519:ana"}, {"role", "read"}})
+            .error.code,
+        "invalid_input");
+    EXPECT_EQ(with({{"role", "read"}}).error.code, "invalid_input");
 }
 
 TEST(Drive, ShareDownloadsEncodeAcrossBlockBoundaries) {
@@ -7159,12 +7349,62 @@ TEST(ApiErrors, OtherSpellingsAndUnknownCodesBecomeDocumentedOnes) {
     EXPECT_EQ(rest_status(ApiResult::failure("unauthorized", "x")), 403);
     EXPECT_EQ(rest_status(ApiResult::failure("method_not_allowed", "x")), 405);
     EXPECT_EQ(rest_status(ApiResult::failure("not_approved", "x")), 409);
-    EXPECT_EQ(rest_status(ApiResult::failure("engine_error", "x")), 502);
+    EXPECT_EQ(rest_status(ApiResult::failure("engine_error", "x")), 422);
     EXPECT_EQ(rest_status(ApiResult::failure("workspace_not_ready", "x")), 503);
     // The OpenAPI error envelope enumerates exactly the documented codes.
     const json schema = lake::api::error_envelope_schema();
     EXPECT_EQ(schema["properties"]["error"]["properties"]["code"]["enum"].size(),
               lake::api::error_codes().size());
+}
+
+// Cloudflare answers a 502 or 504 from lake with its own page, so a REST caller would never see
+// lake's error (lake#572). No documented code may answer either.
+TEST(ApiErrors, NoCodeAnswersAStatusCloudflareReplaces) {
+    for (const auto& code : lake::api::error_codes()) {
+        EXPECT_NE(code.status, 502) << code.code;
+        EXPECT_NE(code.status, 504) << code.code;
+    }
+    const ApiResult refused =
+        ApiResult::failure("engine_error", "table \"no_such_table\" does not exist");
+    EXPECT_EQ(rest_status(refused), 422);
+    const json body = lake::api::rest_envelope(refused);
+    EXPECT_EQ(body["error"]["code"], "engine_error");
+    EXPECT_EQ(body["error"]["message"], "table \"no_such_table\" does not exist");
+}
+
+// A database constraint the input broke is said as the rule, at the field (lake#592): never "the
+// request contains invalid data" with an empty path, and never the constraint's name.
+TEST(ApiErrors, ABrokenConstraintIsSaidAsItsRuleAtItsField) {
+    const ApiResult named = ApiResult::failure(
+        "invalid_input",
+        "ERROR:  new row for relation \"repositories\" violates check constraint "
+        "\"repository_name_format\"",
+        "/repository_name");
+    EXPECT_EQ(named.error.path, "/repository_name");
+    EXPECT_EQ(named.error.message,
+              "repository_name is 1 to 256 lowercase letters, digits and hyphens, starting and "
+              "ending with a letter or digit");
+    const ApiResult unnamed =
+        ApiResult::failure("invalid_input",
+                           "ERROR:  new row for relation \"grants\" violates check constraint "
+                           "\"grants_attestation_check\"");
+    EXPECT_EQ(unnamed.error.path, "/attestation_digest");
+    EXPECT_TRUE(unnamed.error.message.starts_with("attestation_digest is required"));
+    const ApiResult taken = ApiResult::failure(
+        "conflict",
+        "ERROR:  duplicate key value violates unique constraint "
+        "\"grants_principal_object_role_unique\"\nDETAIL:  Key (…) already exists.");
+    EXPECT_EQ(taken.error.path, "/principal_taap_id");
+    EXPECT_NE(taken.error.message.find("already shared with that person"), std::string::npos);
+    // The in-memory store names the same constraints without a diagnostic.
+    const ApiResult memory =
+        ApiResult::failure("invalid_input", "name must match repository_name_format");
+    EXPECT_EQ(memory.error.path, "/name");
+    EXPECT_TRUE(memory.error.message.starts_with("name is 1 to 256 lowercase"));
+    // An unknown diagnostic still never leaks.
+    const ApiResult other =
+        ApiResult::failure("invalid_input", "ERROR:  something \"secret_table\" DETAIL: x");
+    EXPECT_EQ(other.error.message, "the request contains invalid data");
 }
 
 TEST(ApiErrors, RestSaysWhetherACredentialIsMissingInvalidOrExpired) {
@@ -7203,6 +7443,17 @@ TEST(ApiErrors, RestSaysWhetherACredentialIsMissingInvalidOrExpired) {
     EXPECT_EQ(body(invalid)["error"]["reason"], "invalid");
     EXPECT_NE(response_header(invalid, "WWW-Authenticate").find("error=\"invalid_token\""),
               std::string::npos);
+
+    // viewer needs no key, but a rejected one is refused there too (lake#594); a visitor with
+    // none is answered signed_in: false.
+    const std::string bad_viewer =
+        http_get(server.port(), "/v1/viewer", "Bearer not-a-lake-credential");
+    EXPECT_NE(bad_viewer.find(" 401 "), std::string::npos) << bad_viewer;
+    EXPECT_EQ(body(bad_viewer)["error"]["reason"], "invalid");
+    const std::string visitor = http_get(server.port(), "/v1/viewer");
+    EXPECT_NE(visitor.find(" 200 "), std::string::npos) << visitor;
+    EXPECT_EQ(body(visitor)["value"]["signed_in"], false);
+    EXPECT_FALSE(body(visitor)["value"]["config"].contains("base_agent_model"));
 
     std::this_thread::sleep_for(std::chrono::milliseconds(2100));
     const std::string expired =
@@ -7305,6 +7556,9 @@ TEST(ApiNaming, OneNamePerConceptAcrossCapabilities) {
                                                           {"get_run_metrics", "run_id"},
                                                           {"stop_experiment_trial", "run_id"},
                                                           {"promote_trial", "run_id"},
+                                                          {"promote_trial", "experiment_id"},
+                                                          {"get_experiment", "experiment_id"},
+                                                          {"stop_experiment", "experiment_id"},
                                                           {"get_customer", "customer_id"}}) {
         EXPECT_TRUE(has(capability, field)) << capability << " names it " << field;
     }
@@ -7317,6 +7571,9 @@ TEST(ApiNaming, OneNamePerConceptAcrossCapabilities) {
                 EXPECT_TRUE(schema.value("deprecated", false))
                     << capability->name << " takes `" << field << "`; use `" << field << "_id`";
             }
+            // An experiment is the engine's study; lake never names it so (lake#561).
+            EXPECT_EQ(field.find("study"), std::string::npos)
+                << capability->name << " takes `" << field << "`; use `experiment_id`";
         }
     }
 }
@@ -7333,6 +7590,12 @@ TEST(ApiDescriptions, EveryCapabilitySaysWhatItDoesForAPerson) {
                                   "after explicit confirmation in this space"}) {
             EXPECT_EQ(text.find(vague), std::string::npos) << capability->name << ": " << text;
         }
+        // A person runs experiments; "study" is only the engine's name, in a code span such as
+        // `validate_study` (lake#561).
+        static const std::regex study(R"((^|[^_`.-])\b[Ss]tud(y|ies)\b(?![_-]))");
+        EXPECT_FALSE(std::regex_search(text, study))
+            << capability->name << " says study: \"" << text << "\"";
+        EXPECT_FALSE(std::regex_search(capability->title, study)) << capability->name;
         const auto [previous, inserted] = seen.emplace(text, capability->name);
         EXPECT_TRUE(inserted) << capability->name << " shares its description with "
                               << previous->second << ": \"" << text << "\"";
@@ -7369,6 +7632,25 @@ TEST(WebApp, PermissionsDocsMcpAndPackagesAreCapabilities) {
                {{"object_type", "customer"}, {"object_id", customer_id}, {"actions", {"fly"}}})
             .error.code,
         "invalid_input");
+    // A workspace answers its space's permissions; a drive says to ask about its workspace;
+    // an unknown type lists the ones it takes (lake#594).
+    const auto workspace =
+        s.store.create_workspace({customer_id, "analytics", "dev", "taap:1:ed25519:web-owner"});
+    ASSERT_TRUE(workspace);
+    const ApiResult on_workspace =
+        s.call("my_permissions",
+               {{"object_type", "workspace"}, {"object_id", workspace->id}, {"actions", every}});
+    ASSERT_TRUE(on_workspace.ok) << on_workspace.error.message;
+    EXPECT_EQ(on_workspace.value["allowed"]["write"], true);
+    const ApiResult on_drive =
+        s.call("my_permissions",
+               {{"object_type", "drive"}, {"object_id", workspace->id}, {"actions", every}});
+    EXPECT_EQ(on_drive.error.code, "invalid_input");
+    EXPECT_EQ(on_drive.error.path, "/object_type");
+    const ApiResult odd = s.call(
+        "my_permissions", {{"object_type", "planet"}, {"object_id", "x"}, {"actions", every}});
+    EXPECT_EQ(odd.error.path, "/object_type");
+    EXPECT_NE(odd.error.message.find("\"workspace\""), std::string::npos);
 
     const auto writer = s.store.create_user({"taap:1:ed25519:web-writer", "", "Writer"});
     ASSERT_TRUE(writer);
@@ -7404,6 +7686,11 @@ TEST(WebApp, PermissionsDocsMcpAndPackagesAreCapabilities) {
     EXPECT_EQ(first.value["next"]["slug"], guide.at(1).slug);
     EXPECT_EQ(first.value["section"], guide.front().section);
     EXPECT_FALSE(first.value.contains("previous"));
+    // get_doc takes the `slug` list_docs answers; `page` is its deprecated name (lake#591).
+    const ApiResult by_slug = s.call("get_doc", {{"slug", guide.at(1).slug}});
+    ASSERT_TRUE(by_slug.ok) << by_slug.error.message;
+    EXPECT_EQ(by_slug.value["slug"], guide.at(1).slug);
+    EXPECT_EQ(s.call("get_doc", {{"slug", "no-such-guide"}}).error.path, "/slug");
     const ApiResult last = s.call("get_doc", {{"page", guide.back().slug}});
     ASSERT_TRUE(last.ok);
     EXPECT_FALSE(last.value.contains("next"));
@@ -7449,6 +7736,20 @@ TEST(WebApp, PermissionsDocsMcpAndPackagesAreCapabilities) {
     EXPECT_NE(text.value["pages"][0]["excerpt"].get<std::string>().find("held_out_auc"),
               std::string::npos);
     EXPECT_TRUE(s.call("list_docs", {{"q", "no guide says zqxwv"}}).value["pages"].empty());
+    // Every word, in any order (lake#594): the words of a heading, reversed, still find it.
+    const ApiResult words = s.call("list_docs", {{"q", "csv upload"}});
+    ASSERT_TRUE(words.ok) << words.error.message;
+    EXPECT_FALSE(words.value["pages"].empty());
+    for (const json& page : words.value["pages"]) {
+        std::string body(
+            std::ranges::find(guide, page["slug"].get<std::string>(), &WebUiGuidePage::slug)
+                ->markdown);
+        std::ranges::transform(
+            body, body.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        EXPECT_NE(body.find("csv"), std::string::npos) << page["slug"];
+        EXPECT_NE(body.find("upload"), std::string::npos) << page["slug"];
+    }
+    EXPECT_TRUE(s.call("list_docs", {{"q", "upload zqxwv"}}).value["pages"].empty());
     EXPECT_EQ(s.call("list_docs", {{"q", std::string(201, 'a')}}).error.path, "/q");
     EXPECT_EQ(s.call("mcp_setup").error.code, "unauthenticated");
 

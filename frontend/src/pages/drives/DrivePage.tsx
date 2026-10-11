@@ -1,7 +1,9 @@
 /** One drive (`/w/<id>/drives/drive?id=<drive>&folder=<key>[&focus=<item>]`, lake#561,
  * docs/ui/drives.md): a file manager over the drive's `DriveStorage`, whatever keeps its files.
- * The folder's path, a toolbar (filter, sort), the folder's items with their actions, and:
+ * The folder's path, a toolbar (search, sort), the folder's items with their actions, and:
  *
+ * - Search: what is typed filters this folder's items at once, then `search_drives` finds the
+ *   matching names everywhere else in the drive, listed under the folder with their paths.
  * - Upload files or a whole folder (chosen, or dropped with its subfolders) into the folder, with
  *   progress; a large workspace file goes in chunks.
  * - Select items (shift-click selects a range) and move or delete them together; drag items onto
@@ -20,6 +22,7 @@ import {
   ArrowDownAZ,
   ArrowUpAZ,
   ChevronRight,
+  Database,
   Download,
   ExternalLink,
   Eye,
@@ -47,11 +50,14 @@ import { useTrail } from "@/lib/trail";
 import { Banner, Button, Chip, Empty, ErrorBlock, Field, FormError, Meter, Page, SearchInput, Skeleton, Stat, StatRow, Toolbar, cx, fieldError } from "@/lib/ui";
 import { WorkspaceGate } from "@/components/WorkspaceGate";
 import { Menu, displaySize, driveHref as repositoryDriveHref } from "@/pages/repositories/forge";
-import { qs, useWorkspace, useWsPath } from "@/pages/train/workspace";
-import { rangeSelect, sortEntries, validName, type Direction, type SortKey, type UploadItem } from "./paths";
-import { storageFor, type Drive, type DriveStorage, type Item, type Listing, type Progress } from "./storage";
+import { qs, text, useWorkspace, useWsPath } from "@/pages/train/workspace";
+import { datasetFormat, datasetName, rangeSelect, sortEntries, validName, type Direction, type SortKey, type UploadItem } from "./paths";
+import { storageFor, type Drive, type DriveStorage, type Item, type Listing, type Progress, type Upload } from "./storage";
 import { STORAGE, storageLabel, targetHref, targetLabel } from "./targets";
 import { ShortcutDialog } from "./ShortcutDialog";
+import { matchLink, matchWhere, parentKey, folderKey, type DriveMatch, type SearchDrivesResult } from "./search";
+import { MatchAnchor, matchIcon } from "./MatchLink";
+import { Highlight } from "@/components/Highlight";
 import { FolderPicker } from "./FolderPicker";
 
 /** The type an internal drag carries, so a drop of files from the desktop is never a move. */
@@ -96,7 +102,14 @@ function DriveLoader({ id }: { id: string }) {
   );
 }
 
-type Dialog = { kind: "folder" } | { kind: "shortcut" } | { kind: "rename"; item: Item } | { kind: "move"; items: Item[] } | { kind: "delete"; items: Item[] } | { kind: "drive" };
+type Dialog =
+  | { kind: "folder" }
+  | { kind: "shortcut" }
+  | { kind: "rename"; item: Item }
+  | { kind: "move"; items: Item[] }
+  | { kind: "delete"; items: Item[] }
+  | { kind: "drive" }
+  | { kind: "dataset"; item: Item };
 
 function DriveBrowser({ drive, customerId, workspaceId }: { drive: Drive; customerId: string; workspaceId: string }) {
   const [params, setParams] = useSearchParams();
@@ -299,13 +312,14 @@ function DriveBrowser({ drive, customerId, workspaceId }: { drive: Drive; custom
           {upload.error}
         </Banner>
       )}
+      {(listing.data?.uploads?.length ?? 0) > 0 && <UnfinishedUploads storage={storage} uploads={listing.data!.uploads!} />}
       {upload.refused.length > 0 && (
         <Banner tone="warn" title="Some files were not uploaded" action={<Button variant="ghost" onClick={upload.clear}>Dismiss</Button>}>
           {upload.refused.join(", ")}
         </Banner>
       )}
       <Toolbar>
-        <SearchInput value={filter} onChange={setFilter} placeholder="Filter by name…" label="Filter by name" />
+        <SearchInput value={filter} onChange={setFilter} placeholder="Search this drive…" label="Search this drive" />
         <div className="ml-auto flex flex-wrap items-center gap-2">
           <label className="flex items-center gap-1.5 text-[12.5px] text-ink-2">
             <span className="label m-0">Sort</span>
@@ -372,8 +386,8 @@ function DriveBrowser({ drive, customerId, workspaceId }: { drive: Drive; custom
             {storage.can.upload ? "Drop files or folders here, or upload them." : "Add folders and shortcuts to what this workspace already has."}
           </Empty>
         ) : shown.length === 0 ? (
-          <Empty compact title="Nothing matches">
-            No item here is named like “{filter}”.
+          <Empty compact title="Nothing in This Folder Matches">
+            No item here is named like “{filter}”. Matches elsewhere in the drive are listed below.
           </Empty>
         ) : (
           <div className="table-wrap" role="region" aria-label="Folder contents" tabIndex={0}>
@@ -429,6 +443,7 @@ function DriveBrowser({ drive, customerId, workspaceId }: { drive: Drive; custom
                           ...(storage.viewHref(item) ? [{ label: "View", icon: Eye, href: storage.viewHref(item)! }] : []),
                           ...(storage.downloadHref(item) ? [{ label: "Download", icon: Download, href: storage.downloadHref(item)! }] : []),
                           ...(drive.storage === "repository" && drive.repository_id ? [{ label: "History", icon: History, to: repositoryDriveHref("/drive/history", drive.repository_id, "main", item.key) }] : []),
+                          ...(item.kind === "file" && datasetFormat(item.name) ? [{ label: "Load as dataset", icon: Database, onSelect: () => setDialog({ kind: "dataset", item }) }] : []),
                           { label: "Rename", icon: Pencil, onSelect: () => setDialog({ kind: "rename", item }) },
                           { label: "Move", icon: FolderInput, onSelect: () => setDialog({ kind: "move", items: [item] }) },
                           { label: "Delete", icon: Trash2, danger: true, onSelect: () => setDialog({ kind: "delete", items: [item] }) },
@@ -442,6 +457,7 @@ function DriveBrowser({ drive, customerId, workspaceId }: { drive: Drive; custom
           </div>
         )}
       </div>
+      {needle && <DriveMatches drive={drive} folder={folder} q={filter.trim()} scope={{ customerId, workspaceId }} open={open} wsPath={wsPath} />}
       {dialog?.kind === "folder" && <NewFolder storage={storage} folder={folder} onClose={() => setDialog(null)} />}
       {dialog?.kind === "shortcut" && <ShortcutDialog storage={storage} folder={folder} onClose={() => setDialog(null)} />}
       {dialog?.kind === "rename" && <Rename storage={storage} item={dialog.item} onClose={() => setDialog(null)} />}
@@ -460,6 +476,7 @@ function DriveBrowser({ drive, customerId, workspaceId }: { drive: Drive; custom
         />
       )}
       {dialog?.kind === "delete" && <Delete storage={storage} items={dialog.items} onClose={() => setDialog(null)} onDone={() => setSelected(new Set())} />}
+      {dialog?.kind === "dataset" && <LoadDataset drive={drive} item={dialog.item} customerId={customerId} workspaceId={workspaceId} onClose={() => setDialog(null)} />}
       {dialog?.kind === "drive" && (
         <DriveSettings
           drive={drive}
@@ -473,6 +490,96 @@ function DriveBrowser({ drive, customerId, workspaceId }: { drive: Drive; custom
         />
       )}
     </Page>
+  );
+}
+
+/** The value, once it has stopped changing for `ms`. */
+function useSettled<T>(value: T, ms: number): T {
+  const [settled, setSettled] = useState(value);
+  useEffect(() => {
+    const timer = setTimeout(() => setSettled(value), ms);
+    return () => clearTimeout(timer);
+  }, [value, ms]);
+  return settled;
+}
+
+/** The whole drive searched by name (`search_drives {drive_id}`), once typing settles: every match
+ * outside the folder shown, which the filter above already covers, with its path. */
+function DriveMatches({
+  drive,
+  folder,
+  q,
+  scope,
+  open,
+  wsPath,
+}: {
+  drive: Drive;
+  folder: string;
+  q: string;
+  scope: { customerId: string; workspaceId: string };
+  open: (key: string) => void;
+  wsPath: (path: string) => string;
+}) {
+  const settled = useSettled(q, 250);
+  const search = useQuery<SearchDrivesResult>({
+    queryKey: ["drive-search", drive.id, scope.workspaceId, settled],
+    queryFn: ({ signal }) => read<SearchDrivesResult>("search_drives", { customer_id: scope.customerId, workspace_id: scope.workspaceId, drive_id: drive.id, q: settled, limit: 100 }, { signal }),
+    enabled: !!settled,
+    staleTime: 15_000,
+  });
+  const elsewhere = (search.data?.items ?? []).filter((m: DriveMatch) => m.kind !== "drive" && parentKey(m) !== folder);
+  const skipped = search.data?.skipped ?? [];
+  return (
+    <section className="mt-4 overflow-hidden rounded-[6px] border border-hairline bg-surface" aria-label="Matches in this drive">
+      <header className="flex items-center gap-2 border-b border-hairline bg-raised px-4 py-2">
+        <h2 className="!m-0 !text-[10.5px] after:!hidden">Elsewhere in This Drive</h2>
+        <span className="ml-auto font-mono text-[11px] text-ink-3">{search.isLoading || settled !== q ? "…" : elsewhere.length}</span>
+      </header>
+      {search.isLoading || (settled !== q && !search.data) ? (
+        <div className="px-4">
+          <Skeleton lines={2} />
+        </div>
+      ) : search.isError ? (
+        <div className="p-3">
+          <ErrorBlock error={search.error} retry={() => void search.refetch()} what="the drive's search" />
+        </div>
+      ) : skipped.length ? (
+        <p className="muted m-0 px-4 py-3 text-[13px]">This drive could not be searched: {skipped[0].reason}.</p>
+      ) : !elsewhere.length ? (
+        <p className="muted m-0 px-4 py-3 text-[13px]">No other folder of this drive holds a match.</p>
+      ) : (
+        <ul className="m-0 list-none p-0">
+          {elsewhere.map((m) => {
+            const { icon: Icon, className } = matchIcon(m);
+            const name = <Highlight text={m.name} q={settled} />;
+            return (
+              <li key={`${m.kind}:${m.id ?? m.path}`} className="border-b border-hairline px-4 py-2 last:border-b-0 hover:bg-raised/60">
+                <div className="flex min-w-0 items-center gap-2 text-[13.5px] font-medium">
+                  <Icon size={14} aria-hidden className={cx("shrink-0", className)} />
+                  {m.kind === "folder" ? (
+                    <button type="button" className={LINK} onClick={() => open(folderKey(m))}>
+                      {name}
+                    </button>
+                  ) : (
+                    <MatchAnchor link={matchLink(m, scope)} wsPath={wsPath}>
+                      {name}
+                    </MatchAnchor>
+                  )}
+                </div>
+                <div className="mt-0.5 flex flex-wrap items-center gap-x-2 text-[12.5px] text-ink-3">
+                  <button type="button" className="cursor-pointer border-0 bg-transparent p-0 text-left text-ink-3 hover:underline" onClick={() => open(parentKey(m))}>
+                    {matchWhere(m)}
+                  </button>
+                  {m.kind === "file" && m.size !== undefined && <span className="font-mono text-[11.5px]">{displaySize(m.size)}</span>}
+                  {m.kind === "file" && m.modified_at && <span className="font-mono text-[11.5px]">{relative(m.modified_at)}</span>}
+                </div>
+              </li>
+            );
+          })}
+          {search.data?.truncated && <li className="px-4 py-2 text-[12.5px] text-ink-3">More match; type more of the name to narrow the search.</li>}
+        </ul>
+      )}
+    </section>
   );
 }
 
@@ -882,6 +989,121 @@ function DriveSettings({ drive, customerId, workspaceId, onClose, onDeleted }: {
           </Button>
         </div>
       </div>
+    </Modal>
+  );
+}
+
+/** Uploads begun here and never finished hold their names, so a new upload of the same name
+ * would be renamed (lake#588). They are named here with their age, and can be removed; lake also
+ * removes one 24 hours after it began, when another upload of its name arrives. */
+function UnfinishedUploads({ storage, uploads }: { storage: DriveStorage; uploads: Upload[] }) {
+  const toast = useToast();
+  const [busy, setBusy] = useState(false);
+  const age = (seconds: number) => (seconds < 3600 ? `${Math.max(1, Math.round(seconds / 60))} min` : `${Math.round(seconds / 3600)} h`);
+  return (
+    <Banner
+      tone="quiet"
+      title={uploads.length === 1 ? "1 Unfinished Upload" : `${uploads.length} Unfinished Uploads`}
+      action={
+        <Button
+          variant="ghost"
+          loading={busy}
+          onClick={async () => {
+            setBusy(true);
+            try {
+              for (const upload of uploads) await storage.remove({ key: upload.key, kind: "file", name: upload.name, path: upload.name, size: upload.size });
+              refreshAfterWrite();
+              toast(uploads.length === 1 ? "Unfinished upload removed" : "Unfinished uploads removed");
+            } finally {
+              setBusy(false);
+            }
+          }}
+        >
+          Remove
+        </Button>
+      }
+    >
+      {uploads.map((upload) => `${upload.name} (${upload.expired ? "expired" : `${age(upload.ageSeconds)} ago`})`).join(", ")}. An upload not finished
+      holds its name until it is removed, or until 24 hours after it began.
+    </Banner>
+  );
+}
+
+/** Load as dataset (lake#593): a CSV or JSONL file of the drive becomes a dataset of the
+ * workspace through load_drive_dataset, which reads the file and calls upload_dataset. */
+function LoadDataset({ drive, item, customerId, workspaceId, onClose }: { drive: Drive; item: Item; customerId: string; workspaceId: string; onClose: () => void }) {
+  const navigate = useNavigate();
+  const wsPath = useWsPath();
+  const [tableName, setTableName] = useState(datasetName(item.name));
+  const [rename, setRename] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<unknown>(null);
+  const format = datasetFormat(item.name) ?? "csv";
+  return (
+    <Modal
+      title={`Load ${item.name} as a Dataset`}
+      subtitle="The file's rows become a dataset of this workspace, for SQL and training."
+      onClose={onClose}
+      width={480}
+      footer={
+        <>
+          <Button onClick={onClose}>Cancel</Button>
+          <Button type="submit" form="drive-dataset" variant="primary" loading={busy} disabled={!/^[A-Za-z_][A-Za-z0-9_]{0,62}$/.test(tableName)}>
+            Load dataset
+          </Button>
+        </>
+      }
+    >
+      <form
+        id="drive-dataset"
+        className="stack"
+        onSubmit={async (e) => {
+          e.preventDefault();
+          setBusy(true);
+          setError(null);
+          try {
+            const result = await act("load_drive_dataset", {
+              customer_id: customerId,
+              workspace_id: workspaceId,
+              drive_id: drive.id,
+              id: item.key,
+              table_name: tableName,
+              format,
+              if_exists: rename ? "rename" : "fail",
+            });
+            onClose();
+            navigate(
+              wsPath(
+                `/train/data?${qs({
+                  customer_id: customerId,
+                  loaded: text(result, "table") || tableName,
+                  rows: typeof result.rows === "number" ? result.rows : 0,
+                  database: text(result, "database") || "datasets",
+                  format: text(result, "format") || format,
+                  renamed_from: text(result, "renamed_from"),
+                })}`,
+              ),
+            );
+          } catch (err) {
+            setError(err);
+          } finally {
+            setBusy(false);
+          }
+        }}
+      >
+        <FormError error={error} />
+        <Field label="Dataset name" required error={fieldError(error, "table_name")}>
+          <input value={tableName} onChange={(e) => setTableName(e.target.value)} autoFocus />
+          <small className="muted">Letters, digits and underscores, starting with a letter, so SQL can query it.</small>
+        </Field>
+        <label className="flex! items-start gap-2">
+          <input type="checkbox" checked={rename} onChange={(e) => setRename(e.target.checked)} />
+          <span>If the name is taken, save it under the next free name</span>
+        </label>
+        <Banner tone="quiet">
+          {format === "csv" ? "A CSV" : "A JSONL file"} of at most 16 MiB. A CSV row whose field count differs from the header is refused with its line number.
+        </Banner>
+      </form>
     </Modal>
   );
 }

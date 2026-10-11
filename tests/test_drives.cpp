@@ -5,6 +5,7 @@
 // a whole lake with a real repository store and stream a download.
 
 #include <algorithm>
+#include <chrono>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -14,9 +15,15 @@
 #include <string>
 #include <vector>
 
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <unistd.h>
+
 #include <gtest/gtest.h>
 #include <nlohmann/json.hpp>
 
+#include "api/workspace_records_api.hpp"
 #include "lake/api/audit_routing.hpp"
 #include "lake/api/capabilities.hpp"
 #include "lake/api/registry.hpp"
@@ -26,6 +33,7 @@
 #include "lake/control/drives.hpp"
 #include "lake/control/memory_store.hpp"
 #include "lake/control/zetta_workspace.hpp"
+#include "lake/search/index.hpp"
 #include "one_thread_io.hpp"
 #include "stream_fixture.hpp"
 #include "temporary_directory.hpp"
@@ -524,6 +532,126 @@ TEST(Drives, AWorkspaceFilesDriveKeepsFoldersFilesAndTheirBytes) {
     EXPECT_TRUE(s.in(first, "list_drives", json::object()).value["drives"].empty());
 }
 
+// lake#588: a chunk sent again after the last answers what the upload holds, and an upload left
+// unfinished is listed apart until it expires, when the next upload of its name takes the name.
+TEST(Drives, AResentChunkAnswersTheUploadAndAbandonedUploadsExpire) {
+    Spaces s;
+    const auto& first = s.spaces[0];
+    const ApiResult drive = s.in(first, "create_drive", {{"name", "Big"}, {"storage", "files"}});
+    ASSERT_TRUE(drive.ok) << drive.error.message;
+    const std::string id = drive.value["id"];
+    const std::string bytes = pattern(2 * MiB + MiB / 2);
+    const ApiResult begun =
+        s.in(first,
+             "begin_drive_upload",
+             {{"drive_id", id}, {"path", "Big/blob.bin"}, {"size", bytes.size()}});
+    ASSERT_TRUE(begun.ok) << begun.error.message;
+    const std::string file = begun.value["entry"]["id"];
+    const auto append = [&](std::uint64_t offset, std::uint64_t length) {
+        return s.in(first,
+                    "append_drive_upload",
+                    {{"drive_id", id},
+                     {"id", file},
+                     {"offset", offset},
+                     {"content", base64(bytes.substr(offset, length))}});
+    };
+    const ApiResult one = append(0, MiB);
+    ASSERT_TRUE(one.ok) << one.error.message;
+    EXPECT_EQ(one.value["received"], MiB);
+    EXPECT_EQ(one.value["complete"], false);
+    ASSERT_TRUE(append(MiB, MiB).ok);
+    ASSERT_TRUE(append(2 * MiB, MiB / 2).value["complete"]);
+    const ApiResult resent = append(0, MiB);
+    ASSERT_TRUE(resent.ok) << resent.error.message;
+    EXPECT_EQ(resent.value["received"], bytes.size())
+        << "what the upload holds, not the chunk's end";
+    EXPECT_EQ(resent.value["complete"], true);
+    ASSERT_TRUE(s.in(first, "finish_drive_upload", {{"drive_id", id}, {"id", file}}).ok);
+
+    // An unfinished upload is listed apart, with its age, and holds its name.
+    const ApiResult left = s.in(
+        first, "begin_drive_upload", {{"drive_id", id}, {"path", "Big/left.bin"}, {"size", 10}});
+    ASSERT_TRUE(left.ok) << left.error.message;
+    const ApiResult folder = s.in(first, "list_drive_entries", {{"drive_id", id}, {"path", "Big"}});
+    ASSERT_TRUE(folder.ok) << folder.error.message;
+    ASSERT_EQ(folder.value["items"].size(), 1U) << "blob.bin only";
+    ASSERT_EQ(folder.value["uploads"].size(), 1U);
+    EXPECT_EQ(folder.value["uploads"][0]["name"], "left.bin");
+    EXPECT_EQ(folder.value["uploads"][0]["state"], "uploading");
+    EXPECT_EQ(folder.value["uploads"][0]["expired"], false);
+    EXPECT_GE(folder.value["uploads"][0]["age_seconds"], 0);
+    const std::string big = folder.value["folder_id"];
+
+    // An upload begun more than a day ago, as one abandoned would be.
+    auto context = s.context(first);
+    auto records = lake::api::workspace_records(context, first.customer_id, first.workspaces[0]);
+    ASSERT_TRUE(records) << records.error().message;
+    const auto old_upload = [&](std::string name) {
+        DriveEntry entry;
+        entry.customer_id = first.customer_id;
+        entry.drive_id = id;
+        entry.parent_id = big;
+        entry.kind = "file";
+        entry.name = std::move(name);
+        entry.size = 10;
+        entry.content_type = "application/octet-stream";
+        entry.object_key = lake::control::new_drive_file_key();
+        entry.state = "uploading";
+        entry.created_by = first.principal.user_id;
+        entry.modified_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                                std::chrono::system_clock::now().time_since_epoch())
+                                .count() -
+                            lake::control::drive_upload_expiry_us - 1'000'000;
+        const auto stored = run(lake::control::record_drive_entry(*records, std::move(entry)));
+        EXPECT_TRUE(stored) << stored.error().message;
+        return stored ? stored->id : std::string();
+    };
+    const std::string stale = old_upload("old.bin");
+    const std::string other = old_upload("other.bin");
+    const ApiResult listed =
+        s.in(first, "list_drive_entries", {{"drive_id", id}, {"folder_id", big}});
+    std::map<std::string, bool> expired;
+    for (const json& upload : listed.value["uploads"]) {
+        expired[upload["name"]] = upload["expired"];
+    }
+    EXPECT_EQ(
+        expired,
+        (std::map<std::string, bool>{{"left.bin", false}, {"old.bin", true}, {"other.bin", true}}));
+    EXPECT_EQ(
+        s.in(first,
+             "append_drive_upload",
+             {{"drive_id", id}, {"id", other}, {"offset", 0}, {"content", base64("0123456789")}})
+            .error.code,
+        "conflict")
+        << "an expired upload takes no more chunks";
+
+    // The next upload of the name removes the expired one and takes its name.
+    const ApiResult reused =
+        s.in(first,
+             "upload_drive_entries",
+             {{"drive_id", id},
+              {"files", json::array({{{"path", "Big/old.bin"}, {"content", base64("new")}}})}});
+    ASSERT_TRUE(reused.ok) << reused.error.message;
+    EXPECT_EQ(reused.value["items"][0]["name"], "old.bin");
+    EXPECT_EQ(s.in(first, "get_drive_entry", {{"drive_id", id}, {"id", stale}}).error.code,
+              "not_found");
+    // upload_drive_entries takes `name` as upload_drive_files does (lake#587).
+    const ApiResult named =
+        s.in(first,
+             "upload_drive_entries",
+             {{"drive_id", id},
+              {"parent_id", big},
+              {"files", json::array({{{"name", "n.txt"}, {"content", base64("n")}}})}});
+    ASSERT_TRUE(named.ok) << named.error.message;
+    EXPECT_EQ(named.value["items"][0]["path"], "Big/n.txt");
+    EXPECT_EQ(s.in(first,
+                   "upload_drive_entries",
+                   {{"drive_id", id},
+                    {"files", json::array({{{"name", "a/b.txt"}, {"content", base64("n")}}})}})
+                  .error.path,
+              "/files/0/name");
+}
+
 TEST(Drives, AnotherSpaceNeitherReadsNorWritesADrive) {
     Spaces s;
     const auto& first = s.spaces[0];
@@ -638,6 +766,98 @@ TEST(Drives, AVirtualDriveHoldsShortcutsThatSayWhenTheyBreak) {
     EXPECT_EQ(deleted.value["entries_removed"], 6U);
 }
 
+TEST(Drives, SearchFindsDrivesFoldersFilesAndShortcutsByName) {
+    Spaces s;
+    const auto& first = s.spaces[0];
+    const auto& second = s.spaces[1];
+    const ApiResult team = s.in(first, "create_drive", {{"name", "Team"}, {"storage", "files"}});
+    const ApiResult links =
+        s.in(first, "create_drive", {{"name", "Report Links"}, {"storage", "virtual"}});
+    ASSERT_TRUE(team.ok && links.ok);
+    const std::string team_id = team.value["id"];
+    const std::string links_id = links.value["id"];
+    const ApiResult uploaded =
+        s.in(first,
+             "upload_drive_entries",
+             {{"drive_id", team_id},
+              {"files",
+               json::array({{{"path", "Trip/Day 1/Q3 REPORT.pdf"}, {"content", base64("pdf")}},
+                            {{"path", "Trip/notes.txt"}, {"content", base64("n")}}})}});
+    ASSERT_TRUE(uploaded.ok) << uploaded.error.message;
+    // An unfinished upload is never found.
+    ASSERT_TRUE(s.in(first,
+                     "begin_drive_upload",
+                     {{"drive_id", team_id}, {"path", "report-draft.txt"}, {"size", 9}})
+                    .ok);
+    const ApiResult folder = s.in(
+        first, "create_drive_folder_entry", {{"drive_id", links_id}, {"path", "Reports/2026"}});
+    ASSERT_TRUE(folder.ok) << folder.error.message;
+    ASSERT_TRUE(s.in(first,
+                     "create_drive_shortcut",
+                     {{"drive_id", links_id},
+                      {"parent_id", folder.value["id"]},
+                      {"name", "Board report"},
+                      {"target", {{"kind", "url"}, {"url", "https://orama.test/report"}}}})
+                    .ok);
+
+    const ApiResult found = s.in(first, "search_drives", {{"q", "rEpOrT"}});
+    ASSERT_TRUE(found.ok) << found.error.message;
+    EXPECT_EQ(found.value["truncated"], false);
+    EXPECT_TRUE(found.value["skipped"].empty());
+    std::vector<std::string> names;
+    for (const json& item : found.value["items"]) {
+        names.push_back(item["kind"].get<std::string>() + " " +
+                        item["drive"]["name"].get<std::string>() + ":" +
+                        item["path"].get<std::string>());
+    }
+    EXPECT_EQ(names,
+              (std::vector<std::string>{"drive Report Links:",
+                                        "folder Report Links:Reports",
+                                        "shortcut Report Links:Reports/2026/Board report",
+                                        "file Team:Trip/Day 1/Q3 REPORT.pdf"}))
+        << found.value.dump();
+    const json& file = found.value["items"][3];
+    EXPECT_EQ(file["drive"]["storage"], "files");
+    EXPECT_EQ(file["folder"], "Trip/Day 1");
+    EXPECT_EQ(file["size"], 3);
+    EXPECT_EQ(file["content_type"], "application/pdf");
+    EXPECT_TRUE(file["modified_at"].is_string());
+    EXPECT_TRUE(file["parent_id"].is_string());
+    const json& shortcut = found.value["items"][2];
+    EXPECT_EQ(shortcut["status"], "unknown");
+    EXPECT_EQ(shortcut["target"]["url"], "https://orama.test/report");
+    EXPECT_EQ(shortcut["folder"], "Reports/2026");
+    EXPECT_EQ(shortcut["parent_id"], folder.value["id"]);
+
+    // A limit keeps the first matches and says more were found; a drive narrows to its own items.
+    const ApiResult two = s.in(first, "search_drives", {{"q", "report"}, {"limit", 2}});
+    ASSERT_TRUE(two.ok) << two.error.message;
+    EXPECT_EQ(two.value["items"].size(), 2U);
+    EXPECT_EQ(two.value["truncated"], true);
+    const ApiResult one = s.in(first, "search_drives", {{"q", "day"}, {"drive_id", team_id}});
+    ASSERT_TRUE(one.ok) << one.error.message;
+    ASSERT_EQ(one.value["items"].size(), 1U);
+    EXPECT_EQ(one.value["items"][0]["path"], "Trip/Day 1");
+    EXPECT_TRUE(s.in(first, "search_drives", {{"q", "report"}, {"drive_id", links_id}})
+                    .value["items"]
+                    .size() == 3U);
+    EXPECT_EQ(s.in(first, "search_drives", {{"q", "report"}}, 1).value["items"].size(), 0U)
+        << "another workspace of the space has its own drives";
+    EXPECT_EQ(s.in(first, "search_drives", {{"q", "report"}, {"drive_id", team_id}}, 1).error.code,
+              "not_found");
+
+    // Outside the workspace's space nothing is answered.
+    EXPECT_EQ(s.call(second,
+                     "search_drives",
+                     {{"customer_id", first.customer_id},
+                      {"workspace_id", first.workspaces[0]},
+                      {"q", "report"}})
+                  .error.code,
+              "unauthorized");
+    EXPECT_EQ(s.in(second, "search_drives", {{"q", "report"}, {"drive_id", team_id}}).error.code,
+              "not_found");
+}
+
 TEST(Drives, EveryDriveCapabilityIsAuditedInItsWorkspace) {
     for (const char* name : {"create_drive",
                              "list_drives",
@@ -655,7 +875,10 @@ TEST(Drives, EveryDriveCapabilityIsAuditedInItsWorkspace) {
                              "finish_drive_upload",
                              "upload_drive_entries",
                              "read_drive_file",
-                             "recent_drive_entries"}) {
+                             "recent_drive_entries",
+                             "load_drive_dataset",
+                             "drive_share_people",
+                             "search_drives"}) {
         EXPECT_EQ(lake::api::audit_log_of(name), lake::api::AuditLog::Workspace) << name;
     }
 }
@@ -676,6 +899,7 @@ struct Lake {
             lake::api::ServerOptions{.port = 0,
                                      .node_name = "drives-test",
                                      .store = spaces.store,
+                                     .search = std::make_shared<lake::search::Service>(root),
                                      .workspaces = spaces.service,
                                      .object_transport = spaces.objects,
                                      .admin_token = "drives-test",
@@ -732,7 +956,55 @@ struct Lake {
         const auto [status, body] = request("GET", "/v1/" + capability + query);
         return json::parse(body, nullptr, false);
     }
+
+    // A GET's whole response, headers included, over a plain socket.
+    std::string raw(const std::string& path) {
+        const int socket_fd = ::socket(AF_INET, SOCK_STREAM, 0);
+        sockaddr_in address{};
+        address.sin_family = AF_INET;
+        address.sin_port = htons(static_cast<unsigned short>(server->port()));
+        ::inet_pton(AF_INET, "127.0.0.1", &address.sin_addr);
+        if (::connect(socket_fd, reinterpret_cast<sockaddr*>(&address), sizeof(address)) != 0) {
+            ::close(socket_fd);
+            return {};
+        }
+        const std::string request = "GET " + path +
+                                    " HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n"
+                                    "Authorization: Bearer drives-test\r\n\r\n";
+        static_cast<void>(::send(socket_fd, request.data(), request.size(), 0));
+        std::string response;
+        char buffer[4096];
+        for (;;) {
+            const ssize_t count = ::recv(socket_fd, buffer, sizeof(buffer), 0);
+            if (count <= 0) {
+                break;
+            }
+            response.append(buffer, static_cast<std::size_t>(count));
+        }
+        ::close(socket_fd);
+        return response;
+    }
+
+    // The hits of a search over the first space, as paths.
+    std::set<std::string> found(const std::string& text) {
+        const json result =
+            read("search", {{"query", text}, {"customer", spaces.spaces[0].customer_id}});
+        EXPECT_TRUE(result.value("ok", false)) << result.dump();
+        std::set<std::string> paths;
+        for (const json& item : result["value"]["items"]) {
+            paths.insert(item["path"].get<std::string>());
+        }
+        return paths;
+    }
 };
+
+std::string lowercase_headers(std::string response) {
+    const std::size_t end = response.find("\r\n\r\n");
+    std::string head = response.substr(0, end);
+    std::ranges::transform(
+        head, head.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return head;
+}
 
 } // namespace
 
@@ -819,10 +1091,168 @@ TEST(DrivesHttp, AWorkspaceFileDownloadStreamsItsBytes) {
     EXPECT_EQ(status, 200U);
     ASSERT_EQ(body.size(), bytes.size());
     EXPECT_TRUE(body == bytes) << "the download is the uploaded bytes";
+    EXPECT_NE(lowercase_headers(lake.raw("/drive/files/download" + query))
+                  .find("content-disposition: attachment; filename=\"model.bin\""),
+              std::string::npos)
+        << "the file saves under its name";
+
+    // A workspace file loads as a dataset too (lake#593).
+    const json csv = lake.call(
+        "upload_drive_entries",
+        {{"drive_id", drive_id},
+         {"files",
+          json::array({{{"path", "data/people.jsonl"}, {"content", base64("{\"a\":1}\n")}}})}});
+    ASSERT_TRUE(csv.value("ok", false)) << csv.dump();
+    lake.spaces.zetta->answers["upload_dataset"] = {{"table", "people"}, {"rows", 1}};
+    const json loaded = lake.call(
+        "load_drive_dataset",
+        {{"drive_id", drive_id}, {"id", csv["value"]["items"][0]["id"]}, {"table_name", "people"}});
+    ASSERT_TRUE(loaded.value("ok", false)) << loaded.dump();
+    EXPECT_EQ(loaded["value"]["source"]["name"], "people.jsonl");
+    EXPECT_EQ(
+        lake.call("load_drive_dataset",
+                  {{"drive_id", drive_id}, {"id", id}, {"table_name", "big"}})["error"]["path"],
+        "/format")
+        << "model.bin is neither CSV nor JSONL";
     const auto [missing, error] =
         lake.request("GET",
                      "/drive/files/download?customer_id=" + space.customer_id +
                          "&workspace_id=" + space.workspaces[0] + "&drive_id=" + drive_id +
                          "&id=" + lake::control::new_uuid_v4());
     EXPECT_EQ(missing, 404U) << error;
+}
+
+// lake#584: a file written through a repository drive reaches search as a push does, and moves
+// and deletions follow. lake#587: download_drive_file answers the bytes, a CSV is text/csv, and
+// both download routes are in OpenAPI. lake#593: a CSV in a drive loads as a dataset.
+TEST(DrivesHttp, ARepositoryDriveWriteIsSearchedDownloadedAndLoaded) {
+    Lake lake;
+    const json drive =
+        lake.call("create_drive",
+                  {{"name", "Docs"}, {"storage", "repository"}, {"repository_name", "docs-drive"}});
+    ASSERT_TRUE(drive.value("ok", false)) << drive.dump();
+    const std::string repository_id = drive["value"]["repository_id"];
+    const json uploaded = lake.call(
+        "upload_drive_files",
+        {{"repository_id", repository_id},
+         {"ref", "main"},
+         {"path", ""},
+         {"files",
+          json::array({{{"path", "docs/readme.md"}, {"content", base64("zorblaxquux notes")}},
+                       {{"name", "churn.csv"},
+                        {"content", base64("id,churned\n1,true\n2,false\n")},
+                        {"content_type", "text/csv"}}})}},
+        false);
+    ASSERT_TRUE(uploaded.value("ok", false)) << uploaded.dump();
+    EXPECT_EQ(lake.found("zorblaxquux"), (std::set<std::string>{"docs/readme.md"}))
+        << "a drive write is searched at once";
+    const json moved = lake.call("move_drive_path",
+                                 {{"repository_id", repository_id},
+                                  {"ref", "main"},
+                                  {"path", "docs/readme.md"},
+                                  {"destination", "docs/moved.md"}},
+                                 false);
+    ASSERT_TRUE(moved.value("ok", false)) << moved.dump();
+    EXPECT_EQ(lake.found("zorblaxquux"), (std::set<std::string>{"docs/moved.md"}));
+
+    // The bytes in the answer, the type from the name, and where to stream them from.
+    const json file =
+        lake.read("download_drive_file",
+                  {{"repository_id", repository_id}, {"ref", "main"}, {"path", "churn.csv"}});
+    ASSERT_TRUE(file.value("ok", false)) << file.dump();
+    EXPECT_EQ(file["value"]["content_base64"], base64("id,churned\n1,true\n2,false\n"));
+    EXPECT_EQ(file["value"]["media_type"], "text/csv");
+    const std::string url = file["value"]["download_url"];
+    EXPECT_TRUE(url.starts_with("/drive/download?repository_id=" + repository_id)) << url;
+    const std::string streamed = lake.raw(url);
+    const std::string head = lowercase_headers(streamed);
+    EXPECT_NE(head.find(" 200 "), std::string::npos) << head;
+    EXPECT_NE(head.find("content-type: text/csv"), std::string::npos) << head;
+    EXPECT_NE(head.find("content-disposition: attachment; filename=\"churn.csv\""),
+              std::string::npos)
+        << head;
+    EXPECT_TRUE(streamed.ends_with("id,churned\n1,true\n2,false\n"));
+    EXPECT_EQ(lake.read("download_drive_file",
+                        {{"repository_id", repository_id},
+                         {"ref", "main"},
+                         {"path", "churn.csv"},
+                         {"sort", "name"}})["error"]["code"],
+              "invalid_input")
+        << "browse's ordering is not a download input";
+    const auto [status, openapi] = lake.request("GET", "/v1/openapi.json");
+    const json document = json::parse(openapi, nullptr, false);
+    EXPECT_TRUE(document["paths"].contains("/drive/download"));
+    EXPECT_TRUE(document["paths"].contains("/drive/files/download"));
+
+    // Load as dataset: the file's bytes go to the workspace's upload_dataset.
+    lake.spaces.zetta->answers["upload_dataset"] = {
+        {"table", "churn"}, {"rows", 2}, {"database", "datasets"}};
+    const json loaded = lake.call(
+        "load_drive_dataset",
+        {{"drive_id", drive["value"]["id"]}, {"id", "churn.csv"}, {"table_name", "churn"}});
+    ASSERT_TRUE(loaded.value("ok", false)) << loaded.dump();
+    EXPECT_EQ(loaded["value"]["table"], "churn");
+    EXPECT_EQ(loaded["value"]["source"]["name"], "churn.csv");
+    const auto sent = std::ranges::find_if(
+        lake.spaces.zetta->calls, [](const auto& call) { return call.first == "upload_dataset"; });
+    ASSERT_NE(sent, lake.spaces.zetta->calls.end());
+    EXPECT_EQ(sent->second["format"], "csv");
+    EXPECT_EQ(sent->second["content"], "id,churned\n1,true\n2,false\n");
+    EXPECT_EQ(lake.call("load_drive_dataset",
+                        {{"drive_id", drive["value"]["id"]},
+                         {"id", "docs/moved.md"},
+                         {"table_name", "notes"}})["error"]["path"],
+              "/format")
+        << "only CSV and JSONL load";
+
+    const json deleted =
+        lake.call("delete_drive_path",
+                  {{"repository_id", repository_id}, {"ref", "main"}, {"path", "docs/moved.md"}},
+                  false);
+    ASSERT_TRUE(deleted.value("ok", false)) << deleted.dump();
+    EXPECT_TRUE(lake.found("zorblaxquux").empty());
+}
+
+TEST(DrivesHttp, SearchFindsTheNamesOfARepositoryDrivesPaths) {
+    Lake lake;
+    const json drive = lake.call(
+        "create_drive",
+        {{"name", "Archive"}, {"storage", "repository"}, {"repository_name", "archive-drive"}});
+    ASSERT_TRUE(drive.value("ok", false)) << drive.dump();
+    const std::string repository_id = drive["value"]["repository_id"];
+    const json folder = lake.call(
+        "create_drive_folder",
+        {{"repository_id", repository_id}, {"ref", "main"}, {"path", ""}, {"name", "Reports"}},
+        false);
+    ASSERT_TRUE(folder.value("ok", false)) << folder.dump();
+    const json uploaded = lake.call(
+        "upload_drive_files",
+        {{"repository_id", repository_id},
+         {"ref", "main"},
+         {"path", "Reports"},
+         {"files", json::array({{{"name", "q3-report.csv"}, {"content", base64("a,b\n")}}})}},
+        false);
+    ASSERT_TRUE(uploaded.value("ok", false)) << uploaded.dump();
+    const auto& space = lake.spaces.spaces[0];
+    const json found = lake.read("search_drives",
+                                 {{"customer_id", space.customer_id},
+                                  {"workspace_id", space.workspaces[0]},
+                                  {"q", "REPORT"}});
+    ASSERT_TRUE(found.value("ok", false)) << found.dump();
+    const json& items = found["value"]["items"];
+    ASSERT_EQ(items.size(), 2U) << found.dump();
+    EXPECT_EQ(items[0]["kind"], "folder");
+    EXPECT_EQ(items[0]["path"], "Reports");
+    EXPECT_EQ(items[0]["drive"]["storage"], "repository");
+    EXPECT_TRUE(items[0]["id"].is_null()) << "a repository item is addressed by its path";
+    EXPECT_EQ(items[1]["kind"], "file");
+    EXPECT_EQ(items[1]["path"], "Reports/q3-report.csv");
+    EXPECT_EQ(items[1]["folder"], "Reports");
+    EXPECT_EQ(items[1]["size"], 4);
+    EXPECT_FALSE(items[1].contains("modified_at")) << "the tree carries no time";
+    const json marker = lake.read("search_drives",
+                                  {{"customer_id", space.customer_id},
+                                   {"workspace_id", space.workspaces[0]},
+                                   {"q", "lake-folder"}});
+    EXPECT_TRUE(marker["value"]["items"].empty()) << "the empty-folder marker is never found";
 }

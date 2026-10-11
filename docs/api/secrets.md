@@ -13,7 +13,7 @@ layout.
 | `create_secret_mount` | `admin` on its owner: the customer without `organization_id`, the organization with it | `customer_id`, `workspace_id`, `organization_id?`, lowercase `name`, `description?` | mount metadata, with its `workspace_id`, `owner_type` and `organization_id` (null for an account's mount) |
 | `list_secret_mounts` | candidate-filtered `read` on each mount | `customer_id`, `workspace_id`, `organization_id?`, `limit?` | readable mounts of that workspace only, of every owner; `organization_id` keeps one organization's |
 | `get_secret_mount` | `read` on the mount | `mount_id` | mount metadata |
-| `put_secret` | `write` on the mount | `mount_id`, `name`, object `value`, object `custom_metadata?`, `check_and_set?` | the new version and supplied value |
+| `put_secret` | `write` on the mount | `mount_id`, `name`, object `value`, object `custom_metadata?`, `check_and_set?` | the new version's metadata (`mount_id`, `name`, `version`, `custom_metadata`, `created_at`, `deleted_at`, `destroyed_at`), never the value (lake#590) |
 | `read_secret` | `read` on the mount | `mount_id`, `name`, `version?` | the selected live version and value |
 | `secret_metadata` | `read` on the mount | `mount_id`, `name` | current version, custom metadata and every version's state |
 | `list_secrets` | `read` on the mount | `mount_id`, `prefix?`, `cursor?`, `limit?` (1-500, default 100) | `items` (path and metadata, never a value), `next_cursor` when more follow |

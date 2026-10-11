@@ -5,7 +5,7 @@ to a result. A pipeline can hold one model or several, and a model need not come
 all ([Concepts and Glossary](/docs/concepts)). You describe what to predict, lake builds a pipeline in
 your workspace, you approve it, and a run trains its models on your data and measures them on rows
 they did not see. This page covers building the pipeline, changing it, running it, and reading what
-the run says. Studies that try many settings are on [Experiments](/docs/experiments).
+the run says. Experiments that try many settings are on [Experiments](/docs/experiments).
 
 Everything here happens in one workspace: the one in the page address (`/w/<workspace id>/…`) and
 the top-bar picker. Every REST and MCP call names it as `workspace_id`, beside `customer_id`, the id
@@ -40,12 +40,18 @@ of the account that owns your workspaces (yours, or your organization's).
 A pipeline whose methodology does not train yet says **This Pipeline Trains Nothing Yet** instead of
 pretending to train.
 
-- REST: `POST /v1/compile_pipeline` with
+- REST: the project must exist first. Make it once with `POST /v1/workspace_act`
+  `{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "capability": "create_project", "input": {"name": "retention", "intent": "Predict which accounts churn"}}`,
+  then `POST /v1/compile_pipeline` with
   `{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "project": "retention", "intent": "Predict the churned column of accounts", "dataset": "datasets.accounts"}`.
+  Without the project, `compile_pipeline` answers `not_found` at `/project` and says to create it.
   `dataset` is `<database>.<table>`; `methodology` (for example `M-3`) is optional. The answer's
   `graph` is the new pipeline's name, taken from your description's first words; `template` says
   which template its steps started from.
-- MCP: the `compile_pipeline` tool, with the same input.
+- MCP: `workspace_act` with `create_project`, then the `compile_pipeline` tool, with the same
+  input. `compile_pipeline` is the one recipe: it captures the sentence and compiles it (the
+  engine's `capture_intent` and `compile_intent`) in one call, and `mcp_setup`'s *Train a model*
+  flow uses it too.
 
 You can also start a pipeline empty, from an n8n export or from Python:
 `POST /v1/create_pipeline` with
@@ -145,8 +151,8 @@ The answer carries `gate` (the checks) and `run` (the run started). When a check
 
 **Train → Runs** lists every run in the workspace with its pipeline and project, its status
 (succeeded, failed, in progress) and when it started. Search and filter by status. Each row links to
-**Report**, or **Why it failed** for a failed run, and to **Charts**. A run made by a study is
-listed as *Trial N of study* and the study's name, linked to it.
+**Report**, or **Why it failed** for a failed run, and to **Charts**. A run made by an experiment is
+listed as *Trial N of experiment* and the experiment's name, linked to it.
 
 - REST: `GET /v1/list_runs?customer_id=<customer id>&workspace_id=<workspace id>&project=retention&limit=20`
   (`limit` is 1 to 20; `project` and `solution` filter).
@@ -198,7 +204,7 @@ curves on Experiments; **Workspace streams** opens Train → Streams.
 ## After Training
 
 A successful run registers a model. Publish it and call it from your code on
-[Models and Search Indexes](/docs/ship). Studies use the same held-out names as their objectives
+[Models and Search Indexes](/docs/ship). Experiments use the same held-out names as their objectives
 ([Experiments](/docs/experiments)).
 
 ## Permissions

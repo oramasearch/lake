@@ -9571,12 +9571,12 @@ struct ApiServer::Impl {
         if (!token_response.error.empty() || token_response.status < 200 ||
             token_response.status >= 300) {
             co_return co_await oauth_error(
-                route, http::status::bad_gateway, "OAuth token exchange failed");
+                route, http::status::service_unavailable, "OAuth token exchange failed");
         }
         const nlohmann::json token = nlohmann::json::parse(token_response.body, nullptr, false);
         if (token.is_discarded()) {
             co_return co_await oauth_error(
-                route, http::status::bad_gateway, "OAuth token response was invalid");
+                route, http::status::service_unavailable, "OAuth token response was invalid");
         }
 
         control::OAuthIdentity identity;
@@ -9587,8 +9587,9 @@ struct ApiServer::Impl {
         if (provider_name == "github") {
             const std::string access_token = token.value("access_token", "");
             if (access_token.empty()) {
-                co_return co_await oauth_error(
-                    route, http::status::bad_gateway, "GitHub did not return an access token");
+                co_return co_await oauth_error(route,
+                                               http::status::service_unavailable,
+                                               "GitHub did not return an access token");
             }
             const OutboundResponse user_response =
                 outbound_http.request({"GET",
@@ -9601,7 +9602,7 @@ struct ApiServer::Impl {
             if (!user_response.error.empty() || user_response.status < 200 ||
                 user_response.status >= 300 || user.is_discarded() || !user.contains("id")) {
                 co_return co_await oauth_error(
-                    route, http::status::bad_gateway, "GitHub user verification failed");
+                    route, http::status::service_unavailable, "GitHub user verification failed");
             }
             identity.subject = user["id"].is_string() ? user["id"].get<std::string>()
                                                       : std::to_string(user["id"].get<long long>());
@@ -9780,6 +9781,26 @@ struct ApiServer::Impl {
                          "no-store");
     }
 
+    // The media types a browser shows as data and never runs as a page: the only ones a download
+    // is served as (inline on request for a workspace file); anything else is
+    // application/octet-stream.
+    static bool displayable_media_type(std::string_view type) {
+        static constexpr std::array types = std::to_array<std::string_view>({"image/png",
+                                                                             "image/jpeg",
+                                                                             "image/gif",
+                                                                             "image/webp",
+                                                                             "application/pdf",
+                                                                             "text/plain",
+                                                                             "text/csv",
+                                                                             "text/markdown",
+                                                                             "audio/mpeg",
+                                                                             "audio/mp4",
+                                                                             "audio/wav",
+                                                                             "video/mp4",
+                                                                             "video/webm"});
+        return std::ranges::find(types, type) != types.end();
+    }
+
     boost::http::route_task serve_drive_download(boost::http::route_params& route) {
         ApiContext context = context_for(route);
         const std::string repository_id = query_value(route, "repository_id");
@@ -9795,12 +9816,17 @@ struct ApiServer::Impl {
         }
         std::string filename = path_filename(path);
         std::ranges::replace(filename, '"', '_');
+        std::ranges::replace(filename, '\\', '_');
         std::ranges::replace(filename, '\r', '_');
         std::ranges::replace(filename, '\n', '_');
         route.res.set("content-disposition", "attachment; filename=\"" + filename + "\"");
+        // The file's own type when a browser only shows it (a CSV is text/csv, lake#587).
+        const std::string media_type = json_string(result.value, "media_type");
         co_return co_await send_bytes(route,
                                       boost::http::status::ok,
-                                      json_string(result.value, "media_type"),
+                                      displayable_media_type(media_type)
+                                          ? media_type
+                                          : std::string("application/octet-stream"),
                                       context.sync_response,
                                       "\"" + json_string(result.value, "blob") + "\"");
     }
@@ -9837,23 +9863,8 @@ struct ApiServer::Impl {
             co_return co_await serve_download_error(
                 route, context, ApiResult::failure(found.error().code, found.error().message));
         }
-        static constexpr std::array inline_types =
-            std::to_array<std::string_view>({"image/png",
-                                             "image/jpeg",
-                                             "image/gif",
-                                             "image/webp",
-                                             "application/pdf",
-                                             "text/plain",
-                                             "text/csv",
-                                             "text/markdown",
-                                             "audio/mpeg",
-                                             "audio/mp4",
-                                             "audio/wav",
-                                             "video/mp4",
-                                             "video/webm"});
         const bool show =
-            query_value(route, "inline") == "1" &&
-            std::ranges::find(inline_types, found->content_type) != inline_types.end();
+            query_value(route, "inline") == "1" && displayable_media_type(found->content_type);
         std::string filename = found->name;
         for (char& c : filename) {
             if (c == '"' || c == '\\' || c == '\r' || c == '\n') {

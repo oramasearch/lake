@@ -83,7 +83,7 @@ const ALIASES: Record<string, string> = Object.fromEntries(
   METRIC_NAMES.flatMap(([canonical, spellings]) => [[metricKey(canonical), canonical], ...spellings.map((spelling) => [metricKey(spelling), canonical])]),
 );
 
-/** A metric's canonical name, for a study recorded under an older spelling. */
+/** A metric's canonical name, for an experiment recorded under an older spelling. */
 export function metricLabel(name: unknown): string {
   if (typeof name !== "string") return JSON.stringify(name);
   return ALIASES[metricKey(name)] ?? name;
@@ -126,4 +126,24 @@ function heldOutOrder(name: string): number {
 export function cell(value: unknown): string {
   if (value === undefined || value === null) return "—";
   return typeof value === "string" ? value : JSON.stringify(value);
+}
+
+/** The runs a Compare Runs address names (`?runs=a,b`): trimmed, each once, in order. Compare Runs
+ * calls `compare_runs` only with two or more (`canCompare`); with fewer it shows "choose two or
+ * more runs to compare" and makes no call (lake#576). */
+export function chosenRuns(param: string | null | undefined): string[] {
+  const seen = new Set<string>();
+  for (const run of (param ?? "").split(",")) {
+    const id = run.trim();
+    if (id) seen.add(id);
+  }
+  return [...seen];
+}
+
+/** `compare_runs` takes two to eight runs. */
+export const MIN_COMPARED = 2;
+export const MAX_COMPARED = 8;
+
+export function canCompare(runs: string[]): boolean {
+  return runs.length >= MIN_COMPARED && runs.length <= MAX_COMPARED;
 }

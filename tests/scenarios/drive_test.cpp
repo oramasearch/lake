@@ -624,8 +624,7 @@ TEST_F(DriveScenario, UserSyncsSharesAndSeesHistoryEndToEnd) {
                            {"ref", "main"},
                            {"path", "shared-project"},
                            {"principal_taap_id", recipient.taap_id},
-                           {"role", "read"},
-                           {"attestation_digest", "attestation:drive-recipient"}};
+                           {"role", "read"}};
     const std::string shared = http_request(server_->port(),
                                             "POST",
                                             "/v1/share_drive_folder",

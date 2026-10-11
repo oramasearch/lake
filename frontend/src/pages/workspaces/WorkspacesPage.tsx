@@ -80,7 +80,7 @@ export default function WorkspacesPage() {
     <Page
       eyebrow="Ship"
       title="Workspaces"
-      sub="Isolated environments, each with a Zetta of its own for its projects, data and models."
+      sub="Isolated environments, each keeping its own projects, data and models apart from every other."
       actions={
         customerId ? (
           <Button variant="primary" onClick={() => setCreating(true)}>
@@ -131,7 +131,7 @@ export default function WorkspacesPage() {
                     </Button>
                   }
                 >
-                  A workspace gets its own Zetta, where its projects, data and models live.
+                  A workspace keeps its own projects, data and models, apart from every other.
                 </Empty>
               )
             }
@@ -238,7 +238,7 @@ function NewWorkspace({ customerId, onDone, onClose }: { customerId: string; onD
   return (
     <Modal
       title="New Workspace"
-      subtitle="It gets a Zetta of its own; preparing it takes a minute or two."
+      subtitle="lake prepares it for you; preparing it takes a minute or two."
       onClose={onClose}
       width={480}
       footer={
@@ -314,7 +314,7 @@ function DeleteConfirmation({ customerId, workspaceId, back, onDone }: { custome
       <>
         <p className="mt-0 text-[13px] text-ink-2">Deleting this workspace destroys everything below. It cannot be undone: retained volume snapshots are the only copy left.</p>
         <ul className="m-0 list-none divide-y divide-hairline rounded-[6px] border border-hairline px-3">
-          {item(null, "Its Zetta, with every record, dataset, topic and store in it, and its own audit history.")}
+          {item(null, "Everything it holds: every record, dataset, topic and store, and its own audit history.")}
           {item(
             count("repositories"),
             <>

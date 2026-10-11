@@ -1,5 +1,7 @@
 #pragma once
 
+#include <optional>
+
 #include "lake/api/registry.hpp"
 #include "lake/control/store.hpp"
 #include "lake/control/zetta_control.hpp"
@@ -156,6 +158,13 @@ ApiResult workspace_failure(const control::ZettaControlError& error,
                             const nlohmann::json& input,
                             std::string_view prefix = {},
                             const std::map<std::string, std::string>& renamed = {});
+// The engine's words in a lake caller's terms (lake#591): a capability lake does not serve
+// (`add_dataset`, a bare `approve_plan`) named as the call that does.
+std::string engine_words_in_lake_terms(std::string text);
+// The `enum` the engine's OpenAPI document declares for one input field of one capability.
+std::optional<nlohmann::json> engine_input_enum(const nlohmann::json& openapi,
+                                                std::string_view capability,
+                                                std::string_view field);
 // Zetta's OpenAPI document reduced to the allow-listed paths, rebased under `base` (the agent
 // path of one workspace), so a client deriving its tools from it sees exactly what it may call.
 nlohmann::json workspace_openapi(const nlohmann::json& document, std::string_view base);

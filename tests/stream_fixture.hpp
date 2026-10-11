@@ -39,6 +39,8 @@ public:
     std::map<std::string, RecordTables> records;
     std::string first_url;
     std::vector<std::pair<std::string, json>> calls;
+    // Fixed answers for workspace capabilities the fake does not model (upload_dataset, ...).
+    std::map<std::string, json> answers;
     std::string last_url, last_token;
     std::mutex mutex;
 
@@ -58,6 +60,9 @@ public:
         };
         if (RecordTables::handles(capability, input)) {
             co_return records[last_url].run(capability, input);
+        }
+        if (const auto found = answers.find(capability); found != answers.end()) {
+            co_return found->second;
         }
         if (capability == "list_topics") {
             json rows = json::array();

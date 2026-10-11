@@ -22,8 +22,10 @@ snapshot and update the page.
 Train → Experiments is implemented in the source tree with eleven registered REST/MCP operations,
 live charts, confirmed promotion, and ExperimentsAgent's editable proposal and confirmed start,
 against workspace Zetta `dev-a1d74b21`. The build's authorized bridge transport source is
-unchanged. Deletion has no engine contract; deployed study/training acceptance is not claimed.
-See `docs/api/experiments.md` and `docs/ui/experiments.md`.
+unchanged. Deletion has no engine contract; deployed experiment/training acceptance is not claimed.
+Lake says experiment (`get_experiment`, `start_experiment`, `stop_experiment`, `experiment_id`) where
+the engine says study, translating at its boundary (lake#561, not deployed); the guides and pages
+never say study. See `docs/api/experiments.md` and `docs/ui/experiments.md`.
 
 The console is the web app in `frontend/` (lake#561), embedded in the binary and answered for every
 browser page request; it calls only `/v1`. The server-rendered console pages, their deferred panels
@@ -55,6 +57,14 @@ file after `get_drive_entry` authorizes it. Shortcuts to repositories, repositor
 items and transcripts say when they break. Data → Drives is one file manager over a
 `DriveStorage` interface with three implementations. `lake_files` has no quota yet. Not deployed.
 See `docs/api/drives.md` and `docs/ui/drives.md`.
+The 2026-10-10 review's drive fixes follow (no migration): drive writes and pushes publish branch
+tips into a space's hot search index too (lake#584); a folder is shared by email or handle among
+the space's people (`drive_share_people`) and lake signs the grant's attestation, refusing a
+made-up digest (lake#585); `download_drive_file` answers the bytes and a `download_url` (lake#587);
+a resent chunk answers the true `received`, and unfinished uploads are listed and expire after
+24 hours (lake#588); `load_drive_dataset` loads a drive's CSV or JSONL file (lake#593); the web app
+retries an edge 503 read under the one `shouldRetry` rule and names who answered (lake#573,
+`docs/ui/web-app.md#a-read-answered-503`).
 
 Every future deployment image receives OCI revision and creation labels. The binary reports the
 same embedded revision through `GET /v1/server_info`; details are in

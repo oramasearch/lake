@@ -20,7 +20,8 @@ More terms:
 | Term | What it is |
 |---|---|
 | **Role** | What a recipient may do: **View** (browse and download), **Edit** (also upload, rename, move and delete) or **Share** (also create shares). |
-| **TAAP identity** | The id lake knows a person or organization by. A person can show theirs with `liquid identity show`. |
+| **Email or handle** | How you name a person when you share: their sign-in email, or their handle (`@ana`). |
+| **TAAP identity** | The id lake knows a person or organization by; programs may share by it. A person can show theirs with `liquid identity show`. |
 | **Inherited access** | Access that comes from somewhere above the folder, such as the repository or an organization membership. The access table marks each entry **direct** or **inherited**. |
 | **Holding workspace** | The workspace a folder's links are kept in. Links live in one workspace of the repository's owner, chosen when you open the sharing page. |
 | **Stable folder identity** | A shared folder is followed by its identity, not its path, so moving or renaming it keeps the share pointing at the same folder. |
@@ -43,22 +44,44 @@ The table is the policy engine's own answer, the same check lake runs on every o
 
 ## Share with a Person or an Organization
 
+You name the person by their email or their handle; lake finds who that is and records the share
+itself.
+
 1. On the sharing page, under **Choose a Delivery**, press **Share with person** (or **Share with
    organization**). The header's **Share with person** does the same.
-2. Enter the **Person's TAAP identity** (or **Organization TAAP identity**).
+2. In **Person (email or handle)**, start typing: the list offers the people of this workspace's
+   account (its owner, and for an organization every member) by email and handle. Choose one, or
+   type an email (`ana@example.com`) or a handle (`@ana`). For an organization, type its handle in
+   **Organization (handle)**.
 3. Choose **What they can do**: **View — browse and download**, **Edit — upload, rename, move, and
    delete**, or **Share — browse and create shares**.
-4. Enter the **Attestation digest**: the digest of the signed statement that records this grant,
-   which lake keeps on the grant as evidence.
-5. Press the dialog's **Share with person** (or **Share with organization**). The access table
+4. Press the dialog's **Share with person** (or **Share with organization**). The access table
    updates.
+
+Lake writes a statement of the share (the folder, the person, the role and who shared it), signs
+it with lake's own identity, and keeps the statement's digest on the grant as its evidence. You
+never make or paste a digest. Sharing the same folder with the same person and role again answers
+the grant that is already there.
+
+Someone outside the account cannot be found by email: invite them to the organization first
+([Organizations, Members and Teams](/docs/organizations)), then share.
 
 An organization grant goes to that organization identity; the people who then have access appear
 in the table only as their own access arrives.
 
+- See who can be named: `GET /v1/drive_share_people?repository_id=<repository id>&ref=main&path=reports`
+  (MCP: `drive_share_people`). Each person has `taap_id`, `kind`, `display_name`, `email` and
+  `handle`.
 - REST: `POST /v1/share_drive_folder` with
-  `{"repository_id": "<repository id>", "ref": "main", "path": "reports", "principal_taap_id": "<recipient TAAP id>", "role": "read", "attestation_digest": "<attestation digest>"}`.
-  `role` is `read`, `write` or `share`.
+  `{"repository_id": "<repository id>", "ref": "main", "path": "reports", "recipient": "ana@example.com", "role": "read"}`.
+  `recipient` is an email or a handle; `role` is `read`, `write` or `share`. The answer carries the
+  grant, the person, and the signed statement with its `digest`.
+- A program that already holds a person's TAAP identity sends it instead of `recipient`:
+  `{"repository_id": "<repository id>", "ref": "main", "path": "reports", "principal_taap_id": "<recipient TAAP id>", "role": "read"}`.
+  Lake refuses an identity it does not know (`invalid_input` at `/principal_taap_id`).
+- `attestation_digest` is optional and only for repeating a share: lake accepts only the digest it
+  answered for the same folder, person and role, and refuses any other (`invalid_input` at
+  `/attestation_digest`).
 - MCP: `share_drive_folder` with the same input.
 
 ## Create a Link

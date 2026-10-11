@@ -50,7 +50,12 @@ export type Listing = {
   /** From the top down to this folder, the top excluded. */
   crumbs: Crumb[];
   items: Item[];
+  /** Uploads begun in this folder and not finished (a workspace-files drive's): they hold their
+   * names until finished, removed, or 24 hours after they began (lake#588). */
+  uploads?: Upload[];
 };
+
+export type Upload = { key: string; name: string; size: number; ageSeconds: number; expired: boolean };
 
 export type Progress = { sent: number; total: number; file: string };
 
@@ -216,7 +221,13 @@ type Entry = {
   target?: Target;
 };
 
-type EntryListing = { folder_id: string | null; path: string; ancestors: { id: string; name: string }[]; items: Entry[] };
+type EntryListing = {
+  folder_id: string | null;
+  path: string;
+  ancestors: { id: string; name: string }[];
+  items: Entry[];
+  uploads?: (Entry & { age_seconds: number; expired: boolean })[];
+};
 
 /** Files at most this big go several to a call (upload_drive_entries); larger ones are sent in
  * chunks (begin_drive_upload, append_drive_upload, finish_drive_upload). */
@@ -264,6 +275,7 @@ export class FilesStorage implements DriveStorage {
       path: listing.path,
       crumbs: listing.ancestors.map((a) => ({ key: a.id, name: a.name })),
       items: listing.items.map(itemOf),
+      uploads: (listing.uploads ?? []).map((u) => ({ key: u.id, name: u.name, size: u.size ?? 0, ageSeconds: u.age_seconds, expired: u.expired })),
     };
   }
 

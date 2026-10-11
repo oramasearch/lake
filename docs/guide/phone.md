@@ -146,7 +146,7 @@ on the account that owns the workspace; reading them needs `read`.
 | *Speech-to-text is not configured on this lake.* | Your lake has no speech-to-text key. **Upload text** and **Paste** still work; ask your lake's operator to add the key. |
 | The browser never asks for the microphone, or refuses it | Allow the microphone for your lake's site in the browser's settings, then reload. |
 | `size_invalid` (413) | The audio is over 25 MB or the text over 400,000 bytes. Split the recording. |
-| `engine_error` (502) | OpenAI could not transcribe it; the message says why. Try again, or upload the text. |
+| `engine_error` (422) | OpenAI could not transcribe it; the message says why. Try again, or upload the text. |
 | A timeout while transcribing a long recording | The proxy closed the wait. Use a shorter recording. |
 | The file picker does not show your recording | Save it to Files first (see **From your phone** above). |
 

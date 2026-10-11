@@ -35,7 +35,8 @@ tick.
 | `POST /identity/clerk-session` | exchanges a Clerk session token for the `lake_session` cookie ([`../api/clerk.md`](../api/clerk.md)) |
 | `GET /v1/oauth/<provider>/callback` | OAuth authorization-code callback with one-use state, PKCE, and verified provider identity; sets the cookie and redirects |
 | `GET /file/raw`, `/file/download`, `/drive/download`, `/exports/download`, `/share/<token>/download` | the bytes of a repository file, a Drive file, a signed export or a shared file; without a credential a protected download redirects to `/sign-in` |
-| `GET /drive/files/download?customer_id=&workspace_id=&drive_id=&id=[&inline=1]` | a workspace file ([drives.md](../api/drives.md#uploads)): authorized and audited through `get_drive_entry`, then streamed from the workspace Zetta's `lake_files` bucket 1 MiB at a time (the image-pull streamer, its slots and idle timeout), `nosniff`, a sandboxing CSP, and `inline` only for media types a browser shows as data |
+| `GET /drive/files/download?customer_id=&workspace_id=&drive_id=&id=[&inline=1]` | a workspace file ([drives.md](../api/drives.md#uploads)): authorized and audited through `get_drive_entry`, then streamed from the workspace Zetta's `lake_files` bucket 1 MiB at a time (the image-pull streamer, its slots and idle timeout), `nosniff`, a sandboxing CSP, and `inline` only for media types a browser shows as data; always `Content-Disposition` with the file's name |
+| (both drive downloads) | described in `GET /v1/openapi.json` as `drive_download` and `drive_files_download` (lake#587; `openapi_document` in `src/api/rest.cpp`), although they answer bytes rather than a capability's JSON. `/drive/download` sends a file's own media type (from its extension) when a browser shows that type as data, else `application/octet-stream` (`displayable_media_type`) |
 | `GET /llms.txt`, `/llms-full.txt`, `/developer/mcp/skill`, `/skills/lake/SKILL.md` | the agents' guide and the Claude skill, public text |
 | `GET /apps/<id>/sign-up`, `/sign-in`, `/mfa`, `/passkey-sign-in`; the same four paths on an application's custom sign-in host | themed application identity pages, server-rendered ([`../api/apps.md`](../api/apps.md)); on lake's own host those paths are the web app's |
 | `POST /apps/<id>/identity/*` | application-pool identity form adapters |
@@ -263,6 +264,29 @@ produces no stderr output; lake's session loop (`HttpConnections`, [below](#conn
 writes nothing for it. Lake pins `oramasearch/beast2` branch `orama-main`, whose carried patch
 suppresses the former `read_header error: end of stream` line. The carrier and its update procedure
 are recorded in [`../build/dependencies.md`](../build/dependencies.md).
+
+## Statuses Behind Cloudflare
+
+lake on `lake.oramadev.net` is reached through Cloudflare. Cloudflare answers an origin's `502` or
+`504` with its own HTML page (*"Error 502: Bad gateway … The origin web server returned an invalid
+or incomplete response"*) and drops lake's body; it passes `500`, `501` and `503` and every 4xx
+through unchanged (Cloudflare's *Custom Errors* and *Error 502/504* pages). Until lake#572 lake
+answered `engine_error` with `502`, so a REST caller who mistyped a SQL table, or uploaded audio
+OpenAI could not read, got Cloudflare's page telling them to retry in 60 seconds, while MCP (always
+`200` with the error inside) showed the real message.
+
+The rule, enforced by `ApiErrors.NoCodeAnswersAStatusCloudflareReplaces`:
+
+- **lake never answers `502` or `504` itself.** `engine_error` (the workspace engine or an outside
+  service refused the call) is `422`; an unreachable dependency is `503` (`store_unavailable`);
+  lake's own faults are `500`. The OAuth callback's provider failures are `503`.
+- A `502` or `504` a caller sees therefore came from a proxy, not from lake: lake was unreachable,
+  closed the connection (see [Handler exceptions](#handler-exceptions)), or a long call (a long
+  transcription) passed Cloudflare's 100-second origin timeout. lake's request log has no `502`.
+
+How to verify: `curl -s -w '%{http_code}\n' -H 'Authorization: Bearer <key>'
+'https://<host>/v1/workspace_sql?customer_id=<c>&workspace_id=<w>&statement=SELECT%20*%20FROM%20datasets.no_such_table%20LIMIT%201'`
+answers `422` with `{"ok":false,"error":{"code":"engine_error","message":"table \"no_such_table\" does not exist",…}}`.
 
 ## Handler exceptions
 

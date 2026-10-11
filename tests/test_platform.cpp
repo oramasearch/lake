@@ -647,6 +647,31 @@ TEST_F(PlatformFixture, ReadRoleCannotWriteAndDeployRoleIsRequiredForDomains) {
     EXPECT_TRUE(domain.ok) << domain.error.message;
 }
 
+// A lake without the platform mirror answers its reads and writes `not_supported` (501), which a
+// caller does not retry, and says what an operator configures (lake#575).
+TEST_F(PlatformFixture, WithoutThePlatformMirrorEveryCallSaysDeploymentsAreNotSetUp) {
+    context.platform = nullptr;
+    const std::vector<std::pair<std::string, json>> calls = {
+        {"list_environments", {{"repository_id", repository.id}}},
+        {"get_environment", {{"repository_id", repository.id}, {"environment", "production"}}},
+        {"set_environment_env",
+         {{"repository_id", repository.id},
+          {"environment", "production"},
+          {"key", "COLOR"},
+          {"value", "green"}}},
+    };
+    for (const auto& [name, input] : calls) {
+        const ApiResult result = call_async(name, input);
+        EXPECT_FALSE(result.ok) << name;
+        EXPECT_EQ(result.error.code, "not_supported") << name;
+        EXPECT_EQ(lake::api::rest_status(result), 501) << name;
+        EXPECT_NE(result.error.message.find("not set up on this lake"), std::string::npos) << name;
+        EXPECT_NE(result.error.message.find("an operator turns them on"), std::string::npos)
+            << name;
+        EXPECT_EQ(result.error.message.find("Zetta"), std::string::npos) << name;
+    }
+}
+
 TEST_F(PlatformFixture, DiscoveryExposesPlatformSurface) {
     ASSERT_TRUE(sync());
     const json openapi = lake::api::openapi_document(registry, "test");

@@ -13,7 +13,7 @@ organization's) and `workspace_id`; [Getting Started](/docs) says where to find 
 
 | Term | What it is |
 |---|---|
-| **AI project** | Where an AI solution is built: a business question and the decision it should improve, with a name, a description, its intent and its pipelines. The pages call it a *project*. |
+| **AI project** | Where an AI solution is built: a business question and the decision it should improve, with a name, a description, that decision and its pipelines. The pages call it a *project*. |
 | **Pipeline** | The project's workflow, an execution graph of steps joined by arrows. Each step has a kind: `connect`, `clean`, `model`, `index`, `serve` or `act`. |
 | **Edge** | An arrow between two steps. A solid arrow carries data (`data_flow`); a dashed one only orders the steps (`control`). |
 | **Methodology** | The modelling method a pipeline uses, such as churn classification, segmentation or forecasting ([AI Solutions, Methodologies and Opportunities](/docs/solutions)). |
@@ -32,10 +32,12 @@ organization's) and `workspace_id`; [Getting Started](/docs) says where to find 
 `POST /v1/workspace_act`
 
 ```json
-{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "capability": "create_project", "input": {"name": "retention", "description": "Keep paying accounts", "intent": "Which accounts customer success calls first each week"}}
+{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "capability": "create_project", "input": {"name": "retention", "description": "Keep paying accounts", "decision": "Which accounts customer success calls first each week"}}
 ```
 
-From an AI agent the MCP tool is `workspace_act` with the same JSON.
+From an AI agent the MCP tool is `workspace_act` with the same JSON. Lake keeps `decision` in the
+workspace and answers it on `get_project` beside the description; the project page shows it on its
+Decision card.
 
 **Design → Projects** lists every project with its pipelines, how many are approved and its status,
 under three figures (Projects, With pipelines, Runs active). Search filters the list. When the

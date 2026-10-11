@@ -50,6 +50,7 @@ public:
     std::map<std::string, json> answers; // per capability, when set; else `value`
     std::vector<std::pair<std::string, json>> calls;
     std::optional<lake::control::ZettaControlError> failure;
+    std::string failure_for; // when set, only this capability fails
     std::function<void()> before_reply;
     lake::test::StreamCaller topics;
     std::mutex mutex;
@@ -81,7 +82,7 @@ public:
             if (before_reply) {
                 before_reply();
             }
-            if (failure) {
+            if (failure && (failure_for.empty() || failure_for == capability)) {
                 answered = ZettaControlResult<json>(std::unexpected(*failure));
             } else if (capability != "create_topic" && capability != "update_topic" &&
                        capability != "publish_event" && capability != "receive_events" &&
@@ -1508,6 +1509,18 @@ TEST(Workspaces, DatasetRulesNameCsvIdAndEngineResults) {
     EXPECT_EQ(listed["datasets"][0]["kind"], "data");
     EXPECT_EQ(listed["datasets"][1]["id"], "entity_resolution_results/pairs_1a2b");
     EXPECT_EQ(listed["datasets"][1]["kind"], "result");
+
+    // `format` is what the person loaded; a name SQL cannot name says so (lake#594).
+    json csv = {{"name", "accounts"}, {"format", "jsonl"}, {"source_format", "csv"}};
+    datasets::annotate_one(csv);
+    EXPECT_EQ(csv["format"], "csv");
+    EXPECT_EQ(csv["storage_format"], "jsonl");
+    EXPECT_EQ(csv["sql_queryable"], true);
+    json old = {{"name", "ux-review-2026-10-01-accounts"}, {"format", "jsonl"}};
+    datasets::annotate_one(old);
+    EXPECT_EQ(old["format"], "jsonl") << "no source_format: the engine's format stays";
+    EXPECT_EQ(old["sql_queryable"], false);
+    EXPECT_NE(old["sql_note"].get<std::string>().find("load it again"), std::string::npos);
 }
 
 // Uploads are checked before they reach the workspace, a taken name is never renamed silently,
@@ -3154,7 +3167,7 @@ TEST(AgentRuns, AProjectAgentReplyIncludesTheQuestionAndAnswer) {
               std::string::npos);
 }
 
-TEST(AgentRuns, ExperimentsAgentGrantsEachTurnOnlyItsStudyOperations) {
+TEST(AgentRuns, ExperimentsAgentGrantsEachTurnOnlyItsExperimentOperations) {
     AgentRuns r;
     auto& config = const_cast<lake::control::WorkspaceConfig&>(r.w.service->config());
     config.agent_endpoints = {{"agent-experiments", "http://experiments:8080"}};
@@ -3191,19 +3204,20 @@ TEST(AgentRuns, ExperimentsAgentGrantsEachTurnOnlyItsStudyOperations) {
               "/train/experiments?customer_id=" + r.w.customer_id + "&task=" + first->id +
                   "#experiment-proposal");
 
-    const auto confirmed = r.call("agent_turn",
-                                  {{"agent", "agent-experiments"},
-                                   {"kind", "experiment"},
-                                   {"message", "Confirm and start the reviewed study proposal."},
-                                   {"proposal_task_id", first->id},
-                                   {"proposal_sha256", review.value["proposal_sha256"]},
-                                   {"context", {{"confirmed_proposal", proposal}}}});
+    const auto confirmed =
+        r.call("agent_turn",
+               {{"agent", "agent-experiments"},
+                {"kind", "experiment"},
+                {"message", "Confirm and start the reviewed experiment proposal."},
+                {"proposal_task_id", first->id},
+                {"proposal_sha256", review.value["proposal_sha256"]},
+                {"context", {{"confirmed_proposal", proposal}}}});
     ASSERT_TRUE(confirmed.ok) << confirmed.error.message;
     const auto second = r.task(confirmed.value["task_id"]);
     ASSERT_TRUE(second);
     EXPECT_NE(std::ranges::find(second->scopes, "workspace_act"), second->scopes.end());
     EXPECT_NE(std::ranges::find(second->scopes, "create_study"), second->scopes.end());
-    EXPECT_NE(std::ranges::find(second->scopes, "start_study"), second->scopes.end());
+    EXPECT_NE(std::ranges::find(second->scopes, "start_experiment"), second->scopes.end());
     EXPECT_EQ(std::ranges::find(second->scopes, "stop_trial"), second->scopes.end());
     const std::string confirmed_credential =
         "lat." + second->id + ".0123456789abcdef0123456789abcdef";
@@ -3228,15 +3242,16 @@ TEST(AgentRuns, ExperimentsAgentGrantsEachTurnOnlyItsStudyOperations) {
          {"input", {{"study", "study-one"}, {"run", "trial-1"}}}});
     EXPECT_EQ(refused.error.code, "unauthorized");
 
-    const auto status = r.call(
-        "agent_turn",
-        {{"agent", "agent-experiments"},
-         {"kind", "experiment_status"},
-         {"message", "Watch study-one"},
-         {"context", {{"study", "study-one"}}}});
+    const auto status = r.call("agent_turn",
+                               {{"agent", "agent-experiments"},
+                                {"kind", "experiment_status"},
+                                {"message", "Watch study-one"},
+                                {"context", {{"experiment_id", "study-one"}}}});
     ASSERT_TRUE(status.ok) << status.error.message;
     const auto status_task = r.task(status.value["task_id"]);
     ASSERT_TRUE(status_task);
+    // A lake caller names the experiment; ExperimentsAgent reads the engine's `study` (lake#561).
+    EXPECT_EQ(status_task->body["context"]["study"], "study-one");
     EXPECT_NE(std::ranges::find(status_task->scopes, "stop_trial"),
               status_task->scopes.end());
     EXPECT_NE(std::ranges::find(status_task->scopes, "stop_experiment_trial"),
@@ -3294,6 +3309,8 @@ TEST(AgentRuns, ExperimentsAgentGrantsEachTurnOnlyItsStudyOperations) {
         {{"capability", "promote_trial"},
          {"input", {{"study", "study-one"}, {"run", "trial-1"}}}});
     ASSERT_TRUE(promoted.ok) << promoted.error.message;
+    EXPECT_EQ(promoted.value["study"], "study-one")
+        << "workspace_act answers in the engine's names";
 
     EXPECT_EQ(r.call("agent_turn",
                      {{"agent", "agent-experiments"},
@@ -3602,6 +3619,7 @@ namespace {
 struct ReadyWorkspace {
     Workspaces w;
     lake::api::Registry registry;
+    std::string instance_kek; // empty: no workspace records
     ReadyWorkspace() {
         auto requested = w.run(w.service->request(w.customer_id));
         const auto workspace = w.store->get_service(requested->service_id);
@@ -3616,6 +3634,7 @@ struct ReadyWorkspace {
         context.authorized = true;
         context.acting_identity = "admin";
         context.operator_credential = true;
+        context.instance_kek = instance_kek;
         context.request_id = lake::control::new_uuid_v4();
         if (!input.contains("customer_id")) {
             input["customer_id"] = w.customer_id;
@@ -3724,7 +3743,48 @@ TEST(Workspaces, NamingEngineRefusalsCarryThePathAndLakeCodes) {
           {{"table_name", "t"}, {"format", "xml"}, {"content", "x"}, {"if_exists", "rename"}}}});
     EXPECT_EQ(format.error.code, "invalid_input");
     EXPECT_EQ(format.error.path, "/input/format");
-    EXPECT_EQ(format.error.message, "format: instance not found in required enum");
+    // Without the engine's OpenAPI document, the rule in lake's words (lake#591).
+    EXPECT_EQ(format.error.message, "format is not one of the values it accepts");
+
+    // With it, the values, as lake's own enum refusals list them.
+    r.w.caller->failure_for = "upload_dataset";
+    r.w.caller->answers["openapi.json"] = {
+        {"paths",
+         {{"/v1/upload_dataset",
+           {{"post",
+             {{"requestBody",
+               {{"content",
+                 {{"application/json",
+                   {{"schema",
+                     {{"properties",
+                       {{"format",
+                         {{"type", "string"}, {"enum", {"csv", "jsonl"}}}}}}}}}}}}}}}}}}}}};
+    const auto listed = r.call(
+        "workspace_act",
+        {{"capability", "upload_dataset"},
+         {"input",
+          {{"table_name", "t"}, {"format", "xml"}, {"content", "x"}, {"if_exists", "rename"}}}});
+    EXPECT_EQ(listed.error.path, "/input/format");
+    EXPECT_EQ(listed.error.message, "expected one of [\"csv\",\"jsonl\"]");
+
+    r.w.caller->failure = lake::control::ZettaControlError{
+        "invalid_argument",
+        "validation failed for additional property 'name': instance invalid as per false-schema"};
+    r.w.caller->failure_for = "create_index";
+    const auto unexpected =
+        r.call("workspace_act",
+               {{"capability", "create_index"}, {"input", {{"table", "t"}, {"name", "x"}}}});
+    EXPECT_EQ(unexpected.error.code, "invalid_input");
+    EXPECT_EQ(unexpected.error.path, "/input/name");
+    EXPECT_EQ(unexpected.error.message, "unexpected field name");
+    r.w.caller->failure = lake::control::ZettaControlError{
+        "not_found", "no table 't' (load the table first with add_dataset)"};
+    const auto named =
+        r.call("workspace_act", {{"capability", "create_index"}, {"input", {{"table", "t"}}}});
+    EXPECT_NE(named.error.message.find("workspace_act upload_dataset"), std::string::npos)
+        << named.error.message;
+    EXPECT_EQ(named.error.message.find("add_dataset"), std::string::npos);
+    r.w.caller->failure_for.clear();
 
     r.w.caller->failure =
         lake::control::ZettaControlError{"engine_error", "required property 'project' not found"};
@@ -3732,6 +3792,21 @@ TEST(Workspaces, NamingEngineRefusalsCarryThePathAndLakeCodes) {
         r.call("workspace_act", {{"capability", "approve_plan"}, {"input", json::object()}});
     EXPECT_EQ(required.error.code, "invalid_input");
     EXPECT_EQ(required.error.path, "/input/project");
+}
+
+// compile_pipeline takes `project` at the top level, so a missing project is refused there and
+// says how to make one (lake#591), though the step behind it is a workspace_act call.
+TEST(Workspaces, CompilePipelinePointsAtItsOwnProjectField) {
+    ReadyWorkspace r;
+    r.w.caller->failure =
+        lake::control::ZettaControlError{"not_found", "no project named 'churn' (or with that id)"};
+    r.w.caller->failure_for = "capture_intent";
+    const auto missing =
+        r.call("compile_pipeline", {{"project", "churn"}, {"intent", "Predict churn"}});
+    EXPECT_EQ(missing.error.code, "not_found");
+    EXPECT_EQ(missing.error.path, "/project");
+    EXPECT_NE(missing.error.message.find("workspace_act create_project"), std::string::npos)
+        << missing.error.message;
 }
 
 // Zetta refuses an empty name and a taken one with the same message; lake says which (lake#452).
@@ -3760,6 +3835,78 @@ TEST(Workspaces, CreateProjectSaysWhetherTheNameIsMissingOrTaken) {
     const auto other = r.call("workspace_act",
                               {{"capability", "create_project"}, {"input", {{"name", "churn"}}}});
     EXPECT_NE(other.error.code, "conflict") << "only the engine's name refusal is a clash";
+}
+
+// The decision a project should improve is lake's to keep (lake#577): the engine's project has no
+// field for it (its `intent` is a trace note it strips), so create_project keeps `decision` in the
+// workspace's records under the new project's id, get_project answers it beside the description,
+// and delete_project removes it.
+TEST(Workspaces, AProjectKeepsItsDecisionBesideItsDescription) {
+    ReadyWorkspace r;
+    r.instance_kek = lake::test::test_instance_kek();
+    const std::string id = lake::control::new_uuid_v4();
+    r.w.caller->answers["create_project"] = {{"name", "churn"}, {"owner", "admin"}};
+    r.w.caller->answers["get_project"] = {{"id", id},
+                                          {"name", "churn"},
+                                          {"description", "Which accounts will not renew?"},
+                                          {"inputs", json::array()},
+                                          {"graphs", json::array()}};
+    const auto created =
+        r.call("workspace_act",
+               {{"capability", "create_project"},
+                {"input",
+                 {{"name", "churn"},
+                  {"description", "Which accounts will not renew?"},
+                  {"decision", "  Which accounts the success team calls first each week  "}}}});
+    ASSERT_TRUE(created.ok) << created.error.message;
+    EXPECT_EQ(created.value["decision"], "Which accounts the success team calls first each week");
+    const json sent = r.sent("create_project");
+    EXPECT_FALSE(sent.contains("decision")) << "the engine's project has no such field";
+    EXPECT_EQ(sent["description"], "Which accounts will not renew?");
+
+    const auto read =
+        r.call("workspace_query", {{"capability", "get_project"}, {"input", {{"name", "churn"}}}});
+    ASSERT_TRUE(read.ok) << read.error.message;
+    EXPECT_EQ(read.value["description"], "Which accounts will not renew?");
+    EXPECT_EQ(read.value["decision"], "Which accounts the success team calls first each week")
+        << "three distinct strings, each in its place";
+
+    // Sealed in the workspace's records, not in PostgreSQL.
+    bool sealed = false;
+    for (auto& [url, tables] : r.w.caller->topics.records) {
+        for (const auto& [key, row] : tables.rows("project_decisions")) {
+            sealed = true;
+            EXPECT_EQ(key, id);
+            EXPECT_EQ(row.dump().find("success team"), std::string::npos) << "sealed at rest";
+        }
+    }
+    EXPECT_TRUE(sealed);
+
+    EXPECT_EQ(
+        r.call("workspace_act",
+               {{"capability", "create_project"}, {"input", {{"name", "other"}, {"decision", 7}}}})
+            .error.path,
+        "/input/decision");
+
+    r.w.caller->answers["delete_project"] = {{"name", "churn"},
+                                             {"id", id},
+                                             {"removed", {{"inputs", 0}, {"graphs", 0}}},
+                                             {"kept", {{"runs", 0}, {"models", 0}}}};
+    ASSERT_TRUE(
+        r.call("workspace_act", {{"capability", "delete_project"}, {"input", {{"name", "churn"}}}})
+            .ok);
+    const auto gone =
+        r.call("workspace_query", {{"capability", "get_project"}, {"input", {{"name", "churn"}}}});
+    ASSERT_TRUE(gone.ok);
+    EXPECT_FALSE(gone.value.contains("decision")) << "a deleted project's decision goes with it";
+
+    // A project created without a decision writes no record and reads none.
+    r.w.caller->calls.clear();
+    const auto plain =
+        r.call("workspace_act", {{"capability", "create_project"}, {"input", {{"name", "plain"}}}});
+    ASSERT_TRUE(plain.ok);
+    EXPECT_FALSE(plain.value.contains("decision"));
+    EXPECT_TRUE(r.sent("get_project").is_null());
 }
 
 // list_services states the status the Services page shows, and says why a service that cannot

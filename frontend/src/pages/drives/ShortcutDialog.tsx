@@ -1,7 +1,7 @@
 /** New shortcut (create_drive_shortcut): a name and what it opens. Repositories, transcripts and
  * drive items are chosen from what the workspace has; a dataset, project, agent or model is named;
  * a web address is typed. */
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { useRead } from "@/lib/api";
 import { Modal } from "@/lib/overlay";
 import { useToast } from "@/lib/toast";
@@ -11,7 +11,7 @@ import type { Repository } from "@/pages/repositories/forge";
 import { useWorkspace } from "@/pages/train/workspace";
 import { validName } from "./paths";
 import { storageFor, type Drive, type DriveStorage, type Item } from "./storage";
-import { TARGETS, cleanTarget, targetProblem, type Target, type TargetKind } from "./targets";
+import { TARGETS, cleanTarget, nameAfterTarget, selectsOnFocus, targetProblem, type Target, type TargetKind } from "./targets";
 import { FolderPicker } from "./FolderPicker";
 
 export function ShortcutDialog({ storage, folder, onClose }: { storage: DriveStorage; folder: string; onClose: () => void }) {
@@ -21,6 +21,7 @@ export function ShortcutDialog({ storage, folder, onClose }: { storage: DriveSto
   const [target, setTarget] = useState<Target>({ kind: "repository" });
   const [name, setName] = useState("");
   const [named, setNamed] = useState(false);
+  const selectedOnFocus = useRef(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
   const [picking, setPicking] = useState<Drive | null>(null);
@@ -36,7 +37,7 @@ export function ShortcutDialog({ storage, folder, onClose }: { storage: DriveSto
 
   const set = (patch: Partial<Target>, suggested?: string) => {
     setTarget((current) => ({ ...current, ...patch }));
-    if (suggested && !named) setName(suggested);
+    if (suggested) setName((current) => nameAfterTarget(current, named, suggested));
   };
   const choose = (next: TargetKind) => {
     setKind(next);
@@ -169,6 +170,21 @@ export function ShortcutDialog({ storage, folder, onClose }: { storage: DriveSto
           <Field label="Name" required error={nameProblem ?? fieldError(error, "name")} help="How the shortcut is listed in this folder.">
             <input
               value={name}
+              // A suggested name is selected on focus, so typing replaces it (lake#580). A click
+              // would move the caret on mouse-up and drop the selection, so that one mouse-up is
+              // let pass.
+              onFocus={(e) => {
+                if (selectsOnFocus(name, named)) {
+                  e.currentTarget.select();
+                  selectedOnFocus.current = true;
+                }
+              }}
+              onMouseUp={(e) => {
+                if (selectedOnFocus.current) {
+                  e.preventDefault();
+                  selectedOnFocus.current = false;
+                }
+              }}
               onChange={(e) => {
                 setNamed(true);
                 setName(e.target.value);
