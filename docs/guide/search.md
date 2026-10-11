@@ -1,7 +1,7 @@
 # Search
 
 Lake searches everything you can open: your repositories, the code in them, the datasets,
-transcripts, projects, agents, models and drives of every workspace you have, and these Docs.
+transcripts, projects, solutions, agents, models and drives of every workspace you have, and these Docs.
 There are two ways in: the **Search** box in the top bar, for a quick look as you type, and
 **Data → Search**, for every result with the places you choose.
 
@@ -31,6 +31,7 @@ your workspaces, whose text says it.
 | **Datasets** | dataset and database names | every workspace |
 | **Transcripts** | the title and the whole text of each transcript | every workspace |
 | **Projects** | project names, descriptions and decisions | every workspace |
+| **Solutions** | Orama's solutions and your own by name, id, promise and decision, and the methodologies by name, id and family, each shown with its icon | every workspace |
 | **Agents** | your own agents by name, id and purpose | every workspace |
 | **Models** | trained models by name, id and methodology | every workspace |
 | **Drives** | the names of drives and of the folders, files and shortcuts in them | every workspace |

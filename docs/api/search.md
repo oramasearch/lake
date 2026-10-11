@@ -11,7 +11,7 @@ a result that the capability would reject.
 |---|---|
 | `query` | Required. Plain text is ranked BM25F; quoted text is an exact substring; `/expression/` is an ECMAScript regex. |
 | `customer_id` | Optional space id (`customer` is its deprecated name, lake#591). Searches the space's index on lake's volume and, when the caller may read the space, the index of each of its switched workspaces. Empty: every space for the operator, and for anyone else every space the caller may read. |
-| `workspace_id` | Optional. Searches only that switched workspace's index (lake#381). A workspace that does not exist, is not switched, is deleted or is in a space the caller cannot read answers the same `invalid_input` (`workspace_id must name a workspace Zetta in this space`). |
+| `workspace_id` | Optional. Searches only that switched workspace's index (lake#381). A workspace that does not exist, is not switched, is deleted or is in an account the caller cannot read answers the same `invalid_input` (`workspace_id must name a workspace Zetta in this account`). |
 | `repository` | Optional repository id. |
 | `ref` | Optional branch or tag name. An immutable tag snapshot takes precedence over a branch with the same name. |
 | `change` | Optional exact change digest. Requires `customer_id` and `repository`, cannot be combined with `ref` or `history`, and uses scan mode. |

@@ -4,7 +4,8 @@ import { Fragment } from "react";
 import { Link } from "react-router-dom";
 import { BookOpen } from "lucide-react";
 import { Button, Empty } from "@/lib/ui";
-import { qs, useWsPath } from "./api";
+import { MethodologyIcon } from "@/components/CatalogueIcon";
+import { qs, useWq, useWsPath } from "./api";
 import { solutionMethodologies, type J } from "./logic";
 
 /** A solution's methodologies as links, each with its minimum level when above 1, or "—". */
@@ -17,7 +18,10 @@ export function MethodologyLinks({ solution }: { solution: J }) {
       {list.map((m, index) => (
         <Fragment key={`${m.id}-${index}`}>
           {index > 0 && ", "}
-          <Link to={ws(`/design/methodology?${qs({ id: m.id })}`)}>{m.id}</Link>
+          <span className="inline-flex items-center gap-1 align-middle">
+            <MethodologyIcon entry={{ id: m.id }} size={20} />
+            <Link to={ws(`/design/methodology?${qs({ id: m.id })}`)}>{m.id}</Link>
+          </span>
           {m.level > 1 && <span className="sub"> (level {m.level}+)</span>}
         </Fragment>
       ))}
@@ -40,6 +44,15 @@ export function MethodologyChips({ solution }: { solution: J }) {
       ))}
     </div>
   );
+}
+
+/** Each methodology's family, from the engine's list (empty on an older engine), so a solution of
+ * your own built on a methodology the icon set has not drawn takes that family's icon (lake#639). */
+export function useMethodologyFamilies(enabled = true): Record<string, string> {
+  const listed = useWq<J>("list_methodologies", {}, { retry: false, enabled });
+  const families: Record<string, string> = {};
+  if (!listed.isError && Array.isArray(listed.data?.methodologies)) for (const m of listed.data!.methodologies as J[]) if (m?.id) families[String(m.id)] = String(m.family ?? "");
+  return families;
 }
 
 /** Whether an entry matches a catalogue search: its id, name and the text fields given. */

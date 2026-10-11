@@ -72,6 +72,9 @@ workspace alias checks, audit, REST/MCP parity and actual calls, `start_experime
 confirmation (`Experiments.AgentDocsNameTheLiveReadAndTheConfirmation`; lake#449, lake#463), and
 lake's experiment names translated to and from the engine's study names
 (`Experiments.LakeSaysExperimentAndTheEngineKeepsItsStudyNames`, lake#561).
+`Docs.AgentDocsSayLakeAndNeverSpace` (`test_markdown.cpp`, lake#647) renders llms.txt,
+llms-full.txt, the skill and every description in OpenAPI and `tools/list` and fails on "space" or
+a lowercase "lake" in their prose.
 `Docs.GuidesSpeakOfExperiments` and `frontend/tests/wording.test.ts` keep "study" out of the guides
 and the pages. `test_workspaces.cpp` covers trial runs and experiment models named by their
 experiment, the promoted marker,

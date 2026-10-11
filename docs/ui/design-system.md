@@ -109,7 +109,10 @@ error state, `scripts/check-list-errors.mjs`).
 Icons: `components/Icon.tsx` draws lake's own 16 × 16 navigation and theme icons and returns
 nothing for an unknown name, so an unreviewed icon cannot slip in. The app also uses
 `lucide-react` for a few controls (the Ask Orama panel's buttons). Icons are decorative
-(`aria-hidden`); the accessible name stays on the surrounding link or button.
+(`aria-hidden`); the accessible name stays on the surrounding link or button. The one exception is
+the catalogue icons of solutions and methodologies (`components/CatalogueIcon.tsx`, lake#639): they
+are hand-drawn two-tone pictures on lake's tokens, each an image with a label saying what it shows.
+Their grid, stroke, palette and motifs are in [catalogue-icons.md](catalogue-icons.md).
 
 Hosted application identity pages are still rendered by lake. They use a compact version of the
 same token, font, form, focus, theme, and motion contracts. Their validated application accent is a

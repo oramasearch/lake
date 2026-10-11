@@ -54,7 +54,7 @@ shows it and keeps it honest.
   workspace Zetta of the workspace the conversation was held in (collection `lake_ask_messages`,
   [workspace-records.md](../architecture/workspace-records.md)): the person's text, and for Ask
   Orama's the reply with its proposals, reads, delegations and trace id. The page's `/w/<id>/`
-  workspace owns it; another workspace of the same space never shows it. Only the person who had a
+  workspace owns it; another workspace of the same account never shows it. Only the person who had a
   conversation reads it back, from any replica. A workspace that is not ready shows the error
   instead of falling back anywhere. Lake's PostgreSQL `ask_messages` table (migration `0030`) was copied
   into the workspace Zettas by the operator's one-shot copy and dropped by migration

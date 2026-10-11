@@ -94,8 +94,12 @@ struct WorkspaceFile {
     std::string name;
     std::string content_type;
     std::string sha256;
-    std::string object_key;
+    std::string object_key; // a store drive's file: its path in the store
     std::uint64_t size = 0;
+    // A store drive's file (lake#656): the drive, and the provider's version of the bytes for the
+    // ETag when it has one. Empty for a workspace file.
+    std::string store_drive_id = {};
+    std::string etag = {};
 };
 liquid::runtime::task<control::ZettaControlResult<WorkspaceFile>>
 find_workspace_file(ApiContext& context,
@@ -103,7 +107,16 @@ find_workspace_file(ApiContext& context,
                     std::string workspace_id,
                     std::string drive_id,
                     std::string id);
-// Plaintext [offset, offset + length) of a workspace file of `size` bytes.
+// The same for a file of a store drive, read from the store's provider; find_workspace_file
+// answers it for a store drive's id too.
+liquid::runtime::task<control::ZettaControlResult<WorkspaceFile>>
+find_store_file(ApiContext& context,
+                std::string customer_id,
+                std::string workspace_id,
+                std::string drive_id,
+                std::string id);
+// Plaintext [offset, offset + length) of a workspace file of `size` bytes, or with
+// `store_drive_id`, of the file at path `object_key` in that store drive's store.
 liquid::runtime::task<control::ZettaControlResult<std::string>>
 read_workspace_file(ApiContext& context,
                     std::string customer_id,
@@ -111,7 +124,8 @@ read_workspace_file(ApiContext& context,
                     std::string object_key,
                     std::uint64_t size,
                     std::uint64_t offset,
-                    std::uint64_t length);
+                    std::uint64_t length,
+                    std::string store_drive_id = {});
 // The live workspace a new repository is created in (lake#315): `input.workspace_id` must name a
 // workspace of `input.customer_id`'s space that is not deleted. Anything else, including a missing
 // id, is invalid_input at /workspace_id; there is no default workspace.

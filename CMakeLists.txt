@@ -225,6 +225,7 @@ add_library(lake-core STATIC
   src/control/project_decisions.cpp
   src/control/drives.cpp
   src/control/drive_files.cpp
+  src/control/store_contents.cpp
   src/control/stream_owners.cpp
   src/control/drive_share_links.cpp
   src/control/forge_records.cpp

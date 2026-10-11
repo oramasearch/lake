@@ -751,7 +751,7 @@ Result<TimestampEvidence> TimestampService::timestamp(std::string checkpoint_dig
     std::unique_lock lock(impl_->mutex);
     if (!impl_->valid_instance) {
         return std::unexpected(
-            Error{"invalid_input", "lake instance name is not a safe path component"});
+            Error{"invalid_input", "Lake instance name is not a safe path component"});
     }
     if (!valid_checkpoint_digest(checkpoint_digest)) {
         return std::unexpected(
@@ -810,7 +810,7 @@ Result<TimestampEvidence> TimestampService::renew(std::string_view checkpoint_di
     std::unique_lock lock(impl_->mutex);
     if (!impl_->valid_instance) {
         return std::unexpected(
-            Error{"invalid_input", "lake instance name is not a safe path component"});
+            Error{"invalid_input", "Lake instance name is not a safe path component"});
     }
     if (!valid_checkpoint_digest(checkpoint_digest)) {
         return std::unexpected(
@@ -874,7 +874,7 @@ Result<TimestampEvidence> TimestampService::evidence(std::string_view checkpoint
     std::unique_lock lock(impl_->mutex);
     if (!impl_->valid_instance) {
         return std::unexpected(
-            Error{"invalid_input", "lake instance name is not a safe path component"});
+            Error{"invalid_input", "Lake instance name is not a safe path component"});
     }
     const auto loaded = impl_->load(checkpoint_digest, policy);
     if (!loaded) {
@@ -888,7 +888,7 @@ Result<std::vector<std::string>> TimestampService::due(std::chrono::system_clock
     std::unique_lock lock(impl_->mutex);
     if (!impl_->valid_instance) {
         return std::unexpected(
-            Error{"invalid_input", "lake instance name is not a safe path component"});
+            Error{"invalid_input", "Lake instance name is not a safe path component"});
     }
     const auto valid_policy = validate_timestamp_policy(policy);
     if (!valid_policy) {

@@ -264,7 +264,7 @@ void register_image_capabilities(Registry& registry) {
         .name = "create_image_repository",
         .title = "Create image repository",
         .description =
-            "Route a tenant image repository `<space>/<name>` (or `<space>/cache/<name>`) to one "
+            "Route a tenant image repository `<account>/<name>` (or `<account>/cache/<name>`) to one "
             "workspace, whose Zetta then holds its manifests and tags. `workspace_id` is required "
             "and there is no default; a build's first push routes its target from the build's "
             "workspace. Repeating it for the same workspace answers the route; a name another "
@@ -349,7 +349,7 @@ void register_image_capabilities(Registry& registry) {
             }
             if (input.contains("workspace_id") && to.empty()) {
                 return ApiResult::failure("invalid_input",
-                                          "workspace_id must name a live workspace of this space",
+                                          "workspace_id must name a live workspace of this account",
                                           "/workspace_id");
             }
             const auto removed = context.store->delete_oci_repository_route(customer_id, name, to);
@@ -385,7 +385,7 @@ void register_image_capabilities(Registry& registry) {
         .name = "list_image_repositories",
         .title = "List image repositories",
         .description =
-            "A space's tenant image repositories with the workspace each belongs to and its tags, "
+            "An account's tenant image repositories with the workspace each belongs to and its tags, "
             "read from that workspace. `workspace_id` narrows it to one workspace. A repository "
             "whose workspace cannot be read is listed with `tags_unavailable`.",
         .input_schema = {{"type", "object"},
@@ -416,7 +416,7 @@ void register_image_capabilities(Registry& registry) {
                 }
                 if (!decision->allowed) {
                     co_return ApiResult::failure(
-                        "unauthorized", "principal is not allowed to read this space's images");
+                        "unauthorized", "principal is not allowed to read this account's images");
                 }
             }
             const std::string customer_id = input.at("customer_id");
@@ -430,7 +430,7 @@ void register_image_capabilities(Registry& registry) {
                 const auto workspace = context.store->get_workspace(workspace_id);
                 if (!workspace || workspace->customer_id != customer_id) {
                     co_return ApiResult::failure(
-                        "invalid_input", "workspace_id must name a workspace of this space",
+                        "invalid_input", "workspace_id must name a workspace of this account",
                         "/workspace_id");
                 }
             }

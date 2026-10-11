@@ -443,7 +443,7 @@ Result<Metadata> Service::initialize(const json& root) {
     std::unique_lock lock(impl_->mutex);
     if (!impl_->valid_instance) {
         return std::unexpected(
-            Error{"invalid_input", "lake instance name is not a safe path component"});
+            Error{"invalid_input", "Lake instance name is not a safe path component"});
     }
     const auto existing = impl_->latest_version("root");
     if (existing) {
@@ -488,7 +488,7 @@ Result<Metadata> Service::rotate_root(const json& root) {
     std::unique_lock lock(impl_->mutex);
     if (!impl_->valid_instance) {
         return std::unexpected(
-            Error{"invalid_input", "lake instance name is not a safe path component"});
+            Error{"invalid_input", "Lake instance name is not a safe path component"});
     }
     const auto current_version = impl_->latest_version("root");
     if (!current_version) {
@@ -535,7 +535,7 @@ Result<json> Service::publish(const json& targets, const json& snapshot, const j
     std::unique_lock lock(impl_->mutex);
     if (!impl_->valid_instance) {
         return std::unexpected(
-            Error{"invalid_input", "lake instance name is not a safe path component"});
+            Error{"invalid_input", "Lake instance name is not a safe path component"});
     }
     const auto root = impl_->load("root", std::nullopt);
     if (!root) {
@@ -614,7 +614,7 @@ Result<Metadata> Service::metadata(const std::string& role,
     std::unique_lock lock(impl_->mutex);
     if (!impl_->valid_instance) {
         return std::unexpected(
-            Error{"invalid_input", "lake instance name is not a safe path component"});
+            Error{"invalid_input", "Lake instance name is not a safe path component"});
     }
     return impl_->load(role, version);
 }

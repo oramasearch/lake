@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" role="img" aria-label="A gear with a clock counting down to its service">
+<title>S-8 Predictive Maintenance</title>
+<style>.l,.a{fill:none;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round}.l{stroke:currentColor}.a{stroke:var(--cat-accent,#8e6a00)}.d{fill:var(--cat-accent,#8e6a00)}.t{fill:var(--cat-tint,#8e6a0033)}.s{stroke-dasharray:2 2.5}</style>
+<circle class="l" cx="9" cy="14" r="4.5"/>
+<circle class="l" cx="9" cy="14" r="1.5"/>
+<path class="l" d="M9 7.5v1.5M9 19v1.5M2.5 14H4M14 14h1.5M4.4 9.4l1.1 1.1M12.5 17.5l1.1 1.1M4.4 18.6l1.1-1.1M12.5 10.5l1.1-1.1"/>
+<circle class="a" cx="18" cy="6" r="3.75"/>
+<path class="a" d="M18 4.25V6h1.5"/>
+</svg>

@@ -1,10 +1,13 @@
-/** Data → Drives (`/w/<id>/drives`, lake#561, docs/ui/drives.md): the workspace's drives, each
- * keeping its files in a repository (with history), as workspace files, or as shortcuts only, and
- * the workspace files changed most recently. New drive opens a drawer. */
-import { useMemo, useState } from "react";
-import { Link, useNavigate } from "react-router-dom";
-import { Clock, FileText, FolderGit2, HardDrive, Link2, Plus, Search } from "lucide-react";
-import { useRead } from "@/lib/api";
+/** Data → Drives (`/w/<id>/drives`, lake#561, docs/ui/drives.md): two tabs. **Drives**: the
+ * workspace's drives, each keeping its files in a repository (with history), as workspace files,
+ * as shortcuts only, or in one of its buckets or filesystems (a storage drive, lake#656), and the
+ * workspace files changed most recently; New drive opens a drawer. **Storage** (`?tab=storage`,
+ * moved from Datasets in lake#656): the workspace's buckets, filesystems and volumes. An old
+ * `#storage` link opens the Storage tab. */
+import { useEffect, useMemo, useState } from "react";
+import { Link, useLocation, useNavigate } from "react-router-dom";
+import { Archive, Clock, FileText, FolderGit2, HardDrive, Link2, Plus, Search } from "lucide-react";
+import { useRead, type Row } from "@/lib/api";
 import { relative } from "@/lib/format";
 import { Button, Card, Chip, DataTable, Empty, ErrorBlock, FilterChips, Page, Section, Skeleton, Stat, StatRow, SearchInput, Toolbar } from "@/lib/ui";
 import { useToast } from "@/lib/toast";
@@ -14,17 +17,30 @@ import { qs, useWorkspace, useWsPath } from "@/pages/train/workspace";
 import { STORAGE, storageLabel, type Storage } from "./targets";
 import type { Drive } from "./storage";
 import { NewDrive } from "./NewDrive";
+import { StorageTab } from "./StorageTab";
+import { QueryTabs, useQueryTab } from "@/pages/design/parts";
+
+const TABS = ["drives", "storage"] as const;
 
 type Recent = { drive: { id: string; name: string }; entry: { id: string; name: string; path: string; size?: number; modified_at: string; parent_id: string | null } };
 
-const ICONS = { repository: FolderGit2, files: HardDrive, virtual: Link2 } as const;
+const ICONS = { repository: FolderGit2, files: HardDrive, virtual: Link2, store: Archive } as const;
 
 export default function DrivesPage() {
   const { customerId, workspaceId } = useWorkspace();
   const wsPath = useWsPath();
   const navigate = useNavigate();
   const toast = useToast();
-  const [creating, setCreating] = useState(false);
+  const [creating, setCreating] = useState<false | { store?: Row }>(false);
+  const location = useLocation();
+  const tab = useQueryTab(TABS, "drives");
+  // Storage moved here from Datasets (lake#656): an old `#storage` link opens its tab.
+  useEffect(() => {
+    if (location.hash !== "#storage" || tab === "storage") return;
+    const next = new URLSearchParams(location.search);
+    next.set("tab", "storage");
+    navigate(`${location.pathname}?${next.toString()}`, { replace: true });
+  }, [location.hash, location.pathname, location.search, tab, navigate]);
   const [filter, setFilter] = useState("");
   const [kind, setKind] = useState<Storage | null>(null);
   const scope = { customer_id: customerId, workspace_id: workspaceId };
@@ -38,13 +54,23 @@ export default function DrivesPage() {
   const driveHref = (id: string, folder?: string | null) => wsPath(`/drives/drive?${qs({ id, folder: folder ?? "" })}`);
 
   const newButton = (
-    <Button variant="primary" onClick={() => setCreating(true)}>
+    <Button variant="primary" onClick={() => setCreating({})}>
       <Plus size={15} aria-hidden /> New drive
     </Button>
   );
 
   return (
-    <Page eyebrow="Data" title="Drives" sub="Where this workspace keeps its files: repositories with history, workspace files, and folders of shortcuts." actions={newButton}>
+    <Page eyebrow="Data" title="Drives" sub="Where this workspace keeps its files: repositories with history, workspace files, folders of shortcuts, and its buckets, filesystems and volumes." actions={tab === "drives" ? newButton : null}>
+      <QueryTabs<(typeof TABS)[number]>
+        value={tab}
+        tabs={[
+          { id: "drives", label: "Drives", count: drives.data ? all.length : undefined },
+          { id: "storage", label: "Storage" },
+        ]}
+      />
+      {tab === "storage" ? (
+        <StorageTab drives={all} onOpenAsDrive={(store) => setCreating({ store })} />
+      ) : (
       <WorkspaceGate returnTo="/drives">
         <StatRow cols={4}>
           <Stat label="Drives" icon={HardDrive} value={drives.isLoading ? "…" : all.length} sub="in this workspace" />
@@ -123,8 +149,10 @@ export default function DrivesPage() {
           )}
         </Section>
       </WorkspaceGate>
+      )}
       {creating && (
         <NewDrive
+          store={creating.store}
           onClose={() => setCreating(false)}
           onCreated={(drive) => {
             setCreating(false);

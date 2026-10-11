@@ -5182,7 +5182,7 @@ private:
         if (current != nullptr) {
             if (current->customer_id != customer_id) {
                 return std::unexpected(SyncStoreError{
-                    "invalid_input", "the workspace is not in the repository's space"});
+                    "invalid_input", "the workspace is not in the repository's account"});
             }
             if (current->usable()) {
                 return current;
@@ -5475,7 +5475,7 @@ private:
         std::error_code error;
         const bool present = std::filesystem::exists(marker, error);
         if (error) {
-            return std::unexpected(SyncStoreError{"io", "could not inspect the space store: " + error.message()});
+            return std::unexpected(SyncStoreError{"io", "could not inspect the account store: " + error.message()});
         }
         // Lake makes a repository's directory beside the space store when it first opens it, and
         // liquid writes LIQUID_REPO at create, so a directory without the entry point means the
@@ -5483,12 +5483,12 @@ private:
         const bool opened_before =
             std::filesystem::exists(repository_identifier(customer_id, repository_id), error);
         if (error) {
-            return std::unexpected(SyncStoreError{"io", "could not inspect the space store: " + error.message()});
+            return std::unexpected(SyncStoreError{"io", "could not inspect the account store: " + error.message()});
         }
         if (!present && opened_before) {
             return std::unexpected(SyncStoreError{
                 "corrupt", "repository " + repository_id +
-                               " was opened in the space store but its entry point is missing there; "
+                               " was opened in the account store but its entry point is missing there; "
                                "nothing is copied or created for it"});
         }
         return present;
@@ -5961,7 +5961,7 @@ public:
         // Only <root>/<space>/store and <root>/<space>/repositories, never the instance's own
         // directory (<root>/<node name>), <root>/workspaces or anything above the space.
         if (!path_component_is_safe(customer_id) || customer_id == "workspaces") {
-            return std::unexpected(SyncStoreError{"invalid_input", "invalid space location"});
+            return std::unexpected(SyncStoreError{"invalid_input", "invalid account store location"});
         }
         if (root_.empty()) {
             return std::unexpected(
@@ -7346,7 +7346,7 @@ struct ApiServer::Impl {
                              customer_id, *dropped,
                              std::filesystem::exists(entry.path() / "index", error)
                                  ? ""
-                                 : "; the space index is empty and was removed");
+                                 : "; the account's index is empty and was removed");
             }
         }
     }
@@ -7661,7 +7661,7 @@ struct ApiServer::Impl {
             }
             if (repository->customer_id != customer_id) {
                 return std::unexpected(SyncStoreError{
-                    "invalid_input", "the repository is not in this space"});
+                    "invalid_input", "the repository is not in this account"});
             }
             if (repository->workspace_id.empty()) {
                 // Not yet assigned (lake#513): it can only be in the space's store.
@@ -7770,7 +7770,7 @@ struct ApiServer::Impl {
                 }
                 if (!customer.empty() && workspace->customer_id != customer) {
                     return std::unexpected(
-                        search::Error{"invalid_input", "the workspace is not in this space"});
+                        search::Error{"invalid_input", "the workspace is not in this account"});
                 }
                 if (workspace->store_moved_at.empty() || workspace->desired == "deleted") {
                     return std::unexpected(search::Error{
@@ -7816,7 +7816,7 @@ struct ApiServer::Impl {
                 }
                 if (listed->size() >= static_cast<std::size_t>(page)) {
                     return std::unexpected(search::Error{
-                        "unsupported", "too many spaces to search them all; name a customer"});
+                        "unsupported", "too many accounts to search them all; name a customer_id"});
                 }
                 for (const control::Customer& customer : *listed) {
                     customers.push_back(customer.id);
@@ -8529,6 +8529,7 @@ struct ApiServer::Impl {
         ctx.clerk_publishable_key = options.clerk_publishable_key;
         ctx.sealing_public_key = options.sealing_public_key;
         ctx.transcriber = transcriber;
+        ctx.store_browser = options.store_browser;
         ctx.payments = payments;
         ctx.object_transport = object_transport;
         ctx.artifact_catalog = [this] {
@@ -10060,14 +10061,19 @@ struct ApiServer::Impl {
         auto shared = std::make_shared<ApiContext>(context);
         const std::string key = found->object_key;
         const std::uint64_t size = found->size;
+        const std::string store_drive_id = found->store_drive_id;
+        const std::string etag = !found->sha256.empty() ? found->sha256
+                                 : !found->etag.empty() ? found->etag
+                                                        : "size-" + std::to_string(size);
         co_return co_await stream_blob(
             route,
-            "\"" + found->sha256 + "\"",
+            "\"" + etag + "\"",
             size,
-            [shared, customer_id, workspace_id, key, size](
+            [shared, customer_id, workspace_id, key, size, store_drive_id](
                 std::uint64_t offset, std::span<std::byte> into) -> SyncStoreResult<std::uint64_t> {
                 auto window = control::settled(liquid::runtime::block_on(read_workspace_file(
-                    *shared, customer_id, workspace_id, key, size, offset, into.size())));
+                    *shared, customer_id, workspace_id, key, size, offset, into.size(),
+                    store_drive_id)));
                 if (!window) {
                     return std::unexpected(
                         SyncStoreError{window.error().code, window.error().message});

@@ -1272,7 +1272,7 @@ json audit_filter_input() {
                 {"description", "Read only this workspace's audit (its Zetta's chain)."}}},
               {"customer_id",
                {{"type", "string"},
-                {"description", "With the central log, read the audits of this space's live "
+                {"description", "With the central log, read the audits of this account's live "
                                 "workspaces (by default, every workspace in scope)."}}},
               {"log",
                {{"type", "string"},
@@ -1916,13 +1916,13 @@ std::expected<control::NewToken, ApiError> attenuated_token(const json& input,
                 ? std::ranges::find(*customers, "individual", &control::Customer::customer_type)
                 : std::vector<control::Customer>::const_iterator{};
         if (!customers || personal == customers->end()) {
-            return std::unexpected(ApiError{"unauthorized", "no personal space to check"});
+            return std::unexpected(ApiError{"unauthorized", "no account of your own to check"});
         }
         const auto allowed = context.store->customer_allows_non_expiring_credentials(personal->id);
         if (!allowed || !*allowed) {
             return std::unexpected(
                 ApiError{"unauthorized",
-                         "credentials that never expire are off for your space; turn on "
+                         "credentials that never expire are off for your account; turn on "
                          "allow_non_expiring_credentials with set_customer_credential_policy"});
         }
         token.is_static = true;
@@ -2074,7 +2074,7 @@ std::expected<control::Workspace, ApiError> repository_workspace(ApiContext& con
     if (!workspace || workspace->desired == "deleted" || workspace->customer_id != customer_id) {
         return std::unexpected(ApiError{"invalid_input",
                                         "workspace_id must name a workspace of the repository's "
-                                        "space; a repository belongs to one workspace",
+                                        "account; a repository belongs to one workspace",
                                         "/workspace_id"});
     }
     return *workspace;
@@ -2209,7 +2209,7 @@ void register_identity_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "get_organization",
         .title = "Get organization",
-        .description = "Read one organization: its name, the space it owns and when it was made.",
+        .description = "Read one organization: its name, the account it owns and when it was made.",
         .input_schema = id_input(),
         .output_schema =
             [] {
@@ -2287,7 +2287,7 @@ void register_identity_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "list_customers",
         .title = "List customers",
-        .description = "List the spaces (customers) you can see, newest first; a space owns "
+        .description = "List the accounts (customers) you can see, newest first; an account owns "
                        "repositories, workspaces and services.",
         .input_schema = list_input(),
         .output_schema = list_schema(customer_schema()),
@@ -2304,7 +2304,7 @@ void register_identity_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "get_customer",
         .title = "Get customer",
-        .description = "Read one space (customer): its handle, whether it belongs to a person or "
+        .description = "Read one account (customer): its handle, whether it belongs to a person or "
                        "an organization, and when it was made. Name it by `customer_id`.",
         .input_schema = {{"type", "object"},
                          {"properties", {{"customer_id", {{"type", "string"}}}}},
@@ -2973,7 +2973,7 @@ void register_identity_capabilities(Registry& registry) {
                             {{"type", "boolean"},
                              {"description",
                               "a standing token with no expiry that survives sign-out; needs a "
-                              "reason and named scopes, and the space's opt-in (lake#234)"}}},
+                              "reason and named scopes, and the account's opt-in (lake#234)"}}},
                            {"reason", {{"type", "string"}}}}},
                          {"required", json::array({"name", "scopes"})},
                          {"additionalProperties", false}},
@@ -3766,7 +3766,7 @@ void register_repository_capabilities(Registry& registry) {
         Capability{.name = "list_repositories",
                    .title = "List repositories",
                    .description = "The most recent repositories, newest first; customer_id "
-                                  "narrows to one space and workspace_id to one of its "
+                                  "narrows to one account and workspace_id to one of its "
                                   "workspaces.",
                    .input_schema = {{"type", "object"},
                                     {"properties",
@@ -3816,7 +3816,7 @@ void register_repository_capabilities(Registry& registry) {
                    }});
     registry.add(Capability{.name = "get_repository",
                             .title = "Get repository",
-                            .description = "Read one repository: its name, space, workspace, "
+                            .description = "Read one repository: its name, account, workspace, "
                                            "visibility, description (from its workspace) and "
                                            "whether it is deleted.",
                             .input_schema = id_input(),
@@ -3950,8 +3950,8 @@ void register_repository_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "transfer_repository",
         .title = "Transfer repository",
-        .description = "Refused: a repository stays in the space and workspace it was created "
-                       "in (lake#315). Export it and import it into the other space's workspace "
+        .description = "Refused: a repository stays in the account and workspace it was created "
+                       "in (lake#315). Export it and import it into the other account's workspace "
                        "instead.",
         .input_schema = {{"type", "object"},
                          {"properties",
@@ -3973,9 +3973,9 @@ void register_repository_capabilities(Registry& registry) {
             }
             // The routing trigger of migration 0051 holds the space and workspace fixed.
             return ApiResult::failure("conflict",
-                                      "a repository stays in the space and workspace it was "
+                                      "a repository stays in the account and workspace it was "
                                       "created in; export it and import it into a workspace of "
-                                      "the other space",
+                                      "the other account",
                                       "/customer_id");
         }});
     registry.add(Capability{
@@ -4907,7 +4907,7 @@ void register_organization_capabilities(Registry& registry) {
                    .description = "Invitations in an organization or team, including expiry "
                                   "and acceptance. Without organization_id, the pending "
                                   "invitations addressed to the signed-in person, by email or "
-                                  "by the handle of their personal space, with organization_name.",
+                                  "by the handle of their own account, with organization_name.",
                    .input_schema = {{"type", "object"},
                                     {"properties",
                                      {{"organization_id", {{"type", "string"}}},
@@ -5089,7 +5089,7 @@ void register_organization_capabilities(Registry& registry) {
         .name = "create_organization_space",
         .title = "Create organization",
         .description = "Start an organization as the signed-in person: the organization, its own "
-                       "space (handle generated when name is omitted), and the caller as its "
+                       "account (handle generated when name is omitted), and the caller as its "
                        "owner, in one step. Invite colleagues next with create_invitation.",
         .input_schema = {{"type", "object"},
                          {"properties",
@@ -5131,10 +5131,10 @@ void register_organization_capabilities(Registry& registry) {
         }});
     registry.add(Capability{
         .name = "convert_personal_space",
-        .title = "Turn a personal space into an organization",
-        .description = "Turn the caller's personal space into an organization's space. The space "
+        .title = "Turn your account into an organization",
+        .description = "Turn the caller's own account into an organization's account. The account "
                        "keeps its id, handle, repositories, workspaces and apps; the caller "
-                       "becomes the organization's owner and receives a fresh personal space.",
+                       "becomes the organization's owner and receives a fresh account of their own.",
         .input_schema = {{"type", "object"},
                          {"properties",
                           {{"customer_id", {{"type", "string"}}},
@@ -5152,7 +5152,7 @@ void register_organization_capabilities(Registry& registry) {
             }
             if (ctx.acting_user_id.empty()) {
                 return ApiResult::failure(
-                    "unauthorized", "only the person whose personal space this is can convert it");
+                    "unauthorized", "only the person whose own account this is can convert it");
             }
             if (trim_copy(in.at("display_name").get<std::string>()).empty()) {
                 return ApiResult::failure(
@@ -5175,7 +5175,7 @@ void register_organization_capabilities(Registry& registry) {
         .name = "join_organization",
         .title = "Join organization",
         .description = "Accept, as the signed-in person, a pending invitation addressed to their "
-                       "email or to the handle of their personal space. The membership records "
+                       "email or to the handle of their own account. The membership records "
                        "the invitation as its evidence and its inviter as the grantor.",
         .input_schema = {{"type", "object"},
                          {"properties", {{"invitation_id", {{"type", "string"}}}}},
@@ -5256,7 +5256,7 @@ void register_policy_capabilities(Registry& registry) {
     registry.add(Capability{.name = "get_object",
                             .title = "Get object",
                             .description =
-                                "Read one object of the access-control tree (a space, repository, "
+                                "Read one object of the access-control tree (an account, repository, "
                                 "team…) and its parent, to see where its grants come from.",
                             .input_schema = id_input(),
                             .output_schema = object_schema(),
@@ -5508,7 +5508,7 @@ std::expected<search::Query, ApiError> search_scope(const json& input, ApiContex
         return decision && decision->allowed;
     };
     const ApiError not_searchable{
-        "invalid_input", "workspace_id must name a workspace Zetta in this space",
+        "invalid_input", "workspace_id must name a workspace Zetta in this account",
         "/workspace_id"};
     if (!query.workspace.empty()) {
         const auto workspace = context.store->get_workspace(query.workspace);
@@ -5571,7 +5571,7 @@ std::expected<search::Query, ApiError> search_scope(const json& input, ApiContex
             // No cursor for this list: refused rather than searched in part.
             return std::unexpected(
                 ApiError{"invalid_input",
-                         "too many spaces to search them all; name a customer_id",
+                         "too many accounts to search them all; name a customer_id",
                          "/customer_id"});
         }
         std::vector<std::string> objects;
@@ -5724,7 +5724,7 @@ audit_scope(const json& input, ApiContext& context, const std::vector<std::strin
         }
         if (!spaces.empty() && std::ranges::find(spaces, workspace->customer_id) == spaces.end()) {
             return std::unexpected(ApiError{
-                "unauthorized", "the workspace is not in one of the caller's spaces"});
+                "unauthorized", "the workspace is not in one of the caller's accounts"});
         }
         scope.central = false;
         scope.workspaces.emplace_back(workspace->customer_id, workspace->id);
@@ -5738,7 +5738,7 @@ audit_scope(const json& input, ApiContext& context, const std::vector<std::strin
         const std::string customer_id = input.at("customer_id");
         if (!spaces.empty() && std::ranges::find(spaces, customer_id) == spaces.end()) {
             return std::unexpected(
-                ApiError{"unauthorized", "the space is not one of the caller's", "/customer_id"});
+                ApiError{"unauthorized", "the account is not one of the caller's", "/customer_id"});
         }
         customers.push_back(customer_id);
     } else if (!spaces.empty()) {
@@ -5848,7 +5848,7 @@ void register_audit_capabilities(Registry& registry) {
                        "event names its principal (`principal_name`) and, for a workspace call, "
                        "the inner `capability`. Reads the central log and every workspace's audit "
                        "(decision 52): `workspace_id` reads one workspace's, `customer_id` limits "
-                       "the workspaces to one space's, and `log: central` reads the central log "
+                       "the workspaces to one account's, and `log: central` reads the central log "
                        "alone. Each event says its `log`.",
         .input_schema = audit_filter_input(),
         .output_schema = list_schema(audit_event_schema()),
@@ -5881,7 +5881,7 @@ void register_audit_capabilities(Registry& registry) {
         .title = "Query my audit events",
         .description =
             "The signed-in principal's own signed audit events, filtered like audit, newest first, "
-            "from the central log and the audits of the workspaces of the principal's spaces. "
+            "from the central log and the audits of the workspaces of the principal's accounts. "
             "Successful reads (the polling a browser does) are left out unless `include_reads` "
             "is true; failed and denied reads always appear.",
         .input_schema = audit_filter_input(),
@@ -6056,8 +6056,8 @@ void register_audit_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "set_audit_retention",
         .title = "Set audit retention",
-        .description = "Set a space's retention of the central audit log, at or above the "
-                       "400-day floor; it can never be reduced. The space's workspace audits are "
+        .description = "Set an account's retention of the central audit log, at or above the "
+                       "400-day floor; it can never be reduced. The account's workspace audits are "
                        "kept until their workspace is deleted (decision 52, lake#318).",
         .input_schema = {{"type", "object"},
                          {"properties",

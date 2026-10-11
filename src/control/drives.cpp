@@ -101,7 +101,8 @@ std::string drive_entries_lookup(const std::string& drive_id) {
 }
 
 bool known_drive_storage(std::string_view storage) {
-    return storage == "repository" || storage == "files" || storage == "virtual";
+    return storage == "repository" || storage == "files" || storage == "virtual" ||
+           storage == "store";
 }
 
 bool valid_drive_name(std::string_view name) {
@@ -118,7 +119,8 @@ bool valid_drive_name(std::string_view name) {
 std::optional<std::string> drive_problem(const Drive& drive) {
     if (drive.customer_id.empty() || !valid_drive_name(drive.name) ||
         !known_drive_storage(drive.storage) ||
-        (drive.storage == "repository") == drive.repository_id.empty()) {
+        (drive.storage == "repository") == drive.repository_id.empty() ||
+        (drive.storage == "store") == drive.store_id.empty()) {
         return "drive is invalid";
     }
     return std::nullopt;
@@ -136,6 +138,9 @@ nlohmann::json DriveCodec::encode(const Drive& drive) {
     if (!drive.repository_id.empty()) {
         body["repository_id"] = drive.repository_id;
     }
+    if (!drive.store_id.empty()) {
+        body["store_id"] = drive.store_id;
+    }
     return body;
 }
 
@@ -150,6 +155,7 @@ std::optional<Drive> DriveCodec::decode(const StoredRecord& record) {
     drive.name = text(record.body, "name");
     drive.storage = text(record.body, "storage");
     drive.repository_id = text(record.body, "repository_id");
+    drive.store_id = text(record.body, "store_id");
     drive.created_by = text(record.body, "created_by");
     drive.created_at = record_instant(record.at_us);
     drive.at_us = record.at_us;
