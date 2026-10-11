@@ -3504,6 +3504,7 @@ namespace {
 struct ReadyWorkspace {
     Workspaces w;
     lake::api::Registry registry;
+    std::string instance_kek; // empty: no workspace records
     ReadyWorkspace() {
         auto requested = w.run(w.service->request(w.customer_id));
         const auto workspace = w.store->get_service(requested->service_id);
@@ -3518,6 +3519,7 @@ struct ReadyWorkspace {
         context.authorized = true;
         context.acting_identity = "admin";
         context.operator_credential = true;
+        context.instance_kek = instance_kek;
         context.request_id = lake::control::new_uuid_v4();
         if (!input.contains("customer_id")) {
             input["customer_id"] = w.customer_id;
@@ -3662,6 +3664,78 @@ TEST(Workspaces, CreateProjectSaysWhetherTheNameIsMissingOrTaken) {
     const auto other = r.call("workspace_act",
                               {{"capability", "create_project"}, {"input", {{"name", "churn"}}}});
     EXPECT_NE(other.error.code, "conflict") << "only the engine's name refusal is a clash";
+}
+
+// The decision a project should improve is lake's to keep (lake#577): the engine's project has no
+// field for it (its `intent` is a trace note it strips), so create_project keeps `decision` in the
+// workspace's records under the new project's id, get_project answers it beside the description,
+// and delete_project removes it.
+TEST(Workspaces, AProjectKeepsItsDecisionBesideItsDescription) {
+    ReadyWorkspace r;
+    r.instance_kek = lake::test::test_instance_kek();
+    const std::string id = lake::control::new_uuid_v4();
+    r.w.caller->answers["create_project"] = {{"name", "churn"}, {"owner", "admin"}};
+    r.w.caller->answers["get_project"] = {{"id", id},
+                                          {"name", "churn"},
+                                          {"description", "Which accounts will not renew?"},
+                                          {"inputs", json::array()},
+                                          {"graphs", json::array()}};
+    const auto created =
+        r.call("workspace_act",
+               {{"capability", "create_project"},
+                {"input",
+                 {{"name", "churn"},
+                  {"description", "Which accounts will not renew?"},
+                  {"decision", "  Which accounts the success team calls first each week  "}}}});
+    ASSERT_TRUE(created.ok) << created.error.message;
+    EXPECT_EQ(created.value["decision"], "Which accounts the success team calls first each week");
+    const json sent = r.sent("create_project");
+    EXPECT_FALSE(sent.contains("decision")) << "the engine's project has no such field";
+    EXPECT_EQ(sent["description"], "Which accounts will not renew?");
+
+    const auto read =
+        r.call("workspace_query", {{"capability", "get_project"}, {"input", {{"name", "churn"}}}});
+    ASSERT_TRUE(read.ok) << read.error.message;
+    EXPECT_EQ(read.value["description"], "Which accounts will not renew?");
+    EXPECT_EQ(read.value["decision"], "Which accounts the success team calls first each week")
+        << "three distinct strings, each in its place";
+
+    // Sealed in the workspace's records, not in PostgreSQL.
+    bool sealed = false;
+    for (auto& [url, tables] : r.w.caller->topics.records) {
+        for (const auto& [key, row] : tables.rows("project_decisions")) {
+            sealed = true;
+            EXPECT_EQ(key, id);
+            EXPECT_EQ(row.dump().find("success team"), std::string::npos) << "sealed at rest";
+        }
+    }
+    EXPECT_TRUE(sealed);
+
+    EXPECT_EQ(
+        r.call("workspace_act",
+               {{"capability", "create_project"}, {"input", {{"name", "other"}, {"decision", 7}}}})
+            .error.path,
+        "/input/decision");
+
+    r.w.caller->answers["delete_project"] = {{"name", "churn"},
+                                             {"id", id},
+                                             {"removed", {{"inputs", 0}, {"graphs", 0}}},
+                                             {"kept", {{"runs", 0}, {"models", 0}}}};
+    ASSERT_TRUE(
+        r.call("workspace_act", {{"capability", "delete_project"}, {"input", {{"name", "churn"}}}})
+            .ok);
+    const auto gone =
+        r.call("workspace_query", {{"capability", "get_project"}, {"input", {{"name", "churn"}}}});
+    ASSERT_TRUE(gone.ok);
+    EXPECT_FALSE(gone.value.contains("decision")) << "a deleted project's decision goes with it";
+
+    // A project created without a decision writes no record and reads none.
+    r.w.caller->calls.clear();
+    const auto plain =
+        r.call("workspace_act", {{"capability", "create_project"}, {"input", {{"name", "plain"}}}});
+    ASSERT_TRUE(plain.ok);
+    EXPECT_FALSE(plain.value.contains("decision"));
+    EXPECT_TRUE(r.sent("get_project").is_null());
 }
 
 // list_services states the status the Services page shows, and says why a service that cannot

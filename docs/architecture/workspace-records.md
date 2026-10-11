@@ -29,6 +29,9 @@ route (`oci_repository_routes`) finds their workspace from an address that names
 Transcripts (lake#561) are the first collection created in the workspace from the start, with no
 PostgreSQL table behind it and nothing to copy: `lake_transcripts`, found by the space, edited at the
 revision read ([transcripts.md](../api/transcripts.md)).
+A project's decision (lake#577) is lake's own record about an engine object: `lake_project_decisions`,
+keyed by the engine's project id and found by the space, written once when the project is created
+and removed with it ([workspaces.md](../api/workspaces.md#a-projects-decision)).
 Drives (lake#561) follow the same way: `lake_drives`, found by the space, and `lake_drive_entries`,
 found by drive, each edited at the revision read; a workspace file's bytes are not a record but an
 object in the workspace Zetta's `lake_files` bucket ([drives.md](../api/drives.md#how-file-bytes-are-kept)).

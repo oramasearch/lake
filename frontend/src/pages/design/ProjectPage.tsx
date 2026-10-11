@@ -146,8 +146,9 @@ function ProjectBody({ name, building, onBuilding }: { name: string; building: b
         />
       </Panel>
       <Panel label="Decision" title="What It Should Improve">
-        <p className="m-0 text-[13px]">{text(p, "intent") || text(p, "description") || <span className="text-ink-3">No description.</span>}</p>
-        {text(p, "intent") && text(p, "description") && <p className="mb-0 mt-2 text-[12.5px] text-ink-2">{text(p, "description")}</p>}
+        {/* The decision (lake#577) and, below it, the description: each in its own place. */}
+        <p className="m-0 text-[13px]">{text(p, "decision") || <span className="text-ink-3">No decision recorded.</span>}</p>
+        {text(p, "description") && <p className="mb-0 mt-2 text-[12.5px] text-ink-2">{text(p, "description")}</p>}
       </Panel>
       <Panel label="Dataset">
         <p className="m-0 font-mono text-[12.5px] break-all">{dataset || <span className="font-sans text-ink-3">Chosen when you build or run a pipeline.</span>}</p>
