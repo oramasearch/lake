@@ -16,12 +16,12 @@ optional pipeline template or reference, and notes.
 
 | Capability | Kind | Input | Output |
 |---|---|---|---|
-| `list_solutions` | read, `read` on the space | `{customer_id, workspace_id, source?}` | `{solutions: [...], catalogue: {available, message}}` |
-| `get_solution` | read, `read` on the space | `{customer_id, workspace_id, id}` | `{solution}` |
-| `create_solution` | action, `write` on the space | `{customer_id, workspace_id, name, problem, decision, measurement: {metric, baseline?, target?}, methodologies?, pipeline?, notes?}` | `{solution}` |
-| `update_solution` | action, `write` on the space | `{customer_id, workspace_id, id}` and any of the fields `create_solution` takes | `{solution}` |
-| `delete_solution` | action, `write` on the space | `{customer_id, workspace_id, id}` | `{deleted: true}` |
-| `duplicate_solution` | action, `write` on the space | `{customer_id, workspace_id, id, name?}` | `{solution}`, the new copy |
+| `list_solutions` | read, `read` on the account | `{customer_id, workspace_id, source?}` | `{solutions: [...], catalogue: {available, message}}` |
+| `get_solution` | read, `read` on the account | `{customer_id, workspace_id, id}` | `{solution}` |
+| `create_solution` | action, `write` on the account | `{customer_id, workspace_id, name, problem, decision, measurement: {metric, baseline?, target?}, methodologies?, pipeline?, notes?}` | `{solution}` |
+| `update_solution` | action, `write` on the account | `{customer_id, workspace_id, id}` and any of the fields `create_solution` takes | `{solution}` |
+| `delete_solution` | action, `write` on the account | `{customer_id, workspace_id, id}` | `{deleted: true}` |
+| `duplicate_solution` | action, `write` on the account | `{customer_id, workspace_id, id, name?}` | `{solution}`, the new copy |
 
 Every solution in an answer carries:
 
@@ -129,10 +129,10 @@ The copy is a new record; editing it never changes the original.
 ## Where they live
 
 A workspace's own solutions are sealed records in the collection `lake_solutions` of the workspace
-Zetta ([workspace records](../architecture/workspace-records.md)), found by the space
+Zetta ([workspace records](../architecture/workspace-records.md)), found by the account
 (`customer:<id>`). Nothing about them is in PostgreSQL. A solution belongs to the workspace it was
-created in: another workspace of the same space neither lists it nor reads, edits, deletes or
-copies it (`not_found`), and another space is refused before any workspace is read
+created in: another workspace of the same account neither lists it nor reads, edits, deletes or
+copies it (`not_found`), and another account is refused before any workspace is read
 (`unauthorized`). Deleting the workspace deletes them with its Zetta.
 
 Edits and deletes are written conditionally on the revision read and retried on a conflict, as for
@@ -171,7 +171,7 @@ and `get_solution`: lake's answer both kinds, the engine's (inside `workspace_qu
 | `invalid_input` | A required field is missing or empty (`/name`, `/problem`, `/decision`, `/measurement/metric`), a field is longer than its bound, a methodology id is not an id or is listed twice (`/methodologies/<n>/id`), a level is outside 1-4, `source` is neither `orama` nor `workspace`, or `update_solution` sends no field to change |
 | `forbidden` | `update_solution` or `delete_solution` names one of Orama's solutions |
 | `not_found` | No solution by that id in this workspace, or none in Orama's catalogue |
-| `unauthorized` | The caller cannot read (lists and reads) or write (changes) the space |
+| `unauthorized` | The caller cannot read (lists and reads) or write (changes) the account |
 | `workspace_not_ready` | The workspace Zetta is not ready |
 
 ## Limits
@@ -194,7 +194,7 @@ A workspace's own solutions are not paged: a workspace is expected to hold tens 
   - `WorkspaceRecordStores.SolutionsAreTheWorkspacesOwnAndOramasStayReadOnly`
     (`tests/test_workspace_records.cpp`, in memory and on PostgreSQL) creates one, lists both
     kinds, reads, edits, refuses editing and deleting Orama's with `forbidden`, duplicates from
-    Orama's and from one's own, deletes, refuses another workspace and another space, and lists
+    Orama's and from one's own, deletes, refuses another workspace and another account, and lists
     without the catalogue.
 - `frontend/tests/solutions.test.ts` covers the page's filter, the methodology field and the
   inputs Start as a Project sends.

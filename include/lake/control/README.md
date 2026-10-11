@@ -11,6 +11,11 @@ as `WorkspaceDeletionItem`s, with `completed_at` once lake finished the steps ou
 used from its space's index; `search::Service::drop_workspace` removes a deleted workspace's own
 search index (lake#381).
 
+`OrganizationDeletion` (`store.hpp`, lake#645) is what `Store::delete_organization` removes or,
+with `dry_run`, would remove: the organization, its account's id and handle, the live workspaces that
+refuse it, and counts per kind. `Store` also gains `revoke_invitation`, `get_grant`,
+`revoke_grant` and `delete_secret_mount_route` ([deletion.md](../../../docs/api/deletion.md)).
+
 `StreamOwner` is a topic's creator; `stream_owners.hpp` keeps it as a sealed record in the
 topic's workspace Zetta (lake#379); `Store` has no reads of the retired `stream_owners` table,
 which migration `0070` dropped (lake#311). `list_agent_task_stream_scopes` supplies one customer's compact durable task
@@ -120,7 +125,9 @@ workspace, and `transfer_repository` is no longer part of `Store`.
 
 `metering.hpp` holds repository usage in workspace Zettas (lake#348, lake#349): the
 `lake_metering_usage` hourly transfer counters, added to with a conditional write, and the
-`lake_metering_build_records` per-result records, written `if_absent`. `store.hpp` has no
+`lake_metering_build_records` per-result records, written `if_absent`, and (lake#658) the
+`lake_metering_job_records` that a finished build, agent job or cron run was charged, written
+`if_absent` before its resources are added to the usage series. `store.hpp` has no
 metering store methods: the retired tables and their legacy reads are gone (migration `0070`).
 `store.hpp`'s `UsageLimit`, `usage_limits` and `set_usage_limit` are an account's per-dimension
 usage limits (migration `0072_usage_limits`, lake#564): content-free configuration; the usage stays

@@ -100,6 +100,14 @@ public:
                                                         int lifetime_seconds);
     SecretTask<control::DynamicSecretLease> revoke_lease(std::string lease_id);
 
+    // Deleting the mount (lake#645): every record of it in its workspace, the secrets with all
+    // their versions, the named keys, their and the mount's data keys, its leases, its name claim
+    // and last the mount record, each removed by key; a record already gone is not an error, so a
+    // deletion stopped part way is finished by calling again. With `dry_run` nothing is removed.
+    // Answers how many records of each kind went (would go), and the secrets' names. The caller
+    // removes the route (Store::delete_secret_mount_route) only after this succeeded.
+    SecretTask<nlohmann::json> remove_all(bool dry_run);
+
 private:
     MountSecrets(control::WorkspaceRecords records, control::SecretMountRoute route,
                  control::Store* store, std::string instance_kek)

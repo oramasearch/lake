@@ -229,6 +229,113 @@ json secret_value(const std::string& plaintext) {
 
 } // namespace
 
+SecretTask<json> MountSecrets::remove_all(bool dry_run) {
+    using Result = ZettaControlResult<json>;
+    const std::string& mount_id = route_.mount_id;
+    // Each record to remove: its collection and key, in the order they go. The mount record
+    // goes last, so a deletion stopped part way still finds the mount and is finished by a retry.
+    std::vector<std::pair<control::RecordCollection, std::string>> doomed;
+    json names = json::array();
+    std::map<std::string, std::int64_t> counts{{"secrets", 0},
+                                               {"versions", 0},
+                                               {"encryption_keys", 0},
+                                               {"data_keys", 0},
+                                               {"leases", 0},
+                                               {"mount", 0}};
+    auto entries = control::settled(co_await records_.list(
+        control::SecretEntryCodec::collection, control::SecretEntryCodec::lookup(mount_id)));
+    if (!entries) {
+        co_return Result(std::unexpected(entries.error()));
+    }
+    for (const StoredRecord& stored : *entries) {
+        const auto entry = control::SecretEntryCodec::decode(stored);
+        if (!entry || entry->mount_id != mount_id) {
+            continue;
+        }
+        auto versions = control::settled(
+            co_await records_.list(control::SecretVersionCodec::collection,
+                                   control::SecretVersionCodec::lookup(mount_id, entry->name)));
+        if (!versions) {
+            co_return Result(std::unexpected(versions.error()));
+        }
+        for (const StoredRecord& version : *versions) {
+            const auto decoded = control::SecretVersionCodec::decode(version);
+            if (decoded && decoded->mount_id == mount_id && decoded->name == entry->name) {
+                doomed.emplace_back(control::SecretVersionCodec::collection, version.id);
+                ++counts["versions"];
+            }
+        }
+        doomed.emplace_back(control::SecretEntryCodec::collection, stored.id);
+        ++counts["secrets"];
+        names.push_back(entry->name);
+    }
+    std::set<std::string> key_ids;
+    auto keys = control::settled(co_await records_.list(
+        control::EncryptionKeyCodec::collection, control::EncryptionKeyCodec::lookup(mount_id)));
+    if (!keys) {
+        co_return Result(std::unexpected(keys.error()));
+    }
+    for (const StoredRecord& stored : *keys) {
+        const auto decoded = control::EncryptionKeyCodec::decode(stored);
+        if (decoded && decoded->key.mount_id == mount_id) {
+            key_ids.insert(decoded->key.id);
+            doomed.emplace_back(control::EncryptionKeyCodec::collection, stored.id);
+            ++counts["encryption_keys"];
+        }
+    }
+    auto leases = control::settled(co_await records_.list(
+        control::SecretLeaseCodec::collection, control::SecretLeaseCodec::lookup(mount_id)));
+    if (!leases) {
+        co_return Result(std::unexpected(leases.error()));
+    }
+    for (const StoredRecord& stored : *leases) {
+        const auto decoded = control::SecretLeaseCodec::decode(stored);
+        if (decoded && decoded->mount_id == mount_id) {
+            doomed.emplace_back(control::SecretLeaseCodec::collection, stored.id);
+            ++counts["leases"];
+        }
+    }
+    // The data keys of the space, of which this mount's and its named keys' go.
+    auto data_keys = control::settled(
+        co_await records_.list(control::SecretDataKeyCodec::collection,
+                               control::SecretDataKeyCodec::lookup(route_.customer_id)));
+    if (!data_keys) {
+        co_return Result(std::unexpected(data_keys.error()));
+    }
+    for (const StoredRecord& stored : *data_keys) {
+        const auto decoded = control::SecretDataKeyCodec::decode(stored);
+        if (decoded &&
+            ((decoded->owner_kind == "mount" && decoded->owner_id == mount_id) ||
+             (decoded->owner_kind == "encryption" && key_ids.contains(decoded->owner_id)))) {
+            doomed.emplace_back(control::SecretDataKeyCodec::collection, stored.id);
+            ++counts["data_keys"];
+        }
+    }
+    // The name claim, then the mount itself.
+    auto mount = control::settled(co_await this->mount());
+    if (mount) {
+        doomed.emplace_back(control::SecretMountCodec::collection,
+                            control::secret_mount_name_key(records_, *mount));
+        doomed.emplace_back(control::SecretMountCodec::collection, mount_id);
+        counts["mount"] = 1;
+    } else if (mount.error().code != "not_found") {
+        co_return Result(std::unexpected(mount.error()));
+    }
+    if (!dry_run) {
+        for (const auto& [collection, key] : doomed) {
+            auto removed = control::settled(co_await records_.remove(collection, key));
+            if (!removed && removed.error().code != "not_found") {
+                co_return Result(std::unexpected(removed.error()));
+            }
+        }
+    }
+    json counted = json::object();
+    for (const auto& [kind, count] : counts) {
+        counted[kind] = count;
+    }
+    co_return Result(json{{"counts", std::move(counted)}, {"secrets", std::move(names)}});
+}
+
 ApiResult secret_records_failure(const ZettaControlError& error) {
     return ApiResult::failure(error.code, error.message, error.path);
 }

@@ -50,7 +50,7 @@ after Transcripts, and call only `/v1` capabilities.
 **Sign in** asks for the secret mount the refresh token goes to, calls
 `begin_mcp_connection_sign_in` and sends the browser to the server's sign-in. The server sends it
 back to `/mcp-connections/oauth/callback?code&state` (outside any workspace: the state names the
-space and workspace), which calls `complete_mcp_connection_sign_in` there and opens the
+account and workspace), which calls `complete_mcp_connection_sign_in` there and opens the
 connection, or says why the sign-in did not finish.
 
 ## Verify

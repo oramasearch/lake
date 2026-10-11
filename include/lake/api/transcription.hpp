@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <expected>
 #include <functional>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -57,6 +58,13 @@ bool looks_like_captions(std::string_view text);
 // repeated by the next cue (rolling captions) is kept once. Cues become lines. Plain text comes
 // back unchanged, apart from CRLF line ends.
 std::string clean_caption_text(std::string_view text);
+
+// How long a recording is, read from its container (lake#658, src/api/audio_duration.cpp): WAV,
+// FLAC, Ogg (Opus, Vorbis), WebM/Matroska (its Duration, or its latest block for a browser's
+// recording that has none), MP4/M4A (the movie header, or a fragmented file's sample durations)
+// and MP3 (a Xing/Info or VBRI frame count, else its bit rate). nullopt for anything else.
+// Speech-to-text is billed by these seconds when the model does not report them.
+std::optional<double> audio_duration_seconds(std::string_view audio);
 
 // The multipart/form-data body of OpenAI's transcription request.
 std::string openai_transcription_body(std::string_view boundary,

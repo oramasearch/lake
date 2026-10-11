@@ -28,6 +28,7 @@ may wrap across source lines.
 | | `sharing` | Sharing and Shared with Me |
 | | `search` | Search |
 | | `load-data` | Datasets and Loading Data |
+| | `connections` | Connections (lake#651) |
 | | `transcripts` | Transcripts and Speech-to-Text |
 | | `mcp-connections` | MCP Connections |
 | Design | `design` | AI Projects and Pipelines |
@@ -65,10 +66,11 @@ may wrap across source lines.
   plainly as a limit. `concepts.md` says when it was last checked against lake's source; change
   that date when you check it again. `Workspaces.StartWorkspaceAnswersItsIdBesideTheSpacesOtherWorkspaces`
   keeps it saying an account "can have many workspaces" and naming `workspace_id`.
-- Speak of **workspaces**. The guides never say "space" or "personal space" to a reader; `customer_id`
+- Speak of **workspaces**. The guides never say `space` or `personal space` to a reader; `customer_id`
   is the id of the account that owns the workspaces (theirs, or their organization's). Code spans
   and blocks may name fields and quote server messages. `Docs.GuidesSpeakOfWorkspaces` checks the
-  prose, and the banned word "seam".
+  prose, and the banned word "seam"; `Docs.DeveloperDocsNeverSaySpace` checks every file here,
+  this README included, and every `docs/api/*.md` page (lake#669).
 - Speak of **experiments**, as an AI experiment tracker does. The guides never say "study" to a
   reader; it is the engine's name, which only code spans may quote (`study-events.*`,
   ExperimentsAgent's `study` field). An experiment's attempts are **trials**, each a training

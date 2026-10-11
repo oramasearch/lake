@@ -4,9 +4,10 @@
 import { INLINE_TYPES, storageLabel, targetHref, type Storage, type Target } from "./targets.ts";
 
 export type DriveMatch = {
-  drive: { id: string; name: string; storage: Storage; repository_id: string | null };
+  drive: { id: string; name: string; storage: Storage; repository_id: string | null; store_id?: string | null };
   kind: "drive" | "folder" | "file" | "shortcut";
-  /** The entry's id in a workspace-files or virtual drive; null for a drive or a repository path. */
+  /** The entry's id in a workspace-files or virtual drive, its path in a store drive; null for a
+   * drive or a repository path. */
   id: string | null;
   parent_id: string | null;
   name: string;

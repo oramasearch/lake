@@ -39,13 +39,13 @@ opens its serving page; **training** under it opens Train → Models.
 2. Press **Publish v2** on the model's row (the button names its latest version). The row then
    shows **Call** and **Unpublish**. To publish another version, promote it from Train → Models.
 
-- REST: `POST /v1/workspace_act` with the engine's `expose_model`:
+- REST: `POST /v1/expose_model`:
 
 ```json
-{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "capability": "expose_model", "input": {"model_id": "<model id>"}}
+{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "model_id": "<model id>"}
 ```
 
-- MCP: `workspace_act` with the same input.
+- MCP: `expose_model` with the same input.
 
 The answer's `call` names the Lake capability that now serves the model (`predict`), with its method,
 path and input filled in.
@@ -93,13 +93,13 @@ account, so a read-only key can call it.
 Press **Unpublish** on the model's row and confirm. Unpublishing a model stops every outside call
 at once; you can publish it again later.
 
-- REST: `POST /v1/workspace_act`:
+- REST: `POST /v1/unexpose_model`:
 
 ```json
-{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "capability": "unexpose_model", "input": {"model_id": "<model id>"}}
+{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "model_id": "<model id>"}
 ```
 
-- MCP: `workspace_act` with the same input.
+- MCP: `unexpose_model` with the same input.
 
 ### A Model's Serving Page
 
@@ -137,13 +137,13 @@ is not measured yet.
 
 ### List Models from Code
 
-- REST: `POST /v1/workspace_query`:
+- REST: `POST /v1/list_models`:
 
 ```json
-{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "capability": "list_models", "input": {}}
+{"customer_id": "<customer id>", "workspace_id": "<workspace id>"}
 ```
 
-- MCP: `workspace_query` with the same input. Each model carries its id, name, project and
+- MCP: `list_models` with the same input. Each model carries its id, name, project and
   pipeline, run, score, feature schema, creation time and whether it is published.
 
 ## Ship → Search Indexes
@@ -160,13 +160,13 @@ filters the list; open an index to search it, publish it and call it from your o
    to index every column.
 4. Press **Create index**. The new index opens.
 
-- REST: `POST /v1/workspace_act` with the engine's `create_index`:
+- REST: `POST /v1/create_index`:
 
 ```json
-{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "capability": "create_index", "input": {"table": "support_tickets", "fields": ["subject", "body"]}}
+{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "table": "support_tickets", "fields": ["subject", "body"]}
 ```
 
-- MCP: `workspace_act` with the same input. The answer carries the new index's id.
+- MCP: `create_index` with the same input. The answer carries the new index's id.
 
 ### Try a Search
 
@@ -175,13 +175,13 @@ under **In** (or keep *all fields*), set **Hits** (1 to 100) and press **Search*
 record's id and its score. The query, field and hit count stay in the page address, so a search can
 be shared. Searching here works whether or not the index is published.
 
-- REST: `POST /v1/workspace_query` with the engine's search:
+- REST: `POST /v1/search_workspace_index`:
 
 ```json
-{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "capability": "search", "input": {"index_id": "<index id>", "query": "renewal risk", "top_k": 10}}
+{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "target": "<index id>", "query": "renewal risk", "top_k": 10}
 ```
 
-- MCP: `workspace_query` with the same input.
+- MCP: `search_workspace_index` with the same input.
 
 ### Publish an Index
 
@@ -189,13 +189,13 @@ On the index page, the **Publishing** card says whether the index answers outsid
 **Publish**. To stop, press **Unpublish** and confirm: every outside call stops at once, and
 searching in Lake keeps working.
 
-- REST: `POST /v1/workspace_act`:
+- REST: `POST /v1/expose_index`:
 
 ```json
-{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "capability": "expose_index", "input": {"index_id": "<index id>"}}
+{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "index_id": "<index id>"}
 ```
 
-- The same with `unexpose_index` unpublishes it. MCP: `workspace_act` with the same input.
+- The same with `unexpose_index` unpublishes it. MCP: `expose_index` with the same input.
 
 ### Create a Search Key
 
@@ -240,6 +240,18 @@ workspace and records the query.
 
 For an index over `account_id` and `plan`, each hit's `fields` holds that row's `account_id` and
 `plan`. Ask for some fields only with `&fields=plan` (repeat it, or comma-separate, for more).
+
+## Delete a Model Version or a Search Index
+
+- On Ship → Model, press **Delete**, type the model's name and press **Delete model version**. That
+  version's trained model goes, and stops answering if it was published; its other versions and
+  the run that trained it stay. REST `POST /v1/delete_model`, MCP `delete_model`.
+- On Ship → Search Index, press **Delete**, type the indexed table's name and press **Delete
+  index**. The index goes, and stops answering if it was published; the dataset stays. REST
+  `POST /v1/delete_index`, MCP `delete_index`.
+
+Both take `customer_id`, `workspace_id` and `id`, and `"dry_run": true` to check first. Neither can
+be undone.
 
 ## Limits
 

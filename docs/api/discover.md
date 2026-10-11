@@ -3,11 +3,11 @@
 **Updated 2026-10-03 (lake#376): Opportunities live in the workspace Zetta of the workspace their
 scan ran in.** A finished scan is saved, once, as records of the `lake_opportunities` collection in
 that workspace's Zetta ([workspace records](../architecture/workspace-records.md)), sealed and found
-by the space. Each record's key is derived from the scan and its rank, so however many readers or
+by the account. Each record's key is derived from the scan and its rank, so however many readers or
 replicas settle the scan, it is saved once. `list_opportunities`, `dismiss_opportunity` and
 `create_projects_from_opportunities {opportunity_ids}` take `workspace_id` (required, as for every
 workspace capability) and act on that workspace's Opportunities only: another workspace of the same
-space lists none of them and answers `not_found` for their ids, and a missing, malformed or unknown
+account lists none of them and answers `not_found` for their ids, and a missing, malformed or unknown
 `workspace_id` is `invalid_input` at `/workspace_id`. A status change (`dismissed`, `project`) is a
 write conditional on the revision read, reread and retried when another write landed first. A task
 that names no workspace has nowhere to keep its Opportunities and saves none; a workspace that is not

@@ -33,6 +33,7 @@ export function Page({
   actions,
   children,
   wide,
+  icon,
 }: {
   eyebrow?: ReactNode;
   title: ReactNode;
@@ -40,14 +41,19 @@ export function Page({
   actions?: ReactNode;
   children?: ReactNode;
   wide?: boolean;
+  /** A picture beside the title (a solution's or methodology's icon, lake#639). */
+  icon?: ReactNode;
 }) {
   return (
     <div className={cx("page-container", wide && "page-wide")}>
       <header className="page-header">
-        <div className="min-w-0">
-          {eyebrow && <p className="eyebrow">{eyebrow}</p>}
-          <h1>{title}</h1>
-          {sub && <p className="sub">{sub}</p>}
+        <div className={cx("min-w-0", icon && "flex items-start gap-4")}>
+          {icon && <div className="page-icon shrink-0">{icon}</div>}
+          <div className="min-w-0">
+            {eyebrow && <p className="eyebrow">{eyebrow}</p>}
+            <h1>{title}</h1>
+            {sub && <p className="sub">{sub}</p>}
+          </div>
         </div>
         {actions && <div className="page-actions">{actions}</div>}
       </header>
@@ -100,9 +106,12 @@ export function Card({
   tone = "default",
   padded = true,
   to,
+  icon,
 }: {
   children?: ReactNode;
   className?: string;
+  /** A picture before the label and title (a solution's or methodology's icon, lake#639). */
+  icon?: ReactNode;
   title?: ReactNode;
   label?: ReactNode;
   actions?: ReactNode;
@@ -125,6 +134,7 @@ export function Card({
     >
       {(title || label || actions) && (
         <div className={cx("flex flex-wrap items-start gap-x-3 gap-y-2", padded ? "px-4 pt-3" : "border-b border-hairline px-4 py-3")}>
+          {icon && <div className="shrink-0">{icon}</div>}
           <div className="min-w-0 flex-1">
             {label && <div className="label m-0">{label}</div>}
             {title && <div className="mt-0.5 text-[14.5px] font-semibold text-ink">{title}</div>}

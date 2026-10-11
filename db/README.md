@@ -336,3 +336,18 @@ dimension and class) and `billing_invoice_lines`, so GPU time can carry a rate p
 only; usage stays in each workspace Zetta. Nothing is dropped; idempotent. The latest guard is
 `workload_resources_guard`; the operator must vendor this schema, select that guard and report the
 resources before rollout. See [schema.md](../docs/control-plane/schema.md#workload-resources-migration).
+
+Migration `0076_organization_deletion` (lake#645) adds `deleted_at` to `organizations` and
+`customers`, set by `delete_organization` once the organization's account has no workspace and
+everything it held is removed; the rows stay because the central audit chain names the account, and
+lake never reads a marked one again. Nothing is dropped; idempotent. The guard was
+`organization_deletion_guard`; the operator must vendor this schema and select that guard before
+rollout. See [schema.md](../docs/control-plane/schema.md#organization-deletion-migration).
+
+Migration `0077_metered_jobs` (lake#658) lets `workload_resources` hold `agent_cron_run` rows, the
+resources of each run an agent's cron schedule starts (`object_id` the `agent_cron_runs` id), so a
+cron run's CPU, RAM, GPU and GPU memory are metered like a job-mode launch's. Lake charges every
+finished build, job launch and cron run once, in its workspace Zetta. Nothing is dropped;
+idempotent. The latest guard is `metered_jobs_guard`; the operator must vendor this schema, select
+that guard and report cron runs before rollout. See
+[schema.md](../docs/control-plane/schema.md#metered-jobs-migration).

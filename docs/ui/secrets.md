@@ -28,7 +28,7 @@ workspaces (another account's workspace shows that account's name), or the organ
 *(workspace owner)*, when the workspace is an organization's (`get_customer` names it). Then it
 offers each organization the person administers (an `owner` or `admin` membership of the
 organization itself, from `list_memberships`; the operator administers every one), except one whose
-own space is another account's (`get_organization`'s `customer_id`). Choosing the account sends no
+own account is another account's (`get_organization`'s `customer_id`). Choosing the account sends no
 `organization_id`; choosing an organization sends its id. Nothing blocks a person who belongs to no
 organization: their account is always offered. Changing the workspace returns the field to that
 workspace's owner. A refusal at `/organization_id` or `/customer_id` shows under the field.
@@ -70,6 +70,14 @@ writing a new version, and deleting or destroying the revealed version. Every re
   typed exactly: `ConfirmButton` with `typed` (`frontend/src/lib/overlay.tsx`).
 
 A destroyed version reads *erased* and offers nothing.
+
+## Deleting a Mount (lake#645)
+
+Secret Mounts has **Delete** on each mount. The dialog lists, from
+`delete_secret_mount {dry_run: true}`, how many secrets (with their versions), encryption keys, data
+keys and leases go, and every secret by name, and asks for the mount's name, which it sends as
+`confirm`. Everything is removed from the mount's workspace; anything its keys encrypted can no
+longer be decrypted. See [deletion.md](deletion.md).
 
 ## Encryption Keys
 

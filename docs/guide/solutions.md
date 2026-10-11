@@ -38,6 +38,17 @@ Design** (sketches that are not yet a module).
 Open one of Orama's to read **What It Does**, its **Levels**, and its status: whether it runs here
 and, when it does not, where that is tracked.
 
+Each solution has an icon: a small picture of what it does, with an amber accent. Each methodology
+has an icon with a blue accent, and a solution's icon reuses the picture of the methodology it is
+built on. Your own solutions get an icon too:
+
+- A duplicate of one of Orama's solutions keeps the original's icon.
+- Otherwise your solution uses the icon of its first methodology, or of the methodology you marked
+  as primary.
+- A solution with no methodology shows the first letter of its name.
+
+To see every icon, open **Design → Catalogue Icons** (`/design/icons`).
+
 Through the API, `list_solutions` lists both kinds, each with `source` (`orama` or `workspace`) and
 `editable`, and `get_solution` reads one:
 
@@ -198,10 +209,10 @@ These are workspace actions inside `workspace_act`: `run_solution`, `update_poli
 `list_ledger`, `get_monitor` and `get_roi_readout` inside `workspace_query`. For example, approving
 one A1 decision:
 
-`POST /v1/workspace_act`
+`POST /v1/approve_decision`
 
 ```json
-{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "capability": "approve_decision", "input": {"decision_id": "<decision id>"}}
+{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "decision_id": "<decision id>"}
 ```
 
 ## Methodologies
@@ -216,10 +227,10 @@ choose the methodology under Build a Pipeline ([AI Projects and Pipelines](/docs
 
 Through the API it is `list_methodologies` inside `workspace_query`:
 
-`POST /v1/workspace_query`
+`POST /v1/list_methodologies`
 
 ```json
-{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "capability": "list_methodologies", "input": {}}
+{"customer_id": "<customer id>", "workspace_id": "<workspace id>"}
 ```
 
 Each entry carries `runnable`. An engine that predates the registry answers `unknown_capability`;
@@ -269,7 +280,7 @@ Then list, create and dismiss:
 ```
 
 When Auto-Suggest is not running on this Lake, the page says *a new scan is not available*;
-earlier Opportunities stay listed. **Design → Agent Library** shows which agents run
+earlier Opportunities stay listed. **Design → Agents** shows which of Orama's agents run
 ([Agents](/docs/agents)).
 
 ## Permissions

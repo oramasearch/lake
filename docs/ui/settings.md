@@ -7,7 +7,7 @@ and forms. Files are under `frontend/src/pages/organizations/` and `frontend/src
 
 | Area | Route and tabs | File | Content and actions |
 |---|---|---|---|
-| Organization | `/organization?id=<id>&tab=` `overview`, `teams`, `members`, `invitations`, `access`, `sso`, `applications`, `metering` (labelled Usage), `audit` | `OrganizationPage.tsx` | `get_organization`, `list_teams`, `list_memberships`, `list_invitations`, `entity_effective_access`, `list_sso_providers`, `list_applications`, `metering_usage` (Usage tab only, because it reads the space's workspaces) and `audit` reads; invite (`create_invitation`), create a team (`create_team`), configure a provider (`register_sso_provider`) |
+| Organization | `/organization?id=<id>&tab=` `overview`, `teams`, `members`, `invitations`, `access`, `sso`, `applications`, `metering` (labelled Usage), `audit` | `OrganizationPage.tsx` | `get_organization`, `list_teams`, `list_memberships`, `list_invitations`, `entity_effective_access`, `list_sso_providers`, `list_applications`, `metering_usage` (Usage tab only, because it reads the account's workspaces) and `audit` reads; invite (`create_invitation`), create a team (`create_team`), configure a provider (`register_sso_provider`) |
 | Team | `/team?id=<id>` | `TeamPage.tsx` | the team's memberships and effective access |
 | Member | `/member?id=<id>` | `MemberPage.tsx` | role, attestation evidence, effective access, `set_member_role`, and confirmed `remove_member` |
 | Usage | `/usage` | `../usage/UsagePage.tsx` | usage over time across the chosen workspaces, limits and CSV ([usage.md](usage.md), lake#564) |
@@ -22,14 +22,14 @@ not a policy message invented by the page.
 viewer may read, with their role and links to settings, Invite, teams, members, invitations,
 effective access and SSO. For a signed-in person (not the operator credential) it also shows:
 
-- **Invitations for you**: pending invitations addressed to their email or personal-space handle
+- **Invitations for you**: pending invitations addressed to their email or personal-account handle
   (`list_invitations` without a scope), each with **Join** (`join_organization`), which opens the
   organization.
 - **Create an organization**: name and optional handle (`create_organization_space`). The creator
   becomes owner and lands on the Invitations tab.
-- **Turn your personal space into an organization**: says what moves (the handle, repositories,
-  workspaces and apps stay; a new, empty personal space is created) and asks the person to type
-  the handle. The page reads the space's current handle with `get_customer` and compares it before
+- **Turn your personal account into an organization**: says what moves (the handle, repositories,
+  workspaces and apps stay; a new, empty personal account is created) and asks the person to type
+  the handle. The page reads the account's current handle with `get_customer` and compares it before
   calling `convert_personal_space`; a mismatch changes nothing.
 
 **Invitations.** The Invitations tab offers member, admin and owner with what each can do, and a
@@ -58,8 +58,8 @@ call (the typed handle, the invitation lifetime, the removal confirmation) are m
 
 **Verify.** Sign in as an organization owner and as a plain member, open `/organization?id=…` on
 every tab, invite someone with each lifetime, create a team, change a member's role and remove
-them through the confirmation. As a person with a personal space, create an organization, join an
-invitation, and convert the personal space with a wrong handle (nothing changes) and then the right
+them through the confirmation. As a person with a personal account, create an organization, join an
+invitation, and convert the personal account with a wrong handle (nothing changes) and then the right
 one. The capability flows are tested in
 [`../api/organizations.md`](../api/organizations.md#verify-and-change).
 

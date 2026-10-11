@@ -33,8 +33,9 @@ Top to bottom:
 - **Near a Limit.** One warning banner per limit at or past its warning percentage.
 - **Figures.** One tile per dimension: the total (a reading's latest value for storage), its unit
   in words (`formatValue`: CPU in vCPU-minutes or -hours, RAM and GPU memory in GiB-minutes or
-  -hours, GPU in GPU-minutes or -hours), and its change against the last period with an arrow. Pressing a tile
-  charts it (`?dimension=`).
+  -hours, GPU in GPU-minutes or -hours), and its change against the last period with an arrow. A
+  dimension the reading answers with `billed: false` (build, run and instance time, lake#658) says
+  *Detail, not billed* under it (`billingNote`). Pressing a tile charts it (`?dimension=`).
 - **Over Time.** A uPlot chart (`pages/usage/UsageChart.tsx`, as Train and Ship's charts) of the
   chosen dimension, stacked **By workspace** or **By kind**: the six largest bands and Other
   (`stackSeries`), in lake's colours, redrawn when the theme changes; the legend shows each band's
@@ -43,12 +44,17 @@ Top to bottom:
   workload or model (**By Workload or Model**) and GPU class (**By GPU Class**, lake#643; "Unknown
   class" for a GPU the operator could not name) where the reading has them, each with its total and
   share.
-- **Limits.** One meter per limit (used of limit, percent, enforced or warns), red past the limit;
+- **Limits.** One meter per limit (used of limit, percent, and what it does at its line, `limitNote`:
+  storage refuses new repository writes, model tokens refuse agents' model calls through the
+  [model gateway](../api/model-gateway.md#limits), every other limit warns), red past the limit;
   **Set a limit** opens a dialog: what to limit, the limit in a person's unit (GiB, hours,
   vCPU-hours, GiB-hours, GPU-hours, instance-hours or a count, `toLimit`), and the warning
   percentage. Empty or 0 removes
   it.
-- **Not Measured Yet.** The reading's `not_measured` sentences, as a quiet banner.
+- **Not Measured Yet.** The reading's `not_measured` sentences, as a quiet banner. Since lake#658
+  it names only what is still not measured: workloads the operator has not reported, the engine
+  storage of a workspace whose Zetta is older, app traffic (lake#661) and unreported model tokens
+  (lake#248).
 - **Repository Usage by Hour.** A card linking `/metering` for the account.
 - **By Workspace.** Every dimension's figure per workspace, sortable, or why a workspace was not read.
 
@@ -84,7 +90,8 @@ tables scroll in their own box.
 ## Verify
 
 `frontend/tests/usage.test.ts`: windows and their previous periods, units, changes, two accounts
-added up, the stacked series with Other, the CSV, limits in a person's units, links, one thing's
+added up, the stacked series with Other, the CSV, limits in a person's units and what each does,
+links, one thing's
 usage, and the workspace selection. `npx tsc --noEmit -p .`, `npm test` and `npm run build` in
 `frontend/`.
 

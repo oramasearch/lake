@@ -391,6 +391,7 @@ ApiResult resolve_file(const json& input, ApiContext& context, std::string_view 
         return sync_error(file.error());
     }
     context.sync_response = file->raw_contents;
+    record_workspace_transfer(context, repository->workspace_id, 0, file->size);
     context.audit_customer_id = repository->customer_id;
     context.audit_kind = std::string(kind) + ".file.read";
     context.audit_object = "repository/" + repository->id + "/path/" + file->path;
@@ -669,8 +670,8 @@ void register_model_capabilities(Registry& registry) {
         .name = "resolve_model",
         .title = "Find a model by name",
         .description =
-            "The model repository a model page names, by `name` and optionally its space "
-            "(`namespace`, the space's handle), with the revision the page shows. A model you "
+            "The model repository a model page names, by `name` and optionally its account "
+            "(`namespace`, the account's handle), with the revision the page shows. A model you "
             "may not read is not_found, as if it did not exist; a public model needs no "
             "credential. Read it with get_model {id: repository_id, revision}.",
         .input_schema = {{"type", "object"},
@@ -762,6 +763,7 @@ void register_model_capabilities(Registry& registry) {
             if (contents.size() != expected_size) {
                 return ApiResult::failure("invalid_input", "uploaded size does not match");
             }
+            record_workspace_transfer(context, repository->workspace_id, contents.size(), 0);
             const std::string bytes(reinterpret_cast<const char*>(contents.data()),
                                     contents.size());
             if (control::identity_crypto::sha256_hex(bytes) != input.at("oid").get<std::string>()) {
@@ -831,6 +833,13 @@ void register_model_capabilities(Registry& registry) {
                 }
                 operations.push_back(std::move(operation));
             }
+            // Inline file bytes come in with the commit (staged LFS files were counted when
+            // staged) and are the repository workspace's transfer in (lake#658).
+            std::uint64_t uploaded = 0;
+            for (const auto& operation : operations) {
+                uploaded += operation.contents.size();
+            }
+            record_workspace_transfer(context, repository->workspace_id, uploaded, 0);
             const auto committed = context.sync_store->commit_repository_files(
                 repository->customer_id,
                 repository->id,

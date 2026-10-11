@@ -66,10 +66,10 @@ loopback.
 ## Where things live
 
 - **The connection** is a workspace record: a sealed `lake_mcp_connections` record in the workspace
-  Zetta of its workspace, found by its space ([workspace records](../architecture/workspace-records.md)).
+  Zetta of its workspace, found by its account ([workspace records](../architecture/workspace-records.md)).
   It holds the name, the URL and transport, the authentication kind, what the server offered at
   the last refresh, the person's decision for each tool, the re-export switch, the auto-approve
-  grants, and the connection's agent and streams. Another workspace of the space never sees it.
+  grants, and the connection's agent and streams. Another workspace of the account never sees it.
   Nothing of it is in PostgreSQL, and there is no migration.
 - **The credential** is a workspace secret (decision 58) in a secret mount of the same workspace:
   a bearer token, or the OAuth refresh token Lake writes there when a person signs in. The record
@@ -81,7 +81,7 @@ loopback.
 
 ## Capabilities
 
-Every capability takes `customer_id` and `workspace_id`; the reads need `read` on the space and the
+Every capability takes `customer_id` and `workspace_id`; the reads need `read` on the account and the
 actions `write`. Each is audited in the workspace's own log ([audit](audit.md#which-log)), with
 `object` `mcp_connection/<id>`.
 
@@ -273,7 +273,7 @@ public transport refusing `127.0.0.1` before anything is sent.
 
 `Stores/WorkspaceRecordStores.McpConnectionsLiveInTheirWorkspaceAndKeepTheirTokenSecret` (memory
 and PostgreSQL stores): refusals before anything is kept, discovery on create, the record sealed
-with no token in it, another workspace and another space, tools allowed and decided, a read, a
+with no token in it, another workspace and another account, tools allowed and decided, a read, a
 change refused as a read, a change by a person, Ask Orama reading but refused a change, a
 user-built agent refused without its skill and its change refused until a person grants it, the
 grant taken back, the audit with no arguments, the usage series, re-export through

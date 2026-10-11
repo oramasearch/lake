@@ -1,15 +1,16 @@
 # Drives
 
 **Status: implemented 2026-10-10 in the source tree (lake#561); not deployed.** A workspace's
-drives are the places it keeps files. Each drive keeps its files one of three ways (`storage`):
+drives are the places it keeps files. Each drive keeps its files one of four ways (`storage`):
 
 | `storage` | Files are | History | Written with |
 |---|---|---|---|
 | `repository` | a liquid repository of the workspace | every write is a change | the drive_* capabilities ([drive.md](../ui/drive.md)) on the drive's `repository_id` |
 | `files` | workspace files: records and sealed objects in the workspace Zetta | none | the entry capabilities below |
 | `virtual` | folders and shortcuts only | none | the entry capabilities below, without uploads |
+| `store` | one of the workspace's bucket or filesystem stores, in place (lake#656) | the provider's | the entry capabilities below, an item's `id` being its path ([Store drives](#store-drives)) |
 
-A drive is one sealed record in `lake_drives` of its workspace Zetta, found by its space; its
+A drive is one sealed record in `lake_drives` of its workspace Zetta, found by its account; its
 folders, files and shortcuts (a `files` or `virtual` drive's) are sealed records in
 `lake_drive_entries`, found by drive ([workspace-records.md](../architecture/workspace-records.md)).
 Nothing about a drive is in PostgreSQL. Deleting the workspace deletes them with its Zetta.
@@ -17,16 +18,16 @@ Nothing about a drive is in PostgreSQL. Deleting the workspace deletes them with
 ## Capabilities
 
 Every capability takes `customer_id` and `workspace_id` (`Registry::call` checks the workspace is
-the space's) and authorizes on the space: reads need `read`, actions `write`. Every call is
+the account's) and authorizes on the account: reads need `read`, actions `write`. Every call is
 audited in the workspace's own log ([audit.md](audit.md#which-log)).
 
 | Capability | Kind | Input (besides `customer_id`, `workspace_id`) | Output |
 |---|---|---|---|
-| `create_drive` | action | `name`, `storage`, `repository_id?`, `repository_name?` | the drive |
+| `create_drive` | action | `name`, `storage`, `repository_id?`, `repository_name?`, `store_id?` | the drive |
 | `list_drives` | read | — | `{drives: [drive]}`, by name |
 | `get_drive` | read | `id` | the drive |
 | `rename_drive` | action | `id`, `name` | the drive |
-| `delete_drive` | action | `id`, `confirm_name` | `{deleted: true, entries_removed, repository_id?}` |
+| `delete_drive` | action | `id`, `confirm_name` | `{deleted: true, entries_removed, repository_id?, store_id?}` |
 | `list_drive_entries` | read | `drive_id`, `folder_id?` or `path?` | `{drive, folder_id, path, ancestors: [{id, name}], items: [entry]}` |
 | `get_drive_entry` | read | `drive_id`, `id` | the entry |
 | `create_drive_folder_entry` | action | `drive_id`, `parent_id?`, `path` | the last folder |
@@ -40,11 +41,12 @@ audited in the workspace's own log ([audit.md](audit.md#which-log)).
 | `read_drive_file` | read | `drive_id`, `id`, `offset?`, `length?` | `{id, name, size, content_type, sha256, offset, content_base64}` |
 | `recent_drive_entries` | read | `limit?` (1 to 100, default 20) | `{items: [{drive: {id, name}, entry}]}` |
 | `load_drive_dataset` | action | `drive_id`, `id`, `table_name`, `format?`, `if_exists?` | `upload_dataset`'s answer, with `source: {drive_id, id, name}` |
+| `load_drive_model` | action | `drive_id`, `id`, `name` or `version_of`, `kind?`, `metrics?` | `register_model`'s answer (`model_id`, …), with `source: {drive_id, id, name}` ([models.md](models.md#a-standalone-model-lake654)) |
 
 | `search_drives` | read | `q` (1 to 255 bytes), `drive_id?`, `limit?` (1 to 200, default 50) | `{items: [match], truncated, skipped: [{drive, reason}]}` ([Search](#search)) |
 
-A drive is `{id, name, storage, repository_id, created_by, created_at}`; `repository_id` is `null`
-except for a repository drive. An entry is `{id, drive_id, parent_id, kind, name, path, created_by,
+A drive is `{id, name, storage, repository_id, store_id, created_by, created_at}`; `repository_id`
+is `null` except for a repository drive, and `store_id` except for a store drive. An entry is `{id, drive_id, parent_id, kind, name, path, created_by,
 created_at, modified_by, modified_at}`, `parent_id` `null` at the drive's top, plus for a file
 `{size, content_type, sha256, state}` and for a shortcut `{target, status, reason?}`.
 
@@ -61,8 +63,8 @@ created_at, modified_by, modified_at}`, `parent_id` `null` at the drive's top, p
   (`commit_repository_files` takes an empty folder path for it), which `drive_browse` never lists.
 - `delete_drive` needs `confirm_name` equal to the drive's name (`invalid_input` at
   `/confirm_name`). A `files` drive's entries and their objects are deleted first, children before
-  parents; a `virtual` drive's entries are deleted; a `repository` drive's repository is never
-  touched, and the answer names it.
+  parents; a `virtual` drive's entries are deleted; a `repository` drive's repository and a `store`
+  drive's store are never touched, and the answer names them.
 
 ### Folders, Files and Shortcuts
 
@@ -100,7 +102,7 @@ drive refuses uploads.
 | `transcript` | `id` | the transcript exists in this workspace |
 | `dataset`, `agent`, `model` | `id` | not checked |
 | `project` | `name` | not checked |
-| `url` | `url` (`http://` or `https://`, no space, `"`, `<` or `>`) | not checked |
+| `url` | `url` (`http://` or `https://`, no whitespace, `"`, `<` or `>`) | not checked |
 
 `create_drive_shortcut` refuses a checked target that is not there (`not_found` at `/target`).
 Every listing and `get_drive_entry` checks again and answers `status`: `ok`, `broken` (with
@@ -161,6 +163,46 @@ PDF, plain text, CSV, Markdown, audio and video; anything else is an attachment.
 carries `X-Content-Type-Options: nosniff` and `Content-Security-Policy: sandbox; default-src
 'none'`, and its ETag is the SHA-256.
 
+## Store Drives
+
+**Implemented 2026-10-11 in the source tree (lake#656); not deployed.** A drive with `storage:
+store` opens one of the workspace's stores ([storage.md](storage.md)) as a drive, so a bucket or a
+filesystem is browsed with the same pages and capabilities as workspace files. "Store" is the
+API's word; the Lake Console says *storage*.
+
+- **Creating one** names `store_id`, a store of this workspace that is a bucket (`object`) or a
+  filesystem, Ready, with its connection delivered to Lake. Nothing is copied: the drive's record
+  (a `lake_drives` record in the workspace Zetta, like every drive's) only names the store, and
+  the bytes stay in the store's own provider. A volume is `invalid_input` at `/store_id`: *a volume
+  is shown, not browsed* (its contents belong to the service that mounts it); a store not Ready is
+  `workspace_not_ready`; another workspace's is `not_found`.
+- **Browsing** goes through `control::StoreContents` (`include/lake/control/store_contents.hpp`):
+  list a folder, stat, read a range, write a whole file, make a folder, move, remove. A
+  `StoreBrowser`, injected as `ServerOptions::store_browser`, opens a store's contents from its
+  record and its connection (`store_connection`'s answer). **No provider is browsable yet:** the
+  only store Lake offers is a cluster volume, and every bucket and filesystem pair waits on
+  lake#196's later phases. Without a browser for it, `create_drive` answers `not_supported` naming
+  the provider and [lake#664](https://github.com/oramasearch/lake/issues/664), which tracks a
+  `StoreContents` implementation per provider. The tests run the whole kind over an in-memory one.
+- **Items** are addressed by their path in the store: `id`, `folder_id`, `parent_id` and `path`
+  are all paths (`Reports/2026/q3.csv`; the top is `null` or empty). Each name in a path is a valid
+  drive name. An item has no `created_by` (empty), `created_at` and `modified_at` are the
+  provider's modified time when it gives one, and a file's `sha256` is `null`.
+- **What works:** `list_drive_entries`, `get_drive_entry`, `create_drive_folder_entry` (levels made
+  where missing; a file on the way is `conflict`), `move_drive_entry` (into another folder and/or
+  renamed; a folder never into itself; a taken name is `conflict`), `delete_drive_entry` (a folder
+  with everything in it), `upload_drive_entries` (16 MiB a call; `on_conflict` as for workspace
+  files), `read_drive_file`, `GET /drive/files/download` (streamed 1 MiB a read, ETag from the
+  provider's version), `load_drive_dataset` and `search_drives` (every name in the store, walked
+  from the top, at most 10,000 items per drive; a store that cannot be read is listed in
+  `skipped`).
+- **What does not:** shortcuts (`invalid_input`: they go in a workspace-files or virtual drive),
+  chunked uploads (`begin_drive_upload` is `invalid_input` at `/drive_id`), history, sharing, and
+  `recent_drive_entries` (workspace files only).
+- **Deleting the drive** (`delete_drive`) removes its record only and answers `store_id`; the store
+  and everything in it stay. Deleting an item deletes it from the store itself, which keeps no
+  history Lake can restore.
+
 ## Two Families of Calls (lake#587)
 
 A drive's files are reached through the calls of the storage that keeps them, because the two
@@ -200,6 +242,16 @@ its errors come back at this call's fields (`/table_name`, and `/id` for the con
 MiB (`size_invalid` at `/id`), as `upload_dataset` takes. Nothing is stored anywhere but the
 dataset. The Drives page offers it as **Load as dataset** on a CSV or JSONL file.
 
+## A Drive File as a Model (lake#654)
+
+`load_drive_model` brings a model file of a drive into the workspace as a standalone model, the same
+way: `id` is the file, a virtual drive is refused at `/drive_id`, the bytes are read as the caller,
+and the text goes to the workspace engine's `register_model` through `workspace_act` with `name`
+(or `version_of`), `kind?`, `metrics?` and `source` (`drive <drive name>: <file name>`). A new model
+needs `name` (`invalid_input` at `/name` before a byte is read). The engine's refusal of the file
+(`not_supported` for a format it cannot read) comes back at `/id`. At most 16 MiB. Train → Models'
+**New model**, Bring one, A drive offers it ([models.md](models.md#a-standalone-model-lake654)).
+
 ## Search
 
 `search_drives` finds the drives, folders, files and shortcuts of the workspace whose **name**
@@ -233,7 +285,7 @@ it, a read failure) is listed in `skipped` with the reason and never fails the c
 the repository's own: a person who sees a repository folder only through a shared link finds
 nothing of it here.
 
-Like `list_drive_entries`, the read authorizes `read` on the space before it reads, and its audit
+Like `list_drive_entries`, the read authorizes `read` on the account before it reads, and its audit
 event (in the workspace's log) records the `drive_id` searched and the number of matches, never the
 query.
 
@@ -269,7 +321,7 @@ holds the key; a move or rename never touches the object.
   into its folder.
 
 **Known gap:** `lake_files` is created without a quota, and lake's storage quota and usage
-figures read the `lake_store` bucket, so workspace files are not counted against the space's
+figures read the `lake_store` bucket, so workspace files are not counted against the account's
 storage quota yet. The workspace Zetta's own volume is the bound.
 
 ## Errors
@@ -281,7 +333,8 @@ storage quota yet. The workspace Zetta's own volume is the bound.
 | `conflict` | a name taken; a folder level that is not a folder; a chunk out of order; an upload not complete; a finished upload sent more bytes; an expired upload |
 | `invalid_digest` | `finish_drive_upload`'s `sha256` differs from the bytes |
 | `size_invalid` | a chunk over 8 MiB, an inline upload or read over 16 MiB, a file over 64 GiB |
-| `not_supported` | this lake has no workspace Zetta object transport (no workspace files) |
+| `not_supported` | this lake has no workspace Zetta object transport (no workspace files); a store drive's store is of a provider Lake cannot browse yet ([lake#664](https://github.com/oramasearch/lake/issues/664)) |
+| `workspace_not_ready` | a store drive's store is not Ready, or its connection has not reached Lake |
 | `corrupt` | a stored block does not open with this workspace's key |
 | `quota_exceeded`, `store_unavailable` | the workspace Zetta refused or did not answer |
 
@@ -291,23 +344,32 @@ storage quota yet. The workspace Zetta's own volume is the bound.
   and workspace); chunked writes, retries, a lost answer, out-of-order and short objects, any-range
   reads; a workspace-files drive end to end (folders from an upload path, chunked upload, finish,
   moves without copying, rename/replace/refuse, recursive delete, recent files, drive delete);
-  another space refused; a virtual drive's shortcuts going broken; the audit routing; and over
+  another account refused; a virtual drive's shortcuts going broken; the audit routing; and over
   HTTP, a repository drive's `main` from creation (a bare repository's `drive_browse` is
   `not_found`) and a streamed download of a 3 MiB file.
 - `Drives.SearchFindsDrivesFoldersFilesAndShortcutsByName`: matches across a workspace-files and a
   virtual drive in either case, with their paths, sizes and shortcut status; an unfinished upload
-  never found; a limit with `truncated`; one drive; another workspace; another space refused.
+  never found; a limit with `truncated`; one drive; another workspace; another account refused.
   `DrivesHttp.SearchFindsTheNamesOfARepositoryDrivesPaths`: a repository drive's folder and file
   paths, without the folder marker.
 - `SchemaConformance.EveryToolAndRequiredOutputUsesHttpContract` calls every capability above and
   validates its answer against its output schema.
+- `Drives.AStoreDriveBrowsesItsStoreInPlaceAndLeavesItWhenDeleted` (lake#656): a store drive over
+  an in-memory `StoreContents`, created with no copy; its folders and files listed by path; an
+  upload (renamed, refused), a folder, a read, a move and a rename made in the store; search by
+  name; an item deleted; the drive deleted with the store and its contents still there.
+  `Drives.AVolumeIsShownNotBrowsedAndAStoreLakeCannotBrowseIsRefused`: a volume refused, a bucket
+  `not_supported` without a browser (naming lake#664), a store not Ready, a store that is not
+  there.
 - `Drives.AResentChunkAnswersTheUploadAndAbandonedUploadsExpire` (lake#588): a resent chunk's
   true `received` and `complete`, unfinished uploads under `uploads`, an expired one refusing
   chunks and giving up its name, and `upload_drive_entries` taking `name`.
 - `DrivesHttp.ARepositoryDriveWriteIsSearchedDownloadedAndLoaded` (lake#584, lake#587, lake#593):
   a drive write found by hot search, then moved and deleted; `download_drive_file`'s bytes, media
   type and `download_url`, whose route serves `text/csv` with the file's name; both download routes
-  in OpenAPI; and `load_drive_dataset` sending the CSV to `upload_dataset`.
+  in OpenAPI; and `load_drive_dataset` sending the CSV to `upload_dataset`; `load_drive_model`
+  sending a model file's text, its name, metrics and source to `register_model`, refusing a new
+  model with no name at `/name`, and the engine's refusal of the file at `/id` (lake#654).
   `DrivesHttp.AWorkspaceFileDownloadStreamsItsBytes` checks `Content-Disposition` and loads a JSONL
   workspace file.
 
@@ -317,5 +379,8 @@ storage quota yet. The workspace Zetta's own volume is the bound.
   `ShortcutChecker` (`src/api/drives_capabilities.cpp`), and `frontend/src/pages/drives/targets.ts`.
 - A new storage: `known_drive_storage`, `create_drive`, and a `DriveStorage` implementation in
   `frontend/src/pages/drives/storage.ts`.
+- A provider a store drive can browse: a `control::StoreContents` implementation and a
+  `StoreBrowser` that opens it for that type and provider, set in `ServerOptions::store_browser`
+  ([lake#664](https://github.com/oramasearch/lake/issues/664)).
 - The block format is versioned by its labels (`v1`); a new format gets new labels and a record
   field naming it, and keeps reading `v1`.

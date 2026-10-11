@@ -28,12 +28,13 @@ namespace lake::api {
 // time-series.md), one bucket an hour, kept 400 days:
 //
 // - `lake_usage`, a counter labelled `dimension` and, by dimension, `kind`, `agent`, `launch_id`,
-//   `model`, `object_id` and `class`: API and MCP calls, each model's answered predictions,
-//   speech-to-text seconds, model tokens, the instance and volume seconds of managed services,
-//   stores and apps, and the CPU, RAM, GPU and VRAM seconds every workload is scheduled with
-//   (lake#643);
+//   `model`, `object_id` and `class`: API and MCP calls, each model's answered predictions and
+//   each index's answered searches, speech-to-text seconds, model tokens, the instance and volume
+//   seconds of managed services, stores and apps, the CPU, RAM, GPU and VRAM seconds every
+//   workload is scheduled with (lake#643), and transfer outside repository sync (lake#658);
 // - `lake_storage`, a gauge labelled `kind` (repositories, images, workspace_data, transcripts,
-//   drive_files): the workspace's stored bytes, sampled by the owner loop.
+//   drive_files, and the engine's models, indexes, runs, streams, files and buckets): the
+//   workspace's stored bytes, sampled by the owner loop.
 //
 // A request only adds to an in-memory value for (workspace, metric, hour, labels); nothing here
 // does I/O on the request path. `flush`, run by the server's owner loop and once more when the
@@ -89,6 +90,15 @@ public:
              std::uint64_t value,
              std::map<std::string, std::string> labels = {},
              std::chrono::system_clock::time_point at = std::chrono::system_clock::now());
+
+    // Transfer outside repository sync (lake#658): bytes lake accepted for the workspace (`in`:
+    // a drive upload, an image push) or sent from it (`out`: a download, an image pull, a file
+    // read), as `transfer` of that kind. Repository sync keeps its exact hourly records instead.
+    // Never does I/O.
+    void add_transfer(const std::string& workspace_id,
+                      std::uint64_t in,
+                      std::uint64_t out,
+                      std::chrono::system_clock::time_point at = std::chrono::system_clock::now());
 
     // Adds every increment, or none of them when the bound leaves no room for all. Never does I/O.
     void add_together(const std::string& workspace_id,
@@ -149,5 +159,25 @@ struct UsageDimension {
 };
 const std::vector<UsageDimension>& usage_dimensions();
 const UsageDimension* find_usage_dimension(std::string_view name);
+
+// What is metered where (lake#658, docs/api/metering.md#what-is-metered-where). Every capability
+// call routed to a workspace counts in `calls`; a capability that also consumes a resource for a
+// workspace names the dimensions its use adds to here. `UsageContract.*` fails when a registered
+// capability that looks like it consumes a resource is in neither this table nor
+// `calls_only_capabilities()`, or when a dimension here is unknown or unpriced.
+struct CapabilityMeter {
+    std::string_view capability;
+    std::vector<std::string_view> dimensions;
+    std::string_view how;
+};
+const std::vector<CapabilityMeter>& capability_meters();
+// Capabilities whose names look like they consume a resource but whose use is only a call (they
+// change records, not resources), each with why.
+const std::vector<std::pair<std::string_view, std::string_view>>& calls_only_capabilities();
+// The workload_resources kinds the owner loop's sample charges: every kind the schema allows.
+const std::vector<std::string_view>& metered_workload_kinds();
+// The store types whose stores are metered (as `volumes`): a provider may be offered only for
+// these.
+const std::vector<std::string_view>& metered_store_types();
 
 } // namespace lake::api

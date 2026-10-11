@@ -10,23 +10,27 @@ by OpenAI with lake's own key, and **the audio is never kept**.
 
 | Capability | Kind | Input | Output |
 |---|---|---|---|
-| `transcribe` | action, any signed-in caller | `{name, audio_base64, language?}` | `{text, seconds?, model}` |
-| `create_transcript` | action, `write` on the space | `{customer_id, workspace_id, title, text?, audio_base64?, audio_name?, language?, source, recorded_at?}` | the transcript |
-| `list_transcripts` | read, `read` on the space | `{customer_id, workspace_id, q?, limit?, cursor?}` | `{transcripts: [{id, title, excerpt, source, seconds, created_at, created_by, created_by_name}], total, next_cursor?}` |
-| `get_transcript` | read, `read` on the space | `{customer_id, workspace_id, id}` | the transcript |
-| `update_transcript` | action, `write` on the space | `{customer_id, workspace_id, id, title?, text?}` | the transcript |
-| `delete_transcript` | action, `write` on the space | `{customer_id, workspace_id, id}` | `{deleted: true}` |
+| `transcribe` | action, `write` on the account | `{customer_id, workspace_id, name, audio_base64, language?}` | `{text, seconds?, model}` |
+| `create_transcript` | action, `write` on the account | `{customer_id, workspace_id, title, text?, audio_base64?, audio_name?, language?, source, recorded_at?}` | the transcript |
+| `list_transcripts` | read, `read` on the account | `{customer_id, workspace_id, q?, limit?, cursor?}` | `{transcripts: [{id, title, excerpt, source, seconds, created_at, created_by, created_by_name}], total, next_cursor?}` |
+| `get_transcript` | read, `read` on the account | `{customer_id, workspace_id, id}` | the transcript |
+| `update_transcript` | action, `write` on the account | `{customer_id, workspace_id, id, title?, text?}` | the transcript |
+| `delete_transcript` | action, `write` on the account | `{customer_id, workspace_id, id}` | `{deleted: true}` |
 
 A transcript is `{id, title, text, source, seconds, language, recorded_at, created_at, created_by,
 created_by_name}`:
 
 - `source` is `recording`, `upload` or `text`, as the person chose.
-- `seconds` is the audio's length when the speech-to-text model reports it, otherwise `null`.
-  `gpt-4o-transcribe` reports usage in tokens, so its transcripts have `null`; `whisper-1` reports
-  seconds. Either is the workspace's usage (lake#564): the seconds as `speech`, the tokens as
-  `model_tokens` of that model, counted off the request path when the audio is heard
-  ([metering](metering.md#dimensions)). Dictation through `transcribe` names no workspace and is not
-  counted ([lake#613](https://github.com/oramasearch/lake/issues/613)).
+- `seconds` is the audio's length: what the speech-to-text model reports (`whisper-1`), else what
+  lake measured from the recording ([below](#how-long-a-recording-is)), else `null`. It is the
+  workspace's usage (lake#564) as `speech`, counted off the request path when the audio is heard
+  ([metering](metering.md#dimensions)). Speech is billed by the minute only: the tokens
+  `gpt-4o-transcribe` reports go to the audit event as unbilled detail (`speech_tokens`) and never
+  to `model_tokens` (lake#658), so no recording is billed twice.
+- Dictation through `transcribe` names the workspace it is dictated in (lake#613): whoever may
+  write the workspace may dictate in it, and its seconds (`speech`, `kind` `dictation`) are that
+  workspace's usage, counted the same way. Its audit event goes to that workspace's log. A
+  dictation that names no workspace is `invalid_input`.
 - `language` is the ISO-639-1 code the person gave, otherwise `null`.
 - `recorded_at` is when it was said, as the person gave it (an RFC 3339 date or instant), otherwise
   `null`.
@@ -68,9 +72,9 @@ too.
 - `next_cursor` is present when more follow. Pass it as `cursor` for the next page. A cursor that
   names no transcript of the list is `invalid_input` at `/cursor`.
 
-Every transcript capability authorizes through the space (`customer_id`), and `Registry::call`
-checks that `workspace_id` is a live workspace of that space. Another space's caller is
-`unauthorized` before any workspace is read. A transcript of another workspace of the same space
+Every transcript capability authorizes through the account (`customer_id`), and `Registry::call`
+checks that `workspace_id` is a live workspace of that account. Another account's caller is
+`unauthorized` before any workspace is read. A transcript of another workspace of the same account
 is `not_found`.
 
 Every transcript capability is MCP tool group **Transcripts** in `llms.txt`. `list_transcripts` and
@@ -83,7 +87,7 @@ too (`control::agent_launch_scopes`, [agent-launches.md](agent-launches.md)).
 Each transcript is one sealed record in the collection `lake_transcripts` of its workspace's Zetta
 ([workspace records](../architecture/workspace-records.md)):
 
-- The lookup is the space (`customer:<id>`), so every reader of the space reads it in that
+- The lookup is the account (`customer:<id>`), so every reader of the account reads it in that
   workspace and no other workspace sees it.
 - The body is `{customer_id, title, text, source, seconds?, language, recorded_at, created_by}`,
   sealed with the workspace's key. The workspace holds only ciphertext and a blind index.
@@ -92,9 +96,20 @@ Each transcript is one sealed record in the collection `lake_transcripts` of its
 - Nothing about a transcript is in lake's PostgreSQL. Deleting the workspace deletes its
   transcripts with its Zetta.
 
-`list_transcripts` reads the space's records in the workspace (one `list_records` walk) and filters
+`list_transcripts` reads the account's records in the workspace (one `list_records` walk) and filters
 and pages in lake. A workspace with thousands of long transcripts will want a search index in the
 workspace instead; that is not built.
+
+## How long a recording is
+
+`gpt-4o-transcribe`, the default model, reports tokens, not seconds, so lake measures the audio it
+is about to send (`audio_duration_seconds`, `src/api/audio_duration.cpp`, lake#658), from the
+container's own bytes and never by guessing: WAV (the data chunk over the byte rate), FLAC
+(STREAMINFO), Ogg Opus and Vorbis (the last page's granule position), WebM and Matroska (the
+segment's Duration, or for a browser's recording without one the latest block's time), MP4 and M4A
+(the movie header, or a fragmented recording's summed sample durations) and MP3 (a Xing, Info or
+VBRI frame count, else the bit rate). The model's own figure wins when it reports one. A recording
+lake cannot read counts no speech; its audit event says `speech_seconds: null`.
 
 ## The audio is never kept
 
@@ -102,7 +117,7 @@ workspace instead; that is not built.
   OpenAI and drop it.
 - Lake writes no audio to a record, a file, a log or the audit. The record's body has no audio field
   (the test reads the opened body to check).
-- The audit event of `transcribe` names only the model. The audit event of `create_transcript`
+- The audit event of `transcribe` names only the model, in the workspace's log. The audit event of `create_transcript`
   names the transcript and its source, never its text.
 - The request log names the route pattern and ids only ([telemetry](../serving/telemetry.md)).
 
@@ -169,7 +184,7 @@ which is not built.
 | `invalid_input` (400) | A file name whose extension is not audio or video (`memo.txt is not audio or video: send .webm, .mp4, …`, at `/name` or `/audio_name`; lake#594), not sent to OpenAI. Not base64, an empty audio, a missing or long title, neither text nor audio (`/text`), no speech heard in the audio, an unknown `source`, a bad `language`, `recorded_at` or `cursor`. |
 | `size_invalid` (413) | Audio over 25 MiB, or text over 400,000 bytes. |
 | `not_found` (404) | No such transcript in this workspace (`/id`). |
-| `unauthorized` (403) | No `read`/`write` on the space, or a scoped key without the capability. |
+| `unauthorized` (403) | No `read`/`write` on the account, or a scoped key without the capability. |
 | `busy` (503) | Lake's blocking pool is full; retry. |
 | `workspace_not_ready` | The workspace Zetta is not ready. |
 

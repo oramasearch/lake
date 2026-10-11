@@ -24,6 +24,8 @@ export type Dimension = {
   by_object?: Breakdown[];
   /** GPU and GPU memory by GPU class (lake#643); "" is a GPU of no known class. */
   by_class?: Breakdown[];
+  /** Whether the price list bills it (lake#658): build, run and instance time are detail only. */
+  billed?: boolean;
 };
 
 export type Reading = {
@@ -193,6 +195,13 @@ export function mergeReadings(readings: Reading[]): Reading | null {
   };
 }
 
+/** What a dimension's tile says about the bill (lake#658): build, run and instance time are
+ * measured and shown as detail, and never billed, since compute is billed as CPU, RAM, GPU and GPU
+ * memory. Null for a dimension the price list bills. */
+export function billingNote(d: Pick<Dimension, "billed">): string | null {
+  return d.billed === false ? "Detail, not billed" : null;
+}
+
 /** A breakdown's name for a person: a workspace's name, else the key in words. */
 export function breakdownName(row: Breakdown, names: Record<string, string> = {}): string {
   if (row.name) return row.name;
@@ -206,6 +215,13 @@ const KIND_NAMES: Record<string, string> = {
   workspace_data: "Workspace data",
   transcripts: "Transcripts",
   drive_files: "Drive files",
+  models: "Models",
+  indexes: "Indexes",
+  runs: "Run artifacts",
+  streams: "Streams",
+  files: "Files",
+  buckets: "Buckets",
+  dictation: "Dictation",
   in: "Uploaded",
   out: "Downloaded",
   repository: "Repository builds",
@@ -333,6 +349,13 @@ export function fromLimit(limit: number, unit: string): string {
 /** A limit's meter tone: over is bad, a warning is the warning colour, otherwise none. */
 export function limitTone(state: string): "bad" | "warn" | undefined {
   return state === "over" ? "bad" : state === "warning" ? "warn" : undefined;
+}
+
+/** What a limit does at its line: storage refuses repository writes, model tokens refuse agents'
+ * model calls through Lake's model gateway (lake#248), every other limit warns. */
+export function limitNote(limit: { dimension: string; enforced: boolean; warn_percent: number }): string {
+  if (!limit.enforced) return `This month; warns from ${limit.warn_percent}%`;
+  return limit.dimension === "model_tokens" ? "This month; agents' model calls are refused at the limit" : "Enforced on new repository writes";
 }
 
 /** A link to the Usage dashboard for some workspaces, a range and the dimension to chart. */

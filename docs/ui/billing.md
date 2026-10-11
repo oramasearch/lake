@@ -43,7 +43,7 @@ fractions of a cent only under one unit (a price of $0.0004 a call). Quantities 
 
 ## Words
 
-Bills, rates and invoices say **account** and **workspace**, never space, and never plan. Headings are Title Case;
+Bills, rates and invoices say **account** and **workspace**, never `space`, and never plan. Headings are Title Case;
 buttons sentence case. Prices never appear on the Usage dashboard; Billing links to Usage and back.
 
 ## Verify

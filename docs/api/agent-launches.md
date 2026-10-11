@@ -37,10 +37,36 @@ older than five minutes.
 per launch, `lal.<launch id>.<secret>`, puts it in a Secret owned by the Job or Deployment, and
 writes only its SHA-256 (`credential_sha256`). lake's stores resolve such a bearer by comparing
 digests in constant time (`context_for`): it acts as the person who launched it, limited to the
-launch's `scopes` (`control::agent_launch_scopes`: `workspace_query`, `workspace_act`,
-`workspace_openapi`, `list_agent_library`, `repository_tree`, `repository_file`, and the workspace's
-transcripts through `list_transcripts` and `get_transcript`, lake#561; the tools of the workspace's MCP connections through `list_mcp_connection_tools`, `read_mcp_tool` and `call_mcp_tool`, lake#652, where Lake checks the agent's `mcp:<prefix>` skill on every call, [MCP connections](mcp-connections.md#who-may-call-a-tool)). A launch or schedule credential that leaves out `workspace_id` gets its launch's or schedule's workspace, as a task credential gets its task's (lake#652). A launch that is
-stopped (`desired = absent`) or not yet reported has no usable credential.
+launch's `scopes`. A launch that is stopped (`desired = absent`) or not yet reported has no usable
+credential.
+
+**A run's scopes follow its agent's skills** (agent-runtime#7). `control::agent_launch_scopes_for`
+reads the agent record's `skills` when lake stores the launch, schedule or conversation service,
+and gives the credential:
+
+- what every run has (`control::agent_launch_scopes`): `workspace_query`, `workspace_act`,
+  `workspace_openapi`, `list_agent_library`, `repository_tree`, `repository_file` (a definition
+  stored in lake), the workspace's transcripts through `list_transcripts` and `get_transcript`
+  (lake#561), and the App and build reads agent-runtime gives every agent (`list_apps`, `get_app`,
+  `app_logs`, `receive_app_events`, `list_builds`, `get_build`, `build_logs`,
+  `receive_build_events`); and the tools of the workspace's MCP connections through
+  `list_mcp_connection_tools`, `read_mcp_tool` and `call_mcp_tool` (lake#652), where lake checks the
+  agent's `mcp:<prefix>` skill on every call ([MCP connections](mcp-connections.md#who-may-call-a-tool));
+- the **Lake reads** each of its skills grants, and nothing for a skill lake does not know.
+
+A skill's changes are never scopes: agent-runtime turns them into proposals a person confirms, and
+the confirmed change runs as that person. Which reads each skill grants is agent-runtime's decision
+(`skills.py`, published as `skills.json`); lake vendors it with
+`tools/agents/vendor-agent-skills.py <agent-runtime>/skills.json` into
+`src/control/agent_skills.cpp` (and the labels into
+`frontend/src/pages/train/agent-skills.json`), and `--check` says when lake's copy is behind. See
+[agent-factory.md](agent-factory.md#skills) for the skills. A launch or schedule credential that
+leaves out `workspace_id` gets its launch's or schedule's workspace, as a task credential gets its
+task's (lake#652). A schedule's runs and a conversation
+service get the same scopes as a launch of the same agent.
+
+Verify: `AgentRuns.ARunsKeyCarriesTheReadsOfItsAgentsSkillsAndNoChange` and
+`AgentRuns.EverySkillLakeOffersIsOneAgentRuntimeDefines` (tests/test_workspaces.cpp).
 
 ## Schedules
 
@@ -86,7 +112,7 @@ lake#586): `Pending` until the operator reports (*Waiting for lake to set up thi
 zone (from a schedule stored before the check), runs not enabled on this lake, or otherwise *Lake
 could not set it up. Remove it and add it again*. The operator's own text, which names Kubernetes
 objects and fields, stays in `agent_cron_schedule_status` for whoever runs lake. A schedule
-belongs to its workspace, as a launch does. Creating a Python agent with a trigger in Train → Agents (or through the
+belongs to its workspace, as a launch does. Creating a Python agent with a trigger in Design → Agents (or through the
 Agent Factory) adds its first schedule; deleting the agent removes all of them.
 
 The per-agent `agent_schedules` table of 0030 and lake's in-process scheduler are retired: the
@@ -135,8 +161,8 @@ native agents still answer within the call (a follow-up).
 | **ExperimentsAgent** (`agent-experiments`) | its service | an `experiment`, `experiment_status` or `experiment_explain` task and a credential for the selected workspace adapter. Proposal turns can read planning inputs (including `validate_study`, the no-side-effect preflight of `create_study`) but cannot write. A later `experiment` task carrying `context.confirmed_proposal`, with `proposal_task_id` and `proposal_sha256` naming the stored proposal it confirms (checked by `agent_turn`; only the experiment, the agent's `study`, may be edited), receives workspace `create_study` and backing `start_experiment`; status receives trial monitoring/stop tools, and explanation receives promotion only with its own confirmation. Experiment data remains in workspace Zetta |
 | **Auto-Suggest** (`agent-autosuggest`) | its service | the workspace's profile, which lake builds (`list_datasets`, then `get_dataset` for up to twelve); no key: it reads nothing itself |
 | **AgentCreator** (`agent-creator`) | its service | a turn key limited to `workspace_query` / `workspace_openapi` |
-| a **native** agent of the space | the workspace's `chat` (`GET`) | the message |
-| a **Python** agent of the space | its running `service` launch | the message and conversation id; with no running service lake starts one and answers `status: starting` |
+| a **native** agent of the account | the workspace's `chat` (`GET`) | the message |
+| a **Python** agent of the account | its running `service` launch | the message and conversation id; with no running service lake starts one and answers `status: starting` |
 
 A turn key is revoked when the turn ends. Offline library agents and library agents this lake
 does not run are refused. lake presents `LAKE_AGENT_SERVICE_TOKEN` as the bearer to every agent
@@ -156,15 +182,17 @@ service.
 
 Audit kinds: `agent.launch`, `agent.stop`, `agent.schedule`, `agent.unschedule`, `agent.turn`.
 
-## Model Tokens (lake#564)
+## Model Tokens (lake#564, lake#248)
 
-A launch, a schedule's run or a background turn reports the model tokens it spent with
-`record_model_usage {model_name, input_tokens, output_tokens}`, using its own credential (a library
-agent adds `task_id` with its bus credential). Lake counts them in the workspace the run belongs to,
-by agent, run and model; the Usage dashboard and the agent's page show them
-([metering](metering.md#model-tokens)). The capability is not in a launch's scopes because it needs
-none: lake authorizes it by the credential's kind and finds the run from it. agent-runtime and the
-library agents do not call it yet ([lake#248](https://github.com/oramasearch/lake/issues/248)).
+A launch, a schedule's run or a background turn calls its model through Lake's
+[model gateway](model-gateway.md): the OpenAI SDK with its base URL at `<LAKE_URL>/openai/v1` and its
+own credential (`LAKE_TOKEN`, or the turn's `lake_token`) as the API key. Lake sends the call to the
+provider with Orama's key and counts the provider's own token usage in the workspace the run belongs
+to, by agent, run and model; the Usage dashboard and the agent's page show them
+([metering](metering.md#model-tokens)). Agent pods hold no provider key. The capability
+(`model_completion`) is not in a launch's scopes because it needs none: lake authorizes it by the
+credential's kind and finds the run from it. `record_model_usage` remains only for a model call made
+outside Lake.
 
 ## Configuration
 
@@ -174,9 +202,10 @@ library agents do not call it yet ([lake#248](https://github.com/oramasearch/lak
 | `LAKE_INTERNAL_URL` | lake's in-cluster address, handed to agents |
 | `LAKE_AGENT_SERVICE_TOKEN` | the bearer lake presents to agent services |
 
-## Train → Agents
+## Train → Agent: runs and schedules
 
-An agent's page lists its runs (started, how, mode, status, result, *Stop*; a scheduled run has no
+Running an agent stays on its Train page (`/train/agent?id=&tab=runs`), linked from its Design page
+(lake#653). The page lists its runs (started, how, mode, status, result, *Stop*; a scheduled run has no
 *Stop*, its schedule does), refreshes every five seconds while one is starting, and for a Python
 agent offers **Run now** with an input and a **Schedules** panel: every schedule with its words,
 cron, zone, what it asks, the operator's status and last firing, a *Remove* button, and a form that

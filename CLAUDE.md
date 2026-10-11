@@ -65,6 +65,17 @@ a resent chunk answers the true `received`, and unfinished uploads are listed an
 24 hours (lake#588); `load_drive_dataset` loads a drive's CSV or JSONL file (lake#593); the web app
 retries an edge 503 read under the one `shouldRetry` rule and names who answered (lake#573,
 `docs/ui/web-app.md#a-read-answered-503`).
+Data → Connections (lake#651, no migration): the databases a workspace reads have their own page
+(`/connections`, one connection's tables at `/connections/connection?name=`), out of Datasets,
+whose Load data picks from them; old `?browse=`/`#connections` links redirect
+(`docs/ui/connections.md`). Storage moves from Datasets to the Storage tab of Data → Drives, and a
+bucket or filesystem store opens as a fourth drive kind, `store` (lake#656, no migration):
+`create_drive {storage: "store", store_id}` and the entry capabilities browse it in place through
+`control::StoreContents` and the injected `StoreBrowser` (an item's id is its path; deleting the
+drive never deletes the store; a volume is refused). No provider is browsable yet, so without a
+browser it answers `not_supported` (lake#664); which services and apps mount a store is not
+recorded (lake#666). Not deployed. See `docs/api/drives.md#store-drives` and
+`docs/ui/drives.md#storage`.
 
 A workspace's own AI solutions follow (lake#597, no migration): sealed `lake_solutions` records in
 the workspace Zetta in the catalogue's shape (name, business problem, decision, measurement with
@@ -90,6 +101,32 @@ through `/w/<workspace>/mcp` as `<prefix>__<tool>`; a connection's agent (skill 
 needing the zetta change) with input and output streams and mirrored notifications, run by the store
 root's owner (`McpStreamWorker`); Data → MCP Connections in the web app. Not deployed. See
 `docs/api/mcp-connections.md` and `docs/ui/mcp-connections.md`.
+A standalone model follows (lake#654, no migration): Train → Models' New model trains one from a
+dataset, a target and a methodology (`train_model`) or brings a model file from this computer, a
+drive (`load_drive_model`) or a model repository (`register_model`); a standalone model has Retrain,
+New version (`retrain_model`), Move into a project (`move_model_to_project`) and Delete (each
+version's `delete_model`), and Ship serves it as any model. The engine keeps an internal project for
+it that it never lists. An engine that lacks an allow-listed capability is answered `not_supported`.
+Needs the zetta standalone-models change in the workspace image. Not deployed. See
+`docs/api/models.md#a-standalone-model-lake654` and `docs/ui/train.md#a-standalone-model`.
+
+The workspace engine's capabilities are named capabilities (lake#650, no migration): every name in
+`workspace_reads` and `workspace_actions` is served by `/v1/<name>`, its own OpenAPI operation and
+its own MCP tool, either one registered from the engine's input schema (`src/api/engine_openapi.json`,
+vendored from Zetta's `schemas/openapi.json` by `tools/api/vendor-engine-openapi.py`) or a Lake
+capability that already covered it. Each runs the `workspace_query`/`workspace_act` path
+(`call_workspace_capability`), so policy, agent scopes, audit and caching are unchanged; Lake renames
+where the engine's name collides or says too little (`gate` is `check_pipeline`, `run` is
+`start_run`, `search` is `search_workspace_index`). Those two stay, with an `enum` on `capability`.
+Not deployed. See `docs/api/engine-capabilities.md`.
+Agents are designed in Design → Agents and trained in Train → Agents (lake#653, no migration):
+Design → Agents (was Agent Library; `/design/agent-library` and `/train/agents/new` redirect) lists
+Orama's agents read-only beside the workspace's own, with New agent, Duplicate, Edit and the Agent
+Factory; every `create_agent` and `update_agent` the engine accepts is kept as a sealed, append-only
+`lake_agent_revisions` record in the workspace Zetta (`list_agent_revisions`); Train → Agents lists
+only agents with something to train, with performance, versions, promote and roll back, the
+training schedule and Launch experiment. The pages call the named engine capabilities. Not
+deployed. See `docs/api/train-agents.md`.
 
 Every future deployment image receives OCI revision and creation labels. The binary reports the
 same embedded revision through `GET /v1/server_info`; details are in
@@ -203,6 +240,25 @@ GPU-minute, with a GPU rate per class (`billing_plan_prices.class`). `instances`
 the operator must vendor the schema, select `workload_resources_guard` and report the resources
 (orama-operator#288).
 See `docs/api/metering.md#resources` and `docs/api/billing.md#price-list`.
+Every kind of usage is metered and billed (lake#658, migration `0077_metered_jobs`): a finished
+build, job launch or agent cron run (new `workload_resources` kind `agent_cron_run`) is charged once
+whenever lake first finds its resources reported, in the hour it ended, recorded `if_absent` in its
+workspace (`lake_metering_job_records`); `transcribe` names its workspace (lake#613); Zetta's
+`storage_usage` adds `storage` kinds `models`, `indexes`, `runs`, `streams`, `files`, `buckets`;
+`search_index` counts the priced `searches`; drive, image, file and Hub bytes count as `transfer`;
+`instances`, `build_compute`, `run_compute` are unbilled detail (`billed: false`).
+`tests/test_usage_contract.cpp` fails on an unmetered capability, workload kind or store type, or a
+billed dimension without a list rate. Not deployed; the operator must vendor the schema, select
+`metered_jobs_guard` and report cron runs and job templates. See
+`docs/api/metering.md#what-is-metered-where`.
+Deleting and revoking follow (lake#645, migration `0076_organization_deletion`): `delete_organization`
+(an owner; refused while its account has workspaces, which it names; the organization and its account
+are marked `deleted_at`, never erased, because the central audit chain names the account),
+`revoke_invitation`, `revoke_grant`, `delete_secret_mount` (every record out of the mount's workspace
+Zetta before its route), `delete_dataset`, `delete_model`, `delete_run`, `delete_index` (the workspace
+engine's deletes, zetta#1257; `not_supported` from an older engine) and `delete_ask_conversation`,
+each with `dry_run: true` and a typed confirmation in Lake Console. Not deployed; the operator must
+vendor the schema and select `organization_deletion_guard`. See `docs/api/deletion.md`.
 A user's secret reaches a Kubernetes Secret only as a sealed projection (lake#625, decision 58, no
 migration): lake has two levels of secrets, Orama's platform credentials as environment variables
 of the hosting platform and users' workspace secrets in the secret store (`docs/deployment/secrets.md`).
@@ -668,7 +724,7 @@ one adapter TU) and the pure renderers in `include/zetta/api/web_ui.hpp`.
 - **Schema.** `db/schema.sql` is the source of truth; the operator carries a byte-identical
   vendored copy at `internal/controller/assets/lake-schema.sql` and applies it per Lake as an
   owned `PostgresSchema` (one transaction, guarded on the table the **newest** migration creates,
-  `workload_resources_guard` in the source tree, versioned by content hash).
+  `metered_jobs_guard` in the source tree, versioned by content hash).
   Change the schema HERE, then copy it into the operator in the same change; the operator's test
   checks the copy carries the source-of-truth header. Migrations are single-shot today
   (incremental migrations are the PostgresSchema follow-up), so until then a schema change means

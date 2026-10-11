@@ -22,6 +22,10 @@ injected dependency on `ApiContext` and `ServerOptions` (lake#561, `docs/api/tra
 `mcp_connections.hpp` registers a workspace's MCP connection capabilities and answers what Lake's
 own MCP endpoint re-exports (`exported_mcp_tools`, `call_exported_mcp_tool`). `registry.hpp`'s
 `acting_agent` names the agent whose credential made a call.
+`model_gateway.hpp` declares the model gateway's pure helpers (`prepare_model_request`,
+`model_usage`, `model_provider_failure`) and `openai_model_provider`. `registry.hpp` declares the
+`ModelProvider` injected dependency on `ApiContext`, and `server.hpp` the provider and its URL on
+`ServerOptions` (lake#248, `docs/api/model-gateway.md`).
 
 `ServerOptions::external_origin` is trusted instance configuration for repository terminal
 instructions (`repository_external_origin`). It takes precedence over `https://` plus the trusted
@@ -75,8 +79,11 @@ by the audit route and the request series. `usage_recorder.hpp` declares `UsageR
 per-workspace `lake_usage` counter and `lake_storage` readings (lake#564, `ApiContext::usage_recorder`,
 `ServerOptions::usage_flush_interval`, `usage_max_pending`, `usage_sample_interval`), and
 `usage_dimensions()`, each dimension's unit, whether the price list may rate it and whether it has
-GPU classes (lake#643); `capabilities.hpp` declares `sample_usage` and
-`queue_repository_builds`, and `images.hpp`'s `ImageBytes` splits image bytes by workspace.
+GPU classes (lake#643), `add_transfer` for bytes moved outside repository sync, and (lake#658) the
+metering contract's tables: `capability_meters()`, `calls_only_capabilities()`,
+`metered_workload_kinds()` and `metered_store_types()`; `capabilities.hpp` declares `sample_usage`,
+`record_workspace_transfer` and `queue_repository_builds`, and `images.hpp`'s `ImageBytes` splits
+image bytes by workspace.
 `registry.hpp`'s `Transcription` carries the tokens a speech-to-text model reports. See
 [metering](../../../docs/api/metering.md#usage-over-time). `billing.hpp`'s `UsageQuantities` and `bill_lines` price a GPU class at its own rate (lake#643).
 `billing.hpp` declares billing (lake#564,
@@ -168,3 +175,7 @@ move (`transfer_to_workspace_store`, `switch_workspace_store`, `create_repositor
 `server.hpp` adds `ServerOptions::object_transport` and `workspace_store_lease_ttl`, and
 `registry_upload_max_age` (lake#383 phase B: abandoned OCI uploads are removed after it) and
 `registry_stream_idle_timeout` (a pull whose client takes no bytes for it is ended).
+
+`register_deletion_capabilities` (`capabilities.hpp`, lake#645) registers `delete_dataset`,
+`delete_model`, `delete_run`, `delete_index` and `delete_ask_conversation`
+([deletion.md](../../../docs/api/deletion.md)).

@@ -50,15 +50,15 @@ The rail and top bar come from `NAV` in `frontend/src/routes.tsx` and `component
 | Viewer | Rail | Top bar |
 |---|---|---|
 | Signed out or dead credential | Home, Public Repositories · **Developer:** Docs | Sign in; also Create account when Clerk is off and password sign-up is open |
-| Ordinary account | **Home:** Ask Orama (`/`), Dashboard (`/dashboard`) · **Data:** Repositories, Drives, Shared with Me, Search, Datasets, Transcripts · **Design:** Projects, Opportunities, Solutions, Methodologies, Agent Library · **Train:** Agents, Runs, Experiments, Streams · **Ship:** Models, Search Indexes, Packages, Apps, Deployments, Services, Workspaces · **Organization:** Organizations, Secrets, Usage, Activity · **Developer:** API, MCP, Docs | Space and workspace picker, Go to, theme, Ask Orama, the account menu: Settings, Sessions, Passkeys (omitted when Clerk is on), Tokens, Sign out |
-| Operator | Home, Repositories, Search · **Design** · **Train** · **Ship** (as an account) · **Administration:** Customers, Organizations, Applications, Usage, Secrets, Audit · **Developer:** API, MCP, Docs | the picker when the operator can see a space, Go to, theme, Sign out |
+| Ordinary account | **Home:** Ask Orama (`/`), Dashboard (`/dashboard`) · **Data:** Repositories, Drives, Shared with Me, Search, Datasets, Transcripts · **Design:** Projects, Opportunities, Solutions, Methodologies, Agents · **Train:** Agents, Runs, Experiments, Streams · **Ship:** Models, Search Indexes, Packages, Apps, Deployments, Services, Workspaces · **Organization:** Organizations, Secrets, Usage, Activity · **Developer:** API, MCP, Docs | Account and workspace picker, Go to, theme, Ask Orama, the account menu: Settings, Sessions, Passkeys (omitted when Clerk is on), Tokens, Sign out |
+| Operator | Home, Repositories, Search · **Design** · **Train** · **Ship** (as an account) · **Administration:** Customers, Organizations, Applications, Usage, Secrets, Audit · **Developer:** API, MCP, Docs | the picker when the operator can see an account, Go to, theme, Sign out |
 
 - **Activity** (`/activity`) is the account's own audit events through `my_audit`: newest first,
   principals by name, a workspace call's inner capability, successful reads hidden unless
   **Include reads** is ticked ([audit.md](../api/audit.md#reading-the-log-as-a-person-lake445)).
-  **Usage** opens on the account's own space. **API** opens Developer → API (`/developer/api`), whose
+  **Usage** opens on the account's own account. **API** opens Developer → API (`/developer/api`), whose
   Operations tab renders `/v1/openapi.json` and whose header downloads it.
-- **Design, Train and Ship** run on the workspace in the URL, one of the space's workspace Zettas
+- **Design, Train and Ship** run on the workspace in the URL, one of the account's workspace Zettas
   ([workspace-selection.md](workspace-selection.md), [`../api/workspaces.md`](../api/workspaces.md)).
 - **The current item is chosen by path.** `currentNav` compares the path, without any `/w/<id>`
   prefix, with each item's path and the paths its screen `owns`: an exact match or a parent

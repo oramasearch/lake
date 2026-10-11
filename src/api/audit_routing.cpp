@@ -5,6 +5,7 @@
 #include <cctype>
 
 #include "lake/api/audit_recorder.hpp"
+#include "lake/api/capabilities.hpp"
 #include "lake/control/store.hpp"
 
 namespace lake::api {
@@ -58,6 +59,7 @@ constexpr std::array central = std::to_array<std::string_view>({
     "create_token",
     "create_user",
     "create_workspace",
+    "delete_organization",
     "delete_workspace",
     "disable_mfa",
     "drive_shared_with_me",
@@ -151,6 +153,8 @@ constexpr std::array central = std::to_array<std::string_view>({
     "revoke_agent_session",
     "revoke_device",
     "revoke_dynamic_secret",
+    "revoke_grant",
+    "revoke_invitation",
     "revoke_offline_grant",
     "revoke_session",
     "revoke_user_sessions",
@@ -190,8 +194,6 @@ constexpr std::array central = std::to_array<std::string_view>({
     "test_sso_provider",
     "timestamp_checkpoint",
     "timestamp_evidence",
-    // Speech-to-text names no workspace and keeps nothing (docs/api/transcripts.md, lake#561).
-    "transcribe",
     "transparency_checkpoint",
     "transparency_consistency_proof",
     "transparency_identity_scan",
@@ -277,12 +279,18 @@ constexpr std::array workspace = std::to_array<std::string_view>({
     "delete_app",
     "delete_application_organization",
     "delete_application_user",
+    "delete_ask_conversation",
+    "delete_dataset",
     "delete_domain",
     "delete_drive",
     "delete_drive_entry",
     "delete_drive_path",
+    "delete_index",
     "delete_mcp_connection",
+    "delete_model",
     "delete_repository",
+    "delete_run",
+    "delete_secret_mount",
     "delete_secret_versions",
     "delete_service",
     "delete_solution",
@@ -343,6 +351,7 @@ constexpr std::array workspace = std::to_array<std::string_view>({
     "latest_agent_task",
     "launch_agent",
     "list_agent_launches",
+    "list_agent_revisions",
     "list_agent_schedules",
     "list_application_organizations",
     "list_application_users",
@@ -383,9 +392,12 @@ constexpr std::array workspace = std::to_array<std::string_view>({
     "list_webhook_deliveries",
     "list_webhooks",
     "load_drive_dataset",
+    "load_drive_model",
     "map_review_anchors",
     // The operator's delivery of a secret to a Kubernetes Secret: the mount's workspace (lake#625).
     "mint_sealed_secret",
+    // A model call through the model gateway: the workspace the agent's run belongs to (lake#248).
+    "model_completion",
     "model_traffic",
     "move_drive_entry",
     "move_drive_path",
@@ -464,6 +476,8 @@ constexpr std::array workspace = std::to_array<std::string_view>({
     "suspend_application_user",
     "tail_experiment_events",
     "test_mcp_connection",
+    // Dictation is the speech-to-text usage of the workspace it is dictated in (lake#613).
+    "transcribe",
     "transfer_repository",
     "unbind_service_from_app",
     "undelete_secret_versions",
@@ -637,7 +651,8 @@ std::optional<AuditLog> audit_log_of(std::string_view capability) {
     if (listed(central, capability)) {
         return AuditLog::Central;
     }
-    if (listed(workspace, capability)) {
+    // Each named engine capability is a workspace_query or workspace_act call (lake#650).
+    if (listed(workspace, capability) || !engine_capability_of(capability).empty()) {
         return AuditLog::Workspace;
     }
     return std::nullopt;

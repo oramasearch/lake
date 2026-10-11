@@ -1273,7 +1273,7 @@ json audit_filter_input() {
                 {"description", "Read only this workspace's audit (its Zetta's chain)."}}},
               {"customer_id",
                {{"type", "string"},
-                {"description", "With the central log, read the audits of this space's live "
+                {"description", "With the central log, read the audits of this account's live "
                                 "workspaces (by default, every workspace in scope)."}}},
               {"log",
                {{"type", "string"},
@@ -1732,6 +1732,92 @@ ApiResult attestation_failure(const ApiError& error) {
     return ApiResult::failure(error.code, error.message, error.path);
 }
 
+// What delete_organization answers (lake#645, docs/api/organizations.md#deleting-an-organization).
+json organization_deletion_json(const control::OrganizationDeletion& plan, bool dry_run) {
+    json workspaces = json::array();
+    for (const control::Workspace& workspace : plan.live_workspaces) {
+        workspaces.push_back({{"id", workspace.id},
+                              {"name", workspace.name},
+                              {"environment", workspace.environment}});
+    }
+    json counts = json::object();
+    for (const auto& [kind, count] : plan.counts) {
+        counts[kind] = count;
+    }
+    return {{"organization_id", plan.organization.id},
+            {"display_name", plan.organization.display_name},
+            {"customer_id", plan.customer_id.empty() ? json(nullptr) : json(plan.customer_id)},
+            {"handle", plan.customer_name.empty() ? json(nullptr) : json(plan.customer_name)},
+            {"workspaces", std::move(workspaces)},
+            {"counts", std::move(counts)},
+            {"dry_run", dry_run},
+            {"deleted", !dry_run},
+            {"deleted_at", plan.deleted_at.empty() ? json(nullptr) : json(plan.deleted_at)}};
+}
+
+// delete_organization: an owner (or the instance operator) deletes an organization whose space
+// holds no workspace. `confirm` is its handle, or its id when it has no space.
+ApiResult delete_organization(const json& in, ApiContext& ctx) {
+    if (!ctx.store) {
+        return no_store();
+    }
+    const std::string id = in.at("organization_id");
+    const bool dry_run = in.value("dry_run", false);
+    auto plan = ctx.store->delete_organization(id, true);
+    if (!plan) {
+        auto failed = from_store_error(plan.error());
+        failed.error.path = "/organization_id";
+        return failed;
+    }
+    ctx.audit_kind = dry_run ? "organization.delete.plan" : "organization.delete";
+    ctx.audit_object = "organization/" + id;
+    ctx.audit_customer_id = plan->customer_id;
+    ctx.audit_details = {{"organization_id", id}, {"handle", plan->customer_name}};
+    if (ctx.acting_identity != "admin") {
+        const auto memberships = ctx.store->list_memberships(id, "", 1000);
+        if (!memberships) {
+            return from_store_error(memberships.error());
+        }
+        if (std::ranges::none_of(*memberships, [&](const control::Membership& membership) {
+                return membership.team_id.empty() && membership.role == "owner" &&
+                       membership.principal_taap_id == ctx.acting_identity;
+            })) {
+            return ApiResult::failure("unauthorized",
+                                      "only an owner of the organization can delete it");
+        }
+    }
+    const std::string expected = plan->customer_name.empty() ? id : plan->customer_name;
+    const bool confirmed = in.contains("confirm") && in.at("confirm") == expected;
+    if (!confirmed && (!dry_run || in.contains("confirm"))) {
+        return ApiResult::failure(
+            "invalid_input", "confirm must match the organization's handle", "/confirm");
+    }
+    json value = organization_deletion_json(*plan, true);
+    ctx.audit_details["counts"] = value["counts"];
+    if (dry_run) {
+        return ApiResult::success(std::move(value));
+    }
+    if (!plan->live_workspaces.empty()) {
+        std::string names;
+        for (const control::Workspace& workspace : plan->live_workspaces) {
+            names += (names.empty() ? "" : ", ") + workspace.name;
+        }
+        return ApiResult::failure("conflict",
+                                  "the organization still owns workspaces; delete them first: " +
+                                      names,
+                                  "/organization_id");
+    }
+    auto deleted = ctx.store->delete_organization(id, false);
+    if (!deleted) {
+        auto failed = from_store_error(deleted.error());
+        failed.error.path = "/organization_id";
+        return failed;
+    }
+    value = organization_deletion_json(*deleted, false);
+    ctx.audit_details["counts"] = value["counts"];
+    return ApiResult::success(std::move(value));
+}
+
 // A grant or membership written with the attestation lake signed for it (lake#602): the answer is
 // the row plus `attestation: {statement, signer, signature, digest}`, and the audit event carries
 // the same.
@@ -1831,13 +1917,13 @@ std::expected<control::NewToken, ApiError> attenuated_token(const json& input,
                 ? std::ranges::find(*customers, "individual", &control::Customer::customer_type)
                 : std::vector<control::Customer>::const_iterator{};
         if (!customers || personal == customers->end()) {
-            return std::unexpected(ApiError{"unauthorized", "no personal space to check"});
+            return std::unexpected(ApiError{"unauthorized", "no account of your own to check"});
         }
         const auto allowed = context.store->customer_allows_non_expiring_credentials(personal->id);
         if (!allowed || !*allowed) {
             return std::unexpected(
                 ApiError{"unauthorized",
-                         "credentials that never expire are off for your space; turn on "
+                         "credentials that never expire are off for your account; turn on "
                          "allow_non_expiring_credentials with set_customer_credential_policy"});
         }
         token.is_static = true;
@@ -1989,7 +2075,7 @@ std::expected<control::Workspace, ApiError> repository_workspace(ApiContext& con
     if (!workspace || workspace->desired == "deleted" || workspace->customer_id != customer_id) {
         return std::unexpected(ApiError{"invalid_input",
                                         "workspace_id must name a workspace of the repository's "
-                                        "space; a repository belongs to one workspace",
+                                        "account; a repository belongs to one workspace",
                                         "/workspace_id"});
     }
     return *workspace;
@@ -2124,7 +2210,7 @@ void register_identity_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "get_organization",
         .title = "Get organization",
-        .description = "Read one organization: its name, the space it owns and when it was made.",
+        .description = "Read one organization: its name, the account it owns and when it was made.",
         .input_schema = id_input(),
         .output_schema =
             [] {
@@ -2173,12 +2259,36 @@ void register_identity_capabilities(Registry& registry) {
                                                              in.value("display_name", ""),
                                                              in.value("customer_id", "")}));
                             }});
+    registry.add(Capability{
+        .name = "delete_organization",
+        .title = "Delete an organization",
+        .description =
+            "Delete an organization, which cannot be undone: its teams, members, invitations, "
+            "SSO providers, federation issuers and every access grant on it and its account. It is "
+            "refused while the organization's account still has workspaces, which the refusal "
+            "names "
+            "(delete them first with delete_workspace). Only an owner can delete it. `confirm` "
+            "must be its handle (its id when it has no account). `dry_run: true` deletes nothing "
+            "and lists what would go, with counts and any workspaces in the way.",
+        .input_schema = {{"type", "object"},
+                         {"properties",
+                          {{"organization_id", {{"type", "string"}}},
+                           {"confirm", {{"type", "string"}}},
+                           {"dry_run", {{"type", "boolean"}}}}},
+                         {"required", json::array({"organization_id"})},
+                         {"additionalProperties", false}},
+        .output_schema = {{"type", "object"}},
+        .kind = CapabilityKind::Action,
+        .object = "organization",
+        .action = "admin",
+        .resolve_object = entity_object("organization", "organization_id"),
+        .handler = delete_organization});
 
     // ---- customers ----
     registry.add(Capability{
         .name = "list_customers",
         .title = "List customers",
-        .description = "List the spaces (customers) you can see, newest first; a space owns "
+        .description = "List the accounts (customers) you can see, newest first; an account owns "
                        "repositories, workspaces and services.",
         .input_schema = list_input(),
         .output_schema = list_schema(customer_schema()),
@@ -2195,7 +2305,7 @@ void register_identity_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "get_customer",
         .title = "Get customer",
-        .description = "Read one space (customer): its handle, whether it belongs to a person or "
+        .description = "Read one account (customer): its handle, whether it belongs to a person or "
                        "an organization, and when it was made. Name it by `customer_id`.",
         .input_schema = {{"type", "object"},
                          {"properties", {{"customer_id", {{"type", "string"}}}}},
@@ -2864,7 +2974,7 @@ void register_identity_capabilities(Registry& registry) {
                             {{"type", "boolean"},
                              {"description",
                               "a standing token with no expiry that survives sign-out; needs a "
-                              "reason and named scopes, and the space's opt-in (lake#234)"}}},
+                              "reason and named scopes, and the account's opt-in (lake#234)"}}},
                            {"reason", {{"type", "string"}}}}},
                          {"required", json::array({"name", "scopes"})},
                          {"additionalProperties", false}},
@@ -3657,7 +3767,7 @@ void register_repository_capabilities(Registry& registry) {
         Capability{.name = "list_repositories",
                    .title = "List repositories",
                    .description = "The most recent repositories, newest first; customer_id "
-                                  "narrows to one space and workspace_id to one of its "
+                                  "narrows to one account and workspace_id to one of its "
                                   "workspaces.",
                    .input_schema = {{"type", "object"},
                                     {"properties",
@@ -3707,7 +3817,7 @@ void register_repository_capabilities(Registry& registry) {
                    }});
     registry.add(Capability{.name = "get_repository",
                             .title = "Get repository",
-                            .description = "Read one repository: its name, space, workspace, "
+                            .description = "Read one repository: its name, account, workspace, "
                                            "visibility, description (from its workspace) and "
                                            "whether it is deleted.",
                             .input_schema = id_input(),
@@ -3841,8 +3951,8 @@ void register_repository_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "transfer_repository",
         .title = "Transfer repository",
-        .description = "Refused: a repository stays in the space and workspace it was created "
-                       "in (lake#315). Export it and import it into the other space's workspace "
+        .description = "Refused: a repository stays in the account and workspace it was created "
+                       "in (lake#315). Export it and import it into the other account's workspace "
                        "instead.",
         .input_schema = {{"type", "object"},
                          {"properties",
@@ -3864,9 +3974,9 @@ void register_repository_capabilities(Registry& registry) {
             }
             // The routing trigger of migration 0051 holds the space and workspace fixed.
             return ApiResult::failure("conflict",
-                                      "a repository stays in the space and workspace it was "
+                                      "a repository stays in the account and workspace it was "
                                       "created in; export it and import it into a workspace of "
-                                      "the other space",
+                                      "the other account",
                                       "/customer_id");
         }});
     registry.add(Capability{
@@ -4051,6 +4161,8 @@ void register_repository_capabilities(Registry& registry) {
             if (!file) {
                 return from_sync_store_error(file.error());
             }
+            // The file's bytes leave its repository's workspace (lake#658).
+            record_workspace_transfer(ctx, repository->workspace_id, 0, file->size);
             json out = repository_file_json(*file);
             if (in.value("units", false)) {
                 if (auto units = web_ui_source_units(file->path, file->contents)) {
@@ -4798,7 +4910,7 @@ void register_organization_capabilities(Registry& registry) {
                    .description = "Invitations in an organization or team, including expiry "
                                   "and acceptance. Without organization_id, the pending "
                                   "invitations addressed to the signed-in person, by email or "
-                                  "by the handle of their personal space, with organization_name.",
+                                  "by the handle of their own account, with organization_name.",
                    .input_schema = {{"type", "object"},
                                     {"properties",
                                      {{"organization_id", {{"type", "string"}}},
@@ -4869,6 +4981,40 @@ void register_organization_capabilities(Registry& registry) {
                                                                     in.at("expires_at"),
                                                                     ctx.acting_identity,
                                                                     ctx.request_id}));
+        }});
+    registry.add(Capability{
+        .name = "revoke_invitation",
+        .title = "Revoke an invitation",
+        .description = "Revoke a pending invitation so it can no longer be accepted; it stays "
+                       "listed as revoked. An accepted invitation is a membership: remove the "
+                       "member instead. `dry_run: true` changes nothing and answers the "
+                       "invitation that would be revoked.",
+        .input_schema = {{"type", "object"},
+                         {"properties",
+                          {{"invitation_id", {{"type", "string"}}},
+                           {"dry_run", {{"type", "boolean"}}}}},
+                         {"required", json::array({"invitation_id"})},
+                         {"additionalProperties", false}},
+        .output_schema = invitation_schema(),
+        .kind = CapabilityKind::Action,
+        .object = "invitation scope",
+        .action = "admin",
+        .resolve_object = invitation_object,
+        .handler = [](const json& in, ApiContext& ctx) {
+            if (!ctx.store) {
+                return no_store();
+            }
+            const bool dry_run = in.value("dry_run", false);
+            ctx.audit_kind = dry_run ? "invitation.revoke.plan" : "invitation.revoke";
+            ctx.audit_object = "invitation/" + in.at("invitation_id").get<std::string>();
+            auto result = one_result(ctx.store->revoke_invitation(in.at("invitation_id"), dry_run));
+            if (!result.ok && result.error.path.empty()) {
+                result.error.path = "/invitation_id";
+            }
+            if (result.ok) {
+                result.value["dry_run"] = dry_run;
+            }
+            return result;
         }});
     registry.add(Capability{
         .name = "accept_invitation",
@@ -4946,7 +5092,7 @@ void register_organization_capabilities(Registry& registry) {
         .name = "create_organization_space",
         .title = "Create organization",
         .description = "Start an organization as the signed-in person: the organization, its own "
-                       "space (handle generated when name is omitted), and the caller as its "
+                       "account (handle generated when name is omitted), and the caller as its "
                        "owner, in one step. Invite colleagues next with create_invitation.",
         .input_schema = {{"type", "object"},
                          {"properties",
@@ -4988,10 +5134,10 @@ void register_organization_capabilities(Registry& registry) {
         }});
     registry.add(Capability{
         .name = "convert_personal_space",
-        .title = "Turn a personal space into an organization",
-        .description = "Turn the caller's personal space into an organization's space. The space "
+        .title = "Turn your account into an organization",
+        .description = "Turn the caller's own account into an organization's account. The account "
                        "keeps its id, handle, repositories, workspaces and apps; the caller "
-                       "becomes the organization's owner and receives a fresh personal space.",
+                       "becomes the organization's owner and receives a fresh account of their own.",
         .input_schema = {{"type", "object"},
                          {"properties",
                           {{"customer_id", {{"type", "string"}}},
@@ -5009,7 +5155,7 @@ void register_organization_capabilities(Registry& registry) {
             }
             if (ctx.acting_user_id.empty()) {
                 return ApiResult::failure(
-                    "unauthorized", "only the person whose personal space this is can convert it");
+                    "unauthorized", "only the person whose own account this is can convert it");
             }
             if (trim_copy(in.at("display_name").get<std::string>()).empty()) {
                 return ApiResult::failure(
@@ -5032,7 +5178,7 @@ void register_organization_capabilities(Registry& registry) {
         .name = "join_organization",
         .title = "Join organization",
         .description = "Accept, as the signed-in person, a pending invitation addressed to their "
-                       "email or to the handle of their personal space. The membership records "
+                       "email or to the handle of their own account. The membership records "
                        "the invitation as its evidence and its inviter as the grantor.",
         .input_schema = {{"type", "object"},
                          {"properties", {{"invitation_id", {{"type", "string"}}}}},
@@ -5113,7 +5259,7 @@ void register_policy_capabilities(Registry& registry) {
     registry.add(Capability{.name = "get_object",
                             .title = "Get object",
                             .description =
-                                "Read one object of the access-control tree (a space, repository, "
+                                "Read one object of the access-control tree (an account, repository, "
                                 "team…) and its parent, to see where its grants come from.",
                             .input_schema = id_input(),
                             .output_schema = object_schema(),
@@ -5229,6 +5375,52 @@ void register_policy_capabilities(Registry& registry) {
                 ctx);
         }});
     registry.add(Capability{
+        .name = "revoke_grant",
+        .title = "Revoke a grant",
+        .description =
+            "Remove one access grant (list_grants names them). A grant that comes with a "
+            "membership is removed with it (remove_member), and the last admin grant on an account "
+            "is kept so the account always has an administrator. `dry_run: true` changes nothing "
+            "and answers the grant that would be revoked.",
+        .input_schema = {{"type", "object"},
+                         {"properties",
+                          {{"grant_id", {{"type", "string"}}}, {"dry_run", {{"type", "boolean"}}}}},
+                         {"required", json::array({"grant_id"})},
+                         {"additionalProperties", false}},
+        .output_schema = grant_schema(),
+        .kind = CapabilityKind::Action,
+        .object = "policy object",
+        .action = "admin",
+        .resolve_object = [](const json& in,
+                             ApiContext& ctx) -> std::expected<std::string, ApiError> {
+            const auto grant = ctx.store->get_grant(in.at("grant_id"));
+            if (!grant) {
+                return std::unexpected(
+                    ApiError{grant.error().code, grant.error().message, "/grant_id"});
+            }
+            return grant->object_id;
+        },
+        .handler =
+            [](const json& in, ApiContext& ctx) {
+                if (!ctx.store) {
+                    return no_store();
+                }
+                const bool dry_run = in.value("dry_run", false);
+                ctx.audit_kind = dry_run ? "grant.revoke.plan" : "grant.revoke";
+                ctx.audit_object = "grant/" + in.at("grant_id").get<std::string>();
+                auto result = one_result(ctx.store->revoke_grant(in.at("grant_id"), dry_run));
+                if (!result.ok && result.error.path.empty()) {
+                    result.error.path = "/grant_id";
+                }
+                if (result.ok) {
+                    ctx.audit_details = {{"principal_taap_id", result.value["principal_taap_id"]},
+                                         {"object_id", result.value["object_id"]},
+                                         {"role", result.value["role"]}};
+                    result.value["dry_run"] = dry_run;
+                }
+                return result;
+            }});
+    registry.add(Capability{
         .name = "effective_access",
         .title = "Effective access",
         .description = "Who can access an object, which actions they have, and "
@@ -5319,7 +5511,7 @@ std::expected<search::Query, ApiError> search_scope(const json& input, ApiContex
         return decision && decision->allowed;
     };
     const ApiError not_searchable{
-        "invalid_input", "workspace_id must name a workspace Zetta in this space",
+        "invalid_input", "workspace_id must name a workspace Zetta in this account",
         "/workspace_id"};
     if (!query.workspace.empty()) {
         const auto workspace = context.store->get_workspace(query.workspace);
@@ -5382,7 +5574,7 @@ std::expected<search::Query, ApiError> search_scope(const json& input, ApiContex
             // No cursor for this list: refused rather than searched in part.
             return std::unexpected(
                 ApiError{"invalid_input",
-                         "too many spaces to search them all; name a customer_id",
+                         "too many accounts to search them all; name a customer_id",
                          "/customer_id"});
         }
         std::vector<std::string> objects;
@@ -5535,7 +5727,7 @@ audit_scope(const json& input, ApiContext& context, const std::vector<std::strin
         }
         if (!spaces.empty() && std::ranges::find(spaces, workspace->customer_id) == spaces.end()) {
             return std::unexpected(ApiError{
-                "unauthorized", "the workspace is not in one of the caller's spaces"});
+                "unauthorized", "the workspace is not in one of the caller's accounts"});
         }
         scope.central = false;
         scope.workspaces.emplace_back(workspace->customer_id, workspace->id);
@@ -5549,7 +5741,7 @@ audit_scope(const json& input, ApiContext& context, const std::vector<std::strin
         const std::string customer_id = input.at("customer_id");
         if (!spaces.empty() && std::ranges::find(spaces, customer_id) == spaces.end()) {
             return std::unexpected(
-                ApiError{"unauthorized", "the space is not one of the caller's", "/customer_id"});
+                ApiError{"unauthorized", "the account is not one of the caller's", "/customer_id"});
         }
         customers.push_back(customer_id);
     } else if (!spaces.empty()) {
@@ -5659,7 +5851,7 @@ void register_audit_capabilities(Registry& registry) {
                        "event names its principal (`principal_name`) and, for a workspace call, "
                        "the inner `capability`. Reads the central log and every workspace's audit "
                        "(decision 52): `workspace_id` reads one workspace's, `customer_id` limits "
-                       "the workspaces to one space's, and `log: central` reads the central log "
+                       "the workspaces to one account's, and `log: central` reads the central log "
                        "alone. Each event says its `log`.",
         .input_schema = audit_filter_input(),
         .output_schema = list_schema(audit_event_schema()),
@@ -5692,7 +5884,7 @@ void register_audit_capabilities(Registry& registry) {
         .title = "Query my audit events",
         .description =
             "The signed-in principal's own signed audit events, filtered like audit, newest first, "
-            "from the central log and the audits of the workspaces of the principal's spaces. "
+            "from the central log and the audits of the workspaces of the principal's accounts. "
             "Successful reads (the polling a browser does) are left out unless `include_reads` "
             "is true; failed and denied reads always appear.",
         .input_schema = audit_filter_input(),
@@ -5867,8 +6059,8 @@ void register_audit_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "set_audit_retention",
         .title = "Set audit retention",
-        .description = "Set a space's retention of the central audit log, at or above the "
-                       "400-day floor; it can never be reduced. The space's workspace audits are "
+        .description = "Set an account's retention of the central audit log, at or above the "
+                       "400-day floor; it can never be reduced. The account's workspace audits are "
                        "kept until their workspace is deleted (decision 52, lake#318).",
         .input_schema = {{"type", "object"},
                          {"properties",
@@ -5952,6 +6144,7 @@ void register_core_capabilities(Registry& registry, std::string_view version) {
     register_mcp_connection_capabilities(registry);
     register_solution_capabilities(registry);
     register_drives_capabilities(registry);
+    register_deletion_capabilities(registry);
 }
 
 } // namespace lake::api

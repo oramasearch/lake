@@ -1,7 +1,7 @@
 # The Agent Factory
 
 **Status: implemented 2026-09-27 (lake#233, epic lake#228).** *Build it with the Agent Factory* in
-Train → Agents → Create an Agent (`/train/agents/new`): a conversation with **AgentCreator**
+Design → Agents → Describe it to the Agent Factory (`/design/agents/new`; `/train/agents/new` redirects there, lake#653): a conversation with **AgentCreator**
 ([`oramasearch/agent-creator`](https://github.com/oramasearch/agent-creator)), which asks what it must
 and proposes an agent in Studio's shape. **Nothing is created until the person approves.**
 
@@ -11,6 +11,40 @@ question, or the proposal in one sentence) and the structured answer in `result`
 (`{kind: question | proposal, question?, proposal?, defects, facts}`), so an API or MCP caller reads
 `result` without parsing text. The Factory page reads `result`, falling back to the JSON an older
 AgentCreator put in `reply`.
+
+## Skills
+
+What a person's agent may do is the **skills** a person grants it, in the Agent Factory's proposal
+or the New agent drawer, and shown on the agent page. agent-runtime decides what each grants
+([`skills.py`](https://github.com/oramasearch/agent-runtime/blob/main/src/agent_runtime/skills.py),
+agent-runtime#7): reads are tools that call Lake, and changes are proposals a person confirms, as App
+changes are. The workspace engine's agent record accepts exactly these names.
+
+| Skill | Label | What it reaches |
+|---|---|---|
+| `search` | Search data | datasets, connections, search indexes (creating or exposing one is a proposal), Lake-wide `search`, the Docs, solution reads |
+| `generate-data` | Generate a dataset | dataset generators |
+| `train` | Train a Model | projects, runs, jobs, models, experiments (starting or stopping one is a proposal), solution reads |
+| `summarize` | Summarize and explain | projects, runs, models, model health and traffic, traces, the workspace's status |
+| `call-api` | Call the API | models (`score`, `explain`, `predict`), exposing a model as a proposal, solution decisions |
+| `drives` | Use drives | browse, read, preview, history and search; uploads, folders, moves, deletes as proposals |
+| `transcripts` | Use transcripts | list and read; adding, editing, deleting and `transcribe` as proposals |
+| `repositories` | Work in repositories | files, refs, changes, issues, reviews, releases, artifacts, environments; issues, comments, reviews and commits as proposals |
+| `datasets` | Load datasets | datasets, analysis, feature plans, connections and their tables; loading from a drive or a connection, uploads and new connections as proposals |
+| `streams` | Read and publish streams | streams and their messages; publishing and stream changes as proposals |
+| `pipelines` | Design pipelines | projects, pipelines, methodologies, runs, Opportunities; creating, editing, checking, approving, running and deploying a pipeline, and composing a solution, as proposals |
+| `usage` | Read usage and billing | metered usage, usage over time, limits, the billing account, the price list, invoices |
+
+A run's lake key carries the reads of its agent's skills and nothing else
+([agent-launches.md](agent-launches.md#launches)): an agent's own code cannot read what its skills do
+not grant. Sign-in, recovery, key and certificate minting, secrets, people and access, and the
+generic `workspace_query`/`workspace_act` are never any agent's (agent-runtime's
+`NEVER_FOR_AGENTS`); agent-runtime's contract test fails when Lake publishes a capability that is in
+no skill and not on that list.
+
+The list is vendored from agent-runtime's `skills.json` by `tools/agents/vendor-agent-skills.py`
+(`src/control/agent_skills.cpp` for the keys, `frontend/src/pages/train/agent-skills.json` for the
+pages). AgentCreator proposes only these skills.
 
 ## The conversation
 

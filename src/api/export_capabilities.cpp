@@ -321,7 +321,7 @@ void register_export_capabilities(Registry& registry) {
                    .title = "Import repository",
                    .description = "Verify and recreate a signed portable repository archive "
                                   "as a new repository in one workspace (`workspace_id`, "
-                                  "required) of the customer's space.",
+                                  "required) of the customer's account.",
                    .input_schema = {{"type", "object"},
                                     {"properties",
                                      {{"customer_id", {{"type", "string"}}},

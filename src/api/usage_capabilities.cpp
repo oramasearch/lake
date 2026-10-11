@@ -1,6 +1,7 @@
 // Usage over time (lake#564, docs/api/metering.md#usage-over-time): usage_over_time, usage_limits,
-// set_usage_limit, record_model_usage, and the owner loop's usage sample. Every workspace's usage
-// is read from its own workspace Zetta; lake's control store holds only the limits.
+// set_usage_limit, record_model_usage, model_completion (the model gateway, lake#248), and the
+// owner loop's usage sample. Every workspace's usage is read from its own workspace Zetta; lake's
+// control store holds only the limits.
 
 #include <algorithm>
 #include <chrono>
@@ -12,6 +13,7 @@
 #include <limits>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <set>
 #include <string>
@@ -22,15 +24,18 @@
 
 #include "lake/api/capabilities.hpp"
 #include "lake/api/images.hpp"
+#include "lake/api/model_gateway.hpp"
 #include "lake/api/sync_store.hpp"
 #include "lake/api/usage_recorder.hpp"
 #include "lake/control/agent_bus.hpp"
 #include "lake/control/builds.hpp"
+#include "lake/control/drive_files.hpp"
 #include "lake/control/drives.hpp"
 #include "lake/control/metering.hpp"
 #include "lake/control/store.hpp"
 #include "lake/control/transcripts.hpp"
 #include "lake/control/web_apps.hpp"
+#include "lake/control/workspace_store.hpp"
 #include "lake/control/zetta_workspace.hpp"
 #include "workspace_records_api.hpp"
 
@@ -505,9 +510,188 @@ bool finished(std::string_view phase) {
     return phase == "Succeeded" || phase == "Failed" || phase == "Cancelled";
 }
 
+// The kinds of Zetta's storage_usage lake records, and the `lake_storage` kind each becomes
+// (lake#658). Datasets keep their name from before, `workspace_data`.
+const std::vector<std::pair<std::string_view, std::string_view>>& engine_storage_kinds() {
+    static const std::vector<std::pair<std::string_view, std::string_view>> kinds{
+        {"datasets", "workspace_data"},
+        {"models", "models"},
+        {"indexes", "indexes"},
+        {"runs", "runs"},
+        {"streams", "streams"},
+        {"files", "files"},
+        {"buckets", "buckets"},
+    };
+    return kinds;
+}
+
+// A workload charged once for how long it ran (lake#658): an image build, a job-mode agent launch
+// or an agent cron run that has finished. It ran from its request (a cron run: its start) to its
+// final status, so time queued is included for builds and launches, as for build time.
+struct FinishedJob {
+    std::string row_kind;   // its workload_resources kind: build, agent_launch or agent_cron_run
+    std::string usage_kind; // its kind in the usage series: build or agent
+    std::string id, workspace_id, started, ended;
+};
+
+struct FinishedJobs {
+    std::vector<FinishedJob> jobs;
+    std::vector<std::string> problems;
+};
+
+// The account's finished jobs in `workspaces`.
+FinishedJobs finished_jobs(control::Store& store,
+                           const std::string& customer_id,
+                           const std::set<std::string>& workspaces) {
+    FinishedJobs out;
+    if (const auto builds = store.list_builds(customer_id)) {
+        for (const control::Build& build : *builds) {
+            if (workspaces.contains(build.workspace_id) && finished(build.phase)) {
+                out.jobs.push_back({"build",
+                                    "build",
+                                    build.id,
+                                    build.workspace_id,
+                                    build.created_at,
+                                    build.updated_at});
+            }
+        }
+    } else {
+        out.problems.push_back("Builds: " + builds.error().message);
+    }
+    if (const auto launches = store.list_agent_launches(customer_id, "", 10000)) {
+        for (const control::AgentLaunch& launch : *launches) {
+            if (workspaces.contains(launch.workspace_id) && launch.mode == "job" &&
+                finished(launch.phase) && !launch.status_updated_at.empty()) {
+                out.jobs.push_back({"agent_launch",
+                                    "agent",
+                                    launch.id,
+                                    launch.workspace_id,
+                                    launch.created_at,
+                                    launch.status_updated_at});
+            }
+        }
+    } else {
+        out.problems.push_back("Agent launches: " + launches.error().message);
+    }
+    if (const auto runs = store.list_agent_cron_runs(customer_id, "", 10000)) {
+        for (const control::AgentLaunch& run : *runs) {
+            if (workspaces.contains(run.workspace_id) && finished(run.phase) &&
+                !run.status_updated_at.empty()) {
+                out.jobs.push_back({"agent_cron_run",
+                                    "agent",
+                                    run.id,
+                                    run.workspace_id,
+                                    run.created_at,
+                                    run.status_updated_at});
+            }
+        }
+    } else {
+        out.problems.push_back("Agent cron runs: " + runs.error().message);
+    }
+    return out;
+}
+
+// The usage series keeps 400 days; a job that ended before them is not charged.
+constexpr std::int64_t series_retention_ms = 400 * day_ms;
+// At most this many jobs are charged per workspace in one sample, so a first sample after a long
+// gap spreads its writes over the following ones.
+constexpr std::size_t jobs_per_sample = 500;
+
+std::chrono::system_clock::time_point time_of(std::int64_t ms) {
+    return std::chrono::system_clock::time_point{std::chrono::milliseconds(ms)};
+}
+
+// Charges every finished job that has its resources reported and was not charged before: its
+// CPU, RAM, GPU and GPU memory for how long it ran, in the hour it ended, after recording
+// `if_absent` in its workspace that it was charged (lake_metering_job_records). A job whose
+// record was written but whose usage was lost (a crash before the flush) is not charged again:
+// at most once, never twice.
+liquid::runtime::task<void> charge_finished_jobs(ApiContext& context,
+                                                 const std::string& customer_id,
+                                                 const std::vector<FinishedJob>& jobs,
+                                                 const ResourceRows& resources,
+                                                 std::chrono::system_clock::time_point at,
+                                                 UsageSampleReport& report) {
+    const std::int64_t now_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(at.time_since_epoch()).count();
+    const std::int64_t horizon_ms = now_ms - series_retention_ms;
+    struct Candidate {
+        const FinishedJob* job;
+        const control::WorkloadResources* row;
+        std::int64_t ended_ms;
+        std::uint64_t seconds;
+    };
+    std::map<std::string, std::vector<Candidate>> by_workspace;
+    for (const FinishedJob& job : jobs) {
+        const auto* row = resources_of(resources, job.row_kind, job.id);
+        const auto ended = utc_ms(job.ended);
+        const auto ran = elapsed_seconds(job.started, job.ended);
+        if (row == nullptr || !ended || !ran || *ended < horizon_ms || *ended > now_ms) {
+            continue;
+        }
+        by_workspace[job.workspace_id].push_back({&job, row, *ended, *ran});
+    }
+    for (auto& [workspace_id, candidates] : by_workspace) {
+        auto records = workspace_records(context, customer_id, workspace_id);
+        if (!records) {
+            report.unmeasured.push_back("Finished jobs of workspace " + workspace_id + ": " +
+                                        records.error().message);
+            continue;
+        }
+        auto charged = control::settled(
+            co_await control::list_metered_jobs(*records, customer_id, horizon_ms * 1000));
+        if (!charged) {
+            report.unmeasured.push_back("Finished jobs of workspace " + workspace_id + ": " +
+                                        charged.error().message);
+            continue;
+        }
+        std::set<std::string> seen;
+        for (const control::MeteredJob& job : *charged) {
+            seen.insert(job.kind + ":" + job.object_id);
+        }
+        std::ranges::stable_sort(candidates, {}, &Candidate::ended_ms);
+        std::size_t written = 0;
+        for (const Candidate& candidate : candidates) {
+            const FinishedJob& job = *candidate.job;
+            if (seen.contains(job.row_kind + ":" + job.id)) {
+                continue;
+            }
+            if (written == jobs_per_sample) {
+                break;
+            }
+            ++written;
+            auto recorded = control::settled(co_await control::record_metered_job(
+                *records,
+                {customer_id,
+                 job.row_kind,
+                 job.id,
+                 utc_text(floor_to(candidate.ended_ms, hour_ms)),
+                 candidate.seconds}));
+            if (!recorded) {
+                report.unmeasured.push_back("Job " + job.id + ": " + recorded.error().message);
+                continue;
+            }
+            if (!*recorded) {
+                continue; // another lake charged it first
+            }
+            auto increments =
+                resource_increments(*candidate.row,
+                                    candidate.seconds,
+                                    {{"kind", job.usage_kind}, {"object_id", job.id}});
+            if (increments.empty()) {
+                continue;
+            }
+            report.increments += increments.size();
+            context.usage_recorder->add_together(
+                workspace_id, std::move(increments), time_of(candidate.ended_ms));
+        }
+    }
+    co_return {};
+}
+
 // The running workloads of the chosen workspaces the operator has not reported the resources of,
-// by name, and the finished builds and agent jobs of [from, to) without them: their CPU, RAM, GPU
-// and VRAM are not counted (usage_over_time's not_measured).
+// by name, and the finished builds, agent jobs and cron runs of [from, to) without them: their
+// CPU, RAM, GPU and VRAM are not counted (usage_over_time's not_measured).
 std::vector<std::string> unreported_workloads(control::Store& store,
                                               const std::string& customer_id,
                                               const std::vector<control::Workspace>& workspaces,
@@ -542,37 +726,27 @@ std::vector<std::string> unreported_workloads(control::Store& store,
             }
         }
     }
-    std::size_t jobs = 0;
-    if (const auto builds = store.list_builds(customer_id)) {
-        for (const control::Build& build : *builds) {
-            const auto ended = utc_ms(build.updated_at);
-            if (chosen.contains(build.workspace_id) && finished(build.phase) && ended &&
-                *ended >= from_ms && *ended < to_ms && !resources_of(rows, "build", build.id)) {
-                ++jobs;
+    if (const auto launches = store.list_agent_launches(customer_id, "", 10000)) {
+        for (const control::AgentLaunch& launch : *launches) {
+            if (chosen.contains(launch.workspace_id) && launch.mode == "service" &&
+                launch.desired == "present" && !resources_of(rows, "agent_launch", launch.id)) {
+                names.push_back("agent " +
+                                (launch.agent_name.empty() ? launch.agent_id : launch.agent_name));
             }
         }
     }
-    if (const auto launches = store.list_agent_launches(customer_id, "", 10000)) {
-        for (const control::AgentLaunch& launch : *launches) {
-            if (!chosen.contains(launch.workspace_id) ||
-                resources_of(rows, "agent_launch", launch.id)) {
-                continue;
-            }
-            if (launch.mode == "service" && launch.desired == "present") {
-                names.push_back("agent " +
-                                (launch.agent_name.empty() ? launch.agent_id : launch.agent_name));
-                continue;
-            }
-            const auto ended = utc_ms(launch.status_updated_at);
-            if (launch.mode == "job" && finished(launch.phase) && ended && *ended >= from_ms &&
-                *ended < to_ms) {
-                ++jobs;
-            }
+    std::size_t jobs = 0;
+    for (const FinishedJob& job : finished_jobs(store, customer_id, chosen).jobs) {
+        const auto ended = utc_ms(job.ended);
+        if (ended && *ended >= from_ms && *ended < to_ms &&
+            !resources_of(rows, job.row_kind, job.id)) {
+            ++jobs;
         }
     }
     if (jobs > 0) {
-        names.push_back(std::format("{} finished build{} and agent job{}",
+        names.push_back(std::format("{} finished build{}, agent job{} and cron run{}",
                                     jobs,
+                                    jobs == 1 ? "" : "s",
                                     jobs == 1 ? "" : "s",
                                     jobs == 1 ? "" : "s"));
     }
@@ -604,9 +778,9 @@ liquid::runtime::task<UsageReading> read_usage(ApiContext& context, const UsageQ
         return query.dimensions.contains(std::string(dimension));
     };
     const bool wants_resources = wants("cpu") || wants("ram") || wants("gpu") || wants("vram");
-    const bool wants_series = wants("calls") || wants("predictions") || wants("speech") ||
-                              wants("model_tokens") || wants("instances") || wants("volumes") ||
-                              wants_resources;
+    const bool wants_series = wants("calls") || wants("predictions") || wants("searches") ||
+                              wants("speech") || wants("model_tokens") || wants("instances") ||
+                              wants("volumes") || wants("transfer") || wants_resources;
     const std::int64_t from_ms = periods.starts.empty() ? 0 : periods.starts.front();
     const std::int64_t to_ms = periods.end;
     const std::int64_t since_us = from_ms * 1000;
@@ -834,10 +1008,13 @@ liquid::runtime::task<UsageReading> read_usage(ApiContext& context, const UsageQ
         }
         const double total = total_of(all, gauge);
         reading.totals[std::string(dimension.name)] = total;
+        // `billed` (lake#658): whether the price list may rate it. Build, run and instance time
+        // are kept as detail and never billed: compute is billed as CPU, RAM, GPU and VRAM.
         json entry{{"dimension", dimension.name},
                    {"title", dimension.title},
                    {"unit", dimension.unit},
                    {"aggregation", dimension.aggregation},
+                   {"billed", dimension.priced},
                    {"total", total},
                    {"points", points_json(all, gauge)}};
         entry["by_workspace"] = breakdown(
@@ -867,7 +1044,8 @@ liquid::runtime::task<UsageReading> read_usage(ApiContext& context, const UsageQ
             });
         }
         if (dimension.name == "instances" || dimension.name == "volumes" ||
-            dimension.name == "predictions" || resource_dimension(dimension.name)) {
+            dimension.name == "predictions" || dimension.name == "searches" ||
+            resource_dimension(dimension.name)) {
             entry["by_object"] = breakdown(
                 mine,
                 gauge,
@@ -924,20 +1102,40 @@ liquid::runtime::task<UsageReading> read_usage(ApiContext& context, const UsageQ
                 rows.error());
         }
     }
-    if (wants("model_tokens")) {
-        reading.not_measured.push_back(
-            "Model tokens: counted only when an agent reports them with record_model_usage; "
-            "agent-runtime and the library agents do not report them yet (lake#248).");
-    }
-    if (wants("speech")) {
-        reading.not_measured.push_back(
-            "Speech-to-text for dictation outside a transcript (transcribe) belongs to no "
-            "workspace; only transcripts made from audio are counted (lake#613).");
-    }
+    // Model tokens are counted by the model gateway as each call is answered (lake#248).
+    // Speech is measured for every transcript and dictation (lake#613, lake#658).
     if (wants("storage")) {
+        // A workspace sampled in the window whose engine reported no models (its Zetta has no
+        // storage_usage yet): its models, indexes, run artifacts, topics, files and buckets are
+        // not in its storage (lake#658).
+        std::set<std::string> sampled, reported;
+        for (const auto& [key, series] : accumulator.series()) {
+            if (series.dimension != "storage") {
+                continue;
+            }
+            sampled.insert(series.workspace_id);
+            if (label(series, "kind") == "models") {
+                reported.insert(series.workspace_id);
+            }
+        }
+        std::string unreported;
+        for (const control::Workspace& workspace : query.workspaces) {
+            if (sampled.contains(workspace.id) && !reported.contains(workspace.id)) {
+                unreported += (unreported.empty() ? "" : ", ") + workspace.name;
+            }
+        }
+        if (!unreported.empty()) {
+            reading.not_measured.push_back(
+                "Model files, indexes, run artifacts, topics, files and buckets inside workspace " +
+                unreported +
+                ": its engine does not report their size yet (it needs a Zetta with "
+                "storage_usage), so only its datasets are counted (lake#658).");
+        }
+    }
+    if (wants("transfer")) {
         reading.not_measured.push_back(
-            "Model files and indexes inside a workspace: the workspace does not report their size "
-            "yet.");
+            "Transfer of apps through the ingress: the Orama operator does not report it yet "
+            "(lake#661).");
     }
     co_return reading;
 }
@@ -1158,7 +1356,8 @@ liquid::runtime::task<ApiResult> limits_of(const std::string& customer_id, ApiCo
                  limit.limit,
                  limit.warn_percent,
                  used == reading.totals.end() ? std::nullopt : std::optional<double>(used->second),
-                 false,
+                 // The model gateway refuses model calls past this one (lake#248).
+                 name == "model_tokens",
                  "month");
     }
     co_return ApiResult::success({{"customer_id", customer_id},
@@ -1177,6 +1376,7 @@ struct Reporter {
     std::string workspace_id;
     std::string agent;
     std::string launch_id;
+    std::string customer_id;
 };
 
 std::expected<Reporter, ApiResult> reporter_of(const json& input, ApiContext& context) {
@@ -1201,14 +1401,14 @@ std::expected<Reporter, ApiResult> reporter_of(const json& input, ApiContext& co
             return std::unexpected(
                 ApiResult::failure("conflict", "the task is not one of this agent's", "/task_id"));
         }
-        return Reporter{task->workspace_id, task->agent, task->id};
+        return Reporter{task->workspace_id, task->agent, task->id, task->customer_id};
     }
     if (context.credential_kind == "agent_task") {
         const auto task = context.store->get_agent_task(id_after("task:"));
         if (!task) {
             return std::unexpected(refused());
         }
-        return Reporter{task->workspace_id, task->agent, task->id};
+        return Reporter{task->workspace_id, task->agent, task->id, task->customer_id};
     }
     if (context.credential_kind == "agent_launch") {
         const auto launch = context.store->get_agent_launch(id_after("launch:"));
@@ -1217,7 +1417,8 @@ std::expected<Reporter, ApiResult> reporter_of(const json& input, ApiContext& co
         }
         return Reporter{launch->workspace_id,
                         launch->agent_name.empty() ? launch->agent_id : launch->agent_name,
-                        launch->id};
+                        launch->id,
+                        launch->customer_id};
     }
     if (context.credential_kind == "agent_schedule") {
         const auto schedule = context.store->get_agent_cron_schedule(id_after("schedule:"));
@@ -1226,7 +1427,8 @@ std::expected<Reporter, ApiResult> reporter_of(const json& input, ApiContext& co
         }
         return Reporter{schedule->workspace_id,
                         schedule->agent_name.empty() ? schedule->agent_id : schedule->agent_name,
-                        schedule->id};
+                        schedule->id,
+                        schedule->customer_id};
     }
     return std::unexpected(refused());
 }
@@ -1235,7 +1437,225 @@ std::expected<std::string, ApiError> agent_object(const json&, ApiContext&) {
     return std::string("agent_usage");
 }
 
+// ------------------------------------------------------------------------------------------------
+// The model gateway (lake#248, docs/api/model-gateway.md).
+
+// Who a model call is made for: an agent's own task, launch or schedule credential, never a
+// person's key or a library agent's bus credential (which names no turn).
+std::expected<Reporter, ApiResult> model_caller(const json& input, ApiContext& context) {
+    if (!context.authorized) {
+        return std::unexpected(ApiResult::failure(
+            "unauthenticated",
+            "a model call needs the agent's task, launch or schedule credential as its key"));
+    }
+    if (context.credential_kind != "agent_task" && context.credential_kind != "agent_launch" &&
+        context.credential_kind != "agent_schedule") {
+        return std::unexpected(ApiResult::failure(
+            "unauthorized",
+            "only an agent's own task, launch or schedule credential may call a model through "
+            "Lake"));
+    }
+    return reporter_of(input, context);
+}
+
+// An account's monthly model-token limit and this month's use, as this process last read them.
+// Reading the use reads every workspace of the account, so it is read at most once a minute; the
+// tokens this process counts in between are added to it. Each replica keeps its own, so a limit
+// is exceeded by at most about a minute of every replica's calls.
+struct ModelTokenAllowance {
+    std::uint64_t limit = 0; // 0: no limit
+    double used = 0;
+    std::chrono::steady_clock::time_point read_at;
+};
+constexpr std::chrono::seconds allowance_refresh{60};
+
+std::mutex& allowance_mutex() {
+    static std::mutex mutex;
+    return mutex;
+}
+std::map<std::string, ModelTokenAllowance>& allowances() {
+    static std::map<std::string, ModelTokenAllowance> by_customer;
+    return by_customer;
+}
+
+std::optional<ApiResult> over_model_limit(const ModelTokenAllowance& allowance) {
+    if (allowance.limit == 0 || allowance.used < static_cast<double>(allowance.limit)) {
+        return std::nullopt;
+    }
+    return ApiResult::failure(
+        "usage_limit_reached",
+        std::format("This account has used its monthly limit of {} model tokens. An administrator "
+                    "of the account raises or removes it with set_usage_limit (Usage in the "
+                    "Lake Console).",
+                    allowance.limit));
+}
+
+// The refusal when the account's model tokens are at or over its monthly limit, if they are.
+liquid::runtime::task<std::optional<ApiResult>> model_limit_refusal(const std::string& customer_id,
+                                                                    ApiContext& context) {
+    const auto now = std::chrono::steady_clock::now();
+    {
+        std::lock_guard lock(allowance_mutex());
+        const auto found = allowances().find(customer_id);
+        if (found != allowances().end() && now - found->second.read_at < allowance_refresh) {
+            co_return over_model_limit(found->second);
+        }
+    }
+    const auto stored = context.store->usage_limits(customer_id);
+    if (!stored) {
+        co_return ApiResult::failure("store_unavailable",
+                                     "the account's usage limits could not be read: " +
+                                         stored.error().message);
+    }
+    ModelTokenAllowance allowance{.read_at = now};
+    for (const control::UsageLimit& limit : *stored) {
+        if (limit.dimension == "model_tokens") {
+            allowance.limit = limit.limit;
+        }
+    }
+    if (allowance.limit > 0 && context.workspaces) {
+        const std::int64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                        std::chrono::system_clock::now().time_since_epoch())
+                                        .count();
+        const std::int64_t month = period_floor(now_ms, Granularity::month);
+        UsageQuery query;
+        query.customer_id = customer_id;
+        query.dimensions.insert("model_tokens");
+        if (const auto rows = context.store->list_workspaces(customer_id)) {
+            for (const control::Workspace& row : *rows) {
+                if (row.desired != "deleted") {
+                    query.workspaces.push_back(row);
+                }
+            }
+        }
+        query.periods =
+            *periods_of(month, period_after(month, Granularity::month), Granularity::month);
+        auto read = co_await read_usage(context, query);
+        if (!read) {
+            co_return ApiResult::failure("store_unavailable",
+                                         "this month's model tokens could not be read: " +
+                                             read.error().message);
+        }
+        if (const auto total = read->totals.find("model_tokens"); total != read->totals.end()) {
+            allowance.used = total->second;
+        }
+    }
+    std::lock_guard lock(allowance_mutex());
+    allowances()[customer_id] = allowance;
+    co_return over_model_limit(allowance);
+}
+
+void count_model_tokens(const std::string& customer_id, std::uint64_t tokens) {
+    std::lock_guard lock(allowance_mutex());
+    if (const auto found = allowances().find(customer_id); found != allowances().end()) {
+        found->second.used += static_cast<double>(tokens);
+    }
+}
+
+liquid::runtime::task<ApiResult> model_completion(const json& input, ApiContext& context) {
+    if (!context.store) {
+        co_return ApiResult::failure("store_unavailable", "no control-plane store is configured");
+    }
+    auto caller = model_caller(input, context);
+    if (!caller) {
+        co_return caller.error();
+    }
+    if (caller->workspace_id.empty()) {
+        co_return ApiResult::failure("conflict", "this run belongs to no workspace");
+    }
+    const std::string endpoint = input.at("endpoint");
+    context.audit_workspace_id = caller->workspace_id;
+    context.audit_object = "agent_usage/" + caller->launch_id;
+    // What was asked of which model and what it cost; never the prompt or the answer.
+    context.audit_details = {{"endpoint", endpoint}};
+    auto prepared = prepare_model_request(endpoint, input.at("request"));
+    if (!prepared) {
+        co_return ApiResult::failure(
+            prepared.error().code, prepared.error().message, prepared.error().path);
+    }
+    const std::string requested = prepared->at("model");
+    const auto stream_field = prepared->find("stream");
+    const bool stream = stream_field != prepared->end() && stream_field->is_boolean() &&
+                        stream_field->get<bool>();
+    context.audit_details["model"] = requested;
+    context.audit_details["streamed"] = stream;
+    if (!context.model_provider) {
+        co_return ApiResult::failure("not_supported",
+                                     "No model provider is configured on this Lake; an "
+                                     "administrator sets LAKE_OPENAI_API_KEY.");
+    }
+    auto refusal = co_await model_limit_refusal(caller->customer_id, context);
+    if (!refusal) {
+        co_return ApiResult::failure("store_error", refusal.error().message);
+    }
+    if (*refusal) {
+        context.audit_details["refused"] = "usage_limit";
+        co_return std::move(**refusal);
+    }
+    ModelProviderRequest request{endpoint, prepared->dump(), stream};
+    auto ran = co_await run_blocking(
+        [provider = context.model_provider, request]() { return provider(request); });
+    if (!ran) {
+        co_return ApiResult::failure("busy", ran.error().message);
+    }
+    const ModelProviderResponse& response = *ran;
+    context.audit_details["provider_status"] = response.status;
+    if (!response.error.empty() || response.status < 200 || response.status >= 300) {
+        const ApiError failure =
+            model_provider_failure(response.status, response.body, response.error);
+        co_return ApiResult::failure(failure.code, failure.message);
+    }
+    const ModelUsage usage = model_usage(response.body, stream);
+    const std::string model = usage.model.empty() ? requested : usage.model;
+    const bool recorded = usage.reported && context.usage_recorder != nullptr;
+    if (recorded) {
+        const Labels labels{
+            {"agent", caller->agent}, {"launch_id", caller->launch_id}, {"model", model}};
+        Labels in = labels, out = labels;
+        in["kind"] = "input";
+        out["kind"] = "output";
+        std::vector<UsageRecorder::Increment> increments;
+        increments.push_back({"model_tokens", usage.input_tokens, std::move(in)});
+        increments.push_back({"model_tokens", usage.output_tokens, std::move(out)});
+        context.usage_recorder->add_together(caller->workspace_id, std::move(increments));
+    }
+    count_model_tokens(caller->customer_id, usage.input_tokens + usage.output_tokens);
+    context.audit_details["answered_model"] = model;
+    context.audit_details["input_tokens"] = usage.input_tokens;
+    context.audit_details["output_tokens"] = usage.output_tokens;
+    context.audit_details["usage_reported"] = usage.reported;
+    json out{{"workspace_id", caller->workspace_id},
+             {"agent", caller->agent},
+             {"launch_id", caller->launch_id},
+             {"model", model},
+             {"input_tokens", usage.input_tokens},
+             {"output_tokens", usage.output_tokens},
+             {"usage_reported", usage.reported},
+             {"recorded", recorded},
+             {"streamed", stream}};
+    if (stream) {
+        out["events"] = response.body;
+    } else {
+        json answer = json::parse(response.body, nullptr, false);
+        if (!answer.is_object()) {
+            co_return ApiResult::failure("engine_error",
+                                         "the model provider answered without a JSON object");
+        }
+        out["response"] = std::move(answer);
+    }
+    co_return ApiResult::success(std::move(out));
+}
+
 } // namespace
+
+void record_workspace_transfer(const ApiContext& context,
+                               const std::string& workspace_id,
+                               std::uint64_t in,
+                               std::uint64_t out) {
+    if (context.usage_recorder != nullptr) {
+        context.usage_recorder->add_transfer(workspace_id, in, out);
+    }
+}
 
 // ------------------------------------------------------------------------------------------------
 // The owner loop's sample.
@@ -1378,7 +1798,46 @@ liquid::runtime::task<UsageSampleReport> sample_usage(ApiContext& context,
                     }
                 }
             }
-            sample(workspace.id, "workspace_data", data_bytes);
+            // Everything else the engine holds (lake#658): its models, indexes, run artifacts,
+            // topics, files and buckets, from Zetta's storage_usage; its datasets from there too,
+            // whole databases rather than row chunks. An engine without the capability reports
+            // only the datasets above, and usage_over_time says what it cannot include.
+            auto stored = control::settled(
+                co_await call_workspace(bound, customer.id, "storage_usage", true, json::object()));
+            if (stored && stored->is_object() && stored->contains("kinds") &&
+                stored->at("kinds").is_object()) {
+                const auto bytes_of = [](const json& value) -> std::uint64_t {
+                    return value.is_number_unsigned() ? value.get<std::uint64_t>()
+                           : value.is_number_integer()
+                               ? static_cast<std::uint64_t>(
+                                     std::max<std::int64_t>(0, value.get<std::int64_t>()))
+                               : 0;
+                };
+                const json kinds = stored->value("kinds", json::object());
+                for (const auto& [kind, name] : engine_storage_kinds()) {
+                    if (kind == "buckets") {
+                        continue;
+                    }
+                    sample(workspace.id, name, bytes_of(kinds.value(std::string(kind), json(0))));
+                }
+                // The workspace's own buckets, never lake's: the store and workspace files are
+                // `repositories` and `drive_files` already.
+                std::uint64_t buckets = 0;
+                for (const json& bucket : stored->value("buckets", json::array())) {
+                    const std::string name = bucket.value("bucket", std::string());
+                    if (name != control::workspace_store_bucket &&
+                        name != control::drive_files_bucket) {
+                        buckets += bytes_of(bucket.value("bytes", json(0)));
+                    }
+                }
+                sample(workspace.id, "buckets", buckets);
+            } else {
+                report.unmeasured.push_back(
+                    "Workspace " + workspace.name + " engine storage: " +
+                    (stored ? std::string("the engine reports no storage_usage")
+                            : stored.error().message));
+                sample(workspace.id, "workspace_data", data_bytes);
+            }
             auto records = workspace_records(context, customer.id, workspace.id);
             if (!records) {
                 report.unmeasured.push_back("Workspace " + workspace.name +
@@ -1481,8 +1940,8 @@ liquid::runtime::task<UsageSampleReport> sample_usage(ApiContext& context,
 
         // Scheduled resources (lake#643): CPU, RAM, GPU and GPU memory of every workload, from
         // the requests (or limits) the operator schedules it with. A running workload counts the
-        // seconds since the last sample; a build or agent job counts once, from its request to its
-        // final status, in the sample after it ends.
+        // seconds since the last sample; a finished build, agent job or cron run counts once, for
+        // how long it ran, in the hour it ended (lake#658).
         if (resources) {
             const auto charge = [&](const std::string& workspace_id,
                                     const control::WorkloadResources& row,
@@ -1499,15 +1958,6 @@ liquid::runtime::task<UsageSampleReport> sample_usage(ApiContext& context,
                                      const std::string& id) -> const control::WorkloadResources* {
                 const control::WorkloadResources* row = resources_of(*resources, kind, id);
                 return row != nullptr && row->pods > 0 ? row : nullptr;
-            };
-            const std::int64_t at_ms =
-                std::chrono::duration_cast<std::chrono::milliseconds>(at.time_since_epoch())
-                    .count();
-            const std::int64_t since_ms =
-                at_ms - std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count();
-            const auto ended_now = [&](std::string_view ended) {
-                const auto ms = utc_ms(ended);
-                return ms && *ms > since_ms && *ms <= at_ms;
             };
             std::set<std::string> engines;
             for (const control::Workspace& workspace : live) {
@@ -1566,52 +2016,31 @@ liquid::runtime::task<UsageSampleReport> sample_usage(ApiContext& context,
                     }
                 }
             }
-            if (const auto builds = context.store->list_builds(customer.id)) {
-                for (const control::Build& build : *builds) {
-                    if (!live_ids.contains(build.workspace_id) || !finished(build.phase) ||
-                        !ended_now(build.updated_at)) {
-                        continue;
-                    }
-                    const auto* row = resources_of(*resources, "build", build.id);
-                    const auto ran = elapsed_seconds(build.created_at, build.updated_at);
-                    if (row != nullptr && ran) {
-                        charge(build.workspace_id,
-                               *row,
-                               *ran,
-                               {{"kind", "build"}, {"object_id", build.id}});
-                    }
-                }
-            } else {
-                report.unmeasured.push_back("Builds of " + customer.id + ": " +
-                                            builds.error().message);
-            }
             if (const auto launches = context.store->list_agent_launches(customer.id, "", 10000)) {
                 for (const control::AgentLaunch& launch : *launches) {
-                    if (!live_ids.contains(launch.workspace_id)) {
+                    if (!live_ids.contains(launch.workspace_id) || launch.mode != "service" ||
+                        launch.desired != "present") {
                         continue;
                     }
-                    const Labels labels{{"kind", "agent"}, {"object_id", launch.id}};
-                    if (launch.mode == "service") {
-                        if (launch.desired == "present") {
-                            if (const auto* row = running("agent_launch", launch.id)) {
-                                charge(launch.workspace_id, *row, seconds, labels);
-                            }
-                        }
-                        continue;
-                    }
-                    if (!finished(launch.phase) || !ended_now(launch.status_updated_at)) {
-                        continue;
-                    }
-                    const auto* row = resources_of(*resources, "agent_launch", launch.id);
-                    const auto ran = elapsed_seconds(launch.created_at, launch.status_updated_at);
-                    if (row != nullptr && ran) {
-                        charge(launch.workspace_id, *row, *ran, labels);
+                    if (const auto* row = running("agent_launch", launch.id)) {
+                        charge(launch.workspace_id,
+                               *row,
+                               seconds,
+                               {{"kind", "agent"}, {"object_id", launch.id}});
                     }
                 }
             } else {
                 report.unmeasured.push_back("Agent launches of " + customer.id + ": " +
                                             launches.error().message);
             }
+            // Builds, job launches and cron runs (lake#658): each finished one is charged once,
+            // whenever lake first finds it finished with its resources reported.
+            auto jobs = finished_jobs(*context.store, customer.id, live_ids);
+            for (const std::string& problem : jobs.problems) {
+                report.unmeasured.push_back(problem + " of " + customer.id);
+            }
+            static_cast<void>(co_await charge_finished_jobs(
+                context, customer.id, jobs.jobs, *resources, at, report));
         }
 
         // Repository build results finished since a little before the last sample, for their
@@ -1639,8 +2068,10 @@ void register_usage_capabilities(Registry& registry) {
             "workspaces of one account (all of them when `workspace_ids` is left out), with each "
             "dimension's total, a value per period, and breakdowns by workspace and by kind (model "
             "tokens also by agent, launch and model; instances and volumes by service, store or "
-            "app). Read from each workspace's own Zetta. `from` is rounded down and `to` up to "
-            "whole periods; an hour granularity covers at most 100 days.",
+            "app; CPU, RAM, GPU, GPU memory, predictions and searches by object). `billed` says "
+            "whether the price list bills the dimension; build, run and instance time are detail "
+            "and never billed. Read from each workspace's own Zetta. `from` is rounded down and "
+            "`to` up to whole periods; an hour granularity covers at most 100 days.",
         .input_schema = {{"type", "object"},
                          {"properties",
                           {{"customer_id", {{"type", "string"}}},
@@ -1895,6 +2326,63 @@ void register_usage_capabilities(Registry& registry) {
                                        {"launch_id", reporter->launch_id},
                                        {"recorded", recorded}});
         }});
+    registry.add(Capability{
+        .name = "model_completion",
+        .title = "Call a model through Lake",
+        .description =
+            "The model gateway: an agent's model call, sent to the model provider with Lake's own "
+            "key and counted as `model_tokens` in the workspace its task, launch or schedule runs "
+            "in. Only an agent's own task, launch or schedule credential may call it. `endpoint` "
+            "is the OpenAI API path (`chat/completions`, `responses` or `embeddings`) and "
+            "`request` its JSON body. Agents normally reach it as the OpenAI-compatible "
+            "`POST /openai/v1/<endpoint>`, with the OpenAI SDK's base URL set to "
+            "`<lake>/openai/v1` and the credential as its API key. Refused with "
+            "`usage_limit_reached` once the account's monthly `model_tokens` limit is used up.",
+        .input_schema =
+            {{"type", "object"},
+             {"properties",
+              {{"endpoint",
+                {{"type", "string"},
+                 {"enum", json::array({"chat/completions", "responses", "embeddings"})},
+                 {"description", "the OpenAI API path the request is for"}}},
+               {"request",
+                {{"type", "object"},
+                 {"description",
+                  "the OpenAI request body: `model` and the endpoint's own fields, such as "
+                  "`messages` and `tools`; `stream: true` answers the whole event stream"}}}}},
+             {"required", json::array({"endpoint", "request"})},
+             {"additionalProperties", false}},
+        .output_schema = {{"type", "object"},
+                          {"properties",
+                           {{"workspace_id", {{"type", "string"}}},
+                            {"agent", {{"type", "string"}}},
+                            {"launch_id", {{"type", "string"}}},
+                            {"model", {{"type", "string"}}},
+                            {"input_tokens", {{"type", "integer"}}},
+                            {"output_tokens", {{"type", "integer"}}},
+                            {"usage_reported", {{"type", "boolean"}}},
+                            {"recorded", {{"type", "boolean"}}},
+                            {"streamed", {{"type", "boolean"}}},
+                            {"response", {{"type", "object"}}},
+                            {"events", {{"type", "string"}}}}},
+                          {"required",
+                           json::array({"workspace_id",
+                                        "agent",
+                                        "launch_id",
+                                        "model",
+                                        "input_tokens",
+                                        "output_tokens",
+                                        "usage_reported",
+                                        "recorded",
+                                        "streamed"})}},
+        .kind = CapabilityKind::Action,
+        // Authorized by the agent's own credential, which the handler checks; like
+        // record_model_usage.
+        .requires_auth = false,
+        .object = "agent_usage",
+        .action = "write",
+        .resolve_object = agent_object,
+        .async_handler = model_completion});
 }
 
 } // namespace lake::api

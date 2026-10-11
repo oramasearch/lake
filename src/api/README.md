@@ -92,13 +92,30 @@ the path. See [telemetry](../../docs/serving/telemetry.md#request-logs).
 
 Usage over time (lake#564): `record_request` also adds each routed capability call to
 `usage_recorder.cpp`'s `UsageRecorder` (`calls`, `api` or `mcp`), as `predict` adds a model's
+answered predictions, `search_index` an index's answered searches, `create_transcript` and
+`transcribe` the audio's seconds (`audio_duration.cpp` measures a recording's length when the
+model reports none; tokens are never billed), and the file, drive, Hub and image paths their bytes as
+`transfer` (`record_workspace_transfer`, `stream_blob`'s `metered_workspace`; lake#658);
+`ApiServer::drain` flushes it every `usage_flush_interval` and, as the store root's owner, schedules
+`usage_capabilities.cpp`'s `sample_usage` (stored bytes, the engine's `storage_usage` by kind,
+instance and volume time, CPU, RAM, GPU and GPU memory from the operator's `workload_resources`
+(lake#643), each finished build, job and cron run once, new build results) every
+`usage_sample_interval`. `usage_capabilities.cpp` registers `usage_over_time`, `usage_limits`,
+`set_usage_limit` and `record_model_usage`; `metering_capabilities.cpp`'s `queue_repository_builds`
+is the build-record queueing the sample shares with `metering_usage`. See
 answered predictions and `create_transcript` the audio's seconds or tokens; `ApiServer::drain`
 flushes it every `usage_flush_interval` and, as the store root's owner, schedules
 `usage_capabilities.cpp`'s `sample_usage` (stored bytes, instance and volume time, CPU, RAM, GPU and
 GPU memory from the operator's `workload_resources` (lake#643), new build results)
 every `usage_sample_interval`. `usage_capabilities.cpp` registers `usage_over_time`, `usage_limits`,
-`set_usage_limit` and `record_model_usage`; `metering_capabilities.cpp`'s `queue_repository_builds`
-is the build-record queueing the sample shares with `metering_usage`. See
+`set_usage_limit`, `record_model_usage` and `model_completion`, the model gateway (lake#248): an
+agent's model call, sent through `ApiContext::model_provider` on the blocking pool, its tokens added
+to the run's workspace usage and refused past the monthly `model_tokens` limit. `model_gateway.cpp`
+holds the gateway's pure parts (the request as forwarded, the usage of every answer shape, the
+provider's refusals, `openai_model_provider`), and `http_server.cpp` serves the OpenAI-compatible
+`POST /openai/v1/<endpoint>` over `model_completion` and builds the provider over its outbound client
+when `LAKE_OPENAI_API_KEY` is set (`docs/api/model-gateway.md`). `metering_capabilities.cpp`'s
+`queue_repository_builds` is the build-record queueing the sample shares with `metering_usage`. See
 [metering](../../docs/api/metering.md#usage-over-time).
 
 Billing (lake#564, decision 56): `billing_capabilities.cpp` registers the ten billing capabilities and
@@ -130,6 +147,25 @@ summaries and the collapsed correctness certificate. Experiment allocations come
 latest actions, while the bounded decision rows supply pending A1 approval controls. The five
 operating-state reads remain concurrent. See
 [`workspaces.md`](../../docs/api/workspaces.md).
+
+`engine_capabilities.cpp` registers every allow-listed workspace engine capability that no Lake
+capability already covers as a named capability (lake#650): the engine's input schema from
+`engine_openapi.json` (vendored by `tools/api/vendor-engine-openapi.py`, embedded by
+`cmake/embed_engine_openapi.cmake`), Lake's name where the engine's collides or says too little,
+and a handler that is `call_workspace_capability`, the `workspace_query`/`workspace_act` path, so
+policy, agent scopes, audit and caching are the same. `granted_by_scope` lets a credential that may
+call `workspace_query` or `workspace_act` call them. See
+[`engine-capabilities.md`](../../docs/api/engine-capabilities.md). The standalone-model
+capabilities (`train_model`, `retrain_model`, `register_model`, `move_model_to_project`, lake#654)
+are named this way; `workspace_call` answers an engine that does not know an allow-listed name
+`not_supported`, saying it needs a newer Zetta. `drives_capabilities.cpp`'s `load_drive_model`
+reads a drive's model file as the caller and sends it to `register_model`
+([`models.md`](../../docs/api/models.md#a-standalone-model-lake654)).
+[`engine-capabilities.md`](../../docs/api/engine-capabilities.md).
+After the engine accepts a `create_agent` or `update_agent`, `workspace_call` keeps the definition
+as a revision in the agent's workspace (`agent_revision_step`, lake#653) and answers
+`definition_revision`; `list_agent_revisions` (in `workspace_capabilities.cpp`) reads them. See
+[`train-agents.md`](../../docs/api/train-agents.md#definition-revisions).
 
 `experiment_capabilities.cpp` registers eleven space-scoped experiment/run operations using the
 closed contracts in `experiment_schemas.hpp`, and translates lake's experiment names to the engine's
@@ -171,6 +207,14 @@ calls, and the re-export `mcp.cpp` calls for `/w/<workspace>/mcp`. `mcp_connecti
 a connection's topic, one agent job per input event as the person who set the streams, and each
 finished job's result on the output topic; `mcp_connection_internal.hpp` lends it the connection's
 bearer, never a capability.
+`deletion_capabilities.cpp` registers what deletes a workspace's data (lake#645):
+`delete_dataset`, `delete_model`, `delete_run` and `delete_index`, named capabilities over the
+workspace engine's own deletes that answer `not_supported` from an older engine, and
+`delete_ask_conversation`, which removes one person's message records from the workspace Zetta.
+`delete_organization`, `revoke_invitation` and `revoke_grant` sit beside their siblings in
+`capabilities.cpp`, and `delete_secret_mount` in `secrets_capabilities.cpp` over
+`MountSecrets::remove_all` (`secret_records_api.cpp`). Each takes `dry_run`. See
+`docs/api/deletion.md`.
 
 `solution_capabilities.cpp` registers the six solution capabilities (lake#597): a workspace's own
 solutions are sealed `lake_solutions` records in the workspace Zetta, listed and read beside Orama's

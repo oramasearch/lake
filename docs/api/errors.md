@@ -55,6 +55,7 @@ Every capability answers a failure the same way on REST and MCP:
 | `workspace_not_ready` | 503 | The workspace or service exists but is not ready yet. |
 | `busy` | 503 | The resource is busy; retry. |
 | `rate_limited` | 429 | Too many requests from this caller, or in all, are waiting; retry. Sent with `Retry-After: 1` when a long poll finds the long-request caps full ([http](../serving/http.md#connections-and-workers), lake#534). |
+| `usage_limit_reached` | 429 | The account has used its monthly limit on this dimension (model tokens); an administrator raises or removes it with `set_usage_limit`. The model gateway answers it before it calls the model ([model-gateway.md](model-gateway.md#limits), lake#248). |
 
 `not_supported` was 500, `engine_error` 500, `quota_exceeded` 500, and a missing or rejected
 credential 403 `unauthorized` before lake#450. `engine_error` was 502 from lake#450 until lake#572.
@@ -122,8 +123,8 @@ lacks a scope or a grant is still 403 `unauthorized`.
   "row 2 has no 'tenure'" at `/rows/2/tenure`.
 - **A message that leads with an input field's name** (`confirm must be the service name`): the
   registry points `path` at that field when the handler gave none.
-- **A space that does not own the workspace** is refused at `/customer_id` (`customer_id is not the
-  space that owns workspace …`); an unknown workspace at `/workspace_id`.
+- **An account that does not own the workspace** is refused at `/customer_id` (`customer_id is not the
+  account that owns workspace …`); an unknown workspace at `/workspace_id`.
 - **A database constraint the input broke** (lake#592). PostgreSQL's diagnostic never reaches a
   caller (it is logged as `api_store_error`); `constraint_rules` in `src/api/registry.cpp` turns
   the constraints an input can break into the rule, at the field. The field is the caller's `path`

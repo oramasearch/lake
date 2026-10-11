@@ -5,7 +5,7 @@ under the same name (lake#450).
 
 | Concept | Name | Deprecated aliases still accepted |
 |---|---|---|
-| A space (customer) | `customer_id` | `id` on `get_customer` |
+| An account (customer) | `customer_id` | `id` on `get_customer` |
 | A workspace | `workspace_id` | — |
 | A run | `run_id` | `run` on `get_run_metrics`, `stop_experiment_trial`, `promote_trial`; `run` inside `workspace_query`/`workspace_act` input |
 | A trained model | `model_id` | `model` on `predict`; `model` inside `workspace_query`/`workspace_act` input |
@@ -14,7 +14,7 @@ under the same name (lake#450).
 | A workspace dataset | `<database>/<name>`, the `id` `list_datasets` answers | `<database>.<name>` and a bare name (in `datasets`), everywhere a dataset or `dataset_path` is read |
 
 | A Docs guide | `slug` (what `list_docs` answers) | `page` on `get_doc` (lake#591) |
-| A space, on `search` | `customer_id` | `customer` on `search` (lake#591) |
+| An account, on `search` | `customer_id` | `customer` on `search` (lake#591) |
 | A repository, on its content reads | `repository_id` (as every drive call) | `id` and `repository` on `repository_file` and `repository_tree`; the other repository reads still take `id` |
 | A workspace model, on `get_model` | `id` | `model_id`, the workspace engine's own spelling, on the top-level `get_model` (lake#591) |
 

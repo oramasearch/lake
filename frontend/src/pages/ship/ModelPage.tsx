@@ -7,12 +7,14 @@
  *   and drift, which is not measured yet.
  * Training it is Train → Model, linked from the header. */
 import { useMemo, useState } from "react";
-import { Link, useSearchParams } from "react-router-dom";
-import { Activity, AlertTriangle, Gauge, GraduationCap, KeyRound, Play, Plus } from "lucide-react";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
+import { Activity, AlertTriangle, Gauge, GraduationCap, KeyRound, Play, Plus, Trash2 } from "lucide-react";
 import { act, useList, type Row } from "@/lib/api";
 import { relative } from "@/lib/format";
 import { ConfirmButton, Modal } from "@/lib/overlay";
 import { useToast } from "@/lib/toast";
+import { modelLines } from "@/lib/deletion";
+import { DeletionButton } from "@/lib/deletionDialog";
 import { entityCrumb, useTrail } from "@/lib/trail";
 import { Banner, Button, Card, Chip, CopyBlock, DataTable, Empty, ErrorBlock, Field, FormError, KeyValue, Notice, Skeleton, Split, Stat, StatRow, StateTabs, Status, fieldError, Form } from "@/lib/ui";
 import { NO_WORKSPACE } from "@/pages/account/signIn";
@@ -30,6 +32,8 @@ export default function ShipModelPage() {
   const [params] = useSearchParams();
   const id = params.get("id") ?? "";
   const links = useModelLinks();
+  const navigate = useNavigate();
+  const { customerId, workspaceId } = useWorkspace();
   const { q, groups } = useModelGroups();
   const group = groupOf(groups, id);
   const version = group?.versions.find((v) => text(v, "id") === id);
@@ -50,9 +54,26 @@ export default function ShipModelPage() {
       sub="Serving this model: how to call it, who may, where its answers go, and how it is doing."
       actions={
         id ? (
-          <Button to={links.train(id)}>
-            <GraduationCap size={14} aria-hidden /> Training
-          </Button>
+          <>
+            <Button to={links.train(id)}>
+              <GraduationCap size={14} aria-hidden /> Training
+            </Button>
+            {group && version ? (
+              <DeletionButton
+                capability="delete_model"
+                input={{ customer_id: customerId, workspace_id: workspaceId, id }}
+                title={`Delete ${group.name} v${versionNumber(group, id)}`}
+                confirmLabel="Delete model version"
+                intro="Deleting this version removes the trained model from the workspace. It cannot be undone; its other versions stay."
+                typed={() => group.name}
+                lines={modelLines}
+                done={`Deleted ${group.name} v${versionNumber(group, id)}`}
+                onDone={() => navigate(links.shipList)}
+              >
+                <Trash2 size={14} aria-hidden /> Delete
+              </DeletionButton>
+            ) : null}
+          </>
         ) : null
       }
     >

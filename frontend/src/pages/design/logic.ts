@@ -493,7 +493,7 @@ export function parseInteger(value: string): number | null {
 
 /** Where Start your workspace lands (serve_workspace_form "start"): the section's list page when it
  * is one of these, else Projects. Transcripts (lake#561) is the app's own addition. */
-export const START_RETURNS = ["/design/projects", "/train/data", "/train/agents", "/train/runs", "/train/models", "/ship/models", "/ship/indexes", "/transcripts"];
+export const START_RETURNS = ["/design/projects", "/design/agents", "/train/data", "/train/agents", "/train/runs", "/train/models", "/ship/models", "/ship/indexes", "/transcripts"];
 
 /** A workspace page's list page (the server's workspace_sections `path`). */
 const LIST_OF: [RegExp, string][] = [
@@ -501,8 +501,8 @@ const LIST_OF: [RegExp, string][] = [
   [/^\/design\/(opportunities|discover)$/, "/design/opportunities"],
   [/^\/design\/solutions?$/, "/design/solutions"],
   [/^\/design\/methodolog(y|ies)$/, "/design/methodologies"],
-  [/^\/design\/agent-library$/, "/design/agent-library"],
-  [/^\/train\/agents?(\/.*)?$/, "/train/agents"],
+  [/^\/design\/(agents?|agent-library)(\/.*)?$/, "/design/agents"],
+  [/^\/train\/agents?$/, "/train/agents"],
   [/^\/train\/(data|dataset|query)$/, "/train/data"],
   [/^\/train\/runs?$/, "/train/runs"],
   [/^\/train\/models?$/, "/train/models"],

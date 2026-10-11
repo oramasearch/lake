@@ -37,7 +37,7 @@ after the change, which publishes the repository's branch tips again as its refe
 now ([search.md](search.md)). A failed index update is recorded in the call's audit details
 (`search_index`) and never fails the write; in a switched workspace search then names the
 workspace in `stale_workspaces` until its worker retries. Before lake#584 neither drive writes nor
-pushes into a space's index on lake's volume reached hot search: only a release or an explicit
+pushes into an account's index on lake's volume reached hot search: only a release or an explicit
 publication did, so a file saved through a drive was found only by a history scan.
 
 ## Path history

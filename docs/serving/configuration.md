@@ -55,8 +55,8 @@ selects the Postgres store. `server_info` reports which one as `store` (`memory`
 | `LAKE_APPS_WILDCARD` | parent domain required for Ship app hosts; also enables app lifecycle topics on the Lake bus | [`../api/web-apps.md`](../api/web-apps.md) |
 | `LAKE_APPS_RUNTIME_IMAGE` | required base image for `build_app`; supplied by the operator from `spec.apps.runtimeImage` and recorded as `APP_RUNTIME_IMAGE` | [`../api/builds.md`](../api/builds.md) |
 | `LAKE_APPS_RESERVED_NAMES` | comma-separated additional Ship app names to refuse; surrounding whitespace is ignored | [`../api/web-apps.md`](../api/web-apps.md) |
-| `LAKE_APPS_PER_CUSTOMER` | maximum live Ship apps per space; zero means no configured limit | [`../api/web-apps.md`](../api/web-apps.md) |
-| `LAKE_APP_REPLICAS_PER_CUSTOMER` | maximum aggregate desired Ship app replicas per space; zero means no configured limit | [`../api/web-apps.md`](../api/web-apps.md) |
+| `LAKE_APPS_PER_CUSTOMER` | maximum live Ship apps per account; zero means no configured limit | [`../api/web-apps.md`](../api/web-apps.md) |
+| `LAKE_APP_REPLICAS_PER_CUSTOMER` | maximum aggregate desired Ship app replicas per account; zero means no configured limit | [`../api/web-apps.md`](../api/web-apps.md) |
 | `LAKE_PLATFORM_SYNC_SECONDS` | platform poll interval, default 15, must be greater than zero | [`../api/platform.md`](../api/platform.md) |
 | `LAKE_LOG_MODE` | `air-gapped`, `witnessed` (default) or `anchored`; read only when a store root is set | [`../control-plane/log.md`](../control-plane/log.md) |
 | `LAKE_LOG_WITNESSES`, `LAKE_LOG_WITNESS_THRESHOLD`, `LAKE_LOG_AGGREGATOR` | JSON witness endpoint/public-key records, their quorum, and the aggregation endpoint anchored mode requires | [`../control-plane/log.md`](../control-plane/log.md), [`../api/transparency.md`](../api/transparency.md) |
@@ -64,7 +64,8 @@ selects the Postgres store. `server_info` reports which one as `store` (`memory`
 | `LAKE_TSA_RENEWAL_SECONDS`, `LAKE_TSA_RENEW_BEFORE_SECONDS` | renewal policy for RFC 4998 evidence records; defaults 31536000 and 2592000 | [`../api/transparency.md`](../api/transparency.md) |
 | `LAKE_PRICE_CURRENCY` (default `USD`), `LAKE_PRICE_STORAGE_GIB_HOUR_MICROS`, `LAKE_PRICE_TRANSFER_IN_GIB_MICROS`, `LAKE_PRICE_TRANSFER_OUT_GIB_MICROS`, `LAKE_PRICE_COMPUTE_SECOND_MICROS` | integer pricing applied by `metering_usage` and `/metering`; the storage price is reported but applies to nothing since repository storage has no hourly history (lake#348) | [`../api/metering.md`](../api/metering.md) |
 | `LAKE_STORAGE_QUOTA_BYTES` | default per-customer storage quota; per-customer overrides are capability-backed | [`../api/metering.md`](../api/metering.md) |
-| `LAKE_OPENAI_API_KEY` | OpenAI API key for speech-to-text (`transcribe`, and `create_transcript` from audio); unset, both answer `not_supported`. On a Lake CR it comes from a Secret through `spec.env` `valueFrom.secretKeyRef` | [`../api/transcripts.md`](../api/transcripts.md), [`../deployment/aks.md`](../deployment/aks.md#speech-to-text-key) |
+| `LAKE_OPENAI_API_KEY` | Orama's OpenAI API key, a platform environment variable: speech-to-text (`transcribe`, and `create_transcript` from audio) and the model gateway (`/openai/v1/*`, every agent model call); unset, they answer `not_supported`. On a Lake CR it comes from a Secret through `spec.env` `valueFrom.secretKeyRef` | [`../api/transcripts.md`](../api/transcripts.md), [`../api/model-gateway.md`](../api/model-gateway.md), [`../deployment/aks.md`](../deployment/aks.md#speech-to-text-key) |
+| `LAKE_MODEL_PROVIDER_URL` | the model gateway's OpenAI-compatible provider base URL; default `https://api.openai.com/v1` | [`../api/model-gateway.md`](../api/model-gateway.md#configuration) |
 | `LAKE_TRANSCRIBE_MODEL` | OpenAI transcription model; default `gpt-4o-transcribe` | [`../api/transcripts.md`](../api/transcripts.md) |
 
 Startup refuses to run when `LAKE_OPERATOR_ZETTA_URL` and `LAKE_OPERATOR_ZETTA_TOKEN` are not set

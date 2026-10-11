@@ -1,5 +1,5 @@
 /** Where an MCP server's sign-in sends the browser back (`/mcp-connections/oauth/callback?code&state`,
- * lake#652, docs/ui/mcp-connections.md). The state names the space and workspace Lake started the
+ * lake#652, docs/ui/mcp-connections.md). The state names the account and workspace Lake started the
  * sign-in in; the page finishes it there with `complete_mcp_connection_sign_in` (Lake exchanges the
  * code with its PKCE verifier and keeps the refresh token as a workspace secret), then opens the
  * connection. A refusal from the server (`error`) or Lake is said in words, with the way back. */

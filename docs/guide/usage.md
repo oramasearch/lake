@@ -1,9 +1,9 @@
 # Usage and Metering
 
 **Organization → Usage** shows what your workspaces store and use over time: storage by kind,
-transfer, CPU, RAM, GPU and GPU memory, build and run time, speech-to-text, API and MCP calls,
-model predictions, model tokens, and the instance and volume time of your services, stores and
-apps. Choose the workspaces
+transfer, CPU, RAM, GPU and GPU memory, speech-to-text, API and MCP calls, model predictions, index
+searches, model tokens, the volume time of your services and stores, and, as detail that is not
+billed, build and run time and the instance time of your services and apps. Choose the workspaces
 and the period, compare it with the period before, chart it by workspace or by kind, set limits that
 warn as you near them, and export it as CSV. **Repository Usage by Hour** keeps the exact
 repository transfer and build time, the repository storage limit and, when the Lake has prices set,
@@ -16,13 +16,17 @@ Billing** turns it into a monthly bill on your plan; an enterprise install has n
 
 | Term | What it is |
 |---|---|
-| **Dimension** | One kind of usage with one unit: **CPU** (vCPU-hours), **RAM** (GiB-hours), **GPU** (GPU-hours, by GPU class), **GPU Memory** (GiB-hours), **Storage** (bytes), **Transfer** (bytes), **Build Time** and **Workspace Run Time** (time), **Speech to Text** (time), **API and MCP Calls**, **Model Predictions**, **Model Tokens**, **Service and App Instances** (instance-hours) and **Service and Store Volumes** (GiB-hours). |
-| **CPU, RAM, GPU and GPU memory** | What each workload is scheduled with (the resources its containers request, or their limits when they request nothing), for as long as it runs: your workspace's engine, each service, app, image build and agent run. Pipeline runs and training run on your workspace's engine and are part of its figures. |
+| **Dimension** | One kind of usage with one unit: **CPU** (vCPU-hours), **RAM** (GiB-hours), **GPU** (GPU-hours, by GPU class), **GPU Memory** (GiB-hours), **Storage** (bytes), **Transfer** (bytes), **Speech to Text** (time), **API and MCP Calls**, **Model Predictions**, **Index Searches**, **Model Tokens** and **Service and Store Volumes** (GiB-hours), all billed on Orama Cloud; and **Build Time**, **Workspace Run Time** and **Service and App Instances** (instance-hours), marked **Detail, not billed**. |
+| **CPU, RAM, GPU and GPU memory** | What each workload is scheduled with (the resources its containers request, or their limits when they request nothing), for as long as it runs: your workspace's engine, each service, app, image build, agent run and scheduled agent run. Pipeline runs, training and experiments run on your workspace's engine and are part of its figures. A finished build or agent run is counted once, in the hour it finished. |
+| **Detail, not billed** | Build time, run time and instance time say how long builds, runs, services and apps ran. Their compute is billed as CPU, RAM, GPU and GPU memory, so these are shown and never billed. |
 | **Workspace usage** | Each workspace keeps its own usage in the workspace itself, an hour at a time, for 400 days. Usage adds up the workspaces you choose. |
-| **Storage** | The latest reading in a period: repositories, container images, workspace data, transcripts and drive files, read every fifteen minutes. |
+| **Storage** | The latest reading in a period, read every fifteen minutes: repositories, container images, workspace data (your datasets), transcripts, drive files, and what your workspace's engine holds besides: models, indexes, run artifacts, streams, files and buckets. |
+| **Transfer** | The bytes you send to and receive from your workspaces: repository pushes and pulls, drive uploads and downloads, image pushes and pulls, file and model downloads. |
 | **Instance time** | How long each service and app ran ready, times its instances or replicas. Your workspace's own engine is a service, and counts. |
 | **Volume time** | The size of each running service's and store's volumes, times how long it ran. |
-| **Model tokens** | The tokens an agent reports it spent, by agent, run and model, and the tokens a speech-to-text model reports for a transcript. |
+| **Model tokens** | The tokens an agent reports it spent, by agent, run and model. Speech to text is never counted here: it is billed by the minute only. |
+| **Speech to text** | The minutes of audio transcribed: transcripts made from audio, and dictation in the workspace you dictate in. Lake measures each recording's length from the file when the model does not report it. |
+| **Index searches** | Each answered search of a published index, by index. |
 | **Limit** | A ceiling on one dimension with a warning percentage. The storage limit is enforced on new repository writes; every other limit warns and refuses nothing. |
 | **Repository storage limit** | The storage limit: above it, new repository writes are refused; what is stored stays readable. |
 | **Estimated charge** | On Repository Usage by Hour only: transfer and repository build time at the prices the Lake operator configured. |
@@ -112,9 +116,13 @@ The value overrides the Lake's default limit for that account; `0` removes the l
 
 To write again, delete what you no longer need, or ask an admin of the account to raise the limit.
 
+A **Model Tokens** limit is enforced too: once this month's model tokens reach it, every agent's
+model call is refused (`usage_limit_reached`, HTTP 429) until an admin raises or removes the limit,
+or the month ends. Every other limit only warns.
+
 ## Usage of One Agent, App, Service or Model
 
-- An agent's page (**Train → Agents**, then the agent) shows its **Model tokens** this month.
+- An agent's page (**Train → Agents** or **Design → Agents**, then the agent, then its training page) shows its **Model tokens** this month.
 - An app's page (**Ship → Apps**, then the app) shows its **CPU**, **RAM**, **GPU** and **Instance
   time** this month.
 - **Ship → Services** shows each service's CPU, RAM and volume time this month.
@@ -123,16 +131,22 @@ To write again, delete what you no longer need, or ask an admin of the account t
 Each card's **Usage** button opens the dashboard on that workspace and dimension. Home's
 **Dashboard** has a **Usage** button for the workspaces chosen there.
 
-## Report an Agent's Model Tokens
+## How an Agent's Model Tokens Are Counted
 
-An agent run reports the tokens it spent with its own credential (a task, launch or schedule
-credential, or a library agent's bus credential with its task):
+Every model call an agent makes goes through Lake, which sends it to the model provider and counts
+the tokens the provider reports in the workspace the agent's run belongs to, by agent, run and
+model. Ask Orama, the other library agents and the agents you build are all counted this way; none
+of them reports its own tokens, and none holds a provider key. An agent you write calls the model
+with the OpenAI SDK pointed at Lake:
 
-- REST: `POST /v1/record_model_usage` with
-  `{"model_name": "gpt-5", "input_tokens": 1200, "output_tokens": 300}`.
-- MCP: `record_model_usage`.
+```python
+from openai import OpenAI
+client = OpenAI(base_url=f"{LAKE_URL}/openai/v1", api_key=LAKE_TOKEN)
+```
 
-Lake counts them in the workspace the run belongs to. A person's own sign-in or token is refused.
+A model call made outside Lake can be reported with `record_model_usage`
+(`{"model_name": "gpt-5", "input_tokens": 1200, "output_tokens": 300}`, with the run's own
+credential). Never report a call that went through Lake: it is already counted.
 
 ## Repository Usage by Hour
 
@@ -163,11 +177,11 @@ workspaces.
 **Not Measured Yet** names, in plain sentences, what a reading could not include:
 
 - CPU, RAM, GPU and GPU memory of a workload the Lake operator has not reported the resources of,
-  named (such as "service orders"): it is not counted;
-- agents' scheduled runs (cron): their resources are not reported yet;
+  named (such as "service orders"): it is counted once it is reported;
 - model tokens an agent has not reported (agents do not report them yet);
-- speech-to-text for dictation outside a transcript;
-- model files and indexes inside a workspace, whose size is not reported yet;
+- what a workspace's engine holds besides its datasets, when that engine is older and does not
+  report it;
+- app traffic through the ingress;
 - a workspace that is not running, or could not be read: never counted as zero, it is named
   instead.
 
@@ -179,16 +193,17 @@ Usage before this measurement started is not in the charts.
 |---|---|
 | `usage_over_time`, `usage_limits`, `metering_usage` | `read` on the account (any organization member, for the organization's account) |
 | `set_usage_limit`, `set_storage_quota` | `admin` on the account |
-| `record_model_usage` | the agent run's own credential |
+| `record_model_usage`, `model_completion` (the model gateway) | the agent run's own credential |
 
 Each read and each limit change is recorded in the central audit log; an agent's report is
 recorded in its workspace's audit.
 
 ## Limits
 
-- Calls, predictions, speech and tokens reach the workspace within about ten seconds; storage,
-  CPU, RAM, GPU and instance time are read every fifteen minutes, and an image build or agent job is
-  counted in the reading after it finishes.
+- Calls, predictions, searches, speech, transfer and tokens reach the workspace within about ten
+  seconds; storage, CPU, RAM, GPU and instance time are read every fifteen minutes, and an image
+  build, agent job or scheduled agent run is counted once, in the hour it finished, by the first
+  reading that finds its resources reported.
 - The usage series are approximate: a server that stops abruptly loses the last few seconds, and
   rarely a write is counted twice. Repository transfer and build time are exact.
 - Image build time, and a build's or agent job's CPU and RAM, run from when it was requested to
@@ -205,6 +220,7 @@ recorded in its workspace's audit.
 | `invalid_input` at `/to` | `to` is not after `from`, or the period is too long for the granularity. |
 | `unauthorized` | You have no grant on that account, or (for `record_model_usage`) the credential is not an agent run's. |
 | **Near a Limit** | A dimension passed its warning percentage this month. Raise the limit or use less. |
+| An agent answers `usage_limit_reached` | The account used its monthly Model Tokens limit. An admin raises or removes it under Usage. |
 | Pushes answer 429 busy | Repository storage is at the limit. See [What Happens over the Limit](#what-happens-over-the-limit). |
 | A workspace shows **Not read** | It is not running or could not be read; its figures are left out, not counted as zero. |
 

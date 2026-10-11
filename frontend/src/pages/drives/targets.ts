@@ -1,7 +1,7 @@
 /** What a drive is and what a shortcut points at (lake#561, docs/ui/drives.md): the words a page
  * shows and the page each shortcut opens. Pure, so `tests/drives.test.ts` runs it under Node. */
 
-export type Storage = "repository" | "files" | "virtual";
+export type Storage = "repository" | "files" | "virtual" | "store";
 
 export const STORAGE: { id: Storage; label: string; short: string; tagline: string; detail: string }[] = [
   {
@@ -24,6 +24,13 @@ export const STORAGE: { id: Storage; label: string; short: string; tagline: stri
     short: "Virtual",
     tagline: "Shortcuts to what you already have",
     detail: "Folders of shortcuts to things that live elsewhere: repositories, files, datasets, transcripts, projects, agents, models and links.",
+  },
+  {
+    id: "store",
+    label: "Storage",
+    short: "Storage",
+    tagline: "A bucket or filesystem, browsed in place",
+    detail: "One of this workspace's buckets or filesystems, opened as a drive. Nothing is copied; deleting the drive never deletes the storage.",
   },
 ];
 
@@ -145,7 +152,7 @@ export function targetHref(target: Target | null | undefined): { href: string; e
     case "project":
       return target.name ? { href: `/design/project?${q({ name: target.name })}`, external: false, workspace: true } : null;
     case "agent":
-      return target.id ? { href: `/train/agent?${q({ id: target.id })}`, external: false, workspace: true } : null;
+      return target.id ? { href: `/design/agent?${q({ id: target.id })}`, external: false, workspace: true } : null;
     case "model":
       return target.id ? { href: `/models/${encodeURIComponent(target.id)}`, external: false, workspace: false } : null;
     case "url":

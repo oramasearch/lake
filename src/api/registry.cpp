@@ -120,7 +120,7 @@ void log_database_diagnostic(std::string_view code, std::string_view message) {
     std::println(stderr, "{}", entry.dump());
 }
 
-constexpr std::array<ErrorCode, 32> documented_error_codes{{
+constexpr std::array<ErrorCode, 33> documented_error_codes{{
     {"invalid_input", 400, "The input is at fault; `path` points at the field."},
     {"secret_required",
      400,
@@ -187,6 +187,10 @@ constexpr std::array<ErrorCode, 32> documented_error_codes{{
     {"workspace_not_ready", 503, "The workspace or service exists but is not ready yet."},
     {"busy", 503, "The resource is busy; retry."},
     {"rate_limited", 429, "Too many requests from this caller, or in all, are waiting; retry."},
+    {"usage_limit_reached",
+     429,
+     "The account has used its monthly limit on this dimension (model tokens); an administrator "
+     "raises or removes it with set_usage_limit."},
 }};
 
 // Other spellings of a documented code: the workspace engine's and liquid's.
@@ -573,7 +577,8 @@ authorize_app_token(const Capability& entry, const nlohmann::json& input, ApiCon
     } else if (context.credential_kind == "app_zetta") {
         if (app->desired == "deleted" ||
             input.value("workspace_id", "") != app->workspace_id ||
-            (entry.name != "workspace_query" && entry.name != "workspace_sql") ||
+            (entry.name != "workspace_query" && entry.name != "workspace_sql" &&
+             entry.granted_by_scope != "workspace_query") ||
             input.value("customer_id", "") != app->customer_id ||
             app->bindings.value("zetta", nlohmann::json()) !=
                 nlohmann::json{{"scopes", nlohmann::json::array({"read"})}}) {
@@ -776,7 +781,10 @@ CallState prepare_call(std::shared_ptr<const Capability> capability,
         state.proceed = state.result.ok;
     } else if (entry.requires_auth && context.session_credential &&
                std::ranges::find(context.scopes, "*") == context.scopes.end() &&
-               std::ranges::find(context.scopes, entry.name) == context.scopes.end()) {
+               std::ranges::find(context.scopes, entry.name) == context.scopes.end() &&
+               (entry.granted_by_scope.empty() ||
+                std::ranges::find(context.scopes, entry.granted_by_scope) ==
+                    context.scopes.end())) {
         state.result =
             ApiResult::failure("unauthorized", "credential does not grant " + entry.name);
         state.proceed = false;
@@ -831,13 +839,13 @@ CallState prepare_call(std::shared_ptr<const Capability> capability,
         } else if (!workspace || (!context.path_workspace_id.empty() &&
                            context.workspace_id != context.path_workspace_id)) {
             state.result = ApiResult::failure("invalid_input",
-                "workspace_id must name a workspace Zetta in this space", "/workspace_id");
+                "workspace_id must name a workspace Zetta in this account", "/workspace_id");
             state.proceed = false;
         } else if (input.contains("customer_id") &&
                    input.at("customer_id") != workspace->customer_id) {
             // The workspace exists, so the space named beside it is the one at fault (lake#450).
             state.result = ApiResult::failure("invalid_input",
-                                              "customer_id is not the space that owns workspace " +
+                                              "customer_id is not the account that owns workspace " +
                                                   context.workspace_id,
                                               "/customer_id");
             state.proceed = false;

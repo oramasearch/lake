@@ -45,7 +45,7 @@ the person to Clerk; lake creates their account the first time they sign in.
 
 3. **Tell them to sign in** at https://lake.oramadev.net/sign-in with that email. On first sign-in
    lake either links them to an existing lake account with the same email, or creates the account
-   with a lake-held TAAP identity and their personal space. Nothing else needs doing in lake.
+   with a lake-held TAAP identity and their personal account. Nothing else needs doing in lake.
 
 4. **Check** (optional): the person lands on `/repositories` with an **Account** menu. Their
    `/sessions` page lists the browser session.

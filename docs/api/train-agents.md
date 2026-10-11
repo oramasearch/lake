@@ -1,44 +1,107 @@
-# Train → Agents and the Agent Library
+# Agents: designed in Design → Agents, trained in Train → Agents
 
-**Status: implemented 2026-09-27 (lake#229, epic lake#228).** The first Train page. It follows the
-Orama Studio design (orama-design `src/studio/studioAgents.js`, `AgentListScreen`): **conversation
-happens in Ask Orama; Train → Agents is where people build agents and read what the unattended
-ones did.** Keeping the two apart stops autonomous work being dressed up as a chat.
+**Status: implemented 2026-09-27 (lake#229, epic lake#228); split into Design and Train 2026-10-11
+(lake#653, not deployed).** Steve, 2026-10-11: *"the Agents section should be able to create agents
+in the Design section (like solutions do; rename agent library to just agents, and allow agents to
+be created (designed) there) ... the Train > Agents page should be dedicated to training
+model-based agents and improving them and their performance metrics, launching experiments,
+etc..."* Conversation still happens in Ask Orama.
 
-## What a person sees
-
-`/train/agents` has three parts:
-
-| Part | What it is |
+| Where | What it is for |
 |---|---|
-| **Your Agents** | The agents people built in this workspace, from the workspace's `list_agents` (records with `kind: orama` are left out). Columns follow Studio: Agent (name and purpose), Engagement (*Conversation*, or *Conversation and unattended* when it has a trigger), Skills, Model, Status. Each links to its page. Needs a ready workspace. Zetta's `list_agents` took 380–690 ms on the dev site, so the page shows the rest first and fills this panel once that read answers (lake#446) |
-| **Create an Agent** | Studio's boxes: name, purpose, **work area** (this workspace, a single project, specific data, plus which), **manifesto**, **goal**, **skills** (*Search data*, *Generate a dataset*, *Train a Model*, *Summarize and explain*, *Call the API*; granted, never assumed), **model**, and **trigger or schedule** (empty means conversation only). The web app calls `create_agent` |
-| **Agent Library** | Every specialized agent Orama ships, from `list_agent_library`: what it does, where a person meets it, how it runs, and whether this lake runs it. Shown even before the workspace is ready, because the library is lake's, not the workspace's |
+| **Design → Agents** (`/design/agents`, was *Agent Library*; `/design/agent-library` redirects) | Designing agents: Orama's beside the workspace's own, New agent, the Agent Factory, an agent's definition and its revisions |
+| **Train → Agents** (`/train/agents`) | Training and improving the agents that learn: performance over time, trained versions, the training schedule, experiments, promote and roll back |
+| **Train → Agent** (`/train/agent?id=`) | One agent's training page, and where it runs: its unattended runs (*Run now*) and schedules, as before |
 
-The model choice decides where the agent runs:
+The pages call Lake's named engine capabilities (`list_agents`, `get_agent`, `create_agent`,
+`update_agent`, `delete_agent`, `agent_training_status`, `set_training_schedule`,
+[lake#650](engine-capabilities.md)), not `workspace_query`/`workspace_act`.
 
-- **Orama base model** makes a **native** agent: `runtime: native`, `model` is the base-agent
-  checkpoint inside the workspace (`LAKE_BASE_AGENT_MODEL`, default
-  `/var/lib/zetta/models/base-agent`), `model_name` *Orama base model*, and the manifesto as its
-  system prompt. It runs in the workspace's Zetta, on the GPU when there is one and on CPU when not.
-- **Frontier model** makes a **Python** agent: `runtime: python`, `model_name` is
-  `LAKE_AGENT_MODEL` (default `gpt-4o`), and a `definition` stored in Zetta (`source: zetta`) whose
-  instructions are composed from the name, purpose, manifesto and goal. It runs on
-  `agent-runtime` with the runtime's own tool loop (an empty `entrypoint`).
+## Design → Agents
 
-**Pipelines as tools** (lake#238): the agent page lists the Pipelines granted to the agent, each
-with *Revoke*, and the workspace's **approved** Pipelines not yet granted, each with *Grant*. A grant
-or revoke writes the whole list back through `update_agent`, so Zetta checks every grant is still
-approved and pins each to its approval (`version`). agent-runtime turns each grant into a
-`pipeline_<graph>` tool that gates, runs and reports; Ask Orama can run any approved Pipeline the
-person may run, as a confirmed proposal.
+It works the way Design → Solutions does ([solutions](solutions.md), lake#597):
 
-*Build it with the Agent Factory* opens [the Agent Factory](agent-factory.md).
+- **Orama's agents** are the [Agent Library](#the-agent-library) (`list_agent_library`), marked
+  **By Orama** and **read-only**. Their page (`/design/agent?key=<key>`) says what each does,
+  where a person meets it and whether this Lake runs it, and offers **Duplicate to edit**: New
+  agent, prefilled from the library entry (its name with *(copy)*, its purpose), for the person to
+  finish and create as their own. The library holds no prompt, so the copy's instructions start
+  from its purpose. An engine record of kind `orama` is Orama's too, and read-only.
+- **The workspace's own agents** (`list_agents`, less records of kind `orama`) are listed beside
+  them, marked **Yours**. The toolbar filters **By Orama** or **Yours** and searches names,
+  purposes and where an agent is used.
+- **New agent** designs one in a drawer; **Describe it to the Agent Factory**
+  (`/design/agents/new`, [agent-factory](agent-factory.md); `/train/agents/new` redirects) is the
+  other way in, where AgentCreator drafts it from a description.
 
-`/train/agent?id=` shows the agent's definition (purpose, engagement, work area, skills, model,
-where it runs, manifesto, goal, trigger, status), the **Pipelines** granted to it as tools, its
-**Unattended Runs**, its training status for a native agent (`agent_training_status`), and
-**Delete Agent**, which needs the agent's name typed.
+The definition a person designs, in New agent and Edit:
+
+| Field | Record field |
+|---|---|
+| Name, What it's for | `name`, `purpose` (and `description`) |
+| Instructions (its prompt) | `manifesto`; `system_prompt` for a native agent; composed into a Python agent's `definition.instructions` |
+| What success looks like | `goal` |
+| Skills | `skills`: whatever agent-runtime offers, from its `skills.json` vendored into `frontend/src/pages/train/agent-skills.json` by `tools/agents/vendor-agent-skills.py` (agent-runtime#7; the twelve and what each grants are in [agent-factory](agent-factory.md)), never a list written in the page; the engine's `create_agent` schema accepts each (a test checks it). A skill the runtime no longer lists that the agent has is kept and shown by its own name |
+| Model | Orama base model (`runtime: native`; an empty `model` is filled with the base checkpoint by Lake, on `create_agent` and now also on `update_agent`), a model trained in this workspace (`model:<id>`, from `list_models`), or a frontier model (`runtime: python`, run on agent-runtime) |
+| Pipelines it may use | `pipelines`: approved pipelines only (`list_projects`); the engine pins each grant to its approval |
+| Where it works | `work_area` `{kind, detail}` |
+| Runs on its own | `trigger`; a frontier-model agent's trigger also becomes Lake's schedule (`schedule_agent`) |
+
+An agent's Design page (`/design/agent?id=`) shows its definition and **where it is used**: the
+pipelines it calls, Lake's schedules for it, its recent unattended runs, and Ask Orama. Its
+actions are **Edit** (a new revision), **Duplicate** (`create_agent` with its definition under a
+new name), **Delete** (typed name; its schedules go with it, its revisions are kept), and **Run
+it**, which opens its Train page. Running an agent stays where it was.
+
+### Definition revisions
+
+The engine keeps one record per agent and overwrites it on every `update_agent`. Lake keeps each
+definition it wrote: after the engine accepts a `create_agent` or `update_agent`, through the
+named capability, `workspace_act` or an agent's turn, Lake appends one sealed record to the
+collection `lake_agent_revisions` of the agent's workspace Zetta
+([workspace records](../architecture/workspace-records.md)), found by the account and the agent's id
+(`control::AgentRevision`, `include/lake/control/agent_revisions.hpp`). Its body is the fields a
+person designs (`agent_definition_of`: everything `create_agent` takes except `status`), who made
+it, and `create` or `update`. The answer carries `definition_revision`: `{recorded: true, id,
+created_at}`, or `{recorded: false, message}` when the record could not be written. The change has
+happened either way, so that is never the call's failure.
+
+`list_agent_revisions` (read on the account) answers them newest first, each numbered from the first,
+with who made it (`created_by_name`) and the definition it set. **Restore** on the Design page is
+`update_agent` with that definition, kept as a new revision. Revisions are not the engine's
+**trained versions** (`agent_training_status`'s `versions`, the checkpoints training produced),
+which Train → Agents promotes and rolls back; a promote or roll back is an `update_agent`, so it is
+also a revision.
+
+## Train → Agents
+
+Train → Agents lists only the workspace's agents with something to train
+(`trainable`, `frontend/src/lib/agents.ts`): a native agent with a model the engine trains, an
+agent granted a pipeline, or one with a training schedule other than *manual*. A frontier-model
+agent with no pipeline is not listed, and the page says why when none is left. Each card reads
+`agent_training_status`: stale, due, its versions and its best held-out score.
+
+An agent's training page (`/train/agent?id=`, the **Training** tab) shows:
+
+- **Performance:** the held-out score of the version it runs (or the best), the number of trained
+  versions, the task success rate and median latency of its recent unattended runs
+  (`list_agent_launches`), its cost as model tokens this month (`usage_over_time`, `by_agent`), and
+  a chart of the held-out score of each evaluated version over time.
+- **Training runs and their data:** every version training produced, newest first, with when, its
+  checkpoint, the corpus it learned from, its held-out score and the job that made it.
+- **Promote** a newer version and **Roll back** to an older one, each confirmed: `update_agent`
+  with `model` set to the version's checkpoint and `model_version` to when it was trained.
+- **The pipelines it calls**, each linked to its pipeline and runs.
+- **Launch experiment:** what to compare (its trained versions, variations of its instructions, or
+  the models it could run on) and what it should improve, sent to ExperimentsAgent as an
+  `agent_turn` of kind `experiment` with `context.agent_id`. The proposal opens on Train →
+  Experiments, where nothing starts until it is confirmed ([experiments](experiments.md)). The
+  experiments that name the agent are listed.
+- **The training schedule** (`set_training_schedule`): when it retrains (manual, on change, daily,
+  weekly, monthly), its training data, what it starts from, and its steps.
+
+Design-time editing is not on this page; **Edit its design** opens Design → Agent. The
+**Unattended Runs** and **Schedules** tabs are as before ([agent launches](agent-launches.md)).
 
 ## The Agent Library
 
@@ -51,15 +114,15 @@ where it runs, manifesto, goal, trigger, status), the **Pipelines** granted to i
 | `agent-application` | ApplicationAgent | Ship → Apps: Build an App; Ask Orama's app delegate | its own service |
 | `agent-experiments` | ExperimentsAgent | Train → Experiments: Run an Experiment; Ask Orama and Project Agent training delegates | its own service |
 | `agent-autosuggest` | Auto-Suggest | Design: Discover Opportunities; Ask Orama's subagent | its own service |
-| `agent-creator` | AgentCreator | Train: Agents, Create with the Agent Factory | `agent-runtime` |
+| `agent-creator` | AgentCreator | Design → Agents: Describe it to the Agent Factory | `agent-runtime` |
 | `agent-eval-generator` | Eval Generator | Internal: Orama's own agent tests. A realistic test case on request (a role, their problem, real-looking data), with its own invented tables; publishes nothing (lake#263) | service |
 | `agent-autosuggest-corpus` | Auto-Suggest Corpus Generator | Internal: Orama's own agent tests. One example of what is worth building for a situation you describe, checked against the test cases; writes nothing to the corpus (lake#263) | service |
 | `agent-project-corpus` | Project Corpus Generator | Internal: Orama's own agent tests. A worked example of building or changing a pipeline on your own data, replayed against your workspace; changes nothing (lake#263) | service |
 
 The three generators carry `internal: true` (lake#451), and `list_agent_library` leaves them out
-unless asked with `include_internal: true` (lake#594), so neither the library page, nor an API or
+unless asked with `include_internal: true` (lake#594), so neither the Design → Agents page, nor an API or
 MCP caller, nor Ask Orama's *Talk to* offers them by default: they are tooling for Orama's
-evaluations, not agents a customer uses. With `include_internal`, the library page badges them
+evaluations, not agents a customer uses. With `include_internal`, Design → Agents badges them
 *Orama internal*. `agent_turn` still reaches them by key for that tooling.
 
 Status is *Available* when the operator lists the agent in `LAKE_AGENT_ENDPOINTS`, *Not running on
@@ -70,20 +133,20 @@ ExperimentsAgent is deployed from `oramasearch/agent-experiments:f5be471`. Lake 
 independent `agent-experiments` bus topic and credential. It runs as a chat-capable service; its
 experiment records and trial data stay in the selected workspace Zetta.
 
-The page (2026-09-27, the UX review) says what each agent does for the person and where to use it,
-in plain words: *Agent · What it does for you · Where to use it* and a badge (*Available*, *Not
-available here*). Every library agent takes a conversation (lake#263: the three generators were offline tools until 2026-09-27); the three internal generators are not offered in Ask Orama (lake#451). The create form's fields are
-*What it's for*, *Where it works*, **Instructions** (stored as the record's `manifesto`), *What
-success looks like* (`goal`), *What it may do* (`skills`), *Model* and *Runs on its own*
-(`trigger`).
+Each of Orama's agents on Design → Agents says what it does for the person and where to use it,
+in plain words, with a badge (*Available*, *Not available here*). Every library agent takes a
+conversation (lake#263: the three generators were offline tools until 2026-09-27); the three
+internal generators are not offered in Ask Orama (lake#451). The definition form's fields are in
+[Design → Agents](#design--agents).
 
 ## Capabilities
 
 | Capability | Kind | Authorization | What it does |
 |---|---|---|---|
 | `list_agent_library` | read | any signed-in principal | The catalog above with `deployed` and `status` per agent; the internal generators only with `include_internal: true` |
-| `workspace_query` → `list_agents`, `get_agent`, `agent_training_status` | read | `read` on the customer | The workspace's agents |
-| `workspace_act` → `create_agent`, `update_agent`, `delete_agent`, `set_training_schedule`, `agent_run`, `chat` | action | `write` on the customer | Build, change, run and talk to agents |
+| `list_agents`, `get_agent`, `agent_training_status` (also through `workspace_query`) | read | `read` on the customer | The workspace's agents and how each one's training stands |
+| `create_agent`, `update_agent`, `delete_agent`, `set_training_schedule`, `agent_run`, `chat_with_agent` (also through `workspace_act`, `chat` there) | action | `write` on the customer | Design, change, train, run and talk to agents; `create_agent` and `update_agent` answer `definition_revision` |
+| `list_agent_revisions` | read | `read` on the customer | `{customer_id, workspace_id, agent_id, limit?}`: an agent's [definition revisions](#definition-revisions), newest first |
 
 `chat` is a read in Zetta, which takes it with `GET`, but it loads a model and spends compute, so
 lake allows it only through `workspace_act` (`write`) and calls it with `GET`
@@ -100,17 +163,24 @@ lake allows it only through `workspace_act` (`write`) and calls it with `GET`
 ## Verify
 
 ```sh
-ctest --test-dir build -R 'Workspaces.Agent|Workspaces.TheAgentLibrary|CreateAgent'
+ctest --test-dir build -R 'Workspaces.Agent|Workspaces.TheAgentLibrary|Workspaces.EveryAgentDefinition|CreateAgent'
+cd frontend && npm test
 ```
 
 `Workspaces.AgentCallsAreAllowListedAndChatIsAWriteZettaTakesWithGet`,
-`Workspaces.TheAgentLibraryListsEverySpecializedAgentAndWhatRuns` and
-`AgentRuns.CreateAgentRefusesDefinitionFieldsZettaWouldDrop`. The web app composes a native or
-Python agent from Studio's boxes and calls `create_agent`.
+`Workspaces.TheAgentLibraryListsEverySpecializedAgentAndWhatRuns`,
+`Workspaces.EveryAgentDefinitionIsKeptAsARevision` (revisions through both paths, sealed, newest
+first, the base model on an update, and an unrecorded revision that does not fail the change) and
+`AgentRuns.CreateAgentRefusesDefinitionFieldsZettaWouldDrop`. `frontend/tests/agents.test.ts`
+covers the read-only rule for Orama's agents, the By Orama / Yours filter, Duplicate of each kind,
+New agent's and Edit's input, the skills vendored from agent-runtime, revision changes, the filter to
+trainable agents, and promote and roll back.
 
 ## Change it
 
 A new specialized agent is a row in `control::agent_library` plus its key in the operator's
-`LAKE_AGENT_ENDPOINTS`. A new Studio box is a field on Zetta's `AgentRecord`
-(zetta `docs/agent/README.md`), the form in `agent_create_form`, and the mapping in the
-`agent_create` form action.
+`LAKE_AGENT_ENDPOINTS`. A new field of the definition is a field on Zetta's `AgentRecord`
+(zetta `docs/agent/README.md`), vendored into `src/api/engine_openapi.json`, then
+`agent_definition_of` (so revisions keep it), and `AgentForm`/`agentInput` in
+`frontend/src/lib/agents.ts` with its field in `AgentFields` (`frontend/src/pages/train/agents.tsx`).
+A new skill needs no change here: vendoring agent-runtime's `skills.json` again adds it to the pages.

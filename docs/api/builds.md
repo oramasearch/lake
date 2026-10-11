@@ -97,16 +97,16 @@ previous completed prefix available for retry. The larger parser allowance does 
 capability JSON, forms, model or dataset uploads, drive uploads, MCP, or other request bodies;
 those retain the 64 MiB adapter limit described in [the HTTP contract](../serving/http.md).
 
-Build images are private to their space. OCI push credentials may read and write only below their
-own `<space>/` prefix. Customer pull credentials may read only that space. Existing legacy
+Build images are private to their account. OCI push credentials may read and write only below their
+own `<space>/` prefix. Customer pull credentials may read only that account. Existing legacy
 published packages remain anonymous reads. Registry routes preserve one-, two- and three-part OCI
-repository names so the space prefix and internal cache namespace remain part of authorization.
+repository names so the account prefix and internal cache namespace remain part of authorization.
 
 ## Browser pages
 
 An authorized repository page posts its **Build image** action through the same `build_image`
-capability and redirects to Ship → Packages. That page lists the selected space's rows beside the
-pushed image names, filters images to spaces the caller can read, and hides internal cache
+capability and redirects to Ship → Packages. That page lists the selected account's rows beside the
+pushed image names, filters images to accounts the caller can read, and hides internal cache
 namespaces. `/ship/app?customer_id=<id>&app_id=<app-id>` shows an App's build history and queues
 `build_app`. Both pages long-poll `receive_build_events`, advance the retained sequence cursor,
 and append phase and log events without giving the browser bus credentials.

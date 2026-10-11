@@ -2,7 +2,7 @@
  * words, and when lake says it has no speech-to-text. `npm test`; the build runs it. */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { MICROPHONE_GONE, NOT_CONFIGURED, appendDictation, isNotSupported, spokenLength } from "../src/lib/dictation.ts";
+import { MICROPHONE_GONE, NOT_CONFIGURED, appendDictation, dictationInput, isNotSupported, spokenLength } from "../src/lib/dictation.ts";
 
 test("dictation fills an empty box and follows what was typed", () => {
   assert.equal(appendDictation("", "  The export spins. "), "The export spins.");
@@ -28,4 +28,15 @@ test("not_supported means the lake has no speech-to-text, and nothing else does"
   assert.equal(isNotSupported(null), false);
   assert.ok(MICROPHONE_GONE.startsWith(NOT_CONFIGURED));
   assert.equal(NOT_CONFIGURED, "Speech-to-text is not configured on this Lake.");
+});
+
+test("a dictation names the workspace it is billed to (lake#613)", () => {
+  assert.deepEqual(dictationInput({ customerId: "c-1", workspaceId: "w-1" }, "dictation.webm", "data:audio/webm;base64,AA"), {
+    customer_id: "c-1",
+    workspace_id: "w-1",
+    name: "dictation.webm",
+    audio_base64: "data:audio/webm;base64,AA",
+  });
+  assert.equal(dictationInput({ customerId: "c-1", workspaceId: "" }, "dictation.webm", "AA"), null);
+  assert.equal(dictationInput({ customerId: "", workspaceId: "w-1" }, "dictation.webm", "AA"), null);
 });

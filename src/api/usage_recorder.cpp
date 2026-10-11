@@ -49,11 +49,199 @@ const std::vector<UsageDimension>& usage_dimensions() {
         {"speech", "seconds", "sum", "Speech to Text"},
         {"calls", "calls", "sum", "API and MCP Calls"},
         {"predictions", "calls", "sum", "Model Predictions"},
+        {"searches", "calls", "sum", "Index Searches"},
         {"model_tokens", "tokens", "sum", "Model Tokens"},
         {"instances", "instance_seconds", "sum", "Service and App Instances", false, false},
         {"volumes", "gib_seconds", "sum", "Service and Store Volumes"},
     };
     return dimensions;
+}
+
+const std::vector<CapabilityMeter>& capability_meters() {
+    static const std::vector<CapabilityMeter> meters{
+        // Workloads: what the Orama operator schedules them with (workload_resources), sampled.
+        {"create_workspace",
+         {"cpu", "ram", "gpu", "vram", "volumes", "storage"},
+         "its engine's resources and volume while it runs; what it holds, sampled"},
+        {"start_workspace",
+         {"cpu", "ram", "gpu", "vram", "volumes"},
+         "its engine's resources and volume while it runs"},
+        {"set_workspace_storage", {"volumes"}, "its engine's volume, by size"},
+        {"create_service",
+         {"cpu", "ram", "gpu", "vram", "volumes"},
+         "the service's resources and volumes while it is Ready"},
+        {"create_service_and_bind_to_app",
+         {"cpu", "ram", "gpu", "vram", "volumes"},
+         "as create_service"},
+        {"create_store", {"volumes"}, "the store's volume while it is Ready"},
+        {"create_app", {"cpu", "ram", "gpu", "vram"}, "the app's replicas while they run"},
+        {"deploy_app", {"cpu", "ram", "gpu", "vram"}, "as create_app"},
+        {"start_app", {"cpu", "ram", "gpu", "vram"}, "as create_app"},
+        {"scale_app", {"cpu", "ram", "gpu", "vram"}, "as create_app, per replica"},
+        {"launch_agent",
+         {"cpu", "ram", "gpu", "vram"},
+         "a service launch while it runs; a job once, for how long it ran"},
+        // Work that runs in the workspace's engine is the engine's CPU, RAM and GPU.
+        {"run_pipeline", {"cpu", "ram", "gpu", "vram"}, "in the workspace's engine"},
+        {"start_experiment", {"cpu", "ram", "gpu", "vram"}, "its trials, in the engine"},
+        {"start_solution", {"cpu", "ram", "gpu", "vram"}, "its first run, in the engine"},
+        {"load_drive_dataset", {"storage"}, "the dataset, in the engine's databases"},
+        // The engine's own capabilities, named in Lake (lake#650): their work and what they keep
+        // are the workspace engine's CPU, RAM, GPU and storage.
+        {"train_model",
+         {"cpu", "ram", "gpu", "vram", "storage"},
+         "training in the engine; the model, in its storage"},
+        {"start_run",
+         {"cpu", "ram", "gpu", "vram", "storage"},
+         "the run in the engine; its artifacts, in its storage"},
+        {"run_solution", {"cpu", "ram", "gpu", "vram", "storage"}, "as start_run"},
+        {"deploy_pipeline", {"cpu", "ram", "gpu", "vram"}, "the deployed pipeline, in the engine"},
+        {"create_index", {"cpu", "ram", "storage"}, "built in the engine; kept in its storage"},
+        {"create_dataset_from_query",
+         {"cpu", "ram", "storage"},
+         "the query in the engine; the dataset, in its storage"},
+        {"upload_dataset", {"transfer", "storage"}, "the rows, in the engine's databases"},
+        {"load_drive_model", {"storage"}, "the model, in the engine's storage"},
+        {"import_n8n", {"storage"}, "the workflow, kept as a project artifact"},
+        {"create_stream", {"storage"}, "its topic's bytes, in the engine's streams"},
+        {"publish_stream_message", {"storage"}, "as create_stream"},
+        {"publish_agent_event", {"storage"}, "the event, in the workspace's topic"},
+        {"publish_app_event", {"storage"}, "the event, in the workspace's topic"},
+        {"publish_build_event", {"storage"}, "the event, in the workspace's topic"},
+        // Serving.
+        {"predict", {"predictions"}, "each answered prediction, by model"},
+        {"search_index", {"searches"}, "each answered search, by index"},
+        // Speech to text: seconds, or the tokens a model reports instead.
+        {"transcribe", {"speech", "model_tokens"}, "the dictation's audio, in its workspace"},
+        {"create_transcript",
+         {"speech", "model_tokens", "storage"},
+         "the audio, and the transcript's text"},
+        {"record_model_usage", {"model_tokens"}, "the tokens an agent reports"},
+        // Repository sync: exact hourly transfer records; the store's bytes, sampled.
+        {"find_missing", {"transfer"}, "the request and answer bytes"},
+        {"push", {"transfer", "storage"}, "the pushed bytes; the repository's store"},
+        {"pull", {"transfer"}, "the pulled bytes"},
+        {"upload_chunks", {"transfer", "storage"}, "the chunk bytes; the repository's store"},
+        {"read_chunk", {"transfer"}, "the chunk bytes"},
+        {"import_repository", {"storage"}, "the imported history, in the repository's store"},
+        {"import_github_repository", {"storage"}, "as import_repository"},
+        // Files in and out of a workspace (lake#658).
+        {"repository_file", {"transfer"}, "the file's bytes, out"},
+        {"resolve_model_file", {"transfer"}, "the file's bytes, out"},
+        {"resolve_dataset_file", {"transfer"}, "the file's bytes, out"},
+        {"stage_repository_file", {"transfer", "storage"}, "the staged bytes, in"},
+        {"commit_repository_files", {"transfer", "storage"}, "inline file bytes, in"},
+        {"download_drive_file", {"transfer"}, "the file's bytes, out"},
+        {"download_drive_share_link", {"transfer"}, "the shared file's bytes, out"},
+        {"upload_drive_files", {"transfer", "storage"}, "the files' bytes, in"},
+        {"upload_drive_entries", {"transfer", "storage"}, "the files' bytes, in"},
+        {"append_drive_upload", {"transfer", "storage"}, "the chunk's bytes, in"},
+        {"read_drive_file", {"transfer"}, "the bytes read, out"},
+        // MCP connections (lake#652): each exchange with the remote server is a call, and its
+        // request and answer bytes are transfer (kinds mcp_out, mcp_in). A tool re-exported
+        // through Lake's own MCP runs through call_mcp_tool or read_mcp_tool, so it is metered
+        // here too; mirrored notifications count as calls of their connection.
+        {"call_mcp_tool", {"calls", "transfer"}, "the call to the server and its bytes, each way"},
+        {"read_mcp_tool", {"calls", "transfer"}, "as call_mcp_tool"},
+        {"create_mcp_connection", {"calls", "transfer"}, "discovery: the server's lists and bytes"},
+        {"refresh_mcp_connection", {"calls", "transfer"}, "as create_mcp_connection"},
+        {"test_mcp_connection", {"calls", "transfer"}, "a saved connection's test, as discovery"},
+        {"complete_mcp_connection_sign_in",
+         {"calls", "transfer"},
+         "the discovery after a sign-in; the token exchange is a call"},
+    };
+    return meters;
+}
+
+const std::vector<std::pair<std::string_view, std::string_view>>& calls_only_capabilities() {
+    static const std::vector<std::pair<std::string_view, std::string_view>> calls{
+        // Identity, account and control-plane configuration: no workspace resource.
+        {"append_transparency_entries", "the instance's transparency log"},
+        {"begin_admin_recovery", "account recovery"},
+        {"begin_application_authorization", "sign-in"},
+        {"begin_email_recovery", "account recovery"},
+        {"begin_passkey_registration", "sign-in"},
+        {"begin_passkey_sign_in", "sign-in"},
+        {"begin_root_recovery", "account recovery"},
+        {"create_application_organization", "an identity record"},
+        {"create_application_webhook", "an identity record"},
+        {"create_customer", "an account"},
+        {"create_domain", "a routing record"},
+        {"create_encryption_key", "a key record"},
+        {"create_federation_issuer", "identity configuration"},
+        {"create_grant", "a policy record"},
+        {"create_invitation", "a membership record"},
+        {"create_membership", "a membership record"},
+        {"create_object", "a policy object"},
+        {"create_organization", "an account"},
+        {"create_organization_space", "an account"},
+        {"create_pki_authority", "a key record"},
+        {"create_secret_mount", "a secret mount record"},
+        {"create_team", "a membership record"},
+        {"create_token", "a credential"},
+        {"create_user", "an identity record"},
+        {"publish_transparency_checkpoint", "the instance's transparency log"},
+        {"publish_tuf_metadata", "the instance's update metadata"},
+        {"read_secret", "a secret record"},
+        {"replicate_repository", "Orama's replication between lakes"},
+        {"replicate_transparency_log", "Orama's replication between lakes"},
+        {"copy_workspace_records", "the operator's one-time copy"},
+        {"start_oauth", "sign-in"},
+        {"start_sso_oidc", "sign-in"},
+        // Records: what they write is a few records, never a workload or a file's bytes.
+        {"begin_drive_upload", "the upload's record; its bytes are append_drive_upload's"},
+        {"finish_drive_upload", "the file's record; its bytes were counted as they came"},
+        {"create_agent_from_proposal", "an agent definition; its runs are launch_agent's"},
+        {"begin_mcp_connection_sign_in",
+         "an OAuth state record; the authorization server's metadata is not the workspace's data"},
+        {"create_mcp_connection_agent", "an agent definition; its runs are launch_agent's"},
+        {"create_drive", "a drive record"},
+        {"create_drive_folder", "a folder"},
+        {"create_drive_folder_entry", "a folder record"},
+        {"create_drive_share_link", "a link record"},
+        {"create_drive_shortcut", "a shortcut record"},
+        {"create_image_repository", "a routing record; its images are storage when pushed"},
+        {"create_issue", "a forge record"},
+        {"create_issue_comment", "a forge record"},
+        {"create_pipeline", "a pipeline definition; its runs are run_pipeline's"},
+        {"create_projects_from_opportunities", "project records"},
+        {"create_release", "a forge record"},
+        {"create_repository", "an empty repository; its bytes are storage when pushed"},
+        {"create_review", "a forge record"},
+        {"create_review_comment", "a forge record"},
+        {"create_solution", "a solution record"},
+        {"create_webhook", "a forge record"},
+        {"resolve_conflict", "a repository change, stored as its repository's storage"},
+        {"resolve_drive_share_link", "a link's metadata"},
+        {"resolve_model", "a model's metadata"},
+        {"set_app_auth", "app configuration"},
+        {"set_app_env", "app configuration"},
+        {"set_app_zetta_binding", "app configuration"},
+        // Search runs in lake's own process over indexes lake keeps: a call.
+        {"search", "lake's repository search; the index is in the repositories' storage"},
+        {"search_drives", "lake's drive search"},
+        // Engine reads and records (lake#650): a workspace member's own scoring and searching run
+        // on the workspace engine, whose CPU, RAM and GPU are billed; the served routes, predict
+        // and search_index, are what is priced per request.
+        {"score", "scoring in the workspace engine, billed as its CPU, RAM and GPU"},
+        {"search_workspace_index", "searching in the workspace engine, billed as its CPU and RAM"},
+        {"create_project", "a project record"},
+        {"create_connection", "a connection record; its loads are datasets in storage"},
+        {"create_agent", "an agent record; its serving is the engine's CPU, RAM and GPU"},
+        {"record_outcome", "an outcome record in the engine's ledger"},
+    };
+    return calls;
+}
+
+const std::vector<std::string_view>& metered_workload_kinds() {
+    static const std::vector<std::string_view> kinds{
+        "workspace", "service", "store", "app", "build", "agent_launch", "agent_cron_run"};
+    return kinds;
+}
+
+const std::vector<std::string_view>& metered_store_types() {
+    static const std::vector<std::string_view> types{"volume"};
+    return types;
 }
 
 const UsageDimension* find_usage_dimension(std::string_view name) {
@@ -97,6 +285,14 @@ void UsageRecorder::add(const std::string& workspace_id,
     std::vector<Increment> one;
     one.push_back({std::string(dimension), value, std::move(labels)});
     add_together(workspace_id, std::move(one), at);
+}
+
+void UsageRecorder::add_transfer(const std::string& workspace_id,
+                                 std::uint64_t in,
+                                 std::uint64_t out,
+                                 std::chrono::system_clock::time_point at) {
+    add(workspace_id, "transfer", in, {{"kind", "in"}}, at);
+    add(workspace_id, "transfer", out, {{"kind", "out"}}, at);
 }
 
 void UsageRecorder::add_together(const std::string& workspace_id,

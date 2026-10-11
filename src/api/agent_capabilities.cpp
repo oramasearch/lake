@@ -140,7 +140,7 @@ std::optional<ApiResult> non_expiring_refusal(ApiContext& context, const std::st
     }
     if (!*allowed) {
         return ApiResult::failure("unauthorized",
-                                  "credentials that never expire are off for this space; an "
+                                  "credentials that never expire are off for this account; an "
                                   "admin turns on allow_non_expiring_credentials with "
                                   "set_customer_credential_policy");
     }

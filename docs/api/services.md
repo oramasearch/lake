@@ -19,7 +19,7 @@ adoption — is [`../control-plane/services.md`](../control-plane/services.md).
 
 ## What a person sees
 
-**Ship → Services** (`/services`) lists every service of the selected space: name, kind, size
+**Ship → Services** (`/services`) lists every service of the selected account: name, kind, size
 (instances × storage), the operator's phase and message, and the in-cluster address. Zetta
 services come first; the customer's workspace is marked *(workspace)*. The page refreshes every 3
 seconds while a service is changing. A service the operator reports Ready shows *Connecting* until
@@ -36,12 +36,12 @@ writes the connection (orama-operator#183), so this lasts seconds, not the minut
   node size, images or operators change.
 - **New service:** kind (Zetta first and preselected, then the rest by name; no kind is marked
   preview — decision 47), name (lowercase letters, digits and `-`, starting with a letter), 1–3
-  instances, 1–100 GiB of storage. A space may run any number of services unless the operator
+  instances, 1–100 GiB of storage. An account may run any number of services unless the operator
   of the lake sets `LAKE_SERVICES_PER_CUSTOMER`; the page states a limit only when one is set.
 - **Show connection** (every kind but Zetta, once Ready): answers with the page itself, showing
   every field the operator delivered for that kind (a Postgres URI, Kafka's bootstrap and SASL
   settings, and so on) once. It is never put in a URL, a redirect or the list.
-- **Delete:** type the service's name. When a Train → Data connection uses the service, the form says so. The operator deletes the cluster and its data, which cannot
+- **Delete:** type the service's name. When a connection (Data → Connections) uses the service, the form says so. The operator deletes the cluster and its data, which cannot
   be recovered; the row shows *Deleting* until it is gone.
 
 ### Status, and why a service is stuck (lake#452)
@@ -51,7 +51,7 @@ stays the operator's raw report. `control::service_condition` derives it:
 
 | `status` | When | `status_reason` |
 |---|---|---|
-| *Unassigned* | the service has no `workspace_id` | Migration 0039 leaves a non-Zetta service unassigned when its space had several workspaces. The operator reconciles services through their workspace, so it no longer sees this one: lake cannot connect to it and a delete would never finish. An administrator of the lake must assign or remove it. The page does not keep refreshing for it |
+| *Unassigned* | the service has no `workspace_id` | Migration 0039 leaves a non-Zetta service unassigned when its account had several workspaces. The operator reconciles services through their workspace, so it no longer sees this one: lake cannot connect to it and a delete would never finish. An administrator of the lake must assign or remove it. The page does not keep refreshing for it |
 | *Deleting* | `desired` is `absent` (and the phase is not `Failed`) | *Waiting for the operator to start deleting it.* while `observed_generation` is behind `generation` |
 | *Failed* | `desired` is `absent` and the operator reports `Failed` | the operator's message |
 | *Connecting* | the operator reports `Ready` but the connection is not yet in lake's mount | lake is waiting for the connection |
@@ -151,6 +151,6 @@ cluster is quiet, and whenever node size, images or operators change.
 - **SQLite has one instance and no replication:** its volume is the only copy until backups
   exist. It is reached over `lake-sqlite`'s HTTP API with a bearer token, not the SQLite file format.
 - Addresses are inside the cluster only. A Postgres service is reachable from the customer's other
-  services, for example as a Zetta connection on Train → Data, not from the internet.
+  services, for example as a Zetta connection on Data → Connections, not from the internet.
 - A service cannot be resized or renamed.
 - Design, Train and Ship use the default Zetta service only.
