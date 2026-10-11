@@ -887,7 +887,9 @@ with ([`../api/metering.md#resources`](../api/metering.md#resources)):
 
 Nothing is dropped; idempotent (the primary key is dropped and added again on every run); guard
 `workload_resources_guard`. The operator vendors the schema, selects that guard and fills the table
-in its own pull request before a lake with this change is rolled.
+in its own pull request ([orama-operator#288](https://github.com/oramasearch/orama-operator/pull/288))
+before a lake with this change is rolled. `OperatorContract.*` prepares that pull request's
+statements against this schema.
 
 ## Repository workspaces migration
 

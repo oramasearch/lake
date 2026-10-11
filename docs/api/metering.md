@@ -196,7 +196,9 @@ never count one service twice, samples every live workspace on its maintenance t
 
 ### Resources
 
-**Status: implemented (lake#643), not deployed; needs the orama-operator change that reports them.**
+**Status: implemented (lake#643), not deployed; needs
+[orama-operator#288](https://github.com/oramasearch/orama-operator/pull/288), which vendors the
+schema and reports the resources.**
 Compute is metered by the resources each workload is **scheduled with**: each container's request,
 or its limit where it has none, as Kubernetes admitted it (a namespace's default request included).
 Steve, 2026-10-11: *"service minutes are actually cpu minutes and ram minutes (different prices)...
@@ -206,8 +208,11 @@ and gpu minutes and vram minutes"*.
 PostgreSQL (migration `0075_workload_resources`, [schema](../control-plane/schema.md#workload-resources-migration)):
 one row per workload, the totals of its scheduled pods: `cpu_millis`, `memory_bytes`, `gpus`
 (`nvidia.com/gpu`), `gpu_class` (from the node's GPU product, lower case) and `vram_bytes` (the
-GPUs' memory), with `pods`, how many are scheduled now. A row is numbers only, written only by the
-operator, like its status rows; lake never writes it outside tests. Lake creates the desired state of
+GPUs' memory), with `pods`, how many are scheduled now, and `observed_at`, when its numbers last
+changed (the operator writes a row only when they change, at most every 30 seconds per Lake, and
+only where the Lake runs services or builds). A row is numbers only, written only by the operator,
+like its status rows; lake never writes it outside tests. A build's or agent job's row stays until
+lake removes the build or launch, so its duration can be priced after its pods are gone. Lake creates the desired state of
 services, apps and builds but not their pod sizes, which the operator and its catalogue decide, so
 the operator is the one place that knows them.
 
@@ -215,7 +220,7 @@ the operator is the one place that knows them.
 |---|---|---|
 | `workspace` | the workspace | its engine (the workspace Zetta) |
 | `service` | the service | a managed service (Postgres, Kafka, ClickHouse, …) |
-| `store` | the store | a store that runs pods (most are only volumes or buckets, and have no row) |
+| `store` | the store | a store that runs pods (today every store is a volume or a bucket, and has no row) |
 | `app` | the app | its replicas |
 | `build` | the build | the image build's pod |
 | `agent_launch` | the launch | agent-runtime's Job (`job`) or Deployment (`service`) |
@@ -251,7 +256,9 @@ class; `""` for a GPU of no known class).
   window, whose resources the operator has not reported (no `workload_resources` row): named, such as
   "service orders" or "the engine of workspace home", and not counted. Until the orama-operator change
   is deployed this is every workload. If the table cannot be read, the reading says so.
-- Agent cron runs (`agent_cron_runs`): the operator does not report their resources yet.
+- Agent cron runs (`agent_cron_runs`): `workload_resources` has no kind for them yet, so the operator
+  does not report them.
+- Lake's own pods and the library agents belong to no workspace, and are not billed.
 - Model tokens are counted only when an agent reports them; agent-runtime and the library agents do
   not yet ([lake#248](https://github.com/oramasearch/lake/issues/248)).
 - Speech-to-text for dictation outside a transcript (`transcribe`) belongs to no workspace

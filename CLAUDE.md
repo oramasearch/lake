@@ -186,7 +186,8 @@ GPUs, their class and memory); the store root's owner records `cpu`, `ram`, `gpu
 `vram` seconds in each workspace's `lake_usage`, and the price list rates them per vCPU-, GiB- and
 GPU-minute, with a GPU rate per class (`billing_plan_prices.class`). `instances`, `build_compute` and
 `run_compute` stay measured but are no longer priced; issued invoices keep their lines. Not deployed;
-the operator must vendor the schema, select `workload_resources_guard` and report the resources.
+the operator must vendor the schema, select `workload_resources_guard` and report the resources
+(orama-operator#288).
 See `docs/api/metering.md#resources` and `docs/api/billing.md#price-list`.
 A user's secret reaches a Kubernetes Secret only as a sealed projection (lake#625, decision 58, no
 migration): lake has two levels of secrets, Orama's platform credentials as environment variables
