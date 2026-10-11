@@ -533,8 +533,18 @@ html[data-resizing-ask] .ask-panel {
   grid-template-columns: repeat(auto-fill, minmax(min(100%, 260px), 1fr));
   gap: var(--lake-space-2, 8px);
 }
+/* The message box takes the column's width (lake.css caps a form.stack at 36rem). */
+.ask-home form.ask-composer {
+  max-width: none;
+}
 .ask-starter {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  height: auto;
   min-height: 56px;
+  white-space: normal;
+  line-height: 1.4;
   border: var(--lake-border-width) solid var(--lake-border-subtle);
   border-radius: 6px;
   padding: var(--lake-space-3, 12px);
