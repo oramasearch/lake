@@ -4,6 +4,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { ancestors, chunkBySize, chunkRanges, cleanPath, driveSlug, expandTo, isWithin, joinPath, nameOf, parentOf, planMoves, planUpload, rangeSelect, sortEntries, validName } from "../src/pages/drives/paths.ts";
 import { cleanTarget, storageLabel, targetHref, targetProblem } from "../src/pages/drives/targets.ts";
+import { folderKey, matchLink, matchWhere, parentKey, type DriveMatch } from "../src/pages/drives/search.ts";
 
 test("drive paths", () => {
   assert.equal(cleanPath("/a//b/./c/"), "a/b/c");
@@ -106,4 +107,48 @@ test("a shortcut's target is checked as lake checks it", () => {
   assert.equal(targetProblem({ kind: "url", url: "ftp://x" }), "A web address starts with http:// or https://.");
   assert.equal(targetProblem({ kind: "url", url: "https://x.test" }), null);
   assert.deepEqual(cleanTarget({ kind: "repository_path", repository_id: " r ", path: "/a/b/", id: "stray", url: "x" }), { kind: "repository_path", repository_id: "r", path: "a/b" });
+});
+
+test("where a drive search match opens", () => {
+  const scope = { customerId: "c", workspaceId: "w" };
+  const files = { id: "d1", name: "Team", storage: "files" as const, repository_id: null };
+  const repo = { id: "d2", name: "Archive", storage: "repository" as const, repository_id: "r1" };
+  const match = (m: Partial<DriveMatch>): DriveMatch => ({ drive: files, kind: "file", id: null, parent_id: null, name: "", path: "", folder: "", ...m });
+
+  assert.deepEqual(matchLink(match({ kind: "drive", name: "Team" }), scope), { to: "/drives/drive?id=d1", workspace: true });
+  assert.equal(matchWhere(match({ kind: "drive" })), "Workspace files drive");
+
+  const folder = match({ kind: "folder", id: "f1", parent_id: "f0", name: "Day 1", path: "Trip/Day 1", folder: "Trip" });
+  assert.deepEqual(matchLink(folder, scope), { to: "/drives/drive?id=d1&folder=f1", workspace: true });
+  assert.equal(folderKey(folder), "f1");
+  assert.equal(parentKey(folder), "f0");
+  assert.equal(matchWhere(folder), "Team / Trip");
+
+  // A repository drive addresses its folders by path.
+  const repoFolder = match({ drive: repo, kind: "folder", name: "Reports", path: "Reports", folder: "" });
+  assert.deepEqual(matchLink(repoFolder, scope), { to: "/drives/drive?id=d2&folder=Reports", workspace: true });
+  assert.equal(parentKey(repoFolder), "");
+  assert.equal(matchWhere(repoFolder), "Archive");
+  assert.deepEqual(matchLink(match({ drive: repo, kind: "file", path: "Reports/q3.csv", folder: "Reports" }), scope), {
+    to: "/drive/preview?repository_id=r1&ref=main&path=Reports%2Fq3.csv",
+    workspace: false,
+  });
+
+  // A workspace file opens in the browser when it can show it, and downloads otherwise.
+  assert.deepEqual(matchLink(match({ id: "e1", content_type: "application/pdf" }), scope), {
+    href: "/drive/files/download?customer_id=c&workspace_id=w&drive_id=d1&id=e1&inline=1",
+    newTab: true,
+    download: false,
+  });
+  assert.deepEqual(matchLink(match({ id: "e2", content_type: "application/zip" }), scope), {
+    href: "/drive/files/download?customer_id=c&workspace_id=w&drive_id=d1&id=e2",
+    newTab: false,
+    download: true,
+  });
+
+  // A shortcut opens its target; a broken one shows where it is.
+  const shortcut = match({ kind: "shortcut", id: "s1", target: { kind: "url", url: "https://orama.test/" }, status: "unknown" });
+  assert.deepEqual(matchLink(shortcut, scope), { href: "https://orama.test/", newTab: true, download: false });
+  assert.deepEqual(matchLink({ ...shortcut, target: { kind: "transcript", id: "t1" } }, scope), { to: "/transcript?id=t1", workspace: true });
+  assert.deepEqual(matchLink({ ...shortcut, status: "broken", target: { kind: "transcript", id: "t1" } }, scope), { to: "/drives/drive?id=d1&focus=s1", workspace: true });
 });

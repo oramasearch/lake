@@ -1,8 +1,8 @@
 # Search
 
 **Data → Search** looks for one query across the places you choose: your repositories, the code
-in them, the datasets and transcripts of your workspace, its projects, agents and models, and these
-Docs. Every place is searched at once and the results come back grouped by place, each group with
+in them, the datasets and transcripts of your workspace, its projects, agents, models and drives,
+and these Docs. Every place is searched at once and the results come back grouped by place, each group with
 its count.
 
 ## What It Searches
@@ -16,11 +16,12 @@ its count.
 | **Projects** | project names, descriptions and decisions | yes |
 | **Agents** | the workspace's own agents by name, id and purpose | yes |
 | **Models** | trained models by name, id and methodology | yes |
+| **Drives** | the names of the workspace's drives and of the folders, files and shortcuts in them | yes |
 | **Docs** | the title and text of every Docs page | no |
 
 The places that need a workspace search the workspace selected in the top bar. With none selected,
 the page says *Choose a workspace in the top bar to search its datasets, transcripts, projects,
-agents and models*, and still searches the rest.
+agents, models and drives*, and still searches the rest.
 
 A place that fails or is unavailable says so in its own group and never hides the others.
 
@@ -31,10 +32,30 @@ A place that fails or is unavailable says so in its own group and never hides th
 3. Under **Search in**, tick the places to search. **Everything** ticks them all; **Code only**
    leaves just code search.
 4. Each result opens its page: a repository, a file in a repository, a dataset, a transcript, a
-   project, an agent, the Models page or a Docs page.
+   project, an agent, the Models page, a drive's folder or file, or a Docs page.
 
 The address keeps the query and the places (`/search?q=renewal&in=code,transcripts`), so a search
 can be bookmarked or shared. This browser also remembers which places you ticked.
+
+## Drives
+
+The **Drives** place finds drives, folders, files and shortcuts by name, in every drive of the
+workspace. Each result shows an icon for what it is, its name with your words marked, and under it
+the drive and the folder that holds it (for example *Team / Trip / Day 1*).
+
+- A drive or a folder opens in **Data → Drives**, at that folder.
+- A file opens in the browser when the browser can show it (images, PDF, text, audio and video)
+  and downloads otherwise; a repository drive's file opens in the repository's preview.
+- A shortcut opens what it points at. A broken shortcut opens the folder that holds it, with the
+  shortcut selected.
+
+Names match anywhere in them, ignoring capitals: `report` finds *Q3 REPORT.pdf*. File contents
+are not searched. A repository drive is searched by the names of its folders and files on `main`;
+to search what is written inside them, use the **Code** place. A drive is searched only as far as
+you can open it: a repository drive whose repository you cannot read is left out.
+
+Inside one drive, the box on the drive's own page (*Search this drive…*) does the same for that
+drive alone ([Drives](/docs/drives#find-a-file)).
 
 ## Code Search
 
@@ -133,6 +154,8 @@ Each place is the capability its own page reads:
 {"customer_id": "<customer id>", "workspace_id": "<workspace id>", "capability": "list_projects", "input": {}}
 ```
 
+- **Drives**: `search_drives` with `q`, and `drive_id` to search one drive:
+  `GET /v1/search_drives?customer_id=<customer id>&workspace_id=<workspace id>&q=report`
 - **Docs**: `list_docs` and `get_doc`, which need no sign-in.
 
 ## Who Can See What
@@ -150,6 +173,8 @@ Each place is the capability its own page reads:
 
 - Code search returns at most 1000 results per call; the page asks for 100.
 - Transcripts return 50 per page.
+- Drives return the first 100 names on the page (`search_drives` answers 50 by default, at most
+  200, and says when more matched).
 - Repositories are matched among the first 500 the list returns.
 - Datasets, projects, agents and models are matched by name and description, not by their
   contents. To look inside a dataset, query it ([Datasets and Loading Data](/docs/load-data#query-a-dataset)).
