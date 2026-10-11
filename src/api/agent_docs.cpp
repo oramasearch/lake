@@ -519,6 +519,20 @@ const std::vector<Flow>& flows() {
           {"predict",
            "`model_id`, `rows` (each with its key in `entity`): the rows ranked by risk, each "
            "answered with its `entity` key and `row`"}}},
+        {"Make a model on its own",
+         "A standalone model: no project or pipeline to look after, versions like any other.",
+         {{"list_methodologies", "what can learn, and which need a target"},
+          {"train_model",
+           "`name`, `methodology`, `dataset_path: \"datasets.<name>\"`, `target` (none for one "
+           "that learns without), `holdout_fraction: 0.2`: answers the `run_id`"},
+          {"retrain_model",
+           "`model_id`, optionally a new `dataset_path`, `target` or `holdout_fraction`: a new "
+           "version"},
+          {"register_model",
+           "`name`, `weights` (a model file's contents, the engine's tree format), `metrics`: "
+           "bring one; load_drive_model brings one from a drive"},
+          {"move_model_to_project", "`model_id`, `project_name`: a pipeline can grow around it"},
+          {"delete_model", "`id` of each version; the last takes the model with it"}}},
         {"Stand up a Postgres service and connect it",
          "A service is a database, stream or engine Lake runs for your account.",
          {{"list_service_kinds", "the kinds, their expected start times, which are preview"},
@@ -575,7 +589,10 @@ const std::vector<Flow>& flows() {
           {"list_drives", "every drive of the workspace with its `storage`"},
           {"load_drive_dataset",
            "`drive_id`, `id` (a CSV or JSONL file of a workspace-files drive), `table_name`: "
-           "loads it into a dataset of the workspace"}}},
+           "loads it into a dataset of the workspace"},
+          {"load_drive_model",
+           "`drive_id`, `id` (a model file), `name` (or `version_of`): brings it into the "
+           "workspace as a standalone model"}}},
         {"Search everything",
          "Search what you can open, place by place, as the Lake Console's search does.",
          {{"search", "`query`: repository code, ranked (`history: true` searches past changes)"},

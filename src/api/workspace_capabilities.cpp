@@ -239,7 +239,7 @@ constexpr std::array<std::string_view, 47> workspace_reads = {"server_info",
                                                               "list_ledger",
                                                               "get_monitor",
                                                               "get_roi_readout"};
-constexpr std::array<std::string_view, 41> workspace_actions = {"create_project",
+constexpr std::array<std::string_view, 45> workspace_actions = {"create_project",
                                                                 "create_study",
                                                                 "stop_study",
                                                                 "stop_trial",
@@ -279,6 +279,13 @@ constexpr std::array<std::string_view, 41> workspace_actions = {"create_project"
                                                                 "delete_agent",
                                                                 "set_training_schedule",
                                                                 "agent_run",
+                                                                // A model made on its own, not as
+                                                                // a project pipeline's step
+                                                                // (lake#654).
+                                                                "train_model",
+                                                                "retrain_model",
+                                                                "register_model",
+                                                                "move_model_to_project",
                                                                 // A read in Zetta, called with GET,
                                                                 // but it loads a model and spends
                                                                 // compute: `write` in lake.
@@ -816,6 +823,15 @@ liquid::runtime::task<ApiResult> workspace_call(bool read, json input, ApiContex
                     "a project named '" + project_name +
                         "' already exists in this workspace; choose another name",
                     "/input/name");
+            }
+            // An engine older than the capability (allow-listed here, unknown there) says so in
+            // words a person can act on, not as a missing route (lake#654).
+            if (called->error().code == "unknown_capability") {
+                co_return ApiResult::failure(
+                    "not_supported",
+                    "this workspace's engine does not have " +
+                        std::string(engine_capability_name(capability)) +
+                        " yet; it needs a newer Zetta. Nothing was changed.");
             }
             // Point at the field the workspace names (lake#256, lake#450), in lake's codes.
             ApiResult failed = workspace_failure(called->error(), sent, "/input", renamed);

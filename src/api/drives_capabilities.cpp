@@ -1802,6 +1802,106 @@ liquid::runtime::task<ApiResult> load_drive_dataset(const json& input, ApiContex
     co_return ApiResult::success(std::move(value));
 }
 
+// ---- A drive file as a model (lake#654) ----
+
+// Brings a model file of a drive into the workspace as a standalone model, as load_drive_dataset
+// brings a table: the bytes are read as the caller (read_drive_file or download_drive_file, so
+// the drive's authorization and audit apply), then the workspace engine's register_model keeps
+// them through workspace_act. The engine reads its own gradient-boosted tree weights format and
+// refuses any other. At most 16 MiB.
+liquid::runtime::task<ApiResult> load_drive_model(const json& input, ApiContext& context) {
+    Opened opened = awaited(co_await open_drive(input, context, false));
+    if (opened.failure) {
+        co_return *opened.failure;
+    }
+    const std::string customer_id = input.at("customer_id");
+    const std::string workspace_id = input.at("workspace_id");
+    const std::string id = input.at("id");
+    if (opened.drive.storage == "virtual") {
+        co_return ApiResult::failure(
+            "invalid_input",
+            "a virtual drive holds shortcuts only; open the file where it lives",
+            "/drive_id");
+    }
+    if (!input.contains("name") && !input.contains("version_of")) {
+        co_return ApiResult::failure(
+            "invalid_input", "name the model, or give version_of for a new version of one", "/name");
+    }
+    std::string name = id.substr(id.rfind('/') == std::string::npos ? 0 : id.rfind('/') + 1);
+    if (opened.drive.storage == "files") {
+        ApiResult entry = called_as(co_await call_as(context,
+                                                     "get_drive_entry",
+                                                     {{"customer_id", customer_id},
+                                                      {"workspace_id", workspace_id},
+                                                      {"drive_id", opened.drive.id},
+                                                      {"id", id}}));
+        if (!entry.ok) {
+            co_return ApiResult::failure(entry.error.code, entry.error.message, "/id");
+        }
+        if (entry.value.value("kind", "") != "file" || entry.value.value("state", "") != "ready") {
+            co_return ApiResult::failure("not_found", "no such file in this drive", "/id");
+        }
+        name = entry.value.value("name", std::string());
+        if (entry.value.value("size", std::uint64_t{0}) > max_inline_bytes) {
+            co_return ApiResult::failure(
+                "size_invalid", "a model is brought from a file of at most 16 MiB", "/id");
+        }
+    }
+    ApiResult read =
+        opened.drive.storage == "repository"
+            ? called_as(co_await call_as(
+                  context,
+                  "download_drive_file",
+                  {{"repository_id", opened.drive.repository_id}, {"ref", "main"}, {"path", id}}))
+            : called_as(co_await call_as(context,
+                                         "read_drive_file",
+                                         {{"customer_id", customer_id},
+                                          {"workspace_id", workspace_id},
+                                          {"drive_id", opened.drive.id},
+                                          {"id", id}}));
+    if (!read.ok) {
+        co_return ApiResult::failure(read.error.code, read.error.message, "/id");
+    }
+    if (!read.value.contains("content_base64") || !read.value.at("content_base64").is_string() ||
+        read.value.value("size", std::uint64_t{0}) > max_inline_bytes) {
+        co_return ApiResult::failure(
+            "size_invalid", "a model is brought from a file of at most 16 MiB", "/id");
+    }
+    auto bytes = decode_base64(read.value.at("content_base64").get<std::string>(), "/id");
+    if (!bytes) {
+        co_return ApiResult::failure("corrupt", "the file's bytes did not decode", "/id");
+    }
+    json model{{"weights", bytes_text(*bytes)},
+               {"source", "drive " + opened.drive.name + ": " + name}};
+    for (const char* key : {"name", "version_of", "kind", "metrics"}) {
+        if (input.contains(key)) {
+            model[key] = input.at(key);
+        }
+    }
+    ApiResult brought = called_as(co_await call_as(context,
+                                                   "workspace_act",
+                                                   {{"customer_id", customer_id},
+                                                    {"workspace_id", workspace_id},
+                                                    {"capability", "register_model"},
+                                                    {"input", std::move(model)}}));
+    if (!brought.ok) {
+        // register_model's own fields are this call's fields of the same name; the file is `id`.
+        std::string path = brought.error.path;
+        if (path.starts_with("/input/")) {
+            path = path.substr(6);
+        }
+        if (path == "/weights" || path == "/source") {
+            path = "/id";
+        }
+        co_return ApiResult::failure(brought.error.code, brought.error.message, path);
+    }
+    json value = brought.value.is_object() ? brought.value : json{{"result", brought.value}};
+    value["source"] = {{"drive_id", opened.drive.id}, {"id", id}, {"name", name}};
+    context.audit_details["drive_id"] = opened.drive.id;
+    context.audit_details["id"] = id;
+    co_return ApiResult::success(std::move(value));
+}
+
 // ---- Search ----
 
 constexpr std::size_t default_search = 50;
@@ -2292,6 +2392,24 @@ void register_drives_capabilities(Registry& registry) {
                            json::array({"drive_id", "id", "table_name"})),
            {{"type", "object"}},
            load_drive_dataset);
+    action("load_drive_model",
+           "Bring a drive file as a model",
+           "Bring a model file of a drive into the workspace as a standalone model, scored, "
+           "served and compared like a trained one (the engine's register_model). `id` is the "
+           "file: its entry id in a workspace-files drive, its path in a repository drive (on "
+           "main). `name` names a new model; `version_of` (a brought model's id) adds the file as "
+           "its next version. The engine reads gradient-boosted tree weights in its own JSON "
+           "format and refuses any other. At most 16 MiB.",
+           workspace_input({{"drive_id", string_schema()},
+                            {"id", string_schema()},
+                            {"name", string_schema()},
+                            {"version_of", string_schema()},
+                            {"kind", {{"type", "string"}, {"enum", {"classifier", "regressor"}}}},
+                            {"metrics",
+                             {{"type", "object"}, {"additionalProperties", {{"type", "number"}}}}}},
+                           json::array({"drive_id", "id"})),
+           {{"type", "object"}},
+           load_drive_model);
     read("recent_drive_entries",
          "Recent Files",
          "The workspace files changed most recently across the workspace's workspace-files "

@@ -4316,6 +4316,76 @@ TEST(EngineCapabilities, EveryAllowListedNameHasANamedCapability) {
     }
 }
 
+// A model made on its own (lake#654): train_model, retrain_model, register_model and
+// move_model_to_project are named actions in Models, reach the engine by their own names, and an
+// engine older than them says so instead of failing as a missing route.
+TEST(EngineCapabilities, StandaloneModelsAreNamedAndAnOlderEngineSaysSo) {
+    Workspaces w;
+    lake::control::InMemoryStore& store = *w.store;
+    const auto principal = store.context_for(w.secret);
+    auto requested = w.run(w.service->request(w.customer_id));
+    const auto workspace = store.get_service(requested->service_id);
+    ASSERT_TRUE(store.set_service_status(workspace->id, "Ready", "", "http://ws:4800"));
+    w.deliver(*workspace, {{"kind", "zetta"}, {"token", "t"}});
+    lake::api::Registry registry;
+    lake::api::register_core_capabilities(registry, "test");
+    const auto call = [&](const std::string& name, json input) {
+        lake::api::ApiContext context;
+        context.store = &store;
+        context.workspaces = w.service.get();
+        context.authorized = true;
+        context.acting_user_id = principal->user_id;
+        context.acting_identity = principal->taap_id;
+        context.request_id = lake::control::new_uuid_v4();
+        input["customer_id"] = w.customer_id;
+        input["workspace_id"] = w.workspace_id();
+        auto completed = liquid::runtime::block_on(registry.call_async(name, input, context));
+        EXPECT_TRUE(completed);
+        return std::move(*completed);
+    };
+    for (const char* name : {"train_model", "retrain_model", "register_model",
+                             "move_model_to_project"}) {
+        const auto capability = registry.find(name);
+        ASSERT_TRUE(capability) << name;
+        EXPECT_EQ(capability->action, "write") << name;
+        EXPECT_EQ(lake::api::agent_docs::group_of(name), "Models") << name;
+        EXPECT_TRUE(lake::api::workspace_action_allowed(name)) << name;
+    }
+    EXPECT_TRUE(registry.find("train_model")->input_schema["properties"].contains("methodology"));
+    EXPECT_TRUE(registry.find("register_model")->input_schema["properties"].contains("weights"));
+
+    w.caller->answers["train_model"] = {
+        {"run_id", "r-1"}, {"name", "churn"}, {"project_id", "p-1"}, {"standalone", true}};
+    const auto trained = call("train_model", {{"name", "churn"},
+                                              {"methodology", "M-1"},
+                                              {"dataset_path", "datasets/accounts"},
+                                              {"target", "churned"},
+                                              {"holdout_fraction", 0.2}});
+    ASSERT_TRUE(trained.ok) << trained.error.message;
+    EXPECT_EQ(trained.value["run_id"], "r-1");
+    EXPECT_EQ(w.caller->capability, "train_model");
+    EXPECT_FALSE(w.caller->read);
+    EXPECT_EQ(w.caller->input["target"], "churned");
+    EXPECT_EQ(w.caller->input["dataset_path"], "datasets.accounts");
+
+    const auto moved =
+        call("move_model_to_project", {{"model_id", "m-1"}, {"project_name", "Retention"}});
+    ASSERT_TRUE(moved.ok) << moved.error.message;
+    EXPECT_EQ(w.caller->capability, "move_model_to_project");
+    EXPECT_EQ(w.caller->input["model_id"], "m-1");
+
+    // An engine that has not got it yet.
+    w.caller->failure_for = "retrain_model";
+    w.caller->failure = lake::control::ZettaControlError{
+        "unknown_capability", "no capability named 'retrain_model'"};
+    const auto older = call("retrain_model", {{"model_id", "m-1"}});
+    ASSERT_FALSE(older.ok);
+    EXPECT_EQ(older.error.code, "not_supported");
+    EXPECT_NE(older.error.message.find("needs a newer Zetta"), std::string::npos)
+        << older.error.message;
+    EXPECT_NE(older.error.message.find("retrain_model"), std::string::npos);
+}
+
 // REST, OpenAPI and MCP are one registry: every tool is an OpenAPI operation with the same input
 // schema, and every operation a tool (lake#650).
 TEST(EngineCapabilities, McpAndOpenApiDescribeTheSameCapabilities) {

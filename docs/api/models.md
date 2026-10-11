@@ -61,8 +61,40 @@ Grouping is the web app's (`frontend/src/pages/train/models.ts`); no capability 
   `model_traffic` ([workspaces.md](workspaces.md),
   [../serving/telemetry.md](../serving/telemetry.md#the-per-model-prediction-series)).
 
-A model uploaded on its own is a model repository (the routes above). Lake does not record which
-repositories hold a model, so Train → Models does not list them yet.
+A model repository (the routes above) keeps model files with their history. Lake does not record
+which repositories hold a model, so Train → Models does not list them; a file in one becomes a
+workspace model when it is brought (below).
+
+## A standalone model (lake#654)
+
+A standalone model is made on its own, not as one step of a project's pipeline. Train → Models'
+**New model** makes one, and four named engine capabilities (zetta, `docs/ml/standalone-models.md`)
+plus one Lake capability carry it. Each takes `customer_id` and `workspace_id`, needs `write` on the
+account like `workspace_act`, and is audited in the workspace's own chain.
+
+| Capability | Input | What it does |
+|---|---|---|
+| `train_model` | `name`, `methodology` (an id from `list_methodologies`), `dataset_path` (`<database>/<name>` or `<database>.<name>`), `target` (required when the methodology's `label` input is), `entity_column?`, `holdout_fraction?` | Trains it: answers the `run_id`; the model appears in `list_models` when the run finishes |
+| `retrain_model` | `model_id` (any version), and optionally a new `dataset_path`, `target`, `entity_column` or `holdout_fraction` | A new version. A standalone model keeps the new settings for its next retrain; a project's model uses them for this run only |
+| `register_model` | `weights` (the file's contents), `name` or `version_of`, `kind?`, `metrics?` (the figures measured where it was trained), `source?` | Brings a model trained elsewhere so `score`, `explain`, `expose_model` and `predict` take it like a trained one |
+| `load_drive_model` (Lake's) | `drive_id`, `id` (the file), `name` or `version_of`, `kind?`, `metrics?` | Reads the file as the caller (`read_drive_file` or `download_drive_file`) and sends it to `register_model`, as `load_drive_dataset` loads a table. At most 16 MiB |
+| `move_model_to_project` | `model_id`, `project_name?` (default the model's name) | Makes it a project in Design → Projects, with its pipeline and every version |
+
+- **Why the engine keeps a project for it.** Every methodology trains through a project and a
+  pipeline, and the run and the model record them. So the engine gives a standalone model an
+  internal project of its own, which `list_projects` never lists. Lake never shows it: `list_models`
+  marks each version `standalone: true`, and the pages say "trained on its own" or "brought from a
+  file" where a project's model names its pipeline and project.
+- **What can be brought.** The engine scores, serves and explains what it reads natively: a
+  gradient-boosted tree model in its own JSON weights format (`objective`, `base_score`,
+  `feature_names`, `trees`), the format every model trained in Lake is kept in. Any other file is
+  `not_supported` and nothing is kept. A model repository's file is read with
+  `resolve_model_file` and sent as `weights`.
+- **Delete.** `delete_model` deletes one version. Deleting a standalone model's last version also
+  removes its internal project (`removed.standalone_project: 1`); its runs are kept.
+- **An older engine.** A workspace whose engine predates these capabilities answers each with
+  `not_supported` ("this workspace's engine does not have train_model yet; it needs a newer
+  Zetta"), and nothing changes. This holds for every allow-listed engine capability.
 
 ## Deleting from a workspace
 
@@ -75,7 +107,7 @@ dry run, naming the capability, the id and what was removed).
 | Capability | `id` | Engine input | What goes, and what is kept |
 |---|---|---|---|
 | `delete_dataset` | `<database>/<dataset>`, as `list_datasets` returns it | `dataset`, `database` | the table, its rows and partitions, and every search index on it; a run still reading it is not detected, so delete a dataset no run reads |
-| `delete_model` | the model id (`model_id` is accepted too) | `model_id` | the trained model, no longer served if it was published; the run that trained it is kept |
+| `delete_model` | the model id (`model_id` is accepted too) | `model_id` | the trained model, no longer served if it was published; the run that trained it is kept. A standalone model's last version takes its internal project with it (`removed.standalone_project`) |
 | `delete_run` | the run id (`run_id` too) | `run_id` | a finished run and its report; refused while pending or running; the models it trained are kept and named |
 | `delete_index` | the index id (`index_id` too) | `index_id` | the index, no longer served if it was published; the dataset is kept |
 

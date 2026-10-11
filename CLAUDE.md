@@ -77,6 +77,15 @@ Orama's answers the new `forbidden` (403). Lake's `create_solution` is not the e
 the project and its first pipeline from the composed methodology, since the engine composes the
 governed foundation only for catalogue ids. Not deployed. See `docs/api/solutions.md`.
 
+A standalone model follows (lake#654, no migration): Train → Models' New model trains one from a
+dataset, a target and a methodology (`train_model`) or brings a model file from this computer, a
+drive (`load_drive_model`) or a model repository (`register_model`); a standalone model has Retrain,
+New version (`retrain_model`), Move into a project (`move_model_to_project`) and Delete (each
+version's `delete_model`), and Ship serves it as any model. The engine keeps an internal project for
+it that it never lists. An engine that lacks an allow-listed capability is answered `not_supported`.
+Needs the zetta standalone-models change in the workspace image. Not deployed. See
+`docs/api/models.md#a-standalone-model-lake654` and `docs/ui/train.md#a-standalone-model`.
+
 The workspace engine's capabilities are named capabilities (lake#650, no migration): every name in
 `workspace_reads` and `workspace_actions` is served by `/v1/<name>`, its own OpenAPI operation and
 its own MCP tool, either one registered from the engine's input schema (`src/api/engine_openapi.json`,

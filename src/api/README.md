@@ -138,7 +138,12 @@ capability already covers as a named capability (lake#650): the engine's input s
 and a handler that is `call_workspace_capability`, the `workspace_query`/`workspace_act` path, so
 policy, agent scopes, audit and caching are the same. `granted_by_scope` lets a credential that may
 call `workspace_query` or `workspace_act` call them. See
-[`engine-capabilities.md`](../../docs/api/engine-capabilities.md).
+[`engine-capabilities.md`](../../docs/api/engine-capabilities.md). The standalone-model
+capabilities (`train_model`, `retrain_model`, `register_model`, `move_model_to_project`, lake#654)
+are named this way; `workspace_call` answers an engine that does not know an allow-listed name
+`not_supported`, saying it needs a newer Zetta. `drives_capabilities.cpp`'s `load_drive_model`
+reads a drive's model file as the caller and sends it to `register_model`
+([`models.md`](../../docs/api/models.md#a-standalone-model-lake654)).
 
 `experiment_capabilities.cpp` registers eleven space-scoped experiment/run operations using the
 closed contracts in `experiment_schemas.hpp`, and translates lake's experiment names to the engine's
