@@ -111,51 +111,44 @@ struct PaymentStatus {
     std::string provider = "manual";
     std::string title = "Invoice only";
     bool online_payment = false;
-    std::string reason;     // why card payment is not available; empty when it is
-    std::string checked_at; // when lake last read the provider's keys; empty: never
-    std::uint64_t key_version = 0;
+    std::string reason; // why card payment is not available; empty when it is
 };
 
 // Where the payment provider comes from at the moment of use. The billing capabilities and the
-// payment notice route ask it every time; the Stripe keys live in lake's own secret store and can
-// change (a new version) while lake runs.
+// payment notice route ask it every time. Lake's own provider keys are environment variables of
+// the hosting platform (docs/api/billing.md#where-the-keys-live), read once at start.
 class PaymentProviders {
 public:
     virtual ~PaymentProviders() = default;
     // The provider to use now. The manual provider, with PaymentStatus::reason, when the
-    // configured one is not available (no mount, no secret, a key missing); an error only when
-    // lake cannot tell (the secret's workspace does not answer and nothing is cached).
-    // `refresh` skips the cache (a notice whose signature fails is checked again with the newest
-    // keys, so a rotated webhook secret is picked up at once).
+    // configured one is not available (a key unset or malformed); an error only when lake cannot
+    // tell. `refresh` asks a provider source that can change while lake runs to look again (a
+    // notice whose signature fails is checked once more before it is refused).
     virtual liquid::runtime::task<std::expected<std::shared_ptr<PaymentProvider>, ApiError>>
     current(ApiContext& context, bool refresh = false) = 0;
     virtual PaymentStatus status() const = 0;
 };
 
-// Always `provider` (tests, and the manual provider where no secret mount is configured, with
+// Always `provider` (tests, and the manual provider where the Stripe keys are not set, with
 // `reason` saying why card payment is not available).
 std::shared_ptr<PaymentProviders> fixed_payment_providers(std::shared_ptr<PaymentProvider> provider,
                                                           std::string reason = {});
 
-// The Stripe keys, read from lake's secret store (LAKE_BILLING_SECRETS, docs/api/billing.md).
+// The Stripe keys: lake's own platform credentials, environment variables of the hosting platform
+// (LAKE_STRIPE_SECRET_KEY, LAKE_STRIPE_WEBHOOK_SECRET; lake#628, docs/api/billing.md). Never a
+// user's secret store, never logged.
 struct StripeKeys {
     std::string secret_key;     // sk_test_..., sk_live_... or a restricted rk_...
     std::string webhook_secret; // whsec_...
 };
 using StripeProviderFactory = std::function<std::shared_ptr<PaymentProvider>(const StripeKeys&)>;
 
-// Reads the secret `secret_name` (fields `secret_key`, `webhook_secret`) from the secret mount
-// `mount_id` with read_secret, as the operator, at use; keeps it for `ttl`, never logs it, and
-// builds the Stripe provider from it with `stripe`. No mount, no secret or a missing or malformed
-// key: the manual provider with `instructions`, and a reason.
-struct SecretPaymentConfig {
-    std::string mount_id;
-    std::string secret_name = "stripe";
-    std::string instructions; // the manual provider's (LAKE_BILLING_INSTRUCTIONS)
-    std::chrono::seconds ttl{60};
-    StripeProviderFactory stripe;
-};
-std::shared_ptr<PaymentProviders> secret_payment_providers(SecretPaymentConfig config);
+// The payment provider for the keys lake was started with: Stripe, built with `stripe`, when both
+// keys are set and well formed; otherwise the manual provider with `instructions` and a reason
+// that names the variable to set, never a value. A key changes only with a restart.
+std::shared_ptr<PaymentProviders> environment_payment_providers(const StripeKeys& keys,
+                                                                std::string instructions,
+                                                                const StripeProviderFactory& stripe);
 
 // What the payment notice route answers: an HTTP status and a JSON body.
 struct NoticeOutcome {

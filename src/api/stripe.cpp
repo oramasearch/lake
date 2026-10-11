@@ -77,7 +77,7 @@ std::string stripe_failure(std::string_view what, const StripeResponse& response
         return std::format("Stripe could not be reached to {}: {}", what, response.error);
     }
     if (response.status == 401 || response.status == 403) {
-        return std::format("Stripe refused lake's key to {} (HTTP {}); check the billing secret",
+        return std::format("Stripe refused lake's key to {} (HTTP {}); check LAKE_STRIPE_SECRET_KEY",
                            what,
                            response.status);
     }
