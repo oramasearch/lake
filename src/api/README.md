@@ -97,8 +97,14 @@ flushes it every `usage_flush_interval` and, as the store root's owner, schedule
 `usage_capabilities.cpp`'s `sample_usage` (stored bytes, instance and volume time, CPU, RAM, GPU and
 GPU memory from the operator's `workload_resources` (lake#643), new build results)
 every `usage_sample_interval`. `usage_capabilities.cpp` registers `usage_over_time`, `usage_limits`,
-`set_usage_limit` and `record_model_usage`; `metering_capabilities.cpp`'s `queue_repository_builds`
-is the build-record queueing the sample shares with `metering_usage`. See
+`set_usage_limit`, `record_model_usage` and `model_completion`, the model gateway (lake#248): an
+agent's model call, sent through `ApiContext::model_provider` on the blocking pool, its tokens added
+to the run's workspace usage and refused past the monthly `model_tokens` limit. `model_gateway.cpp`
+holds the gateway's pure parts (the request as forwarded, the usage of every answer shape, the
+provider's refusals, `openai_model_provider`), and `http_server.cpp` serves the OpenAI-compatible
+`POST /openai/v1/<endpoint>` over `model_completion` and builds the provider over its outbound client
+when `LAKE_OPENAI_API_KEY` is set (`docs/api/model-gateway.md`). `metering_capabilities.cpp`'s
+`queue_repository_builds` is the build-record queueing the sample shares with `metering_usage`. See
 [metering](../../docs/api/metering.md#usage-over-time).
 
 Billing (lake#564, decision 56): `billing_capabilities.cpp` registers the ten billing capabilities and
@@ -163,6 +169,15 @@ kept. `transcription.cpp` holds the pure parts: audio decoding, file names, `.vt
 cleaning, and OpenAI's multipart request and answer. The HTTP exchange is the injected
 `TranscriptPost`, which `http_server.cpp` builds over its outbound client when
 `LAKE_OPENAI_API_KEY` is set. See `docs/api/transcripts.md`.
+
+`deletion_capabilities.cpp` registers what deletes a workspace's data (lake#645):
+`delete_dataset`, `delete_model`, `delete_run` and `delete_index`, named capabilities over the
+workspace engine's own deletes that answer `not_supported` from an older engine, and
+`delete_ask_conversation`, which removes one person's message records from the workspace Zetta.
+`delete_organization`, `revoke_invitation` and `revoke_grant` sit beside their siblings in
+`capabilities.cpp`, and `delete_secret_mount` in `secrets_capabilities.cpp` over
+`MountSecrets::remove_all` (`secret_records_api.cpp`). Each takes `dry_run`. See
+`docs/api/deletion.md`.
 
 `solution_capabilities.cpp` registers the six solution capabilities (lake#597): a workspace's own
 solutions are sealed `lake_solutions` records in the workspace Zetta, listed and read beside Orama's

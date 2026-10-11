@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" role="img" aria-label="A group of people counted together">
+<title>B-2 Employee Attrition (aggregate-first)</title>
+<style>.l,.a{fill:none;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round}.l{stroke:currentColor}.a{stroke:var(--cat-accent,#8e6a00)}.d{fill:var(--cat-accent,#8e6a00)}.t{fill:var(--cat-tint,#8e6a0033)}.s{stroke-dasharray:2 2.5}</style>
+<rect class="a s" x="2.5" y="3" width="19" height="18" rx="3"/>
+<circle class="l" cx="12" cy="8.5" r="2.25"/>
+<path class="l" d="M7.5 18c0-2.7 2-4.5 4.5-4.5s4.5 1.8 4.5 4.5"/>
+<circle class="d" cx="6.5" cy="10.5" r="1.5"/>
+<circle class="d" cx="17.5" cy="10.5" r="1.5"/>
+</svg>

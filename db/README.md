@@ -346,3 +346,9 @@ artifact stay in the workspace Zetta. Nothing is dropped; idempotent. The latest
 `methodology_runs_guard`; the operator must vendor this schema, select that guard and run the
 pods (orama-operator#291) before rollout. See
 [schema.md](../docs/control-plane/schema.md#methodology-runs-migration).
+Migration `0076_organization_deletion` (lake#645) adds `deleted_at` to `organizations` and
+`customers`, set by `delete_organization` once the organization's account has no workspace and
+everything it held is removed; the rows stay because the central audit chain names the account, and
+lake never reads a marked one again. Nothing is dropped; idempotent. The latest guard is
+`organization_deletion_guard`; the operator must vendor this schema and select that guard before
+rollout. See [schema.md](../docs/control-plane/schema.md#organization-deletion-migration).

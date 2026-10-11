@@ -214,6 +214,11 @@ public:
     control::Result<control::Organization> get_organization(const std::string& id) override {
         return call("get_organization", [&] { return store_->get_organization(id); });
     }
+    control::Result<control::OrganizationDeletion> delete_organization(const std::string& id,
+                                                                       bool dry_run) override {
+        return call("delete_organization",
+                    [&] { return store_->delete_organization(id, dry_run); });
+    }
     control::Result<control::Customer> create_customer(const control::NewCustomer& value) override {
         return call("create_customer", [&] { return store_->create_customer(value); });
     }
@@ -312,6 +317,10 @@ public:
     control::Result<control::Invitation> get_invitation(const std::string& id) override {
         return call("get_invitation", [&] { return store_->get_invitation(id); });
     }
+    control::Result<control::Invitation> revoke_invitation(const std::string& id,
+                                                           bool dry_run) override {
+        return call("revoke_invitation", [&] { return store_->revoke_invitation(id, dry_run); });
+    }
     control::Result<control::OrganizationSpace>
     create_organization_space(const control::NewOrganizationSpace& value) override {
         return call("create_organization_space",
@@ -357,6 +366,12 @@ public:
     }
     control::Result<control::Grant> create_grant(const control::NewGrant& value) override {
         return call("create_grant", [&] { return store_->create_grant(value); });
+    }
+    control::Result<control::Grant> get_grant(const std::string& id) override {
+        return call("get_grant", [&] { return store_->get_grant(id); });
+    }
+    control::Result<control::Grant> revoke_grant(const std::string& id, bool dry_run) override {
+        return call("revoke_grant", [&] { return store_->revoke_grant(id, dry_run); });
     }
     control::Result<std::vector<control::Grant>>
     list_grants(const std::vector<std::string>& object_ids,
@@ -924,6 +939,10 @@ public:
     get_secret_mount_route(const std::string& mount_id) override {
         return call("get_secret_mount_route",
                     [&] { return store_->get_secret_mount_route(mount_id); });
+    }
+    control::Result<void> delete_secret_mount_route(const std::string& mount_id) override {
+        return call("delete_secret_mount_route",
+                    [&] { return store_->delete_secret_mount_route(mount_id); });
     }
     control::Result<std::vector<control::SecretMountRoute>>
     list_secret_mount_routes(const std::string& customer_id,

@@ -37,6 +37,16 @@ the rows already read.
 query), `HowItWorks`, `matches` and `countBy` (search and filter-chip options). `admin/usageFormat.ts`
 holds the usage wording (`usageDuration`, `usageMoney`, `usageHour`).
 
+## Deleting and Revoking (lake#645)
+
+An owner deletes an organization from its header (**Delete organization**). The dialog lists what
+goes from `delete_organization {dry_run: true}` and asks for the organization's handle; while the
+organization still owns a workspace, the action stays disabled and each workspace is linked to its
+deletion on Workspaces. A pending invitation has **Revoke** on the Invitations tab and on
+`/invitations`; each direct grant has **Revoke** on `/grants`, and Effective Access links every
+source to its direct grants. Both ask for the word `revoke`. The dialog is the shared one,
+[deletion.md](deletion.md).
+
 ## How to verify
 
 `npx tsc --noEmit -p .`, `npm test` and `npm run build` from `frontend/` (the build also runs

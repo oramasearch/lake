@@ -14,6 +14,11 @@ for the Streams contracts and `docs/api/experiments.md` for the Experiments oper
 OpenAI's request and answer) and `openai_transcriber`. `registry.hpp` declares the `Transcriber`
 injected dependency on `ApiContext` and `ServerOptions` (lake#561, `docs/api/transcripts.md`).
 
+`model_gateway.hpp` declares the model gateway's pure helpers (`prepare_model_request`,
+`model_usage`, `model_provider_failure`) and `openai_model_provider`. `registry.hpp` declares the
+`ModelProvider` injected dependency on `ApiContext`, and `server.hpp` the provider and its URL on
+`ServerOptions` (lake#248, `docs/api/model-gateway.md`).
+
 `ServerOptions::external_origin` is trusted instance configuration for repository terminal
 instructions (`repository_external_origin`). It takes precedence over `https://` plus the trusted
 identity/platform `public_host`; with neither value, lake names no origin. See
@@ -161,3 +166,7 @@ move (`transfer_to_workspace_store`, `switch_workspace_store`, `create_repositor
 `server.hpp` adds `ServerOptions::object_transport` and `workspace_store_lease_ttl`, and
 `registry_upload_max_age` (lake#383 phase B: abandoned OCI uploads are removed after it) and
 `registry_stream_idle_timeout` (a pull whose client takes no bytes for it is ended).
+
+`register_deletion_capabilities` (`capabilities.hpp`, lake#645) registers `delete_dataset`,
+`delete_model`, `delete_run`, `delete_index` and `delete_ask_conversation`
+([deletion.md](../../../docs/api/deletion.md)).

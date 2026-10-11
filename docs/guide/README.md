@@ -28,6 +28,7 @@ may wrap across source lines.
 | | `sharing` | Sharing and Shared with Me |
 | | `search` | Search |
 | | `load-data` | Datasets and Loading Data |
+| | `connections` | Connections (lake#651) |
 | | `transcripts` | Transcripts and Speech-to-Text |
 | Design | `design` | AI Projects and Pipelines |
 | | `solutions` | AI Solutions, Methodologies and Opportunities |

@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" role="img" aria-label="A funnel with a star for the best lead">
+<title>S-2 Lead &amp; Opportunity Scoring</title>
+<style>.l,.a{fill:none;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round}.l{stroke:currentColor}.a{stroke:var(--cat-accent,#8e6a00)}.d{fill:var(--cat-accent,#8e6a00)}.t{fill:var(--cat-tint,#8e6a0033)}.s{stroke-dasharray:2 2.5}</style>
+<path class="l" d="M3 4.5h14l-5 6.5v7l-4 2v-9z"/>
+<path class="d" d="M18.5 12.5l.9 2.6 2.6.9-2.6.9-.9 2.6-.9-2.6-2.6-.9 2.6-.9z"/>
+</svg>

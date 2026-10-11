@@ -28,10 +28,12 @@ add_executable(lake-tests test_main.cpp test_web_ui.cpp test_web_app.cpp test_ma
   test_drives.cpp
   test_request_series.cpp
   test_usage.cpp
+  test_model_gateway.cpp
   test_billing.cpp
   test_stripe.cpp
   test_sealed_delivery.cpp
   test_workspace_deletion.cpp
+  test_deletions.cpp
   test_workspace_store.cpp
   test_object_http.cpp
   test_registry_store.cpp

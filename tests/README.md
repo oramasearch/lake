@@ -408,6 +408,12 @@ space with two is left alone and reported once; a rerun changes nothing; and eve
 `workspace_id` is refused in the migration's transaction, afterwards, and with the setting alone. `repository_test_support.hpp` (`repository_workspace`) gives other tests the
 space's first live workspace for the repositories they create.
 
+`test_deletions.cpp` covers deleting and revoking (lake#645, `Stores/Deletions.*` over the memory
+and PostgreSQL stores): an organization refused while it owns a workspace and then gone from every
+read, a revoked invitation that cannot be accepted, the grants that are kept, a secret mount that
+leaves nothing in its workspace, a conversation removed for its person only, the engine deletions'
+fields and an older engine's `not_supported`, and the log each is audited in.
+
 `test_transcripts.cpp` covers the pure parts of speech-to-text and transcripts (lake#561):
 `.vtt`/`.srt` cleaning, audio decoding and its 25 MiB limit, file names, the OpenAI multipart
 request and its errors through a fake `TranscriptPost`, paging, excerpts and the audit
@@ -473,6 +479,13 @@ together dropped together, readings keeping their latest, deleted and refusing w
 `usage_over_time` across workspaces by hour, day and month and its refusals, limits, `record_model_usage`,
 the owner loop's `sample_usage` and the speech-to-text seconds and tokens of a transcript.
 `record_fixture.hpp`'s time series now answers a gauge's `last` reading per step.
+
+The model gateway (lake#248): `test_model_gateway.cpp` covers the request as forwarded (a stream
+asked for its usage), the usage of every answer shape (chat, Responses, embeddings, both streams),
+the provider's refusals without echoing Lake's key, `model_completion` counting a task's and a
+launch's tokens in the run's workspace with the prompt kept out of the audit, every other caller
+refused before the provider, the monthly `model_tokens` limit refusing with `usage_limit_reached`,
+and the OpenAI-compatible `/openai/v1/*` route over a real server, all against a fake provider.
 
 Billing (lake#564): `test_billing.cpp` covers prices and bill lines, choosing a plan now or next
 month, a month's bill from two workspaces' usage, invoices frozen, voided, reissued and paid, an

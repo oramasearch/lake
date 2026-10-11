@@ -11,6 +11,7 @@
 @import "./styles/app.css" layer(components);
 @import "./styles/look.css" layer(components);
 @import "./styles/phone.css" layer(components);
+@import "./styles/catalogue-icons.css" layer(components);
 
 @custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
 

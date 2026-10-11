@@ -1,9 +1,13 @@
 # Drives
 
 **Data → Drives** is where a workspace keeps its files and folders. Each drive keeps its files one
-of three ways, chosen when you create it: as **workspace files**, in a **repository** with
-history, or as **shortcuts** to things that already live somewhere else (a virtual drive). Every
-drive opens in the same file manager: folders, uploads with progress, drag to move, rename, delete.
+of four ways, chosen when you create it: as **workspace files**, in a **repository** with
+history, as **shortcuts** to things that already live somewhere else (a virtual drive), or in one
+of the workspace's **buckets or filesystems** (a storage drive). Every drive opens in the same file
+manager: folders, uploads with progress, drag to move, rename, delete.
+
+The page has two tabs: **Drives** and **Storage**, the workspace's buckets, filesystems and volumes
+([below](#storage)).
 
 ## Concepts
 
@@ -17,6 +21,12 @@ drive opens in the same file manager: folders, uploads with progress, drag to mo
   ([Sharing and Shared with Me](/docs/sharing)). A new repository drive gets its first change when
   it is created, so it is ready at once. Deleting the drive never deletes its repository.
 - **Virtual drive.** Folders of shortcuts only.
+- **Storage drive.** One of the workspace's buckets or filesystems, opened as a drive: its files
+  are browsed where they are, nothing is copied, and deleting the drive never deletes the storage.
+  A volume never opens as a drive: its contents belong to the service that mounts it.
+- **Storage.** A bucket, filesystem or volume that holds bytes for your services and apps. A
+  *drive* is where people work with files; *storage* holds the bytes. The API calls storage a
+  *store* (`list_stores`).
 - **Shortcut.** A link in a folder to something that lives elsewhere: a repository, a file or
   folder in a repository, an item of another drive, a dataset, a transcript, a project, an agent,
   a model or a web address. Deleting a shortcut never deletes what it opens. A shortcut whose
@@ -33,13 +43,16 @@ changed most recently across every workspace-files drive; each opens the folder 
 
 1. Press **New drive**.
 2. Type its **Name**.
-3. Choose how it **Keeps its files as**: Workspace files, Repository or Virtual.
+3. Choose how it **Keeps its files as**: Workspace files, Repository, Virtual or Storage.
 4. For a repository drive, choose **Create a new one** (the repository's name starts from the
-   drive's; lowercase letters, numbers and hyphens) or **Use one of this workspace**.
+   drive's; lowercase letters, numbers and hyphens) or **Use one of this workspace**. For a storage
+   drive, choose the **Storage**: a Ready bucket or filesystem of this workspace (volumes are
+   listed but cannot be chosen).
 5. Press **Create drive**. The drive opens.
 
 REST: `POST /v1/create_drive` with `customer_id`, `workspace_id`, `name`, `storage` (`files`,
-`repository` or `virtual`) and, for a repository drive, `repository_id` or `repository_name`.
+`repository`, `virtual` or `store`) and, for a repository drive, `repository_id` or
+`repository_name`; for a storage drive, `store_id`.
 MCP: `create_drive`. `list_drives` and `get_drive` read them.
 
 ## Work with Files
@@ -143,6 +156,30 @@ go with it and cannot be restored; a virtual drive's shortcuts go, never what th
 repository drive's repository stays, with its history. REST: `rename_drive`, and `delete_drive`
 with `confirm_name`. MCP: the same names.
 
+## Storage
+
+The **Storage** tab of **Data → Drives** (Go to finds it as **Storage**; it used to be a card on
+**Data → Datasets**, and an old link there opens it) lists the workspace's buckets, filesystems and
+volumes, with four figures (Storage, Opens as a drive, Volumes, Size). Each row shows its type and
+provider, size, its volume time this month (linking to **Usage**), status and endpoint, and:
+
+- **Open as a drive** for a Ready bucket or filesystem: it opens **New drive** with that storage
+  chosen. Once a drive opens it, the row says **Open drive**.
+- *Shown, not browsed* on a volume: a service mounts it and owns what is in it.
+- **Show connection** once it is Ready, and **Delete**, which asks you to type its name and deletes
+  the storage and everything in it.
+
+**New storage** creates one; [Services and Storage](/docs/services#storage) explains the kinds,
+the statuses and the connection. Today Lake offers volumes only, so no storage drive can be made
+yet: buckets and filesystems follow, and each will open as a drive as it arrives.
+
+### Work in a Storage Drive
+
+A storage drive's files are the storage's own: uploads, new folders, moves, renames and deletes
+change the bucket or filesystem itself, which keeps no history in Lake. Each upload is at most 16
+MiB per file. A storage drive holds no shortcuts. Deleting the drive leaves the storage and its
+files as they are.
+
 ## Limits
 
 - Workspace files have no version history, no sharing links and no previews rendered by Lake; a
@@ -182,11 +219,15 @@ sharing ([Grants and Effective Access](/docs/access)).
   `.csv`, `.jsonl` or `.ndjson`, of at most 16 MiB.
 - **"this Lake keeps no workspace files"**: this Lake has no workspace storage for files. Use a
   repository drive.
+- **"a volume is shown, not browsed"**: only a bucket or filesystem opens as a drive.
+- **"Lake cannot browse this store … yet"**: that kind of storage cannot be opened as a drive on
+  this Lake yet.
 
 ## Related Pages
 
 - [Repositories](/docs/repositories)
 - [Datasets and Loading Data](/docs/load-data)
+- [Services and Storage](/docs/services)
 - [Sharing and Shared with Me](/docs/sharing)
 - [Transcripts and Speech-to-Text](/docs/transcripts)
 - [Workspaces](/docs/workspaces)

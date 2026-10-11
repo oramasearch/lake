@@ -94,6 +94,7 @@
 #include "lake/api/drive.hpp"
 #include "lake/api/images.hpp"
 #include "lake/api/mcp.hpp"
+#include "lake/api/model_gateway.hpp"
 #include "lake/api/oauth.hpp"
 #include "lake/api/registry.hpp"
 #include "lake/api/rest.hpp"
@@ -6685,6 +6686,8 @@ struct OutboundRequest {
     std::vector<std::pair<std::string, std::string>> headers;
     // The whole exchange after the TLS handshake; speech-to-text uploads take longer.
     std::chrono::seconds timeout{30};
+    // The largest response body read; a model's answer or event stream can be larger (lake#248).
+    std::size_t body_limit = 2 * 1024 * 1024;
 };
 
 struct OutboundResponse {
@@ -6831,7 +6834,7 @@ boost::capy::io_task<std::string> exchange_outbound(Stream& stream,
     }
 
     http::parser_config limits(false);
-    limits.body_limit = 2 * 1024 * 1024;
+    limits.body_limit = request.body_limit;
     http::response_parser parser(http::make_parser_config(limits));
     parser.reset();
     parser.start();
@@ -7156,6 +7159,9 @@ struct ApiServer::Impl {
     // Speech-to-text (docs/api/transcripts.md): the injected one, else OpenAI over outbound_http
     // when a key is configured, else empty.
     Transcriber transcriber;
+    // The model gateway's provider (docs/api/model-gateway.md): the injected one, else OpenAI's
+    // API over outbound_http when LAKE_OPENAI_API_KEY is set (lake#248).
+    ModelProvider model_provider;
     // The workspace Zettas' object transport (configure_workspace_stores), for workspace files;
     // null without workspaces.
     std::shared_ptr<control::ObjectTransport> object_transport;
@@ -7997,6 +8003,23 @@ struct ApiServer::Impl {
                         response.status, std::move(response.body), std::move(response.error)};
                 });
         }
+        model_provider = options.model_provider;
+        if (!model_provider && !options.openai_api_key.empty()) {
+            model_provider = openai_model_provider(
+                options.openai_api_key,
+                options.model_provider_url,
+                [this](const std::string& url,
+                       std::string body,
+                       std::vector<std::pair<std::string, std::string>> headers,
+                       std::chrono::seconds timeout) {
+                    OutboundRequest request{
+                        "POST", url, std::move(body), std::move(headers), timeout};
+                    request.body_limit = 64 * 1024 * 1024;
+                    OutboundResponse response = outbound_http.request(std::move(request));
+                    return ModelProviderResponse{
+                        response.status, std::move(response.body), std::move(response.error)};
+                });
+        }
         register_core_capabilities(registry, version_string());
         // Billing only where it is on (LAKE_BILLING, lake#564): off, its capabilities are absent.
         if (options.billing) {
@@ -8530,6 +8553,8 @@ struct ApiServer::Impl {
         ctx.clerk_publishable_key = options.clerk_publishable_key;
         ctx.sealing_public_key = options.sealing_public_key;
         ctx.transcriber = transcriber;
+        ctx.store_browser = options.store_browser;
+        ctx.model_provider = model_provider;
         ctx.payments = payments;
         ctx.object_transport = object_transport;
         ctx.artifact_catalog = [this] {
@@ -10061,14 +10086,19 @@ struct ApiServer::Impl {
         auto shared = std::make_shared<ApiContext>(context);
         const std::string key = found->object_key;
         const std::uint64_t size = found->size;
+        const std::string store_drive_id = found->store_drive_id;
+        const std::string etag = !found->sha256.empty() ? found->sha256
+                                 : !found->etag.empty() ? found->etag
+                                                        : "size-" + std::to_string(size);
         co_return co_await stream_blob(
             route,
-            "\"" + found->sha256 + "\"",
+            "\"" + etag + "\"",
             size,
-            [shared, customer_id, workspace_id, key, size](
+            [shared, customer_id, workspace_id, key, size, store_drive_id](
                 std::uint64_t offset, std::span<std::byte> into) -> SyncStoreResult<std::uint64_t> {
                 auto window = control::settled(liquid::runtime::block_on(read_workspace_file(
-                    *shared, customer_id, workspace_id, key, size, offset, into.size())));
+                    *shared, customer_id, workspace_id, key, size, offset, into.size(),
+                    store_drive_id)));
                 if (!window) {
                     return std::unexpected(
                         SyncStoreError{window.error().code, window.error().message});
@@ -12794,6 +12824,75 @@ struct ApiServer::Impl {
         co_return http::route_done;
     }
 
+    // POST /openai/v1/<endpoint> — the model gateway (docs/api/model-gateway.md, lake#248): the
+    // OpenAI API's own request and answer around model_completion, so an agent's OpenAI SDK points
+    // its base URL at `<lake>/openai/v1` with its task, launch or schedule credential as the key.
+    // A failure is OpenAI's error shape, `{error: {message, type, code, param}}`, with Lake's code.
+    boost::http::route_task serve_model_gateway(boost::http::route_params& route,
+                                                std::string endpoint) {
+        namespace http = boost::http;
+        http::status status = http::status::ok;
+        std::string body;
+        std::string content_type = "application/json; charset=utf-8";
+        const auto openai_error = [](const ApiResult& result) {
+            return nlohmann::json{
+                {"error",
+                 {{"message", result.error.message},
+                  {"type", result.error.code},
+                  {"code", result.error.code},
+                  {"param", result.error.path.empty() ? nlohmann::json(nullptr)
+                                                      : nlohmann::json(result.error.path)}}}}
+                .dump();
+        };
+        nlohmann::json request;
+        JsonBodySink sink;
+        auto [read_error, bytes_read] = co_await boost::capy::push_to(route.req_body, sink);
+        if (read_error || bytes_read == 0) {
+            status = read_error && body_is_too_large(read_error) ? http::status::payload_too_large
+                                                                 : http::status::bad_request;
+            body = openai_error(ApiResult::failure(
+                status == http::status::payload_too_large ? "size_invalid" : "invalid_input",
+                "the request body must be the endpoint's JSON request"));
+        } else {
+            request = to_nlohmann(sink.release());
+            if (request.is_discarded() || !request.is_object()) {
+                status = http::status::bad_request;
+                body = openai_error(
+                    ApiResult::failure("invalid_input", "the request body is not a JSON object"));
+            }
+        }
+        if (body.empty()) {
+            ApiContext ctx = context_for(route);
+            auto completed = co_await registry.call_async(
+                "model_completion", {{"endpoint", endpoint}, {"request", std::move(request)}}, ctx);
+            const ApiResult result =
+                completed ? std::move(*completed)
+                          : ApiResult::failure("store_error", completed.error().message);
+            status = http::int_to_status(static_cast<unsigned>(rest_status(result)));
+            if (!result.ok) {
+                body = openai_error(result);
+            } else if (result.value.value("streamed", false)) {
+                content_type = "text/event-stream; charset=utf-8";
+                body = result.value.value("events", std::string());
+            } else {
+                body = result.value.value("response", nlohmann::json::object()).dump();
+            }
+        }
+        route.status(status);
+        route.res.set(http::field::content_type, content_type);
+        route.res.set(http::field::cache_control, "no-store");
+        if (status == http::status::service_unavailable ||
+            status == http::status::too_many_requests) {
+            route.res.set(http::field::retry_after, "1");
+        }
+        route.res.set("Server-Timing", server_timing_of(route));
+        stamp_response_headers(route, body);
+        auto [send_error] = co_await route.send(body);
+        if (send_error)
+            co_return http::route_error(send_error);
+        co_return http::route_done;
+    }
+
     boost::http::route_task serve_capability(boost::http::route_params& route,
                                              std::shared_ptr<const Capability> capability) {
         namespace http = boost::http;
@@ -13699,6 +13798,15 @@ bool ApiServer::start() {
                        return impl.observe_request(route,
                                                    "/workspaces/:customer_id/zetta/v1/:capability",
                                                    impl.serve_workspace_zetta(route, false));
+                   });
+    }
+    for (const std::string_view endpoint : model_gateway_endpoints) {
+        const std::string path = "/openai/v1/" + std::string(endpoint);
+        add_route(http::method::post,
+                   path,
+                   [&impl, path, endpoint](http::route_params& route) -> http::route_task {
+                       return impl.observe_request(
+                           route, path, impl.serve_model_gateway(route, std::string(endpoint)));
                    });
     }
     for (const auto& capability : impl.registry.list()) {

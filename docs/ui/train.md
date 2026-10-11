@@ -12,7 +12,7 @@ happens. A header action that needs the workspace (Load data, New agent) shows o
 
 | Page | Path | Reads | Layout |
 |---|---|---|---|
-| Datasets | `/w/<id>/train/data` | `system.datasets` through `workspace_sql`, `list_connections`, `list_services`, `list_stores`, `list_store_providers`; `list_source_tables` with `?browse=` | Figures (datasets, run outputs, connections, stores); a searchable table of datasets filtered to Datasets (the default) or Run outputs, each with its database, kind and a Query link; "Load data" opens a drawer with Upload (`upload_dataset`), Generate (`generate_dataset`, `list_dataset_generators`) and From a connection (`create_dataset_from_query`); the Connections card (table, Browse tables, Remove behind a confirmation, Connect One of Your Services, Add connection in a drawer); the Storage card (status chips, polled every 3 seconds while a store changes, New storage in a dialog, the connection in a dialog, delete in a dialog that needs the store's name typed). `?loaded=…` shows the upload's result as a banner; `?error=` as a warning |
+| Datasets | `/w/<id>/train/data` | `system.datasets` through `workspace_sql`; `list_connections` for Load data's pull | Figures (datasets, run outputs); a searchable table of datasets filtered to Datasets (the default) or Run outputs, each with its database, kind and a Query link; "Load data" opens a drawer with Upload (`upload_dataset`), Generate (`generate_dataset`, `list_dataset_generators`) and From a connection (`create_dataset_from_query`, picking from the existing connections, with a link to Data → Connections to add one). `?loaded=…` shows the upload's result as a banner; `?error=` as a warning. Datasets only: connections have their own page ([connections.md](connections.md), lake#651) and storage is Drives' Storage tab ([drives.md](drives.md#storage), lake#656); an old `?browse=<name>`, `#connections` or `#storage` link is sent there |
 | Dataset | `/w/<id>/train/dataset?database=…&name=…` | `get_dataset`, `analyze_dataset`, the first 20 rows through `workspace_sql` | Figures (rows, size, columns, copies); a split: tabs Columns, First Rows and Partitions on the left; the facts and the actions (Query it, Keep durable with `promote_dataset` when a partition has one copy) on the right |
 | Query | `/w/<id>/train/query?statement=…&database=…` | `workspace_sql` | An editor card (⌘/Ctrl+Enter runs it) and a results card with the first 500 rows; the statement and database stay in the URL |
 | Agents | `/w/<id>/train/agents` | `list_agents`, `list_agent_library` | Figures (agents, run on their own, conversation only, frontier model); a searchable card grid filtered by engagement, each card with its purpose, trigger or Conversation chip, model and skills; "New agent" opens a drawer (`create_agent`, then `schedule_agent` for a frontier agent's trigger); "Build with the Agent Factory" goes to the factory; the Agent Library as cards |
@@ -38,6 +38,15 @@ helpers the Run and Models pages share (`useExperimentRefs`, `TrialSubject`).
   footer beside Cancel, as every other drawer does; a tab with nothing to act on (no generators,
   no connections) shows none. Upload picks its file with the kit's `FilePicker` (`lib/ui.tsx`): a
   dashed zone to press or drop a file on, which then shows the file's name and size.
+
+## Deleting a Dataset or a Run (lake#645)
+
+Data → Dataset has **Delete dataset** in its Actions card, confirmed by typing the dataset's name;
+the dialog lists its rows, size and the search indexes built on it (`delete_dataset
+{dry_run: true}`). Train → Run has **Delete** in its header once the run has finished, confirmed by
+the first eight characters of its id; the models it trained are kept (`delete_run`). Both go back
+to their list. An older workspace engine answers that it cannot delete yet, which the dialog shows.
+See [deletion.md](deletion.md).
 
 ## How to verify
 

@@ -10,6 +10,7 @@ import { act, postRead } from "@/lib/api";
 import { Drawer } from "@/lib/overlay";
 import { Badge, Button, Card, Chip, Empty, FilterChips, Grid, Field, Form, Page, SearchInput, Section, Skeleton, Stat, StatRow, Toolbar, fieldError } from "@/lib/ui";
 import { WorkspaceGate, useWorkspaceStatus } from "@/components/WorkspaceGate";
+import { MethodologyIcon } from "@/components/CatalogueIcon";
 import { qs, useScope, useWq, useWsPath } from "./api";
 import { joined, text, type J } from "./logic";
 import { TARGET_KINDS, filterMethodologies, methodologyBadge, methodologySource, validationState, type MethodologySource } from "./methodologies";
@@ -109,6 +110,7 @@ function Methodologies({ onNew }: { onNew: () => void }) {
                   <Card
                     key={text(entry, "id") || row}
                     to={ws(`/design/methodology?${qs({ id: text(entry, "id") })}`)}
+                    icon={<MethodologyIcon entry={entry} size={32} />}
                     title={text(entry, "name")}
                     actions={
                       <span className="inline-flex flex-wrap items-center gap-1">
@@ -153,6 +155,7 @@ function Methodologies({ onNew }: { onNew: () => void }) {
                 <Card
                   key={text(entry, "id") || row}
                   to={ws(`/design/methodology?${qs({ id: text(entry, "id") })}`)}
+                  icon={<MethodologyIcon entry={entry} size={32} />}
                   label={text(entry, "id")}
                   title={text(entry, "name")}
                   actions={

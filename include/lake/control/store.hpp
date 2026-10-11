@@ -432,6 +432,21 @@ struct WorkspaceDeletionRequest {
     // (oci_repository_routes) are added and deleted by the store in the cascade transaction.
     std::vector<std::string> images;
 };
+// Deleting an organization (lake#645, docs/api/organizations.md#deleting-an-organization). It is
+// refused while its space holds a workspace that is not deleted (`live_workspaces` names them).
+// Otherwise one transaction removes its teams, memberships, invitations, SSO providers,
+// federation issuers, recovery attempts and secret mount routes, and the policy objects of its
+// space and of itself (their children and every grant on them go with them), and marks the
+// organization and its space deleted. The two rows stay, marked, because the central audit chain
+// names the space; they are never listed or read again, and the handle stays retired. `counts`
+// says how many of each went (a dry run: would go).
+struct OrganizationDeletion {
+    Organization organization;
+    std::string customer_id, customer_name; // empty when it has no space
+    std::vector<Workspace> live_workspaces;
+    std::map<std::string, std::int64_t> counts;
+    std::string deleted_at; // empty for a dry run
+};
 // Where a tenant image repository lives (lake#383, decision 54 S4-S6, migration 0068): the
 // content-free central route from `<space>/<name>` (the space by its customer id, `name` the path
 // below it, `<image>` or `cache/<image>`) to the workspace whose Zetta holds the repository's
@@ -1230,6 +1245,10 @@ public:
     virtual Result<Organization> create_organization(const NewOrganization&) = 0;
     virtual Result<std::vector<Organization>> list_organizations(int limit) = 0;
     virtual Result<Organization> get_organization(const std::string& id) = 0;
+    // See OrganizationDeletion. `conflict` while it owns a live workspace (the answer still names
+    // them through `live_workspaces` on a dry run); `not_found` for an unknown or deleted one.
+    virtual Result<OrganizationDeletion> delete_organization(const std::string& id,
+                                                             bool dry_run) = 0;
 
     virtual Result<Customer> create_customer(const NewCustomer&) = 0;
     virtual Result<std::vector<Customer>> list_customers(int limit,
@@ -1282,6 +1301,9 @@ public:
     virtual Result<std::vector<Invitation>>
     list_invitations(const std::string& organization_id, const std::string& team_id, int limit) = 0;
     virtual Result<Invitation> get_invitation(const std::string& id) = 0;
+    // A pending invitation becomes `revoked` (lake#645) and can no longer be accepted; with
+    // `dry_run` it is only checked. `conflict` for one that is accepted, expired or revoked.
+    virtual Result<Invitation> revoke_invitation(const std::string& id, bool dry_run) = 0;
     // Organizations a person runs themselves (docs/api/organizations.md#self-service).
     virtual Result<OrganizationSpace> create_organization_space(const NewOrganizationSpace&) = 0;
     virtual Result<OrganizationSpace> convert_personal_space(const ConvertPersonalSpace&) = 0;
@@ -1305,6 +1327,11 @@ public:
     policy_paths(const std::vector<std::string>& requested_object_ids) = 0;
 
     virtual Result<Grant> create_grant(const NewGrant&) = 0;
+    virtual Result<Grant> get_grant(const std::string& id) = 0;
+    // Removes one grant (lake#645), or with `dry_run` only checks that it could. `conflict` for a
+    // grant a membership derives (remove_member removes it with the membership) and for the last
+    // `admin` grant on a space, which would leave the space without an administrator.
+    virtual Result<Grant> revoke_grant(const std::string& id, bool dry_run) = 0;
     virtual Result<std::vector<Grant>>
     list_grants(const std::vector<std::string>& object_ids,
                 const std::optional<std::string>& principal_taap_id,
@@ -1625,6 +1652,10 @@ public:
     // customer, at /workspace_id when the workspace is not a live workspace of that customer.
     virtual Result<SecretMountRoute> create_secret_mount_route(const SecretMountRoute& value) = 0;
     virtual Result<SecretMountRoute> get_secret_mount_route(const std::string& mount_id) = 0;
+    // The last step of deleting a mount (lake#645), after its records left its workspace: its
+    // route, its leases' routes and its policy object (with its secrets' objects and every grant
+    // on them). `not_found` when no route names it.
+    virtual Result<void> delete_secret_mount_route(const std::string& mount_id) = 0;
     // A customer's routes, newest first; `workspace_id` empty: every workspace.
     virtual Result<std::vector<SecretMountRoute>>
     list_secret_mount_routes(const std::string& customer_id, const std::string& workspace_id) = 0;

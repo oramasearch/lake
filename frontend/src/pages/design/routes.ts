@@ -10,6 +10,7 @@ const Solution = lazyPage(() => import("./SolutionPage"));
 const Methodologies = lazyPage(() => import("./MethodologiesPage"));
 const Methodology = lazyPage(() => import("./MethodologyPage"));
 const AgentLibrary = lazyPage(() => import("./AgentLibraryPage"));
+const Icons = lazyPage(() => import("./IconsPage"));
 
 export const screens: Screen[] = [
   { path: "/design/projects", title: "Projects", section: "design", nav: true, icon: "audit", workspace: true, owns: ["/design/project", "/design/pipeline"], component: Projects },
@@ -22,4 +23,6 @@ export const screens: Screen[] = [
   { path: "/design/discover", title: "Opportunities", section: "design", workspace: true, component: Opportunities },
   { path: "/design/solution", title: "Solution", section: "design", workspace: true, component: Solution },
   { path: "/design/methodology", title: "Methodology", section: "design", workspace: true, component: Methodology },
+  // The catalogue icons at every size, for review (lake#639); not in the rail, open to everyone.
+  { path: "/design/icons", title: "Catalogue Icons", section: "design", audience: ["visitor", "account", "operator"], component: Icons },
 ];

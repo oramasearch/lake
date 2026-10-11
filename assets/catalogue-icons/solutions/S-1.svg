@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" role="img" aria-label="A person, and an arrow turning back towards them">
+<title>S-1 Churn &amp; Retention</title>
+<style>.l,.a{fill:none;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round}.l{stroke:currentColor}.a{stroke:var(--cat-accent,#8e6a00)}.d{fill:var(--cat-accent,#8e6a00)}.t{fill:var(--cat-tint,#8e6a0033)}.s{stroke-dasharray:2 2.5}</style>
+<circle class="l" cx="8.5" cy="7.5" r="2.75"/>
+<path class="l" d="M4 20c0-3.3 2-5.25 4.5-5.25s4.5 1.95 4.5 5.25"/>
+<path class="a" d="M15.5 4.5c4.3 1.8 5.6 7.6 2.2 11.2"/>
+<path class="a" d="M20 16.2l-2.3-.5.4-2.3"/>
+</svg>

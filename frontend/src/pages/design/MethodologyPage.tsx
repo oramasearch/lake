@@ -15,6 +15,7 @@ import { ConfirmButton, Drawer } from "@/lib/overlay";
 import { useToast } from "@/lib/toast";
 import { Badge, Button, Card, Chip, DataTable, Empty, ErrorBlock, Field, Form, Grid, KeyValue, Page, Skeleton, Split, StateTabs, fieldError } from "@/lib/ui";
 import { WorkspaceGate, useWorkspaceStatus } from "@/components/WorkspaceGate";
+import { MethodologyIcon, SolutionIcon } from "@/components/CatalogueIcon";
 import { qs, useScope, useScopedRead, useWq, useWsPath } from "./api";
 import { datasetChoices, datasetColumns, joined, solutionUses, text, type J } from "./logic";
 import {
@@ -63,6 +64,7 @@ export default function MethodologyPage() {
         )
       }
       sub={entry && own ? text(entry, "description") : undefined}
+      icon={entry ? <MethodologyIcon entry={entry} size={64} /> : undefined}
       actions={entry ? <HeaderActions entry={entry} own={own} onOpen={setOpen} /> : undefined}
     >
       <WorkspaceGate>
@@ -225,7 +227,7 @@ function OramaMethodology({ entry }: { entry: J }) {
         {users.length ? (
           <Grid className="grid-cols-1 gap-2 sm:grid-cols-2">
             {users.map((s, index) => (
-              <Card key={text(s, "id") || index} to={ws(`/design/solution?${qs({ id: text(s, "id") })}`)} label={text(s, "id")} title={text(s, "name")} actions={<RunsBadge entry={s} />} />
+              <Card key={text(s, "id") || index} to={ws(`/design/solution?${qs({ id: text(s, "id") })}`)} icon={<SolutionIcon entry={s} size={32} />} label={text(s, "id")} title={text(s, "name")} actions={<RunsBadge entry={s} />} />
             ))}
           </Grid>
         ) : (

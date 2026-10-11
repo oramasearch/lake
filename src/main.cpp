@@ -76,8 +76,11 @@ int usage() {
                  "(default $LAKE_INSTANCE_KEK)");
     std::println("  --clerk-publishable-key Clerk key; browser sign-in goes through Clerk "
                  "(default $LAKE_CLERK_PUBLISHABLE_KEY)");
-    std::println("  LAKE_OPENAI_API_KEY OpenAI key for speech-to-text; LAKE_TRANSCRIBE_MODEL its "
-                 "model (default gpt-4o-transcribe)");
+    std::println("  LAKE_OPENAI_API_KEY OpenAI key for speech-to-text and the model gateway "
+                 "(/openai/v1); LAKE_TRANSCRIBE_MODEL the speech model "
+                 "(default gpt-4o-transcribe)");
+    std::println("  LAKE_MODEL_PROVIDER_URL the model gateway's OpenAI-compatible provider "
+                 "(default https://api.openai.com/v1)");
     std::println(
         "  LAKE_BILLING=on turns billing on (Orama Cloud); unset or off, as on an enterprise "
         "install, billing is absent. LAKE_BILLING_INSTRUCTIONS tells accounts how to pay");
@@ -159,6 +162,7 @@ int main(int argc, char** argv) {
     opts.sealing_public_key = env_or("LAKE_SEALING_PUBLIC_KEY", "");
     // Speech-to-text (docs/api/transcripts.md): without a key, transcribe answers not_supported.
     opts.openai_api_key = env_or("LAKE_OPENAI_API_KEY", "");
+    opts.model_provider_url = env_or("LAKE_MODEL_PROVIDER_URL", "");
     opts.transcribe_model = env_or("LAKE_TRANSCRIBE_MODEL", "");
     // Billing (docs/api/billing.md): on only where LAKE_BILLING=on, as on Orama Cloud; an
     // enterprise install leaves it unset and has no billing capability or page.

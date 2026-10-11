@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" role="img" aria-label="A magnifying glass over a spike in a line">
+<title>S-7 KPI Anomaly &amp; Driver Analysis</title>
+<style>.l,.a{fill:none;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round}.l{stroke:currentColor}.a{stroke:var(--cat-accent,#8e6a00)}.d{fill:var(--cat-accent,#8e6a00)}.t{fill:var(--cat-tint,#8e6a0033)}.s{stroke-dasharray:2 2.5}</style>
+<circle class="l" cx="10" cy="10" r="7"/>
+<path class="l" d="M15 15l6 6"/>
+<path class="a" d="M4 12h2.5l2-5.5 2.5 7.5 1.5-2.5H16"/>
+</svg>
