@@ -69,6 +69,24 @@ admin and cluster tokens), `lake-prod-openai` (`OPENAI_API_KEY`, lake's and its 
 operator's own (`cloudflare-api-token`, `cloudflare-r2`, `oramasearch-dockerhub`), the Cloud v1 dev
 stack's `v1-*` Secrets and Helm release records.
 
+## Roll Out (Steve's Steps)
+
+Nothing on dev needs a value moved: no app has a secret reference and no `LakeSealedSecret` exists.
+The level 1 Secrets stay where they are. In order:
+
+1. **Lake** with `mint_sealed_secret` (this change) rolls first; nothing asks it for a delivery yet.
+2. **The operator's CRDs.** Helm does not upgrade `crds/`, so apply the two changed CRDs from
+   orama-operator (branch `lake-625-secret-projections`) before the operator:
+   `kubectl --context orama-production-cluster-01 apply -f chart/crds/orama.cloud_lakeapps.yaml -f chart/crds/orama.cloud_lakesealedsecrets.yaml`.
+3. **The operator** (`helm upgrade`, per orama-operator `docs/development.md`). A `helm upgrade` also
+   reconciles Prod 2: afterwards confirm the `OramaCloudV1` in `orama-prod2` is still `Ready`.
+4. **Use it.** A person keeps the secret in a mount of the app's workspace and names it on the app,
+   never handling the value outside lake: Data → Secrets (or `create_secret_mount`, then
+   `put_secret`), then the app's Settings → Environment with the mount, secret and field. The
+   `LakeSealedSecret` appears in `lake` within a reconcile, and the app rolls once it is delivered.
+5. **Removing an old Kubernetes Secret** is a person's call, made only after the app reads from the
+   store. None exists on dev today.
+
 ## Verify
 
 ```sh
