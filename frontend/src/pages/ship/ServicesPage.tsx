@@ -192,10 +192,16 @@ function Services({ customerId, creating, setCreating }: { customerId: string; c
   const month = windows("month").current;
   const usage = useRead<Reading>(
     listed.isSuccess ? "usage_over_time" : null,
-    { customer_id: customerId, dimensions: ["instances", "volumes"], from: month.from, to: month.to, granularity: "month" },
+    { customer_id: customerId, dimensions: ["cpu", "ram", "volumes"], from: month.from, to: month.to, granularity: "month" },
     { workspace: null, staleTime: 300_000 },
   );
-  const usedBy = (id: string) => usageOf(usage.data, [{ dimension: "instances", breakdown: "by_object", keys: [id] }, { dimension: "volumes", breakdown: "by_object", keys: [id] }]);
+  // CPU and RAM of what each service is scheduled with (lake#643), and its volumes.
+  const usedBy = (id: string) =>
+    usageOf(usage.data, [
+      { dimension: "cpu", breakdown: "by_object", keys: [id] },
+      { dimension: "ram", breakdown: "by_object", keys: [id] },
+      { dimension: "volumes", breakdown: "by_object", keys: [id] },
+    ]);
   const [shown, setShown] = useState<Row | null>(null);
   const [deleting, setDeleting] = useState<Row | null>(null);
   const [needle, setNeedle] = useState("");
@@ -315,11 +321,13 @@ function Services({ customerId, creating, setCreating }: { customerId: string; c
                   sort: (s) => usedBy(text(s, "id"))[0]?.value ?? 0,
                   render: (service) => {
                     if (!usage.data) return <span className="text-ink-3">—</span>;
-                    const [instances, volumes] = usedBy(text(service, "id"));
+                    const [cpu, ram, volumes] = usedBy(text(service, "id"));
                     return (
-                      <Link to={usageLink({ dimension: "instances" })} className="block font-mono text-[12.5px] whitespace-nowrap tabular-nums text-inherit no-underline hover:underline">
-                        {formatValue(instances.value, instances.unit)}
-                        <div className="text-[11.5px] text-ink-3">{formatValue(volumes.value, volumes.unit)}</div>
+                      <Link to={usageLink({ dimension: "cpu" })} className="block font-mono text-[12.5px] whitespace-nowrap tabular-nums text-inherit no-underline hover:underline">
+                        {formatValue(cpu.value, cpu.unit)}
+                        <div className="text-[11.5px] text-ink-3">
+                          {formatValue(ram.value, ram.unit)} · {formatValue(volumes.value, volumes.unit)}
+                        </div>
                       </Link>
                     );
                   },

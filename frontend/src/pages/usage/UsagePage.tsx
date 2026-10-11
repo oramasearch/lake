@@ -273,7 +273,8 @@ function BreakdownCard({ dimension, names }: { dimension: Dimension; names: Reco
     ["By Agent", dimension.by_agent],
     ["By Run", dimension.by_launch],
     ["By Model", dimension.by_model],
-    ["By Service, Store, App or Model", dimension.by_object],
+    ["By Workload or Model", dimension.by_object],
+    ["By GPU Class", dimension.by_class],
   ];
   const total = dimension.total || 1;
   return (

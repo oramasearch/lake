@@ -32,17 +32,21 @@ Top to bottom:
   with all of last month (`windows`, `pages/usage/usage.ts`).
 - **Near a Limit.** One warning banner per limit at or past its warning percentage.
 - **Figures.** One tile per dimension: the total (a reading's latest value for storage), its unit
-  in words (`formatValue`), and its change against the last period with an arrow. Pressing a tile
+  in words (`formatValue`: CPU in vCPU-minutes or -hours, RAM and GPU memory in GiB-minutes or
+  -hours, GPU in GPU-minutes or -hours), and its change against the last period with an arrow. Pressing a tile
   charts it (`?dimension=`).
 - **Over Time.** A uPlot chart (`pages/usage/UsageChart.tsx`, as Train and Ship's charts) of the
   chosen dimension, stacked **By workspace** or **By kind**: the six largest bands and Other
   (`stackSeries`), in lake's colours, redrawn when the theme changes; the legend shows each band's
   own value. Chips switch the dimension.
-- **Breakdowns.** Beside or below the chart: the chosen dimension by kind, and by agent, run, model
-  or service, store, app or model where the reading has them, each with its total and share.
+- **Breakdowns.** Beside or below the chart: the chosen dimension by kind, and by agent, run, model,
+  workload or model (**By Workload or Model**) and GPU class (**By GPU Class**, lake#643; "Unknown
+  class" for a GPU the operator could not name) where the reading has them, each with its total and
+  share.
 - **Limits.** One meter per limit (used of limit, percent, enforced or warns), red past the limit;
   **Set a limit** opens a dialog: what to limit, the limit in a person's unit (GiB, hours,
-  instance-hours, GiB-hours or a count, `toLimit`), and the warning percentage. Empty or 0 removes
+  vCPU-hours, GiB-hours, GPU-hours, instance-hours or a count, `toLimit`), and the warning
+  percentage. Empty or 0 removes
   it.
 - **Not Measured Yet.** The reading's `not_measured` sentences, as a quiet banner.
 - **Repository Usage by Hour.** A card linking `/metering` for the account.
@@ -54,7 +58,8 @@ dashboard never names the account itself to a person; with several, a limit name
 ## Export CSV
 
 **Export CSV** downloads `lake-usage-<from>-<range>.csv`: `dimension, unit, breakdown, name, period,
-value`, one row per dimension, breakdown (total, workspace, kind, agent, launch, model, object) and
+value`, one row per dimension, breakdown (total, workspace, kind, agent, launch, model, object,
+class) and
 period, values in the dimension's own unit (`toCsv`).
 
 ## Usage of One Thing
@@ -64,12 +69,12 @@ period, values in the dimension's own unit (`toCsv`).
 | Page | Figure | Read |
 |---|---|---|
 | Train → Agents → an agent | **Model tokens**, by the agent's name or id | `usage_over_time` `model_tokens`, `by_agent` |
-| Ship → Apps → an app | **Instance time** | `instances`, `by_object` |
+| Ship → Apps → an app | **CPU**, **RAM**, **GPU** and **Instance time** | `cpu`, `ram`, `gpu`, `instances`, `by_object` |
 | Ship → Models → a model | **Predictions answered** | `predictions`, `by_object` |
 
 Each reads its workspace for this month and links the dashboard on that workspace and dimension.
-Ship → Services adds a **This Month** column (instance and volume time per service, from one
-`usage_over_time` read of the account), and Home's Dashboard a **Usage** button for its selection.
+Ship → Services adds a **This Month** column (CPU, then RAM and volume time per service, from one
+`usage_over_time` read of the account; lake#643), and Home's Dashboard a **Usage** button for its selection.
 
 ## Phone
 

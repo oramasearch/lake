@@ -3040,3 +3040,138 @@ TEST(PostgresWebApp, AnOrganizationNamesItsOwnSpace) {
     // MFA enrollment on PostgreSQL is read through `viewer` in
     // HttpServer/HttpResponseIsolation.TheViewerSaysWhoIsSignedInAndWhereTheyAre.
 }
+
+namespace {
+
+// lake#643 against one store: the resources the operator reports per workload, rates per class,
+// an invoice line naming its class, and when a launch's status was last written.
+void workload_resources_and_classes_follow_the_contract(lake::control::Store& store,
+                                                        const std::string& suffix) {
+    const auto user = store.create_user(
+        {"taap:1:ed25519:wr-" + suffix, "wr-" + suffix + "@example.com", "Resources"});
+    ASSERT_TRUE(user) << user.error().message;
+    const auto customer = store.create_customer({"individual", user->id, "", "wr-" + suffix});
+    ASSERT_TRUE(customer) << customer.error().message;
+
+    const std::string app = lake::control::new_uuid_v4();
+    const std::string build = lake::control::new_uuid_v4();
+    ASSERT_TRUE(
+        store.put_workload_resources({"app", app, 2, 1500, 3ULL << 30, 1, "h100", 80ULL << 30}));
+    ASSERT_TRUE(store.put_workload_resources({"build", build, 1, 500, 1ULL << 30}));
+    // The operator replaces a row: the build's pods finished, its resources stay.
+    ASSERT_TRUE(store.put_workload_resources({"build", build, 0, 500, 1ULL << 30}));
+    EXPECT_EQ(store.put_workload_resources({"repository", app, 1}).error().code, "invalid_input");
+    const auto rows = store.workload_resources();
+    ASSERT_TRUE(rows) << rows.error().message;
+    const auto find = [&](const std::string& kind, const std::string& id) {
+        return std::ranges::find_if(*rows, [&](const lake::control::WorkloadResources& row) {
+            return row.object_kind == kind && row.object_id == id;
+        });
+    };
+    const auto gpu_app = find("app", app);
+    ASSERT_NE(gpu_app, rows->end());
+    EXPECT_EQ(gpu_app->pods, 2);
+    EXPECT_EQ(gpu_app->cpu_millis, 1500U);
+    EXPECT_EQ(gpu_app->memory_bytes, 3ULL << 30);
+    EXPECT_EQ(gpu_app->gpus, 1);
+    EXPECT_EQ(gpu_app->gpu_class, "h100");
+    EXPECT_EQ(gpu_app->vram_bytes, 80ULL << 30);
+    EXPECT_FALSE(gpu_app->observed_at.empty());
+    const auto finished = find("build", build);
+    ASSERT_NE(finished, rows->end());
+    EXPECT_EQ(finished->pods, 0);
+    EXPECT_EQ(finished->cpu_millis, 500U);
+
+    // A GPU rate per class beside the default; the same class twice is refused.
+    lake::control::BillingPlan list;
+    list.id = "usage-202611-" + std::string(17 - suffix.size(), '0') + suffix;
+    list.name = "Usage";
+    list.currency = "USD";
+    list.prices = {{"gpu", 38'750, 60, 0},
+                   {"gpu", 10'800, 60, 0, "l4"},
+                   {"gpu", 78'750, 60, 0, "h100"},
+                   {"cpu", 1'500, 60'000, 0}};
+    const auto stored = store.put_billing_plan(list);
+    ASSERT_TRUE(stored) << stored.error().message;
+    ASSERT_EQ(stored->prices.size(), 4U);
+    EXPECT_EQ(stored->prices[0].dimension, "cpu");
+    EXPECT_EQ(stored->prices[1].class_name, "") << "by dimension, then class";
+    EXPECT_EQ(stored->prices[2].class_name, "h100");
+    EXPECT_EQ(stored->prices[3].class_name, "l4");
+    EXPECT_EQ(stored->prices[3].unit_micros, 10'800U);
+    list.prices.push_back({"gpu", 1, 60, 0, "l4"});
+    EXPECT_EQ(store.put_billing_plan(list).error().code, "invalid_input");
+
+    // An invoice line keeps the class it billed.
+    lake::control::Invoice invoice;
+    invoice.customer_id = customer->id;
+    invoice.period = "2026-11";
+    invoice.plan_id = list.id;
+    invoice.plan_name = "Usage";
+    invoice.currency = "USD";
+    invoice.total_micros = 648'000;
+    invoice.provider = "manual";
+    invoice.lines = {
+        {"usage", "gpu", "GPU (L4)", "gpu_seconds", 3600, 0, 3600, 10'800, 60, 648'000, "l4"},
+        {"usage",
+         "instances",
+         "Service and App Instances",
+         "instance_seconds",
+         60,
+         0,
+         60,
+         1'350,
+         60,
+         1'350}};
+    const auto issued = store.create_invoice(invoice);
+    ASSERT_TRUE(issued) << issued.error().message;
+    const auto read = store.get_invoice(issued->id);
+    ASSERT_TRUE(read) << read.error().message;
+    ASSERT_EQ(read->lines.size(), 2U);
+    EXPECT_EQ(read->lines[0].class_name, "l4");
+    EXPECT_EQ(read->lines[1].class_name, "") << "a line from before lake#643 has no class";
+    EXPECT_EQ(read->lines[1].dimension, "instances");
+}
+
+} // namespace
+
+TEST(PostgresBilling, WorkloadResourcesAndClassRatesFollowTheContract) {
+    {
+        lake::control::InMemoryStore memory;
+        workload_resources_and_classes_follow_the_contract(memory, "mem");
+    }
+    const char* uri = lake::test::postgres_uri();
+    if (uri == nullptr || std::string(uri).empty()) {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not set";
+    }
+    auto store = lake::control::make_postgres_store(
+        uri, "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff");
+    ASSERT_TRUE(store->ping()) << store->ping().error().message;
+    {
+        pqxx::connection connection(uri);
+        pqxx::work tx(connection);
+        for (const char* table : {"workload_resources", "workload_resources_guard"}) {
+            EXPECT_FALSE(
+                tx.exec_params("SELECT to_regclass($1)", std::string(table))[0][0].is_null())
+                << table;
+        }
+        EXPECT_FALSE(
+            tx.exec("SELECT 1 FROM schema_migrations WHERE version = '0075_workload_resources'")
+                .empty());
+        // The primary key of a price is its plan, dimension and class.
+        EXPECT_EQ(
+            tx.exec("SELECT array_to_string(array_agg(a.attname ORDER BY k.ord), ',') FROM "
+                    "pg_index i CROSS JOIN LATERAL unnest(i.indkey) WITH ORDINALITY k(attnum, "
+                    "ord) JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = "
+                    "k.attnum WHERE i.indrelid = 'billing_plan_prices'::regclass AND "
+                    "i.indisprimary")[0][0]
+                .as<std::string>(),
+            "plan_id,dimension,class");
+        // A class that is not a lower-case name is refused by the schema.
+        EXPECT_THROW(tx.exec("INSERT INTO workload_resources (object_kind, object_id, gpu_class) "
+                             "VALUES ('app', gen_random_uuid(), 'H100')"),
+                     pqxx::check_violation);
+    }
+    workload_resources_and_classes_follow_the_contract(*store,
+                                                       lake::control::new_uuid_v4().substr(0, 8));
+}

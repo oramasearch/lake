@@ -218,14 +218,24 @@ std::vector<PriceList> price_lists(const std::vector<control::BillingPlan>& stor
 std::optional<PriceList> price_list_for(const std::vector<PriceList>& lists,
                                         std::string_view period);
 
-// What of a month's `quantity` in `unit` is billed (lake#637): time (`seconds`,
-// `instance_seconds`) by the minute, the month's summed seconds rounded up once to a whole minute;
-// every other unit as measured.
+// What of a month's `quantity` in `unit` is billed (lake#637, lake#643): time by the minute, the
+// month's summed seconds rounded up once to a whole minute (`seconds`, `instance_seconds`,
+// `gpu_seconds`), a whole vCPU-minute (`mcpu_seconds`, 60,000) or a whole GiB-minute
+// (`mib_seconds`, 61,440); every other unit as measured.
 std::uint64_t billable_quantity(std::string_view unit, std::uint64_t quantity);
 
-// One month's bill: one usage line per priced dimension (in dimension order) with its quantity
-// from `quantities` (0 when absent), its billable quantity (billable_quantity) and its amount at
-// the list rate. Nothing is included.
+// A month's measured usage: each dimension's total, and for a dimension with classes (GPU and GPU
+// memory) its total per class ("" for usage of no known class).
+struct UsageQuantities {
+    std::map<std::string, std::uint64_t> totals;
+    std::map<std::string, std::map<std::string, std::uint64_t>> by_class;
+};
+
+// One month's bill: one usage line per price on the list, in list order, with its quantity, its
+// billable quantity (billable_quantity) and its amount at the list rate. A dimension rated per
+// class bills each class at its class's rate, and what no class rate covers at the dimension's
+// default rate (class ""), if it has one. Nothing is included.
+std::vector<control::InvoiceLine> bill_lines(const PriceList& list, const UsageQuantities& usage);
 std::vector<control::InvoiceLine>
 bill_lines(const PriceList& list, const std::map<std::string, std::uint64_t>& quantities);
 

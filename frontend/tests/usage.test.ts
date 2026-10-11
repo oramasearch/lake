@@ -46,6 +46,10 @@ test("each unit reads in a person's words", () => {
   assert.equal(formatValue(5400, "seconds"), "1.5 h");
   assert.equal(formatValue(7200, "instance_seconds"), "2 instance-h");
   assert.equal(formatValue(36000 * 5, "gib_seconds"), "50 GiB-h");
+  // lake#643: CPU in mCPU-seconds, RAM and GPU memory in MiB-seconds, GPU in GPU-seconds.
+  assert.equal(formatValue(500 * 7200, "mcpu_seconds"), "1 vCPU-h");
+  assert.equal(formatValue(1024 * 3600 * 24, "mib_seconds"), "24 GiB-h");
+  assert.equal(formatValue(5400, "gpu_seconds"), "1.5 GPU-h");
   assert.equal(formatValue(12_500, "tokens"), "12.5k tokens");
   assert.equal(formatValue(2_400_000, "calls"), "2.4M calls");
   assert.equal(formatValue(null, "calls"), "—");
@@ -131,6 +135,9 @@ test("a limit is typed in GiB, hours or a count and kept in the dimension's unit
   assert.equal(toLimit("5", "bytes"), 5 * 1024 ** 3);
   assert.equal(toLimit("1.5", "seconds"), 5400);
   assert.equal(toLimit("100", "instance_seconds"), 360_000);
+  assert.equal(toLimit("2", "mcpu_seconds"), 7_200_000, "vCPU-hours");
+  assert.equal(toLimit("1", "mib_seconds"), 3_686_400, "GiB-hours");
+  assert.equal(fromLimit(7_200_000, "mcpu_seconds"), "2");
   assert.equal(toLimit("1000", "calls"), 1000);
   assert.equal(toLimit("ten", "calls"), null);
   assert.equal(toLimit("-1", "calls"), null);

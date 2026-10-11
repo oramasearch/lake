@@ -1,8 +1,9 @@
 # Usage and Metering
 
 **Organization → Usage** shows what your workspaces store and use over time: storage by kind,
-transfer, build and run compute, speech-to-text, API and MCP calls, model predictions, model
-tokens, and the instance and volume time of your services, stores and apps. Choose the workspaces
+transfer, CPU, RAM, GPU and GPU memory, build and run time, speech-to-text, API and MCP calls,
+model predictions, model tokens, and the instance and volume time of your services, stores and
+apps. Choose the workspaces
 and the period, compare it with the period before, chart it by workspace or by kind, set limits that
 warn as you near them, and export it as CSV. **Repository Usage by Hour** keeps the exact
 repository transfer and build time, the repository storage limit and, when the lake has prices set,
@@ -15,7 +16,8 @@ Billing** turns it into a monthly bill on your plan; an enterprise install has n
 
 | Term | What it is |
 |---|---|
-| **Dimension** | One kind of usage with one unit: **Storage** (bytes), **Transfer** (bytes), **Build Compute** and **Workspace Run Compute** (time), **Speech to Text** (time), **API and MCP Calls**, **Model Predictions**, **Model Tokens**, **Service and App Instances** (instance-hours) and **Service and Store Volumes** (GiB-hours). |
+| **Dimension** | One kind of usage with one unit: **CPU** (vCPU-hours), **RAM** (GiB-hours), **GPU** (GPU-hours, by GPU class), **GPU Memory** (GiB-hours), **Storage** (bytes), **Transfer** (bytes), **Build Time** and **Workspace Run Time** (time), **Speech to Text** (time), **API and MCP Calls**, **Model Predictions**, **Model Tokens**, **Service and App Instances** (instance-hours) and **Service and Store Volumes** (GiB-hours). |
+| **CPU, RAM, GPU and GPU memory** | What each workload is scheduled with (the resources its containers request, or their limits when they request nothing), for as long as it runs: your workspace's engine, each service, app, image build and agent run. Pipeline runs and training run on your workspace's engine and are part of its figures. |
 | **Workspace usage** | Each workspace keeps its own usage in the workspace itself, an hour at a time, for 400 days. Usage adds up the workspaces you choose. |
 | **Storage** | The latest reading in a period: repositories, container images, workspace data, transcripts and drive files, read every fifteen minutes. |
 | **Instance time** | How long each service and app ran ready, times its instances or replicas. Your workspace's own engine is a service, and counts. |
@@ -63,7 +65,8 @@ another account is refused, never read.
 
 On **Organization → Usage**, press **Export CSV**. The file has one row per dimension, breakdown
 (the total, each workspace, each kind, agent, run, model or service) and period, in the dimension's
-own unit (bytes, seconds, calls, tokens, instance-seconds, GiB-seconds), so a spreadsheet adds them
+own unit (bytes, seconds, calls, tokens, instance-seconds, GiB-seconds, mCPU-seconds, MiB-seconds,
+GPU-seconds), so a spreadsheet adds them
 up exactly.
 
 ## Set a Usage Limit
@@ -71,9 +74,9 @@ up exactly.
 You need `admin` on the account.
 
 1. On **Organization → Usage**, press **Set a limit**.
-2. Choose **What to limit**, enter the limit in the unit shown (GiB for storage, hours for compute
-   and speech, instance-hours, GiB-hours, or a count), and **Warn from** a percentage (80 by
-   default).
+2. Choose **What to limit**, enter the limit in the unit shown (GiB for storage, hours for build
+   and run time and speech, vCPU-hours, GiB-hours, GPU-hours, instance-hours, or a count), and
+   **Warn from** a percentage (80 by default).
 3. Press **Save limit**. Leave the limit empty or 0 to remove it.
 
 - REST: `POST /v1/set_usage_limit` with
@@ -112,8 +115,9 @@ To write again, delete what you no longer need, or ask an admin of the account t
 ## Usage of One Agent, App, Service or Model
 
 - An agent's page (**Train → Agents**, then the agent) shows its **Model tokens** this month.
-- An app's page (**Ship → Apps**, then the app) shows its **Instance time** this month.
-- **Ship → Services** shows each service's instance and volume time this month.
+- An app's page (**Ship → Apps**, then the app) shows its **CPU**, **RAM**, **GPU** and **Instance
+  time** this month.
+- **Ship → Services** shows each service's CPU, RAM and volume time this month.
 - A model's page (**Ship → Models**, then the model) shows its **Predictions answered** this month.
 
 Each card's **Usage** button opens the dashboard on that workspace and dimension. Home's
@@ -145,7 +149,8 @@ Narrow the hours with `from` and `to` (inclusive UTC hours) and `limit` (1 to 10
 
 Prices are set by the lake operator, for inbound and outbound transfer per GiB and for compute per
 second; only transfer and repository build time are priced, and with no price set the page says
-there is no charge to show. How usage is billed is not decided.
+there is no charge to show. On Orama Cloud, your bill comes from the price list instead (see
+[Billing and Invoices](/docs/billing)).
 
 ## The Operator's View
 
@@ -157,7 +162,9 @@ workspaces.
 
 **Not Measured Yet** names, in plain sentences, what a reading could not include:
 
-- CPU and memory of services, stores and apps: only instance and volume time is measured;
+- CPU, RAM, GPU and GPU memory of a workload the lake operator has not reported the resources of,
+  named (such as "service orders"): it is not counted;
+- agents' scheduled runs (cron): their resources are not reported yet;
 - model tokens an agent has not reported (agents do not report them yet);
 - speech-to-text for dictation outside a transcript;
 - model files and indexes inside a workspace, whose size is not reported yet;
@@ -179,11 +186,13 @@ recorded in its workspace's audit.
 
 ## Limits
 
-- Calls, predictions, speech and tokens reach the workspace within about ten seconds; storage and
-  instance time are read every fifteen minutes.
+- Calls, predictions, speech and tokens reach the workspace within about ten seconds; storage,
+  CPU, RAM, GPU and instance time are read every fifteen minutes, and an image build or agent job is
+  counted in the reading after it finishes.
 - The usage series are approximate: a server that stops abruptly loses the last few seconds, and
   rarely a write is counted twice. Repository transfer and build time are exact.
-- Image build time runs from when the build was queued to when it finished.
+- Image build time, and a build's or agent job's CPU and RAM, run from when it was requested to
+  when it finished.
 - When an account has several workspaces, each repository's bytes count in its own workspace, so a
   file two workspaces' repositories share counts in both.
 

@@ -12,7 +12,7 @@ import { useTrail } from "@/lib/trail";
 import { useToast } from "@/lib/toast";
 import { relative } from "@/lib/format";
 import { Banner, Button, Card, DataTable, Empty, ErrorBlock, Field, Form, Page, Skeleton, Split } from "@/lib/ui";
-import { DIMENSIONS, monthLabel, months, priceLabel, ratesInput, rateRows, type PriceList, type PriceListAnswer, type RateRow } from "./billing";
+import { DIMENSIONS, monthLabel, months, priceLabel, ratesInput, rateRows, rowTitle, type PriceList, type PriceListAnswer, type RateRow } from "./billing";
 
 export default function PriceListPage() {
   useTrail([{ label: "Billing" }, { label: "Price List" }], "Price List");
@@ -22,7 +22,7 @@ export default function PriceListPage() {
     <Page
       eyebrow="Administration"
       title="Price List"
-      sub="One rate per kind of usage. Every account pays for what it uses at these rates: no plans, no monthly fee, nothing included."
+      sub="One rate per kind of usage, and one per GPU class. Compute is priced as the CPU, RAM, GPU and GPU memory each workload is scheduled with. Every account pays for what it uses at these rates: no plans, no monthly fee, nothing included."
       wide
     >
       <Banner tone="quiet" title="Metis Is Not on This List">
@@ -57,7 +57,7 @@ function Editor({ current, next }: { current: PriceList | null; next: PriceList 
     setError(null);
     const input = ratesInput(rows);
     if ("bad" in input) {
-      setError(new ApiError(400, "invalid_input", `${DIMENSIONS[input.bad].title}: a rate is an amount, such as 0.04, and "per" a whole number above 0`, `/prices/${input.bad}`));
+      setError(new ApiError(400, "invalid_input", `${rowTitle(rows[input.bad])}: a rate is an amount, such as 0.04, and "per" a whole number above 0`, `/prices/${input.bad}`));
       return;
     }
     setBusy(true);
@@ -101,12 +101,12 @@ function Editor({ current, next }: { current: PriceList | null; next: PriceList 
           const rate = Number(row.rate);
           const preview = row.rate.trim() === "" ? "not charged" : Number.isFinite(rate) && Number.isInteger(per) && per > 0 ? priceLabel({ unit_micros: Math.round(rate * 1_000_000), per, unit: dimension.unit }, currency) : "";
           return (
-            <div key={row.dimension} className="grid grid-cols-2 items-end gap-2 sm:grid-cols-[2fr_1fr_1fr_2fr]">
-              <div className="col-span-2 self-center text-[13px] font-semibold text-ink sm:col-span-1">{dimension.title}</div>
+            <div key={`${row.dimension}:${row.class}`} className="grid grid-cols-2 items-end gap-2 sm:grid-cols-[2fr_1fr_1fr_2fr]">
+              <div className={`col-span-2 self-center text-[13px] text-ink sm:col-span-1 ${row.class ? "pl-3" : "font-semibold"}`}>{rowTitle(row)}</div>
               <Field label={`Rate (${currency})`}>
                 <input inputMode="decimal" value={row.rate} placeholder="not charged" onChange={(e) => update(index, { rate: e.target.value })} />
               </Field>
-              <Field label={`Per (${dimension.unit.replace(/_/g, " ")})`}>
+              <Field label={`Per (${UNIT_WORDS[dimension.unit] ?? dimension.unit.replace(/_/g, " ")})`}>
                 <input inputMode="numeric" value={row.per} onChange={(e) => update(index, { per: e.target.value })} />
               </Field>
               <div className="col-span-2 self-center text-[12.5px] text-ink-3 sm:col-span-1">{preview}</div>
@@ -123,6 +123,14 @@ function Editor({ current, next }: { current: PriceList | null; next: PriceList 
     </Card>
   );
 }
+
+/** What a rate's "per" counts, in words, for the units a person would not guess. */
+const UNIT_WORDS: Record<string, string> = {
+  mcpu_seconds: "thousandths of a vCPU × seconds",
+  mib_seconds: "MiB × seconds",
+  gpu_seconds: "GPU × seconds",
+  gib_seconds: "GiB × seconds",
+};
 
 function History({ lists, current, next }: { lists: PriceList[]; current?: string; next?: string }) {
   return (

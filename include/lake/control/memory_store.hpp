@@ -185,6 +185,8 @@ public:
     Result<Build> cancel_build(const std::string& id) override;
     // The production operator updates these columns directly after reconciling the Job.
     Result<void> set_build_status(const std::string& id, BuildStatus status);
+    // Moves a build's request time back, as if it had been running `seconds`; tests only.
+    Result<void> age_build(const std::string& id, std::int64_t seconds);
     Result<std::vector<ManagedStore>> list_stores(const std::string& customer_id,
                                                   const std::string& workspace_id = {}) override;
     Result<ManagedStore> get_store(const std::string& id) override;
@@ -273,6 +275,8 @@ public:
     Result<std::vector<UsageLimit>> usage_limits(const std::string& customer_id) override;
     Result<UsageLimit> set_usage_limit(const UsageLimit& limit) override;
     Result<std::vector<BillingPlan>> billing_plans() override;
+    Result<std::vector<WorkloadResources>> workload_resources() override;
+    Result<void> put_workload_resources(const WorkloadResources& row) override;
     Result<BillingPlan> put_billing_plan(const BillingPlan& plan) override;
     Result<Invoice> create_invoice(const Invoice& invoice) override;
     Result<std::vector<Invoice>> list_invoices(const std::string& customer_id) override;
@@ -467,6 +471,7 @@ private:
     std::map<std::string, std::uint64_t> storage_quotas_;
     std::map<std::pair<std::string, std::string>, UsageLimit> usage_limits_;
     std::map<std::string, BillingPlan> billing_plans_;
+    std::map<std::pair<std::string, std::string>, WorkloadResources> workload_resources_;
     std::vector<Invoice> invoices_;
     std::map<std::pair<std::string, std::string>, std::string> billing_provider_customers_;
     std::set<std::pair<std::string, std::string>> payment_events_;

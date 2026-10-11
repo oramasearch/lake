@@ -214,3 +214,10 @@ requests by kind for the process metrics and a request's `Server-Timing`, and
 `run_object_requests` runs a sync's `:barrier` and stale-tail removals (lake#527). `zetta_workspace.hpp` adds
 `WorkspaceService::endpoint`, and `store.hpp` `Workspace::store_moved_at` and
 `mark_workspace_store_moved` (migration `0067`).
+
+`store.hpp`'s `WorkloadResources` (lake#643, migration `0075_workload_resources`) is what the Orama
+operator reports a workload is scheduled with; `Store::workload_resources` lists every row and
+`put_workload_resources` is the operator's write, for tests. `BillingPrice::class_name` and
+`InvoiceLine::class_name` carry a GPU class rate and the class a line bills; `AgentLaunch::status_updated_at`
+is when the operator last wrote a launch's status (a finished job's end). See
+[metering](../../../docs/api/metering.md#resources).

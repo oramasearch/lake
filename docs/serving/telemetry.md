@@ -193,14 +193,14 @@ of a model's training data to compare against.
 
 Usage over time (lake#564) is kept in each workspace Zetta beside `lake_requests`, in two series of
 its own with an hour's resolution and 400 days' retention: the counter `lake_usage` (labelled
-`dimension` and, by dimension, `kind`, `agent`, `launch_id`, `model`, `object_id`) and the gauge
+`dimension` and, by dimension, `kind`, `agent`, `launch_id`, `model`, `object_id`, `class`) and the gauge
 `lake_storage` (labelled `kind`). Every capability call counted in `lake_requests` is also one
 `calls` increment in `lake_usage` (`kind` `mcp` for `/mcp` and `/w/:workspace_id/mcp`, else `api`),
 through the bounded `UsageRecorder` (`include/lake/api/usage_recorder.hpp`), never on the request's
 critical path: the request adds to memory and the owner loop writes. `lake_requests` keeps its
 minute resolution and 30 days for traffic; `lake_usage` keeps the hourly totals for usage. The
-store root's owner also samples each workspace's stored bytes and its services' instance and volume
-time every fifteen minutes. What each dimension means, how it is read and what is not measured are
+store root's owner also samples each workspace's stored bytes, its services' instance and volume
+time, and every workload's CPU, RAM, GPU and GPU memory (lake#643) every fifteen minutes. What each dimension means, how it is read and what is not measured are
 in [metering](../api/metering.md#usage-over-time).
 
 Read it with the workspace's `query_metric`, for example

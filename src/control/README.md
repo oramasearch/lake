@@ -232,3 +232,7 @@ client, `make_pooled_object_transport`: keep-alive connections per workspace Zet
 resolution per origin while fresh, `TCP_NODELAY`, and a kept connection reused only while it is
 open and silent. It never sends a request twice; `ZettaObjectClient` keeps the retries. See
 [workspace-store.md](../../docs/architecture/workspace-store.md#per-request-cost-lake544).
+
+Both stores keep `workload_resources` rows (lake#643): PostgreSQL in the operator-written table, the
+memory store in a map keyed by kind and id; prices and invoice lines carry their `class`, and the
+memory store's `age_build` moves a build's request time back for tests.

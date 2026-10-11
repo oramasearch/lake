@@ -12,7 +12,7 @@ import { Banner, Button, DataTable, Page, SearchInput, StateTabs, Stat, StatRow,
 import { RANGES, formatValue, mergeReadings, rangeOf, usageLink, windows, type RangeKey, type Reading } from "./usage";
 
 const MAX_ACCOUNTS = 200;
-const FIGURES = ["storage", "calls", "run_compute", "build_compute", "instances", "volumes", "model_tokens"];
+const FIGURES = ["storage", "calls", "cpu", "ram", "gpu", "volumes", "model_tokens"];
 
 export default function AccountsPage() {
   useTrail([{ label: "Usage", to: "/usage" }, { label: "Every Account" }], "Every Account");
@@ -43,7 +43,7 @@ export default function AccountsPage() {
       {total && (
         <StatRow cols={4}>
           <Stat label="Accounts" value={accounts.length} icon={Users} sub={`${known.length} read`} />
-          {["storage", "instances", "volumes"].map((d) => {
+          {["storage", "cpu", "ram"].map((d) => {
             const f = figure(total, d);
             return <Stat key={d} label={f?.title ?? d} value={formatValue(f?.total ?? 0, f?.unit ?? "")} sub="every account" />;
           })}

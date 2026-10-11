@@ -40,13 +40,17 @@ const std::vector<UsageDimension>& usage_dimensions() {
     static const std::vector<UsageDimension> dimensions{
         {"storage", "bytes", "last", "Storage"},
         {"transfer", "bytes", "sum", "Transfer"},
-        {"build_compute", "seconds", "sum", "Build Compute"},
-        {"run_compute", "seconds", "sum", "Workspace Run Compute"},
+        {"cpu", "mcpu_seconds", "sum", "CPU", true, false},
+        {"ram", "mib_seconds", "sum", "RAM", true, false},
+        {"gpu", "gpu_seconds", "sum", "GPU", true, true},
+        {"vram", "mib_seconds", "sum", "GPU Memory", true, true},
+        {"build_compute", "seconds", "sum", "Build Time", false, false},
+        {"run_compute", "seconds", "sum", "Workspace Run Time", false, false},
         {"speech", "seconds", "sum", "Speech to Text"},
         {"calls", "calls", "sum", "API and MCP Calls"},
         {"predictions", "calls", "sum", "Model Predictions"},
         {"model_tokens", "tokens", "sum", "Model Tokens"},
-        {"instances", "instance_seconds", "sum", "Service and App Instances"},
+        {"instances", "instance_seconds", "sum", "Service and App Instances", false, false},
         {"volumes", "gib_seconds", "sum", "Service and Store Volumes"},
     };
     return dimensions;

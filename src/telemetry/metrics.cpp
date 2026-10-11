@@ -637,6 +637,12 @@ public:
     control::Result<std::vector<control::BillingPlan>> billing_plans() override {
         return call("billing_plans", [&] { return store_->billing_plans(); });
     }
+    control::Result<std::vector<control::WorkloadResources>> workload_resources() override {
+        return call("workload_resources", [&] { return store_->workload_resources(); });
+    }
+    control::Result<void> put_workload_resources(const control::WorkloadResources& row) override {
+        return call("put_workload_resources", [&] { return store_->put_workload_resources(row); });
+    }
     control::Result<control::BillingPlan>
     put_billing_plan(const control::BillingPlan& plan) override {
         return call("put_billing_plan", [&] { return store_->put_billing_plan(plan); });
