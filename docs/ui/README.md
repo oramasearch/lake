@@ -53,7 +53,9 @@ operator sign-in, passkey sign-in and the public share pages).
   brand strip to the bottom of the window, its 48px head level with the shell bar (lake#567).
   **Expand over the page** widens it in place across everything but the rail, with a 200ms width
   transition (none while the edge is dragged, none under reduced motion), and **Back to the side**
-  returns it. **Open as a page** opens the same conversation on `/ask`. Before, this was a docked iframe of the server's Ask page. Its
+  returns it; expanded, the conversation and its message box share one centred 880px column, and the
+  panel stays above the shell bar (z-index 35) so its own head is never covered. **Open as a page**
+  opens the same conversation on `/ask`. Before, this was a docked iframe of the server's Ask page. Its
   message box has the microphone (dictation, `components/dictation/Dictate.tsx`) and **From your
   phone**; a page can open it about something (`openAsk`, `lib/ask.ts`), as the transcript page
   does.
