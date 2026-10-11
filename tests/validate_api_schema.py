@@ -62,7 +62,9 @@ def check_upload_schema(evidence, tools):
     upload_input = tools["upload_drive_files"]["inputSchema"]
     item_schema = upload_input["properties"]["files"]["items"]
     assert item_schema["type"] == "object"
-    assert set(item_schema["required"]) == {"name", "content"}
+    # lake#587: one item shape with upload_drive_entries: `path` or `name`, and `content`.
+    assert set(item_schema["required"]) == {"content"}
+    assert {"path", "name", "content", "content_type"} == set(item_schema["properties"])
     assert item_schema["properties"]["content"]["contentEncoding"] == "base64"
     for call in evidence["calls"]:
         if call["name"] != "upload_drive_files":

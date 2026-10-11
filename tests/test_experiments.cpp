@@ -1,17 +1,18 @@
+#include <algorithm>
 #include <cstdlib>
 #include <iostream>
-#include <regex>
+#include <string>
+#include <vector>
 
 #include <gtest/gtest.h>
 
 #include "audit_test_support.hpp"
 #include "experiment_fixture.hpp"
 #include "http1/client.hpp"
-#include "one_thread_io.hpp"
 #include "lake/api/agent_docs.hpp"
 #include "lake/api/capabilities.hpp"
 #include "lake/api/server.hpp"
-#include "lake/api/web_ui.hpp"
+#include "one_thread_io.hpp"
 
 namespace {
 using nlohmann::json;
@@ -30,34 +31,6 @@ void closed_objects(const json& schema) {
             if (key != "enum" && key != "const") {
                 closed_objects(child);
             }
-        }
-    }
-}
-
-void controls_registered(const std::string& html, const lake::api::Registry& registry) {
-    const auto begin = html.find("<section id=\"experiments\"");
-    const auto end = html.find("<script type=\"application/json\" id=\"experiment-data\"", begin);
-    ASSERT_NE(begin, std::string::npos);
-    ASSERT_NE(end, std::string::npos);
-    const auto content = html.substr(begin, end - begin);
-    const std::regex controls("</?(?:form|a|input|button|select|textarea|summary)\\b[^>]*>");
-    const std::regex mapping("data-capability=\"([^\"]+)\"");
-    std::string form;
-    for (auto match = std::sregex_iterator(content.begin(), content.end(), controls);
-         match != std::sregex_iterator(); ++match) {
-        const auto tag = match->str();
-        if (tag == "</form>") {
-            form.clear();
-        }
-        if (tag.starts_with("</")) {
-            continue;
-        }
-        std::smatch declaration;
-        const auto capability = std::regex_search(tag, declaration, mapping) ? declaration[1].str() : form;
-        ASSERT_FALSE(capability.empty()) << "Unmapped experiment control: " << tag;
-        EXPECT_NE(registry.find(capability), nullptr) << tag;
-        if (tag.starts_with("<form ")) {
-            form = capability;
         }
     }
 }
@@ -111,54 +84,6 @@ protected:
     }
 };
 
-TEST(ExperimentsRenderer, RunBoxShowsAnEditableConfirmedAgentProposal) {
-    lake::api::ExperimentsPage page;
-    page.customer_id = "customer-one";
-    page.customers = {{"customer-one", "Personal", true}};
-    page.data = {{"studies", json::array()}, {"runs", json::array()}};
-    page.experiments_agent = true;
-    page.agent_task = {
-        {"task_id", "task-one"},
-        {"status", "succeeded"},
-        {"answer",
-         {{"reply", "Review the bounded study."},
-          {"result",
-           {{"kind", "proposal"},
-            {"confirm", true},
-            {"study", lake::test::experiment_study().at("spec")},
-            {"explanations", {{"objective", "Use validation AUC."}}}}}}}};
-    page.proposal_sha256 = std::string(64, 'a');
-    const std::string html = lake::api::web_ui_experiments(page, true);
-    EXPECT_NE(html.find("<h2>Run an Experiment</h2>"), std::string::npos);
-    EXPECT_NE(html.find("Ask ExperimentsAgent"), std::string::npos);
-    EXPECT_NE(html.find("Study proposal (JSON)"), std::string::npos);
-    EXPECT_NE(html.find("held_out_auc"), std::string::npos);
-    EXPECT_NE(html.find("Confirm and start study"), std::string::npos);
-    EXPECT_NE(html.find(std::string(64, 'a')), std::string::npos);
-    EXPECT_EQ(html.find("ExperimentsAgent is not registered"), std::string::npos);
-}
-
-TEST(ExperimentsRenderer, AQuestionHasAReplyBoxForTheSameTurn) {
-    lake::api::ExperimentsPage page;
-    page.customer_id = "customer-one";
-    page.customers = {{"customer-one", "Personal", true}};
-    page.data = {{"studies", json::array()}, {"runs", json::array()}};
-    page.experiments_agent = true;
-    page.agent_reply = true;
-    page.agent_task = {
-        {"task_id", "task-question"},
-        {"status", "succeeded"},
-        {"answer",
-         {{"reply", "Which project should I use?"},
-          {"result", {{"kind", "question"}, {"confirm", false}}}}}};
-    const std::string html = lake::api::web_ui_experiments(page, true);
-    EXPECT_NE(html.find("Which project should I use?"), std::string::npos);
-    EXPECT_NE(html.find("<h3>Reply</h3>"), std::string::npos);
-    EXPECT_NE(html.find("name=\"task_id\" value=\"task-question\""), std::string::npos);
-    EXPECT_NE(html.find("name=\"reply\""), std::string::npos);
-    EXPECT_EQ(html.find("name=\"goal\" value="), std::string::npos);
-}
-
 TEST_F(Experiments, SpacePolicyConfirmationAndWorkspaceAliasesCannotBypassPromotion) {
     const auto object = store->find_policy_object("customer", customer);
     ASSERT_TRUE(object);
@@ -167,10 +92,12 @@ TEST_F(Experiments, SpacePolicyConfirmationAndWorkspaceAliasesCannotBypassPromot
     context.operator_credential = false;
     context.acting_identity = "reader";
     EXPECT_TRUE(call("list_experiments", json::object()).ok);
-    EXPECT_FALSE(call("start_study", lake::test::experiment_start_input()).ok);
+    EXPECT_FALSE(call("start_experiment", lake::test::experiment_start_input()).ok);
     context.acting_identity = "writer";
-    EXPECT_TRUE(call("start_study", lake::test::experiment_start_input()).ok);
-    EXPECT_FALSE(call("promote_trial", {{"study", "study-one"}, {"run", "trial-1"}, {"confirm", true}}).ok);
+    EXPECT_TRUE(call("start_experiment", lake::test::experiment_start_input()).ok);
+    EXPECT_FALSE(call("promote_trial",
+                      {{"experiment_id", "study-one"}, {"run", "trial-1"}, {"confirm", true}})
+                     .ok);
     EXPECT_FALSE(call("workspace_act", {{"capability", "promote_trial"},
         {"input", {{"study", "study-one"}, {"run", "trial-1"}, {"confirm", true}}}}).ok);
     context.acting_identity = "admin";
@@ -178,10 +105,12 @@ TEST_F(Experiments, SpacePolicyConfirmationAndWorkspaceAliasesCannotBypassPromot
     auto unconfirmed = lake::test::experiment_start_input();
     unconfirmed["confirm"] = false;
     auto count = workspace->caller->calls.size();
-    EXPECT_FALSE(call("start_study", unconfirmed).ok);
+    EXPECT_FALSE(call("start_experiment", unconfirmed).ok);
     EXPECT_FALSE(call("workspace_act", {{"capability", "create_study"}, {"input", unconfirmed}}).ok);
     EXPECT_EQ(workspace->caller->calls.size(), count);
-    EXPECT_TRUE(call("promote_trial", {{"study", "study-one"}, {"run", "trial-1"}, {"confirm", true}}).ok);
+    EXPECT_TRUE(call("promote_trial",
+                     {{"experiment_id", "study-one"}, {"run", "trial-1"}, {"confirm", true}})
+                    .ok);
     const auto events = lake::test::audit_events(*store, {.request_id = context.request_id});
     ASSERT_TRUE(events);
     ASSERT_EQ(events->size(), 1);
@@ -224,9 +153,9 @@ TEST_F(Experiments, ListsFilterTrackedRunsAndMetricsRespectPrivacyAndBounds) {
     const auto listing = call("list_experiments", json::object());
     ASSERT_TRUE(listing.ok) << listing.error.message;
     EXPECT_EQ(listing.value.at("runs").size(), 3);
-    EXPECT_EQ(listing.value.at("studies").size(), 1);
+    EXPECT_EQ(listing.value.at("experiments").size(), 1);
     EXPECT_TRUE(call("list_experiments", {{"project", "different"}}).value.at("runs").empty());
-    EXPECT_TRUE(call("list_experiments", {{"state", "failed"}}).value.at("studies").empty());
+    EXPECT_TRUE(call("list_experiments", {{"state", "failed"}}).value.at("experiments").empty());
     const auto dp = call("get_run_metrics", {{"run", "dp-run"}});
     ASSERT_TRUE(dp.ok);
     EXPECT_EQ(dp.value.at("metrics_suppressed"), "differential_privacy");
@@ -242,9 +171,9 @@ TEST_F(Experiments, ListsFilterTrackedRunsAndMetricsRespectPrivacyAndBounds) {
     EXPECT_FALSE(call("get_run_metrics", {{"run", "run-a"}, {"names", {"bad metric"}}}).ok);
     auto invalid = lake::test::experiment_start_input();
     invalid["objective"]["validation_split"] = "test";
-    EXPECT_FALSE(call("start_study", invalid).ok);
+    EXPECT_FALSE(call("start_experiment", invalid).ok);
     invalid["objective"]["direction"] = "sideways";
-    EXPECT_FALSE(call("start_study", invalid).ok);
+    EXPECT_FALSE(call("start_experiment", invalid).ok);
     for (const auto& [name, input] : lake::test::experiment_calls(customer, workspace->id)) {
         closed_objects(registry.find(name)->input_schema);
         closed_objects(registry.find(name)->output_schema);
@@ -253,10 +182,10 @@ TEST_F(Experiments, ListsFilterTrackedRunsAndMetricsRespectPrivacyAndBounds) {
 
 // lake#463: from_defaults lets Zetta fill the objective and budgets, and Zetta's error path is
 // what the caller sees.
-TEST_F(Experiments, StartStudyLeavesDefaultsToZettaAndKeepsItsErrorPath) {
+TEST_F(Experiments, StartExperimentLeavesDefaultsToZettaAndKeepsItsErrorPath) {
     const json minimal = {{"name", "Defaults"}, {"methodology", "M-1"}, {"dataset", "accounts"},
         {"from_defaults", true}, {"confirm", true}};
-    const auto started = call("start_study", minimal);
+    const auto started = call("start_experiment", minimal);
     ASSERT_TRUE(started.ok) << started.error.message;
     const auto upstream = workspace->caller->calls.back();
     EXPECT_EQ(upstream.at("name"), "create_study");
@@ -266,86 +195,32 @@ TEST_F(Experiments, StartStudyLeavesDefaultsToZettaAndKeepsItsErrorPath) {
 
     auto partial = minimal;
     partial["objective"] = {{"metric", "held_out_log_loss"}};
-    EXPECT_TRUE(call("start_study", partial).ok);
+    EXPECT_TRUE(call("start_experiment", partial).ok);
     EXPECT_EQ(workspace->caller->calls.back().at("input").at("objective"),
               (json{{"metric", "held_out_log_loss"}}));
 
     const auto count = workspace->caller->calls.size();
     auto without = minimal;
     without.erase("from_defaults");
-    const auto refused = call("start_study", without);
+    const auto refused = call("start_experiment", without);
     EXPECT_FALSE(refused.ok);
     EXPECT_EQ(refused.error.code, "invalid_input");
     EXPECT_EQ(refused.error.path, "/objective");
     EXPECT_NE(refused.error.message.find("from_defaults"), std::string::npos);
     without["objective"] = lake::test::experiment_start_input().at("objective");
-    EXPECT_EQ(call("start_study", without).error.path, "/budgets");
+    EXPECT_EQ(call("start_experiment", without).error.path, "/budgets");
     EXPECT_EQ(workspace->caller->calls.size(), count);
 
     auto rejected = lake::test::experiment_start_input();
     rejected["name"] = "Rejected By Zetta";
-    const auto failed = call("start_study", rejected);
+    const auto failed = call("start_experiment", rejected);
     EXPECT_FALSE(failed.ok);
     EXPECT_EQ(failed.error.code, "invalid_input");
     EXPECT_EQ(failed.error.path, "/objective");
     EXPECT_NE(failed.error.message.find("from_defaults"), std::string::npos);
 }
 
-TEST(ExperimentsRenderer, ObjectivesUseTheRunReportsMetricNames) {
-    lake::api::ExperimentsPage page;
-    page.customer_id = "customer-one";
-    page.customers = {{"customer-one", "Personal", true}};
-    page.can_write = true;
-    auto study = lake::test::experiment_study();
-    study["spec"]["objective"]["metric"] = "validation.auc";
-    page.data = {{"studies", json::array({study})}, {"runs", json::array()}};
-    const std::string html = lake::api::web_ui_experiments(page, true);
-    EXPECT_NE(html.find("name=\"objective.metric\" value=\"held_out_auc\""), std::string::npos);
-    EXPECT_NE(html.find("<option value=\"held_out_log_loss\">"), std::string::npos);
-    EXPECT_NE(html.find("<td>held_out_auc</td>"), std::string::npos);
-    EXPECT_EQ(html.find(">validation.auc<"), std::string::npos);
-    EXPECT_NE(html.find("\"roc_auc\":\"held_out_auc\""), std::string::npos);
-}
-
-// lake#449: analysis panels are tables, promotion is marked, and the latest trials' curves are in
-// the page before any script runs.
-TEST(ExperimentsRenderer, StudyPanelsAreReadableAndCarryTrialCurves) {
-    lake::api::ExperimentsPage page;
-    page.customer_id = "customer-one";
-    page.customers = {{"customer-one", "Personal", true}};
-    page.mode = "study";
-    page.study = "study-one";
-    page.data = lake::test::experiment_study();
-    page.data["promoted_model"] = "model-one";
-    lake::test::ExperimentCaller caller;
-    page.analysis = caller.analysis();
-    page.trial_metrics = json::array({lake::test::experiment_metrics("trial-1")});
-    const std::string html = lake::api::web_ui_experiments(page, true);
-    const auto history = html.find("id=\"optimization-table\"");
-    ASSERT_NE(history, std::string::npos);
-    const auto panels = html.substr(history, html.find("Trial Leaderboard") - history);
-    EXPECT_EQ(panels.find("<pre>"), std::string::npos);
-    EXPECT_NE(panels.find("<td>trial-1</td>"), std::string::npos);
-    EXPECT_NE(panels.find("<th scope=\"col\">learning_rate</th>"), std::string::npos);
-    EXPECT_NE(panels.find("<td>learning_rate</td><td>1.0</td>"), std::string::npos);
-    EXPECT_NE(html.find("status-success\">promoted</span>"), std::string::npos);
-    EXPECT_NE(html.find("trial-1 · validation.auc — Data Table"), std::string::npos);
-    const auto data = html.find("id=\"experiment-data\"");
-    ASSERT_NE(data, std::string::npos);
-    EXPECT_NE(html.find("\"details\":[{", data), std::string::npos);
-}
-
-TEST_F(Experiments, StudyPageReadsTheLatestTrialCurves) {
-    lake::api::ApiServer server({.port = 0, .store = store,
-        .workspaces = workspace->service, .admin_token = "experiment-operator"});
-    ASSERT_TRUE(server.start()) << server.reason();
-    const auto html = request(server.port(), "GET", "/w/" + workspace->id +
-        "/train/experiment?study=study-one&customer_id=" + customer);
-    EXPECT_NE(html.find("trial-1 · validation.auc — Data Table"), std::string::npos);
-    EXPECT_NE(html.find("trial-2 · train.loss — Data Table"), std::string::npos);
-}
-
-TEST_F(Experiments, BoundedLiveReadsResolveOnlyTheSelectedSpacesStudyOrRun) {
+TEST_F(Experiments, BoundedLiveReadsResolveOnlyTheSelectedWorkspacesExperimentOrRun) {
     const json input = {{"kind", "run"}, {"id", "run-a"}, {"from_sequence", 42},
         {"wait_ms", 30000}, {"max_events", 2}};
     const auto result = call("tail_experiment_events", input);
@@ -401,33 +276,115 @@ TEST_F(Experiments, RestAndMcpExposeMatchingSchemasAndCallEveryOperation) {
     }
 }
 
-TEST_F(Experiments, EveryPageControlUsesACapabilityAndNavigationOwnsAllExperimentRoutes) {
+// A read with an array input is callable with GET (lake#576): repeated keys, a comma list or a
+// JSON array decode as the array, and OpenAPI says the key repeats.
+TEST_F(Experiments, CompareRunsAnswersItsGetFormWithRepeatedKeysOrACommaList) {
+    lake::api::ApiServer server({.port = 0,
+                                 .store = store,
+                                 .workspaces = workspace->service,
+                                 .admin_token = "experiment-operator"});
+    ASSERT_TRUE(server.start()) << server.reason();
+    const std::string scope = "customer_id=" + customer + "&workspace_id=" + workspace->id;
+    for (const std::string runs :
+         {"runs=run-a&runs=dp-run", "runs=run-a,dp-run", "runs=%5B%22run-a%22,%22dp-run%22%5D"}) {
+        const auto answer =
+            json::parse(request(server.port(), "GET", "/v1/compare_runs?" + scope + "&" + runs));
+        ASSERT_TRUE(answer.at("ok").get<bool>()) << runs << answer;
+        EXPECT_EQ(answer.at("value").at("details").size(), 2) << runs;
+    }
+    const auto openapi = json::parse(request(server.port(), "GET", "/v1/openapi.json"));
+    const auto parameters = openapi.at("paths").at("/v1/compare_runs").at("get").at("parameters");
+    const auto runs = std::ranges::find_if(
+        parameters, [](const json& parameter) { return parameter.at("name") == "runs"; });
+    ASSERT_NE(runs, parameters.end());
+    EXPECT_EQ(runs->at("style"), "form");
+    EXPECT_EQ(runs->at("explode"), true);
+}
+
+// zetta#1247 (lake#615): a GBDT classifier run with a held-out split logs a confusion matrix, an
+// ROC curve and calibration; get_run_metrics says so and passes them through for the run page.
+TEST_F(Experiments, RunMetricsPromiseAndCarryTheHeldOutCharts) {
+    const auto capability = registry.find("get_run_metrics");
+    ASSERT_NE(capability, nullptr);
+    for (const std::string promised :
+         {"GBDT classifier", "confusion matrix", "ROC curve", "calibration", "held_out"}) {
+        EXPECT_NE(capability->description.find(promised), std::string::npos) << promised;
+    }
+    const auto read = call("get_run_metrics", {{"run", "run-a"}});
+    ASSERT_TRUE(read.ok) << read.error.message;
+    std::vector<std::string> types;
+    for (const auto& artifact : read.value.at("artifacts")) {
+        types.push_back(artifact.at("type"));
+    }
+    for (const std::string chart : {"confusion_matrix", "roc_curve", "calibration"}) {
+        EXPECT_NE(std::ranges::find(types, chart), types.end()) << chart;
+    }
+}
+
+// lake#561: lake says experiment and `experiment_id`; the engine's study names stay on the engine
+// side of the call. workspace_act speaks the engine's names in and out.
+TEST_F(Experiments, LakeSaysExperimentAndTheEngineKeepsItsStudyNames) {
+    for (const std::string old : {"start_study", "stop_study", "get_experiment_study"}) {
+        EXPECT_EQ(registry.find(old), nullptr) << old;
+    }
+    for (const auto& capability : registry.list()) {
+        const auto schemas = capability->input_schema.dump() + capability->output_schema.dump();
+        if (capability->name.find("experiment") != std::string::npos ||
+            capability->name == "promote_trial") {
+            EXPECT_EQ(schemas.find("\"study"), std::string::npos) << capability->name;
+            EXPECT_EQ(capability->description.find("stud"), std::string::npos) << capability->name;
+        }
+    }
+    const auto read = call("get_experiment", {{"experiment_id", "study-one"}});
+    ASSERT_TRUE(read.ok) << read.error.message;
+    EXPECT_EQ(workspace->caller->calls.back().at("name"), "get_study");
+    EXPECT_EQ(workspace->caller->calls.back().at("input"), (json{{"study", "study-one"}}));
+
+    const auto trials = call("list_experiment_trials", {{"experiment_id", "study-one"}});
+    ASSERT_TRUE(trials.ok) << trials.error.message;
+    EXPECT_EQ(trials.value.at("experiment_id"), "study-one");
+    EXPECT_FALSE(trials.value.contains("study"));
+
+    const auto missing = call("get_experiment", {{"experiment_id", "other"}});
+    EXPECT_FALSE(missing.ok);
+    EXPECT_EQ(missing.error.code, "not_found");
+    EXPECT_EQ(missing.error.message, "no experiment named 'other'");
+    EXPECT_EQ(missing.error.path, "/experiment_id");
+
+    const auto stopped =
+        call("stop_experiment_trial",
+             {{"experiment_id", "study-one"}, {"run_id", "trial-2"}, {"confirm", true}});
+    ASSERT_TRUE(stopped.ok) << stopped.error.message;
+    EXPECT_EQ(stopped.value.at("experiment_id"), "study-one");
+    EXPECT_EQ(workspace->caller->calls.back().at("input"),
+              (json{{"study", "study-one"}, {"run", "trial-2"}}));
+
+    const auto acted =
+        call("workspace_act",
+             {{"capability", "stop_trial"},
+              {"input", {{"study", "study-one"}, {"run", "trial-2"}, {"confirm", true}}}});
+    ASSERT_TRUE(acted.ok) << acted.error.message;
+    EXPECT_EQ(acted.value.at("study"), "study-one");
+    EXPECT_FALSE(acted.value.contains("experiment_id"));
+
+    const auto live = call("tail_experiment_events",
+                           {{"kind", "experiment"}, {"id", "study-one"}, {"wait_ms", 0}});
+    ASSERT_TRUE(live.ok) << live.error.message;
+    EXPECT_EQ(workspace->caller->calls.back().at("input").at("topic"), "study-events.study-one");
+    EXPECT_FALSE(call("tail_experiment_events", {{"kind", "study"}, {"id", "study-one"}}).ok);
+
+    const auto stop = call("stop_experiment", {{"experiment_id", "study-one"}, {"confirm", true}});
+    ASSERT_TRUE(stop.ok) << stop.error.message;
+    EXPECT_EQ(stop.value.at("experiment_id"), "study-one");
+    EXPECT_EQ(workspace->caller->calls.back().at("name"), "stop_study");
+}
+
+// The web app's Experiments pages call only these capabilities (docs/ui/experiments.md); the
+// agents' guide names the live read and the confirmation a person gives.
+TEST_F(Experiments, AgentDocsNameTheLiveReadAndTheConfirmation) {
     lake::api::ApiServer server({.port = 0, .store = store,
         .workspaces = workspace->service, .admin_token = "experiment-operator"});
     ASSERT_TRUE(server.start()) << server.reason();
-    const std::vector<std::string> paths = {"/train/experiments?", "/train/experiment?study=study-one&",
-        "/train/experiment/run?run=run-a&", "/train/experiments/compare?runs=run-a,run-b&"};
-    for (const auto& path : paths) {
-        const auto html = request(server.port(), "GET", "/w/" + workspace->id + path + "customer_id=" + customer);
-        controls_registered(html, registry);
-        const auto navigation = html.find("href=\"/w/" + workspace->id + "/train/experiments\" aria-current=\"page\"");
-        ASSERT_NE(navigation, std::string::npos);
-        const auto link = html.substr(navigation, html.find("</a>", navigation) - navigation);
-        EXPECT_NE(link.find("<svg class=\"icon\""), std::string::npos);
-        EXPECT_EQ(html.find("href=\"/train/runs\" aria-current=\"page\""), std::string::npos);
-        EXPECT_EQ(html.find("experiment-service-secret"), std::string::npos);
-        EXPECT_EQ(html.find("data-action=\"delete"), std::string::npos);
-        EXPECT_EQ(html.find(">Delete"), std::string::npos);
-        EXPECT_EQ(html.find("<script>alert(1)</script>"), std::string::npos);
-        for (const auto name : lake::api::web_ui_experiment_asset_names()) {
-            const std::string asset(lake::api::web_ui_experiment_asset_url(name));
-            EXPECT_NE(html.find(asset), std::string::npos);
-            EXPECT_EQ(lake::api::web_ui_asset_cache_control(asset), "public, max-age=31536000, immutable");
-            EXPECT_EQ(request(server.port(), "GET", asset), lake::api::web_ui_experiment_asset(name));
-        }
-    }
-    const auto dp = request(server.port(), "GET", "/w/" + workspace->id + "/train/experiment/run?run=dp-run&customer_id=" + customer);
-    EXPECT_NE(dp.find("curves suppressed for differential privacy"), std::string::npos);
     const auto agent_docs = lake::api::agent_docs::llms_full_txt(registry, "http://127.0.0.1");
     EXPECT_NE(agent_docs.find("tail_experiment_events"), std::string::npos);
     EXPECT_NE(agent_docs.find("person's confirmation"), std::string::npos);

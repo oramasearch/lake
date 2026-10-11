@@ -293,7 +293,29 @@ with no recorded workspace owner (`RAISE EXCEPTION`, nothing dropped); it does n
 so `copy_workspace_records` `plan`, `copy` and `verify` are a manual gate before applying. When it refuses, nothing is dropped. Either run `copy_workspace_records` `plan`, `copy` and `verify` for each table named with the previous lake image (`oramasearch/lake:20261005a`, the image on dev when this was written, or any image built before `0070`), resolve its unresolved rows and apply the schema again; or, on a development environment and only with the owner's approval (it destroys data), delete the named rows and apply again. Their `CREATE`s and columns
 are removed from the earlier sections and the earlier migration blocks run only while they exist, so
 a rerun never recreates them. Routing rows, routes, policy objects, `keystore`, `audit_events` and
-the `workspace_assignments` record stay. The latest guard is `drop_moved_tables_guard`; the operator
+the `workspace_assignments` record stay. Its guard is `drop_moved_tables_guard`; the operator
 must vendor this schema, drop the four `CREATE TABLE IF NOT EXISTS secrets_*` entries from
 `TestLakeSchemaMatchesVendoredSource` and add the guard to its rehearsal query before rollout. See
 [schema.md](../docs/control-plane/schema.md#drop-moved-tables-migration).
+
+Migration `0071_secret_mount_owners` (lake#561) drops `NOT NULL` from
+`secret_mount_routes.organization_id`: a secret mount created without an organization belongs to
+the account that owns its workspace, and its route stores NULL there. Nothing else changes and
+nothing is dropped; idempotent. Its guard is `secret_mount_owners_guard`. See
+[schema.md](../docs/control-plane/schema.md#secret-mount-owners-migration).
+
+Migration `0072_usage_limits` (lake#564) adds `customer_usage_limits`: an account's limit on one
+dimension of usage (customer, dimension, limit in the dimension's unit, warning percentage), the
+content-free configuration `usage_limits` reads and `set_usage_limit` writes. The usage it is
+compared with stays in each workspace Zetta; no price, plan or bill is stored. Nothing is dropped;
+idempotent. Its guard is `usage_limits_guard`. See
+[schema.md](../docs/control-plane/schema.md#usage-limits-migration).
+
+Migration `0073_billing` (lake#564, decision 56) adds billing records as multitenancy:
+`billing_plans` and `billing_plan_prices` (the price list, a price per usage dimension),
+`billing_subscriptions` (an account's plan from the first of a month), `billing_invoices` (one
+account and month, a total and its payment state; at most one that is not void) and
+`billing_invoice_lines` (the quantity billed per dimension, frozen). Usage stays in each workspace
+Zetta; no workspace content is kept. Nothing is dropped; idempotent. The latest guard is
+`billing_guard`; the operator must vendor this schema and select that guard before rollout. See
+[schema.md](../docs/control-plane/schema.md#billing-migration).

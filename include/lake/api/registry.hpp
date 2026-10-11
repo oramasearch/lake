@@ -77,6 +77,15 @@ struct ErrorCode {
 std::span<const ErrorCode> error_codes();
 const ErrorCode* find_error_code(std::string_view code);
 
+struct Capability;
+// What a capability does, as MCP's tool annotations and mcp_setup say it (lake#594), one rule for
+// both: it writes unless it is a read or authorized as one (`predict` scores without changing
+// anything); it destroys only when it deletes, destroys, removes, revokes or drops something; it
+// is idempotent when calling it again with the same input changes nothing more.
+bool capability_writes(const Capability& capability);
+bool capability_destroys(const Capability& capability);
+bool capability_idempotent(const Capability& capability);
+
 struct ApiResult {
     bool ok = false;
     nlohmann::json value;
@@ -99,6 +108,29 @@ using WebhookSender = std::function<WebhookDeliveryResult(
     const std::string& url, const nlohmann::json& headers, const std::string& payload)>;
 using ReplicationRequester = std::function<std::expected<nlohmann::json, ApiError>(
     const std::string& source_url, std::uint64_t after_tree_size)>;
+
+// Speech-to-text (docs/api/transcripts.md, lake#561). The audio is held only while it is sent:
+// a transcriber never stores or logs it.
+struct TranscriptionRequest {
+    std::string file_name; // with an extension the provider recognises (audio_file_name)
+    std::string mime;      // the audio's media type, or application/octet-stream
+    std::string audio;     // the decoded bytes
+    std::string language;  // ISO-639-1, or empty to let the provider detect it
+};
+struct Transcription {
+    std::string text;
+    std::optional<double> seconds; // the audio's length, when the provider reports it
+    std::string model;
+    // The tokens the provider counted, when it reports usage in tokens (gpt-4o-transcribe) rather
+    // than seconds (lake#564).
+    std::optional<std::uint64_t> input_tokens;
+    std::optional<std::uint64_t> output_tokens;
+};
+// Turns audio into text. The HTTP server injects one over its outbound client when
+// LAKE_OPENAI_API_KEY is set; tests inject a fake. Empty: speech-to-text is not configured.
+// It blocks for the length of the exchange, so a handler runs it with run_blocking.
+using Transcriber =
+    std::function<std::expected<Transcription, ApiError>(const TranscriptionRequest& request)>;
 
 enum class CapabilityKind { Read, Action };
 std::string_view to_string(CapabilityKind kind);
@@ -206,6 +238,8 @@ void close_execution_context(const void* context);
 void forget_execution_context(const void* context);
 class MeteringRecorder;
 class AuditRecorder;
+class RequestRecorder;
+class UsageRecorder;
 
 struct WorkspaceCallTiming {
     std::atomic<std::size_t> count{0};
@@ -276,7 +310,6 @@ struct ApiContext {
     std::string credential_rejection;
     std::string workspace_id; // explicitly supplied by the capability or workspace URL
     std::string path_workspace_id; // immutable selection from /w/<workspace>/...
-    std::string remembered_workspace_id; // UI navigation only; never a capability default
     std::string authentication_method;
     std::string device;
     std::string credential_device_id;
@@ -291,6 +324,13 @@ struct ApiContext {
     std::string identity_seed;
     std::string instance_kek;
     WebhookSender webhook_sender;
+    // Speech-to-text for transcribe and create_transcript (docs/api/transcripts.md); empty when
+    // this lake has no OpenAI key.
+    Transcriber transcriber;
+    // The transport to workspace Zettas' object routes, for workspace files (drives with
+    // `files` storage, docs/api/drives.md): the HTTP server's pooled client, or a test's fake.
+    // Null: this lake keeps no workspace files.
+    std::shared_ptr<control::ObjectTransport> object_transport;
     SyncStore* sync_store = nullptr;
     MeteringConfig metering;
     // Repository transfer and build records on their way to the workspace Zettas (lake#348,
@@ -315,8 +355,6 @@ struct ApiContext {
     std::shared_ptr<WorkspaceCallTiming> workspace_call_timing;
     // The HTTP request this call serves (lake#384); null outside a request (owner loop, tests).
     std::shared_ptr<RequestAttribution> request_attribution;
-    // GET-page navigation resolves the same authorized customer list once per request.
-    std::shared_ptr<std::optional<ApiResult>> page_customers;
     // Only renderer definition reads opt in; edits must read the current graph.
     bool cache_workspace_definitions = false;
     // Sends a turn to an agent's service (docs/api/agent-launches.md); null without agents.
@@ -352,6 +390,14 @@ struct ApiContext {
     bool operator_credential = false;
     bool session_credential = false;
     std::string public_host;
+    // The configured browser-facing origin (LAKE_EXTERNAL_ORIGIN); empty when only public_host is
+    // set. The web app's `viewer` reports it with the clone and push origin (lake#561).
+    std::string external_origin;
+    // LAKE_CLERK_PUBLISHABLE_KEY as configured; `viewer` derives Clerk's frontend host from it.
+    std::string clerk_publishable_key;
+    // The instance registries' catalog (npm, Python, one-component OCI) as {available, oci, npm,
+    // python}, read from the store root by the HTTP server (list_packages). Empty outside HTTP.
+    std::function<nlohmann::json()> artifact_catalog;
     std::string request_origin;
     std::string caller_origin;
     std::string pool_id = "lake";
@@ -367,6 +413,13 @@ struct ApiContext {
     // The workspace audit's writer (docs/api/audit.md#workspace-audit). Null: this lake has no
     // workspace Zettas, and every event is recorded in the central log.
     AuditRecorder* audit_recorder = nullptr;
+    // The per-workspace request and per-model prediction series (docs/serving/telemetry.md):
+    // `predict` counts each call of a model here (lake#599). Null: nothing is counted.
+    RequestRecorder* request_recorder = nullptr;
+    // Usage over time in each workspace Zetta (lake#564, docs/api/metering.md#usage-over-time):
+    // calls, speech-to-text seconds and model tokens are added here, off the request path. Null:
+    // nothing is recorded.
+    UsageRecorder* usage_recorder = nullptr;
 };
 
 using CapabilityHandler =

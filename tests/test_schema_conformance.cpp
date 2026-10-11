@@ -15,16 +15,18 @@
 #include <liquid/liquid.hpp>
 #include <nlohmann/json.hpp>
 
+#include "api/agent_task_records_api.hpp"
+#include "experiment_fixture.hpp"
 #include "http1/client.hpp"
-#include "one_thread_io.hpp"
 #include "lake/api/server.hpp"
 #include "lake/control/identity_crypto.hpp"
 #include "lake/control/memory_store.hpp"
 #include "objects/records.hpp"
-#include "temporary_directory.hpp"
-#include "stream_fixture.hpp"
-#include "experiment_fixture.hpp"
+#include "one_thread_io.hpp"
 #include "repository_test_support.hpp"
+#include "stream_fixture.hpp"
+#include "temporary_directory.hpp"
+#include "zetta_object_fixture.hpp"
 
 extern char** environ;
 
@@ -151,7 +153,8 @@ void check_uploads(HttpEvidence& http, const std::string& repository) {
     const std::vector<std::pair<json, std::string>> malformed{
         {json::array({1}), "/files/0"},
         {json::array({nullptr}), "/files/0"},
-        {json::array({json::object()}), "/files/0/name"},
+        // `path` or `name` (lake#587): the content is the one field every item needs.
+        {json::array({json::object()}), "/files/0/content"},
         {json::array({{{"name", "sample.txt"}}}), "/files/0/content"},
         {json::array({{{"name", 1}, {"content", ""}}}), "/files/0/name"},
         {json::array({{{"name", "sample.txt"}, {"content", 1}}}), "/files/0/content"},
@@ -192,8 +195,7 @@ void check_membership(HttpEvidence& http, const json& user) {
                                        {"principal_type", "user"},
                                        {"principal_id", user.at("id")},
                                        {"principal_taap_id", user.at("taap_id")},
-                                       {"role", "member"},
-                                       {"attestation_digest", "sha512-256:schema-membership"}});
+                                       {"role", "member"}});
     http.call("remove_member", {{"id", membership.at("id")}});
 }
 
@@ -214,6 +216,122 @@ void check_person_organizations(HttpEvidence& http, lake::control::Store& store)
     http.call("create_organization_space", {{"display_name", "Schema organization"}});
     http.call("convert_personal_space",
               {{"customer_id", personal}, {"display_name", "Schema converted"}});
+    http.bearer = operator_bearer;
+}
+
+// The web app's capabilities (lake#561): the reads it needs and the Ask Orama and Agent Factory
+// conversation, as a person with write on the space.
+void check_web_app(HttpEvidence& http,
+                   lake::control::InMemoryStore& store,
+                   lake::test::ExperimentWorkspace& experiments,
+                   const std::string& kek,
+                   const lake::control::Customer& customer,
+                   const lake::control::Repository& repository) {
+    const json space{{"customer_id", customer.id}, {"workspace_id", experiments.id}};
+    const auto with = [&](const json& extra) {
+        json input = space;
+        input.update(extra);
+        return input;
+    };
+    http.call("my_permissions",
+              {{"object_type", "customer"},
+               {"object_id", customer.id},
+               {"actions", {"read", "write", "promote"}}});
+    http.call("resolve_model", {{"namespace", customer.name}, {"name", repository.name}});
+    auto& answers = experiments.caller->answers;
+    answers["capture_intent"] = {{"input_id", "intent-1"}};
+    answers["compile_intent"] = {{"name", "schema-graph"}};
+    answers["get_graph"] = {
+        {"graph_id", "graph-1"},
+        {"name", "schema-graph"},
+        {"project", "schema"},
+        {"nodes",
+         {{{"id", "load"}, {"kind", "connect"}, {"name", "Load"}},
+          {{"id", "train"}, {"kind", "model"}, {"name", "Train"}}}},
+        {"edges", {{{"from", "load"}, {"to", "train"}, {"kind", "data_flow"}}}}};
+    http.call("compile_pipeline", with({{"project", "schema"}, {"intent", "Predict churn"}}));
+    http.call("render_pipeline",
+              with({{"project", "schema"}, {"graph", "schema-graph"}, {"step", "train"}}));
+
+    const std::string suffix = lake::control::new_uuid_v4().substr(0, 8);
+    const auto session = checked(store.sign_up_password({"lake",
+                                                         "schema-asker-" + suffix + "@example.test",
+                                                         "correct horse battery staple",
+                                                         "Schema asker",
+                                                         "schema",
+                                                         "{}"}));
+    const auto person = checked(store.get_user(session.session.user_id));
+    const auto object = checked(store.find_policy_object("customer", customer.id));
+    checked(store.create_grant(
+        {person.taap_id, object.id, "write", "schema-asker-attestation", "admin", "schema"}));
+    const std::string operator_bearer = http.bearer;
+    http.bearer = session.secret;
+    http.call("viewer", {{"workspace_id", experiments.id}});
+
+    // An agent of the space answers at once; its proposal runs only through the conversation.
+    answers["get_agent"] = {{"id", "schema-agent"}, {"runtime", "native"}};
+    answers["chat"] = {{"reply", "You have one repository."},
+                       {"proposals", {{{"capability", "server_info"}, {"input", json::object()}}}},
+                       {"reads", json::array()},
+                       {"delegations", json::array()},
+                       {"trace_id", ""}};
+    const json sent = http.call("send_ask_message",
+                                with({{"agent", "schema-agent"}, {"message", "What do I have?"}}));
+    http.call("confirm_ask_proposal",
+              with({{"conversation_id", sent.at("conversation_id")},
+                    {"message_id", sent.at("reply_id")},
+                    {"index", 0}}));
+
+    // Background turns: the Project Agent's build of a project, and an AgentCreator proposal.
+    const auto task = [&](std::string agent, std::string kind, std::string conversation) {
+        return checked(store.create_agent_task({.id = lake::control::new_uuid_v4(),
+                                                .customer_id = customer.id,
+                                                .agent = std::move(agent),
+                                                .kind = std::move(kind),
+                                                .conversation_id = std::move(conversation),
+                                                .workspace_id = experiments.id,
+                                                .scopes = {"workspace_query"},
+                                                .requested_by_user_id = person.id,
+                                                .requested_by_taap_id = person.taap_id}));
+    };
+    task("agent-project", "build:schema", "");
+    http.call("latest_agent_task", with({{"subject", "build:schema"}}));
+    const std::string conversation = lake::control::new_uuid_v4();
+    auto factory = task("agent-creator", "factory", conversation);
+    lake::api::ApiContext context;
+    context.store = &store;
+    context.workspaces = experiments.service.get();
+    context.instance_kek = kek;
+    context.workspace_id = experiments.id;
+    const auto must = [](auto completed) {
+        const auto settled = lake::control::settled(std::move(completed));
+        if (!settled) {
+            throw std::runtime_error(settled.error().message);
+        }
+    };
+    must(liquid::runtime::block_on(lake::api::write_agent_task_request(context, factory)));
+    checked(store.claim_agent_task(factory.id, "agent-creator", std::string(64, 'a')));
+    factory = checked(store.record_agent_task_event(factory.id, "agent-creator", "Succeeded"));
+    const json answer{{"ok", true},
+                      {"result",
+                       {{"kind", "proposal"},
+                        {"proposal",
+                         {{"type", "native"},
+                          {"agent", {{"name", "Schema watcher"}, {"purpose", "Watch renewals"}}}}},
+                        {"defects", json::array()}}}};
+    must(liquid::runtime::block_on(
+        lake::api::write_agent_task_event(context, factory, "Succeeded", "Done", answer)));
+    http.call(
+        "settle_ask_turn",
+        with({{"conversation_id", conversation}, {"task_id", factory.id}, {"kind", "factory"}}));
+    const json messages =
+        http.call("get_ask_conversation", with({{"conversation_id", conversation}})).at("messages");
+    const json proposed = messages.back();
+    answers["create_agent"] = {{"id", "agent-schema"}, {"name", "Schema watcher"}};
+    http.call("approve_agent_proposal",
+              with({{"conversation_id", conversation},
+                    {"message_id", proposed.at("id")},
+                    {"proposal_sha256", proposed.at("payload").at("proposal_sha256")}}));
     http.bearer = operator_bearer;
 }
 
@@ -274,13 +392,25 @@ TEST(SchemaConformance, EveryToolAndRequiredOutputUsesHttpContract) {
     lake::test::StreamWorkspace streams(store, customer.id);
     lake::test::ExperimentWorkspace experiments(store, customer.id);
     experiments.caller->fallback = streams.caller;
-    lake::api::ApiServer server({.port = 0,
-                                 .node_name = "schema-test",
-                                 .store = store,
-                                 .workspaces = experiments.service,
-                                 .admin_token = "schema-test",
-                                 .instance_kek = kek,
-                                 .store_root = root.string()});
+    const auto objects = std::make_shared<lake::test::FakeZettaObjects>();
+    objects->add_node("http://experiments.test", "experiment-service-secret");
+    lake::api::ApiServer server(
+        {.port = 0,
+         .node_name = "schema-test",
+         .store = store,
+         .workspaces = experiments.service,
+         // Workspace files (drives) in the workspace Zetta's object routes, faked.
+         .object_transport = objects,
+         .admin_token = "schema-test",
+         .instance_kek = kek,
+         // A fake: tests never call OpenAI (docs/api/transcripts.md).
+         .transcriber = [](const lake::api::TranscriptionRequest&)
+             -> std::expected<lake::api::Transcription, lake::api::ApiError> {
+             return lake::api::Transcription{"schema words", 1.5, "gpt-4o-transcribe"};
+         },
+         // Billing on (lake#564), so its capabilities are in the contract too.
+         .billing = true,
+         .store_root = root.string()});
     ASSERT_TRUE(server.start()) << server.reason();
     HttpEvidence http(server.port());
     for (const auto& tool : http.document.at("tools")) {
@@ -314,10 +444,152 @@ TEST(SchemaConformance, EveryToolAndRequiredOutputUsesHttpContract) {
     http.call("delete_stream_messages", stream_delete);
     stream["confirm_name"] = "schema-orders";
     http.call("delete_stream", stream);
+    http.call("transcribe", {{"name", "memo.webm"}, {"audio_base64", "c3BlZWNo"}});
+    const json transcript_scope{{"customer_id", customer.id}, {"workspace_id", experiments.id}};
+    auto transcript_input = transcript_scope;
+    transcript_input.update({{"title", "Schema call"}, {"source", "text"}, {"text", "words"}});
+    const auto transcript = http.call("create_transcript", transcript_input);
+    auto from_audio = transcript_scope;
+    from_audio.update(
+        {{"title", "Schema memo"}, {"source", "recording"}, {"audio_base64", "c3BlZWNo"}});
+    http.call("create_transcript", from_audio);
+    http.call("list_transcripts", transcript_scope);
+    http.read("list_transcripts",
+              "?customer_id=" + customer.id + "&workspace_id=" + experiments.id + "&q=schema");
+    auto transcript_id = transcript_scope;
+    transcript_id["id"] = transcript.at("id");
+    http.call("get_transcript", transcript_id);
+    auto transcript_edit = transcript_id;
+    transcript_edit["title"] = "Schema call, edited";
+    http.call("update_transcript", transcript_edit);
+    http.call("delete_transcript", transcript_id);
+    // A workspace's own solutions (docs/api/solutions.md, lake#597).
+    auto solution_input = transcript_scope;
+    solution_input.update({{"name", "Schema solution"},
+                           {"problem", "Late payments"},
+                           {"decision", "Who to call first"},
+                           {"measurement", {{"metric", "days sales outstanding"}}},
+                           {"methodologies", json::array({"M-1"})}});
+    const auto solution = http.call("create_solution", solution_input);
+    http.call("list_solutions", transcript_scope);
+    auto solution_id = transcript_scope;
+    solution_id["id"] = solution.at("solution").at("id");
+    http.call("get_solution", solution_id);
+    auto solution_edit = solution_id;
+    solution_edit["name"] = "Schema solution, edited";
+    http.call("update_solution", solution_edit);
+    const auto copy = http.call("duplicate_solution", solution_id);
+    auto copy_id = transcript_scope;
+    copy_id["id"] = copy.at("solution").at("id");
+    http.call("delete_solution", copy_id);
+    // Drives (docs/api/drives.md): a workspace-files drive in the workspace Zetta's fake object
+    // store, and a virtual one.
+    auto drive_input = transcript_scope;
+    drive_input.update({{"name", "Schema files"}, {"storage", "files"}});
+    const auto drive = http.call("create_drive", drive_input);
+    auto drive_scope = transcript_scope;
+    drive_scope["drive_id"] = drive.at("id");
+    auto virtual_input = transcript_scope;
+    virtual_input.update({{"name", "Schema links"}, {"storage", "virtual"}});
+    http.call("create_drive", virtual_input);
+    http.call("list_drives", transcript_scope);
+    http.read("list_drives", "?customer_id=" + customer.id + "&workspace_id=" + experiments.id);
+    auto drive_id = transcript_scope;
+    drive_id["id"] = drive.at("id");
+    http.call("get_drive", drive_id);
+    auto drive_rename = drive_id;
+    drive_rename["name"] = "Schema files, renamed";
+    http.call("rename_drive", drive_rename);
+    auto folder_input = drive_scope;
+    folder_input["path"] = "Reports/2026";
+    const auto folder = http.call("create_drive_folder_entry", folder_input);
+    auto small_input = drive_scope;
+    small_input["files"] = json::array({{{"path", "notes.txt"}, {"content", "aGVsbG8="}}});
+    const auto small = http.call("upload_drive_entries", small_input);
+    auto begin_input = drive_scope;
+    begin_input.update({{"path", "Reports/data.csv"}, {"size", 4}});
+    const auto begun = http.call("begin_drive_upload", begin_input);
+    auto chunk = drive_scope;
+    chunk.update({{"id", begun.at("entry").at("id")}, {"offset", 0}, {"content", "YSxiCg=="}});
+    http.call("append_drive_upload", chunk);
+    auto finish = drive_scope;
+    finish["id"] = begun.at("entry").at("id");
+    http.call("finish_drive_upload", finish);
+    http.call("list_drive_entries", drive_scope);
+    http.read("list_drive_entries",
+              "?customer_id=" + customer.id + "&workspace_id=" + experiments.id +
+                  "&drive_id=" + drive.at("id").get<std::string>());
+    auto entry_id = drive_scope;
+    entry_id["id"] = small.at("items").at(0).at("id");
+    http.call("get_drive_entry", entry_id);
+    http.call("read_drive_file", entry_id);
+    http.call("recent_drive_entries", transcript_scope);
+    auto search_input = transcript_scope;
+    search_input["q"] = "notes";
+    http.call("search_drives", search_input);
+    http.read("search_drives",
+              "?customer_id=" + customer.id + "&workspace_id=" + experiments.id + "&q=report");
+    auto shortcut_input = drive_scope;
+    shortcut_input.update(
+        {{"name", "Orama"}, {"target", {{"kind", "url"}, {"url", "https://orama.test/"}}}});
+    http.call("create_drive_shortcut", shortcut_input);
+    auto move_input = entry_id;
+    move_input["parent_id"] = folder.at("id");
+    http.call("move_drive_entry", move_input);
+    http.call("delete_drive_entry", entry_id);
+    auto drive_delete = drive_id;
+    drive_delete["confirm_name"] = "Schema files, renamed";
+    http.call("delete_drive", drive_delete);
     http.read("server_info");
     http.call("set_storage_quota", {{"customer_id", customer.id}, {"quota_bytes", 0}});
     http.call("metering_usage", {{"customer_id", customer.id}});
     http.read("metering_usage", "?customer_id=" + customer.id);
+    // Usage over time (lake#564): a reading, the limits and setting one.
+    http.call("set_usage_limit",
+              {{"customer_id", customer.id}, {"dimension", "calls"}, {"limit", 1000}});
+    http.call("usage_limits", {{"customer_id", customer.id}});
+    http.call("usage_over_time",
+              {{"customer_id", customer.id},
+               {"from", "2026-10-01T00:00:00Z"},
+               {"to", "2026-10-03T00:00:00Z"},
+               {"granularity", "day"}});
+    http.read("usage_over_time",
+              "?customer_id=" + customer.id +
+                  "&from=2026-10-01T00:00:00Z&to=2026-10-02T00:00:00Z&granularity=hour");
+    // Billing (lake#564): the price list, a plan, a preview, and a month invoiced and paid.
+    http.call("set_billing_plan",
+              {{"id", "schema-team"},
+               {"name", "Team"},
+               {"base_micros", 1000000},
+               {"prices", json::array({{{"dimension", "calls"}, {"unit_micros", 1000}}})}});
+    http.call("billing_plans");
+    http.read("billing_plans", "");
+    http.call("choose_billing_plan", {{"customer_id", customer.id}, {"plan_id", "schema-team"}});
+    http.call("billing_account", {{"customer_id", customer.id}});
+    http.read("billing_account", "?customer_id=" + customer.id);
+    http.call("bill_preview", {{"customer_id", customer.id}});
+    // January on a plan with only a fee, so its invoice reads no workspace's usage.
+    http.call("set_billing_plan",
+              {{"id", "schema-flat"}, {"name", "Flat"}, {"base_micros", 5000000}});
+    checked(store->set_billing_subscription(customer.id, "2026-01-01", "schema-flat"));
+    http.call("issue_invoice", {{"customer_id", customer.id}, {"period", "2026-01"}});
+    lake::control::Invoice month;
+    month.customer_id = customer.id;
+    month.plan_id = "schema-team";
+    month.plan_name = "Team";
+    month.currency = "USD";
+    month.provider = "manual";
+    month.lines = {{"plan", "", "Team plan", "month", 1, 0, 1, 1000000, 1, 1000000}};
+    month.period = "2026-02";
+    const auto due = checked(store->create_invoice(month));
+    http.call("list_invoices", {{"customer_id", customer.id}});
+    http.read("list_invoices", "?customer_id=" + customer.id);
+    const auto invoices = checked(store->list_invoices(customer.id));
+    const std::string january = invoices.back().id;
+    http.call("get_invoice", {{"customer_id", customer.id}, {"invoice_id", january}});
+    http.read("get_invoice", "?customer_id=" + customer.id + "&invoice_id=" + january);
+    http.call("record_invoice_payment", {{"invoice_id", january}, {"reference", "W1"}});
+    http.call("void_invoice", {{"invoice_id", due.id}, {"note", "issued twice"}});
     http.call("list_conflicts", {{"id", repository.id}});
     http.read("list_conflicts", "?id=" + repository.id);
     http.call("resolve_conflict",
@@ -330,6 +602,11 @@ TEST(SchemaConformance, EveryToolAndRequiredOutputUsesHttpContract) {
         "create_drive_folder",
         {{"repository_id", repository.id}, {"ref", "main"}, {"path", ""}, {"name", "shared"}});
     check_uploads(http, repository.id);
+    http.call("download_drive_file",
+              {{"repository_id", repository.id}, {"ref", "main"}, {"path", "shared/sample.txt"}});
+    http.call("drive_share_people",
+              {{"repository_id", repository.id}, {"ref", "main"}, {"path", "shared"}});
+    http.call("issue_assignees", {{"repository_id", repository.id}});
     const auto link = http.call("create_drive_share_link",
                                 {{"repository_id", repository.id},
                                  {"workspace_id", experiments.id},
@@ -343,6 +620,7 @@ TEST(SchemaConformance, EveryToolAndRequiredOutputUsesHttpContract) {
     http.call("download_drive_share_link", linked_file);
     check_membership(http, lake::control::to_json(user));
     check_person_organizations(http, *store);
+    check_web_app(http, *store, experiments, kek, customer, repository);
     check_proofs(http);
     validate_evidence(http.document);
 }

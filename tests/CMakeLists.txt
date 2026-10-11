@@ -5,7 +5,7 @@ if(NOT LAKE_JSONSCHEMA_RESULT EQUAL 0)
   message(FATAL_ERROR "Lake schema conformance tests require Python jsonschema")
 endif()
 
-add_executable(lake-tests test_main.cpp test_web_ui.cpp test_markdown.cpp
+add_executable(lake-tests test_main.cpp test_web_ui.cpp test_web_app.cpp test_markdown.cpp
   test_examples.cpp
   test_audit_isolation.cpp
   test_instance_origin.cpp
@@ -22,7 +22,12 @@ add_executable(lake-tests test_main.cpp test_web_ui.cpp test_markdown.cpp
   test_clerk.cpp
   test_workspaces.cpp
   test_workspace_records.cpp
+  test_transcripts.cpp
+  test_solutions.cpp
+  test_drives.cpp
   test_request_series.cpp
+  test_usage.cpp
+  test_billing.cpp
   test_workspace_deletion.cpp
   test_workspace_store.cpp
   test_object_http.cpp
@@ -83,20 +88,9 @@ add_test(
   NAME lake-ui-token-gates
   COMMAND ${CMAKE_SOURCE_DIR}/tools/ui/test-token-gates.sh)
 
-# The UI fixture starts, renders every page it seeds, and answers every registered GET route
-# below 500 (lake#497).
-add_test(
-  NAME lake-ui-fixture-pages
-  COMMAND ${CMAKE_SOURCE_DIR}/tools/ui/test-fixture-pages.sh $<TARGET_FILE:lake-ui-fixture>)
-set_tests_properties(lake-ui-fixture-pages PROPERTIES TIMEOUT 600)
-
 add_test(
   NAME lake-ui-contrast
   COMMAND ${LAKE_NODE_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/ui/check-contrast.mjs)
-
-add_test(
-  NAME lake-experiment-charts
-  COMMAND ${LAKE_NODE_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/experiment_charts.cjs)
 
 # The fakes are coroutines too: one that flows off its end is an error, as in lake's own targets.
 foreach(lake_test_target lake-tests lake-postgres-tests)

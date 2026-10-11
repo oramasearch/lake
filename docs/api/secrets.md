@@ -1,7 +1,7 @@
 # Static secrets
 
-**What.** A secret mount belongs to one organization inside one customer namespace, and lives in
-one workspace of that space (lake#328). Each name in the mount is a versioned JSON object. Lake
+**What.** A secret mount lives in one workspace (lake#328) and has one owner: the customer (the
+account) that owns the workspace, or an organization inside that customer's namespace (lake#561). Each name in the mount is a versioned JSON object. Lake
 keeps immutable version history, custom metadata and the current-version pointer, all in the
 mount's workspace Zetta. The API is lake-native; it does not reproduce another service's URL
 layout.
@@ -10,12 +10,13 @@ layout.
 
 | Capability | Authorization | Input | Result |
 |---|---|---|---|
-| `create_secret_mount` | `admin` on the organization | `customer_id`, `workspace_id`, `organization_id`, lowercase `name`, `description?` | mount metadata, with its `workspace_id` |
-| `list_secret_mounts` | candidate-filtered `read` on each mount | `customer_id`, `workspace_id`, `organization_id?`, `limit?` | readable mounts of that workspace only |
+| `create_secret_mount` | `admin` on its owner: the customer without `organization_id`, the organization with it | `customer_id`, `workspace_id`, `organization_id?`, lowercase `name`, `description?` | mount metadata, with its `workspace_id`, `owner_type` and `organization_id` (null for an account's mount) |
+| `list_secret_mounts` | candidate-filtered `read` on each mount | `customer_id`, `workspace_id`, `organization_id?`, `limit?` | readable mounts of that workspace only, of every owner; `organization_id` keeps one organization's |
 | `get_secret_mount` | `read` on the mount | `mount_id` | mount metadata |
-| `put_secret` | `write` on the mount | `mount_id`, `name`, object `value`, object `custom_metadata?`, `check_and_set?` | the new version and supplied value |
+| `put_secret` | `write` on the mount | `mount_id`, `name`, object `value`, object `custom_metadata?`, `check_and_set?` | the new version's metadata (`mount_id`, `name`, `version`, `custom_metadata`, `created_at`, `deleted_at`, `destroyed_at`), never the value (lake#590) |
 | `read_secret` | `read` on the mount | `mount_id`, `name`, `version?` | the selected live version and value |
 | `secret_metadata` | `read` on the mount | `mount_id`, `name` | current version, custom metadata and every version's state |
+| `list_secrets` | `read` on the mount | `mount_id`, `prefix?`, `cursor?`, `limit?` (1-500, default 100) | `items` (path and metadata, never a value), `next_cursor` when more follow |
 | `delete_secret_versions` | `write` on the mount | `mount_id`, `name`, positive `versions[]` | updated metadata |
 | `undelete_secret_versions` | `write` on the mount | same | updated metadata |
 | `destroy_secret_versions` | `write` on the mount | same | updated metadata |
@@ -25,10 +26,46 @@ current version or the put returns `conflict`; zero makes no concurrency asserti
 first value starts at version 1. Supplying nonempty custom metadata replaces the entry metadata;
 omitting it preserves existing metadata.
 
+`list_secrets` (lake#561) answers a mount's secrets in name order: each item's `name`,
+`current_version`, `created_at`, `updated_at`, and the current version's state, `deleted`
+(true once it is deleted or destroyed) with `deleted_at` and `destroyed_at` (null while live). It
+never returns a value, never decrypts and never reads the data key. `prefix` keeps the names that
+start with it. When more names follow, `next_cursor` is the last name answered; pass it back as
+`cursor` for the next page, which starts after it. It is read-only (`readOnlyHint` in MCP),
+authorizes the one mount itself before the workspace is reached (like every `list_*`), and its
+event goes to the mount's workspace audit, naming the mount and the prefix.
+
 Delete is reversible: it sets `deleted_at`, makes that version unreadable and retains ciphertext.
 Undelete clears `deleted_at` unless the version was destroyed. Destroy clears the ciphertext and
 sets both deletion and destruction timestamps. Its history row remains, but reads and undelete
 return an error. A later put creates the next version and never reuses a number.
+
+## Who Owns a Mount (lake#561)
+
+A mount's owner is chosen at creation and never changes:
+
+| `create_secret_mount` input | Owner | Caller needs | Policy path |
+|---|---|---|---|
+| no `organization_id` (or an empty one) | the customer `customer_id`, the account that owns the workspace, individual or organization | `admin` on the customer's object | `customer → environment secrets/<customer> → secret_mount` |
+| `organization_id` | that organization, which must sit inside `customer_id`'s namespace (`invalid_input` at `/organization_id` otherwise) | `admin` on the organization's object | `organization → environment secrets/<customer>/<organization> → secret_mount` |
+
+An individual account therefore keeps secrets without any organization: a person's sign-up grant
+(`admin` on their own customer) is what `create_secret_mount` checks, and the mount's grants are
+inherited from the account. Another person, with no grant on the account, is refused every call on
+the mount (`unauthorized`) before its workspace is reached, and `list_secret_mounts` answers them
+nothing. The organization case is unchanged from before lake#561.
+
+Mount metadata names its owner: `owner_type` is `customer` or `organization`, and `organization_id`
+is `null` for an account's mount. Every capability after creation names only the mount and
+authorizes against the mount's own policy object, whichever owner it hangs under: `get_secret_mount`
+and the secret, key, transit and lease capabilities need `read` or `write` there, and the lists
+authorize the mount (or each candidate mount) the same way.
+
+A name is unique within its workspace and owner. The name claim's blind index is over the owner and
+the name: `organization:<organization id>` for an organization (the value claims have always used,
+so existing claims still hold) and `customer:<customer id>` for an account. A UUID contains no
+colon, so the two owner values cannot collide, and an account mount and an organization mount of
+the same name live side by side in one workspace.
 
 ## Where secrets live (lake#328-#332)
 
@@ -45,13 +82,13 @@ is not ready answers `workspace_not_ready`; a deleted workspace took its mounts 
 
 | Where | What |
 |---|---|
-| Workspace Zetta, `lake_secrets_mounts` | The mount (name, description, organization), keyed by its id, and a name claim keyed by the blind index of organization and name, written `if_absent` |
-| `lake_secrets_entries` | One record per secret name: current version and custom metadata |
+| Workspace Zetta, `lake_secrets_mounts` | The mount (name, description, owner: its organization, empty for an account), keyed by its id, and a name claim keyed by the blind index of owner and name, written `if_absent` |
+| `lake_secrets_entries` | One record per secret name: current version and custom metadata. `list_secrets` reads the mount's entries by their lookup, then each one's current version record for its state |
 | `lake_secrets_versions` | One record per version: the existing AES-256-GCM ciphertext, soft-delete and destroy instants |
 | `lake_secrets_encryption_keys` | One record per named key: its id (which every transit ciphertext names), current version, derivation parent |
 | `lake_secrets_data_keys` | One record per data key version: the mount's data key and each named-key version, wrapped by the customer KEK, with the KEK version that wraps it |
-| PostgreSQL `secret_mount_routes` | Mount id → space, organization, workspace. No name, value or key: dispatch only |
-| PostgreSQL `objects` | The mount's policy object, under `organization → environment` |
+| PostgreSQL `secret_mount_routes` | Mount id → space, owning organization (NULL for an account's mount, migration `0071`), workspace. No name, value or key: dispatch only |
+| PostgreSQL `objects` | The mount's policy object, under `organization → environment` or, for an account's mount, `customer → environment` |
 | PostgreSQL `keystore` | The customer KEK, wrapped by `LAKE_INSTANCE_KEK` (lake#324 governs its own move) |
 
 Every record is sealed with the workspace's record key and found by blind indexes
@@ -80,8 +117,9 @@ rotation finishes the earlier one before it starts. A data key written while a r
 rewrapped by its writer if the KEK changed underneath it. PKI authorities (still in PostgreSQL) are
 rewrapped in the same transaction as the KEK change.
 
-**Authorization** is unchanged: mount creation adds `organization → environment → secret_mount` to
-the policy graph, and mount grants are inherited through the normal policy engine. A policy
+**Authorization**: mount creation adds `organization → environment → secret_mount` (an organization's
+mount) or `customer → environment → secret_mount` (an account's) to the policy graph, and mount
+grants are inherited through the normal policy engine. A policy
 decision reads only PostgreSQL, so a refused caller causes no workspace call; `list_secret_mounts`
 authorizes the workspace's routes with `authorize_batch` before it reads the workspace, and omits
 mounts the caller cannot read. Per-name `secret` policy objects are no longer created (they carried
@@ -90,6 +128,16 @@ names); the ones 0009 made stay until the tables are dropped.
 Every call passes through `Registry::call` and `audit::record`. Secret audit events identify the
 customer, caller, mount, workspace, name and version or version set; values and ciphertext are
 never audit details. A policy refusal records outcome `denied` against `secret_mount/<mount-id>`.
+
+## Migration 0071: Account Owners (lake#561)
+
+`0071_secret_mount_owners` drops `NOT NULL` from `secret_mount_routes.organization_id`, so the route
+of an account's mount carries NULL there; nothing else changes, existing routes are untouched, and
+the statement is idempotent. Its guard table is `secret_mount_owners_guard`. The operator vendors
+`db/schema.sql` byte-identically (`internal/controller/assets/lake-schema.sql`) and must select the
+new guard in its own pull request before a lake with this change is rolled; until then
+`create_secret_mount` without `organization_id` fails at the route insert (`store_error`), and
+organization mounts work as before.
 
 ## Migration and cutover (lake#328-#332)
 
@@ -192,13 +240,19 @@ revocation leaf's compact inclusion proof with libliquid's verifier.
 
 ## Page and verification
 
-`GET /secret-mounts?workspace_id=<uuid>` lists the readable mounts of one workspace (without the
-parameter, the workspace the viewer last chose, or a prompt to choose one).
-`GET /secrets?mount_id=<uuid>&name=<name>` shows custom metadata and version states but
-deliberately does not render values. Mutations remain capability calls.
+The web app manages secrets through these capabilities ([../ui/secrets.md](../ui/secrets.md)):
+`/secret-mounts?workspace_id=<uuid>` lists the readable mounts of one workspace and creates one;
+`/secrets?mount_id=<uuid>` lists a mount's secrets (`list_secrets`) and writes a new one;
+`/secrets?mount_id=<uuid>&name=<name>` shows a secret's versions, writes the next one with
+check-and-set, reveals one version's value on a deliberate click (`read_secret`, held only in the
+page's memory) and deletes, undeletes or destroys versions; `/encryption-keys?mount_id=<uuid>`
+creates, derives and rotates keys and tries encrypt, decrypt, rewrap, sign, verify and HMAC. A value
+never appears in a URL, a log or browser storage.
 
 | Test | Covers |
 |---|---|
+| `Stores/WorkspaceRecordStores.SecretMountsBelongToAnAccountOrAnOrganization/{Memory,Postgres}` | lake#561: a person with only an individual account creates a mount without an organization (route without organization, policy object under `customer → secrets/<customer>`), puts, reads and lists a secret, creates a key and encrypts and decrypts with it; another person is refused create, read, write, list, get and key calls and lists nothing; an organization inside the account owns a mount of the same name in the same workspace without a collision, each owner's duplicate is `conflict` at `/name`, the organization's route and environment are as before; an organization of another space is `invalid_input` at `/organization_id`; a KEK rotation; on PostgreSQL, migration `0071` (nullable column, NULL route, guard) |
+| `SecretsCapabilities.ListSecretsAnswersNamesAndStateNeverValues` | `list_secrets`: name order, current version, times and deleted/destroyed state, no value in the answer, `prefix`, the cursor walking every name once, `limit` bounds, an unknown mount, read-only and candidate-authorizing, classified as workspace audit, an ungranted caller refused and audited before any workspace call |
 | `SecretsCapabilities.*` | The capability contract on workspace records: history, delete/undelete/destroy, number reuse, a stopped put completed by the next, transit, KEK rotation finished after a workspace was not ready, dynamic leases, denial and audit, an ungranted list reaching no workspace |
 | `Stores/WorkspaceRecordStores.SecretsLiveInTheirMountsWorkspace/{Memory,Postgres}` | Two spaces with two workspaces each, records sealed only at their own endpoint and absent from PostgreSQL, duplicate names, missing, malformed, unknown and foreign `workspace_id`, unknown `mount_id`, another space's person, a record copied elsewhere not opening, a workspace not ready, KEK rotation across workspaces, workspace deletion |
 | `Stores/WorkspaceRecordStores.TheOneShotCopyMovesSecretsIntoTheirMountsWorkspace/{Memory,Postgres}` | The five collections: plan, copy, rerun, verify, legacy ciphertexts read and decrypted through the capabilities, a later put, undelete and KEK rotation accepted, `needs_selection` resolved, `workspace_deleted` not blocking, tamper detection, operator only |

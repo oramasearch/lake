@@ -8,14 +8,15 @@
 
 namespace lake::control {
 
-// A secret mount (docs/api/secrets.md): one organization's namespace of versioned secrets and named
-// encryption keys, in one workspace of the customer's space (lake#328). The mount itself, its
-// secrets, their versions, its named keys and every data key live in that workspace's Zetta
-// (control/secret_records.hpp); the control store keeps only the content-free route below.
+// A secret mount (docs/api/secrets.md): a namespace of versioned secrets and named encryption keys,
+// in one workspace of the customer's space (lake#328). Its owner is the customer itself (an
+// account, `organization_id` empty) or an organization inside the customer's namespace. The mount
+// itself, its secrets, their versions, its named keys and every data key live in that workspace's
+// Zetta (control/secret_records.hpp); the control store keeps only the content-free route below.
 struct SecretMount {
     std::string id;
     std::string customer_id;
-    std::string organization_id;
+    std::string organization_id; // empty: the customer (account) owns the mount
     std::string workspace_id;
     std::string name;
     std::string description;
@@ -29,7 +30,7 @@ struct SecretMount {
 struct SecretMountRoute {
     std::string mount_id;
     std::string customer_id;
-    std::string organization_id;
+    std::string organization_id; // empty (NULL): the customer owns the mount (migration 0071)
     std::string workspace_id;
     std::string created_at;
 };
@@ -162,6 +163,10 @@ struct CustomerKekRotation {
 
 nlohmann::json to_json(const SecretMount& value);
 nlohmann::json to_json(const SecretMountRoute& value);
+// The external id of the policy environment a mount hangs under, below its owner's object:
+// `secrets/<customer>/<organization>` for an organization's mount (unchanged since 0009) and
+// `secrets/<customer>` for an account's.
+std::string secret_mount_environment(const SecretMountRoute& route);
 nlohmann::json to_json(const SecretVersion& value);
 nlohmann::json to_json(const SecretMetadata& value);
 nlohmann::json to_json(const DynamicSecretLease& value);

@@ -16,12 +16,14 @@ std::string rest_path(const Capability& capability);    // "/v1/<name>"
 std::string rest_method(const Capability& capability);  // "GET" for reads, "POST" for actions
 
 // Query parameters → input document, each value coerced by its declared type; undeclared keys
-// stay strings so validation rejects them with the schema's own reason.
+// stay strings so validation rejects them with the schema's own reason. An array input takes
+// repeated keys, a comma list or a JSON array, each item coerced by its `items` type (lake#576).
 nlohmann::json rest_input_from_query(const Capability& capability,
                                      const std::vector<std::pair<std::string, std::string>>& query);
 
-// 200 on ok; invalid_input 400, unauthorized 403, not_found / unknown_capability 404, conflict
-// 409, store_unavailable 503, anything else 500.
+// 200 on ok; otherwise the status error_codes() gives the code (invalid_input 400, not_found 404,
+// engine_error 422, store_unavailable 503, …). No code answers 502 or 504, whose bodies
+// Cloudflare replaces with its own page (lake#572).
 int rest_status(const ApiResult& result);
 
 // { ok, value | error{code,message,path}, duration_ms } — the same envelope MCP carries as

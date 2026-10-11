@@ -216,18 +216,26 @@ nlohmann::json to_json(const Grant& grant) {
             {"updated_at", grant.updated_at}};
 }
 
+std::string secret_mount_environment(const SecretMountRoute& route) {
+    return route.organization_id.empty()
+               ? "secrets/" + route.customer_id
+               : "secrets/" + route.customer_id + "/" + route.organization_id;
+}
+
 nlohmann::json to_json(const SecretMountRoute& route) {
     return {{"mount_id", route.mount_id},
             {"customer_id", route.customer_id},
-            {"organization_id", route.organization_id},
+            {"organization_id", nullable(route.organization_id)},
             {"workspace_id", route.workspace_id},
             {"created_at", route.created_at}};
 }
 
 nlohmann::json to_json(const SecretMount& mount) {
+    // The owner: the customer (an account's mount, organization_id null) or an organization.
     return {{"id", mount.id},
             {"customer_id", mount.customer_id},
-            {"organization_id", mount.organization_id},
+            {"owner_type", mount.organization_id.empty() ? "customer" : "organization"},
+            {"organization_id", nullable(mount.organization_id)},
             {"workspace_id", mount.workspace_id},
             {"name", mount.name},
             {"description", mount.description},
@@ -2088,6 +2096,220 @@ Result<std::uint64_t> InMemoryStore::set_storage_quota(const std::string& custom
     return quota_bytes;
 }
 
+Result<std::vector<UsageLimit>> InMemoryStore::usage_limits(const std::string& customer_id) {
+    std::lock_guard lock(mutex_);
+    if (std::ranges::none_of(
+            customers_, [&](const Customer& customer) { return customer.id == customer_id; })) {
+        return std::unexpected(StoreError{"not_found", "no customer " + customer_id});
+    }
+    std::vector<UsageLimit> rows;
+    for (const auto& [key, limit] : usage_limits_) {
+        if (key.first == customer_id) {
+            rows.push_back(limit);
+        }
+    }
+    return rows;
+}
+
+Result<UsageLimit> InMemoryStore::set_usage_limit(const UsageLimit& limit) {
+    std::lock_guard lock(mutex_);
+    if (std::ranges::none_of(customers_, [&](const Customer& customer) {
+            return customer.id == limit.customer_id;
+        })) {
+        return std::unexpected(StoreError{"not_found", "no customer " + limit.customer_id});
+    }
+    if (limit.dimension.empty() || limit.warn_percent < 1 || limit.warn_percent > 100) {
+        return std::unexpected(StoreError{"invalid_input",
+                                          "a dimension and a warning percentage "
+                                          "from 1 to 100 are required"});
+    }
+    const auto key = std::make_pair(limit.customer_id, limit.dimension);
+    if (limit.limit == 0) {
+        usage_limits_.erase(key);
+        return limit;
+    }
+    UsageLimit stored = limit;
+    stored.updated_at = now_iso8601();
+    usage_limits_[key] = stored;
+    return stored;
+}
+
+namespace {
+
+bool valid_plan_id(const std::string& id) {
+    if (id.empty() || id.size() > 63 || id[0] < 'a' || id[0] > 'z') {
+        return false;
+    }
+    return std::ranges::all_of(
+        id, [](char c) { return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-'; });
+}
+
+bool valid_currency(const std::string& currency) {
+    return currency.size() == 3 &&
+           std::ranges::all_of(currency, [](char c) { return c >= 'A' && c <= 'Z'; });
+}
+
+bool valid_month_start(const std::string& date) {
+    return date.size() == 10 && date[4] == '-' && date[7] == '-' && date.substr(8) == "01";
+}
+
+} // namespace
+
+Result<std::vector<BillingPlan>> InMemoryStore::billing_plans() {
+    std::lock_guard lock(mutex_);
+    std::vector<BillingPlan> plans;
+    for (const auto& [id, plan] : billing_plans_) {
+        plans.push_back(plan);
+    }
+    std::ranges::stable_sort(plans, [](const BillingPlan& left, const BillingPlan& right) {
+        return std::tie(left.position, left.id) < std::tie(right.position, right.id);
+    });
+    return plans;
+}
+
+Result<BillingPlan> InMemoryStore::put_billing_plan(const BillingPlan& plan) {
+    if (!valid_plan_id(plan.id) || plan.name.empty() || !valid_currency(plan.currency)) {
+        return std::unexpected(StoreError{"invalid_input",
+                                          "a plan needs an id of lower-case letters, digits and "
+                                          "hyphens, a name and a three-letter currency"});
+    }
+    std::set<std::string> seen;
+    for (const BillingPrice& price : plan.prices) {
+        if (price.dimension.empty() || price.per == 0 || !seen.insert(price.dimension).second) {
+            return std::unexpected(StoreError{
+                "invalid_input", "each price needs its own dimension and a `per` above 0"});
+        }
+    }
+    std::lock_guard lock(mutex_);
+    BillingPlan stored = plan;
+    const auto found = billing_plans_.find(plan.id);
+    stored.created_at = found == billing_plans_.end() ? now_iso8601() : found->second.created_at;
+    stored.updated_at = now_iso8601();
+    std::ranges::sort(stored.prices, {}, &BillingPrice::dimension);
+    billing_plans_[plan.id] = stored;
+    return stored;
+}
+
+Result<std::vector<BillingSubscription>>
+InMemoryStore::billing_subscriptions(const std::string& customer_id) {
+    std::lock_guard lock(mutex_);
+    if (std::ranges::none_of(
+            customers_, [&](const Customer& customer) { return customer.id == customer_id; })) {
+        return std::unexpected(StoreError{"not_found", "no customer " + customer_id});
+    }
+    std::vector<BillingSubscription> rows;
+    for (const BillingSubscription& row : billing_subscriptions_) {
+        if (row.customer_id == customer_id) {
+            rows.push_back(row);
+        }
+    }
+    std::ranges::sort(rows, {}, &BillingSubscription::effective_from);
+    return rows;
+}
+
+Result<std::vector<BillingSubscription>> InMemoryStore::set_billing_subscription(
+    const std::string& customer_id, const std::string& effective_from, const std::string& plan_id) {
+    if (!valid_month_start(effective_from)) {
+        return std::unexpected(
+            StoreError{"invalid_input", "a plan takes effect on the first day of a month"});
+    }
+    {
+        std::lock_guard lock(mutex_);
+        if (std::ranges::none_of(
+                customers_, [&](const Customer& customer) { return customer.id == customer_id; })) {
+            return std::unexpected(StoreError{"not_found", "no customer " + customer_id});
+        }
+        if (!plan_id.empty() && !billing_plans_.contains(plan_id)) {
+            return std::unexpected(StoreError{"not_found", "no plan " + plan_id});
+        }
+        std::erase_if(billing_subscriptions_, [&](const BillingSubscription& row) {
+            return row.customer_id == customer_id && row.effective_from >= effective_from;
+        });
+        if (!plan_id.empty()) {
+            billing_subscriptions_.push_back({customer_id, effective_from, plan_id, now_iso8601()});
+        }
+    }
+    return billing_subscriptions(customer_id);
+}
+
+Result<Invoice> InMemoryStore::create_invoice(const Invoice& invoice) {
+    if (invoice.customer_id.empty() || invoice.period.size() != 7 || invoice.plan_id.empty() ||
+        !valid_currency(invoice.currency) || invoice.provider.empty()) {
+        return std::unexpected(StoreError{
+            "invalid_input", "an invoice needs an account, a month, a plan and a currency"});
+    }
+    std::lock_guard lock(mutex_);
+    for (const Invoice& existing : invoices_) {
+        if (existing.customer_id == invoice.customer_id && existing.period == invoice.period &&
+            existing.state != "void") {
+            return std::unexpected(StoreError{"conflict",
+                                              "invoice " + std::to_string(existing.number) +
+                                                  " already bills " + invoice.period});
+        }
+    }
+    Invoice stored = invoice;
+    stored.id = new_uuid_v4();
+    stored.number = invoices_.size() + 1;
+    stored.state = "due";
+    stored.issued_at = now_iso8601();
+    stored.paid_at.clear();
+    stored.voided_at.clear();
+    invoices_.push_back(stored);
+    return stored;
+}
+
+Result<std::vector<Invoice>> InMemoryStore::list_invoices(const std::string& customer_id) {
+    std::lock_guard lock(mutex_);
+    std::vector<Invoice> rows;
+    for (const Invoice& invoice : invoices_) {
+        if (invoice.customer_id == customer_id) {
+            rows.push_back(invoice);
+        }
+    }
+    std::ranges::sort(rows, [](const Invoice& left, const Invoice& right) {
+        return std::tie(right.period, right.number) < std::tie(left.period, left.number);
+    });
+    return rows;
+}
+
+Result<Invoice> InMemoryStore::get_invoice(const std::string& id) {
+    std::lock_guard lock(mutex_);
+    for (const Invoice& invoice : invoices_) {
+        if (invoice.id == id) {
+            return invoice;
+        }
+    }
+    return std::unexpected(StoreError{"not_found", "no invoice " + id});
+}
+
+Result<Invoice> InMemoryStore::set_invoice_state(const std::string& id,
+                                                 const std::string& state,
+                                                 const std::string& provider_reference,
+                                                 const std::string& note) {
+    if (state != "paid" && state != "void") {
+        return std::unexpected(StoreError{"invalid_input", "an invoice becomes paid or void"});
+    }
+    std::lock_guard lock(mutex_);
+    for (Invoice& invoice : invoices_) {
+        if (invoice.id != id) {
+            continue;
+        }
+        if (invoice.state != "due") {
+            return std::unexpected(StoreError{"conflict",
+                                              "invoice " + std::to_string(invoice.number) + " is " +
+                                                  invoice.state + ", not due"});
+        }
+        invoice.state = state;
+        if (!provider_reference.empty()) {
+            invoice.provider_reference = provider_reference;
+        }
+        invoice.note = note;
+        (state == "paid" ? invoice.paid_at : invoice.voided_at) = now_iso8601();
+        return invoice;
+    }
+    return std::unexpected(StoreError{"not_found", "no invoice " + id});
+}
+
 Result<User> InMemoryStore::get_user(const std::string& id) {
     std::lock_guard lock(mutex_);
     for (const auto& u : users_)
@@ -2229,6 +2451,14 @@ Result<Customer> InMemoryStore::get_customer(const std::string& id) {
         if (c.id == id)
             return c;
     return std::unexpected(StoreError{"not_found", "no customer " + id});
+}
+
+Result<Customer> InMemoryStore::organization_customer(const std::string& organization_id) {
+    std::lock_guard lock(mutex_);
+    for (const auto& c : customers_)
+        if (!organization_id.empty() && c.organization_id == organization_id)
+            return c;
+    return std::unexpected(StoreError{"not_found", "no space for organization " + organization_id});
 }
 
 } // namespace lake::control
@@ -2615,6 +2845,18 @@ Result<MfaEnrollment> InMemoryStore::enroll_mfa(const std::string& user_id,
         }
     }
     return std::unexpected(StoreError{"not_found", "password credential not found"});
+}
+
+Result<bool> InMemoryStore::mfa_enrolled(const std::string& user_id, const std::string& pool_id) {
+    std::lock_guard lock(mutex_);
+    const std::string pool = pool_id.empty() ? "lake" : pool_id;
+    for (const auto& credential : passwords_) {
+        if (credential.user_id == user_id && credential.pool_id == pool &&
+            !credential.totp_secret.empty()) {
+            return true;
+        }
+    }
+    return false;
 }
 
 Result<void> InMemoryStore::disable_mfa(const std::string& user_id,
@@ -5015,10 +5257,16 @@ InMemoryStore::policy_paths(const std::vector<std::string>& requested_object_ids
 
 Result<Grant> InMemoryStore::create_grant(const NewGrant& in) {
     std::lock_guard lock(mutex_);
-    if (in.principal_taap_id.empty() || !valid_policy_role(in.role) ||
-        in.attestation_digest.empty() || in.granted_by_taap_id.empty()) {
+    // The messages name PostgreSQL's constraints, which ApiResult::failure says as rules.
+    if (in.principal_taap_id.empty() || in.granted_by_taap_id.empty()) {
         return std::unexpected(
-            StoreError{"invalid_input", "principal, role, and attestation evidence are required"});
+            StoreError{"invalid_input", "a principal and a granting identity are required"});
+    }
+    if (!valid_policy_role(in.role)) {
+        return std::unexpected(StoreError{"invalid_input", "grants_role_check"});
+    }
+    if (in.attestation_digest.empty()) {
+        return std::unexpected(StoreError{"invalid_input", "grants_attestation_check"});
     }
     const auto object = std::ranges::find_if(
         policy_objects_, [&](const PolicyObject& row) { return row.id == in.object_id; });
@@ -5034,7 +5282,8 @@ Result<Grant> InMemoryStore::create_grant(const NewGrant& in) {
             return grant.principal_taap_id == in.principal_taap_id &&
                    grant.object_id == in.object_id && grant.role == in.role;
         })) {
-        return std::unexpected(StoreError{"conflict", "grant already exists"});
+        return std::unexpected(
+            StoreError{"conflict", "grant already exists (grants_principal_object_role_unique)"});
     }
     const std::string now = now_iso8601();
     grants_.push_back(Grant{new_uuid_v4(),
@@ -5430,16 +5679,24 @@ Result<SecretMountRoute> InMemoryStore::create_secret_mount_route(const SecretMo
         std::ranges::find_if(policy_objects_, [&](const PolicyObject& value) {
             return value.object_type == "customer" && value.external_id == input.customer_id;
         });
+    if (customer_object == policy_objects_.end()) {
+        return std::unexpected(StoreError{"invalid_input", "customer_id is unknown"});
+    }
+    // The owner: the customer itself (an account's mount, no organization), or an organization
+    // inside the customer's namespace.
+    const bool account = input.organization_id.empty();
     const auto organization_object =
-        std::ranges::find_if(policy_objects_, [&](const PolicyObject& value) {
-            return value.object_type == "organization" &&
-                   value.external_id == input.organization_id;
-        });
-    if (customer_object == policy_objects_.end() || organization_object == policy_objects_.end() ||
-        organization_object->parent_id != customer_object->id) {
+        account ? policy_objects_.end()
+                : std::ranges::find_if(policy_objects_, [&](const PolicyObject& value) {
+                      return value.object_type == "organization" &&
+                             value.external_id == input.organization_id;
+                  });
+    if (!account && (organization_object == policy_objects_.end() ||
+                     organization_object->parent_id != customer_object->id)) {
         return std::unexpected(
             StoreError{"invalid_input", "organization_id is not inside the customer namespace"});
     }
+    const std::string owner_object_id = account ? customer_object->id : organization_object->id;
     const auto workspace = std::ranges::find(workspaces_, input.workspace_id, &Workspace::id);
     if (workspace == workspaces_.end() || workspace->customer_id != input.customer_id ||
         workspace->desired == "deleted") {
@@ -5453,19 +5710,13 @@ Result<SecretMountRoute> InMemoryStore::create_secret_mount_route(const SecretMo
         return std::unexpected(StoreError{"conflict", "secret mount already exists"});
     }
     const std::string now = now_iso8601();
-    const std::string environment_external =
-        "secrets/" + input.customer_id + "/" + input.organization_id;
+    const std::string environment_external = secret_mount_environment(input);
     auto environment = std::ranges::find_if(policy_objects_, [&](const PolicyObject& value) {
         return value.object_type == "environment" && value.external_id == environment_external;
     });
     if (environment == policy_objects_.end()) {
-        policy_objects_.push_back(PolicyObject{new_uuid_v4(),
-                                               "environment",
-                                               environment_external,
-                                               organization_object->id,
-                                               now,
-                                               now,
-                                               true});
+        policy_objects_.push_back(PolicyObject{
+            new_uuid_v4(), "environment", environment_external, owner_object_id, now, now, true});
         environment = std::prev(policy_objects_.end());
     }
     policy_objects_.push_back(PolicyObject{

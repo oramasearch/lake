@@ -30,6 +30,7 @@ public:
     Result<std::vector<Customer>> list_customers(int limit,
                                                  const std::string& user_id = {}) override;
     Result<Customer> get_customer(const std::string& id) override;
+    Result<Customer> organization_customer(const std::string& organization_id) override;
     Result<Repository> create_repository(const NewRepository&) override;
     Result<std::vector<Repository>> list_repositories(const std::string& customer_id,
                                                       int limit,
@@ -269,6 +270,23 @@ public:
     Result<void> set_agent_task_status(const std::string& id,
                                        std::string phase,
                                        std::string credential_sha256 = {});
+    Result<std::vector<UsageLimit>> usage_limits(const std::string& customer_id) override;
+    Result<UsageLimit> set_usage_limit(const UsageLimit& limit) override;
+    Result<std::vector<BillingPlan>> billing_plans() override;
+    Result<BillingPlan> put_billing_plan(const BillingPlan& plan) override;
+    Result<std::vector<BillingSubscription>>
+    billing_subscriptions(const std::string& customer_id) override;
+    Result<std::vector<BillingSubscription>>
+    set_billing_subscription(const std::string& customer_id,
+                             const std::string& effective_from,
+                             const std::string& plan_id) override;
+    Result<Invoice> create_invoice(const Invoice& invoice) override;
+    Result<std::vector<Invoice>> list_invoices(const std::string& customer_id) override;
+    Result<Invoice> get_invoice(const std::string& id) override;
+    Result<Invoice> set_invoice_state(const std::string& id,
+                                      const std::string& state,
+                                      const std::string& provider_reference,
+                                      const std::string& note) override;
     Result<std::uint64_t> set_storage_quota(const std::string& customer_id,
                                             std::uint64_t quota_bytes) override;
     Result<PkiAuthorityRecord> create_pki_authority(const NewPkiAuthorityRecord& value,
@@ -334,6 +352,7 @@ public:
     Result<void> disable_mfa(const std::string& user_id,
                              const std::string& pool_id,
                              const std::string& code) override;
+    Result<bool> mfa_enrolled(const std::string& user_id, const std::string& pool_id) override;
     Result<IssuedSession> sign_in_totp(const PasswordSignIn&) override;
     Result<WebAuthnChallenge> begin_passkey_registration(const std::string& user_id,
                                                          const std::string& pool_id,
@@ -445,6 +464,10 @@ private:
     std::vector<audit::Event> audit_events_;
     std::vector<std::pair<std::string, int>> audit_retentions_;
     std::map<std::string, std::uint64_t> storage_quotas_;
+    std::map<std::pair<std::string, std::string>, UsageLimit> usage_limits_;
+    std::map<std::string, BillingPlan> billing_plans_;
+    std::vector<BillingSubscription> billing_subscriptions_;
+    std::vector<Invoice> invoices_;
     std::vector<ManagedService> services_;
     std::vector<Workspace> workspaces_;
     std::vector<WorkspaceDeletion> workspace_deletions_;

@@ -1,21 +1,22 @@
 # Public API types
 
-`ExperimentsPage` contains capability values, resolved display permissions, ExperimentsAgent task
-state, reply availability and the stored proposal digest for the pure study/run/comparison
-renderer. `AppsPage` carries the equivalent ApplicationAgent reply state. Experiment asset
-declarations expose embedded bytes and hashed URLs without filesystem or HTTP dependencies. See
-[the UI contract](../../../docs/ui/experiments.md) and
-[registered API operations](../../../docs/api/experiments.md).
+`web_ui.hpp` declares what lake still renders on the server since the console became the web app
+(lake#561, [web-app.md](../../../docs/ui/web-app.md)): an identity application's hosted sign-in
+pages, the stylesheet and fonts they link, the Docs guides `list_docs` and `get_doc` read, a handler
+failure's page, and the pure helpers capabilities share (`web_ui_escape`, `web_ui_space_label`,
+`web_ui_source_units`). `web_app.hpp` declares the embedded app and which requests it answers.
 
 `Capability::post_alias` gives read capabilities a JSON POST route as well as GET, preserving
-read policy and identical OpenAPI/MCP schemas. `StreamsPage` holds only capability values and
-resolved UI permissions, including list cursors and Agent event filters; `web_ui_streams` is a
-pure renderer. See `docs/api/streams.md` and `docs/ui/streams.md` for the contracts.
+read policy and identical OpenAPI/MCP schemas. See `docs/api/streams.md` and `docs/ui/streams.md`
+for the Streams contracts and `docs/api/experiments.md` for the Experiments operations.
+
+`transcription.hpp` declares speech-to-text's pure helpers (audio decoding, caption cleaning,
+OpenAI's request and answer) and `openai_transcriber`. `registry.hpp` declares the `Transcriber`
+injected dependency on `ApiContext` and `ServerOptions` (lake#561, `docs/api/transcripts.md`).
 
 `ServerOptions::external_origin` is trusted instance configuration for repository terminal
-instructions. The HTTP adapter validates it and supplies it to `RepositoryHomeData`. It takes
-precedence over `https://` plus the trusted identity/platform `public_host`; with neither value,
-commands are omitted. See
+instructions (`repository_external_origin`). It takes precedence over `https://` plus the trusted
+identity/platform `public_host`; with neither value, lake names no origin. See
 [configuration.md](../../../docs/serving/configuration.md) and
 [forge.md](../../../docs/ui/forge.md).
 
@@ -60,10 +61,18 @@ the bounded queue of workspace audit events on their way to each workspace's cha
 `ApiContext::audit_recorder` points at the server's (null: no workspaces, every event central),
 `ApiContext::audit_workspace_id` carries the workspace a call acted on, and
 `ServerOptions::audit_flush_interval` (one second) and `audit_max_pending` (65,536) configure it.
-`web_ui.hpp`'s `AuditPageView` carries each event's workspace, the queued events and the workspaces
-that could not be read.
 `audit_routing.hpp`'s `acted_workspace` is the one lookup of the workspace a call acted on, shared
-by the audit route and the request series. `request_recorder.hpp` declares `RequestRecorder`, the
+by the audit route and the request series. `usage_recorder.hpp` declares `UsageRecorder`, the bounded
+per-workspace `lake_usage` counter and `lake_storage` readings (lake#564, `ApiContext::usage_recorder`,
+`ServerOptions::usage_flush_interval`, `usage_max_pending`, `usage_sample_interval`), and
+`usage_dimensions()`, each dimension's unit; `capabilities.hpp` declares `sample_usage` and
+`queue_repository_builds`, and `images.hpp`'s `ImageBytes` splits image bytes by workspace.
+`registry.hpp`'s `Transcription` carries the tokens a speech-to-text model reports. See
+[metering](../../../docs/api/metering.md#usage-over-time). `billing.hpp` declares billing (lake#564,
+decision 56): the `PaymentProvider` interface and its manual implementation, `billing_enabled`
+(`LAKE_BILLING`), `register_billing_capabilities` (called by `ApiServer` only where
+`ServerOptions::billing` is on), `billing_registered`, and the pure `price_of` and `bill_lines`. See
+[billing](../../../docs/api/billing.md). `request_recorder.hpp` declares `RequestRecorder`, the
 bounded per-workspace `lake_requests` counts on their way to each workspace Zetta's time series
 (decision 54 S9, lake#384); `registry.hpp`'s `RequestAttribution` (`ApiContext::request_attribution`)
 is what one HTTP request's capability calls resolved: its outermost capability, its workspace and
@@ -76,8 +85,7 @@ instance KEK.
 
 `forge.hpp` declares `BranchProtectionRecords` and `load_branch_protection`: the rules, reviews and
 releases a push needs, read from the repository's workspace before the push (lake#341), and
-`evaluate_branch_protection` over that snapshot. `web_ui.hpp`'s `RepositoryHomeData` and
-`ChangeReviewData` carry why releases or reviews could not be read.
+`evaluate_branch_protection` over that snapshot.
 
 Verify changes with the full PostgreSQL-backed static and shared CTest suites. Keep the identity
 contract in `docs/api/identity.md` updated with changes to token derivation.
@@ -91,30 +99,21 @@ shared contract, and input validation recursively checks object fields and array
 pointer errors. See [`docs/api/README.md`](../../../docs/api/README.md) for the envelope decision
 and HTTP conformance proof.
 
-`WebUiViewer` is presentation state, passed explicitly to shared-shell page renderers. Its
-operator flag comes from the resolved credential and does not authorize a capability. Boolean
-renderer arguments remain compatible and mean an ordinary account, never an operator. See
-[front-door.md](../../../docs/ui/front-door.md).
+`agent_proposal_digest` (`capabilities.hpp`) is the digest of an agent's proposal as lake stored
+it: `approve_agent_proposal` and `agent_turn`'s confirmed ApplicationAgent and ExperimentsAgent
+turns compare it with the one the person reviewed (lake#561).
 
-`AppsPage` carries the selected ApplicationAgent task, working state, and exact proposal digest to
-the pure Ship Apps renderer. Authorization and digest verification remain in the HTTP adapter.
-
-`OrganizationsPageData` gives the Organizations renderer the viewer's memberships, the invitations
-addressed to them and their personal space; see [settings.md](../../../docs/ui/settings.md).
 `datasets.hpp` is pure: workspace dataset naming, CSV checks, the `<database>/<name>` id and the
-engine-result classification shared by the capabilities and the pages. See
+engine-result classification the capabilities share. See
 [workspaces.md](../../../docs/api/workspaces.md).
 
 `WorkspaceCallTiming` records each workspace call's Zetta capability and duration for the
-`zetta_<capability>` entries of `Server-Timing`. `web_ui_deferred_panels` names the JSON routes a
-page fills a slow panel from; `web_ui_your_agents` and `web_ui_new_index` render two of them, and
-`AskPage::defer_agents` marks the deferred agent picker. See
-[performance.md](../../../docs/ui/performance.md) (lake#446).
+`zetta_<capability>` entries of `Server-Timing`. See
+[performance.md](../../../docs/ui/performance.md).
 
 `repository_workspace` (`capabilities.hpp`) checks the workspace a new repository is created in
 (lake#315). `evaluate_branch_protection` (`forge.hpp`) takes the repository, not its id, so the
-evaluation knows the repository's workspace. `RepositoryHomeData::workspace` and
-`web_ui_repositories`' workspaces let the repository pages name the owning workspace. See
+evaluation knows the repository's workspace. See
 [repositories.md](../../../docs/ui/repositories.md#the-owning-workspace).
 
 `apps.hpp` declares the asynchronous application identity helpers: `application_session_result`

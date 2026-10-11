@@ -1,56 +1,67 @@
 # Organization and personal settings
 
-**What.** The settings surface is rendered by pure functions in
-`include/lake/api/web_ui.hpp` and `src/api/web_ui.cpp`, with data loaded through the capability
-registry. It uses the shared shell, tabs, panels, standard controls, empty states, and error
-markup from the design system. The tab order follows the page order below, so keyboard focus
-visits navigation before the selected page content and form controls.
+**What.** The settings pages of the web app read and change organizations, teams, members and the
+person's own account through the registry's capabilities, called from the browser. The tab order
+follows the page order below, so keyboard focus visits the tabs before the selected tab's content
+and forms. Files are under `frontend/src/pages/organizations/` and `frontend/src/pages/account/`.
 
-| Area | Route and tabs | Capability-backed content and actions |
-|---|---|---|
-| Organization | `GET /organization?id=<id>&tab=` `overview`, `teams`, `members`, `invitations`, `access`, `sso`, `applications`, `metering` (labelled Usage), `audit` | Organization, team, member, invitation, effective-access, SSO, application, usage, and audit reads (usage only on its own tab, because it reads the space's workspaces); invite (`create_invitation`), configure provider (`register_sso_provider`), and quota form (`set_storage_quota`) |
-| Team | `GET /team?id=<id>` | Team memberships and effective access |
-| Member | `GET /member?id=<id>` | Membership role, attestation evidence, effective access, `set_member_role`, and `remove_member` |
-| Personal | `GET /settings?tab=` `profile`, `sessions`, `passkeys`, `tokens`, `notifications` | Profile identity, active sessions/devices, and links to the existing passkey and token capability forms |
+| Area | Route and tabs | File | Content and actions |
+|---|---|---|---|
+| Organization | `/organization?id=<id>&tab=` `overview`, `teams`, `members`, `invitations`, `access`, `sso`, `applications`, `metering` (labelled Usage), `audit` | `OrganizationPage.tsx` | `get_organization`, `list_teams`, `list_memberships`, `list_invitations`, `entity_effective_access`, `list_sso_providers`, `list_applications`, `metering_usage` (Usage tab only, because it reads the space's workspaces) and `audit` reads; invite (`create_invitation`), create a team (`create_team`), configure a provider (`register_sso_provider`) |
+| Team | `/team?id=<id>` | `TeamPage.tsx` | the team's memberships and effective access |
+| Member | `/member?id=<id>` | `MemberPage.tsx` | role, attestation evidence, effective access, `set_member_role`, and confirmed `remove_member` |
+| Usage | `/usage` | `../usage/UsagePage.tsx` | usage over time across the chosen workspaces, limits and CSV ([usage.md](usage.md), lake#564) |
+| Repository Usage by Hour | `/metering?customer_id=<id>` | `../admin/MeteringPage.tsx` | the account's repository usage by hour and its repository storage limit (`set_storage_quota`); the organization's Usage tab and the Usage dashboard link here |
+| Personal | `/settings?tab=` `profile`, `sessions`, `passkeys`, `tokens`, `notifications` | `../account/SettingsPage.tsx` | see [Personal settings](#personal-settings) |
 
-The organization page is entered from `GET /organizations`. Each page has an empty state when
-the corresponding list is empty. An empty state says what to do in the product (a link to the
-form that fills it), never which endpoint to call. Registry refusals are returned as the API error
-code and reason, instead of a locally invented policy message.
+Each list has an empty state that says what to do in the product (a link to the form that fills
+it), never which endpoint to call. A capability's refusal is shown as its error code and reason,
+not a policy message invented by the page.
 
-**Organizations page.** `GET /organizations` lists the organizations the viewer may read, with
-their role and links to settings, Invite, teams, members, invitations, effective access and SSO.
-For a signed-in person (not an operator credential) it also shows:
+**Organizations page.** `/organizations` (`OrganizationsPage.tsx`) lists the organizations the
+viewer may read, with their role and links to settings, Invite, teams, members, invitations,
+effective access and SSO. For a signed-in person (not the operator credential) it also shows:
 
 - **Invitations for you**: pending invitations addressed to their email or personal-space handle
-  (`list_invitations` without a scope), each with **Join**, which posts `invitation_id` to
-  `POST /invitations/accept` (`join_organization`) and opens the organization.
-- **Create an organization**: name and optional handle, posted to `POST /organizations/create`
-  (`create_organization_space`). The creator becomes owner and lands on the Invitations tab.
+  (`list_invitations` without a scope), each with **Join** (`join_organization`), which opens the
+  organization.
+- **Create an organization**: name and optional handle (`create_organization_space`). The creator
+  becomes owner and lands on the Invitations tab.
 - **Turn your personal space into an organization**: says what moves (the handle, repositories,
-  workspaces and apps stay; a new personal space is created) and asks the person to type the
-  handle. `POST /organizations/convert` compares it with the space's handle from `get_customer`
-  before calling `convert_personal_space`; a mismatch answers `400` and changes nothing.
+  workspaces and apps stay; a new, empty personal space is created) and asks the person to type
+  the handle. The page reads the space's current handle with `get_customer` and compares it before
+  calling `convert_personal_space`; a mismatch changes nothing.
 
-The Invitations tab offers member, admin and owner with what each can do, and a lifetime of 1, 7
-(the default) or 30 days; `/organization/invitations` turns `expires_in_days` (1 to 90) into
-`expires_at`, and an explicit `expires_at` still wins. The tab lists sent invitations with their
-status. The Teams tab creates a team through `POST /organization/teams` (`create_team`).
+**Invitations.** The Invitations tab offers member, admin and owner with what each can do, and a
+lifetime of 1, 7 (the default) or 30 days. The page turns the day count (1 to 90) into
+`expires_at`, in UTC to the second, before calling `create_invitation`. The tab lists sent
+invitations with their status. `list_invitations` is for administrators: a plain member sees its
+refusal inside the Invitations panel and the rest of the page still opens (before lake#561 the
+whole page answered 403).
 
-**Mutation contract.** The invitation form posts to `/organization/invitations`; the team form to
-`/organization/teams`; the Organizations page forms to `/organizations/create`,
-`/organizations/convert` and `/invitations/accept`; the SSO form posts to `/organization/sso`; role changes post to `/member/role`; removals post to `/member/remove`;
-and quota changes post to `/metering/quota`. Every adapter calls the named registry capability, so
-REST, MCP, and the settings surface use one validation, policy, and audit path.
+**Dangerous changes.** **Remove** on a member opens `/member?id=<id>&confirm_removal=yes`, which
+states that the membership and the grants derived from it are revoked immediately, and removes the
+member only from that confirmation.
 
-**Dangerous changes.** A remove request first redirects to the member confirmation page. That page
-states that membership and derived grants are revoked immediately, then posts a separate confirmed
-request. This is an ordinary server-rendered confirmation page and works without JavaScript.
+## Personal settings
 
-**Verify.** `ctest --test-dir build -R WebUi.SettingsPagesExposeTabsMutationsAndConfirmation
---output-on-failure` checks the renderer strings, tabs, form targets, confirmation copy, escaping,
-and shared shell scripts. `WebUi.OrganizationsPageCreatesJoinsAndConvertsWithoutNamingEndpoints`
-checks the Organizations page for a person and an operator, and that no organization, team,
-member, invitation, grant or customer empty state names an endpoint. The HTTP flows are listed in
-[`../api/organizations.md`](../api/organizations.md#verify-and-change). The seeded screenshot script covers the navigable pages in
-`docs/ui/screenshots/`.
+`/settings` has five tabs; an unknown `tab` shows Notifications. The breadcrumb is Account › the
+tab. Profile shows the person's TAAP identity (from `viewer`); Sessions and devices reads
+`list_sessions` and `list_devices`; Passkeys and Tokens link to `/passkeys` and `/tokens`, where the capability forms
+are ([identity.md](identity.md)); Notifications says no delivery preferences are configured.
+
+**What changed.** Every form posted to a server adapter (`/organization/invitations`,
+`/organization/teams`, `/organization/sso`, `/organizations/create`, `/organizations/convert`,
+`/invitations/accept`, `/member/role`, `/member/remove`, `/metering/quota`) is now the page
+calling that adapter's capability as `POST /v1/<name>`. The checks the adapters made before the
+call (the typed handle, the invitation lifetime, the removal confirmation) are made by the page.
+
+**Verify.** Sign in as an organization owner and as a plain member, open `/organization?id=…` on
+every tab, invite someone with each lifetime, create a team, change a member's role and remove
+them through the confirmation. As a person with a personal space, create an organization, join an
+invitation, and convert the personal space with a wrong handle (nothing changes) and then the right
+one. The capability flows are tested in
+[`../api/organizations.md`](../api/organizations.md#verify-and-change).
+
+**Change.** A new tab is an entry in `TABS` in `OrganizationPage.tsx` and a component reading its
+capability; a new action is a capability first.

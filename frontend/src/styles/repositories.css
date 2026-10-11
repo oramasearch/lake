@@ -1,0 +1,82 @@
+/* Data → Repositories and Drive: the one pattern the kit does not draw, an item menu (forge.tsx
+   `Menu`, drawn in a portal on <body>). Its items are full-width rows, not 32px bordered buttons.
+   Lake tokens only. */
+.forge-menu-item,
+main .forge-menu-item {
+  width: 100%;
+  min-height: 30px;
+  justify-content: flex-start;
+  gap: 8px;
+  border: 0;
+  border-radius: 4px;
+  padding: 0 10px;
+  color: var(--lake-text-primary);
+  background: transparent;
+  font: inherit;
+  font-size: 13px;
+  font-weight: var(--lake-weight-regular);
+  line-height: 1;
+  text-align: left;
+  cursor: pointer;
+  text-decoration: none;
+}
+.forge-menu-item:hover,
+main .forge-menu-item:hover {
+  border: 0;
+  color: var(--lake-text-primary);
+  background: var(--lake-raised);
+}
+.forge-menu-item[data-danger='true'],
+main .forge-menu-item[data-danger='true'] {
+  color: var(--lake-danger);
+}
+
+/* Drive's drop zone as a file manager's: a dashed strip that takes dropped files anywhere on it. */
+.drive-drop-zone {
+  min-height: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  border: 1px dashed var(--lake-rule);
+  border-radius: 6px;
+  padding: 14px 16px;
+  color: var(--lake-text-secondary);
+  background: transparent;
+  font-size: 13px;
+  text-align: center;
+  cursor: pointer;
+}
+.drive-drop-zone[data-active='true'] {
+  border-color: var(--lake-action);
+  color: var(--lake-action);
+  background: var(--lake-action-soft, transparent);
+}
+
+/* The path a forge or Drive page sits at (forge.tsx `PathBreadcrumbs`, `DriveBreadcrumbs`): a
+   file manager's location bar, one hairline row above the heading. */
+.breadcrumbs.forge-path {
+  display: inline-flex;
+  max-width: 100%;
+  gap: 6px;
+  margin: 0 0 12px;
+  border: 1px solid var(--lake-border-subtle);
+  border-radius: 6px;
+  padding: 5px 10px;
+  color: var(--lake-text-secondary);
+  background: var(--lake-surface);
+  font-family: var(--lake-font-mono);
+  font-size: 12.5px;
+}
+.breadcrumbs.forge-path a {
+  color: var(--lake-text-secondary);
+  text-decoration: none;
+}
+.breadcrumbs.forge-path a:hover {
+  color: var(--lake-action);
+}
+.breadcrumbs.forge-path [aria-current='page'] {
+  color: var(--lake-text-primary);
+  font-weight: var(--lake-weight-semibold);
+}

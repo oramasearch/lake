@@ -1,12 +1,46 @@
 # Fresh-profile sign-up walkthrough
 
+## The journey in the web app
+
+Without Clerk, a new person's first repository takes these steps in the web app (lake#561):
+
+1. `/sign-up` (`frontend/src/pages/account/SignUpPage.tsx`) links **Install liquid** and the
+   identity command reference, and asks for email, display name, a password of at least 12
+   characters, a device name and the public identity document printed by
+   `liquid identity show --document`. The private key never leaves the client.
+2. **Create account** calls `sign_up_password`, which provisions the person's own space and sets
+   the HttpOnly `lake_session` cookie. A malformed document is refused with the recovery message
+   below and creates nothing. The page then opens `/repositories`.
+3. A repository belongs to one workspace (lake#315). While the space has none, the create form
+   says so and links **Workspaces**, where the person creates one (`create_workspace`).
+4. **Create a Repository** on `/repositories` chooses the workspace, a name and an optional
+   description, and calls `create_repository` (private). The repository home opens.
+
+Under Clerk, sign-up is by invitation and `/sign-up` shows Clerk's form with the invitation
+sentence ([front-door.md](front-door.md)).
+
+To verify, follow the steps in fresh browser profiles at 1280 and 640 px in both themes against a
+native lake on a separate database, then check zero usage with
+`GET /v1/metering_usage?customer_id=<id>` before writing any content.
+
+## Recovery message
+
+> TAAP identity document is incomplete or invalid canonical CBOR: declared length exceeds input. Run liquid identity show --document and paste the complete output.
+
+Invalid alphabet input also returns a specific base64url message with the same export command.
+Signatures and canonical encoding remain verified by libliquid before account creation.
+
+## Recorded walkthrough, 2026-09-08
+
+Historical: everything below records the server-rendered pages, and the screenshots show them.
+
 Recorded on 2026-09-08 against native Lake with local PostgreSQL 17. Each run used a fresh
 Chrome browser context and a separate client identity directory inside this worktree. The
 walkthrough database (`lake_walkthrough_119`) was separate from the suite database
 (`lake_test_119`). No operator bearer was supplied to any onboarding request. The existing
 native Liquid binary supplied the documented identity export command.
 
-## Follow the journey
+### Follow the journey
 
 1. Open `/sign-up` with no cookies. Follow **Install liquid** for prerequisites and the supported
    source build, or expand **Installation commands** on the page. The command sequence clones
@@ -40,14 +74,7 @@ native Liquid binary supplied the documented identity export command.
    each final page's document width matched the viewport width. The shared narrow navigation
    retains its existing horizontal scrolling behavior.
 
-## Recovery message
-
-> TAAP identity document is incomplete or invalid canonical CBOR: declared length exceeds input. Run liquid identity show --document and paste the complete output.
-
-Invalid alphabet input also returns a specific base64url message with the same export command.
-Signatures and canonical encoding remain verified by libliquid before account creation.
-
-## Recorded customers and zero usage
+### Recorded customers and zero usage
 
 The separate walkthrough database contains exactly four customers, four users, and four private
 repositories: one for each profile. Each customer's zero usage was recorded before its first
@@ -70,7 +97,7 @@ ORDER BY c.name;
 -- Four rows; every usage field is 0.
 ```
 
-## Screenshots
+### Screenshots
 
 | Profile | Sign-up instructions | Malformed document | First-repository form | Repository home |
 |---|---|---|---|---|
@@ -79,7 +106,7 @@ ORDER BY c.name;
 | 640-light | [Instructions](screenshots/sign-up/640-light-sign-up.png) | [Recovery](screenshots/sign-up/640-light-malformed.png) | [Form](screenshots/sign-up/640-light-repositories.png) | [Repository](screenshots/sign-up/640-light-first-repository.png) |
 | 640-dark | [Instructions](screenshots/sign-up/640-dark-sign-up.png) | [Recovery](screenshots/sign-up/640-dark-malformed.png) | [Form](screenshots/sign-up/640-dark-repositories.png) | [Repository](screenshots/sign-up/640-dark-first-repository.png) |
 
-## Native proof
+### Native proof
 
 Run the full suite with `LAKE_TEST_DB_URI` pointing at a fresh schema-loaded database and
 `LAKE_INSTANCE_KEK` set. Use a separate database for a manual server; test fixtures own their

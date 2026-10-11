@@ -78,7 +78,7 @@ inline json search_space() {
     return schema;
 }
 
-inline json study_spec() {
+inline json experiment_spec() {
     auto released = array(identifier());
     released["uniqueItems"] = true;
     return object({{"name", identifier()}, {"project", text()}, {"pipeline", text()},
@@ -100,13 +100,25 @@ inline json trial() {
         "cost", "intermediate", "reason", "model"});
 }
 
-inline json study() {
-    return object({{"id", identifier()}, {"spec", study_spec()},
-        {"status", choice({"running", "stopped", "complete"})}, {"created", text()},
-        {"updated", text()}, {"trials", array(trial())}, {"spent_cost", number()},
-        {"stop_reason", text()}, {"promoted_model", text()}},
-        {"id", "spec", "status", "created", "updated", "trials", "spent_cost", "stop_reason",
-        "promoted_model"});
+inline json experiment() {
+    return object({{"id", identifier()},
+                   {"spec", experiment_spec()},
+                   {"status", choice({"running", "stopped", "complete"})},
+                   {"created", text()},
+                   {"updated", text()},
+                   {"trials", array(trial())},
+                   {"spent_cost", number()},
+                   {"stop_reason", text()},
+                   {"promoted_model", text()}},
+                  {"id",
+                   "spec",
+                   "status",
+                   "created",
+                   "updated",
+                   "trials",
+                   "spent_cost",
+                   "stop_reason",
+                   "promoted_model"});
 }
 
 inline json analysis() {

@@ -17,9 +17,11 @@
 #include <gtest/gtest.h>
 #include <nlohmann/json.hpp>
 
+#include "lake/api/billing.hpp"
 #include "lake/api/capabilities.hpp"
 #include "lake/api/markdown.hpp"
 #include "lake/api/registry.hpp"
+#include "lake/api/rest.hpp"
 #include "lake/api/web_ui.hpp"
 
 namespace {
@@ -36,6 +38,8 @@ const lake::api::Registry& registry() {
     static const lake::api::Registry* built = [] {
         auto* registry = new lake::api::Registry();
         lake::api::register_core_capabilities(*registry, "0.0.1");
+        // The billing guide's examples (lake#564) run against billing's schemas too.
+        lake::api::register_billing_capabilities(*registry);
         return registry;
     }();
     return *built;
@@ -135,6 +139,17 @@ json query_input(std::string_view query, const lake::api::Capability& capability
                 input[key] = json::parse(value, nullptr, false);
             } else if (type == "boolean") {
                 input[key] = value == "true";
+            } else if (type == "array") {
+                // Decoded as the REST adapter decodes it: repeated keys, a comma list or a JSON
+                // array (lake#576).
+                json& items = input[key];
+                if (!items.is_array()) {
+                    items = json::array();
+                }
+                for (const json& item :
+                     lake::api::rest_input_from_query(capability, {{key, value}}).at(key)) {
+                    items.push_back(item);
+                }
             } else {
                 input[key] = value;
             }
@@ -284,87 +299,13 @@ std::set<std::string> capabilities_of(const std::vector<Example>& examples) {
     return out;
 }
 
-lake::api::WorkspacePage models_page() {
-    lake::api::WorkspacePage page;
-    page.section = "models";
-    page.customer_id = "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0";
-    page.state = {{"requested", true}, {"phase", "Ready"}, {"ready", true}};
-    page.origin = "https://lake.example";
-    page.data["names"] = {{"projects", {{"p-1", "retention"}}}, {"graphs", json::object()}};
-    page.data["list_models"] = {
-        {"models",
-         json::array({{{"id", "0aebdb83-model"}, {"name", "retention_churn"}, {"project", "p-1"},
-                       {"created", "2026-09-27T13:29:23.873Z"}}})}};
-    page.data["model_details"] = {
-        {"0aebdb83-model",
-         {{"exposed", true},
-          {"metrics", {{"held_out_auc", 0.88}}},
-          {"feature_schema",
-           {{"features", json::array({"support_tickets", "tenure_months"})}}}}}};
-    return page;
-}
-
-lake::api::WorkspacePage index_page() {
-    lake::api::WorkspacePage page;
-    page.section = "index";
-    page.customer_id = "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0";
-    page.subject = "i-1";
-    page.origin = "https://lake.example";
-    page.state = {{"requested", true}, {"phase", "Ready"}, {"ready", true}};
-    page.data["get_index"] = {{"id", "i-1"},
-                              {"table", "docs"},
-                              {"kind", "search"},
-                              {"fields", json::array({"title", "body"})},
-                              {"exposed", true}};
-    return page;
-}
-
 } // namespace
-
-TEST(Examples, TheModelsPageCurlNamesTheSignedInWorkspaceAndRunsAgainstPredict) {
-    lake::api::WorkspacePage page = models_page();
-    page.workspace_id = "9d8c7b6a-workspace";
-    const auto examples =
-        examples_in(lake::api::web_ui_workspace(page, true), "Ship → Models", true);
-    ASSERT_EQ(examples.size(), 1U) << "one call per published model";
-    EXPECT_EQ(examples[0].capability, "predict");
-    EXPECT_EQ(examples[0].input.value("workspace_id", std::string()), "9d8c7b6a-workspace")
-        << "the page's own workspace, so the call works as pasted";
-    EXPECT_EQ(examples[0].input.value("customer_id", std::string()), page.customer_id);
-    EXPECT_EQ(examples[0].input.value("model_id", std::string()), "0aebdb83-model");
-    EXPECT_TRUE(examples[0].input["rows"][0].contains("tenure_months"));
-    expect_valid(examples);
-
-    // Rendered without a workspace (no /w/<id> path), the call carries a placeholder rather than
-    // omitting the field the registry requires.
-    page.workspace_id.clear();
-    const auto placeholder =
-        examples_in(lake::api::web_ui_workspace(page, true), "Ship → Models", true);
-    ASSERT_EQ(placeholder.size(), 1U);
-    EXPECT_EQ(placeholder[0].input.value("workspace_id", std::string()), "<workspace id>");
-    expect_valid(placeholder);
-}
-
-TEST(Examples, TheSearchIndexPageCallsNameTheWorkspace) {
-    lake::api::WorkspacePage page = index_page();
-    page.workspace_id = "9d8c7b6a-workspace";
-    const auto examples =
-        examples_in(lake::api::web_ui_workspace(page, true), "Ship → Search index", true);
-    ASSERT_GE(examples.size(), 2U) << "the curl URL and the Python parameters";
-    for (const Example& example : examples) {
-        EXPECT_EQ(example.capability, "search_index") << example.where;
-        EXPECT_EQ(example.input.value("workspace_id", std::string()), "9d8c7b6a-workspace")
-            << example.where;
-    }
-    expect_valid(examples);
-}
 
 TEST(Examples, EveryDocsExampleRunsAgainstTheRegistrySchema) {
     std::vector<Example> all;
     for (const lake::api::WebUiGuidePage& guide : lake::api::web_ui_guide()) {
-        const auto html = lake::api::web_ui_docs(guide.slug, true);
-        ASSERT_TRUE(html) << guide.slug;
-        const auto examples = examples_in(*html, "/docs/" + std::string(guide.slug), true);
+        const auto examples = examples_in(
+            lake::api::markdown_to_html(guide.markdown), "/docs/" + std::string(guide.slug), true);
         expect_valid(examples);
         all.insert(all.end(), examples.begin(), examples.end());
     }

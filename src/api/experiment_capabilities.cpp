@@ -121,6 +121,24 @@ ApiResult authorize_list(const json& input, ApiContext& context) {
     return ApiResult::success(json::object());
 }
 
+// An engine message says "study"; the person reads "experiment" (lake#561).
+std::string experiment_words(const std::string& message) {
+    static const std::regex word(R"(\b([Ss])tud(y|ies)\b)");
+    std::string out;
+    auto from = message.cbegin();
+    for (std::sregex_iterator it(message.begin(), message.end(), word), end; it != end; ++it) {
+        const auto& match = *it;
+        out.append(from, match[0].first);
+        out += match[1].str() == "S" ? "Experiment" : "experiment";
+        if (match[2].str() == "ies") {
+            out += 's';
+        }
+        from = match[0].second;
+    }
+    out.append(from, message.cend());
+    return out;
+}
+
 Task proxy(ApiContext& context, const json& input, std::string name, json args) {
     if (!context.workspaces) {
         co_return ApiResult::failure("store_unavailable", "workspaces are not configured");
@@ -130,10 +148,24 @@ Task proxy(ApiContext& context, const json& input, std::string name, json args) 
         context, input.at("customer_id"), name, workspace_uses_get(name), std::move(args)));
     if (!result) {
         // Zetta names the field at fault (zetta#1217); workspace_failure keeps that path, in the
-        // caller's names (lake#450).
-        co_return workspace_failure(result.error(), sent, "", {{"run", "run_id"}});
+        // caller's names (lake#450), and lake's word for the engine's study (lake#561).
+        auto failure = workspace_failure(
+            result.error(), sent, "", {{"run", "run_id"}, {"study", "experiment_id"}});
+        failure.error.message = experiment_words(failure.error.message);
+        co_return failure;
     }
     co_return ApiResult::success(*result);
+}
+
+// The engine names an experiment a study and its id `study` (zetta docs/ml/studies.md); lake says
+// experiment and `experiment_id` to every person and client (lake#561). Answers are renamed here,
+// once, on the way out.
+json experiment_answer(json value) {
+    if (value.is_object() && value.contains("study") && value.at("study").is_string()) {
+        value["experiment_id"] = std::move(value["study"]);
+        value.erase("study");
+    }
+    return value;
 }
 
 bool selected(const json& input, const std::string& project, const std::string& state) {
@@ -158,14 +190,14 @@ Task list(ApiContext& context, const json& input) {
     if (!runs.ok) {
         co_return runs;
     }
-    json answer = {{"studies", json::array()}, {"runs", json::array()}};
+    json answer = {{"experiments", json::array()}, {"runs", json::array()}};
     std::set<std::string> trial_runs;
     for (const auto& item : studies.value.at("studies")) {
         for (const auto& row : item.at("trials")) {
             trial_runs.insert(row.at("run"));
         }
         if (selected(input, item.at("spec").at("project"), item.at("status"))) {
-            answer["studies"].push_back(item);
+            answer["experiments"].push_back(item);
         }
     }
     for (auto item : runs.value.at("runs")) {
@@ -240,25 +272,33 @@ Task compare(ApiContext& context, const json& input) {
 }
 
 Task tail(ApiContext& context, const json& input) {
-    const bool is_study = input.at("kind") == "study";
+    // An experiment's events are the engine's study-events.<id> topic.
+    const bool is_experiment = input.at("kind") == "experiment";
     const std::string id = input.at("id");
     if (id.find_first_of(" /\\\t\r\n:*?") != std::string::npos) {
-        co_return ApiResult::failure("invalid_input", "a concrete study or run id is required", "/id");
+        co_return ApiResult::failure(
+            "invalid_input", "a concrete experiment or run id is required", "/id");
     }
-    const auto target = completed(co_await proxy(context, input,
-        is_study ? "get_study" : "get_run_metrics",
-        is_study ? json{{"study", id}} : json{{"run", id}, {"max_points", 4}}));
+    const auto target = completed(
+        co_await proxy(context,
+                       input,
+                       is_experiment ? "get_study" : "get_run_metrics",
+                       is_experiment ? json{{"study", id}} : json{{"run", id}, {"max_points", 4}}));
     if (!target.ok) {
         co_return target;
     }
     const auto from = input.value("from_sequence", std::uint64_t{1});
-    if (!is_study && target.value.contains("metrics_suppressed")) {
+    if (!is_experiment && target.value.contains("metrics_suppressed")) {
         co_return ApiResult::success({{"events", json::array()}, {"next_sequence", from}});
     }
-    const auto result = completed(co_await proxy(context, input, "receive_events",
-        {{"topic", (is_study ? "study-events." : "run-metrics.") + id},
-         {"from_sequence", from}, {"max", input.value("max_events", 100)},
-         {"wait_ms", input.value("wait_ms", 10000)}}));
+    const auto result = completed(
+        co_await proxy(context,
+                       input,
+                       "receive_events",
+                       {{"topic", (is_experiment ? "study-events." : "run-metrics.") + id},
+                        {"from_sequence", from},
+                        {"max", input.value("max_events", 100)},
+                        {"wait_ms", input.value("wait_ms", 10000)}}));
     if (!result.ok && result.error.code == "not_found") {
         // A valid Run may not have emitted its first batch yet, or its ephemeral topic expired.
         co_return ApiResult::success({{"events", json::array()}, {"next_sequence", from}});
@@ -281,12 +321,16 @@ Task dispatch(ApiContext& context, const json& input, const std::string& name,
     args.erase("customer_id");
     args.erase("workspace_id");
     args.erase("confirm");
-    // Lake names a run `run_id` (lake#450); the engine's experiment calls take `run`.
-    if (args.contains("run_id")) {
-        args["run"] = std::move(args["run_id"]);
-        args.erase("run_id");
+    // Lake names a run `run_id` (lake#450) and an experiment `experiment_id` (lake#561); the
+    // engine's calls take `run` and `study`.
+    for (const auto& [lake_name, engine_name] :
+         {std::pair{"run_id", "run"}, std::pair{"experiment_id", "study"}}) {
+        if (args.contains(lake_name)) {
+            args[engine_name] = std::move(args[lake_name]);
+            args.erase(lake_name);
+        }
     }
-    if (name == "start_study") {
+    if (name == "start_experiment") {
         // from_defaults lets Zetta fill a missing objective (held_out_auc, maximize, the
         // validation split) and budgets field by field (zetta#1217). Without it both are required.
         if (!args.value("from_defaults", false)) {
@@ -310,6 +354,9 @@ Task dispatch(ApiContext& context, const json& input, const std::string& name,
     if (name == "get_run_metrics" && result.ok && result.value.contains("metrics_suppressed")) {
         result.value["series"] = json::array();
     }
+    if (result.ok) {
+        result.value = experiment_answer(std::move(result.value));
+    }
     co_return result;
 }
 
@@ -317,41 +364,63 @@ Task dispatch(ApiContext& context, const json& input, const std::string& name,
 std::string experiment_description(const std::string& name) {
     static const std::map<std::string, std::string> descriptions = {
         {"list_experiments",
-         "List the training studies and stand-alone runs in a workspace, optionally only one "
+         "List the training experiments and stand-alone runs in a workspace, optionally only one "
          "project's or those in one state, to see what has been tried."},
-        {"get_experiment_study",
-         "Read one training study: its search space, budgets, every trial with its score, and "
-         "the model it promoted."},
+        {"get_experiment",
+         "Read one training experiment: its search space, budgets, every trial with its score, "
+         "and the model it promoted."},
         {"list_experiment_trials",
-         "List one study's trials with their parameters, state and objective, to see which "
+         "List one experiment's trials with their parameters, state and objective, to see which "
          "settings did best."},
         {"get_experiment_analysis",
-         "Read what a study learned: the best trial, the optimization history, which "
+         "Read what an experiment learned: the best trial, the optimization history, which "
          "parameters mattered, and a leaderboard with confidence bounds."},
         {"get_run_metrics",
-         "Read one run's metric curves, parameters, summary and charts (confusion matrix, "
-         "ROC, calibration) to judge how it trained."},
+         "Read one run's metric curves, parameters and summary to judge how it trained; the "
+         "summary holds its held-out scores (held_out_auc and the like) once training recorded "
+         "them. `artifacts` lists the evaluation charts a trainer logged: a GBDT classifier run "
+         "with a held-out split logs a confusion matrix, an ROC curve and calibration, each "
+         "named held_out; a regressor, or a run without a held-out split, logs none."},
         {"compare_runs",
-         "Compare two to eight runs metric by metric on aligned steps; leave `names` out to "
-         "compare every metric they share."},
-        {"start_study",
-         "Start a training study that tries settings within your budgets and keeps the best "
-         "model; needs `confirm: true` from the person."},
-        {"stop_study",
-         "Stop a running study, keeping the trials it finished; needs `confirm: true` from the "
-         "person."},
+         "Compare two to eight runs metric by metric on aligned steps, held-out scores "
+         "included; leave `names` out to compare every metric they share."},
+        {"start_experiment",
+         "Start a training experiment that tries settings within your budgets, one trial run "
+         "each, and keeps the best model; needs `confirm: true` from the person."},
+        {"stop_experiment",
+         "Stop a running experiment, keeping the trials it finished; needs `confirm: true` from "
+         "the person."},
         {"stop_experiment_trial",
-         "Stop one running trial of a study, marking it failed; needs `confirm: true` from the "
-         "person."},
+         "Stop one running trial of an experiment, marking it failed; needs `confirm: true` from "
+         "the person."},
         {"promote_trial",
-         "Make one trial's model the study's result, published to the project's models; needs "
-         "space administration and `confirm: true`."},
+         "Make one trial's model the experiment's result, published to the project's models; "
+         "needs `admin` on the account and `confirm: true`."},
         {"tail_experiment_events",
-         "Wait for and read the live progress events of a study or run, from a sequence "
+         "Wait for and read the live progress events of an experiment or run, from a sequence "
          "number, without consuming them."},
     };
     const auto found = descriptions.find(name);
     return found == descriptions.end() ? std::string() : found->second;
+}
+
+// A human title for each operation (lake#594): OpenAPI's summary and the MCP tool's title.
+std::string experiment_title(std::string_view name) {
+    static const std::map<std::string_view, std::string_view> titles = {
+        {"list_experiments", "List experiments"},
+        {"get_experiment", "Get an experiment"},
+        {"list_experiment_trials", "List an experiment's trials"},
+        {"get_experiment_analysis", "Analyze an experiment"},
+        {"get_run_metrics", "Get a run's metrics"},
+        {"compare_runs", "Compare runs"},
+        {"start_experiment", "Start an experiment"},
+        {"stop_experiment", "Stop an experiment"},
+        {"stop_experiment_trial", "Stop a trial"},
+        {"promote_trial", "Promote a trial"},
+        {"tail_experiment_events", "Follow an experiment's events"},
+    };
+    const auto found = titles.find(name);
+    return found == titles.end() ? std::string(name) : std::string(found->second);
 }
 
 void add(Registry& registry, std::string name, std::string upstream, json properties,
@@ -369,7 +438,7 @@ void add(Registry& registry, std::string name, std::string upstream, json proper
     const auto schema = object(std::move(properties), std::move(required));
     registry.add(Capability{
         .name = name,
-        .title = name,
+        .title = experiment_title(name),
         .description = experiment_description(name),
         .input_schema = schema,
         .output_schema = std::move(output),
@@ -397,7 +466,8 @@ void add(Registry& registry, std::string name, std::string upstream, json proper
             }
             context.audit_kind = "experiment." + name;
             context.audit_details = {{"customer_id", input.at("customer_id")}};
-            for (const auto* key : {"study", "run_id", "runs", "kind", "id", "confirm", "name"}) {
+            for (const auto* key :
+                 {"experiment_id", "run_id", "runs", "kind", "id", "confirm", "name"}) {
                 if (input.contains(key)) {
                     context.audit_details[key] = input.at(key);
                 }
@@ -411,15 +481,37 @@ void add(Registry& registry, std::string name, std::string upstream, json proper
 } // namespace
 
 void register_experiment_capabilities(Registry& registry) {
-    add(registry, "list_experiments", "", {{"project", text()}, {"state", choice({"", "pending",
-        "running", "succeeded", "failed", "stopped", "complete"})}}, json::array(),
-        object({{"studies", array(study())}, {"runs", array(run_summary())}}, {"studies", "runs"}));
-    add(registry, "get_experiment_study", "get_study", {{"study", identifier()}}, {"study"}, study());
-    add(registry, "list_experiment_trials", "list_trials", {{"study", identifier()},
-        {"state", choice({"running", "pruned", "failed", "complete"})}}, {"study"},
-        object({{"study", identifier()}, {"trials", array(trial())}}, {"study", "trials"}));
-    add(registry, "get_experiment_analysis", "get_study_analysis", {{"study", identifier()}},
-        {"study"}, analysis());
+    // Lake's names say experiment; each forwards to the engine's study operation named second
+    // (lake#561, docs/api/experiments.md#names).
+    add(registry,
+        "list_experiments",
+        "",
+        {{"project", text()},
+         {"state",
+          choice({"", "pending", "running", "succeeded", "failed", "stopped", "complete"})}},
+        json::array(),
+        object({{"experiments", array(experiment())}, {"runs", array(run_summary())}},
+               {"experiments", "runs"}));
+    add(registry,
+        "get_experiment",
+        "get_study",
+        {{"experiment_id", identifier()}},
+        {"experiment_id"},
+        experiment());
+    add(registry,
+        "list_experiment_trials",
+        "list_trials",
+        {{"experiment_id", identifier()},
+         {"state", choice({"running", "pruned", "failed", "complete"})}},
+        {"experiment_id"},
+        object({{"experiment_id", identifier()}, {"trials", array(trial())}},
+               {"experiment_id", "trials"}));
+    add(registry,
+        "get_experiment_analysis",
+        "get_study_analysis",
+        {{"experiment_id", identifier()}},
+        {"experiment_id"},
+        analysis());
     auto names = array({{"type", "string"}, {"pattern", "^[A-Za-z0-9_.-]{1,128}$"}});
     names["uniqueItems"] = true;
     add(registry,
@@ -436,39 +528,58 @@ void register_experiment_capabilities(Registry& registry) {
     names["minItems"] = 1;
     add(registry, "compare_runs", "compare_runs", {{"runs", runs}, {"names", names}},
         {"runs"}, comparison());
-    auto properties = study_spec().at("properties");
+    auto properties = experiment_spec().at("properties");
     properties["from_defaults"] = flag();
     // Zetta fills objective and budgets field by field when from_defaults is set, so each of them
     // and each of their fields is optional here; the handler requires both without it.
     for (const char* field : {"objective", "budgets"}) {
         properties[field]["required"] = json::array();
     }
-    add(registry, "start_study", "create_study", properties, {"name", "methodology"}, study(),
+    add(registry,
+        "start_experiment",
+        "create_study",
+        properties,
+        {"name", "methodology"},
+        experiment(),
         "write");
-    add(registry, "stop_study", "stop_study", {{"study", identifier()}}, {"study"},
-        object({{"study", identifier()}, {"status", choice({"stopped"})}, {"reason", text()}},
-        {"study", "status", "reason"}), "write");
+    add(registry,
+        "stop_experiment",
+        "stop_study",
+        {{"experiment_id", identifier()}},
+        {"experiment_id"},
+        object(
+            {{"experiment_id", identifier()}, {"status", choice({"stopped"})}, {"reason", text()}},
+            {"experiment_id", "status", "reason"}),
+        "write");
     add(registry,
         "stop_experiment_trial",
         "stop_trial",
-        {{"study", identifier()}, {"run_id", identifier()}},
-        {"study", "run_id"},
-        object({{"study", identifier()}, {"run", identifier()}, {"state", choice({"failed"})}},
-               {"study", "run", "state"}),
+        {{"experiment_id", identifier()}, {"run_id", identifier()}},
+        {"experiment_id", "run_id"},
+        object(
+            {{"experiment_id", identifier()}, {"run", identifier()}, {"state", choice({"failed"})}},
+            {"experiment_id", "run", "state"}),
         "write");
     add(registry,
         "promote_trial",
         "promote_trial",
-        {{"study", identifier()}, {"run_id", identifier()}},
-        {"study", "run_id"},
-        object({{"study", identifier()},
+        {{"experiment_id", identifier()}, {"run_id", identifier()}},
+        {"experiment_id", "run_id"},
+        object({{"experiment_id", identifier()},
                 {"run", identifier()},
                 {"model", identifier()},
                 {"project", text()}},
-               {"study", "run", "model", "project"}),
+               {"experiment_id", "run", "model", "project"}),
         "admin");
-    add(registry, "tail_experiment_events", "receive_events", {{"kind", choice({"study", "run"})},
-        {"id", identifier()}, {"from_sequence", integer(1, 9007199254740991)},
-        {"max_events", integer(1, 1000)}, {"wait_ms", integer(0, 30000)}}, {"kind", "id"}, events());
+    add(registry,
+        "tail_experiment_events",
+        "receive_events",
+        {{"kind", choice({"experiment", "run"})},
+         {"id", identifier()},
+         {"from_sequence", integer(1, 9007199254740991)},
+         {"max_events", integer(1, 1000)},
+         {"wait_ms", integer(0, 30000)}},
+        {"kind", "id"},
+        events());
 }
 } // namespace lake::api

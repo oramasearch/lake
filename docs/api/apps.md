@@ -155,11 +155,7 @@ is lake's own account of the person (the `users` row, the pool's credentials and
 
 | Route | Purpose |
 |---|---|
-| `GET /applications`, `POST /applications` | list and register applications |
-| `GET /application?id=<id>` | registration and links to management pages |
-| `GET /application/users?id=<id>`, `POST /application/users/suspend` | list and suspend pool users |
-| `GET /application/organizations?id=<id>` and its POST actions | list, create, and delete organizations |
-| `GET /application/events?id=<id>`, `POST /application/webhooks` | event log and webhook registration |
+| the web app's `/applications`, `/application?id=<id>`, `/application/users`, `/application/organizations`, `/application/events` | registration and management, through the capabilities above (the server forms were retired in lake#561) |
 | `GET /apps/<id>/sign-up`, `/sign-in`, `/mfa`, `/passkey-sign-in` | themed hosted identity pages on lake's host |
 | the same `/sign-up`, `/sign-in`, and `/mfa` paths on the custom host | themed custom-domain entry pages |
 | `GET /v1/apps/<id>/.well-known/jwks.json` | raw public JWKS, cached for five minutes |
@@ -361,6 +357,21 @@ read-only SQL, Service and App reads, and repository reads. Its answer contract 
 person reviews the files and App settings. Lake starts a later turn with that exact object at
 `context.confirmed_proposal`; only the later turn receives `create_repository`,
 `commit_repository_files`, `create_app`, and `deploy_app`.
+
+The confirming call names what it confirms, and `agent_turn` checks it against the stored answer
+rather than trusting the caller's copy (lake#561):
+
+```json
+{"customer_id":"space-id","workspace_id":"workspace-id","agent":"agent-application","kind":"app","message":"Confirm and deploy the reviewed proposal.","proposal_task_id":"task-id","proposal_sha256":"<proposal_sha256 from get_agent_task>","context":{"confirmed_proposal":{"kind":"proposal","confirm":true,"files":[],"app":{"name":"customer-health","auth":"none"}},"confirm_public":true}}
+```
+
+`proposal_task_id` must be a finished `agent-application` `app` turn of this workspace that the
+caller may follow, and its answer a proposal with `confirm: true`, `files` and `app`
+(`That task has no ApplicationAgent proposal to confirm.`, 400). `proposal_sha256` must be the
+digest of that stored proposal, which `get_agent_task` returns beside it, and `confirmed_proposal`
+must equal it (`The ApplicationAgent proposal changed before confirmation.`, 409). A public app
+(`auth` `none` or `public`) also needs `context.confirm_public: true` (`This app will be public.
+Tick the box to confirm that anyone with its address can open it.`, 400).
 
 ApplicationAgent's App shape maps `auth: public` to Ship App `auth: none`, accepts a missing or null
 host as the generated wildcard host, and represents an operator-managed environment credential as

@@ -3,8 +3,8 @@
 lake is where a customer designs, trains and ships AI on their own data. Each customer space has
 one or more workspace Zettas for data, projects, pipelines, runs and models; lake adds the
 accounts, agents, services, apps, Liquid repositories, search and identity around them, through one
-capability registry served as REST, OpenAPI and MCP, and a server-rendered web application. Start
-at the homepage's Getting started (`/docs`).
+capability registry served as REST, OpenAPI and MCP, and a web application (`frontend/`, embedded
+in the binary) that calls only that API. Start at the homepage's Getting started (`/docs`).
 
 ## Build and get a first result
 
@@ -18,11 +18,9 @@ cmake --build build -j 6
 ctest --test-dir build --output-on-failure
 ```
 
-Design, Train, Ship and Ask pages use `/w/<workspace_id>/...`. The global top-bar selector lists
-the space's workspaces. Workspace paths in the table are abbreviated: prepend `/w/<workspace_id>`
-to both GET and POST routes. Old unprefixed GET routes redirect to the remembered or sole workspace;
-unprefixed mutations are refused.
-Forms and person-scoped REST and MCP calls send `workspace_id` explicitly. Library-agent bus and
+The web app's Design, Train, Ship and Ask pages live under `/w/<workspace_id>/...`; the top-bar
+selector lists the space's workspaces ([`docs/ui/web-app.md`](docs/ui/web-app.md)). Person-scoped
+REST and MCP calls send `workspace_id` explicitly. Library-agent bus and
 task-credential calls may omit it: Lake derives the immutable workspace from `agent_tasks` and
 rejects a supplied mismatch. Task/app/build events live in that workspace Zetta; only
 `agent-tasks.*` remain on the Lake bus. See the
@@ -37,49 +35,25 @@ workspace at a time, after which they are served from that store and the space's
 volume stays untouched. It needs liquid `8955519` or later (liquid#332); no workspace is switched on dev. See
 [workspace-store.md](docs/architecture/workspace-store.md).
 
-Workspaces are explicit `workspaces` contract rows, not service aliases. `/workspaces` lists
-their environment and operator status, creates desired state, and deletes with typed-name
+Workspaces are explicit `workspaces` contract rows, not service aliases. The app's `/workspaces`
+lists their environment and operator status, creates desired state, and deletes with typed-name
 confirmation. Routing resolves `workspaces.zetta_service_id`; migration 0039 and the operator's
 `workspaces_guard` handoff are documented in [the contract](docs/control-plane/workspaces.md).
 
+A browser opening any page gets the web app's `index.html`; every other request is the API or a
+protocol route. The full route table is [`docs/serving/http.md`](docs/serving/http.md).
+
 | Route | Serves |
 |---|---|
-| `GET /` | *Design, train, and ship AI on your own data*: Getting started and the Design, Train and Ship cards, with actions and navigation matched to the viewer ([`docs/ui/front-door.md`](docs/ui/front-door.md)) |
-| `GET /style-<hash>.css`, `GET /fonts/<IBM Plex face>-<hash>.woff2` | content-hashed design-system assets (`public, max-age=31536000, immutable`) linked by every page |
-| `GET /style.css`, `GET /fonts/<IBM Plex face>.woff2` | compatibility aliases for direct and older links (`no-cache`) |
-| `GET /healthz`, `GET /readyz` | unauthenticated liveness and control-store readiness probes |
-| `GET /metrics` | Prometheus metrics, guarded by the same bearer or session cookie as capabilities |
-| `GET /v1/server_info` | `{ok, value: {name, node, version, api, store}}`, no auth |
-| `GET /sign-up`, `/sign-in`, `/mfa`, `/passkey-sign-in` | public password, TOTP, OAuth and passkey entry pages; with `LAKE_CLERK_PUBLISHABLE_KEY` set, `/sign-in` and `/sign-up` are Clerk's forms ([`docs/api/clerk.md`](docs/api/clerk.md)) |
-| `GET /ship/apps`, `/ship/app`; `POST /ship/apps/*`, `/ship/app/*` | create and operate customer apps, or review and confirm an ApplicationAgent proposal, with masked secrets and live app/build events ([`docs/ui/apps.md`](docs/ui/apps.md)) |
-| `GET /train/streams`, `/train/stream` | paged space-scoped topic/message CRUD, shared agent views and non-consuming live browse on workspace and bus Zettas ([`docs/ui/streams.md`](docs/ui/streams.md), [`docs/api/streams.md`](docs/api/streams.md)) |
-| `GET /train/experiments`, `/train/experiment`, `/train/experiment/run`, `/train/experiments/compare`; `POST /train/experiments/agent`, `/train/experiments/agent/confirm` | space-scoped studies, live run metrics, comparison, confirmed promotion, and an editable ExperimentsAgent proposal before a study starts ([`docs/ui/experiments.md`](docs/ui/experiments.md), [`docs/api/experiments.md`](docs/api/experiments.md)) |
-| `GET /design/projects`, `/design/project`, `/design/solutions`, `/design/solution`, `/train/data`, `/train/runs`, `/train/run`, `/ship/models`, `/ship/indexes`; `POST /workspace/start` and the forms under them | Design, solution projects, Train and Ship over the selected workspace Zetta ([`docs/api/workspaces.md`](docs/api/workspaces.md)) |
-| `POST /identity/clerk-session` | exchanges a verified Clerk `lake` template token for a `lake_session`; absent without Clerk |
-| `GET /settings`, `/sessions`, `/passkeys`, `/tokens` | authenticated profile, session/device, passkey and scoped-token management pages |
-| `GET /applications`, `/application`, `/application/users`, `/application/organizations`, `/application/events` | application registration and operator management pages |
-| `GET /apps/<id>/sign-up`, `/sign-in`, `/mfa`, `/passkey-sign-in` | themed application identity pages; a configured custom host serves its equivalent entry pages |
-| `GET /apps/authorize?app=<id>&rd=<URL>` | validates a protected Ship app destination and redirects a signed-in member with a short-lived handoff code |
-| `GET /v1/apps/auth`, `/w/<workspace_id>/v1/apps/auth` | nginx forward-auth for protected Ship apps, including one-use code exchange for a host-only app session |
-| `GET /v1/apps/<id>/.well-known/jwks.json` | the application's public Ed25519 JSON Web Key Set |
-| `GET /customers`, `/repositories`, `/repository?id=`, `/organizations`, `/organization?id=`, `/team?id=`, `/member?id=`, `/teams`, `/members`, `/invitations`, `/grants`, `/access`, `/search`, `/metering`, `/secret-mounts`, `/secrets`, `/encryption-keys`, `/audit` | server-rendered pages with ordinary `/sign-in` for protected reads and public repository browsing; operator entry remains `/login` and `POST /session` |
-| `GET /transparency?identity=<taap-id>` | public hosted identity monitor over checkpoint-verified bulk tiles |
-| `GET /repository/tree`, `/file`, `/changes`, `/change`, `/issues`, `/issue`, `/releases`, `/webhooks`, `/protection`, `/conflicts`, `/artifacts`, `/artifact`; `POST /conflicts/resolve` | forge pages over authorized repository, review, issue, release, webhook, policy, signed-audit, and libliquid records; conflict pages explain kind, region, and reasons before an audited resolution. |
-| `GET /environments?repository_id=`, `/environment?repository_id=&name=`, `/logs?repository_id=&environment=` | platform summaries, deployment history, capability-backed environment/domain forms, and cursor-polling Loki-compatible logs; stale mirror reads show a warning |
-| `GET /drive`, `/drive/preview`, `/drive/download`, `/drive/history`, `/drive/history/diff`, `/drive/conflict`, `/drive/share`, `/share/:token` | server-rendered drive list/grid browsing, registered previews with exact-byte fallback, explained conflict comparison, effective access, and scoped links; create, upload, rename, move, delete, restore, conflict resolution, and sharing mutations use POST under `/drive/` |
-| `GET /ship/packages`, `/ship/app`; `POST /repository/build`, `/ship/app/build` | authorized tenant images and live build history/logs, plus repository and App build actions |
-| `/api/models/*`, `/api/datasets/*`, model/dataset resolve and basic-LFS routes | the documented `huggingface_hub` create, upload, list, info, snapshot, and file-download subset; see [`docs/api/models.md`](docs/api/models.md) |
-| `/v2/*`, npm package paths, `/legacy/`, `/simple/*`, `/packages/*` | OCI Distribution, npm publication/install, and Python publication/install protocols; see [`docs/api/registry.md`](docs/api/registry.md) |
-| `/buildid/*`, `PUT /_lake/debug/*` | public debuginfod reads and protected executable, debug-information, and source publication |
-| `GET /models/:namespace/:name`, `/models/:id` | model revisions, files, deduplication savings, and verified training provenance |
-| `GET /v1/<read>`, `POST /v1/<action>`; the same below `/w/<workspace_id>` | the capability registry as REST: identity and application authentication, Ship app desired state/logs/events, asynchronous image builds/status/cancellation/logs, short-lived agent-session keys, account recovery, offline grants, tenants, repositories, organization administration, policy, repository search, static secrets, encryption, TUF metadata, transparency monitoring, asynchronous replication, the lake identity and the signed audit stream; bearer required except documented public identity/recovery entry points, transparency reads, and application JWKS |
-| `/v1/repositories/<repository-id>/sync/*` | streaming liquid push, pull, missing-object negotiation, chunk upload, and ranged chunk reads through the same registry policy and audit path; offline push accepts a grant UUID and returns per-change reauthorization results |
-| `GET /v1/openapi.json`, `/w/<workspace_id>/v1/openapi.json` | the same OpenAPI 3.1 document, generated from the registry |
-| `GET /v1/oauth/<provider>/callback` | OAuth authorization-code callback with one-use state, PKCE, and verified provider identity |
-| `GET /sso?organization_id=<uuid>` | organization SSO provider, federation issuer policy, and SCIM provisioning evidence page |
-| `/scim/v2/Users`, `/scim/v2/Groups` and `/:id` | provider-bearer SCIM 2.0 filtered list, get, create, PATCH and delete resources |
-| `GET /acme/<customer-id>/directory`, ACME resource `POST`s, `HEAD /acme/<customer-id>/new-nonce`, `GET /.well-known/acme-challenge/<token>` | RFC 8555 account, HTTP-01 order, CSR finalize, polling, and certificate download |
-| `POST /mcp`, `/w/<workspace_id>/mcp` | MCP (JSON-RPC 2.0): `initialize`, `tools/list`, `tools/call` — the same registry as tools |
+| a browser's `GET` of `/`, `/repositories`, `/w/<workspace_id>/design/projects` or any other page | the web app ([`docs/ui/web-app.md`](docs/ui/web-app.md)); its files under `/ui/` |
+| `GET /v1/<read>`, `POST /v1/<action>`; the same below `/w/<workspace_id>` | the capability registry as REST, the only thing the web app calls ([`docs/api/README.md`](docs/api/README.md)) |
+| `GET /v1/openapi.json`, `POST /mcp`; the same below `/w/<workspace_id>` | the registry as OpenAPI 3.1 and as MCP tools |
+| `POST /session`, `POST /logout`, `POST /identity/clerk-session`, `GET /v1/oauth/<provider>/callback` | the sign-in routes that set or clear the HttpOnly `lake_session` cookie |
+| `GET /file/raw`, `/file/download`, `/drive/download`, `/exports/download`, `/share/<token>/download` | file bytes; a protected download without a credential redirects to `/sign-in` |
+| `GET /apps/<id>/sign-up`, `/sign-in`, `/mfa`, `/passkey-sign-in` (also on a custom sign-in host), `/apps/authorize`, `/v1/apps/auth` | an identity application's hosted sign-in pages, the one server-rendered surface, and the Ship app handoff ([`docs/api/apps.md`](docs/api/apps.md), [`docs/api/web-apps.md`](docs/api/web-apps.md)) |
+| `GET /healthz`, `/readyz`, `/metrics` | probes and Prometheus metrics |
+| `/v1/repositories/<id>/sync/*`, `/v2/*`, npm, Python and debuginfod paths, `/api/models/*`, `/scim/v2/*`, `/acme/*` | liquid sync, the package registries, the Hugging Face subset, SCIM and ACME |
+| `GET /llms.txt`, `/llms-full.txt`, `/skills/lake/SKILL.md` | the agents' guide and skill |
 | anything else | `404 {"ok":false,"error":{"code":"not_found"}}` |
 
 `lake version` prints the version. The default port is 4900 (`--listen HOST:PORT`);

@@ -294,6 +294,55 @@ struct ClerkIdentity {
 };
 // A service a customer runs on the Lake's cluster (docs/control-plane/services.md): lake writes
 // the desired fields, the operator the status fields.
+// A usage limit on one dimension of a customer's usage (migration 0072, lake#564,
+// docs/api/metering.md#limits): `limit` in the dimension's unit, per UTC calendar month for a
+// counted dimension, and a warning from `warn_percent` of it. Storage's limit is the enforced
+// repository storage quota (customer_storage_quotas); every other limit warns and is not enforced.
+// A content-free number about the account, like the storage quota; never a price.
+struct UsageLimit {
+    std::string customer_id, dimension;
+    std::uint64_t limit = 0;
+    int warn_percent = 80;
+    std::string updated_at;
+};
+// Billing records (migration 0073, lake#564, decision 56, docs/api/billing.md): the price list,
+// each account's plan over time, and the invoices lake issues. Control-plane multitenancy; usage
+// stays in each workspace Zetta and only the quantity billed per dimension is frozen on a line.
+// Amounts are integer millionths of the currency's unit.
+struct BillingPrice {
+    std::string dimension; // a usage_dimensions() name
+    std::uint64_t unit_micros = 0;
+    std::uint64_t per = 1;      // units of the dimension's unit `unit_micros` buys
+    std::uint64_t included = 0; // units a month the plan includes
+};
+struct BillingPlan {
+    std::string id, name, description, currency = "USD";
+    std::uint64_t base_micros = 0; // the fee for one month
+    bool active = true;
+    int position = 0;
+    std::vector<BillingPrice> prices;
+    std::string created_at, updated_at;
+};
+// An account's plan from `effective_from` ("YYYY-MM-01").
+struct BillingSubscription {
+    std::string customer_id, effective_from, plan_id, created_at;
+};
+struct InvoiceLine {
+    std::string kind; // plan or usage
+    std::string dimension, description, unit;
+    std::uint64_t quantity = 0, included = 0, billable = 0, unit_micros = 0, per = 1,
+                  amount_micros = 0;
+};
+struct Invoice {
+    std::string id;
+    std::uint64_t number = 0;
+    std::string customer_id, period, plan_id, plan_name, currency;
+    std::uint64_t total_micros = 0;
+    std::string state = "due"; // due, paid or void
+    std::string provider, provider_reference, instructions, note;
+    std::string issued_at, paid_at, voided_at;
+    std::vector<InvoiceLine> lines;
+};
 struct ManagedService {
     std::string id, customer_id, kind, name, slug;
     bool is_default = false;
@@ -1089,6 +1138,8 @@ public:
     virtual Result<std::vector<Customer>> list_customers(int limit,
                                                          const std::string& user_id = {}) = 0;
     virtual Result<Customer> get_customer(const std::string& id) = 0;
+    // The organization's own space; not_found when it has none (lake#561, get_organization).
+    virtual Result<Customer> organization_customer(const std::string& organization_id) = 0;
 
     // Refuses a workspace_id that is not a live workspace of customer_id's space (invalid_input).
     virtual Result<Repository> create_repository(const NewRepository&) = 0;
@@ -1379,6 +1430,33 @@ public:
     virtual Result<StaleAgentTasks> stale_agent_tasks(std::chrono::seconds republish_after) = 0;
     virtual Result<std::uint64_t> set_storage_quota(const std::string& customer_id,
                                                     std::uint64_t quota_bytes) = 0;
+    // The customer's usage limits (migration 0072, lake#564), by dimension; not_found for an
+    // unknown customer. set_usage_limit replaces one; a `limit` of 0 removes it.
+    virtual Result<std::vector<UsageLimit>> usage_limits(const std::string& customer_id) = 0;
+    virtual Result<UsageLimit> set_usage_limit(const UsageLimit& limit) = 0;
+    // Billing records (migration 0073, lake#564, docs/api/billing.md). billing_plans lists every
+    // plan, active or not, by position then id; put_billing_plan creates or replaces one with its
+    // prices. billing_subscriptions lists an account's plans by effective_from (not_found for an
+    // unknown customer); set_billing_subscription removes the account's rows from
+    // `effective_from` on and, unless `plan_id` is empty, adds one there (not_found for an unknown
+    // plan). create_invoice stores an invoice and its lines, numbering it (conflict when the
+    // account already has an invoice for the period that is not void); set_invoice_state moves a
+    // due invoice to paid or void (conflict from any other state).
+    virtual Result<std::vector<BillingPlan>> billing_plans() = 0;
+    virtual Result<BillingPlan> put_billing_plan(const BillingPlan& plan) = 0;
+    virtual Result<std::vector<BillingSubscription>>
+    billing_subscriptions(const std::string& customer_id) = 0;
+    virtual Result<std::vector<BillingSubscription>>
+    set_billing_subscription(const std::string& customer_id,
+                             const std::string& effective_from,
+                             const std::string& plan_id) = 0;
+    virtual Result<Invoice> create_invoice(const Invoice& invoice) = 0;
+    virtual Result<std::vector<Invoice>> list_invoices(const std::string& customer_id) = 0;
+    virtual Result<Invoice> get_invoice(const std::string& id) = 0;
+    virtual Result<Invoice> set_invoice_state(const std::string& id,
+                                              const std::string& state,
+                                              const std::string& provider_reference,
+                                              const std::string& note) = 0;
 
     virtual Result<PkiAuthorityRecord> create_pki_authority(const NewPkiAuthorityRecord& value,
                                                             const std::string& instance_kek) = 0;
@@ -1480,6 +1558,9 @@ public:
     virtual Result<void> disable_mfa(const std::string& user_id,
                                      const std::string& pool_id,
                                      const std::string& code) = 0;
+    // Whether the user has an active TOTP enrollment in the pool (the web app's `viewer`,
+    // lake#561).
+    virtual Result<bool> mfa_enrolled(const std::string& user_id, const std::string& pool_id) = 0;
     virtual Result<IssuedSession> sign_in_totp(const PasswordSignIn&) = 0;
     virtual Result<WebAuthnChallenge> begin_passkey_registration(const std::string& user_id,
                                                                  const std::string& pool_id,

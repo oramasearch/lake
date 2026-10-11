@@ -1,0 +1,721 @@
+/* The app's look: rev-os's visual language (docs/ui/web-app.md → The look) on lake's own colours
+   and type. Layered after lake.css and app.css, so it restyles lake's component classes in place:
+   every page built from them takes the look without being rewritten. Lake tokens only; the one
+   addition is --lake-rule, a softer control border than --lake-border-strong. */
+
+:root,
+[data-theme='light'] {
+  --lake-rule: var(--orama-color-gray-30);
+  --lake-raised: var(--orama-color-gray-10);
+  --lake-brand-strip: linear-gradient(90deg, var(--orama-color-blue-40) 0%, var(--orama-color-blue-60) 45%, var(--orama-color-violet-60) 100%);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) {
+    --lake-rule: var(--orama-color-night-50);
+    --lake-raised: var(--orama-color-night-80);
+  }
+}
+:root[data-theme='dark'] {
+  --lake-rule: var(--orama-color-night-50);
+  --lake-raised: var(--orama-color-night-80);
+}
+
+/* ---------------------------------------------------------------- base */
+
+html,
+body {
+  font-size: 14px;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--lake-rule) transparent;
+}
+::selection {
+  background: color-mix(in srgb, var(--lake-action) 22%, transparent);
+}
+:where(a, button, input, textarea, select, summary, [tabindex]):focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--lake-focus) 35%, transparent);
+  border-radius: 5px;
+}
+code,
+kbd,
+pre,
+.identifier {
+  font-family: var(--lake-font-mono);
+}
+.brand-strip {
+  height: 2px;
+  background: var(--lake-brand-strip);
+}
+/* The mono kicker: eyebrows, labels, table heads, section names. */
+.label,
+.eyebrow {
+  margin: 0 0 var(--lake-space-1);
+  color: var(--lake-text-tertiary);
+  font-family: var(--lake-font-mono);
+  font-size: 10.5px;
+  font-weight: var(--lake-weight-semibold);
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+/* ---------------------------------------------------------------- page */
+
+main .page-container {
+  width: 100%;
+  max-width: 1240px;
+  margin: 0;
+  padding: 20px 24px 64px;
+  overflow-x: visible;
+  animation: lake-appear 0.18s ease-out;
+}
+main .page-container.page-wide {
+  max-width: 1480px;
+}
+.page-header {
+  align-items: flex-end;
+  margin-bottom: 20px;
+  gap: 12px 24px;
+}
+.page-header > div:first-child {
+  flex: 1 1 auto;
+}
+.page-actions {
+  padding-top: 0;
+}
+main h1 {
+  margin: 0;
+  font-size: 22px;
+  font-weight: var(--lake-weight-semibold);
+  letter-spacing: -0.02em;
+  line-height: 1.2;
+}
+main .sub {
+  max-width: 48rem;
+  margin: 4px 0 0;
+  color: var(--lake-text-secondary);
+  font-size: 13.5px;
+}
+.page-header + * {
+  margin-top: 0;
+}
+/* Section titles read as rev-os's mono labels with a hairline running to the edge. */
+main h2 {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 28px 0 10px;
+  color: var(--lake-text-tertiary);
+  font-family: var(--lake-font-mono);
+  font-size: 10.5px;
+  font-weight: var(--lake-weight-semibold);
+  letter-spacing: 0.14em;
+  line-height: 1.4;
+  text-transform: uppercase;
+}
+main h2::after {
+  height: 1px;
+  flex: 1;
+  background: var(--lake-border-subtle);
+  content: '';
+}
+main .card > h2:first-child,
+main .panel > h2:first-child,
+main .section-heading h2 {
+  margin-top: 0;
+}
+main .card > h2::after,
+main .panel > h2::after,
+main .section-heading h2::after,
+main .dialog h2::after,
+main h2.dialog-title::after {
+  display: none;
+}
+main h3 {
+  margin: 18px 0 6px;
+  font-size: 14.5px;
+  font-weight: var(--lake-weight-semibold);
+  letter-spacing: -0.005em;
+}
+main h4 {
+  margin: 14px 0 4px;
+  font-size: 13.5px;
+  font-weight: var(--lake-weight-semibold);
+}
+main p {
+  margin: 0 0 10px;
+}
+.section-heading {
+  margin-bottom: 10px;
+}
+.section-heading h2,
+.section-heading h3 {
+  margin-bottom: 0;
+}
+.muted,
+small.muted {
+  color: var(--lake-text-secondary);
+}
+
+/* ---------------------------------------------------------------- surfaces */
+
+.card,
+.panel {
+  padding: 12px 16px 14px;
+  border: 1px solid var(--lake-border-subtle);
+  border-radius: 6px;
+  background: var(--lake-surface);
+}
+.panel + .panel,
+.card + .card {
+  margin-top: 12px;
+}
+.lake-grid {
+  gap: 12px;
+}
+a.card {
+  color: inherit;
+  text-decoration: none;
+  transition: border-color var(--lake-motion-fast) var(--lake-motion-ease),
+    background var(--lake-motion-fast) var(--lake-motion-ease);
+}
+a.card:hover {
+  border-color: var(--lake-rule);
+  background: color-mix(in srgb, var(--lake-raised) 40%, var(--lake-surface));
+}
+.empty {
+  padding: 40px 24px;
+  border: 1px dashed var(--lake-rule);
+  border-radius: 6px;
+  color: var(--lake-text-secondary);
+  font-size: 13.5px;
+  text-align: center;
+}
+.panel.empty,
+.card.empty {
+  border-style: dashed;
+}
+.compact-empty {
+  padding: 16px;
+  color: var(--lake-text-secondary);
+}
+.notice,
+.error {
+  margin: 0 0 12px;
+  border-left-width: 3px;
+  border-radius: 5px;
+  padding: 10px 14px;
+  font-size: 13px;
+}
+.notice strong,
+.error strong {
+  font-weight: var(--lake-weight-semibold);
+}
+.error {
+  color: var(--lake-danger);
+}
+.error > span,
+.error > p {
+  color: var(--lake-text-secondary);
+}
+
+/* ---------------------------------------------------------------- tables */
+
+.table-wrap,
+main table:not(.table-wrap table):not(.source-view table) {
+  overflow: hidden;
+  border: 1px solid var(--lake-border-subtle);
+  border-radius: 6px;
+  background: var(--lake-surface);
+}
+.table-wrap {
+  overflow: auto;
+}
+main table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13.5px;
+}
+main th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  border-bottom: 1px solid var(--lake-border-subtle);
+  padding: 7px 12px;
+  color: var(--lake-text-tertiary);
+  background: var(--lake-raised);
+  font-family: var(--lake-font-mono);
+  font-size: 10px;
+  font-weight: var(--lake-weight-semibold);
+  letter-spacing: 0.1em;
+  text-align: left;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+main td {
+  border-bottom: 1px solid var(--lake-border-subtle);
+  padding: 9px 12px;
+  vertical-align: middle;
+}
+main tbody tr:last-child td {
+  border-bottom: 0;
+}
+main tbody tr:hover td {
+  background: color-mix(in srgb, var(--lake-raised) 55%, transparent);
+}
+main td a {
+  font-weight: var(--lake-weight-medium);
+  text-decoration: none;
+}
+main td a:hover {
+  text-decoration: underline;
+}
+main td code {
+  font-size: 12px;
+}
+
+/* ---------------------------------------------------------------- controls */
+
+.button,
+main button,
+.dialog button,
+.drawer button,
+.palette button,
+input[type='submit'] {
+  min-height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border: 1px solid var(--lake-rule);
+  border-radius: 5px;
+  padding: 0 12px;
+  color: var(--lake-text-primary);
+  background: var(--lake-surface);
+  font: inherit;
+  font-size: 13px;
+  font-weight: var(--lake-weight-medium);
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+  text-decoration: none;
+  transition: border-color var(--lake-motion-fast) var(--lake-motion-ease),
+    color var(--lake-motion-fast) var(--lake-motion-ease),
+    background var(--lake-motion-fast) var(--lake-motion-ease),
+    filter var(--lake-motion-fast) var(--lake-motion-ease);
+}
+.button:hover,
+main button:hover,
+.dialog button:hover,
+.drawer button:hover,
+input[type='submit']:hover {
+  border-color: var(--lake-action);
+  color: var(--lake-action);
+  background: var(--lake-surface);
+}
+.button-primary,
+button.primary,
+main form.stack button[type='submit']:not(.button),
+main form.login button,
+main .filters button,
+main form.search button {
+  border-color: var(--lake-action-filled);
+  color: var(--lake-text-on-action);
+  background: var(--lake-action-filled);
+}
+.button-primary:hover,
+button.primary:hover,
+main form.stack button[type='submit']:not(.button):hover,
+main form.login button:hover,
+main .filters button:hover,
+main form.search button:hover {
+  border-color: var(--lake-action-filled);
+  color: var(--lake-text-on-action);
+  background: var(--lake-action-filled);
+  filter: brightness(1.1);
+}
+.button-danger,
+button.danger {
+  border-color: var(--lake-danger);
+  color: var(--lake-text-on-danger);
+  background: var(--lake-danger);
+}
+.button-danger:hover,
+button.danger:hover {
+  border-color: var(--lake-danger);
+  color: var(--lake-text-on-danger);
+  background: var(--lake-danger);
+  filter: brightness(1.1);
+}
+.button-ghost,
+.icon-button {
+  border-color: transparent;
+  color: var(--lake-text-secondary);
+  background: transparent;
+}
+.button-ghost:hover,
+.icon-button:hover {
+  border-color: transparent;
+  color: var(--lake-text-primary);
+  background: var(--lake-raised);
+}
+button:disabled,
+.button:disabled {
+  opacity: 0.5;
+  pointer-events: none;
+}
+main input:not([type='checkbox']):not([type='radio']):not([type='file']):not([type='range']),
+main select,
+main textarea,
+.dialog input:not([type='checkbox']):not([type='radio']),
+.dialog select,
+.dialog textarea {
+  min-height: 32px;
+  border: 1px solid var(--lake-rule);
+  border-radius: 5px;
+  padding: 6px 10px;
+  color: var(--lake-text-primary);
+  background: var(--lake-surface);
+  font: inherit;
+  font-family: var(--lake-font-sans);
+  font-size: 13.5px;
+  font-weight: var(--lake-weight-regular);
+  letter-spacing: normal;
+  text-transform: none;
+  transition: border-color var(--lake-motion-fast) var(--lake-motion-ease);
+}
+main input:hover,
+main select:hover,
+main textarea:hover {
+  border-color: color-mix(in srgb, var(--lake-action) 45%, var(--lake-rule));
+}
+main input:focus,
+main select:focus,
+main textarea:focus {
+  border-color: var(--lake-action);
+}
+main textarea {
+  line-height: 1.5;
+}
+main label,
+.field-label {
+  color: var(--lake-text-tertiary);
+  font-family: var(--lake-font-mono);
+  font-size: 10.5px;
+  font-weight: var(--lake-weight-semibold);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+main label :is(input, select, textarea),
+main label span {
+  font-family: var(--lake-font-sans);
+  letter-spacing: normal;
+  text-transform: none;
+}
+main form label:has(> span > input[type='checkbox']),
+main label:has(> input[type='checkbox']),
+main label:has(> input[type='radio']) {
+  color: var(--lake-text-primary);
+  font-family: var(--lake-font-sans);
+  font-size: 13.5px;
+  font-weight: var(--lake-weight-regular);
+  letter-spacing: normal;
+  text-transform: none;
+}
+main form.stack {
+  gap: 14px;
+}
+.filters {
+  align-items: flex-end;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+kbd {
+  border: 1px solid var(--lake-rule);
+  border-radius: 4px;
+  padding: 0 5px;
+  color: var(--lake-text-secondary);
+  background: var(--lake-surface);
+  font-size: 10px;
+}
+
+/* ---------------------------------------------------------------- chips, tabs, lists */
+
+.badge {
+  min-height: 20px;
+  border-radius: 999px;
+  padding: 0 9px;
+  font-size: 11.5px;
+  font-weight: var(--lake-weight-medium);
+}
+.tabs,
+.forge-tabs,
+nav.tabs {
+  gap: 4px;
+  margin-bottom: 16px;
+  border-bottom: 1px solid var(--lake-border-subtle);
+  flex-wrap: nowrap;
+  overflow-x: auto;
+}
+.tabs a,
+.forge-tabs a {
+  min-height: 0;
+  margin-bottom: -1px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  padding: 8px 12px;
+  color: var(--lake-text-secondary);
+  background: transparent;
+  font-size: 13px;
+  white-space: nowrap;
+}
+.tabs a:hover,
+.forge-tabs a:hover {
+  border-color: transparent;
+  color: var(--lake-text-primary);
+  background: transparent;
+}
+.tabs a[aria-current='page'],
+.forge-tabs a[aria-current='page'] {
+  border-bottom-color: var(--lake-action);
+  color: var(--lake-action);
+  background: transparent;
+  font-weight: var(--lake-weight-semibold);
+}
+.actions {
+  gap: 8px;
+  margin-bottom: 16px;
+}
+.actions a {
+  min-height: 32px;
+  border: 1px solid var(--lake-rule);
+  border-radius: 5px;
+  padding: 0 12px;
+  background: var(--lake-surface);
+  font-size: 13px;
+  font-weight: var(--lake-weight-medium);
+}
+.actions a:hover {
+  border-color: var(--lake-action);
+  color: var(--lake-action);
+  background: var(--lake-surface);
+}
+.view-toggle button {
+  border-radius: 0;
+}
+.view-toggle button:first-child {
+  border-radius: 5px 0 0 5px;
+}
+.view-toggle button:last-child {
+  border-radius: 0 5px 5px 0;
+}
+.view-toggle button[aria-pressed='true'] {
+  border-color: var(--lake-action);
+  color: var(--lake-action);
+  background: var(--lake-action-soft);
+}
+main dl {
+  gap: 10px 24px;
+}
+main dt {
+  color: var(--lake-text-tertiary);
+  font-family: var(--lake-font-mono);
+  font-size: 10.5px;
+  font-weight: var(--lake-weight-semibold);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+main dd {
+  margin: 0;
+  font-size: 13.5px;
+}
+main pre {
+  border: 1px solid var(--lake-border-subtle);
+  border-radius: 5px;
+  padding: 10px 12px;
+  background: var(--lake-raised);
+  font-size: 12.5px;
+}
+main :not(pre) > code {
+  border-radius: 3px;
+  padding: 1px 5px;
+  background: var(--lake-raised);
+  font-size: 12.5px;
+}
+.loading-bars span {
+  border-radius: 4px;
+  background: linear-gradient(90deg, var(--lake-raised) 0%, var(--lake-border-subtle) 50%, var(--lake-raised) 100%);
+  background-size: 200% 100%;
+  animation: lake-shimmer 1.4s ease-in-out infinite;
+}
+@keyframes lake-shimmer {
+  0% {
+    background-position: 200% 0;
+  }
+  100% {
+    background-position: -200% 0;
+  }
+}
+
+/* ---------------------------------------------------------------- overlays */
+
+.overlay {
+  background: color-mix(in srgb, var(--orama-color-gray-100) 38%, transparent);
+  backdrop-filter: blur(1.5px);
+}
+.dialog,
+.palette {
+  border-radius: 8px;
+}
+.dialog-title {
+  font-size: 15px;
+  font-weight: var(--lake-weight-semibold);
+  letter-spacing: normal;
+  text-transform: none;
+}
+.toast {
+  border-radius: 6px;
+  font-size: 13px;
+}
+
+/* ---------------------------------------------------------------- the shell's own controls */
+
+/* lake.css styles every <button>; the shell draws its controls with utilities, which only set what
+   they name. Reset the rest here (components layer), so the utilities alone decide. */
+[data-shell] :is(header.shell-bar, nav[aria-label='Navigation']) button {
+  min-height: 0;
+  border-width: 0;
+  padding: 0;
+  color: inherit;
+  background: transparent;
+  font-weight: inherit;
+  line-height: inherit;
+}
+[data-shell] :is(header.shell-bar, nav[aria-label='Navigation']) button:hover {
+  color: inherit;
+  background: transparent;
+}
+
+/* A sortable column's head is a button: it reads like the others. */
+main th .th-sort,
+main th .th-sort:hover {
+  min-height: 0;
+  border: 0;
+  padding: 0;
+  color: inherit;
+  background: none;
+  font: inherit;
+  letter-spacing: inherit;
+  text-transform: inherit;
+}
+main th .th-sort:hover {
+  color: var(--lake-text-primary);
+}
+main th[aria-sort]::after {
+  margin-left: 4px;
+}
+
+/* A field's label keeps its required mark on the same line. */
+.field > label,
+.field > .field-label {
+  display: block;
+}
+.field small {
+  font-size: 12px;
+}
+
+/* Markdown (docs, READMEs, agent replies) keeps prose headings, as rev-os's .prose does. */
+main :is(.markdown-body, .docs-page) h2 {
+  display: block;
+  margin: 24px 0 8px;
+  color: var(--lake-text-primary);
+  font-family: var(--lake-font-sans);
+  font-size: 17px;
+  font-weight: var(--lake-weight-semibold);
+  letter-spacing: -0.01em;
+  text-transform: none;
+}
+main :is(.markdown-body, .docs-page) h2::after {
+  display: none;
+}
+main :is(.markdown-body, .docs-page) h1 {
+  margin: 0 0 12px;
+}
+main :is(.markdown-body, .docs-page) :is(p, li) {
+  font-size: 14px;
+  line-height: 1.65;
+}
+
+main form.stack .field > label,
+main .field > label {
+  display: block;
+}
+
+/* The kit's search box and filter pills (rev-os's Toolbar). */
+main .search-input {
+  width: 14rem;
+  min-height: 32px;
+}
+main .chip-button {
+  min-height: 0;
+  padding: 1px 10px;
+  font-size: 12px;
+  font-weight: var(--lake-weight-regular);
+  line-height: 20px;
+}
+main .chip-button[aria-pressed='true'] {
+  border-color: var(--lake-action);
+  color: var(--lake-action);
+  font-weight: var(--lake-weight-semibold);
+}
+
+/* Variants and icon buttons inside pages and overlays: as specific as the `main button` /
+   `.dialog button` base above, so a primary, danger or icon button keeps its own look there. */
+:is(main, .dialog, .drawer, .palette) :is(.button-primary, button.primary) {
+  border-color: var(--lake-action-filled);
+  color: var(--lake-text-on-action);
+  background: var(--lake-action-filled);
+}
+:is(main, .dialog, .drawer, .palette) :is(.button-primary, button.primary):hover {
+  border-color: var(--lake-action-filled);
+  color: var(--lake-text-on-action);
+  background: var(--lake-action-filled);
+  filter: brightness(1.1);
+}
+:is(main, .dialog, .drawer, .palette) :is(.button-danger, button.danger) {
+  border-color: var(--lake-danger);
+  color: var(--lake-text-on-danger);
+  background: var(--lake-danger);
+}
+:is(main, .dialog, .drawer, .palette) :is(.button-danger, button.danger):hover {
+  border-color: var(--lake-danger);
+  color: var(--lake-text-on-danger);
+  background: var(--lake-danger);
+  filter: brightness(1.1);
+}
+:is(main, .dialog, .drawer, .palette) :is(.button-ghost, .icon-button) {
+  border-color: transparent;
+  color: var(--lake-text-secondary);
+  background: transparent;
+}
+:is(main, .dialog, .drawer, .palette) .icon-button {
+  width: 32px;
+  padding: 0;
+}
+:is(main, .dialog, .drawer, .palette) :is(.button-ghost, .icon-button):hover {
+  border-color: transparent;
+  color: var(--lake-text-primary);
+  background: var(--lake-raised);
+}
+
+/* Overlays are portalled outside `main`: a Field's label keeps its words and required mark on one
+   line there too (lake.css makes `form.stack label` a grid). */
+:is(.dialog, .drawer) form.stack .field > label,
+:is(.dialog, .drawer) .field > label {
+  display: block;
+}

@@ -38,7 +38,8 @@ per launch, `lal.<launch id>.<secret>`, puts it in a Secret owned by the Job or 
 writes only its SHA-256 (`credential_sha256`). lake's stores resolve such a bearer by comparing
 digests in constant time (`context_for`): it acts as the person who launched it, limited to the
 launch's `scopes` (`control::agent_launch_scopes`: `workspace_query`, `workspace_act`,
-`workspace_openapi`, `list_agent_library`, `repository_tree`, `repository_file`). A launch that is
+`workspace_openapi`, `list_agent_library`, `repository_tree`, `repository_file`, and the workspace's
+transcripts through `list_transcripts` and `get_transcript`, lake#561). A launch that is
 stopped (`desired = absent`) or not yet reported has no usable credential.
 
 ## Schedules
@@ -67,7 +68,24 @@ already written stay.
 (5–59, or whole hours), `every N hours|days`, `hourly`, `daily`, `weekly`, `every day|weekday|<weekday>
 at HH:MM`. lake checks each field's range and refuses a schedule that could fire more often than
 once every five minutes. The refusal states the rule: `every 1 minutes` answers that a schedule runs
-at most once every five minutes, so the shortest is `every 5 minutes` (lake#442). A schedule
+at most once every five minutes, so the shortest is `every 5 minutes` (lake#442).
+
+`time_zone` must be a name in the IANA time zone database (`Etc/UTC` when omitted), because the
+operator hands it to the CronJob's `spec.timeZone`, which Kubernetes refuses otherwise. lake checks
+it before anything is stored (lake#586): `{"cron": "0 9 1 1 *", "time_zone": "Mars/Olympus"}`
+answers `invalid_input` at `/time_zone`, *'Mars/Olympus' is not an IANA time zone; give one such as
+Etc/UTC, America/Toronto or Europe/Paris*, and no schedule exists. A name that differs only in
+letter case is refused with the spelling it most likely meant (`america/toronto` → *did you mean
+'America/Toronto'?*). The cron expression is checked first, at `/cron`. The list of names is
+`src/control/time_zones.cpp`, generated from tz database 2026c by `tools/tz/generate-time-zones.py`;
+regenerate it when IANA publishes a release.
+
+A schedule's `phase` and `message` are lake's, not the operator's (`agent_schedule_progress`,
+lake#586): `Pending` until the operator reports (*Waiting for lake to set up this schedule.*),
+`Ready` (*Scheduled.*), `Stopped` once removed, and `Failed` with why and what to do: an unknown time
+zone (from a schedule stored before the check), runs not enabled on this lake, or otherwise *Lake
+could not set it up. Remove it and add it again*. The operator's own text, which names Kubernetes
+objects and fields, stays in `agent_cron_schedule_status` for whoever runs lake. A schedule
 belongs to its workspace, as a launch does. Creating a Python agent with a trigger in Train → Agents (or through the
 Agent Factory) adds its first schedule; deleting the agent removes all of them.
 
@@ -99,7 +117,7 @@ once and follow the task:
 - Ship → Apps shows ApplicationAgent working, then a reply form for a question or the exact
   proposal and its confirmation;
 - Train → Experiments shows ExperimentsAgent working, then a reply form for a question or an
-  editable study proposal and its confirmation;
+  editable experiment proposal and its confirmation;
 - Design → Opportunities shows *Scanning your workspace…*.
 
 Auto-Suggest builds the workspace profile itself with its read-only credential. Your own Python and
@@ -113,8 +131,8 @@ native agents still answer within the call (a follow-up).
 |---|---|---|
 | **Ask Orama** (`agent-ask-orama`) | its service, `LAKE_AGENT_ENDPOINTS` | a key for this turn derived from the person's credential, carrying **every read capability and `agent_turn`, never an action**, and `lake_url` |
 | **Project Agent** (`agent-project`) | its service | a turn key limited to `workspace_query` / `workspace_openapi`, and `zetta_base_url` = lake's agent path for the workspace. A `context` naming `project` and `graph` is a **change request**: lake adds the graph as it is (`pipeline`), the agent answers with a proposal (agent-project edit mode), and lake keeps it as an Ask Orama message and returns `review_url` (the pipeline page with `&proposal=`), where the person applies it (lake#249) |
-| **ApplicationAgent** (`agent-application`) | its service | an `app` task with read-only workspace, dataset, Service, repository and App tools. A completed proposal returns a Ship → Apps `review_url`. A later task carrying the reviewed object at `context.confirmed_proposal` also receives `create_repository`, `commit_repository_files`, `create_app`, and `deploy_app` |
-| **ExperimentsAgent** (`agent-experiments`) | its service | an `experiment`, `experiment_status` or `experiment_explain` task and a credential for the selected workspace adapter. Proposal turns can read planning inputs (including `validate_study`, the no-side-effect preflight of `create_study`) but cannot write. A later `experiment` task carrying `context.confirmed_proposal` receives workspace `create_study` and backing `start_study`; status receives trial monitoring/stop tools, and explanation receives promotion only with its own confirmation. Study data remains in workspace Zetta |
+| **ApplicationAgent** (`agent-application`) | its service | an `app` task with read-only workspace, dataset, Service, repository and App tools. A completed proposal returns a Ship → Apps `review_url`. A later task carrying the reviewed object at `context.confirmed_proposal`, with `proposal_task_id` and `proposal_sha256` naming the stored proposal it confirms (checked by `agent_turn`), also receives `create_repository`, `commit_repository_files`, `create_app`, and `deploy_app` |
+| **ExperimentsAgent** (`agent-experiments`) | its service | an `experiment`, `experiment_status` or `experiment_explain` task and a credential for the selected workspace adapter. Proposal turns can read planning inputs (including `validate_study`, the no-side-effect preflight of `create_study`) but cannot write. A later `experiment` task carrying `context.confirmed_proposal`, with `proposal_task_id` and `proposal_sha256` naming the stored proposal it confirms (checked by `agent_turn`; only the experiment, the agent's `study`, may be edited), receives workspace `create_study` and backing `start_experiment`; status receives trial monitoring/stop tools, and explanation receives promotion only with its own confirmation. Experiment data remains in workspace Zetta |
 | **Auto-Suggest** (`agent-autosuggest`) | its service | the workspace's profile, which lake builds (`list_datasets`, then `get_dataset` for up to twelve); no key: it reads nothing itself |
 | **AgentCreator** (`agent-creator`) | its service | a turn key limited to `workspace_query` / `workspace_openapi` |
 | a **native** agent of the space | the workspace's `chat` (`GET`) | the message |
@@ -131,12 +149,22 @@ service.
 | `launch_agent` | action | `write` on the customer | `{workspace_id, agent_id, mode: job\|service, input?}`; Python agents only |
 | `list_agent_launches` | read | `read` | `{workspace_id, agent_id?, limit?}`, the workspace's runs newest first, with phase, message, `operator_phase`, `stop_reason`, exit code and result; the schedules' runs are included (trigger `schedule`) |
 | `stop_agent_launch` | action | `write` | `{launch_id}`; the operator removes the Job or Deployment |
-| `schedule_agent` | action | `write` | `{agent_id, cron \| trigger, time_zone?, input?}`; adds one schedule; Python agents only |
-| `list_agent_schedules` | read | `read` | `{agent_id?}`, oldest first, with the operator's phase and last firing |
+| `schedule_agent` | action | `write` | `{agent_id, cron \| trigger, time_zone?, input?}`; adds one schedule; Python agents only; an unknown IANA zone is `invalid_input` at `/time_zone` |
+| `list_agent_schedules` | read | `read` | `{agent_id?}`, oldest first, with its phase, a message in lake's words (lake#586) and last firing |
 | `unschedule_agent` | action | `write` | `{schedule_id}`; the operator deletes its CronJob |
 | `agent_turn` | action | `write` | `{agent, message, conversation_id?, context?, page?, kind?}`; Lake creates the conversation ID when omitted and uses it to attach the preceding same-kind turn; ExperimentsAgent accepts `experiment`, `experiment_status`, or `experiment_explain` |
 
 Audit kinds: `agent.launch`, `agent.stop`, `agent.schedule`, `agent.unschedule`, `agent.turn`.
+
+## Model Tokens (lake#564)
+
+A launch, a schedule's run or a background turn reports the model tokens it spent with
+`record_model_usage {model_name, input_tokens, output_tokens}`, using its own credential (a library
+agent adds `task_id` with its bus credential). Lake counts them in the workspace the run belongs to,
+by agent, run and model; the Usage dashboard and the agent's page show them
+([metering](metering.md#model-tokens)). The capability is not in a launch's scopes because it needs
+none: lake authorizes it by the credential's kind and finds the run from it. agent-runtime and the
+library agents do not call it yet ([lake#248](https://github.com/oramasearch/lake/issues/248)).
 
 ## Configuration
 

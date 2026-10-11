@@ -43,6 +43,8 @@ class FederationIssuerPolicy;
 // closes the stores and releases the owner lock. docs/deployment/store-volume.md has the contract.
 namespace lake::api {
 
+class PaymentProvider; // lake/api/billing.hpp
+
 struct ServerOptions {
     std::string listen_address = "127.0.0.1";
     unsigned short port = 4900; // 0 = pick an ephemeral port
@@ -142,12 +144,28 @@ struct ServerOptions {
     // and sign-up are Clerk's and lake's own identity pages leave the navigation; empty or `xxx`
     // keeps lake's own sign-in, as an on-prem install uses. See docs/api/clerk.md.
     std::string clerk_publishable_key;
+    // Speech-to-text (docs/api/transcripts.md, lake#561): OpenAI's key (LAKE_OPENAI_API_KEY) and
+    // the transcription model (LAKE_TRANSCRIBE_MODEL, empty: gpt-4o-transcribe). With no key and
+    // no injected `transcriber`, transcribe and audio transcripts answer not_supported.
+    std::string openai_api_key;
+    std::string transcribe_model;
+    // An injected transcriber (tests); empty: OpenAI over the server's outbound client when
+    // `openai_api_key` is set.
+    Transcriber transcriber;
     // Configured external attestation verifiers. Lake owns their invocation but
     // callers retain their lifetime for the server lifetime.
     control::callers::TokenReviewer* token_reviewer = nullptr;
     control::callers::JwtVerifier* jwt_verifier = nullptr;
     control::callers::CloudIdentityVerifier* cloud_identity_verifier = nullptr;
     control::callers::FederationIssuerPolicy* federation_issuer_policy = nullptr;
+    // Billing (lake#564, decision 56, docs/api/billing.md): on only where LAKE_BILLING=on (Orama
+    // Cloud). Off, as on an enterprise install, the billing capabilities are not registered, so
+    // REST, OpenAPI, MCP, the web app's billing pages and the billing Docs guide are absent; usage
+    // tracking is unaffected. `payment_provider` collects invoices; null is the manual provider
+    // with `billing_instructions` (LAKE_BILLING_INSTRUCTIONS).
+    bool billing = false;
+    std::shared_ptr<PaymentProvider> payment_provider;
+    std::string billing_instructions;
     // The operator-provided PersistentVolume mount. Customer stores live at
     // <root>/<customer id>/store and instance log objects at
     // <root>/<node name>/log. Empty disables data-plane storage.
@@ -193,6 +211,16 @@ struct ServerOptions {
     // lake#384). Zero writes on every drain() tick.
     std::chrono::milliseconds request_series_flush_interval{std::chrono::seconds(10)};
     std::size_t request_series_max_pending = 16384;
+    // Usage over time (lake#564, docs/api/metering.md#usage-over-time): calls, speech-to-text
+    // seconds and model tokens are held in memory and written to each workspace Zetta's
+    // `lake_usage` series by the owner loop at this interval, at once when half of
+    // `usage_max_pending` is held, and once more on stop. Every `usage_sample_interval` the store
+    // root's owner samples each workspace's stored bytes and the instance and volume time of its
+    // services, stores and apps (only the owner, so one lake counts them once). Zero runs on every
+    // drain() tick.
+    std::chrono::milliseconds usage_flush_interval{std::chrono::seconds(10)};
+    std::size_t usage_max_pending = 8192;
+    std::chrono::milliseconds usage_sample_interval{std::chrono::minutes(15)};
     // Dynamic-secret leases that are due (expired, or revoked and not yet settled) are settled in
     // their workspaces by the owner loop at this interval (docs/api/secrets.md, lake#362). It
     // reads the control store's due index, never every workspace. Zero settles on every drain().

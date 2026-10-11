@@ -38,21 +38,6 @@ set(LAKE_BUILD_REVISION "unknown" CACHE STRING "Source revision embedded in the 
 
 include(FetchContent)
 
-set(LAKE_EXPERIMENT_ASSETS
-  assets/experiments/uPlot.iife.js
-  assets/experiments/uPlot.min.css
-  assets/experiments/experiments.js
-  assets/experiments/experiments.css)
-set(LAKE_EMBEDDED_EXPERIMENTS_CPP "${CMAKE_CURRENT_BINARY_DIR}/generated/experiment_assets.cpp")
-add_custom_command(
-  OUTPUT "${LAKE_EMBEDDED_EXPERIMENTS_CPP}"
-  COMMAND "${CMAKE_COMMAND}"
-    "-DINPUT_DIR=${CMAKE_CURRENT_SOURCE_DIR}/assets/experiments"
-    "-DOUTPUT_FILE=${LAKE_EMBEDDED_EXPERIMENTS_CPP}"
-    -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_experiments.cmake"
-  DEPENDS ${LAKE_EXPERIMENT_ASSETS} cmake/embed_experiments.cmake
-  VERBATIM)
-
 set(LAKE_FONT_FILES
   assets/fonts/ibm-plex-sans-400.woff2
   assets/fonts/ibm-plex-sans-500.woff2
@@ -70,7 +55,8 @@ add_custom_command(
   VERBATIM)
 
 # The Docs section's guides (docs/guide/*.md, lake#252), embedded so /docs needs no files at run time.
-file(GLOB LAKE_GUIDE_FILES "${CMAKE_CURRENT_SOURCE_DIR}/docs/guide/*.md")
+# CONFIGURE_DEPENDS: a new page (an optional slug) is picked up without a reconfigure.
+file(GLOB LAKE_GUIDE_FILES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/docs/guide/*.md")
 set(LAKE_EMBEDDED_GUIDE_CPP "${CMAKE_CURRENT_BINARY_DIR}/generated/web_ui_guide.cpp")
 add_custom_command(
   OUTPUT "${LAKE_EMBEDDED_GUIDE_CPP}"
@@ -79,6 +65,43 @@ add_custom_command(
     "-DOUTPUT_FILE=${LAKE_EMBEDDED_GUIDE_CPP}"
     -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_guide.cmake"
   DEPENDS ${LAKE_GUIDE_FILES} cmake/embed_guide.cmake
+  VERBATIM)
+
+# The web app (frontend/, React + Vite): built with npm and embedded into the binary, so lake
+# serves its whole UI with no files at run time (docs/ui/README.md). LAKE_FRONTEND_DIST points
+# at an already-built dist/ instead (the image's Node stage); empty builds it here.
+set(LAKE_FRONTEND_DIST "" CACHE PATH "A built frontend/dist to embed; empty builds it with npm")
+find_program(LAKE_NODE_EXECUTABLE node REQUIRED)
+set(LAKE_EMBEDDED_WEB_APP_CPP "${CMAKE_CURRENT_BINARY_DIR}/generated/web_app_assets.cpp")
+if(LAKE_FRONTEND_DIST)
+  set(LAKE_WEB_APP_DIST "${LAKE_FRONTEND_DIST}")
+  file(GLOB_RECURSE LAKE_WEB_APP_DEPENDS CONFIGURE_DEPENDS "${LAKE_FRONTEND_DIST}/*")
+else()
+  find_program(LAKE_NPM_EXECUTABLE npm REQUIRED)
+  set(LAKE_WEB_APP_DIST "${CMAKE_CURRENT_SOURCE_DIR}/frontend/dist")
+  file(GLOB_RECURSE LAKE_FRONTEND_SOURCES CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/frontend/src/*"
+    "${CMAKE_CURRENT_SOURCE_DIR}/frontend/scripts/*"
+    "${CMAKE_CURRENT_SOURCE_DIR}/frontend/tests/*")
+  set(LAKE_WEB_APP_STAMP "${CMAKE_CURRENT_BINARY_DIR}/frontend-dist.stamp")
+  add_custom_command(
+    OUTPUT "${LAKE_WEB_APP_STAMP}"
+    COMMAND "${LAKE_NPM_EXECUTABLE}" ci --no-audit --no-fund
+    COMMAND "${LAKE_NPM_EXECUTABLE}" run build
+    COMMAND "${CMAKE_COMMAND}" -E touch "${LAKE_WEB_APP_STAMP}"
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/frontend"
+    DEPENDS ${LAKE_FRONTEND_SOURCES}
+      frontend/package.json frontend/package-lock.json frontend/index.html
+      frontend/vite.config.ts frontend/tsconfig.json
+    COMMENT "Building the web app (frontend/)"
+    VERBATIM)
+  set(LAKE_WEB_APP_DEPENDS "${LAKE_WEB_APP_STAMP}")
+endif()
+add_custom_command(
+  OUTPUT "${LAKE_EMBEDDED_WEB_APP_CPP}"
+  COMMAND "${LAKE_NODE_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/ui/embed-frontend.mjs"
+    "${LAKE_WEB_APP_DIST}" "${LAKE_EMBEDDED_WEB_APP_CPP}"
+  DEPENDS ${LAKE_WEB_APP_DEPENDS} tools/ui/embed-frontend.mjs
   VERBATIM)
 
 # -----------------------------------------------------------------------------
@@ -170,14 +193,15 @@ endif()
 set(SKIP_BUILD_TEST ON CACHE BOOL "" FORCE)
 add_subdirectory(modules/libpqxx EXCLUDE_FROM_ALL)
 
-# lake-core: HTTP-free. Version, the pure web_ui renderers, the capability registry and its
+# lake-core: HTTP-free. Version, the hosted sign-in page renderers, the capability registry and its
 # REST / OpenAPI / MCP renderings, the control-plane store interface and the in-memory store.
 add_library(lake-core STATIC
   src/control/apps.cpp
   src/control/builds.cpp
   ${LAKE_EMBEDDED_FONTS_CPP}
-  ${LAKE_EMBEDDED_EXPERIMENTS_CPP}
   ${LAKE_EMBEDDED_GUIDE_CPP}
+  ${LAKE_EMBEDDED_WEB_APP_CPP}
+  src/api/web_app.cpp
   src/control/lake_identity.cpp
   src/control/saml.cpp
   src/control/callers.cpp
@@ -189,12 +213,18 @@ add_library(lake-core STATIC
   src/control/agent_library.cpp
   src/control/agent_bus.cpp
   src/control/agent_runs.cpp
+  src/control/time_zones.cpp
   src/control/web_apps.cpp
   src/control/zetta_workspace.cpp
   src/control/workspace_records.cpp
   src/control/workspace_store.cpp
   src/control/ask_messages.cpp
   src/control/opportunities.cpp
+  src/control/solutions.cpp
+  src/control/transcripts.cpp
+  src/control/project_decisions.cpp
+  src/control/drives.cpp
+  src/control/drive_files.cpp
   src/control/stream_owners.cpp
   src/control/drive_share_links.cpp
   src/control/forge_records.cpp
@@ -219,12 +249,14 @@ add_library(lake-core STATIC
   src/api/repository_records_api.cpp
   src/api/workspace_deletion.cpp
   src/api/workspace_record_capabilities.cpp
+  src/api/solution_capabilities.cpp
+  src/api/transcript_capabilities.cpp
+  src/api/drives_capabilities.cpp
+  src/api/transcription.cpp
   src/api/workspace_store_capabilities.cpp
   src/api/datasets.cpp
   src/api/stream_capabilities.cpp
   src/api/experiment_capabilities.cpp
-  src/api/web_ui_streams.cpp
-  src/api/web_ui_experiments.cpp
   src/api/pipeline.cpp
   src/api/registry.cpp
   src/api/store_owner.cpp
@@ -232,7 +264,9 @@ add_library(lake-core STATIC
   src/api/mcp.cpp
   src/api/agent_docs.cpp
   src/api/capabilities.cpp
+  src/api/console_capabilities.cpp
   src/api/forge_capabilities.cpp
+  src/api/repository_people.cpp
   src/api/export_capabilities.cpp
   src/api/github_import_capabilities.cpp
   src/api/pki_capabilities.cpp
@@ -240,10 +274,14 @@ add_library(lake-core STATIC
   src/api/metering_recorder.cpp
   src/api/audit_recorder.cpp
   src/api/request_recorder.cpp
+  src/api/usage_recorder.cpp
+  src/api/usage_capabilities.cpp
+  src/api/billing_capabilities.cpp
   src/api/audit_routing.cpp
   src/api/audit_logs.cpp
   src/api/drive.cpp
   src/api/drive_capabilities.cpp
+  src/api/lake_attestation.cpp
   src/api/model_capabilities.cpp
   src/api/transparency_capabilities.cpp
   src/api/timestamp_capabilities.cpp
@@ -272,7 +310,10 @@ add_library(lake-core STATIC
 target_include_directories(lake-core PUBLIC include
   PRIVATE "${LAKE_LIQUID_SOURCE_DIR}" "${LAKE_LIQUID_SOURCE_DIR}/src")
 target_compile_features(lake-core PUBLIC cxx_std_26)
-target_compile_definitions(lake-core PRIVATE LAKE_BUILD_REVISION=\"${LAKE_BUILD_REVISION}\")
+# Only version.cpp reads the revision; defining it for every lake-core source would change every
+# compile command per revision and defeat the image build's compiler cache.
+set_source_files_properties(src/version.cpp PROPERTIES
+  COMPILE_DEFINITIONS "LAKE_BUILD_REVISION=\"${LAKE_BUILD_REVISION}\"")
 target_link_libraries(lake-core
   PUBLIC nlohmann_json::nlohmann_json liquid::liquid orama::oramacore-cpp OpenSSL::Crypto
   PRIVATE liquid_frontend_syntax)
@@ -307,19 +348,14 @@ target_link_libraries(lake-api PRIVATE Boost::beast2 Boost::http Boost::json Boo
 add_executable(lake src/main.cpp)
 target_link_libraries(lake PRIVATE lake-api lake-core lake-control-postgres)
 
-add_executable(lake-ui-fixture tools/ui/fixture_server.cpp)
-target_compile_features(lake-ui-fixture PRIVATE cxx_std_26)
-target_link_libraries(lake-ui-fixture PRIVATE lake-api lake-core lake-control-postgres OpenSSL::Crypto)
-
 # A coroutine returning liquid::runtime::task<T> (a result<T>) that flows off its end leaves the
 # result unset, and the awaiting coroutine then reads uninitialized memory (lake#476). The compiler
 # sees every such path, so it is an error rather than a warning.
-foreach(lake_target lake-core lake-control-postgres lake-api lake lake-ui-fixture)
+foreach(lake_target lake-core lake-control-postgres lake-api lake)
   target_compile_options(${lake_target} PRIVATE -Werror=return-type)
 endforeach()
 
 if(LAKE_BUILD_TESTS)
-  find_program(LAKE_NODE_EXECUTABLE node REQUIRED)
   FetchContent_Declare(googletest
     GIT_REPOSITORY https://github.com/google/googletest.git
     GIT_TAG        v1.17.0)

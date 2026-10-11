@@ -111,6 +111,42 @@ on dev, and migration `0070_drop_moved_tables` drops both tables (lake#311); the
 policy objects stay. The cutover is in
 [workspace-records.md](../architecture/workspace-records.md#cutover-runbook-platform-environments-and-mirror-dev-cluster).
 
+## A lake without the platform mirror
+
+A lake started without `LAKE_OPERATOR_ZETTA_URL` and `LAKE_OPERATOR_ZETTA_TOKEN` (and without
+`LAKE_LOGS_URL`) has no platform service. Every platform capability (`list_environments`,
+`get_environment`, `list_deployments`, `set_environment_env`, `unset_environment_env`,
+`create_domain`, `delete_domain`, `environment_logs`) then answers `501 not_supported`:
+
+```json
+{"ok": false, "error": {"code": "not_supported", "path": "",
+ "message": "deployments are not set up on this lake: an operator turns them on by connecting lake to the cluster operator's platform source (docs/api/platform.md#a-lake-without-the-platform-mirror)"}}
+```
+
+It was `503 store_unavailable` before lake#575, which reads as an outage a client should retry;
+asking again changes nothing until an operator sets those variables, so the code says the feature
+is missing, and the web app's Ship → Deployments shows "Deployments Are Not Set Up on This Lake"
+once, with no retry ([web app](../ui/web-app.md#how-a-page-runs)). The message names no engine,
+because the web app shows it to people. `store_unavailable` stays the answer when the mirror is
+configured and the operator control plane is unreachable (above).
+
+To turn Deployments on, set both variables in the `Lake` CR's `spec.env` (the operator's Zetta
+URL and a bearer it accepts; [aks.md](../deployment/aks.md)) and restart lake. Verify with
+`GET /v1/list_environments?repository_id=<id>`, which then answers `200` with the repository's
+environments (`items`), and with `GET /healthz`, which reports `platform: ready`.
+`PlatformFixture.WithoutThePlatformMirrorEveryCallSaysDeploymentsAreNotSetUp`
+(`tests/test_platform.cpp`) covers the answer.
+
+`server_info` says it too, without authentication: `deployments` is `true` when the platform
+service is configured and `false` otherwise (lake#605). Ship → Deployments reads it first, so on a
+lake without the mirror its one call is `server_info`: it neither lists repositories nor asks any of
+them for environments. A lake from before lake#605 does not send the field; the page then asks the
+first repository alone and the others only once it answered something other than `not_supported`
+(`frontend/src/pages/apps/deployments.ts`, `frontend/tests/deployments.test.ts`).
+`PlatformFixture.ServerInfoSaysWhetherDeploymentsAreSetUp` covers the flag. Verify with
+`curl -s <lake>/v1/server_info`, and in the browser's network panel: Ship → Deployments on a lake
+without the mirror sends `server_info` and nothing else.
+
 ## Loki-compatible logs
 
 `environment_logs` takes the current deployment namespace and sends:

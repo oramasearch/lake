@@ -1,5 +1,26 @@
 # The `/v1` API and MCP
 
+lake#564 (decision 56, migration `0073_billing`): [billing.md](billing.md) documents billing, on only
+where `LAKE_BILLING` is (Orama Cloud): `billing_plans`, `set_billing_plan`, `billing_account`,
+`choose_billing_plan`, `bill_preview`, `issue_invoice`, `list_invoices`, `get_invoice`,
+`record_invoice_payment` and `void_invoice`, the `PaymentProvider` interface with its manual
+implementation (no provider chosen yet), and the switch that leaves them absent on an enterprise
+install.
+lake#561: [drives.md](drives.md) documents drives (repository, workspace files, virtual) and workspace files in the workspace Zetta. [transcripts.md](transcripts.md) documents speech-to-text (`transcribe`) and the
+workspace transcripts kept in the workspace Zetta (`create_transcript`, `list_transcripts`,
+`get_transcript`, `update_transcript`, `delete_transcript`), the audio never kept.
+lake#597: [solutions.md](solutions.md) documents a workspace's own AI solutions, kept in the workspace
+Zetta beside Orama's read-only catalogue (`list_solutions`, `get_solution`, `create_solution`,
+`update_solution`, `delete_solution`, `duplicate_solution`; `forbidden` for Orama's).
+[web-app.md](web-app.md) documents the capabilities the web app reads that the pages
+computed themselves (`viewer`, `my_permissions`, `list_packages`, `list_docs`, `get_doc`,
+`mcp_setup`, `resolve_model`, `latest_agent_task`, `compile_pipeline`, `render_pipeline`);
+[ask-orama.md](ask-orama.md#capabilities-lake561) the conversation capabilities
+(`send_ask_message`, `settle_ask_turn`, `confirm_ask_proposal`, `approve_agent_proposal`);
+[repositories.md](repositories.md) `repository_file`'s `units`; and
+[../serving/http.md](../serving/http.md#cross-site-requests) the refusal of cross-site requests that
+use the browser session.
+
 lake#452: [services.md](services.md) documents `list_services`' shared `status` and
 `status_reason`; [web-apps.md](web-apps.md) the public acknowledgement `create_app` requires;
 [workspaces.md](workspaces.md) the two `create_project` name refusals.
@@ -20,16 +41,24 @@ instance administrator's desired state for each workspace Zetta's volume size an
 snapshots of those volumes and of lake's store volume; [workspaces.md](workspaces.md#capabilities)
 the storage fields a workspace row gains.
 
-[experiments.md](experiments.md) documents eleven training study, trial, run-metric, comparison
-and bounded-live-read capabilities, with identical REST POST/MCP schemas and confirmed actions,
-plus the `agent_turn` contract used for ExperimentsAgent proposals. These names are distinct from
-the solutions holdout `get_experiment` operation. `start_study` leaves a missing objective and
-budgets to Zetta under `from_defaults`, and every experiment error keeps Zetta's `path`.
+[experiments.md](experiments.md) documents eleven training experiment, trial, run-metric,
+comparison and bounded-live-read capabilities, with identical REST POST/MCP schemas and confirmed
+actions, plus the `agent_turn` contract used for ExperimentsAgent proposals. Lake says experiment
+and `experiment_id` where the engine says study (lake#561, [names](experiments.md#names)); lake's
+`get_experiment` is distinct from the solutions holdout `get_experiment` that `workspace_query`
+reads. `start_experiment` leaves a missing objective and budgets to Zetta under `from_defaults`,
+and every experiment error keeps Zetta's `path`.
 
 [streams.md](streams.md) documents all nine topic/message operations on both REST POST and MCP,
 with closed input/output schemas, space permissions, system-topic refusal and bounded live reads.
-Read tools advertise `readOnlyHint`; writes conservatively advertise `destructiveHint`. Streams reads
-retain GET and add POST without changing their read classification.
+Every MCP tool carries all three annotations from one rule in `src/api/registry.cpp` (lake#594):
+`readOnlyHint` for a read or a call authorized as one (`predict`), the same rule `mcp_setup` uses
+for `writes`; `destructiveHint` only on a write that deletes, destroys, removes, revokes or drops
+(`delete_*`, `destroy_*`, `remove_*`, `revoke_*`, `drop_*`, `purge_*`, …), so a client warns before
+those alone; and `idempotentHint` on reads and on writes a second identical call leaves as they
+were (`set_*`, `update_*`, the deletes, `settle_ask_turn`, …). Every operation has a human title,
+OpenAPI's `summary` and the tool's `title` (`Mcp.EveryToolHasAHumanTitleAndOnlyDeletesAreDestructive`).
+Streams reads retain GET and add POST without changing their read classification.
 
 The [sync protocol](sync.md) also backs the repository page's configured-origin clone/push
 instructions. The [private-instance proof](../deployment/private-install.md) executes those
@@ -45,7 +74,8 @@ every pipeline list (lake#438).
 **Shape.** lake exposes JSON capabilities three ways, the way Zetta does: REST under `/v1`, an
 OpenAPI 3.1 document at `GET /v1/openapi.json`, and MCP at `POST /mcp`. One capability registry
 (`include/lake/api/registry.hpp`) is the single source all three read: a capability is a name,
-a kind (`read` → `GET /v1/<name>`, input in the query string; `action` → `POST /v1/<name>`,
+a kind (`read` → `GET /v1/<name>`, input in the query string, each value coerced by its declared
+type ([arrays in a query string](#arrays-in-a-query-string)); `action` → `POST /v1/<name>`,
 input as the JSON body), an input schema, an output schema, an authorization object and action,
 an object resolver, and a handler. REST and MCP go through the same `Registry::call` or coroutine
 `Registry::call_async`, so they
@@ -133,6 +163,29 @@ bindings, logs, events and the read-only app registry pull token. It is separate
 bases, cancellation, status, public digest pull references, retained progress and build-scoped
 credentials.
 
+## Arrays in a query string
+
+A read's query values are coerced by the input schema (`rest_input_from_query`,
+`src/api/rest.cpp`): an integer, number or boolean property from its text, an object from JSON.
+An **array** input (`compare_runs.runs`, `my_permissions.actions`, `get_run_metrics.names`, and any
+other) takes, in any mix (lake#576):
+
+- repeated keys, as OpenAPI declares them (`style: form`, `explode: true`):
+  `GET /v1/compare_runs?customer_id=<space>&workspace_id=<workspace>&runs=<r1>&runs=<r2>`;
+- a comma list:
+  `GET /v1/compare_runs?customer_id=<space>&workspace_id=<workspace>&runs=<r1>,<r2>`;
+- a JSON array, URL-encoded:
+  `GET /v1/compare_runs?customer_id=<space>&workspace_id=<workspace>&runs=%5B%22<r1>%22,%22<r2>%22%5D`.
+
+Each item is coerced by the array's `items` type (`steps=1,2` is `[1, 2]` for integer items), and
+an empty value adds nothing, so `runs=` is `[]` and the schema's `minItems` says what is missing.
+An item that itself holds a comma can be sent only in the JSON form, or with `POST` and a JSON body.
+Before lake#576 only the JSON form worked and repeated keys answered `400` (`expected type
+"array"`), so the GET form of every read with an array input could not be called as OpenAPI
+described it. `Rest.ArrayInputsDecodeFromRepeatedKeysCommaListsAndJsonArrays` (`tests/test_api.cpp`)
+and `Experiments.CompareRunsAnswersItsGetFormWithRepeatedKeysOrACommaList`
+(`tests/test_experiments.cpp`) cover it.
+
 ## Operational routes
 
 | Route | Contract |
@@ -146,12 +199,21 @@ credentials.
 
 | Capability | Kind | Input | Value | Page |
 |---|---|---|---|---|
-| `server_info` | read, **no auth** | — | `{name, node, version, revision, api, store}`; `revision` is the embedded full source commit or `unknown` | [../deployment/production-2026-09-08.md](../deployment/production-2026-09-08.md) |
+| `server_info` | read, **no auth** | — | `{name, node, version, revision, api, store, deployments}`; `revision` is the embedded full source commit or `unknown`; `deployments` says whether the platform mirror is configured ([platform.md](platform.md#a-lake-without-the-platform-mirror), lake#605) | [../deployment/production-2026-09-08.md](../deployment/production-2026-09-08.md) |
+| `viewer` | read, **no auth** | `workspace_id?`, `customer_id?` | who is signed in, their spaces and current workspace, Clerk, sign-up, origin, agent models, version | [web-app.md](web-app.md) |
+| `my_permissions`, `list_packages`, `list_docs`, `get_doc`, `mcp_setup`, `resolve_model` | read (`list_docs`, `get_doc` and a public `resolve_model` need no credential) | see the page | permission flags, the Packages catalog, the Docs guides, Developer → MCP, a model's repository by name | [web-app.md](web-app.md) |
+| `latest_agent_task`, `render_pipeline` / `compile_pipeline` | read / action | `customer_id`, `workspace_id`, then `subject`, or `project` and `graph`, or `project` and `intent` | a project's background task, a pipeline drawn as SVG, a pipeline compiled from a description | [web-app.md](web-app.md) |
+| `send_ask_message`, `settle_ask_turn`, `confirm_ask_proposal`, `approve_agent_proposal` | action | `customer_id`, `workspace_id`, `conversation_id`, … | the Ask Orama and Agent Factory conversation, written only by lake | [ask-orama.md](ask-orama.md#capabilities-lake561) |
+| `transcribe` | action, any signed-in caller | `name`, `audio_base64`, `language?` | `{text, seconds?, model}`: speech-to-text through OpenAI with lake's key; keeps nothing; `not_supported` without `LAKE_OPENAI_API_KEY` | [transcripts.md](transcripts.md) |
+| `create_transcript`, `list_transcripts`, `get_transcript`, `update_transcript`, `delete_transcript` | action / read / read / action / action | `customer_id`, `workspace_id`, then `title`, `source`, `text` or `audio_base64`; `q`, `limit`, `cursor`; or `id` | a transcript kept as a sealed `lake_transcripts` record in the workspace Zetta (the audio never kept), a searchable page of them, or `{deleted: true}` | [transcripts.md](transcripts.md) |
+| `list_solutions`, `get_solution`, `create_solution`, `update_solution`, `delete_solution`, `duplicate_solution` | read / read / action / action / action / action | `customer_id`, `workspace_id`, then `source?`; `id`; `name`, `problem`, `decision`, `measurement`, `methodologies?`, `pipeline?`, `notes?`; or `id` and `name?` | Orama's catalogue (read-only) and the workspace's own, each marked `source` (`orama` or `workspace`) and `editable`; one of the workspace's own as a sealed `lake_solutions` record; `forbidden` for an edit or delete of Orama's | [solutions.md](solutions.md) |
+| `create_drive`, `list_drives`, `get_drive`, `rename_drive`, `delete_drive` | action / read / read / action / action | `customer_id`, `workspace_id`, then `name`, `storage`, `repository_id?` or `repository_name?`; or `id` (`confirm_name` to delete) | a drive kept as a sealed `lake_drives` record in the workspace Zetta; a new repository drive gets its first change at once; deleting never deletes a repository | [drives.md](drives.md) |
+| `list_drive_entries`, `get_drive_entry`, `create_drive_folder_entry`, `create_drive_shortcut`, `move_drive_entry`, `delete_drive_entry`, `begin_drive_upload`, `append_drive_upload`, `finish_drive_upload`, `upload_drive_entries`, `read_drive_file`, `recent_drive_entries`, `search_drives` | reads and actions | `customer_id`, `workspace_id`, `drive_id`, … | a workspace-files or virtual drive's folders, files and shortcuts; file bytes sealed in the workspace Zetta's `lake_files` bucket, uploaded in 1 MiB-aligned chunks; names found across every drive, a repository drive's paths at `main` included | [drives.md](drives.md) |
 | `list_users` | read | `limit` (≤1000, default 100) | `{items: [user]}` | [customers.md](customers.md) |
 | `get_user` | read | `id` | user | [customers.md](customers.md) |
 | `create_user` | action | `taap_id?`, `email?`, `display_name?` | user | [customers.md](customers.md) |
 | `list_organizations` | read | `limit` | `{items: [organization]}` | [customers.md](customers.md) |
-| `get_organization` | read | `id` | organization | [customers.md](customers.md) |
+| `get_organization` | read | `id` | organization, with its own space's `customer_id` (null when none) | [customers.md](customers.md) |
 | `create_organization` | action | `taap_id?`, `display_name?`, `customer_id?` | organization | [organizations.md](organizations.md) |
 | `list_customers` | read | `limit` | `{items: [customer]}` | [customers.md](customers.md) |
 | `get_customer` | read | `customer_id` (`id` deprecated) | customer | [customers.md](customers.md) |
@@ -171,6 +233,7 @@ credentials.
 | `share_drive_folder`, `drive_effective_access`, `drive_shared_with_me` | action/read | folder, recipient, role and evidence; folder; or no input | live grant, direct/inherited access panel, or direct live folders for the signed-in identity | [sharing.md](sharing.md) |
 | `create_drive_share_link`, `resolve_drive_share_link`, `revoke_drive_share_link` | action/read | folder, `workspace_id`, role, expiry; token, ref, optional descendant path; or `workspace_id` and link id | scoped link, authorized folder contents, or revoked link | [sharing.md](sharing.md) |
 | `preview_drive_share_link`, `download_drive_share_link` | read, bearer link | token, ref, file path | scoped format-registry preview or exact base64 bytes; expiry and revocation checked on every call | [sharing.md](sharing.md) |
+| `model_traffic` | read | `customer_id`, `workspace_id`, `model_id?`, `from_ms?`, `to_ms?`, `step_ms?` | each model's `predict` calls, errors and mean latency, step by step, from the workspace's own series; the workspace's `predict` requests; drift not measured yet (lake#599) | [workspaces.md](workspaces.md) |
 | `get_model`, `get_dataset`, `resolve_model_file`, `resolve_dataset_file` | read | repository id and revision, or, without `revision`, a workspace model or dataset id with `customer_id` and `workspace_id`; file path where required | compatible model/dataset metadata, the workspace's trained model or dataset schema, storage/provenance, or exact file | [models.md](models.md) |
 | `prepare_repository_upload`, `stage_repository_file`, `commit_repository_files` | action | repository id plus upload plan, verified staged bytes, or file operations | upload modes, unique stored bytes, or immutable committed revision | [models.md](models.md) |
 | `attach_model_provenance`, `verify_model_provenance` | action | model and dataset revisions plus canonical liquid attestations, or model revision | attached or re-verified dataset-to-model training chain | [models.md](models.md) |
@@ -178,7 +241,7 @@ credentials.
 | `rename_repository`, `transfer_repository`, `set_repository_visibility`, `delete_repository` | action | repository id plus the lifecycle field where applicable; `transfer_repository` is always refused (a repository stays in its workspace) | repository | [repositories.md](repositories.md) |
 | `refs` | read | `repository_id` | `{items: [repository ref]}` | [sync.md](sync.md) |
 | `find_missing`, `push`, `pull`, `upload_chunks`, `read_chunk` | binary read/action | repository id plus liquid sync body, digest, or range | binary liquid response; push reports every reference outcome and refusal reason | [sync.md](sync.md) |
-| `create_issue`, `update_issue`, `list_issues`, `create_issue_comment`, `list_issue_comments` | read/action | repository id, issue fields, state, or issue id | durable Markdown issue and discussion records | [forge.md](forge.md) |
+| `create_issue`, `update_issue`, `list_issues`, `create_issue_comment`, `list_issue_comments`, `issue_assignees` | read/action | repository id, issue fields, state, or issue id | durable Markdown issue and discussion records with their author; the people an issue can be assigned to | [forge.md](forge.md) |
 | `create_review`, `update_review`, `list_reviews`, `create_review_comment`, `list_review_comments`, `map_review_anchors` | read/action | repository id, liquid change, review state, anchor, or text hunks | change review and cursor-compatible anchored discussion records | [forge.md](forge.md) |
 | `create_release`, `list_releases` | read/action | repository id, tag, change, and build-result IDs | tag release retaining verified attestation evidence | [forge.md](forge.md) |
 | `create_webhook`, `list_webhooks`, `deliver_webhook`, `retry_webhook_delivery`, `list_webhook_deliveries` | read/action | repository id, subscription, endpoint, event, payload, or delivery ID | signed delivery attempts and retained retry log | [forge.md](forge.md) |
@@ -186,11 +249,11 @@ credentials.
 | `export_repository`, `import_repository`, `list_exports` | read/action | repository or destination customer and workspace, archive, and optional Git projection | signed portable archive, recreated repository, or prior export records | [export.md](export.md) |
 | `import_github_repository` | action | destination customer and workspace, local Git directory, and recorded GitHub responses | imported repository and durable fidelity report | [github-import.md](github-import.md) |
 | `list_teams`, `get_team`, `create_team` | read/action | organization or team identifiers and fields | team(s) | [organizations.md](organizations.md) |
-| `list_memberships`, `get_membership`, `create_membership`, `set_member_role`, `remove_member` | read/action | scope (omit for your own), membership id, principal, role, TAAP evidence | membership(s) or removal confirmation | [organizations.md](organizations.md) |
+| `list_memberships`, `get_membership`, `create_membership`, `set_member_role`, `remove_member` | read/action | scope (omit for your own), membership id, principal, role; lake signs the evidence (lake#602) | membership(s) or removal confirmation | [organizations.md](organizations.md) |
 | `list_invitations`, `create_invitation`, `accept_invitation` | read/action | scope (omit for your own), invitee, role, expiry or accepting principal | invitation or membership | [organizations.md](organizations.md) |
 | `create_organization_space`, `convert_personal_space`, `join_organization` | action | organization name and handle, your personal space, or an invitation addressed to you | organization space or membership | [organizations.md](organizations.md) |
 | `list_objects`, `get_object`, `create_object` | read/action | graph identifiers, type, parent, `inherit` | object(s) | [policy.md](policy.md) |
-| `list_grants`, `create_grant` | read/action | object, principal, role, TAAP evidence | grant(s) | [policy.md](policy.md) |
+| `list_grants`, `create_grant` | read/action | object, principal, role; lake signs the evidence (lake#602) | grant(s); a created one with `attestation` | [policy.md](policy.md) |
 | `effective_access` | read | `object_id` | `{items: [effective access]}` | [policy.md](policy.md) |
 | `entity_effective_access` | read | `object_type` (`repository`, `organization`, or `team`), `id` | `{object, items: [effective access]}` | [policy.md](policy.md) |
 | `identity` | read, **no auth** | — | lake TAAP identity document | [audit.md](audit.md) |
@@ -212,7 +275,7 @@ credentials.
 | `transparency_proof_bundle` | public read | leaf index | identity, trust configuration, current checkpoint, all committed tiles, and one inclusion proof for offline verification | [transparency.md](transparency.md) |
 | `transparency_consistency_proof` | public read | old and new checkpoint tree sizes | compact append-only audit path bound to the complete new checkpoint record | [transparency.md](transparency.md) |
 | `transparency_identity_scan` | public read | TAAP identity | checkpoint-verified matching attestations and scan measurements | [transparency.md](transparency.md) |
-| `list_agent_library` | read | none | the Agent Library: every specialized agent Orama ships, whether this lake runs it, and `internal` for Orama's own tooling (never offered in Ask Orama) | [train-agents.md](train-agents.md) |
+| `list_agent_library` | read | none | the Agent Library: every specialized agent Orama ships, whether this lake runs it, and, only with `include_internal: true`, Orama's own tooling marked `internal` (never offered in Ask Orama) | [train-agents.md](train-agents.md) |
 | `list_datasets` | read | customer | The workspace dataset catalogue with stable `<database>/<name>` ids (the form `get_dataset` takes) and `kind` (`data` or engine `result`) | [workspaces.md](workspaces.md) |
 | `list_runs` | read | customer, optional project/solution and limit | newest matching runs with status, reached stage and final error line | [workspaces.md](workspaces.md) |
 | `launch_agent`, `list_agent_launches`, `stop_agent_launch`, `schedule_agent`, `list_agent_schedules`, `unschedule_agent` | action / read | customer, agent, mode, input, cron or trigger | run, follow and stop Python agents on agent-runtime, and give them cron schedules (each a CronJob) | [agent-launches.md](agent-launches.md) |
@@ -253,8 +316,13 @@ credentials.
 | `scim_list_*`, `scim_get_*`, `scim_upsert_*`, `scim_patch_*`, `scim_delete_*` | action, provider entry | provider bearer plus filter, resource, PATCH operations, or resource id | SCIM user/group resource, list response, or deletion confirmation | [sso.md](sso.md) |
 | `search` | read | `query`, `customer?`, `repository?`, `ref?`, `change?`, `history?`, `limit?` | `{mode, scanned_changes, items: [ranked hit]}` | [search.md](search.md) |
 | `metering_usage`, `set_storage_quota` | read/action | customer, time range, or quota bytes | hourly repository transfer and build compute from the workspace Zettas, live storage, pricing, the customer quota, and populated cold-read proof | [metering.md](metering.md) |
-| `create_secret_mount`, `list_secret_mounts`, `get_secret_mount` | action/read | customer, `workspace_id`, organization, mount fields | mount metadata (in the mount's workspace Zetta) | [secrets.md](secrets.md) |
+| `usage_over_time` | read | `customer_id`, `workspace_ids?`, `dimensions?`, `from`, `to`, `granularity` (`hour`, `day`, `month`) | each dimension of usage over the period, added up across the chosen workspaces, with breakdowns by workspace and kind (and by agent, launch, model or object where they apply), read from each workspace's own Zetta (lake#564) | [metering.md](metering.md#usage-over-time) |
+| `usage_limits`, `set_usage_limit` | read/action | `customer_id`; a `dimension`, `limit` and `warn_percent?` | the account's limits with this month's use and a state (ok, warning, over); storage's limit is the enforced quota (lake#564) | [metering.md](metering.md#limits) |
+| `billing_plans`, `set_billing_plan`, `billing_account`, `choose_billing_plan`, `bill_preview`, `issue_invoice`, `list_invoices`, `get_invoice`, `record_invoice_payment`, `void_invoice` | read/action | the price list; a `customer_id`, `plan_id`, `period` (`YYYY-MM`) or `invoice_id` | Orama Cloud's billing, registered only where `LAKE_BILLING` is on (absent on enterprise installs): plans and prices per usage dimension, each account's plan, the month's bill from its usage, invoices and their payment state, in PostgreSQL (decision 56, lake#564) | [billing.md](billing.md) |
+| `record_model_usage` | action | `model_name`, `input_tokens`, `output_tokens`, `task_id?` | an agent's own task, launch, schedule or bus credential reports the tokens a turn or run spent; lake adds them to that workspace's usage (lake#564, lake#248) | [metering.md](metering.md#model-tokens) |
+| `create_secret_mount`, `list_secret_mounts`, `get_secret_mount` | action/read | customer, `workspace_id`, optional organization (without it the account owns the mount, lake#561), mount fields | mount metadata with `owner_type` (in the mount's workspace Zetta) | [secrets.md](secrets.md) |
 | `put_secret`, `read_secret`, `secret_metadata` | action/read | mount, name, value/version/metadata fields | versioned value or history | [secrets.md](secrets.md) |
+| `list_secrets` | read | mount, `prefix?`, `cursor?`, `limit?` | a mount's secret paths with current version, times and deleted state; never values | [secrets.md](secrets.md) |
 | `delete_secret_versions`, `undelete_secret_versions`, `destroy_secret_versions` | action | mount, name, `versions[]` | updated history | [secrets.md](secrets.md) |
 | `lease_dynamic_secret`, `renew_dynamic_secret`, `revoke_dynamic_secret` | action | mount, role and bounded lifetime; then lease id | response-only generated credential or updated lease metadata (the lease lives in the mount's workspace Zetta, lake#362) | [secrets.md](secrets.md#dynamic-leases) |
 | `create_encryption_key`, `list_encryption_keys`, `get_encryption_key`, `rotate_encryption_key` | action/read | mount and key name | named-key metadata only | [encryption.md](encryption.md) |

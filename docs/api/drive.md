@@ -10,7 +10,8 @@ deduplication remain liquid repository values.
 |---|---|---|
 | `drive_browse` | `read` on the nearest path object, falling back to the repository | Immediate children, size, last structural change, and requested ordering |
 | `drive_preview` | `read` on the path | A server-rendered preview selected by extension |
-| `download_drive_file` | `read` on the path | Exact bytes with size, digest, and media type |
+| `download_drive_file` | `read` on the path | `{path, blob, size, media_type, content_base64, download_url}`: the exact bytes as base64 for a file of at most 16 MiB (`null` above), the media type from the name, and the `GET /drive/download` address that streams any size (lake#587) |
+| `drive_share_people` | `share` on the folder | The people a folder can be shared with by email or handle ([sharing.md](sharing.md#live-grants-and-effective-access)) |
 | `create_drive_folder` | `write` on the containing folder | A new liquid change containing an empty-folder marker |
 | `upload_drive_files` | `write` on the containing folder | One liquid change containing all decoded uploads |
 | `move_drive_path` | `write` on the source and destination parent | A new liquid move preserving the stable path node |
@@ -26,6 +27,18 @@ stable liquid tree node id means a move does not discard policy. Reads use the n
 folder object, so repository policy remains the default. Move authorization checks both the
 source and destination location. Every mutation calls `commit_repository_files`; the HTTP forms
 do not write the store directly.
+
+## Search Follows Every Drive Write (lake#584)
+
+A drive write is a change like a push's, so search follows it the same way:
+`create_drive_folder`, `upload_drive_files`, `move_drive_path`, `delete_drive_path`,
+`restore_drive_version` and `resolve_conflict` each run `search::Service::reindex_artifacts`
+after the change, which publishes the repository's branch tips again as its references name them
+now ([search.md](search.md)). A failed index update is recorded in the call's audit details
+(`search_index`) and never fails the write; in a switched workspace search then names the
+workspace in `stale_workspaces` until its worker retries. Before lake#584 neither drive writes nor
+pushes into a space's index on lake's volume reached hot search: only a release or an explicit
+publication did, so a file saved through a drive was found only by a history scan.
 
 ## Path history
 
@@ -46,21 +59,29 @@ CSV, JSON, PDF, MP4/WebM/Ogg video, and MP3/M4A/Ogg/WAV audio. Markdown and all 
 escaped before becoming HTML. PDF and media bytes are supplied to browser-native elements.
 Unknown extensions return the `download` presentation with `application/octet-stream`.
 
+`download_drive_file` and `GET /drive/download` give a file its media type from its extension
+(`control::drive_media_type`, shared with workspace files): `churn.csv` is `text/csv`. The download
+route sends that type only for types a browser shows as data (images, PDF, text, CSV, Markdown,
+audio, video) and `application/octet-stream` otherwise, always as an attachment named after the
+file.
+
 Liquid #29's format registry is not yet on main. `DriveFormatRegistry::defaults()` is the explicit
 integration point: replace its extension metadata with liquid codec metadata while retaining the
 current pure-renderer contract and fallback.
 
 ## HTTP surface
 
-The read routes are `GET /drive`, `/drive/preview`, `/drive/download`, `/drive/history`,
-`/drive/history/diff`, and `/drive/conflict`. Mutations are POST-only at `/drive/folder`,
-`/drive/upload`, `/drive/rename`, `/drive/move`, `/drive/delete`, `/drive/history/restore`, and
-`/drive/conflict/resolve`.
-Upload accepts `multipart/form-data`; the handler converts files to the capability's base64 input.
-All other handlers convert query or form values to capability inputs and redirect back to a drive
-read route after a successful change. Conflict resolution offers the left value, right value, an
-available reviewed proposal, or prepared replacement text. The form posts through
-`resolve_conflict`; it does not edit Liquid state directly.
+Drive's pages (`/drive`, `/drive/preview`, `/drive/history`, `/drive/history/diff`,
+`/drive/conflict`) are the web app's ([`../ui/web-app.md`](../ui/web-app.md)); every read and change
+is the capability above (`drive_browse`, `upload_drive_files` with base64 file contents,
+`move_drive_path`, `restore_drive_version`, `resolve_conflict`, …), so the app can do nothing REST
+and MCP cannot. The one server route is `GET /drive/download?repository_id=&ref=&path=`, which
+answers a file's exact bytes as an attachment through `download_drive_file`; without a credential
+it redirects to `/sign-in`. It is described in `GET /v1/openapi.json` (operation
+`drive_download`), beside `GET /drive/files/download` (`drive_files_download`).
+The former HTML form handlers under `/drive/` were retired in lake#561. Conflict resolution
+offers the left value, right value, an available reviewed proposal, or prepared replacement text,
+and goes through `resolve_conflict`; it does not edit Liquid state directly.
 
 The consumer sync client, three-tree reconciliation, `liquid history <path>`, and first-class
 local conflict values belong to [liquid #195](https://github.com/oramasearch/liquid/issues/195).
@@ -68,22 +89,29 @@ Lake uses the push and pull protocol documented in [`sync.md`](sync.md).
 
 ## Verification
 
-`DrivePreview` and `WebUi.DrivePagesExposeBrowseMutationHistoryAndConflictControls` cover pure
-format and page rendering. `Drive.BrowseMutationsDownloadsDiffsAndConflictsUseRepositoryCapabilities`
-covers the capability boundary. The Postgres-backed suite, Linux image build, token gate, and live
+`DrivesHttp.ARepositoryDriveWriteIsSearchedDownloadedAndLoaded` covers search following drive
+writes, `download_drive_file`'s bytes and `download_url`, the CSV media type and file name on the
+route, and both routes in OpenAPI.
+
+`DrivePreview` covers pure format rendering.
+`Drive.BrowseMutationsDownloadsDiffsAndConflictsUseRepositoryCapabilities` covers the capability
+boundary. The Postgres-backed suite, Linux image build, token gate, and live
 seeded screenshot run are the release proof.
 
 ## Upload input schema
 
 `upload_drive_files` takes `repository_id`, `ref`, `path`, and a nonempty `files` array.
-Each item is an object with required string fields `name` (one file name within the folder)
-and `content` (padded base64 file bytes). An empty `content` string creates an empty file;
-additional item fields are rejected. The registry advertises these nested fields and
+Each item is an object with `content` (padded base64 file bytes, required) and either `path`
+(relative to the folder; it may name folders, `Q3/report.csv`) or `name` (one file name within
+the folder), never both (`invalid_input` at `/files/<n>/path`); `content_type` is accepted so
+the item has the same shape as `upload_drive_entries`' (lake#587), and a repository keeps no media
+type. An empty `content` string creates an empty file; additional item fields are rejected. The registry advertises these nested fields and
 `contentEncoding: base64` in both OpenAPI and MCP.
 
 Registry validation rejects wrong item and field types before the handler runs. For example,
 `files: [1]` returns REST `400 invalid_input` with `error.path: "/files/0"`; a missing or
-non-string content field identifies `/files/0/content`. Invalid base64 uses the same field path.
+non-string content field identifies `/files/0/content`, and so does an empty item, since
+`content` is the one field every item needs. Invalid base64 uses the same field path.
 MCP carries the same error under its documented [response envelope](README.md).
 
 Verify with the HTTP schema conformance test described in [the API contract](README.md).

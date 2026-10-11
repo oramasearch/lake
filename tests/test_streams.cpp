@@ -2,57 +2,26 @@
 #include <cstdlib>
 #include <format>
 #include <iostream>
-#include <regex>
 
 #include <gtest/gtest.h>
 
 #include "api/workspace_records_api.hpp"
 #include "audit_test_support.hpp"
 #include "http1/client.hpp"
-#include "one_thread_io.hpp"
 #include "lake/api/agent_docs.hpp"
 #include "lake/api/capabilities.hpp"
 #include "lake/api/server.hpp"
-#include "lake/api/web_ui.hpp"
 #include "lake/audit/audit.hpp"
 #include "lake/control/identity_crypto.hpp"
 #include "lake/control/postgres_store.hpp"
 #include "lake/control/stream_owners.hpp"
+#include "one_thread_io.hpp"
 #include "postgres_fixture.hpp"
-#include "stream_fixture.hpp"
 #include "repository_test_support.hpp"
+#include "stream_fixture.hpp"
 
 namespace {
 using nlohmann::json;
-
-void expect_control_capabilities(const std::string& html, const lake::api::Registry& registry) {
-    const auto root = html.find("<section id=\"streams\"");
-    ASSERT_NE(root, std::string::npos);
-    const auto script = html.find("<script id=\"streams-controls\"", root);
-    ASSERT_NE(script, std::string::npos);
-    const auto content = html.substr(root, script - root);
-    const std::regex controls("</?(?:form|a|input|button|select|textarea)\\b[^>]*>");
-    const std::regex mapping("data-capability=\"([^\"]+)\"");
-    std::string form_capability;
-    for (auto match = std::sregex_iterator(content.begin(), content.end(), controls);
-         match != std::sregex_iterator(); ++match) {
-        const auto tag = match->str();
-        if (tag == "</form>") {
-            form_capability.clear();
-        }
-        if (tag.starts_with("</")) {
-            continue;
-        }
-        std::smatch declared;
-        const auto capability = std::regex_search(tag, declared, mapping)
-            ? declared[1].str() : form_capability;
-        ASSERT_FALSE(capability.empty()) << "Unmapped Streams control: " << tag;
-        EXPECT_NE(registry.find(capability), nullptr) << tag;
-        if (tag.starts_with("<form ")) {
-            form_capability = capability;
-        }
-    }
-}
 
 struct Streams : testing::Test {
     std::shared_ptr<lake::control::InMemoryStore> store = std::make_shared<lake::control::InMemoryStore>();
@@ -487,7 +456,7 @@ TEST_F(Streams, DispatchPagingCanContinueAcrossEmptyFilteredPages) {
     EXPECT_TRUE(detail.value.at("subscriptions").empty());
 }
 
-TEST_F(Streams, RestMcpParityAndEveryControlUsesACapability) {
+TEST_F(Streams, RestAndMcpOperateEveryStreamCapabilityAlike) {
     lake::api::ApiServer server({.port = 0, .store = store,
         .workspaces = workspace->service, .agent_bus = bus, .admin_token = "stream-operator",
         .instance_kek = context.instance_kek});
@@ -551,19 +520,6 @@ TEST_F(Streams, RestMcpParityAndEveryControlUsesACapability) {
         auto update = args;
         update["settings"] = {{"retention_ms", 60000}};
         invoke("update_stream", update);
-        const auto list_html = request("GET", "/w/" + workspace->id + "/train/streams?customer_id=" + customer);
-        const auto detail_html = request("GET", "/w/" + workspace->id + "/train/stream?customer_id=" + customer +
-            "&zetta=workspace&topic=" + args.at("topic").get<std::string>());
-        EXPECT_NE(detail_html.find("href=\"/w/" + workspace->id + "/train/streams\" aria-current=\"page\""), std::string::npos);
-        EXPECT_NE(list_html.find("href=\"/w/" + workspace->id + "/train/streams\" aria-current=\"page\""), std::string::npos);
-        EXPECT_EQ(detail_html.find("test-workspace-service-token"), std::string::npos);
-        EXPECT_NE(detail_html.find("&lt;script&gt;"), std::string::npos);
-        const std::string html = list_html + detail_html;
-        for (const auto& name : names) {
-            EXPECT_NE(html.find("data-capability=\"" + name + "\""), std::string::npos) << name;
-        }
-        expect_control_capabilities(list_html, registry);
-        expect_control_capabilities(detail_html, registry);
         if (!mcp && std::getenv("LAKE_STREAM_BROWSER")) {
             std::cout << "Streams browser fixture: http://127.0.0.1:" << server.port()
                       << "/train/stream?customer_id=" << customer << "&zetta=workspace&topic=rest-orders\n"

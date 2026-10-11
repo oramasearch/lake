@@ -22,8 +22,60 @@ snapshot and update the page.
 Train → Experiments is implemented in the source tree with eleven registered REST/MCP operations,
 live charts, confirmed promotion, and ExperimentsAgent's editable proposal and confirmed start,
 against workspace Zetta `dev-a1d74b21`. The build's authorized bridge transport source is
-unchanged. Deletion has no engine contract; deployed study/training acceptance is not claimed.
-See `docs/api/experiments.md` and `docs/ui/experiments.md`.
+unchanged. Deletion has no engine contract; deployed experiment/training acceptance is not claimed.
+Lake says experiment (`get_experiment`, `start_experiment`, `stop_experiment`, `experiment_id`) where
+the engine says study, translating at its boundary (lake#561, not deployed); the guides and pages
+never say study. See `docs/api/experiments.md` and `docs/ui/experiments.md`.
+
+The console is the web app in `frontend/` (lake#561), embedded in the binary and answered for every
+browser page request; it calls only `/v1`. The server-rendered console pages, their deferred panels
+and HTML form handlers, the `lake_workspace` cookie and the experiment chart assets are retired in
+the source tree; an identity application's hosted sign-in pages are the one server-rendered
+surface. `agent_turn` checks a confirmed ApplicationAgent or ExperimentsAgent proposal against the
+stored one (`proposal_task_id`, `proposal_sha256`). Not deployed yet. See `docs/ui/web-app.md` and
+`docs/serving/http.md`.
+
+Speech-to-text and workspace transcripts follow (lake#561, no migration): `transcribe` sends audio
+to OpenAI (`gpt-4o-transcribe`) with lake's key (`LAKE_OPENAI_API_KEY`, `LAKE_TRANSCRIBE_MODEL`)
+through the server's outbound client, an injected `Transcriber` the tests replace with a fake, and
+`not_supported` without a key; `create_transcript`, `list_transcripts` (`q` on title and text),
+`get_transcript`, `update_transcript` and `delete_transcript` keep sealed `lake_transcripts`
+records in the workspace Zetta, from a recording, uploaded audio, a cleaned `.vtt`/`.srt` or pasted
+text. The audio is never kept. Not deployed; `Lake/prod` needs the key in `spec.env`
+(`docs/deployment/aks.md#speech-to-text-key`). See `docs/api/transcripts.md`.
+
+Drives follow (lake#561, no migration): a workspace's drives are sealed `lake_drives` records that
+keep files in a repository (a new one gets its top folder marker as its first change, so `main`
+exists for every drive_* capability), as workspace files, or as shortcuts only (virtual). Workspace
+files are `lake_drive_entries` records, and each file's bytes one object under an opaque key in the
+workspace Zetta's `lake_files` bucket, sealed in 1 MiB AES-256-GCM blocks with nonces derived from
+each block (keys from `LAKE_INSTANCE_KEK` per workspace, not the workspace store's data key), so a
+resent chunk appends identical bytes, appends are durable, the bucket takes no lease, and a move
+never copies bytes. Uploads go in 1 MiB-aligned chunks (`begin_drive_upload`, `append_drive_upload`,
+`finish_drive_upload`, which records the SHA-256 read back); `GET /drive/files/download` streams a
+file after `get_drive_entry` authorizes it. Shortcuts to repositories, repository paths, drive
+items and transcripts say when they break. Data → Drives is one file manager over a
+`DriveStorage` interface with three implementations. `lake_files` has no quota yet. Not deployed.
+See `docs/api/drives.md` and `docs/ui/drives.md`.
+The 2026-10-10 review's drive fixes follow (no migration): drive writes and pushes publish branch
+tips into a space's hot search index too (lake#584); a folder is shared by email or handle among
+the space's people (`drive_share_people`) and lake signs the grant's attestation, refusing a
+made-up digest (lake#585); `download_drive_file` answers the bytes and a `download_url` (lake#587);
+a resent chunk answers the true `received`, and unfinished uploads are listed and expire after
+24 hours (lake#588); `load_drive_dataset` loads a drive's CSV or JSONL file (lake#593); the web app
+retries an edge 503 read under the one `shouldRetry` rule and names who answered (lake#573,
+`docs/ui/web-app.md#a-read-answered-503`).
+
+A workspace's own AI solutions follow (lake#597, no migration): sealed `lake_solutions` records in
+the workspace Zetta in the catalogue's shape (name, business problem, decision, measurement with
+metric, baseline and target, composed methodologies, pipeline template or reference, notes).
+`list_solutions` and `get_solution` answer Orama's catalogue (read through the workspace's engine)
+and the workspace's own, marked `source: orama|workspace`; `create_solution`, `update_solution`,
+`delete_solution` and `duplicate_solution` change only the workspace's own, and an edit or delete of
+Orama's answers the new `forbidden` (403). Lake's `create_solution` is not the engine's, which
+`confirm_solution` still calls inside `workspace_act`. Start as a Project for one of your own creates
+the project and its first pipeline from the composed methodology, since the engine composes the
+governed foundation only for catalogue ids. Not deployed. See `docs/api/solutions.md`.
 
 Every future deployment image receives OCI revision and creation labels. The binary reports the
 same embedded revision through `GET /v1/server_info`; details are in
@@ -85,6 +137,33 @@ workspace's Zetta with the existing envelope (instance KEK, customer KEK, data k
 keeps only the content-free `secret_mount_routes`, the policy objects and the customer KEK. Version
 numbers are claimed `if_absent`, and a customer KEK rotation rewraps every workspace's data keys
 before it forgets the replaced KEK. See `docs/api/secrets.md`.
+A mount's owner is the account that owns its workspace or, as before, an organization inside it
+(lake#561, migration `0071_secret_mount_owners`): `create_secret_mount` without `organization_id`
+needs `admin` on the customer, hangs the mount under `customer → environment secrets/<customer>`,
+claims its name for `customer:<id>`, and stores a NULL organization in its route. Not deployed; the
+operator must vendor the schema and select `secret_mount_owners_guard`. See
+`docs/api/secrets.md#who-owns-a-mount-lake561`.
+Usage over time follows (lake#564, migration `0072_usage_limits`): every dimension of a workspace's
+usage is kept in its workspace Zetta, the counter `lake_usage` (API and MCP calls, model
+predictions, speech-to-text seconds, model tokens, instance and volume seconds) and the gauge
+`lake_storage` (repositories, images, workspace data, transcripts, drive files), an hour a bucket for
+400 days, written by the bounded `UsageRecorder` the owner loop flushes and sampled every fifteen
+minutes by the store root's owner. `usage_over_time` adds the chosen workspaces up by hour, day or
+month with breakdowns by workspace and kind; `usage_limits` and `set_usage_limit` keep content-free
+per-dimension limits in `customer_usage_limits` (storage's stays the enforced quota; the others
+warn); `record_model_usage` takes an agent's own credential. Usage is a dashboard in the web app. No
+billing here. See `docs/api/metering.md#usage-over-time`.
+Billing follows, for Orama Cloud only (lake#564, decision 56, migration `0073_billing`): billing
+records live in PostgreSQL as multitenancy (`billing_plans`, `billing_plan_prices`,
+`billing_subscriptions`, `billing_invoices`, `billing_invoice_lines`) and usage stays in each
+workspace Zetta, read through `usage_over_time`; an invoice freezes only the quantity billed per
+dimension. Ten capabilities (`billing_plans`, `set_billing_plan`, `billing_account`,
+`choose_billing_plan`, `bill_preview`, `issue_invoice`, `list_invoices`, `get_invoice`,
+`record_invoice_payment`, `void_invoice`), audited centrally, are registered only where
+`LAKE_BILLING=on`; off (an enterprise install), they, the Billing pages, `viewer.billing` and the
+Billing guide are absent. Payment goes through the `PaymentProvider` interface; only the manual
+(invoice only) provider exists, and no provider is chosen (lake#620). Not deployed; the operator
+must vendor the schema and select `billing_guard`. See `docs/api/billing.md`.
 Dynamic-secret leases follow (lake#362, migration `0058`): each lease is a sealed record in its
 mount's workspace, and PostgreSQL keeps only `secret_lease_routes` (lease → mount, workspace, and
 `due_at`), the content-free route and due index. Renew, revoke and the owner loop's expiry pass
@@ -94,7 +173,10 @@ pass claims due routes and reads only the workspaces that hold them. See
 Forge records follow (lake#341, migration `0054`): issues, reviews, comments, releases, webhooks,
 exports and branch protection rules live in the workspace Zetta of their repository's workspace,
 found by repository and kind; the push path reads branch protection there once before the push
-and refuses reference updates when it cannot. See `docs/api/forge.md`.
+and refuses reference updates when it cannot. See `docs/api/forge.md`. The web app opens, discusses,
+edits, labels, assigns, closes and reopens issues through the same capabilities (lake#598, not
+deployed); `create_issue` and `create_issue_comment` record the caller as `author`, and
+`issue_assignees` lists the repository's people (`docs/ui/forge.md#issues`).
 Application users and organizations follow (lake#353, lake#354, migration `0055`): they live in the
 application's workspace Zetta, with a pool user's email and an organization's TAAP identity and name
 as claims written `if_absent`; every session issued in an application's pool is checked against the
@@ -187,7 +269,9 @@ repository-store work (search included, which reads stores only through the repo
 runs off the server thread, so one workspace's Zetta holds up only its own requests. Rollback by the workspace Zetta is not detected yet (lake#522), and
 every workspace store depends on `LAKE_INSTANCE_KEK`, which has no rotation or backup. Replication
 cursors go through liquid's cursor API. It needs liquid `8955519` or later (liquid#332, write-once index
-runs); no workspace is switched on dev, and the copy's snapshot
+runs), and `88c5ef4` or later for the fan-out of held puts: before it, corosio read 8 bytes before a
+continuation that a range `when_all` posted and could fault (lake#604, corosio#13), and an offload's
+completion could signal a `block_on` context that had already ended (liquid#350); no workspace is switched on dev, and the copy's snapshot
 precondition is not enforced (the move does not wait on the `0069` snapshot state yet). See `docs/architecture/workspace-store.md` and
 `docs/api/workspace-store.md`.
 A switched workspace's search index lives beside its store (decision 54 S8, lake#381, no migration):
@@ -395,10 +479,9 @@ Protected Ship apps use `GET /v1/apps/auth` (also under `/w/<workspace_id>`) for
 forward-auth and `/apps/authorize` for the Lake-session handoff. The app cookie is host-only,
 expires after 12 hours, and rechecks workspace membership on every request. Migration
 `0041_app_forward_auth` stores only short-lived one-use code hashes.
-The server-rendered Ship → Apps list and detail pages use those capabilities for creation and all
-controls, mask Secret references, follow retained app/build events, and start ApplicationAgent app
-turns with exact proposal confirmation before repository or App writes. Their contract is
-`docs/ui/apps.md`.
+The Ship → Apps pages use those capabilities for creation and all controls, mask Secret references,
+follow retained app/build events, and start ApplicationAgent app turns with exact proposal
+confirmation before repository or App writes. Their contract is `docs/ui/apps.md`.
 
 In-cluster image builds add migration `0036_builds`, customer-scoped REST/MCP capabilities,
 queued/cancelled desired rows, operator status, build-specific source/push/event hashes and retained
@@ -479,30 +562,43 @@ one adapter TU) and the pure renderers in `include/zetta/api/web_ui.hpp`.
   `io_thread` runs `io_context.run()`; `stop()` = `server->stop()`, `io_context.stop()`,
   join. The owner loop calls `wait_for_work()` then `drain()` each tick; both are
   placeholders until lake has a node to marshal onto.
-- Pages are **server-rendered and self-contained**; renderers in `web_ui.cpp` are pure functions
-  and are the unit-tested surface. Every page has the two documented theme scripts; the two
-  passkey pages each add one script required to call `navigator.credentials`, and the MCP page
-  adds one (`copy-buttons`) for its Copy buttons (`docs/api/mcp.md`). Data pages call
-  capabilities through `Registry::call` and can never do what the API cannot.
+- **The console is the web app** in `frontend/` (React, Vite, Tailwind, TypeScript), built and
+  embedded by CMake and served by the `web_app` middleware: a browser's GET of any page path gets
+  its `index.html` (`Content-Security-Policy: frame-ancestors 'self'`), anything else the route or
+  the 404. It calls **only `/v1` capabilities**, so it can never do what the API cannot; do not add
+  a server page or an HTML form handler. Build, page rules and checks: `docs/ui/web-app.md`. The
+  server routes the app relies on (the cookie-setting sign-in routes and the download routes) are
+  listed there and in `docs/serving/http.md`.
+- **Hosted application pages are the one server-rendered surface**: an identity application's
+  sign-in pages (`/apps/<id>/*` and its custom sign-in host), rendered by the pure functions in
+  `web_ui.cpp` in the application's colours, with the theme scripts and, on the passkey page, one
+  script for `navigator.credentials`. They work without JavaScript otherwise.
 - **Nav items and headings are Title Case** — "Search Indexes", not "Search indexes": every
-  sidebar link and section label, page and section title (`workspace_sections`), and `<h1>`–`<h4>`.
+  rail item and section label, page and section title, and `<h1>`–`<h4>` in the web app and the
+  hosted pages.
   Capitalize every word except articles, coordinating conjunctions and prepositions of four
   letters or fewer (*a, an, the, and, but, or, for, as, at, by, in, of, on, to, via, with, from,
   into, over*), which stay lowercase unless first or last; acronyms stay as written ("API Tokens");
   phrasal verbs keep their particle ("Sign In"). Body text, buttons, form labels and eyebrows stay
   sentence case; a heading written as a full sentence ending in punctuation stays a sentence. Rules
   and examples: `docs/ui/design-system.md` → *Capitalization*.
-- IBM Plex Sans and Mono are self-hosted WOFF2 assets embedded into the binary and served below
-  content-hashed `/fonts/` URLs with immutable cache headers. Pages use the content-hashed
-  stylesheet URL; unhashed stylesheet and font aliases use `no-cache`. The browser never needs a
-  third-party font origin.
-- Static visual-direction references live under `docs/design/ui/mocks/`. The served design system
-  and its complete before/after screenshots are documented in `docs/ui/design-system.md`;
-  `tools/ui/screenshot.sh` reproduces the 1440×900 review images.
+- IBM Plex Sans and Mono are self-hosted WOFF2 assets: the web app bundles them under `/ui/`, and
+  the binary also serves them below content-hashed `/fonts/` URLs for the hosted pages, which link
+  the content-hashed stylesheet; unhashed stylesheet and font aliases use `no-cache`. The browser
+  never needs a third-party font origin. Both use the same Orama design tokens
+  (`tools/ui/build-tokens.mjs`, `docs/ui/design-system.md`).
+- Static visual-direction references live under `docs/design/ui/mocks/`;
+  `tools/ui/screenshot.sh` renders them at 1440×900.
 - **One auth check.** The API bearer and the UI session cookie (`lake_session`, set by
   `POST /session`) carry the same secret and are resolved by the same code (`context_for`);
-  never add a second path. Protected pages redirect to `/sign-in` without a valid credential; `/metrics`
-  uses the same check. `/healthz` and `/readyz` are deliberately unauthenticated Kubernetes probes.
+  never add a second path. The web app guards its own pages from the `viewer` read; a protected
+  server route that remains (a download) redirects to `/sign-in` without a valid credential;
+  `/metrics` uses the same check. `/healthz` and `/readyz` are deliberately unauthenticated Kubernetes probes.
+- **Cross-site requests.** An unsafe request the `lake_session` cookie authenticates must come from
+  lake's own origin (`Origin` and `Sec-Fetch-Site`), and a cookie-authenticated `/v1` or `/mcp`
+  `POST` must be `application/json`; bearer calls are unaffected (`refuse_cross_site`,
+  `docs/serving/http.md#cross-site-requests`, lake#561). Tests that post with a cookie send the
+  headers a browser would.
 - **One registry.** Every capability is registered from `src/api/capabilities.cpp` or its
   area-specific registration file; REST,
   OpenAPI and MCP are renderings of it and never special-case an entry. `Registry::call` is the
@@ -525,7 +621,7 @@ one adapter TU) and the pure renderers in `include/zetta/api/web_ui.hpp`.
 - **Schema.** `db/schema.sql` is the source of truth; the operator carries a byte-identical
   vendored copy at `internal/controller/assets/lake-schema.sql` and applies it per Lake as an
   owned `PostgresSchema` (one transaction, guarded on the table the **newest** migration creates,
-  `agent_task_leases_guard` in the source tree, versioned by content hash).
+  `billing_guard` in the source tree, versioned by content hash).
   Change the schema HERE, then copy it into the operator in the same change; the operator's test
   checks the copy carries the source-of-truth header. Migrations are single-shot today
   (incremental migrations are the PostgresSchema follow-up), so until then a schema change means
@@ -563,14 +659,14 @@ that licence boundary.
   provides Corosio TLS and Argon2id. The runtime carries those OpenSSL shared libraries plus
   `libstdc++6 libpq5 ca-certificates`, numeric non-root `USER 10001:10001` (a named user cannot
   satisfy a `runAsNonRoot` pod security context).
-- GitHub Actions uses the same toolchain for pull-request builds and publishes the Dockerfile image
-  on a Git tag, only for `linux/amd64`. Private repositories are read with one read-only deploy key each
-  (secrets `DEPLOY_KEY_*`); `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` must still be configured by
-  Steve before the image workflow can publish. See
-  `docs/build/ci.md`.
-- Deployment images are CI-built immutable `oramasearch/lake:<tag>` images; the workflow also
-  publishes `oramasearch/lake:sha-<short-sha>` and rejects `latest`. The Docker Hub repo is private;
-  the `Lake` CR needs `spec.pullSecretName` and the Secret in `spec.namespace`.
+- **No CI.** Steve has said no to CI (umbrella `CLAUDE.md`). Never add, enable or extend a
+  workflow, never edit `.github/workflows/` to make CI pass, and never wait on or cite CI checks.
+  Proof is the local suite plus the cluster BuildKit Linux lane
+  (`lake-linux-test/run-lake-linux-tests.sh`, liquid-dev skill). `docs/build/ci.md` describes the
+  workflow files that remain in the repository.
+- Deployment images are built on the cluster BuildKit (liquid-dev skill) as immutable
+  `oramasearch/lake:<tag>` images, never `latest`. The Docker Hub repo is private; the `Lake` CR
+  needs `spec.pullSecretName` and the Secret in `spec.namespace`.
 
 ## Open decisions
 

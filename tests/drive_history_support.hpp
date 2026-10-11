@@ -3,7 +3,7 @@
 // One Drive history exercise (lake#123) shared by the memory, Postgres and workspace-store
 // suites: an ordinary overwrite through `upload_drive_files` keeps the previous version as a
 // normal prior version that can be compared and restored, a restore is a stable-node modification,
-// and a real deletion stays distinct. Every step goes through lake's HTTP routes.
+// and a real deletion stays distinct. Every step goes through lake's HTTP API.
 
 #include <gtest/gtest.h>
 
@@ -49,21 +49,10 @@ inline std::string drive_base64(std::string_view text) {
     return encoded;
 }
 
-inline std::size_t drive_count(std::string_view text, std::string_view needle) {
-    std::size_t count = 0;
-    for (std::size_t at = text.find(needle); at != std::string_view::npos;
-         at = text.find(needle, at + needle.size())) {
-        ++count;
-    }
-    return count;
-}
-
 // Uploads `shared/hello.txt` twice into `repository_id`, whose main branch already exists, then
-// checks history, comparison, restore and deletion. `pages` also checks the rendered
-// `/drive/history` page.
+// checks history, comparison, restore and deletion.
 inline void expect_replaced_drive_file_keeps_its_history(const DriveRequest& request,
-                                                         const std::string& repository_id,
-                                                         bool pages = true) {
+                                                         const std::string& repository_id) {
     using nlohmann::json;
     const std::string path = "shared/hello.txt";
     const std::string context = "repository_id=" + repository_id + "&ref=main&path=" + path;
@@ -125,21 +114,6 @@ inline void expect_replaced_drive_file_keeps_its_history(const DriveRequest& req
                            {{"kind", "context"}, {"text", ""}}}))
         << compared.dump();
 
-    if (pages) {
-        const auto [status, page] = request("GET", "/drive/history?" + context, {});
-        EXPECT_EQ(status, 200U) << page;
-        EXPECT_EQ(page.find(">Deleted<"), std::string::npos) << "a replacement is not a deletion";
-        for (const json* version : {&current, &previous}) {
-            const std::string id = (*version)["id"];
-            EXPECT_NE(page.find("aria-label=\"Compare from " + id + "\""), std::string::npos)
-                << page;
-            EXPECT_NE(page.find("aria-label=\"Compare to " + id + "\""), std::string::npos) << page;
-            EXPECT_NE(page.find("name=\"change_id\" value=\"" + id + "\""), std::string::npos)
-                << "every available version has its restore form";
-        }
-        EXPECT_NE(page.find("Compare selected text versions"), std::string::npos);
-    }
-
     // Restoring the previous version writes a new change: a modification of the same node.
     const json restored = api("POST",
                               "restore_drive_version",
@@ -166,15 +140,6 @@ inline void expect_replaced_drive_file_keeps_its_history(const DriveRequest& req
     EXPECT_EQ(deleted[0]["changes"], json::array({"removed"})) << deleted.dump();
     EXPECT_EQ(deleted[0]["new_blob"], "");
     EXPECT_EQ(deleted[0]["old_blob"], previous["new_blob"]);
-    if (pages) {
-        const auto [status, page] = request("GET", "/drive/history?" + context, {});
-        EXPECT_EQ(status, 200U) << page;
-        EXPECT_EQ(drive_count(page, ">Deleted<"), 1U) << page;
-        EXPECT_EQ(page.find("name=\"change_id\" value=\"" + deleted[0]["id"].get<std::string>() +
-                            "\""),
-                  std::string::npos)
-            << "a deletion has no restore form of its own";
-    }
 }
 
 } // namespace lake::test

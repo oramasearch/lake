@@ -97,9 +97,11 @@ async function ready(server) {
     assert.fail("Lake never became ready");
 }
 
-async function pageWithForgedHeaders(repository) {
+// The origin the web app renders its clone and push commands from (`viewer.external_origin`),
+// asked for with forged Host and proxy headers (lake#561: the page is the app's).
+async function viewerWithForgedHeaders() {
     return new Promise((resolve, reject) => {
-        const pending = http.get(`${origin}/repository?id=${repository.id}`, {
+        const pending = http.get(`${origin}/v1/viewer`, {
             headers: {
                 Authorization: `Bearer ${token}`,
                 Host: "injected.example.invalid:9443",
@@ -210,6 +212,10 @@ try {
     await browser.setCookie({ name: "lake_session", value: token, url: origin,
         httpOnly: true, sameSite: "Strict" });
     await page.goto(`${origin}/repository?id=${repository.id}`, { waitUntil: "networkidle0" });
+    // The web app renders the page after its reads answer.
+    await page.waitForFunction(() => [...document.querySelectorAll("h2")]
+        .some((element) => element.textContent === "Clone and Push" &&
+            element.parentElement.querySelectorAll("pre code").length === 2), { timeout: 30000 });
     const panel = await page.evaluate(() => {
         const heading = [...document.querySelectorAll("h2")]
             .find((element) => element.textContent === "Clone and Push");
@@ -232,8 +238,8 @@ try {
     assert.equal(panel.commands.length, 2);
     assert(panel.commands[0].startsWith("liquid clone "));
     assert(panel.commands[1].startsWith("liquid push "));
-    const forged = await pageWithForgedHeaders(repository);
-    assert(forged.includes(`${origin}/v1/repositories/${repository.id}`));
+    const forged = await viewerWithForgedHeaders();
+    assert.equal(JSON.parse(forged).value.external_origin, origin);
     assert(!forged.includes("injected.example.invalid"));
     record("Host and proxy-header substitution: refused; configured origin preserved");
     copiedCommands(panel.commands[0], repository, root);

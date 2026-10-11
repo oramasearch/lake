@@ -11,8 +11,8 @@ ones did.** Keeping the two apart stops autonomous work being dressed up as a ch
 
 | Part | What it is |
 |---|---|
-| **Your Agents** | The agents people built in this workspace, from the workspace's `list_agents` (records with `kind: orama` are left out). Columns follow Studio: Agent (name and purpose), Engagement (*Conversation*, or *Conversation and unattended* when it has a trigger), Skills, Model, Status. Each links to its page. Needs a ready workspace. Zetta's `list_agents` took 380–690 ms on the dev site, so the page renders without it and fills this panel from the deferred `GET /train/agents/list` (`{html}` rendered by lake); without JavaScript, *Show your agents* opens `?inline=1`, which waits for it (lake#446) |
-| **Create an Agent** | Studio's boxes: name, purpose, **work area** (this workspace, a single project, specific data, plus which), **manifesto**, **goal**, **skills** (*Search data*, *Generate a dataset*, *Train a Model*, *Summarize and explain*, *Call the API*; granted, never assumed), **model**, and **trigger or schedule** (empty means conversation only). Posts to `/train/agents/create` |
+| **Your Agents** | The agents people built in this workspace, from the workspace's `list_agents` (records with `kind: orama` are left out). Columns follow Studio: Agent (name and purpose), Engagement (*Conversation*, or *Conversation and unattended* when it has a trigger), Skills, Model, Status. Each links to its page. Needs a ready workspace. Zetta's `list_agents` took 380–690 ms on the dev site, so the page shows the rest first and fills this panel once that read answers (lake#446) |
+| **Create an Agent** | Studio's boxes: name, purpose, **work area** (this workspace, a single project, specific data, plus which), **manifesto**, **goal**, **skills** (*Search data*, *Generate a dataset*, *Train a Model*, *Summarize and explain*, *Call the API*; granted, never assumed), **model**, and **trigger or schedule** (empty means conversation only). The web app calls `create_agent` |
 | **Agent Library** | Every specialized agent Orama ships, from `list_agent_library`: what it does, where a person meets it, how it runs, and whether this lake runs it. Shown even before the workspace is ready, because the library is lake's, not the workspace's |
 
 The model choice decides where the agent runs:
@@ -56,10 +56,11 @@ where it runs, manifesto, goal, trigger, status), the **Pipelines** granted to i
 | `agent-autosuggest-corpus` | Auto-Suggest Corpus Generator | Internal: Orama's own agent tests. One example of what is worth building for a situation you describe, checked against the test cases; writes nothing to the corpus (lake#263) | service |
 | `agent-project-corpus` | Project Corpus Generator | Internal: Orama's own agent tests. A worked example of building or changing a pipeline on your own data, replayed against your workspace; changes nothing (lake#263) | service |
 
-The three generators carry `internal: true` in `list_agent_library` (lake#451). The library page
-badges them *Orama internal*, and Ask Orama's *Talk to* never offers them, even where they run:
-they are tooling for Orama's evaluations, not agents a customer uses. `agent_turn` still reaches
-them by key for that tooling.
+The three generators carry `internal: true` (lake#451), and `list_agent_library` leaves them out
+unless asked with `include_internal: true` (lake#594), so neither the library page, nor an API or
+MCP caller, nor Ask Orama's *Talk to* offers them by default: they are tooling for Orama's
+evaluations, not agents a customer uses. With `include_internal`, the library page badges them
+*Orama internal*. `agent_turn` still reaches them by key for that tooling.
 
 Status is *Available* when the operator lists the agent in `LAKE_AGENT_ENDPOINTS`, *Not running on
 this lake* otherwise, and *Offline tool* for the three agents that produce evaluations and
@@ -67,7 +68,7 @@ training data rather than serving people. People do not create or delete library
 
 ExperimentsAgent is deployed from `oramasearch/agent-experiments:f5be471`. Lake gives it the
 independent `agent-experiments` bus topic and credential. It runs as a chat-capable service; its
-study records and trial data stay in the selected workspace Zetta.
+experiment records and trial data stay in the selected workspace Zetta.
 
 The page (2026-09-27, the UX review) says what each agent does for the person and where to use it,
 in plain words: *Agent · What it does for you · Where to use it* and a badge (*Available*, *Not
@@ -80,7 +81,7 @@ success looks like* (`goal`), *What it may do* (`skills`), *Model* and *Runs on 
 
 | Capability | Kind | Authorization | What it does |
 |---|---|---|---|
-| `list_agent_library` | read | any signed-in principal | The catalog above with `deployed` and `status` per agent |
+| `list_agent_library` | read | any signed-in principal | The catalog above with `deployed` and `status` per agent; the internal generators only with `include_internal: true` |
 | `workspace_query` → `list_agents`, `get_agent`, `agent_training_status` | read | `read` on the customer | The workspace's agents |
 | `workspace_act` → `create_agent`, `update_agent`, `delete_agent`, `set_training_schedule`, `agent_run`, `chat` | action | `write` on the customer | Build, change, run and talk to agents |
 
@@ -99,14 +100,13 @@ lake allows it only through `workspace_act` (`write`) and calls it with `GET`
 ## Verify
 
 ```sh
-ctest --test-dir build -R 'Workspaces.Agent|Workspaces.TheAgentLibrary|CreateAnAgent'
+ctest --test-dir build -R 'Workspaces.Agent|Workspaces.TheAgentLibrary|CreateAgent'
 ```
 
 `Workspaces.AgentCallsAreAllowListedAndChatIsAWriteZettaTakesWithGet`,
-`Workspaces.TheAgentLibraryListsEverySpecializedAgentAndWhatRuns`,
-`Workspaces.AgentsPageShowsYourAgentsTheStudioFormAndTheAgentLibrary`,
-`Workspaces.AgentPageShowsTheDefinitionPipelinesRunsAndATypedDelete` and
-`HttpServer/HttpResponseIsolation.CreateAnAgentBuildsANativeOrAPythonAgentFromStudiosBoxes`.
+`Workspaces.TheAgentLibraryListsEverySpecializedAgentAndWhatRuns` and
+`AgentRuns.CreateAgentRefusesDefinitionFieldsZettaWouldDrop`. The web app composes a native or
+Python agent from Studio's boxes and calls `create_agent`.
 
 ## Change it
 

@@ -42,14 +42,16 @@
 #include "api/workspace_records_api.hpp"
 #include "lake/api/capabilities.hpp"
 #include "lake/api/forge.hpp"
+#include "lake/api/markdown.hpp"
 #include "lake/api/mcp.hpp"
 #include "lake/api/registry.hpp"
 #include "lake/api/rest.hpp"
 #include "lake/api/server.hpp"
 #include "lake/api/sync_store.hpp"
+#include "lake/api/web_ui.hpp"
 #include "lake/audit/audit.hpp"
-#include "lake/control/workspace_audit.hpp"
 #include "lake/control/apps.hpp"
+#include "lake/control/drive_files.hpp"
 #include "lake/control/drive_share_links.hpp"
 #include "lake/control/handles.hpp"
 #include "lake/control/identity_crypto.hpp"
@@ -57,6 +59,7 @@
 #include "lake/control/metering.hpp"
 #include "lake/control/policy.hpp"
 #include "lake/control/postgres_store.hpp"
+#include "lake/control/workspace_audit.hpp"
 #include "lake/control/zetta_workspace.hpp"
 #include "lake/telemetry/metrics.hpp"
 #include "lake/version.hpp"
@@ -174,6 +177,10 @@ struct RepositoryFixtureStore final : SyncStore {
         }
         if (path == "weights.bin") {
             return RepositoryFile{path, "blob-weights", "fixture weights", 15};
+        }
+        if (path.ends_with(".cpp")) {
+            const std::string source = "int main() {\n    return 0;\n}\n";
+            return RepositoryFile{path, "blob-source", source, source.size(), bytes(source)};
         }
         if (revision == "change-1") {
             return RepositoryFile{path, "blob-1", "old\nshared\n", 11, bytes("old\nshared\n")};
@@ -567,6 +574,117 @@ TEST(Metering, CustomerQuotaCapabilityOverridesTheProcessDefault) {
     EXPECT_TRUE(usage.value.at("over_quota"));
 }
 
+// create_membership, accept_invitation and create_grant sign their own attestation and keep its
+// digest as the evidence; a digest that is not lake's is refused at its field and writes nothing
+// (lake#602).
+TEST(Organizations, GrantsAndMembershipsKeepTheDigestOfAStatementLakeSigned) {
+    Surface surface;
+    const ApiResult user = surface.call("create_user",
+                                        {{"taap_id", "taap:1:ed25519:attested"},
+                                         {"email", "attested@example.com"},
+                                         {"display_name", "Attested"}});
+    const ApiResult organization =
+        surface.call("create_organization", {{"display_name", "Attested"}});
+    ASSERT_TRUE(user.ok) << user.error.message;
+    ASSERT_TRUE(organization.ok) << organization.error.message;
+    const auto recomputed = [](const json& attestation) {
+        return "sha256:" + lake::control::drive_sha256_hex(json{
+                               {"statement", attestation["statement"]},
+                               {"signer", attestation["signer"]},
+                               {"signature",
+                                attestation["signature"]}}.dump());
+    };
+
+    // A membership: a made-up digest is refused and nothing is written; without one, lake signs.
+    const json membership_input{{"organization_id", organization.value["id"]},
+                                {"principal_type", "user"},
+                                {"principal_id", user.value["id"]},
+                                {"principal_taap_id", user.value["taap_id"]},
+                                {"role", "member"}};
+    json made_up = membership_input;
+    made_up["attestation_digest"] = "sha512-256:membership";
+    const ApiResult refused = surface.call("create_membership", made_up);
+    EXPECT_EQ(refused.error.code, "invalid_input");
+    EXPECT_EQ(refused.error.path, "/attestation_digest");
+    EXPECT_NE(refused.error.message.find("leave attestation_digest out"), std::string::npos);
+    const ApiResult none =
+        surface.call("list_memberships", {{"organization_id", organization.value["id"]}});
+    ASSERT_TRUE(none.ok) << none.error.message;
+    EXPECT_TRUE(none.value["items"].empty()) << "a refused digest writes nothing";
+    const ApiResult membership = surface.call("create_membership", membership_input);
+    ASSERT_TRUE(membership.ok) << membership.error.message;
+    const json& signed_membership = membership.value["attestation"];
+    const std::string membership_digest = signed_membership["digest"];
+    EXPECT_TRUE(membership_digest.starts_with("sha256:")) << membership_digest;
+    EXPECT_EQ(membership.value["attestation_digest"], membership_digest);
+    EXPECT_EQ(recomputed(signed_membership), membership_digest);
+    EXPECT_EQ(signed_membership["statement"]["type"], "lake.org_membership/1");
+    EXPECT_EQ(signed_membership["statement"]["role"], "member");
+    EXPECT_EQ(signed_membership["statement"]["principal_taap_id"], "taap:1:ed25519:attested");
+    EXPECT_EQ(signed_membership["statement"]["granted_by"], "admin");
+    EXPECT_EQ(signed_membership["signer"], signed_membership["statement"]["issuer"]);
+    EXPECT_FALSE(signed_membership["signature"].get<std::string>().empty());
+    const ApiResult read = surface.call("get_membership", {{"id", membership.value["id"]}});
+    ASSERT_TRUE(read.ok) << read.error.message;
+    EXPECT_EQ(read.value["attestation_digest"], membership_digest);
+
+    // A grant on the organization: the same rule, and lake's own digest is accepted.
+    const auto object = surface.store.find_policy_object("organization", organization.value["id"]);
+    ASSERT_TRUE(object) << object.error().message;
+    const json grant_input{{"principal_taap_id", "taap:1:ed25519:reader"},
+                           {"object_id", object->id},
+                           {"role", "read"}};
+    json made_up_grant = grant_input;
+    made_up_grant["attestation_digest"] = "sha512-256:grant";
+    const ApiResult refused_grant = surface.call("create_grant", made_up_grant);
+    EXPECT_EQ(refused_grant.error.code, "invalid_input");
+    EXPECT_EQ(refused_grant.error.path, "/attestation_digest");
+    const ApiResult grant = surface.call("create_grant", grant_input);
+    ASSERT_TRUE(grant.ok) << grant.error.message;
+    const json& signed_grant = grant.value["attestation"];
+    EXPECT_EQ(grant.value["attestation_digest"], signed_grant["digest"]);
+    EXPECT_EQ(recomputed(signed_grant), signed_grant["digest"].get<std::string>());
+    EXPECT_EQ(signed_grant["statement"]["type"], "lake.grant/1");
+    EXPECT_EQ(signed_grant["statement"]["object_id"], object->id);
+    // The digest lake answered names this grant only: for another role it is refused; for the same
+    // grant it passes the check and the store answers that the grant exists.
+    json other_role = grant_input;
+    other_role["role"] = "write";
+    other_role["attestation_digest"] = signed_grant["digest"];
+    EXPECT_EQ(surface.call("create_grant", other_role).error.path, "/attestation_digest");
+    json repeated = grant_input;
+    repeated["attestation_digest"] = signed_grant["digest"];
+    EXPECT_EQ(surface.call("create_grant", repeated).error.code, "conflict");
+
+    // An invitation accepted on someone's behalf: the statement names the invitation and its role.
+    const ApiResult guest = surface.call("create_user",
+                                         {{"taap_id", "taap:1:ed25519:guest"},
+                                          {"email", "guest@example.com"},
+                                          {"display_name", "Guest"}});
+    ASSERT_TRUE(guest.ok) << guest.error.message;
+    const ApiResult invitation = surface.call("create_invitation",
+                                              {{"organization_id", organization.value["id"]},
+                                               {"invitee_type", "email"},
+                                               {"invitee", "guest@example.com"},
+                                               {"role", "admin"},
+                                               {"expires_at", "2999-01-01T00:00:00Z"}});
+    ASSERT_TRUE(invitation.ok) << invitation.error.message;
+    const json accept_input{{"invitation_id", invitation.value["id"]},
+                            {"principal_type", "user"},
+                            {"principal_id", guest.value["id"]},
+                            {"principal_taap_id", guest.value["taap_id"]}};
+    json made_up_accept = accept_input;
+    made_up_accept["attestation_digest"] = "sha512-256:accepted";
+    EXPECT_EQ(surface.call("accept_invitation", made_up_accept).error.path, "/attestation_digest");
+    const ApiResult accepted = surface.call("accept_invitation", accept_input);
+    ASSERT_TRUE(accepted.ok) << accepted.error.message;
+    const json& signed_accept = accepted.value["attestation"];
+    EXPECT_EQ(accepted.value["attestation_digest"], signed_accept["digest"]);
+    EXPECT_EQ(recomputed(signed_accept), signed_accept["digest"].get<std::string>());
+    EXPECT_EQ(signed_accept["statement"]["invitation_id"], invitation.value["id"]);
+    EXPECT_EQ(signed_accept["statement"]["role"], "admin");
+}
+
 TEST(Organizations, MemberMutationCapabilitiesUseTheRegistry) {
     Surface surface;
     const ApiResult first = surface.call("create_user",
@@ -588,8 +706,7 @@ TEST(Organizations, MemberMutationCapabilitiesUseTheRegistry) {
                              {"principal_type", "user"},
                              {"principal_id", user.value.at("id")},
                              {"principal_taap_id", user.value.at("taap_id")},
-                             {"role", role},
-                             {"attestation_digest", "sha512-256:membership"}});
+                             {"role", role}});
     };
     const ApiResult first_membership = create(first, "owner");
     const ApiResult second_membership = create(second, "owner");
@@ -2997,7 +3114,10 @@ TEST(TelemetryHttp, MetricsRequireExistingAuthAndUsePrometheusContentType) {
     server.stop();
 }
 
-TEST(IdentityHttp, PagesIssueAndResolveHttpOnlySessions) {
+// The browser session is the API's: password sign-up through /v1 sets the HttpOnly lake_session
+// cookie, which then reads sessions and enrolls MFA. The former server pages are the web app's, so
+// a request that is not a browser's gets the 404 (lake#561).
+TEST(IdentityHttp, ApiSignUpIssuesAndResolvesHttpOnlySessions) {
     ServerOptions options;
     options.port = 0;
     options.public_host = "lake.example";
@@ -3006,61 +3126,54 @@ TEST(IdentityHttp, PagesIssueAndResolveHttpOnlySessions) {
     ApiServer server(options);
     ASSERT_TRUE(server.start()) << server.reason();
 
-    const std::string page = http_get(server.port(), "/sign-up");
-    EXPECT_NE(page.find(" 200 "), std::string::npos);
-    EXPECT_NE(page.find("action=\"/identity/sign-up\""), std::string::npos);
-    const std::string mfa_challenge = http_get(server.port(), "/mfa");
-    EXPECT_NE(mfa_challenge.find(" 200 "), std::string::npos);
-    EXPECT_NE(mfa_challenge.find("action=\"/identity/mfa/verify\""), std::string::npos);
-
-    const std::string operator_page =
-        http_get(server.port(), "/sign-in", "Bearer operator-page-token");
-    EXPECT_NE(operator_page.find(" 302 "), std::string::npos);
-    EXPECT_EQ(response_header(operator_page, "Location"), "/repositories");
-    const std::string operator_sessions =
-        http_get(server.port(), "/sessions", "Bearer operator-page-token");
-    EXPECT_NE(operator_sessions.find(" 302 "), std::string::npos);
-    EXPECT_EQ(response_header(operator_sessions, "Location"), "/repositories");
-
-    const std::string created =
+    for (const std::string_view path : {"/sign-up", "/sign-in", "/mfa", "/sessions"}) {
+        const std::string retired =
+            http_request(server.port(), "GET", path, "", "text/plain", {}, {}, "lake.example");
+        EXPECT_NE(retired.find(" 404 "), std::string::npos) << path << "\n" << retired;
+    }
+    const std::string form =
         http_request(server.port(),
                      "POST",
                      "/identity/sign-up",
                      "email=page%40example.test&display_name=Page+User&password=correct+horse+"
                      "battery+staple&device_name=browser&identity_document=%7B%7D",
-                     "application/x-www-form-urlencoded");
-    EXPECT_NE(created.find(" 302 "), std::string::npos) << created;
-    EXPECT_EQ(response_header(created, "Location"), "/repositories");
-    const std::string set_cookie = response_header(created, "Set-Cookie");
-    EXPECT_NE(set_cookie.find("HttpOnly"), std::string::npos);
-    const std::size_t cookie_end = set_cookie.find(';');
-    const std::string cookie = set_cookie.substr(0, cookie_end);
+                     "application/x-www-form-urlencoded",
+                     {},
+                     {},
+                     "lake.example");
+    EXPECT_NE(form.find(" 404 "), std::string::npos) << "the sign-up form is retired: " << form;
 
-    const std::string sessions =
-        http_request(server.port(), "GET", "/sessions", "", "text/plain", cookie);
-    EXPECT_NE(sessions.find(" 200 "), std::string::npos) << sessions;
-    EXPECT_NE(sessions.find("Sessions and Devices"), std::string::npos);
-    EXPECT_NE(sessions.find("browser"), std::string::npos);
-
-    const std::string mfa_enrollment = http_request(server.port(),
-                                                    "POST",
-                                                    "/identity/mfa/enroll",
-                                                    "",
-                                                    "application/x-www-form-urlencoded",
-                                                    cookie);
-    EXPECT_NE(mfa_enrollment.find(" 200 "), std::string::npos) << mfa_enrollment;
-    EXPECT_NE(mfa_enrollment.find("otpauth://totp/lake:"), std::string::npos);
-    EXPECT_NE(mfa_enrollment.find("Recovery Codes"), std::string::npos);
-    EXPECT_NE(mfa_enrollment.find("action=\"/identity/mfa/disable\""), std::string::npos);
-
-    const std::string rest_signup = http_request(
+    const std::string created = http_request(
         server.port(),
         "POST",
         "/v1/sign_up_password",
-        R"({"email":"rest-page@example.test","password":"correct horse battery staple","display_name":"REST Page","device_name":"browser","identity_document":"{}"})",
-        "application/json");
-    EXPECT_NE(rest_signup.find(" 200 "), std::string::npos) << rest_signup;
-    EXPECT_NE(response_header(rest_signup, "Set-Cookie").find("HttpOnly"), std::string::npos);
+        R"({"email":"page@example.test","password":"correct horse battery staple","display_name":"Page User","device_name":"browser","identity_document":"{}"})",
+        "application/json",
+        {},
+        {},
+        "lake.example");
+    EXPECT_NE(created.find(" 200 "), std::string::npos) << created;
+    const std::string set_cookie = response_header(created, "Set-Cookie");
+    EXPECT_NE(set_cookie.find("HttpOnly"), std::string::npos);
+    EXPECT_NE(set_cookie.find("SameSite=Lax"), std::string::npos);
+    const std::string cookie = set_cookie.substr(0, set_cookie.find(';'));
+
+    const std::string sessions = http_request(
+        server.port(), "GET", "/v1/list_sessions", "", "text/plain", cookie, {}, "lake.example");
+    EXPECT_NE(sessions.find(" 200 "), std::string::npos) << sessions;
+    EXPECT_NE(sessions.find("browser"), std::string::npos);
+
+    const std::string enrolled = http_request(server.port(),
+                                              "POST",
+                                              "/v1/enroll_mfa",
+                                              "{}",
+                                              "application/json",
+                                              cookie,
+                                              {},
+                                              "lake.example");
+    EXPECT_NE(enrolled.find(" 200 "), std::string::npos) << enrolled;
+    EXPECT_NE(enrolled.find("otpauth://totp/lake:"), std::string::npos);
+    EXPECT_NE(enrolled.find("recovery_codes"), std::string::npos);
     server.stop();
 }
 
@@ -3628,6 +3741,70 @@ TEST(Rest, PathsMethodsAndQueryCoercion) {
     EXPECT_EQ(envelope["error"]["code"], "not_found");
     EXPECT_EQ(rest_status(ApiResult::failure("mfa_required", "verify MFA")), 403);
     EXPECT_EQ(rest_status(ApiResult::failure("store_unavailable", "")), 503);
+}
+
+// A GET read's array input (lake#576): repeated keys, a comma list and a JSON array all decode
+// as the array, each item coerced by the declared item type.
+TEST(Rest, ArrayInputsDecodeFromRepeatedKeysCommaListsAndJsonArrays) {
+    Surface s;
+    const auto permissions = s.registry.find("my_permissions");
+    ASSERT_NE(permissions, nullptr);
+    EXPECT_EQ(rest_input_from_query(*permissions, {{"actions", "read"}, {"actions", "admin"}})
+                  .at("actions"),
+              json::array({"read", "admin"}));
+    EXPECT_EQ(rest_input_from_query(*permissions, {{"actions", "read,admin"}}).at("actions"),
+              json::array({"read", "admin"}));
+    EXPECT_EQ(
+        rest_input_from_query(*permissions, {{"actions", R"(["read","admin"])"}}).at("actions"),
+        json::array({"read", "admin"}));
+    EXPECT_EQ(rest_input_from_query(*permissions, {{"actions", "read"}}).at("actions"),
+              json::array({"read"}));
+    EXPECT_EQ(rest_input_from_query(*permissions, {{"actions", ""}}).at("actions"), json::array());
+    Capability numbers{
+        .name = "numbers",
+        .input_schema = {
+            {"type", "object"},
+            {"properties", {{"steps", {{"type", "array"}, {"items", {{"type", "integer"}}}}}}}}};
+    EXPECT_EQ(rest_input_from_query(numbers, {{"steps", "1,2"}, {"steps", "3"}}).at("steps"),
+              json::array({1, 2, 3}));
+}
+
+// lake#594: a newcomer reads every operation by a human title, and an MCP client warns only before
+// a delete or destroy.
+TEST(Mcp, EveryToolHasAHumanTitleAndOnlyDeletesAreDestructive) {
+    lake::api::Registry registry;
+    lake::api::register_core_capabilities(registry, "0.0.1");
+    std::vector<std::string> untitled;
+    for (const auto& capability : registry.list()) {
+        if (capability->transport != CapabilityTransport::Json) {
+            continue;
+        }
+        if (capability->title.empty() || capability->title == capability->name ||
+            capability->title.contains('_')) {
+            untitled.push_back(capability->name + " (" + capability->title + ")");
+        }
+    }
+    EXPECT_TRUE(untitled.empty()) << json(untitled).dump();
+    const json tools = lake::api::mcp_tools(registry, lake::api::SchemaAudience::Caller);
+    const auto tool = [&](std::string_view name) {
+        return *std::ranges::find_if(tools, [&](const json& t) { return t["name"] == name; });
+    };
+    EXPECT_EQ(tool("create_drive")["annotations"]["destructiveHint"], false);
+    EXPECT_EQ(tool("create_drive")["annotations"]["readOnlyHint"], false);
+    EXPECT_EQ(tool("delete_workspace")["annotations"]["destructiveHint"], true);
+    EXPECT_EQ(tool("destroy_secret_versions")["annotations"]["destructiveHint"], true);
+    EXPECT_EQ(tool("set_member_role")["annotations"]["idempotentHint"], true);
+    EXPECT_EQ(tool("create_drive")["annotations"]["idempotentHint"], false);
+    EXPECT_EQ(tool("list_drives")["annotations"]["readOnlyHint"], true);
+    // predict is a read in tools/list and in mcp_setup alike.
+    EXPECT_EQ(tool("predict")["annotations"]["readOnlyHint"], true);
+    EXPECT_FALSE(lake::api::capability_writes(*registry.find("predict")));
+    // workspace_sql also takes POST with a JSON body, so a long statement need not fit a URL.
+    const json doc = openapi_document(registry, "0.0.1");
+    EXPECT_TRUE(doc["paths"]["/v1/workspace_sql"].contains("get"));
+    EXPECT_TRUE(doc["paths"]["/v1/workspace_sql"].contains("post"));
+    // Every operation's summary is its human title.
+    EXPECT_EQ(doc["paths"]["/v1/delete_workspace"]["post"]["summary"], "Delete a workspace");
 }
 
 TEST(Rest, OpenApiCoversEveryCapability) {
@@ -4640,6 +4817,30 @@ TEST(Repositories, PublicRepositoryContentCapabilitiesUseTheRepositoryStore) {
         s.call("repository_file", {{"id", repository_id}, {"ref", "main"}, {"path", "readme.md"}})
             .value["contents"],
         "new\nshared\n");
+    // The File page's syntax-unit shading (lake#561): only on request, only for parsed formats.
+    const ApiResult source =
+        s.call("repository_file",
+               {{"id", repository_id}, {"ref", "main"}, {"path", "src/main.cpp"}, {"units", true}});
+    ASSERT_TRUE(source.ok) << source.error.message;
+    ASSERT_TRUE(source.value.contains("units"));
+    ASSERT_FALSE(source.value["units"].empty());
+    EXPECT_LE(source.value["units"][0]["start_line"], source.value["units"][0]["end_line"]);
+    EXPECT_TRUE(source.value["units"][0]["kind"].is_number_integer());
+    EXPECT_FALSE(s.call("repository_file",
+                        {{"id", repository_id}, {"ref", "main"}, {"path", "src/main.cpp"}})
+                     .value.contains("units"));
+    EXPECT_FALSE(
+        s.call("repository_file",
+               {{"id", repository_id}, {"ref", "main"}, {"path", "readme.md"}, {"units", true}})
+            .value.contains("units"));
+    // The model page's space/name (resolve_model): a public repository needs no credential.
+    const ApiResult resolved =
+        s.call("resolve_model", {{"namespace", "ada"}, {"name", "public-repository"}});
+    ASSERT_TRUE(resolved.ok) << resolved.error.message;
+    EXPECT_EQ(resolved.value["repository_id"], repository_id);
+    EXPECT_EQ(resolved.value["revision"], "main");
+    EXPECT_EQ(s.call("resolve_model", {{"namespace", "ada"}, {"name", "missing"}}).error.code,
+              "not_found");
     EXPECT_EQ(s.call("list_changes", {{"id", repository_id}}).value["items"].size(), 1u);
     EXPECT_EQ(
         s.call("get_change", {{"id", repository_id}, {"change_id", "change-1"}}).value["message"],
@@ -4709,8 +4910,7 @@ TEST(Drive, FolderSharingMatchesAuthorizeAndLinksExpire) {
                                            {"ref", "main"},
                                            {"path", "shared"},
                                            {"principal_taap_id", "taap:1:ed25519:recipient"},
-                                           {"role", "read"},
-                                           {"attestation_digest", "attestation-recipient"}});
+                                           {"role", "read"}});
     ASSERT_TRUE(shared.ok) << shared.error.message;
     const std::string folder_object = shared.value["object"]["id"];
 
@@ -4889,6 +5089,132 @@ TEST(Drive, FolderSharingMatchesAuthorizeAndLinksExpire) {
             "unauthorized");
         EXPECT_TRUE(surface.ctx.sync_response.empty());
     }
+}
+
+// lake#585: a person shares a folder with someone by email or handle, from the space's people;
+// lake writes and signs the grant's attestation, and a digest a caller makes up is refused.
+TEST(Drive, SharingByEmailOrHandleIsAttestedByLake) {
+    Surface surface;
+    RepositoryFixtureStore repository_store;
+    surface.ctx.sync_store = &repository_store;
+    const auto user = [&](const std::string& name) {
+        const ApiResult made = surface.call("create_user",
+                                            {{"taap_id", "taap:1:ed25519:" + name},
+                                             {"email", name + "@example.com"},
+                                             {"display_name", name}});
+        EXPECT_TRUE(made.ok) << made.error.message;
+        return made;
+    };
+    const ApiResult owner = user("owner");
+    const ApiResult ana = user("ana");
+    const ApiResult outsider = user("outsider");
+    ASSERT_TRUE(surface
+                    .call("create_customer",
+                          {{"customer_type", "individual"},
+                           {"user_id", ana.value["id"]},
+                           {"name", "ana-handle"}})
+                    .ok);
+    const ApiResult organization = surface.call(
+        "create_organization", {{"taap_id", "taap:1:ed25519:studio"}, {"display_name", "Studio"}});
+    ASSERT_TRUE(organization.ok) << organization.error.message;
+    const ApiResult customer = surface.call("create_customer",
+                                            {{"customer_type", "organization"},
+                                             {"organization_id", organization.value["id"]},
+                                             {"name", "studio"}});
+    ASSERT_TRUE(customer.ok) << customer.error.message;
+    for (const ApiResult* member : {&owner, &ana}) {
+        const ApiResult joined = surface.call("create_membership",
+                                              {{"organization_id", organization.value["id"]},
+                                               {"principal_type", "user"},
+                                               {"principal_id", member->value["id"]},
+                                               {"principal_taap_id", member->value["taap_id"]},
+                                               {"role", member == &owner ? "owner" : "member"}});
+        ASSERT_TRUE(joined.ok) << joined.error.message;
+    }
+    const ApiResult repository = surface.call(
+        "create_repository",
+        {{"customer_id", customer.value["id"]},
+         {"workspace_id", lake::test::repository_workspace(surface.store, customer.value["id"])},
+         {"name", "drive"}});
+    ASSERT_TRUE(repository.ok) << repository.error.message;
+    const auto repository_object =
+        surface.store.find_policy_object("repository", repository.value["id"]);
+    ASSERT_TRUE(repository_object);
+    ASSERT_TRUE(surface.store.create_grant({"taap:1:ed25519:owner",
+                                            repository_object->id,
+                                            "admin",
+                                            "attestation-owner",
+                                            "admin",
+                                            "request-owner"}));
+    surface.ctx.operator_credential = false;
+    surface.ctx.acting_identity = "taap:1:ed25519:owner";
+    const json folder{
+        {"repository_id", repository.value["id"]}, {"ref", "main"}, {"path", "shared"}};
+    const auto with = [&](json extra) {
+        json input = folder;
+        input.update(extra);
+        return surface.call("share_drive_folder", input);
+    };
+
+    // The people a folder can be shared with by name: the organization and its members.
+    const ApiResult people = surface.call("drive_share_people", folder);
+    ASSERT_TRUE(people.ok) << people.error.message;
+    std::map<std::string, json> by_id;
+    for (const json& person : people.value["people"]) {
+        by_id[person["taap_id"]] = person;
+    }
+    ASSERT_TRUE(by_id.contains("taap:1:ed25519:ana"));
+    EXPECT_EQ(by_id["taap:1:ed25519:ana"]["email"], "ana@example.com");
+    EXPECT_EQ(by_id["taap:1:ed25519:ana"]["handle"], "ana-handle");
+    EXPECT_EQ(by_id[organization.value["taap_id"]]["kind"], "organization");
+    EXPECT_FALSE(by_id.contains("taap:1:ed25519:outsider"));
+
+    // By email, any case: lake resolves the person and signs the attestation itself.
+    const ApiResult shared = with({{"recipient", "Ana@Example.com"}, {"role", "read"}});
+    ASSERT_TRUE(shared.ok) << shared.error.message;
+    EXPECT_EQ(shared.value["grant"]["principal_taap_id"], "taap:1:ed25519:ana");
+    const std::string digest = shared.value["attestation"]["digest"];
+    EXPECT_TRUE(digest.starts_with("sha256:")) << digest;
+    EXPECT_EQ(shared.value["grant"]["attestation_digest"], digest);
+    EXPECT_EQ(shared.value["attestation"]["statement"]["principal_taap_id"], "taap:1:ed25519:ana");
+    EXPECT_EQ(shared.value["attestation"]["statement"]["role"], "read");
+    EXPECT_FALSE(shared.value["attestation"]["signature"].get<std::string>().empty());
+    EXPECT_EQ(shared.value["attestation"]["signer"],
+              shared.value["attestation"]["statement"]["issuer"]);
+
+    // The same share again, by handle and with the digest lake answered: the same grant.
+    const ApiResult again =
+        with({{"recipient", "@ana-handle"}, {"role", "read"}, {"attestation_digest", digest}});
+    ASSERT_TRUE(again.ok) << again.error.message;
+    EXPECT_EQ(again.value["existing"], true);
+    EXPECT_EQ(again.value["grant"]["id"], shared.value["grant"]["id"]);
+
+    // A made-up digest, or one for another role, is refused at its field.
+    const ApiResult made_up = with({{"recipient", "ana-handle"},
+                                    {"role", "write"},
+                                    {"attestation_digest", "sha256:" + std::string(64, 'a')}});
+    EXPECT_EQ(made_up.error.code, "invalid_input");
+    EXPECT_EQ(made_up.error.path, "/attestation_digest");
+    EXPECT_EQ(with({{"recipient", "ana-handle"}, {"role", "write"}, {"attestation_digest", digest}})
+                  .error.path,
+              "/attestation_digest");
+
+    // Someone outside the space is not found by email; a program names a TAAP id lake knows.
+    const ApiResult outside = with({{"recipient", "outsider@example.com"}, {"role", "read"}});
+    EXPECT_EQ(outside.error.code, "invalid_input");
+    EXPECT_EQ(outside.error.path, "/recipient");
+    const ApiResult unknown =
+        with({{"principal_taap_id", "taap:1:ed25519:nobody"}, {"role", "read"}});
+    EXPECT_EQ(unknown.error.path, "/principal_taap_id");
+    const ApiResult program =
+        with({{"principal_taap_id", "taap:1:ed25519:outsider"}, {"role", "read"}});
+    ASSERT_TRUE(program.ok) << program.error.message;
+    EXPECT_TRUE(program.value["attestation"]["digest"].get<std::string>().starts_with("sha256:"));
+    EXPECT_EQ(
+        with({{"recipient", "ana"}, {"principal_taap_id", "taap:1:ed25519:ana"}, {"role", "read"}})
+            .error.code,
+        "invalid_input");
+    EXPECT_EQ(with({{"role", "read"}}).error.code, "invalid_input");
 }
 
 TEST(Drive, ShareDownloadsEncodeAcrossBlockBoundaries) {
@@ -5417,9 +5743,25 @@ TEST(HuggingFaceHttp, CommonModelAndDatasetCallsUseRepositoryCapabilities) {
                                                    {},
                                                    authorization);
     EXPECT_NE(lfs_committed.find(" 200 "), std::string::npos) << lfs_committed;
-    const std::string model_page =
-        http_request(server.port(), "GET", "/models/ada/fixture-model", "", "text/html");
-    EXPECT_NE(model_page.find("Training Provenance"), std::string::npos) << model_page;
+    // The model page's reads: the Hub name resolves to its repository, which get_model reads.
+    const std::string resolved = http_request(server.port(),
+                                              "GET",
+                                              "/v1/resolve_model?namespace=ada&name=fixture-model",
+                                              "",
+                                              "text/plain",
+                                              {},
+                                              authorization);
+    ASSERT_NE(resolved.find(" 200 "), std::string::npos) << resolved;
+    const std::string model_page = http_request(
+        server.port(),
+        "GET",
+        "/v1/get_model?id=" + response_json(resolved)["value"]["repository_id"].get<std::string>() +
+            "&revision=" + response_json(resolved)["value"]["revision"].get<std::string>(),
+        "",
+        "text/plain",
+        {},
+        authorization);
+    EXPECT_NE(model_page.find(" 200 "), std::string::npos) << model_page;
     EXPECT_NE(model_page.find("weights.bin"), std::string::npos) << model_page;
 
     // A repository belongs to one workspace (lake#315): named in the body, or for a hub client
@@ -5703,9 +6045,9 @@ TEST(ModelProvenance, SignedDatasetChainVerifiesAndTamperingIsRefused) {
               liquid::to_string(dataset_change->value));
     const std::string model_page = http_request(server.port(),
                                                 "GET",
-                                                "/models/" + model->id,
+                                                "/v1/get_model?id=" + model->id + "&revision=main",
                                                 "",
-                                                "text/html",
+                                                "text/plain",
                                                 {},
                                                 "Bearer provenance-admin");
     EXPECT_NE(model_page.find("run-7"), std::string::npos) << model_page;
@@ -5727,7 +6069,7 @@ TEST(ModelProvenance, SignedDatasetChainVerifiesAndTamperingIsRefused) {
     server.stop();
 }
 
-TEST(WebUiHttp, PublicRepositoriesAreReadableAndPrivateRepositoriesAreHidden) {
+TEST(RepositoryHttp, PublicRepositoriesAreReadableAndPrivateRepositoriesAreHidden) {
     TemporaryRepositoryRoot root;
     const auto store = std::make_shared<lake::control::InMemoryStore>();
     const auto user = store->create_user({"", "", "Ada"});
@@ -5842,52 +6184,45 @@ TEST(WebUiHttp, PublicRepositoriesAreReadableAndPrivateRepositoriesAreHidden) {
     ApiServer server(options);
     ASSERT_TRUE(server.start()) << server.reason();
 
-    const std::string listed = http_get(server.port(), "/repositories");
-    EXPECT_NE(listed.find(" 200 "), std::string::npos);
-    EXPECT_NE(listed.find("public-repository"), std::string::npos);
-    EXPECT_EQ(listed.find("private-repository"), std::string::npos);
-
-    const std::string public_page =
-        http_get(server.port(), "/repository?id=" + public_repository->id);
-    EXPECT_NE(public_page.find(" 200 "), std::string::npos);
-    EXPECT_NE(public_page.find("public-repository"), std::string::npos);
-    const std::string tree_page =
-        http_get(server.port(), "/repository/tree?id=" + public_repository->id + "&ref=main");
-    EXPECT_NE(tree_page.find(" 200 "), std::string::npos);
-    EXPECT_NE(tree_page.find("readme.md"), std::string::npos);
-    const std::string file_page = http_get(
-        server.port(), "/file?repository_id=" + public_repository->id + "&ref=main&path=readme.md");
-    EXPECT_NE(file_page.find(" 200 "), std::string::npos);
-    EXPECT_NE(file_page.find("public content"), std::string::npos);
-    const std::string change_page = http_get(server.port(),
-                                             "/change?repository_id=" + public_repository->id +
-                                                 "&id=" + liquid::to_string(second_change->value));
-    EXPECT_NE(change_page.find(" 200 "), std::string::npos);
-    EXPECT_NE(change_page.find("readme.md"), std::string::npos);
-    EXPECT_NE(change_page.find("notes.md"), std::string::npos);
-    EXPECT_NE(change_page.find("@@ -2,0 +2,1 @@"), std::string::npos);
-    EXPECT_NE(change_page.find("+updated"), std::string::npos);
-    const std::string reformatting_page =
-        http_get(server.port(),
-                 "/change?repository_id=" + reformatting_repository->id +
-                     "&id=" + liquid::to_string(formatting_change->value));
-    EXPECT_NE(reformatting_page.find(" 200 "), std::string::npos);
-    EXPECT_NE(reformatting_page.find("No changes to display."), std::string::npos);
-    EXPECT_EQ(reformatting_page.find("<code>format.cpp</code>"), std::string::npos);
-    const std::string artifacts_page =
-        http_get(server.port(), "/artifacts?repository_id=" + public_repository->id + "&limit=1");
-    EXPECT_NE(artifacts_page.find(" 200 "), std::string::npos);
-    EXPECT_NE(artifacts_page.find("Build Results"), std::string::npos);
-    EXPECT_NE(artifacts_page.find("Next page"), std::string::npos);
-    const std::string artifact_page =
-        http_get(server.port(),
-                 "/artifact?repository_id=" + public_repository->id +
-                     "&id=" + liquid::to_string(second_result->value));
-    EXPECT_NE(artifact_page.find(" 200 "), std::string::npos);
-    EXPECT_NE(artifact_page.find("build/app"), std::string::npos);
-    EXPECT_NE(artifact_page.find("slsa_provenance/1"), std::string::npos);
-    EXPECT_NE(artifact_page.find("sbom/1"), std::string::npos);
-    EXPECT_NE(artifact_page.find("verified"), std::string::npos);
+    // What the web app's repository pages read, signed out: a public repository is readable
+    // through the API, a private one is not (lake#561).
+    const auto read = [&](const std::string& path, std::string_view authorization = {}) {
+        const std::string response = http_get(server.port(), "/v1/" + path, authorization);
+        EXPECT_NE(response.find(" 200 "), std::string::npos) << path << "\n" << response;
+        return response_json(response)["value"];
+    };
+    const std::string listed = read("list_repositories?customer_id=" + customer->id).dump();
+    EXPECT_NE(listed.find("public-repository"), std::string::npos) << listed;
+    EXPECT_EQ(listed.find("private-repository"), std::string::npos) << listed;
+    EXPECT_EQ(read("get_repository?id=" + public_repository->id)["name"], "public-repository");
+    EXPECT_NE(
+        read("repository_tree?id=" + public_repository->id + "&ref=main").dump().find("readme.md"),
+        std::string::npos);
+    EXPECT_NE(read("repository_file?id=" + public_repository->id + "&ref=main&path=readme.md")
+                  .dump()
+                  .find("public content"),
+              std::string::npos);
+    const std::string change = read("change_diff?id=" + public_repository->id +
+                                    "&change_id=" + liquid::to_string(second_change->value))
+                                   .dump();
+    EXPECT_NE(change.find("readme.md"), std::string::npos) << change;
+    EXPECT_NE(change.find("notes.md"), std::string::npos) << change;
+    EXPECT_NE(change.find("updated"), std::string::npos) << change;
+    // A reformatting-only change has no line to show: its one entry is modified with no hunks.
+    const json reformatting = read("change_diff?id=" + reformatting_repository->id +
+                                   "&change_id=" + liquid::to_string(formatting_change->value));
+    const std::string reformatted = reformatting.dump();
+    EXPECT_EQ(reformatted.find("int value;"), std::string::npos) << reformatted;
+    const json artifacts = read("list_artifacts?id=" + public_repository->id + "&limit=1");
+    EXPECT_EQ(artifacts["items"].size(), 1U) << artifacts.dump();
+    EXPECT_EQ(artifacts["done"], false) << "a next page";
+    EXPECT_FALSE(artifacts.value("next_cursor", std::string()).empty());
+    const std::string artifact = read("get_artifact?id=" + public_repository->id +
+                                      "&result_id=" + liquid::to_string(second_result->value))
+                                     .dump();
+    EXPECT_NE(artifact.find("build/app"), std::string::npos) << artifact;
+    EXPECT_NE(artifact.find("slsa_provenance/1"), std::string::npos) << artifact;
+    EXPECT_NE(artifact.find("sbom/1"), std::string::npos) << artifact;
 
     const std::string model_response =
         http_get(server.port(), "/api/models/" + public_repository->id);
@@ -5906,37 +6241,30 @@ TEST(WebUiHttp, PublicRepositoriesAreReadableAndPrivateRepositoriesAreHidden) {
     EXPECT_NE(nested_model_file.find("{\"fixture\":true}"), std::string::npos);
 
     const std::string drive =
-        http_get(server.port(),
-                 "/drive?repository_id=" + public_repository->id + "&ref=main&path=&view=grid",
-                 "Bearer test-token");
-    EXPECT_NE(drive.find(" 200 "), std::string::npos) << drive;
-    EXPECT_NE(drive.find("class=\"drive-grid\""), std::string::npos);
-    EXPECT_NE(drive.find("action=\"/drive/upload\""), std::string::npos);
-    EXPECT_EQ(drive.find(" · —"), std::string::npos);
-
-    const std::string boundary = "lake-drive-boundary";
-    const std::string multipart =
-        "--" + boundary + "\r\nContent-Disposition: form-data; name=\"repository_id\"\r\n\r\n" +
-        public_repository->id + "\r\n--" + boundary +
-        "\r\nContent-Disposition: form-data; name=\"ref\"\r\n\r\nmain\r\n--" + boundary +
-        "\r\nContent-Disposition: form-data; name=\"path\"\r\n\r\n\r\n--" + boundary +
-        "\r\nContent-Disposition: form-data; name=\"files\"; filename=\"browser.txt\"\r\n"
-        "Content-Type: text/plain\r\n\r\nbrowser upload\r\n--" +
-        boundary + "--\r\n";
-    const std::string uploaded = http_request(server.port(),
-                                              "POST",
-                                              "/drive/upload",
-                                              multipart,
-                                              "multipart/form-data; boundary=" + boundary,
-                                              {},
-                                              "Bearer test-token");
-    EXPECT_NE(uploaded.find(" 302 "), std::string::npos) << uploaded;
-    const std::string uploaded_preview = http_get(
+        read("drive_browse?repository_id=" + public_repository->id + "&ref=main&path=",
+             "Bearer test-token")
+            .dump();
+    EXPECT_NE(drive.find("readme.md"), std::string::npos) << drive;
+    const std::string uploaded = http_request(
         server.port(),
-        "/drive/preview?repository_id=" + public_repository->id + "&ref=main&path=browser.txt",
+        "POST",
+        "/v1/upload_drive_files",
+        json{{"repository_id", public_repository->id},
+             {"ref", "main"},
+             {"path", ""},
+             {"files",
+              json::array({{{"name", "browser.txt"}, {"content", "YnJvd3NlciB1cGxvYWQ="}}})}}
+            .dump(),
+        "application/json",
+        {},
         "Bearer test-token");
-    EXPECT_NE(uploaded_preview.find(" 200 "), std::string::npos) << uploaded_preview;
-    EXPECT_NE(uploaded_preview.find("browser upload"), std::string::npos);
+    EXPECT_NE(uploaded.find(" 200 "), std::string::npos) << uploaded;
+    EXPECT_NE(
+        read("drive_preview?repository_id=" + public_repository->id + "&ref=main&path=browser.txt",
+             "Bearer test-token")
+            .dump()
+            .find("browser upload"),
+        std::string::npos);
     const std::string downloaded = http_get(
         server.port(),
         "/drive/download?repository_id=" + public_repository->id + "&ref=main&path=browser.txt",
@@ -5945,28 +6273,23 @@ TEST(WebUiHttp, PublicRepositoriesAreReadableAndPrivateRepositoriesAreHidden) {
     EXPECT_NE(downloaded.find("attachment; filename=\"browser.txt\""), std::string::npos)
         << downloaded;
     EXPECT_NE(downloaded.find("browser upload"), std::string::npos);
-    const std::string version_diff =
-        http_get(server.port(),
-                 "/drive/history/diff?repository_id=" + public_repository->id +
-                     "&ref=main&path=readme.md&left=" + liquid::to_string(first_change->value) +
-                     "&right=" + liquid::to_string(second_change->value),
-                 "Bearer test-token");
-    EXPECT_NE(version_diff.find(" 200 "), std::string::npos) << version_diff;
-    EXPECT_NE(version_diff.find("+updated"), std::string::npos);
+    EXPECT_NE(read("diff_drive_versions?repository_id=" + public_repository->id +
+                       "&ref=main&path=readme.md&left=" + liquid::to_string(first_change->value) +
+                       "&right=" + liquid::to_string(second_change->value),
+                   "Bearer test-token")
+                  .dump()
+                  .find("updated"),
+              std::string::npos);
 
-    const std::string private_page =
-        http_get(server.port(), "/repository?id=" + private_repository->id);
-    EXPECT_NE(private_page.find(" 302 "), std::string::npos);
-    const std::string private_change =
-        http_get(server.port(), "/change?repository_id=" + private_repository->id + "&id=hidden");
-    EXPECT_NE(private_change.find(" 302 "), std::string::npos);
-    const std::string private_artifacts =
-        http_get(server.port(), "/artifacts?repository_id=" + private_repository->id);
-    EXPECT_NE(private_artifacts.find(" 302 "), std::string::npos);
-    EXPECT_NE(private_page.find("Location: /sign-in"), std::string::npos);
+    // A private repository: not through the API, and a download sends the person to sign in.
     const std::string private_api =
         http_get(server.port(), "/v1/get_repository?id=" + private_repository->id);
     EXPECT_NE(private_api.find(" 401 "), std::string::npos);
+    const std::string private_file =
+        http_get(server.port(),
+                 "/file/raw?repository_id=" + private_repository->id + "&ref=main&path=readme.md");
+    EXPECT_NE(private_file.find(" 302 "), std::string::npos) << private_file;
+    EXPECT_NE(private_file.find("Location: /sign-in"), std::string::npos) << private_file;
     server.stop();
 }
 
@@ -7136,12 +7459,62 @@ TEST(ApiErrors, OtherSpellingsAndUnknownCodesBecomeDocumentedOnes) {
     EXPECT_EQ(rest_status(ApiResult::failure("unauthorized", "x")), 403);
     EXPECT_EQ(rest_status(ApiResult::failure("method_not_allowed", "x")), 405);
     EXPECT_EQ(rest_status(ApiResult::failure("not_approved", "x")), 409);
-    EXPECT_EQ(rest_status(ApiResult::failure("engine_error", "x")), 502);
+    EXPECT_EQ(rest_status(ApiResult::failure("engine_error", "x")), 422);
     EXPECT_EQ(rest_status(ApiResult::failure("workspace_not_ready", "x")), 503);
     // The OpenAPI error envelope enumerates exactly the documented codes.
     const json schema = lake::api::error_envelope_schema();
     EXPECT_EQ(schema["properties"]["error"]["properties"]["code"]["enum"].size(),
               lake::api::error_codes().size());
+}
+
+// Cloudflare answers a 502 or 504 from lake with its own page, so a REST caller would never see
+// lake's error (lake#572). No documented code may answer either.
+TEST(ApiErrors, NoCodeAnswersAStatusCloudflareReplaces) {
+    for (const auto& code : lake::api::error_codes()) {
+        EXPECT_NE(code.status, 502) << code.code;
+        EXPECT_NE(code.status, 504) << code.code;
+    }
+    const ApiResult refused =
+        ApiResult::failure("engine_error", "table \"no_such_table\" does not exist");
+    EXPECT_EQ(rest_status(refused), 422);
+    const json body = lake::api::rest_envelope(refused);
+    EXPECT_EQ(body["error"]["code"], "engine_error");
+    EXPECT_EQ(body["error"]["message"], "table \"no_such_table\" does not exist");
+}
+
+// A database constraint the input broke is said as the rule, at the field (lake#592): never "the
+// request contains invalid data" with an empty path, and never the constraint's name.
+TEST(ApiErrors, ABrokenConstraintIsSaidAsItsRuleAtItsField) {
+    const ApiResult named = ApiResult::failure(
+        "invalid_input",
+        "ERROR:  new row for relation \"repositories\" violates check constraint "
+        "\"repository_name_format\"",
+        "/repository_name");
+    EXPECT_EQ(named.error.path, "/repository_name");
+    EXPECT_EQ(named.error.message,
+              "repository_name is 1 to 256 lowercase letters, digits and hyphens, starting and "
+              "ending with a letter or digit");
+    const ApiResult unnamed =
+        ApiResult::failure("invalid_input",
+                           "ERROR:  new row for relation \"grants\" violates check constraint "
+                           "\"grants_attestation_check\"");
+    EXPECT_EQ(unnamed.error.path, "/attestation_digest");
+    EXPECT_TRUE(unnamed.error.message.starts_with("attestation_digest is required"));
+    const ApiResult taken = ApiResult::failure(
+        "conflict",
+        "ERROR:  duplicate key value violates unique constraint "
+        "\"grants_principal_object_role_unique\"\nDETAIL:  Key (…) already exists.");
+    EXPECT_EQ(taken.error.path, "/principal_taap_id");
+    EXPECT_NE(taken.error.message.find("already shared with that person"), std::string::npos);
+    // The in-memory store names the same constraints without a diagnostic.
+    const ApiResult memory =
+        ApiResult::failure("invalid_input", "name must match repository_name_format");
+    EXPECT_EQ(memory.error.path, "/name");
+    EXPECT_TRUE(memory.error.message.starts_with("name is 1 to 256 lowercase"));
+    // An unknown diagnostic still never leaks.
+    const ApiResult other =
+        ApiResult::failure("invalid_input", "ERROR:  something \"secret_table\" DETAIL: x");
+    EXPECT_EQ(other.error.message, "the request contains invalid data");
 }
 
 TEST(ApiErrors, RestSaysWhetherACredentialIsMissingInvalidOrExpired) {
@@ -7180,6 +7553,17 @@ TEST(ApiErrors, RestSaysWhetherACredentialIsMissingInvalidOrExpired) {
     EXPECT_EQ(body(invalid)["error"]["reason"], "invalid");
     EXPECT_NE(response_header(invalid, "WWW-Authenticate").find("error=\"invalid_token\""),
               std::string::npos);
+
+    // viewer needs no key, but a rejected one is refused there too (lake#594); a visitor with
+    // none is answered signed_in: false.
+    const std::string bad_viewer =
+        http_get(server.port(), "/v1/viewer", "Bearer not-a-lake-credential");
+    EXPECT_NE(bad_viewer.find(" 401 "), std::string::npos) << bad_viewer;
+    EXPECT_EQ(body(bad_viewer)["error"]["reason"], "invalid");
+    const std::string visitor = http_get(server.port(), "/v1/viewer");
+    EXPECT_NE(visitor.find(" 200 "), std::string::npos) << visitor;
+    EXPECT_EQ(body(visitor)["value"]["signed_in"], false);
+    EXPECT_FALSE(body(visitor)["value"]["config"].contains("base_agent_model"));
 
     std::this_thread::sleep_for(std::chrono::milliseconds(2100));
     const std::string expired =
@@ -7282,6 +7666,9 @@ TEST(ApiNaming, OneNamePerConceptAcrossCapabilities) {
                                                           {"get_run_metrics", "run_id"},
                                                           {"stop_experiment_trial", "run_id"},
                                                           {"promote_trial", "run_id"},
+                                                          {"promote_trial", "experiment_id"},
+                                                          {"get_experiment", "experiment_id"},
+                                                          {"stop_experiment", "experiment_id"},
                                                           {"get_customer", "customer_id"}}) {
         EXPECT_TRUE(has(capability, field)) << capability << " names it " << field;
     }
@@ -7294,6 +7681,9 @@ TEST(ApiNaming, OneNamePerConceptAcrossCapabilities) {
                 EXPECT_TRUE(schema.value("deprecated", false))
                     << capability->name << " takes `" << field << "`; use `" << field << "_id`";
             }
+            // An experiment is the engine's study; lake never names it so (lake#561).
+            EXPECT_EQ(field.find("study"), std::string::npos)
+                << capability->name << " takes `" << field << "`; use `experiment_id`";
         }
     }
 }
@@ -7310,8 +7700,248 @@ TEST(ApiDescriptions, EveryCapabilitySaysWhatItDoesForAPerson) {
                                   "after explicit confirmation in this space"}) {
             EXPECT_EQ(text.find(vague), std::string::npos) << capability->name << ": " << text;
         }
+        // A person runs experiments; "study" is only the engine's name, in a code span such as
+        // `validate_study` (lake#561).
+        static const std::regex study(R"((^|[^_`.-])\b[Ss]tud(y|ies)\b(?![_-]))");
+        EXPECT_FALSE(std::regex_search(text, study))
+            << capability->name << " says study: \"" << text << "\"";
+        EXPECT_FALSE(std::regex_search(capability->title, study)) << capability->name;
         const auto [previous, inserted] = seen.emplace(text, capability->name);
         EXPECT_TRUE(inserted) << capability->name << " shares its description with "
                               << previous->second << ": \"" << text << "\"";
     }
 }
+
+namespace {
+
+// lake#561: the reads the web app needs that the server-rendered pages computed themselves.
+TEST(WebApp, PermissionsDocsMcpAndPackagesAreCapabilities) {
+    Surface s;
+    const ApiResult owner =
+        s.call("create_user", {{"taap_id", "taap:1:ed25519:web-owner"}, {"display_name", "Owner"}});
+    ASSERT_TRUE(owner.ok);
+    const ApiResult customer = s.call(
+        "create_customer",
+        {{"customer_type", "individual"}, {"user_id", owner.value["id"]}, {"name", "web-owner"}});
+    ASSERT_TRUE(customer.ok);
+    const std::string customer_id = customer.value["id"];
+    const json every{"read", "write", "admin", "promote"};
+    const ApiResult operator_may =
+        s.call("my_permissions",
+               {{"object_type", "customer"}, {"object_id", customer_id}, {"actions", every}});
+    ASSERT_TRUE(operator_may.ok) << operator_may.error.message;
+    for (const std::string action : {"read", "write", "admin", "promote"}) {
+        EXPECT_EQ(operator_may.value["allowed"][action], true) << action;
+    }
+    EXPECT_EQ(s.call("my_permissions",
+                     {{"object_type", "customer"}, {"object_id", "nope"}, {"actions", every}})
+                  .error.code,
+              "not_found");
+    EXPECT_EQ(
+        s.call("my_permissions",
+               {{"object_type", "customer"}, {"object_id", customer_id}, {"actions", {"fly"}}})
+            .error.code,
+        "invalid_input");
+    // A workspace answers its space's permissions; a drive says to ask about its workspace;
+    // an unknown type lists the ones it takes (lake#594).
+    const auto workspace =
+        s.store.create_workspace({customer_id, "analytics", "dev", "taap:1:ed25519:web-owner"});
+    ASSERT_TRUE(workspace);
+    const ApiResult on_workspace =
+        s.call("my_permissions",
+               {{"object_type", "workspace"}, {"object_id", workspace->id}, {"actions", every}});
+    ASSERT_TRUE(on_workspace.ok) << on_workspace.error.message;
+    EXPECT_EQ(on_workspace.value["allowed"]["write"], true);
+    const ApiResult on_drive =
+        s.call("my_permissions",
+               {{"object_type", "drive"}, {"object_id", workspace->id}, {"actions", every}});
+    EXPECT_EQ(on_drive.error.code, "invalid_input");
+    EXPECT_EQ(on_drive.error.path, "/object_type");
+    const ApiResult odd = s.call(
+        "my_permissions", {{"object_type", "planet"}, {"object_id", "x"}, {"actions", every}});
+    EXPECT_EQ(odd.error.path, "/object_type");
+    EXPECT_NE(odd.error.message.find("\"workspace\""), std::string::npos);
+
+    const auto writer = s.store.create_user({"taap:1:ed25519:web-writer", "", "Writer"});
+    ASSERT_TRUE(writer);
+    const auto object = s.store.find_policy_object("customer", customer_id);
+    ASSERT_TRUE(object);
+    ASSERT_TRUE(s.store.create_grant(
+        {writer->taap_id, object->id, "write", "web-writer-attestation", "admin", "web-writer"}));
+    s.ctx.acting_identity = writer->taap_id;
+    s.ctx.acting_user_id = writer->id;
+    s.ctx.operator_credential = false;
+    s.ctx.session_credential = true;
+    s.ctx.scopes = {"*"};
+    const ApiResult writer_may =
+        s.call("my_permissions",
+               {{"object_type", "customer"}, {"object_id", customer_id}, {"actions", every}});
+    ASSERT_TRUE(writer_may.ok) << writer_may.error.message;
+    EXPECT_EQ(writer_may.value["allowed"],
+              (json{{"read", true}, {"write", true}, {"admin", false}, {"promote", false}}));
+
+    // Docs are public, in reading order.
+    s.ctx.authorized = false;
+    s.ctx.acting_identity.clear();
+    const ApiResult pages = s.call("list_docs");
+    ASSERT_TRUE(pages.ok) << pages.error.message;
+    // The Billing guide is absent where billing is off, as in this registry (lake#564).
+    std::vector<WebUiGuidePage> guide;
+    for (const WebUiGuidePage& page : web_ui_guide()) {
+        if (page.slug != "billing") {
+            guide.push_back(page);
+        }
+    }
+    ASSERT_EQ(pages.value["pages"].size(), guide.size());
+    ASSERT_GE(guide.size(), 2U);
+    EXPECT_EQ(pages.value["pages"][0]["slug"], guide.front().slug);
+    const ApiResult first = s.call("get_doc");
+    ASSERT_TRUE(first.ok) << first.error.message;
+    EXPECT_EQ(first.value["slug"], guide.front().slug);
+    EXPECT_EQ(first.value["markdown"], guide.front().markdown);
+    EXPECT_EQ(first.value["next"]["slug"], guide.at(1).slug);
+    EXPECT_EQ(first.value["section"], guide.front().section);
+    EXPECT_FALSE(first.value.contains("previous"));
+    // get_doc takes the `slug` list_docs answers; `page` is its deprecated name (lake#591).
+    const ApiResult by_slug = s.call("get_doc", {{"slug", guide.at(1).slug}});
+    ASSERT_TRUE(by_slug.ok) << by_slug.error.message;
+    EXPECT_EQ(by_slug.value["slug"], guide.at(1).slug);
+    EXPECT_EQ(s.call("get_doc", {{"slug", "no-such-guide"}}).error.path, "/slug");
+    const ApiResult last = s.call("get_doc", {{"page", guide.back().slug}});
+    ASSERT_TRUE(last.ok);
+    EXPECT_FALSE(last.value.contains("next"));
+    EXPECT_EQ(last.value["previous"]["slug"], guide.at(guide.size() - 2).slug);
+    EXPECT_EQ(s.call("get_doc", {{"page", "no-such-guide"}}).error.code, "not_found");
+
+    // lake#561: sections in reading order, each page under its section with its headings.
+    ASSERT_TRUE(pages.value["sections"].is_array());
+    EXPECT_EQ(pages.value["sections"][0], guide.front().section);
+    std::vector<std::string> sections;
+    for (const auto& page : guide) {
+        if (sections.empty() || sections.back() != page.section) {
+            sections.emplace_back(page.section);
+        }
+    }
+    EXPECT_EQ(pages.value["sections"], json(sections));
+    for (std::size_t i = 0; i < guide.size(); ++i) {
+        EXPECT_EQ(pages.value["pages"][i]["slug"], guide[i].slug);
+        EXPECT_EQ(pages.value["pages"][i]["section"], guide[i].section);
+        EXPECT_TRUE(pages.value["pages"][i]["headings"].is_array());
+    }
+    // A heading of a page anchors as the renderer does; `q` finds it and says where.
+    const json train = *std::ranges::find_if(pages.value["pages"], [](const json& page) {
+        return page["slug"] == "train";
+    });
+    ASSERT_FALSE(train["headings"].empty());
+    const json heading = train["headings"][0];
+    EXPECT_NE(markdown_to_html(std::string(std::ranges::find(guide, "train", &WebUiGuidePage::slug)
+                                               ->markdown))
+                  .find("id=\"" + heading["anchor"].get<std::string>() + "\""),
+              std::string::npos);
+    const ApiResult found = s.call("list_docs", {{"q", heading["text"]}});
+    ASSERT_TRUE(found.ok) << found.error.message;
+    ASSERT_FALSE(found.value["pages"].empty());
+    const json hit = *std::ranges::find_if(found.value["pages"], [](const json& page) {
+        return page["slug"] == "train";
+    });
+    EXPECT_NE(hit["match"], "text");
+    const ApiResult text = s.call("list_docs", {{"q", "HELD_OUT_AUC"}});
+    ASSERT_TRUE(text.ok);
+    ASSERT_FALSE(text.value["pages"].empty());
+    EXPECT_TRUE(text.value["pages"][0].contains("excerpt"));
+    EXPECT_NE(text.value["pages"][0]["excerpt"].get<std::string>().find("held_out_auc"),
+              std::string::npos);
+    EXPECT_TRUE(s.call("list_docs", {{"q", "no guide says zqxwv"}}).value["pages"].empty());
+    // Every word, in any order (lake#594): the words of a heading, reversed, still find it.
+    const ApiResult words = s.call("list_docs", {{"q", "csv upload"}});
+    ASSERT_TRUE(words.ok) << words.error.message;
+    EXPECT_FALSE(words.value["pages"].empty());
+    for (const json& page : words.value["pages"]) {
+        std::string body(
+            std::ranges::find(guide, page["slug"].get<std::string>(), &WebUiGuidePage::slug)
+                ->markdown);
+        std::ranges::transform(
+            body, body.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        EXPECT_NE(body.find("csv"), std::string::npos) << page["slug"];
+        EXPECT_NE(body.find("upload"), std::string::npos) << page["slug"];
+    }
+    EXPECT_TRUE(s.call("list_docs", {{"q", "upload zqxwv"}}).value["pages"].empty());
+    EXPECT_EQ(s.call("list_docs", {{"q", std::string(201, 'a')}}).error.path, "/q");
+    EXPECT_EQ(s.call("mcp_setup").error.code, "unauthenticated");
+
+    s.ctx.authorized = true;
+    s.ctx.acting_identity = writer->taap_id;
+    s.ctx.external_origin = "https://lake.example.test";
+    const ApiResult setup = s.call("mcp_setup");
+    ASSERT_TRUE(setup.ok) << setup.error.message;
+    EXPECT_EQ(setup.value["mcp_url"], "https://lake.example.test/mcp");
+    EXPECT_FALSE(setup.value["tool_groups"].empty());
+    EXPECT_FALSE(setup.value["flows"].empty());
+    EXPECT_EQ(setup.value["scopes"]["all"].size(), s.registry.list().size());
+    const json& read_only = setup.value["scopes"]["read_only"];
+    EXPECT_NE(std::ranges::find(read_only, "list_customers"), read_only.end());
+    EXPECT_EQ(std::ranges::find(read_only, "create_customer"), read_only.end());
+    std::size_t grouped = 0;
+    for (const json& group : setup.value["tool_groups"]) {
+        grouped += group["tools"].size();
+    }
+    EXPECT_GT(grouped, 0U);
+
+    const ApiResult none = s.call("list_packages");
+    ASSERT_TRUE(none.ok) << none.error.message;
+    EXPECT_EQ(none.value["available"], false);
+    EXPECT_EQ(none.value["origin"], "https://lake.example.test");
+    s.ctx.artifact_catalog = [] {
+        return json{{"available", true},
+                    {"npm", {{{"name", "left-pad"}, {"versions", {"1.0.0"}}}}},
+                    {"python", json::array()},
+                    {"oci", {{{"name", "base"}, {"versions", {"latest"}}}}}};
+    };
+    const ApiResult packages = s.call("list_packages");
+    ASSERT_TRUE(packages.ok) << packages.error.message;
+    EXPECT_EQ(packages.value["available"], true);
+    EXPECT_EQ(packages.value["npm"][0]["name"], "left-pad");
+    EXPECT_EQ(packages.value["oci"][0]["versions"][0], "latest");
+}
+
+TEST(WebApp, ViewerNamesClerkAndAnOrganizationNamesItsSpace) {
+    Surface s;
+    s.ctx.clerk_publishable_key = "pk_test_YWJvdmUtc2VhaG9yc2UtNzUzNS5jbGVyay5hY2NvdW50cy5kZXYk";
+    s.ctx.authorized = false;
+    s.ctx.acting_identity.clear();
+    s.ctx.operator_credential = false;
+    const ApiResult visitor = s.call("viewer");
+    ASSERT_TRUE(visitor.ok) << visitor.error.message;
+    EXPECT_EQ(visitor.value["signed_in"], false);
+    EXPECT_EQ(visitor.value["clerk"]["enabled"], true);
+    EXPECT_EQ(visitor.value["clerk"]["frontend_api"], "above-seahorse-7535.clerk.accounts.dev");
+    EXPECT_EQ(visitor.value["password_sign_up"], false);
+    EXPECT_EQ(visitor.value["version"], "0.0.1");
+
+    s.ctx.authorized = true;
+    s.ctx.acting_identity = "admin";
+    s.ctx.operator_credential = true;
+    const ApiResult organization = s.call("create_organization", {{"display_name", "Acme"}});
+    ASSERT_TRUE(organization.ok) << organization.error.message;
+    const ApiResult before = s.call("get_organization", {{"id", organization.value["id"]}});
+    ASSERT_TRUE(before.ok) << before.error.message;
+    EXPECT_TRUE(before.value["customer_id"].is_null());
+    const ApiResult space = s.call("create_customer",
+                                   {{"customer_type", "organization"},
+                                    {"organization_id", organization.value["id"]},
+                                    {"name", "acme"}});
+    ASSERT_TRUE(space.ok) << space.error.message;
+    const ApiResult after = s.call("get_organization", {{"id", organization.value["id"]}});
+    ASSERT_TRUE(after.ok);
+    EXPECT_EQ(after.value["customer_id"], space.value["id"]);
+    const ApiResult administrator = s.call("viewer");
+    ASSERT_TRUE(administrator.ok);
+    EXPECT_EQ(administrator.value["administrator"], true);
+    EXPECT_FALSE(administrator.value.contains("user_id"));
+    ASSERT_EQ(administrator.value["spaces"].size(), 1U);
+    EXPECT_EQ(administrator.value["spaces"][0]["kind"], "organization");
+    EXPECT_EQ(administrator.value["spaces"][0]["label"], "acme");
+    EXPECT_EQ(administrator.value["customer_id"], space.value["id"]);
+}
+
+} // namespace

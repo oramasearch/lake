@@ -1,6 +1,7 @@
 #include "lake/api/capabilities.hpp"
 #include "lake/api/images.hpp"
 #include "audit_logs.hpp"
+#include "lake_attestation.hpp"
 #include "repository_records_api.hpp"
 #include "lake/api/audit_routing.hpp"
 #include "lake/api/metering_recorder.hpp"
@@ -26,6 +27,7 @@
 #include "lake/api/forge.hpp"
 #include "lake/api/oauth.hpp"
 #include "lake/api/sync_store.hpp"
+#include "lake/api/web_ui.hpp"
 #include "lake/control/agent_library.hpp"
 #include "lake/control/handles.hpp"
 #include "lake/control/identity_crypto.hpp"
@@ -145,12 +147,24 @@ std::string repository_input_value(const json& input,
     return canonical_value.empty() ? builder_value : canonical_value;
 }
 
+// The repository a content read names: `repository_id`, as the drive calls name it (lake#591),
+// or the older `id` or `repository`. Empty when none is sent or two disagree.
+std::string repository_reference(const json& input) {
+    const std::string named = input.value("repository_id", "");
+    const std::string older = repository_input_value(input, "id", "repository");
+    if (!named.empty() && !older.empty() && named != older) {
+        return {};
+    }
+    return named.empty() ? older : named;
+}
+
 std::expected<std::string, ApiError> repository_content_object(const json& input,
                                                                ApiContext& context) {
-    const std::string id = repository_input_value(input, "id", "repository");
+    const std::string id = repository_reference(input);
     if (id.empty()) {
-        return std::unexpected(
-            ApiError{"invalid_input", "id or repository is required", "/repository"});
+        return std::unexpected(ApiError{"invalid_input",
+                                        "repository_id is required (or the older id or repository)",
+                                        "/repository_id"});
     }
     if (context.store == nullptr) {
         return std::unexpected(
@@ -171,7 +185,7 @@ readable_repository(const json& input, ApiContext& context, bool revision_requir
         return std::unexpected(
             ApiError{"store_unavailable", "no control-plane store is configured", {}});
     }
-    const std::string id = repository_input_value(input, "id", "repository");
+    const std::string id = repository_reference(input);
     const std::string ref = repository_input_value(input, "ref", "revision");
     if (id.empty() || (revision_required && ref.empty())) {
         return std::unexpected(ApiError{"invalid_input",
@@ -1126,6 +1140,16 @@ json team_schema() {
               {"created_at", {{"type", "string"}}},
               {"updated_at", {{"type", "string"}}}}}};
 }
+// The statement lake signed for a grant or membership it just wrote (lake#602); only the create
+// calls answer it.
+json attestation_schema() {
+    return {{"type", "object"},
+            {"properties",
+             {{"statement", {{"type", "object"}}},
+              {"signer", {{"type", "string"}}},
+              {"signature", {{"type", "string"}}},
+              {"digest", {{"type", "string"}}}}}};
+}
 json membership_schema() {
     return {{"type", "object"},
             {"properties",
@@ -1139,7 +1163,8 @@ json membership_schema() {
               {"attestation_digest", {{"type", "string"}}},
               {"granted_by_taap_id", {{"type", "string"}}},
               {"created_at", {{"type", "string"}}},
-              {"updated_at", {{"type", "string"}}}}}};
+              {"updated_at", {{"type", "string"}}},
+              {"attestation", attestation_schema()}}}};
 }
 json invitation_schema() {
     return {{"type", "object"},
@@ -1179,7 +1204,8 @@ json grant_schema() {
               {"attestation_digest", {{"type", "string"}}},
               {"granted_by_taap_id", {{"type", "string"}}},
               {"created_at", {{"type", "string"}}},
-              {"updated_at", {{"type", "string"}}}}}};
+              {"updated_at", {{"type", "string"}}},
+              {"attestation", attestation_schema()}}}};
 }
 json list_schema(json item) {
     return {{"type", "object"},
@@ -1196,9 +1222,12 @@ json session_schema() {
               {"kind", {{"type", "string"}}},
               {"name", {{"type", "string"}}},
               {"scopes", {{"type", "array"}}},
+              // Why the token exists (create_token's `reason`); empty for a sign-in session.
+              {"reason", {{"type", "string"}}},
               {"expires_at", {{"type", {"string", "null"}}}},
               {"revoked_at", {{"type", {"string", "null"}}}},
-              {"created_at", {{"type", "string"}}}}}};
+              {"created_at", {{"type", "string"}}},
+              {"last_used_at", {{"type", {"string", "null"}}}}}}};
 }
 json device_schema() {
     return {{"type", "object"},
@@ -1695,6 +1724,25 @@ template <class T> ApiResult one_result(control::Result<T> row) {
     return ApiResult::success(control::to_json(*row));
 }
 
+ApiResult attestation_failure(const ApiError& error) {
+    return ApiResult::failure(error.code, error.message, error.path);
+}
+
+// A grant or membership written with the attestation lake signed for it (lake#602): the answer is
+// the row plus `attestation: {statement, signer, signature, digest}`, and the audit event carries
+// the same.
+template <class T>
+ApiResult
+attested_result(control::Result<T> row, const LakeAttestation& attestation, ApiContext& context) {
+    if (!row) {
+        return from_store_error(row.error());
+    }
+    json value = control::to_json(*row);
+    value["attestation"] = attestation.to_json();
+    context.audit_details["attestation"] = attestation.to_json();
+    return ApiResult::success(std::move(value));
+}
+
 bool known_token_scope(const std::string& scope, const Registry* registry) {
     if (scope == "*" || scope == "registry_pull") {
         return true;
@@ -1950,7 +1998,8 @@ void register_server_info(Registry& registry, std::string_view version) {
     registry.add(Capability{
         .name = "server_info",
         .title = "Server info",
-        .description = "Name, node, version and API level of this lake. No authentication.",
+        .description = "Name, node, version and API level of this lake, and whether Deployments "
+                       "are set up on it. No authentication.",
         .input_schema = {{"type", "object"},
                          {"properties", json::object()},
                          {"additionalProperties", false}},
@@ -1961,7 +2010,8 @@ void register_server_info(Registry& registry, std::string_view version) {
                             {"version", {{"type", "string"}}},
                             {"revision", {{"type", "string"}}},
                             {"api", {{"type", "string"}}},
-                            {"store", {{"type", "string"}}}}}},
+                            {"store", {{"type", "string"}}},
+                            {"deployments", {{"type", "boolean"}}}}}},
         .kind = CapabilityKind::Read,
         .requires_auth = false,
         .object = "server",
@@ -1973,7 +2023,12 @@ void register_server_info(Registry& registry, std::string_view version) {
                                        {"version", version_string},
                                        {"revision", build_revision_string()},
                                        {"api", "v1"},
-                                       {"store", ctx.store ? ctx.store->kind() : "none"}});
+                                       {"store", ctx.store ? ctx.store->kind() : "none"},
+                                       // Whether the platform mirror is configured: without it
+                                       // every Deployments read answers `not_supported`, so a
+                                       // page asks this once instead of every repository
+                                       // (lake#605).
+                                       {"deployments", ctx.platform != nullptr}});
         }});
 }
 
@@ -2056,14 +2111,29 @@ void register_identity_capabilities(Registry& registry) {
         .title = "Get organization",
         .description = "Read one organization: its name, the space it owns and when it was made.",
         .input_schema = id_input(),
-        .output_schema = organization_schema(),
+        .output_schema =
+            [] {
+                json schema = organization_schema();
+                // The organization's own space (lake#561), so a page need not scan list_customers.
+                schema["properties"]["customer_id"] = {{"type", json::array({"string", "null"})}};
+                return schema;
+            }(),
         .kind = CapabilityKind::Read,
         .object = "organization",
         .action = "read",
         .resolve_object = entity_object("organization", "id"),
-        .handler = [](const json& in, ApiContext& ctx) {
-            return ctx.store ? one_result(ctx.store->get_organization(in["id"])) : no_store();
-        }});
+        .handler =
+            [](const json& in, ApiContext& ctx) {
+                if (!ctx.store) {
+                    return no_store();
+                }
+                ApiResult result = one_result(ctx.store->get_organization(in["id"]));
+                if (result.ok) {
+                    const auto space = ctx.store->organization_customer(in["id"]);
+                    result.value["customer_id"] = space ? json(space->id) : json(nullptr);
+                }
+                return result;
+            }});
     registry.add(Capability{.name = "create_organization",
                             .title = "Create organization",
                             .description =
@@ -2103,9 +2173,7 @@ void register_identity_capabilities(Registry& registry) {
         .resolve_object = global_object,
         .authorizes_candidates = true,
         .handler = [](const json& in, ApiContext& ctx) {
-            return ctx.store ? authorized_entity_list_result(
-                                   ctx.store->list_customers(limit_of(in)), ctx, "customer")
-                             : no_store();
+            return readable_customers(ctx, limit_of(in));
         }});
     // One name for a space across every capability: customer_id. `id` was get_customer's own
     // spelling and stays as a deprecated alias (lake#443, lake#450).
@@ -3884,6 +3952,7 @@ void register_repository_capabilities(Registry& registry) {
                           {{"id", {{"type", "string"}}},
                            {"ref", {{"type", "string"}}},
                            {"repository", {{"type", "string"}}},
+                           {"repository_id", {{"type", "string"}}},
                            {"revision", {{"type", "string"}}},
                            {"recursive", {{"type", "boolean"}}}}},
                          {"additionalProperties", false}},
@@ -3913,14 +3982,18 @@ void register_repository_capabilities(Registry& registry) {
         .name = "repository_file",
         .title = "Read a repository file",
         .description =
-            "Read one file of a repository at a branch, tag or change, with its contents and size.",
+            "Read one file of a repository at a branch, tag or change, with its contents and size. "
+            "With `units: true`, also the file's syntax units (`start_line`, `end_line`, `kind`) "
+            "for the formats lake parses (C and C++); `units` is absent for any other format.",
         .input_schema = {{"type", "object"},
                          {"properties",
                           {{"id", {{"type", "string"}}},
                            {"ref", {{"type", "string"}}},
                            {"repository", {{"type", "string"}}},
+                           {"repository_id", {{"type", "string"}}},
                            {"revision", {{"type", "string"}}},
-                           {"path", {{"type", "string"}}}}},
+                           {"path", {{"type", "string"}}},
+                           {"units", {{"type", "boolean"}}}}},
                          {"required", json::array({"path"})},
                          {"additionalProperties", false}},
         .output_schema = {{"type", "object"},
@@ -3929,7 +4002,17 @@ void register_repository_capabilities(Registry& registry) {
                             {"blob", {{"type", "string"}}},
                             {"contents", {{"type", "string"}}},
                             {"content_base64", {{"type", "string"}}},
-                            {"size", {{"type", "integer"}}}}}},
+                            {"size", {{"type", "integer"}}},
+                            {"units",
+                             {{"type", "array"},
+                              {"items",
+                               {{"type", "object"},
+                                {"properties",
+                                 {{"start_line", {{"type", "integer"}}},
+                                  {"end_line", {{"type", "integer"}}},
+                                  {"kind", {{"type", "integer"}}}}},
+                                {"required", json::array({"start_line", "end_line", "kind"})},
+                                {"additionalProperties", false}}}}}}}},
         .kind = CapabilityKind::Read,
         .object = "repository",
         .action = "read",
@@ -3953,7 +4036,13 @@ void register_repository_capabilities(Registry& registry) {
             if (!file) {
                 return from_sync_store_error(file.error());
             }
-            return ApiResult::success(repository_file_json(*file));
+            json out = repository_file_json(*file);
+            if (in.value("units", false)) {
+                if (auto units = web_ui_source_units(file->path, file->contents)) {
+                    out["units"] = std::move(*units);
+                }
+            }
+            return ApiResult::success(std::move(out));
         }});
     registry.add(Capability{
         .name = "list_changes",
@@ -4572,8 +4661,9 @@ void register_organization_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "create_membership",
         .title = "Create membership",
-        .description = "Grant owner, admin, or member in an organization or team "
-                       "using TAAP evidence.",
+        .description = "Grant owner, admin, or member in an organization or team. Lake signs the "
+                       "membership's attestation itself and keeps its digest as evidence; "
+                       "attestation_digest is optional and accepted only when it is lake's.",
         .input_schema =
             {{"type", "object"},
              {"properties",
@@ -4590,8 +4680,7 @@ void register_organization_capabilities(Registry& registry) {
                            "principal_type",
                            "principal_id",
                            "principal_taap_id",
-                           "role",
-                           "attestation_digest"})},
+                           "role"})},
              {"additionalProperties", false}},
         .output_schema = membership_schema(),
         .kind = CapabilityKind::Action,
@@ -4599,16 +4688,40 @@ void register_organization_capabilities(Registry& registry) {
         .action = "admin",
         .resolve_object = scope_object,
         .handler = [](const json& in, ApiContext& ctx) {
-            return one_result(
+            if (!ctx.store) {
+                return no_store();
+            }
+            const auto attestation =
+                sign_lake_attestation(ctx,
+                                      {{"type", "lake.org_membership/1"},
+                                       {"organization_id", in.at("organization_id")},
+                                       {"team_id", in.value("team_id", "")},
+                                       {"principal_type", in.at("principal_type")},
+                                       {"principal_id", in.at("principal_id")},
+                                       {"principal_taap_id", in.at("principal_taap_id")},
+                                       {"role", in.at("role")},
+                                       {"granted_by", ctx.acting_identity}},
+                                      "org-membership",
+                                      "the membership");
+            if (!attestation) {
+                return attestation_failure(attestation.error());
+            }
+            if (auto supplied = check_supplied_digest(in, *attestation, "a membership");
+                !supplied) {
+                return attestation_failure(supplied.error());
+            }
+            return attested_result(
                 ctx.store->create_membership(control::NewMembership{in.at("organization_id"),
                                                                     in.value("team_id", ""),
                                                                     in.at("principal_type"),
                                                                     in.at("principal_id"),
                                                                     in.at("principal_taap_id"),
                                                                     in.at("role"),
-                                                                    in.at("attestation_digest"),
+                                                                    attestation->digest,
                                                                     ctx.acting_identity,
-                                                                    ctx.request_id}));
+                                                                    ctx.request_id}),
+                *attestation,
+                ctx);
         }});
     registry.add(
         Capability{.name = "get_membership",
@@ -4745,36 +4858,65 @@ void register_organization_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "accept_invitation",
         .title = "Accept invitation",
-        .description = "Accept a pending invitation into an attested membership.",
-        .input_schema = {{"type", "object"},
-                         {"properties",
-                          {{"invitation_id", {{"type", "string"}}},
-                           {"principal_type",
-                            {{"type", "string"}, {"enum", json::array({"user", "workload"})}}},
-                           {"principal_id", {{"type", "string"}}},
-                           {"principal_taap_id", {{"type", "string"}}},
-                           {"attestation_digest", {{"type", "string"}}}}},
-                         {"required",
-                          json::array({"invitation_id",
-                                       "principal_type",
-                                       "principal_id",
-                                       "principal_taap_id",
-                                       "attestation_digest"})},
-                         {"additionalProperties", false}},
+        .description = "Accept a pending invitation into a membership. Lake signs the membership's "
+                       "attestation itself; attestation_digest is optional and accepted only when "
+                       "it is lake's.",
+        .input_schema =
+            {{"type", "object"},
+             {"properties",
+              {{"invitation_id", {{"type", "string"}}},
+               {"principal_type",
+                {{"type", "string"}, {"enum", json::array({"user", "workload"})}}},
+               {"principal_id", {{"type", "string"}}},
+               {"principal_taap_id", {{"type", "string"}}},
+               {"attestation_digest", {{"type", "string"}}}}},
+             {"required",
+              json::array(
+                  {"invitation_id", "principal_type", "principal_id", "principal_taap_id"})},
+             {"additionalProperties", false}},
         .output_schema = membership_schema(),
         .kind = CapabilityKind::Action,
         .object = "invitation scope",
         .action = "admin",
         .resolve_object = invitation_object,
         .handler = [](const json& in, ApiContext& ctx) {
-            return one_result(
+            if (!ctx.store) {
+                return no_store();
+            }
+            const auto invitation = ctx.store->get_invitation(in.at("invitation_id"));
+            if (!invitation) {
+                return from_store_error(invitation.error());
+            }
+            const auto attestation =
+                sign_lake_attestation(ctx,
+                                      {{"type", "lake.org_membership/1"},
+                                       {"invitation_id", invitation->id},
+                                       {"organization_id", invitation->organization_id},
+                                       {"team_id", invitation->team_id},
+                                       {"principal_type", in.at("principal_type")},
+                                       {"principal_id", in.at("principal_id")},
+                                       {"principal_taap_id", in.at("principal_taap_id")},
+                                       {"role", invitation->role},
+                                       {"granted_by", ctx.acting_identity}},
+                                      "org-membership",
+                                      "the membership");
+            if (!attestation) {
+                return attestation_failure(attestation.error());
+            }
+            if (auto supplied = check_supplied_digest(in, *attestation, "a membership");
+                !supplied) {
+                return attestation_failure(supplied.error());
+            }
+            return attested_result(
                 ctx.store->accept_invitation(control::AcceptInvitation{in.at("invitation_id"),
                                                                        in.at("principal_type"),
                                                                        in.at("principal_id"),
                                                                        in.at("principal_taap_id"),
-                                                                       in.at("attestation_digest"),
+                                                                       attestation->digest,
                                                                        ctx.acting_identity,
-                                                                       ctx.request_id}));
+                                                                       ctx.request_id}),
+                *attestation,
+                ctx);
         }});
 
     // ---- organizations a person runs themselves ----
@@ -5022,7 +5164,10 @@ void register_policy_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "create_grant",
         .title = "Create grant",
-        .description = "Grant a policy role on an object using a TAAP attestation digest.",
+        .description =
+            "Grant a policy role on an object. Lake signs the grant's attestation itself "
+            "and keeps its digest as evidence; attestation_digest is optional and "
+            "accepted only when it is lake's.",
         .input_schema =
             {{"type", "object"},
              {"properties",
@@ -5032,8 +5177,7 @@ void register_policy_capabilities(Registry& registry) {
                 {{"type", "string"},
                  {"enum", json::array({"read", "write", "admin", "deploy", "review", "share"})}}},
                {"attestation_digest", {{"type", "string"}}}}},
-             {"required",
-              json::array({"principal_taap_id", "object_id", "role", "attestation_digest"})},
+             {"required", json::array({"principal_taap_id", "object_id", "role"})},
              {"additionalProperties", false}},
         .output_schema = grant_schema(),
         .kind = CapabilityKind::Action,
@@ -5041,12 +5185,33 @@ void register_policy_capabilities(Registry& registry) {
         .action = "admin",
         .resolve_object = direct_object("object_id"),
         .handler = [](const json& in, ApiContext& ctx) {
-            return one_result(ctx.store->create_grant(control::NewGrant{in.at("principal_taap_id"),
-                                                                        in.at("object_id"),
-                                                                        in.at("role"),
-                                                                        in.at("attestation_digest"),
-                                                                        ctx.acting_identity,
-                                                                        ctx.request_id}));
+            if (!ctx.store) {
+                return no_store();
+            }
+            const auto attestation =
+                sign_lake_attestation(ctx,
+                                      {{"type", "lake.grant/1"},
+                                       {"object_id", in.at("object_id")},
+                                       {"principal_taap_id", in.at("principal_taap_id")},
+                                       {"role", in.at("role")},
+                                       {"granted_by", ctx.acting_identity}},
+                                      "grant",
+                                      "the grant");
+            if (!attestation) {
+                return attestation_failure(attestation.error());
+            }
+            if (auto supplied = check_supplied_digest(in, *attestation, "a grant"); !supplied) {
+                return attestation_failure(supplied.error());
+            }
+            return attested_result(
+                ctx.store->create_grant(control::NewGrant{in.at("principal_taap_id"),
+                                                          in.at("object_id"),
+                                                          in.at("role"),
+                                                          attestation->digest,
+                                                          ctx.acting_identity,
+                                                          ctx.request_id}),
+                *attestation,
+                ctx);
         }});
     registry.add(Capability{
         .name = "effective_access",
@@ -5119,7 +5284,7 @@ void register_policy_capabilities(Registry& registry) {
 // answers one `invalid_input`, so its existence elsewhere is not revealed.
 std::expected<search::Query, ApiError> search_scope(const json& input, ApiContext& context) {
     search::Query query{input.at("query").get<std::string>(),
-                        input.value("customer", ""),
+                        input.value("customer_id", ""),
                         input.value("repository", ""),
                         input.value("ref", ""),
                         limit_of(input),
@@ -5200,9 +5365,10 @@ std::expected<search::Query, ApiError> search_scope(const json& input, ApiContex
         }
         if (customers->size() >= static_cast<std::size_t>(page)) {
             // No cursor for this list: refused rather than searched in part.
-            return std::unexpected(ApiError{"invalid_input",
-                                            "too many spaces to search them all; name a customer",
-                                            "/customer"});
+            return std::unexpected(
+                ApiError{"invalid_input",
+                         "too many spaces to search them all; name a customer_id",
+                         "/customer_id"});
         }
         std::vector<std::string> objects;
         std::map<std::string, std::string> space_of_object;
@@ -5240,7 +5406,7 @@ void register_search_capability(Registry& registry) {
         .input_schema = {{"type", "object"},
                          {"properties",
                           {{"query", {{"type", "string"}}},
-                           {"customer", {{"type", "string"}}},
+                           {"customer_id", {{"type", "string"}}},
                            {"repository", {{"type", "string"}}},
                            {"ref", {{"type", "string"}}},
                            {"change", {{"type", "string"}}},
@@ -5255,29 +5421,33 @@ void register_search_capability(Registry& registry) {
         .action = "read",
         .resolve_object = global_object,
         .authorizes_candidates = true,
-        .handler = [](const json& input, ApiContext& context) {
-            if (!context.search) {
-                return no_search();
-            }
-            if (!context.store) {
-                return no_store();
-            }
-            auto scope = search_scope(input, context);
-            if (!scope) {
-                return ApiResult::failure(scope.error().code, scope.error().message,
-                                          scope.error().path);
-            }
-            auto result = context.search->query(*scope, context.acting_identity, *context.store);
-            if (result) {
-                context.audit_object =
-                    input.value("repository", "").empty()
-                        ? "repository/search"
-                        : "repository/" + input.at("repository").get<std::string>();
-                context.audit_details = {{"mode", search::to_string(result->mode)},
-                                         {"scanned_changes", result->scanned_changes}};
-            }
-            return search_result(std::move(result));
-        }});
+        .handler =
+            [](const json& input, ApiContext& context) {
+                if (!context.search) {
+                    return no_search();
+                }
+                if (!context.store) {
+                    return no_store();
+                }
+                auto scope = search_scope(input, context);
+                if (!scope) {
+                    return ApiResult::failure(
+                        scope.error().code, scope.error().message, scope.error().path);
+                }
+                auto result =
+                    context.search->query(*scope, context.acting_identity, *context.store);
+                if (result) {
+                    context.audit_object =
+                        input.value("repository", "").empty()
+                            ? "repository/search"
+                            : "repository/" + input.at("repository").get<std::string>();
+                    context.audit_details = {{"mode", search::to_string(result->mode)},
+                                             {"scanned_changes", result->scanned_changes}};
+                }
+                return search_result(std::move(result));
+            },
+        // Every other capability names a space `customer_id` (lake#591).
+        .input_aliases = {{"customer", "customer_id"}}});
     registry.add(Capability{
         .name = "reindex_artifacts",
         .title = "Reindex published artifacts",
@@ -5721,8 +5891,15 @@ void register_audit_capabilities(Registry& registry) {
         }});
 }
 
+ApiResult readable_customers(ApiContext& context, int limit) {
+    return context.store ? authorized_entity_list_result(
+                               context.store->list_customers(limit), context, "customer")
+                         : no_store();
+}
+
 void register_core_capabilities(Registry& registry, std::string_view version) {
     register_server_info(registry, version);
+    register_console_capabilities(registry, version);
     register_identity_capabilities(registry);
     register_sso_capabilities(registry);
     register_repository_capabilities(registry);
@@ -5737,6 +5914,7 @@ void register_core_capabilities(Registry& registry, std::string_view version) {
     register_github_import_capabilities(registry);
     register_pki_capabilities(registry);
     register_metering_capabilities(registry);
+    register_usage_capabilities(registry);
     register_drive_capabilities(registry);
     register_model_capabilities(registry);
     register_transparency_capabilities(registry);
@@ -5754,6 +5932,9 @@ void register_core_capabilities(Registry& registry, std::string_view version) {
     register_workspace_capabilities(registry);
     register_workspace_record_capabilities(registry);
     register_workspace_store_capabilities(registry);
+    register_transcript_capabilities(registry);
+    register_solution_capabilities(registry);
+    register_drives_capabilities(registry);
 }
 
 } // namespace lake::api

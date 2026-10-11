@@ -1,43 +1,285 @@
-# Ship
+# Models and Search Indexes
 
-## Call a model
+Ship is where what you trained and indexed leaves lake. This page covers the two things your own
+code calls: **published models**, which score your records, and **published search indexes**,
+which answer full-text searches. Both run in your workspace; lake checks the key, the
+workspace and that the model or index is published, and records every call.
 
-**Ship → Models** lists every model with its project, when it was trained and its score. A model
-trained by a study names its study and trial, and the model a study promoted is marked
-**promoted**. Press
-**Publish**, then call it with a lake key. The page shows this call with your space, workspace and
-model filled in; `workspace_id` is required:
+Every call on this page names two ids. `customer_id` is the id of the account that owns your
+workspaces (yours, or your organization's), and `workspace_id` is the workspace, as in the page
+address `/w/<workspace id>/…`. [Getting Started](/docs) says where to find both.
+
+## Concepts
+
+| Term | What it is |
+|---|---|
+| **Model** | A learned function that makes a prediction. Each training of it is a **version** with its own model id. **Train → Models** is about training it: its versions, held-out scores and what it learned from ([Train a Model](/docs/train)). **Ship → Models** is about serving it: calling it, who may, where its answers go and how it is doing. A pipeline can train several models. A model uploaded on its own lives as a model repository, with no pipeline ([Repositories](/docs/repositories)). |
+| **Predict key** | A lake API token whose only scope is `predict`: it can call published models and do nothing else. |
+| **Published** | A model or index that answers calls from outside lake. Anything not published can still be used inside lake, but `predict` and `search_index` refuse it. |
+| **Promoted** | The model an experiment chose as its best trial ([Experiments](/docs/experiments)). It is marked **promoted** on Train → Models and Ship → Models. Promoting a version to Ship from **Train → Models** publishes it. |
+| **Search index** | A full-text (BM25F) index over one dataset's columns. |
+| **Search key** | A lake API token whose only scope is `search_index`: it can search published indexes and do nothing else. |
+| **Lake key** | Any lake API token, made on Developer → API or Developer → MCP ([Tokens and Keys](/docs/tokens)). |
+
+## Ship → Models
+
+**Ship → Models** serves every model in the workspace, one row per model with its versions grouped
+as on Train → Models. The figures on top count the published models, and every model's calls,
+errors and mean latency over the last 24 hours. Each row shows the version serving and its model
+id, its calls, error rate and latency, and **Publish**, **Call** and **Unpublish**. The model's name
+opens its serving page; **training** under it opens Train → Models.
+
+- **Search models…** filters by name, pipeline, project or id.
+- **Published** and **Not published** filter by state.
+- **Train → Models** in the header opens the training side.
+
+### Publish a Model
+
+1. Open **Ship → Models**.
+2. Press **Publish v2** on the model's row (the button names its latest version). The row then
+   shows **Call** and **Unpublish**. To publish another version, promote it from Train → Models.
+
+- REST: `POST /v1/workspace_act` with the engine's `expose_model`:
+
+```json
+{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "capability": "expose_model", "input": {"model_id": "<model id>"}}
+```
+
+- MCP: `workspace_act` with the same input.
+
+The answer's `call` names the lake capability that now serves the model (`predict`), with its method,
+path and input filled in.
+
+### Call a Published Model
+
+Press **Call** on a published model's row. The **Call a Model from Your Code** drawer shows a `curl`
+command with your account, workspace and model filled in and one row keyed by the model's
+features, ready to paste. Opening it from the page header shows every published model at once.
 
 ```
 curl -s https://lake.oramadev.net/v1/predict \
   -H "Authorization: Bearer $LAKE_KEY" -H 'Content-Type: application/json' \
-  -d '{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "model_id": "<model id>", "rows": [{"support_tickets": 11, "tenure_months": 4}]}'
+  -d '{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "model_id": "<model id>", "rows": [{"entity": "acme", "support_tickets": 11, "tenure_months": 4}]}'
 ```
 
-Each row is keyed by the model's features and carries its own key in `entity` (or the field you
-name in `entity_column`); the answer ranks the rows by risk, each with its `entity` key and its
-position `row`, and says what drives the scores. From an AI agent it is the MCP tool `predict`. **Unpublish** stops every outside call.
+- REST: `POST /v1/predict` with `customer_id`, `workspace_id`, `model_id` and `rows`.
+- MCP: the tool `predict`, with the same input.
 
-## Search an index
+What you send:
 
-**Ship → Search Indexes → New index** over a dataset's text columns. Open it to search, publish
-it, and create a key that can only search (`search_index`). The index page shows the call with your
-values filled in:
-`GET /v1/search_index?customer_id=<customer id>&workspace_id=<workspace id>&index_id=<index id>&query=renewal%20risk`.
+| Field | Required | Meaning |
+|---|---|---|
+| `model_id` | yes | The model's id, as Ship → Models shows it (`model` is an older name for it and still works). |
+| `rows` | yes | One or more records, each keyed by the model's feature columns. |
+| `entity_column` | no | The field in each record that carries its own key. Default `entity`. |
+| `top_k` | no | How many ranked rows to answer (0 or more). |
 
-## Services and storage
+What comes back: the rows ranked by risk. Each ranked entry has `entity` (the value of the record's
+`entity_column` field, left out when the record has none), `row` (its position in the `rows` you
+sent) and `risk`, and the answer says what drives the scores. A record with a missing feature is
+refused with its place: *row 2 has no 'tenure'* is answered `invalid_input` at `/rows/2/tenure`.
 
-**Ship → Services** runs databases, streams and engines for your space; **Train → Data → Storage**
-provisions volumes. Each shows its connection details once it is Ready.
+To ask for only the top five of a batch, keyed by your own column:
 
-## Build and deploy an app
+```json
+{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "model_id": "<model id>", "entity_column": "account_id", "top_k": 5, "rows": [{"account_id": "a-17", "support_tickets": 11, "tenure_months": 4}, {"account_id": "a-42", "support_tickets": 0, "tenure_months": 30}]}
+```
 
-Open **Ship → Apps** and use **Build an App With the ApplicationAgent**. Describe the data app you
-want. ApplicationAgent may inspect datasets, schemas, read-only SQL results, repositories, Services,
-and existing Apps, but its first turn cannot write anything.
+`predict` is a `POST` because it carries your records, but it changes nothing: it needs `read` on the
+account, so a read-only key can call it.
 
-The page shows the complete proposal: App settings and every repository file. Choose **Confirm and
-deploy** only after reviewing them. Lake starts a second turn with that exact proposal. Only that
-turn can create the private repository, commit its files, create the App, and deploy it. The result
-links to the running URL. You can also choose ApplicationAgent in **Ask Orama → Talk to**, or ask Ask
-Orama to delegate an app request to it; confirmation still happens before writes.
+### Unpublish a Model
+
+Press **Unpublish** on the model's row and confirm. Unpublishing a model stops every outside call
+at once; you can publish it again later.
+
+- REST: `POST /v1/workspace_act`:
+
+```json
+{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "capability": "unexpose_model", "input": {"model_id": "<model id>"}}
+```
+
+- MCP: `workspace_act` with the same input.
+
+### A Model's Serving Page
+
+Press a model's name on **Ship → Models**. Its page has four views; **Training** in the header opens
+the same model on Train → Models.
+
+- **Inference**: the endpoint (`POST /v1/predict`, and the MCP tool `predict`), the model id, the
+  call to paste, and **Try It**: edit the rows (prefilled with one row keyed by the model's
+  features) and press **Predict** to see the rows ranked by risk and the whole answer. Try It calls
+  `predict` as you, so the version must be published.
+- **Access**: who may call it. A call needs a lake key of someone with `read` on the workspace; the
+  list shows your keys scoped to `predict` (or to everything). **New predict key** makes a token
+  whose only scope is `predict` and shows its secret once. A call carrying a key is answered from
+  any origin; a browser signed in to lake is refused when the calling page is not lake's own. Lake
+  keeps no per-model list of origins.
+- **Destinations**: where its answers go. Each answer goes back to the caller only; no app, topic
+  or webhook receives a model's answers yet. An app calls a model as any code does.
+- **Monitoring**: calls, errors (refused and failed), mean latency and the workspace's `predict`
+  requests over 1 hour, 24 hours, 7 days or 30 days, as figures and charts, and the recent minutes
+  with calls. Lake counts calls by the minute in your workspace and keeps no row a caller sent.
+  Prediction drift against the training data is not measured yet.
+
+**Publish** and **Unpublish** are in the side column, beside the model's facts.
+
+### Watch a Model from Code
+
+- REST: `GET /v1/model_traffic?customer_id=<customer id>&workspace_id=<workspace id>&model_id=<model id>`
+- MCP: the tool `model_traffic`, with the same input.
+
+Without `model_id` it answers every model with calls. `from_ms`, `to_ms` and `step_ms` (a whole
+number of minutes) choose the range and its steps; the default is the last 24 hours in about 48
+steps. Each model answers `calls`, `errors`, `client_errors`, `server_errors`, `mean_ms` and its
+`steps`; `requests` counts the workspace's `predict` requests by status class, and `drift` says it
+is not measured yet.
+
+### List Models from Code
+
+- REST: `POST /v1/workspace_query`:
+
+```json
+{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "capability": "list_models", "input": {}}
+```
+
+- MCP: `workspace_query` with the same input. Each model carries its id, name, project and
+  pipeline, run, score, feature schema, creation time and whether it is published.
+
+## Ship → Search Indexes
+
+**Ship → Search Indexes** lists the workspace's indexes with the dataset each covers and its fields.
+The figures count the indexes, the datasets they cover and the fields indexed. **Search indexes…**
+filters the list; open an index to search it, publish it and call it from your own code.
+
+### Create an Index
+
+1. Open **Ship → Search Indexes** and press **New index**.
+2. Choose the **Dataset**. Run outputs are listed apart, under *Results*.
+3. Under **Fields to search, comma separated**, name the text columns to index, or leave it empty
+   to index every column.
+4. Press **Create index**. The new index opens.
+
+- REST: `POST /v1/workspace_act` with the engine's `create_index`:
+
+```json
+{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "capability": "create_index", "input": {"table": "support_tickets", "fields": ["subject", "body"]}}
+```
+
+- MCP: `workspace_act` with the same input. The answer carries the new index's id.
+
+### Try a Search
+
+The index page's **Try a Search** card is a playground. Type under **Search for**, choose a field
+under **In** (or keep *all fields*), set **Hits** (1 to 100) and press **Search**. Each hit shows the
+record's id and its score. The query, field and hit count stay in the page address, so a search can
+be shared. Searching here works whether or not the index is published.
+
+- REST: `POST /v1/workspace_query` with the engine's search:
+
+```json
+{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "capability": "search", "input": {"index_id": "<index id>", "query": "renewal risk", "top_k": 10}}
+```
+
+- MCP: `workspace_query` with the same input.
+
+### Publish an Index
+
+On the index page, the **Publishing** card says whether the index answers outside calls. Press
+**Publish**. To stop, press **Unpublish** and confirm: every outside call stops at once, and
+searching in lake keeps working.
+
+- REST: `POST /v1/workspace_act`:
+
+```json
+{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "capability": "expose_index", "input": {"index_id": "<index id>"}}
+```
+
+- The same with `unexpose_index` unpublishes it. MCP: `workspace_act` with the same input.
+
+### Create a Search Key
+
+Once the index is published, the **Search Key** card offers **Create a search key**. The key's only
+scope is `search_index`, so it can search published indexes and nothing else. It is shown once:
+copy it then. It keeps working for your other published indexes until you revoke it on **Tokens**,
+and lasts as long as the sign-in that made it, at most 30 days.
+
+- REST: `POST /v1/create_token`:
+
+```json
+{"name": "search support_tickets", "scopes": ["search_index"]}
+```
+
+- MCP: `create_token` with the same input. The answer's `secret` is the key.
+
+### Search from Your Code
+
+The **Call It from Your Code** card shows the call in curl, JavaScript and Python with your account,
+workspace and index filled in:
+
+```
+curl -s -H "Authorization: Bearer $LAKE_SEARCH_KEY" \
+  "https://lake.oramadev.net/v1/search_index?customer_id=<customer id>&workspace_id=<workspace id>&index_id=<index id>&query=renewal%20risk&top_k=10"
+```
+
+- REST: `GET /v1/search_index?customer_id=<customer id>&workspace_id=<workspace id>&index_id=<index id>&query=renewal%20risk`
+- MCP: the tool `search_index`, with the same inputs.
+
+| Field | Required | Meaning |
+|---|---|---|
+| `index_id` | yes | The index's id (`index` is an older name for it and still works). |
+| `query` | yes | The text to search for. |
+| `field` | no | Limit the search to one indexed field. |
+| `top_k` | no | How many hits, 1 to 100 (default 10). |
+| `fields` | no | Which of the index's fields each hit carries (default: all of them). `[]` (over REST, `fields=` with no value) returns ids and scores only. A field the index does not hold is refused, and the message lists the index's fields. |
+
+The answer's `hits` are `{id, score, fields}`, best first. `fields` holds the matched row's values,
+which is what you show in your search box; `id` is the workspace's internal row id, not a column of
+your table. Lake checks the key, checks that the index is published, runs the search in your
+workspace and records the query.
+
+For an index over `account_id` and `plan`, each hit's `fields` holds that row's `account_id` and
+`plan`. Ask for some fields only with `&fields=plan` (repeat it, or comma-separate, for more).
+
+## Limits
+
+- Only a **published** model or index answers `predict` or `search_index`. Publishing is per model
+  and per index.
+- A model or index is reached only through lake (`/v1/predict`, `/v1/search_index` or the MCP tools
+  of the same names), never at your workspace's own address.
+- `search_index` answers at most 100 hits per call.
+- A model's calls are counted by the minute and kept 30 days; `model_traffic` reads at most 31 days
+  and 10,000 steps at once. Counts can lag by up to ten seconds, and a lake that stops abruptly can
+  lose its last ten seconds of counts.
+- Workspace reads time out after 15 seconds and actions after 60.
+- A key lasts as long as the sign-in that made it, at most 30 days, unless your account allows keys
+  that never expire ([Tokens and Keys](/docs/tokens)).
+
+## Permissions
+
+| Step | Needs |
+|---|---|
+| See models and indexes, their traffic (`model_traffic`), search in the playground | `read` on the account that owns the workspace |
+| Call `predict` or `search_index` | `read` on the account, and a key whose scopes include the capability |
+| Publish, unpublish, create an index, create a key | `write` on the account |
+
+## Troubleshooting
+
+| You see | What it means | What to do |
+|---|---|---|
+| `unauthenticated` (401) | No key, or the key is unknown, revoked or expired; the error's `reason` says which. | Send `Authorization: Bearer <key>`; make a new key on Developer → API. |
+| `unauthorized` (403) | The key is valid but does not grant this call, such as a search key calling `predict`. | Use a key whose scopes include the capability. |
+| `invalid_input` at `/rows/2/tenure` | Row 2 lacks the feature `tenure`. | Send every feature the model reads; the Call drawer lists them. |
+| `invalid_input` at `/workspace_id` or `/customer_id` | The workspace is unknown, or is not one of that account's workspaces. | Copy both ids from the page address or the Call drawer. |
+| A refusal saying the model or index is not published | It was never published, or was unpublished. | Publish it on Ship → Models or the index page. |
+| `workspace_not_ready` (503) | The workspace is starting or stopped. | Open any Design, Train or Ship page and wait until it is ready, or start it ([Workspaces](/docs/workspaces)). |
+| `not_found` | No model or index with that id in this workspace. | Check the id and the workspace; ids are per workspace. |
+
+## Related Pages
+
+- [Train a Model](/docs/train): where models come from, their versions, and the held-out score.
+- [Experiments](/docs/experiments): experiments, trials and promotion.
+- [Datasets and Loading Data](/docs/load-data): the datasets an index covers.
+- [Apps](/docs/apps): ship a whole data app instead of an endpoint.
+- [Tokens and Keys](/docs/tokens): make and revoke keys.
+- [REST API and OpenAPI](/docs/developer) and [MCP Setup](/docs/mcp): calling lake from code and agents.

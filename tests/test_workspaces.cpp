@@ -15,6 +15,8 @@
 #include <nlohmann/json.hpp>
 #include <zetta/connect/http_transport.hpp>
 
+#include "experiment_fixture.hpp"
+#include "lake/api/agent_docs.hpp"
 #include "lake/api/capabilities.hpp"
 #include "lake/api/datasets.hpp"
 #include "lake/api/mcp.hpp"
@@ -29,9 +31,8 @@
 #include "lake/control/identity_crypto.hpp"
 #include "lake/control/memory_store.hpp"
 #include "lake/control/zetta_workspace.hpp"
-#include "experiment_fixture.hpp"
-#include "temporary_directory.hpp"
 #include "stream_fixture.hpp"
+#include "temporary_directory.hpp"
 
 namespace {
 
@@ -49,6 +50,7 @@ public:
     std::map<std::string, json> answers; // per capability, when set; else `value`
     std::vector<std::pair<std::string, json>> calls;
     std::optional<lake::control::ZettaControlError> failure;
+    std::string failure_for; // when set, only this capability fails
     std::function<void()> before_reply;
     lake::test::StreamCaller topics;
     std::mutex mutex;
@@ -80,7 +82,7 @@ public:
             if (before_reply) {
                 before_reply();
             }
-            if (failure) {
+            if (failure && (failure_for.empty() || failure_for == capability)) {
                 answered = ZettaControlResult<json>(std::unexpected(*failure));
             } else if (capability != "create_topic" && capability != "update_topic" &&
                        capability != "publish_event" && capability != "receive_events" &&
@@ -288,7 +290,7 @@ TEST(Workspaces, StartWorkspaceAnswersItsIdBesideTheSpacesOtherWorkspaces) {
     }
     for (const auto& page : lake::api::web_ui_guide()) {
         if (page.slug == "concepts") {
-            EXPECT_NE(page.markdown.find("A space can have many"), std::string::npos);
+            EXPECT_NE(page.markdown.find("can have many workspaces"), std::string::npos);
             EXPECT_NE(page.markdown.find("`workspace_id`"), std::string::npos);
         }
     }
@@ -931,370 +933,6 @@ TEST(Workspaces, StoreCapabilitiesRefuseUnavailablePairsAndCheckTheName) {
         << "a store is deleted only from its own workspace";
 }
 
-TEST(Workspaces, DataPageShowsStorageWithTypedDeleteAndRefreshesWhileChanging) {
-    lake::api::WorkspacePage page;
-    page.section = "data";
-    page.customer_id = std::string(customer);
-    page.data["list_stores"] = {{"stores", json::array()}};
-    std::string html = lake::api::web_ui_workspace(page, true);
-    EXPECT_NE(html.find("<h2>Storage</h2>"), std::string::npos)
-        << "storage shows before the workspace is ready";
-    EXPECT_NE(html.find("Start Your Workspace"), std::string::npos);
-    EXPECT_NE(html.find("No storage yet."), std::string::npos);
-    EXPECT_NE(html.find("<h3>New Storage</h3>"), std::string::npos);
-    EXPECT_NE(html.find("action=\"/train/data/store-create\""), std::string::npos);
-    EXPECT_NE(html.find("<option value=\"volume:cluster\" selected>Volume — cluster disk</option>"),
-              std::string::npos);
-    // Only what can be created today; no internal plans or issue numbers (lake#257).
-    EXPECT_EQ(html.find("value=\"object:r2\""), std::string::npos);
-    EXPECT_EQ(html.find("not yet"), std::string::npos);
-    EXPECT_EQ(html.find("lake#196"), std::string::npos);
-    EXPECT_NE(html.find("are coming later.</small>"), std::string::npos);
-    EXPECT_NE(html.find("name=\"size_gi\""), std::string::npos);
-    EXPECT_EQ(html.find("content=\"3\""), std::string::npos) << "nothing is changing";
-
-    page.state = {{"requested", true}, {"phase", "Ready"}, {"ready", true}};
-    page.data["list_stores"]["stores"] = json::array({{{"id", "s1"},
-                                                       {"name", "uploads"},
-                                                       {"type", "volume"},
-                                                       {"provider", "cluster"},
-                                                       {"size_gi", 10},
-                                                       {"desired", "present"},
-                                                       {"phase", "Ready"},
-                                                       {"message", "claim binds on first use"},
-                                                       {"connected", true}}});
-    html = lake::api::web_ui_workspace(page, true);
-    EXPECT_NE(html.find("<td>uploads</td><td>Volume</td><td>cluster disk</td><td>10 GiB</td>"
-                        "<td>Ready<br><span class=\"muted\">claim binds on first use</span>"),
-              std::string::npos)
-        << html;
-    EXPECT_NE(html.find("action=\"/train/data/store-connection\""), std::string::npos);
-    EXPECT_NE(html.find("action=\"/train/data/store-delete\""), std::string::npos);
-    EXPECT_NE(html.find("deletes the data in it"), std::string::npos);
-    EXPECT_NE(html.find("Type <code>uploads</code> to delete it<input name=\"confirm\" required"),
-              std::string::npos);
-    EXPECT_NE(html.find("name=\"customer_id\" value=\"" + std::string(customer) + "\""),
-              std::string::npos);
-    EXPECT_EQ(html.find("content=\"3\""), std::string::npos) << "a Ready store is settled";
-
-    page.data["list_stores"]["stores"][0]["phase"] = "";
-    html = lake::api::web_ui_workspace(page, true);
-    EXPECT_NE(html.find("Waiting for the operator"), std::string::npos);
-    EXPECT_NE(html.find("<meta http-equiv=\"refresh\" content=\"3\">"), std::string::npos);
-    EXPECT_EQ(html.find("action=\"/train/data/store-connection\""), std::string::npos)
-        << "no connection before Ready";
-
-    page.data["list_stores"]["stores"][0]["phase"] = "Ready";
-    page.data["list_stores"]["stores"][0]["desired"] = "absent";
-    html = lake::api::web_ui_workspace(page, true);
-    EXPECT_NE(html.find("<td>Deleting"), std::string::npos);
-    EXPECT_EQ(html.find("action=\"/train/data/store-delete\""), std::string::npos);
-    EXPECT_NE(html.find("content=\"3\""), std::string::npos);
-
-    page.data["store_connection"] = {
-        {"name", "uploads"}, {"claim", "prod-st-0123456789ab"}, {"namespace", "lake"}};
-    html = lake::api::web_ui_workspace(page, true);
-    EXPECT_NE(html.find("<h2>Connection to uploads</h2>"), std::string::npos);
-    EXPECT_NE(html.find("<code>prod-st-0123456789ab</code>"), std::string::npos);
-}
-
-TEST(Workspaces, PagesGateOnTheWorkspaceAndRenderZettaResults) {
-    lake::api::WorkspacePage page;
-    page.section = "projects";
-    page.customer_id = std::string(customer);
-    page.customers = {{std::string(customer), "grand-lantern-42", true},
-                      {"11111111-2222-3333-4444-555555555555", "acme", false}};
-    std::string html = lake::api::web_ui_workspace(page, true);
-    EXPECT_NE(html.find("Start Your Workspace"), std::string::npos);
-    EXPECT_NE(html.find("action=\"/workspace/start\""), std::string::npos);
-    EXPECT_EQ(html.find("<select name=\"customer_id\">"), std::string::npos)
-        << "workspace pages use the global top-bar selector";
-    EXPECT_NE(html.find("<p class=\"eyebrow\">Design</p>"), std::string::npos);
-
-    page.state = {{"requested", true}, {"phase", "Provisioning"}, {"ready", false}};
-    html = lake::api::web_ui_workspace(page, true);
-    EXPECT_NE(html.find("Preparing Your Workspace"), std::string::npos);
-    EXPECT_NE(html.find("http-equiv=\"refresh\""), std::string::npos);
-
-    page.state = {{"requested", true}, {"phase", "Ready"}, {"ready", true}};
-    page.data["list_projects"] = {{"projects", json::array({"retention<review>"})}};
-    html = lake::api::web_ui_workspace(page, true);
-    EXPECT_NE(html.find("retention&lt;review&gt;"), std::string::npos);
-    EXPECT_EQ(html.find("retention<review>"), std::string::npos);
-    EXPECT_NE(html.find("action=\"/design/projects/create\""), std::string::npos);
-    EXPECT_EQ(html.find("action=\"/workspace/delete\""), std::string::npos)
-        << "the delete form needs the workspace id from the state";
-    page.state["workspace"] = "ws-0f1e2d3c4b5a";
-    html = lake::api::web_ui_workspace(page, true);
-    EXPECT_EQ(html.find("action=\"/workspace/delete\""), std::string::npos);
-    EXPECT_NE(html.find("href=\"/workspaces\""), std::string::npos);
-
-    page.state = {{"requested", true},
-                  {"phase", "Failed"},
-                  {"ready", false},
-                  {"workspace", "ws-0f1e2d3c4b5a"},
-                  {"message", "workspace quota reached (3)"}};
-    html = lake::api::web_ui_workspace(page, true);
-    EXPECT_NE(html.find("as many workspaces as it allows"), std::string::npos);
-    EXPECT_NE(html.find(">Cancel workspace</a>"), std::string::npos);
-    page.state = {
-        {"requested", true}, {"phase", "Ready"}, {"ready", true}, {"workspace", "ws-0f1e2d3c4b5a"}};
-
-    page.section = "project";
-    page.subject = "retention";
-    page.data["get_project"] = {
-        {"graphs",
-         json::array({{{"id", "g1"}, {"name", "proposed plan"}, {"approval", "proposed"}},
-                      {{"id", "g2"}, {"name", "approved plan"}, {"approval", "approved"}}})}};
-    html = lake::api::web_ui_workspace(page, true);
-    EXPECT_NE(html.find(">Approve</button>"), std::string::npos);
-    EXPECT_NE(html.find(">Check and run</button>"), std::string::npos);
-    EXPECT_NE(html.find("action=\"/design/project/delete\""), std::string::npos);
-    EXPECT_LT(html.find("/design/project/approve"), html.find("/design/project/run"))
-        << "the proposed plan offers Approve, the approved one Check and run";
-    page.subject.clear();
-
-    page.section = "run";
-    page.subject = "r1";
-    page.data["get_run"] = {{"status", "running"}};
-    html = lake::api::web_ui_workspace(page, true);
-    EXPECT_NE(html.find("The report appears when the run finishes"), std::string::npos);
-    page.data["get_run"] = {{"status", "succeeded"}};
-    page.data["get_run_report"] = {{"model", {{"auc", 0.9}}}};
-    html = lake::api::web_ui_workspace(page, true);
-    EXPECT_NE(html.find("<h2>Report</h2>"), std::string::npos);
-    page.subject.clear();
-
-    page.section = "data";
-    page.data["list_connections"] = json::object();
-    html = lake::api::web_ui_workspace(page, true);
-    EXPECT_NE(html.find("action=\"/train/data/connect\""), std::string::npos);
-    EXPECT_NE(html.find("action=\"/train/data/upload\" enctype=\"multipart/form-data\""),
-              std::string::npos)
-        << "a file can be uploaded without any connection";
-    EXPECT_LT(html.find("<h2>Load Data</h2>"), html.find("<h2>Connections</h2>"))
-        << "loading data is the first thing on the page (lake#256)";
-    EXPECT_NE(html.find("<details open><summary>Upload a file"), std::string::npos);
-    page.data["loaded"] = {{"table", "accounts"}, {"rows", "200"}};
-    html = lake::api::web_ui_workspace(page, true);
-    EXPECT_NE(html.find("Loaded <strong>200</strong> rows into"), std::string::npos);
-    EXPECT_NE(html.find("name=accounts\">accounts</a>"), std::string::npos);
-    page.data.erase("loaded");
-    EXPECT_NE(html.find("type=\"password\" name=\"token\""), std::string::npos);
-    EXPECT_EQ(html.find("action=\"/train/data/pull\""), std::string::npos)
-        << "no dataset can be pulled before a connection exists";
-    page.data["list_connections"] = {
-        {"connections",
-         json::array(
-             {{{"name", "warehouse"},
-               {"connector", {{"type", "postgres"}, {"host", "db.test"}, {"database", "crm"}}}}})}};
-    html = lake::api::web_ui_workspace(page, true);
-    EXPECT_NE(html.find("db.test/crm"), std::string::npos);
-    EXPECT_NE(html.find("action=\"/train/data/pull\""), std::string::npos);
-    EXPECT_NE(html.find("<option>warehouse</option>"), std::string::npos);
-    EXPECT_NE(html.find("action=\"/train/data/disconnect\""), std::string::npos);
-
-    page.section = "models";
-    page.data["list_models"] = {{"models", json::array({{{"name", "churn"}, {"kind", "gbdt"}}})}};
-    html = lake::api::web_ui_workspace(page, true);
-    EXPECT_NE(html.find("<p class=\"eyebrow\">Ship</p>"), std::string::npos);
-    EXPECT_NE(html.find("action=\"/ship/models/publish\""), std::string::npos);
-
-    page.unavailable = "Design, Train and Ship are not available on this lake yet";
-    html = lake::api::web_ui_workspace(page, true);
-    EXPECT_NE(html.find("not available on this lake yet"), std::string::npos);
-    EXPECT_EQ(html.find("Start Your Workspace"), std::string::npos);
-}
-
-TEST(Workspaces, ServicesPageListsEveryServiceWithoutCredentials) {
-    lake::api::WorkspacePage page;
-    page.section = "services";
-    page.customer_id = std::string(customer);
-    page.data["list_services"] = {{"services", json::array()}, {"limit", 5}};
-    std::string html = lake::api::web_ui_workspace(page, true);
-    EXPECT_NE(html.find("No services yet."), std::string::npos);
-    EXPECT_NE(html.find("action=\"/services/create\""), std::string::npos);
-    EXPECT_NE(html.find("may run 5 services"), std::string::npos) << "a configured limit is stated";
-    page.data["list_services"]["limit"] = 0;
-    EXPECT_EQ(lake::api::web_ui_workspace(page, true).find("may run"), std::string::npos)
-        << "no limit (the default) says nothing";
-    page.data["list_services"]["limit"] = 5;
-    EXPECT_EQ(html.find("Start Your Workspace"), std::string::npos)
-        << "the Services page does not wait for the workspace";
-
-    page.data["list_services"]["services"] =
-        json::array({{{"id", "a"},
-                      {"name", "workspace"},
-                      {"kind", "zetta"},
-                      {"default", true},
-                      {"instances", 1},
-                      {"storage_gi", 10},
-                      {"desired", "present"},
-                      {"phase", "Ready"},
-                      {"endpoint", "http://prod-ws-1-zetta-client:4800"}},
-                     {{"id", "b"},
-                      {"name", "crm"},
-                      {"kind", "postgres"},
-                      {"instances", 2},
-                      {"storage_gi", 20},
-                      {"desired", "present"},
-                      {"phase", "Ready"},
-                      {"endpoint", "prod-svc-1-rw:5432"}},
-                     {{"id", "c"},
-                      {"name", "old"},
-                      {"kind", "postgres"},
-                      {"instances", 1},
-                      {"storage_gi", 10},
-                      {"desired", "absent"},
-                      {"phase", "Ready"}}});
-    html = lake::api::web_ui_workspace(page, true);
-    EXPECT_NE(html.find("workspace <span class=\"muted\">(workspace)</span>"), std::string::npos);
-    EXPECT_NE(html.find("2 × 20 GiB"), std::string::npos);
-    EXPECT_NE(html.find("prod-svc-1-rw:5432"), std::string::npos);
-    EXPECT_NE(html.find(">Deleting<"), std::string::npos) << "an absent service is deleting";
-    EXPECT_NE(html.find("action=\"/services/connection\""), std::string::npos);
-    EXPECT_NE(html.find(">Delete crm</button>"), std::string::npos);
-    EXPECT_EQ(html.find(">Delete old</button>"), std::string::npos);
-    EXPECT_NE(html.find("http-equiv=\"refresh\""), std::string::npos) << "one is still changing";
-    page.data["list_services"]["services"][1]["connected"] = false;
-    html = lake::api::web_ui_workspace(page, true);
-    EXPECT_NE(html.find(">Connecting<"), std::string::npos)
-        << "Ready but not yet delivered to lake's mount";
-    EXPECT_EQ(html.find("action=\"/services/connection\""), std::string::npos);
-    page.data["list_services"]["services"][1]["connected"] = true;
-
-    page.data["service_connection"] = {{"name", "crm"}, {"uri", "postgresql://app:pw@host/app"}};
-    html = lake::api::web_ui_workspace(page, true);
-    EXPECT_NE(html.find("postgresql://app:pw@host/app"), std::string::npos);
-    page.data["service_connection"] = {{"name", "events"},
-                                       {"bootstrap", "prod-svc-1-kafka-bootstrap:9092"},
-                                       {"sasl_mechanism", "SCRAM-SHA-512"}};
-    html = lake::api::web_ui_workspace(page, true);
-    EXPECT_NE(html.find("<dt>bootstrap</dt>"), std::string::npos)
-        << "every kind's connection fields are shown";
-    // The menu: Zetta first and selected, then every other kind by label; each with its usual
-    // start time; no kind is labelled preview (lake#197).
-    const std::string menu =
-        html.substr(html.find("<select name=\"kind\">"),
-                    html.find("</select>", html.find("<select name=\"kind\">")) -
-                        html.find("<select name=\"kind\">"));
-    EXPECT_NE(menu.find("<select name=\"kind\"><option value=\"zetta\" selected>Zetta — ready in "
-                        "about 30 seconds</option>"),
-              std::string::npos)
-        << menu;
-    std::size_t last = 0;
-    for (const char* key : {"cassandra", "clickhouse", "duckdb", "kafka", "polars", "postgres",
-                            "sqlite", "tidb", "valkey"}) {
-        const std::size_t at = menu.find(std::string("<option value=\"") + key + "\">");
-        EXPECT_NE(at, std::string::npos) << key;
-        EXPECT_GT(at, last) << key << " is out of order";
-        last = at;
-    }
-    EXPECT_NE(menu.find("<option value=\"duckdb\">DuckDB — ready in about 30 seconds</option>"),
-              std::string::npos);
-    EXPECT_NE(menu.find("<option value=\"cassandra\">Cassandra — ready in about 7 minutes</option>"),
-              std::string::npos);
-    EXPECT_EQ(menu.find("preview"), std::string::npos);
-    // A starting service says how long its kind usually takes and how long it has been going.
-    page.data["list_services"]["services"] =
-        json::array({{{"id", "d"},
-                      {"name", "events"},
-                      {"kind", "cassandra"},
-                      {"instances", 1},
-                      {"storage_gi", 2},
-                      {"desired", "present"},
-                      {"phase", "Provisioning"},
-                      {"message", "waiting for the Cassandra datacenter"},
-                      {"created_at", "2020-01-01 00:00:00.12+00"}},
-                     {{"id", "e"},
-                      {"name", "cache"},
-                      {"kind", "valkey"},
-                      {"instances", 1},
-                      {"storage_gi", 2},
-                      {"desired", "present"},
-                      {"phase", "Ready"},
-                      {"connected", true}}});
-    page.data.erase("service_connection");
-    html = lake::api::web_ui_workspace(page, true);
-    EXPECT_NE(html.find("Usually ready in about 7 minutes; started "), std::string::npos)
-        << "Postgres' own timestamp text is read";
-    EXPECT_NE(html.find("taking longer than usual"), std::string::npos)
-        << "a service far past its usual time says so";
-    EXPECT_EQ(html.find("Usually ready in about 60 seconds"), std::string::npos)
-        << "a Ready service shows no start hint";
-    EXPECT_NE(html.find("every 3 seconds"), std::string::npos)
-        << "a starting service keeps the page refreshing fast";
-
-    // Zetta services are listed first.
-    page.data["list_services"]["services"] = json::array(
-        {{{"id", "p"}, {"name", "crm"}, {"kind", "postgres"}, {"desired", "present"}, {"phase", "Ready"}},
-         {{"id", "z"}, {"name", "workspace"}, {"kind", "zetta"}, {"desired", "present"}, {"phase", "Ready"}}});
-    html = lake::api::web_ui_workspace(page, true);
-    EXPECT_LT(html.find(">workspace<"), html.find(">crm<"));
-}
-
-TEST(Workspaces, NavigationOffersDesignTrainAndShip) {
-    const std::string home = lake::api::web_ui_home(true);
-    for (const std::string_view label : {"<p class=\"nav-label\">Design</p>",
-                                         "<p class=\"nav-label\">Train</p>",
-                                         "<p class=\"nav-label\">Ship</p>",
-                                         "href=\"/design/projects\"",
-                                         "href=\"/train/data\"",
-                                         "href=\"/train/runs\"",
-                                         "href=\"/ship/models\"",
-                                         "href=\"/ship/indexes\"",
-                                         "href=\"/deployments\"",
-                                         "href=\"/services\""}) {
-        EXPECT_NE(home.find(label), std::string::npos) << label;
-    }
-    EXPECT_EQ(lake::api::web_ui_home().find("/design/projects"), std::string::npos);
-    lake::api::WebUiViewer viewer{true};
-    viewer.path = "/train/run";
-    EXPECT_NE(lake::api::web_ui_home(viewer).find("href=\"/train/runs\" aria-current=\"page\""),
-              std::string::npos);
-}
-
-TEST(Workspaces, PackagesPageListsTheRegistriesWithInstallCommands) {
-    const json catalog{{"oci", json::array({{{"name", "scoring"}, {"versions", {"v1", "v2"}}}})},
-                       {"npm", json::array({{{"name", "@acme/ui<x>"}, {"versions", {"1.0.0"}}}})},
-                       {"python", json::array()}};
-    const std::string html =
-        lake::api::web_ui_packages(catalog, true, "https://lake.example.test", true);
-    EXPECT_NE(html.find("docker pull lake.example.test/scoring:v2"), std::string::npos);
-    EXPECT_NE(html.find("npm install @acme/ui&lt;x&gt; --registry https://lake.example.test"),
-              std::string::npos);
-    EXPECT_NE(html.find("None published."), std::string::npos);
-    EXPECT_NE(lake::api::web_ui_packages(json::object(), false, "", true)
-                  .find("no registry storage configured"),
-              std::string::npos);
-    EXPECT_NE(lake::api::web_ui_home(true).find("href=\"/ship/packages\""), std::string::npos);
-}
-
-// lake#440: a queued build has no image yet, so its digest is null; the page threw on it and the
-// connection dropped (a 502 at the edge).
-TEST(Workspaces, PackagesPageRendersABuildThatHasNoDigestYet) {
-    lake::control::Build queued;
-    queued.id = "build-queued";
-    queued.target = "lake.example.test/acme/scoring:v3";
-    queued.phase = "Queued";
-    lake::control::Build built = queued;
-    built.id = "build-done";
-    built.phase = "Succeeded";
-    built.digest = "sha256:abc";
-    const json builds = json::array(
-        {lake::control::build_json(queued, "lake.example.test"),
-         lake::control::build_json(built, "lake.example.test")});
-    ASSERT_TRUE(builds[0]["digest"].is_null());
-    const json catalog{{"oci", json::array({{{"name", nullptr}, {"versions", nullptr}}})}};
-    std::string html;
-    ASSERT_NO_THROW(html = lake::api::web_ui_packages(
-                        catalog, true, "https://lake.example.test", true, builds, "customer-1"));
-    EXPECT_NE(html.find("data-build-id=\"build-queued\""), std::string::npos);
-    EXPECT_NE(html.find("<code>lake.example.test/acme/scoring:v3</code>"), std::string::npos);
-    EXPECT_NE(html.find(">Queued</td><td><code></code>"), std::string::npos);
-    EXPECT_NE(html.find("<code>sha256:abc</code>"), std::string::npos);
-}
-
 TEST(Workspaces, EditPipelineReadsValidatesAndSavesTheWholeGraph) {
     Workspaces w;
     lake::control::InMemoryStore& store = *w.store;
@@ -1382,162 +1020,6 @@ TEST(Workspaces, EditPipelineReadsValidatesAndSavesTheWholeGraph) {
     EXPECT_FALSE(call(json::object()).ok) << "an op or edits";
 }
 
-TEST(Workspaces, PipelinePageShowsTheGraphInspectorEditsGovernanceAndRuns) {
-    lake::api::WorkspacePage page;
-    page.section = "pipeline";
-    page.customer_id = std::string(customer);
-    page.project = "retention";
-    page.subject = "churn";
-    page.step = "train";
-    page.state = {{"requested", true}, {"phase", "Ready"}, {"ready", true}};
-    page.data["get_graph"] = {
-        {"graph_id", "g-1"},
-        {"name", "churn"},
-        {"project", "retention"},
-        {"approval", "proposed"},
-        {"nodes",
-         json::array({{{"id", "pull"}, {"kind", "connect"}, {"name", "Pull"}},
-                      {{"id", "train"}, {"kind", "model"}, {"name", "Train"}}})},
-        {"edges", json::array({{{"from", "pull"}, {"to", "train"}, {"kind", "data_flow"}}})}};
-    page.data["list_runs"] = {{"runs",
-                               json::array({{{"id", "r1"},
-                                             {"graph", "churn"},
-                                             {"project", "retention"},
-                                             {"status", "succeeded"},
-                                             {"created", "2026-09-26T10:00:00Z"}}})}};
-    page.data["latest_run"] = {{"status", "succeeded"},
-                               {"lineage", {{"steps", json::array({"pull", "train"})}}}};
-    page.data["list_datasets"] = {
-        {"datasets", json::array({{{"name", "accounts"}, {"database", "datasets"}}})}};
-    page.data["gate"] = {
-        {"verdict", "fail"},
-        {"block_deploy", true},
-        {"checks",
-         json::array({{{"name", "has_source"}, {"status", "fail"}, {"reason", "no data"}}})}};
-    const std::string html = lake::api::web_ui_workspace(page, true);
-    EXPECT_NE(html.find("<svg class=\"pipeline-graph\""), std::string::npos);
-    EXPECT_NE(html.find("step-model status-succeeded selected"), std::string::npos);
-    EXPECT_NE(html.find("<h2>Step Train</h2>"), std::string::npos);
-    EXPECT_NE(html.find("proposed — approve before it runs"), std::string::npos);
-    EXPECT_NE(html.find("action=\"/design/pipeline/approve\""), std::string::npos);
-    EXPECT_NE(html.find("Check and run</button>"), std::string::npos);
-    EXPECT_NE(html.find(" disabled>Check and run"), std::string::npos) << "not approved yet";
-    EXPECT_NE(html.find("<option value=\"datasets.accounts\">"), std::string::npos);
-    EXPECT_NE(html.find("has_source"), std::string::npos) << "every gate check is shown";
-    EXPECT_NE(html.find("no data"), std::string::npos);
-    for (const char* op : {"rename_step",
-                           "kind_step",
-                           "remove_step",
-                           "add_step",
-                           "add_edge",
-                           "remove_edge",
-                           "rename"}) {
-        EXPECT_NE(html.find(std::string("name=\"op\" value=\"") + op + "\""), std::string::npos)
-            << op;
-    }
-    EXPECT_NE(html.find("/train/run?customer_id="), std::string::npos) << "its runs link out";
-    EXPECT_NE(html.find("action=\"/design/pipeline/ask\""), std::string::npos)
-        << "the Project Agent can be asked for a change";
-    EXPECT_NE(html.find("name=\"holdout_fraction\" type=\"number\" min=\"0\" max=\"0.9\" "
-                        "step=\"0.05\" value=\"0.2\""),
-              std::string::npos)
-        << "a real hold-out by default, not a placeholder";
-    EXPECT_NE(html.find("name=\"model_name\" value=\"retention_churn\""), std::string::npos)
-        << "the model is named after this pipeline";
-    EXPECT_EQ(html.find("Proposed by the Project Agent"), std::string::npos);
-
-    // A proposal to review: the edits in words, the graph after, Apply and Discard.
-    page.data["proposal"] = {
-        {"summary", "Train on accounts only"},
-        {"steps", json::array({"Remove step pull and its edges"})},
-        {"edits", json::array({{{"op", "remove_step"}, {"step", "pull"}}})},
-        {"run", {{"dataset", "datasets.accounts"}, {"holdout", 0.25}}},
-        {"problems", json::array()},
-        {"after",
-         {{"nodes", json::array({{{"id", "train"}, {"kind", "model"}, {"name", "Train"}}})},
-          {"edges", json::array()}}}};
-    page.data["run_dataset"] = "datasets.accounts";
-    const std::string reviewed = lake::api::web_ui_workspace(page, true);
-    EXPECT_NE(reviewed.find("Proposed by the Project Agent"), std::string::npos);
-    EXPECT_NE(reviewed.find("Remove step pull and its edges"), std::string::npos);
-    EXPECT_NE(reviewed.find("Hold out 25% of rows"), std::string::npos);
-    EXPECT_NE(reviewed.find("action=\"/design/pipeline/apply\""), std::string::npos);
-    EXPECT_NE(reviewed.find("<option value=\"datasets.accounts\" selected>"), std::string::npos);
-    page.data["proposal"]["problems"] = json::array({"edit 1: there is no step pull"});
-    const std::string refused = lake::api::web_ui_workspace(page, true);
-    EXPECT_NE(refused.find("Why it cannot be applied"), std::string::npos);
-    EXPECT_EQ(refused.find("action=\"/design/pipeline/apply\""), std::string::npos)
-        << "a proposal that would not apply cannot be applied";
-    // lake#438: what a workspace call answered reaches the page as one plain sentence and a
-    // next step, never as a status code and JSON body.
-    page.data["proposal"]["problems"] = json::array(
-        {"compile_intent did not succeed: compile_intent FAILED: 403 {\"duration_ms\":0.0,"
-         "\"error\":{\"code\":\"unauthorized\",\"message\":\"credential does not grant "
-         "workspace_act\",\"path\":\"\"},\"ok\":false}",
-         "plan_features FAILED: 500 {\"ok\":false}"});
-    const std::string raw = lake::api::web_ui_workspace(page, true);
-    EXPECT_NE(raw.find("The Project Agent&#39;s compile_intent check did not succeed on your "
-                       "workspace."),
-              std::string::npos)
-        << raw.substr(raw.find("Why it cannot"), 600);
-    EXPECT_NE(raw.find("plan_features check did not succeed"), std::string::npos);
-    EXPECT_NE(raw.find("Ask the Project Agent again below, or change the steps by hand."),
-              std::string::npos);
-    EXPECT_EQ(raw.find("duration_ms"), std::string::npos);
-    EXPECT_EQ(raw.find("403"), std::string::npos);
-    page.data.erase("proposal");
-    page.data.erase("run_dataset");
-
-    page.data["project_agent_error"] = "Which dataset should I use?";
-    page.data["project_agent_reply"] = true;
-    page.data["project_agent_task_id"] = "task-question";
-    const std::string question = lake::api::web_ui_workspace(page, true);
-    EXPECT_NE(question.find("Project Agent Question"), std::string::npos);
-    EXPECT_NE(question.find("Which dataset should I use?"), std::string::npos);
-    EXPECT_NE(question.find("<h3>Reply</h3>"), std::string::npos);
-    EXPECT_NE(question.find("name=\"task_id\" value=\"task-question\""), std::string::npos);
-    EXPECT_NE(question.find("name=\"reply\""), std::string::npos);
-    page.data.erase("project_agent_error");
-
-    // lake#438: the working panel reloads the page itself. Its URL ends in #proposal, and a
-    // declarative refresh to it is a fragment navigation that never reloaded.
-    page.data["project_agent_working"] = true;
-    const std::string working = lake::api::web_ui_workspace(page, true);
-    EXPECT_NE(working.find("The Project Agent is working on it"), std::string::npos);
-    EXPECT_NE(working.find("setTimeout(()=>location.reload(),3000)"), std::string::npos);
-    EXPECT_NE(working.find("<noscript><meta http-equiv=\"refresh\" content=\"3\"></noscript>"),
-              std::string::npos);
-    page.data.erase("project_agent_working");
-    page.data.erase("project_agent_reply");
-    page.data.erase("project_agent_task_id");
-
-    page.section = "run";
-    page.subject = "r1";
-    page.data = {{"get_run",
-                  {{"status", "succeeded"},
-                   {"graph", "churn"},
-                   {"project", "retention"},
-                   {"logs", json::array({{{"level", "info"}, {"message", "trained"}}})}}},
-                 {"get_run_report",
-                  {{"dataset", {{"accounts", 120}, {"features", json::array({"mrr", "seats"})}}},
-                   {"drivers", json::array({{{"feature", "failed_payments"}, {"weight", 26.4}}})},
-                   {"at_risk", json::array({{{"account", "acme"}, {"risk", 0.91}}})}}},
-                 {"list_traces",
-                  {{"spans",
-                    json::array({{{"name", "run"},
-                                  {"duration_ms", 12.5},
-                                  {"ok", true},
-                                  {"attributes", {{"run_id", "r1"}}}}})}}}};
-    const std::string run = lake::api::web_ui_workspace(page, true);
-    EXPECT_NE(run.find("What the Model Leans On"), std::string::npos);
-    EXPECT_NE(run.find("failed_payments"), std::string::npos);
-    EXPECT_NE(run.find("Most at Risk"), std::string::npos);
-    EXPECT_NE(run.find("mrr, seats"), std::string::npos);
-    EXPECT_NE(run.find("<h2>Trace</h2>"), std::string::npos);
-    EXPECT_NE(run.find("<h2>Log</h2>"), std::string::npos);
-    EXPECT_NE(run.find("/design/pipeline?"), std::string::npos) << "a run links to its pipeline";
-}
-
 TEST(Workspaces, SearchIndexAnswersOnlyForAPublishedIndex) {
     Workspaces w;
     lake::control::InMemoryStore& store = *w.store;
@@ -1579,8 +1061,30 @@ TEST(Workspaces, SearchIndexAnswersOnlyForAPublishedIndex) {
     EXPECT_EQ(w.caller->calls.back().second["target"], "i-1");
     EXPECT_EQ(w.caller->calls.back().second["field"], "body");
     EXPECT_EQ(w.caller->calls.back().second["top_k"], 3);
+    EXPECT_FALSE(w.caller->calls.back().second.contains("fields"))
+        << "no `fields`: the engine's default, every field the index holds";
     EXPECT_EQ(registry.find("search_index")->kind, lake::api::CapabilityKind::Read)
         << "GET /v1/search_index for outside callers";
+
+    // zetta#1243 (lake#596, lake#615): each hit carries the matched row's fields, and `fields`
+    // picks which; [] asks for ids and scores only.
+    w.caller->answers["search"] = {
+        {"hits",
+         json::array({{{"id", "doc-7"},
+                       {"score", 2.5},
+                       {"fields", {{"title", "Renewal risk"}, {"plan", "enterprise"}}}}})}};
+    const auto with_fields = search({{"fields", json::array({"title", "plan"})}});
+    ASSERT_TRUE(with_fields.ok) << with_fields.error.message;
+    EXPECT_EQ(w.caller->calls.back().second["fields"], json::array({"title", "plan"}));
+    EXPECT_EQ(with_fields.value["hits"][0]["fields"]["title"], "Renewal risk");
+    const auto ids_only = search({{"fields", json::array()}});
+    ASSERT_TRUE(ids_only.ok) << ids_only.error.message;
+    EXPECT_EQ(w.caller->calls.back().second["fields"], json::array());
+    const std::string described = registry.find("search_index")->description;
+    EXPECT_NE(described.find("{id, score, fields}"), std::string::npos) << described;
+    EXPECT_EQ(described.find("lake#596"), std::string::npos) << "the hit carries fields now";
+    const json output = registry.find("search_index")->output_schema;
+    EXPECT_TRUE(output["properties"]["hits"]["items"]["properties"].contains("fields"));
 }
 
 TEST(Workspaces, PredictAnswersOnlyThroughAPublishedModel) {
@@ -1629,60 +1133,6 @@ TEST(Workspaces, PredictAnswersOnlyThroughAPublishedModel) {
     EXPECT_EQ(registry.find("predict")->action, "read") << "authorized as a read";
 }
 
-TEST(Workspaces, ModelsPageNamesScoresPublishesAndShowsHowToCallThem) {
-    lake::api::WorkspacePage page;
-    page.section = "models";
-    page.customer_id = std::string(customer);
-    page.state = {{"requested", true}, {"phase", "Ready"}, {"ready", true}};
-    page.data["names"] = {{"projects", {{"p-1", "retention"}}}, {"graphs", json::object()}};
-    page.data["list_models"] = {
-        {"models",
-         json::array({{{"id", "m-1-aaaaaaaa"}, {"name", "retention_churn"}, {"project", "p-1"},
-                       {"created", "2026-09-27T13:29:23.873Z"}},
-                      {{"id", "m-2-bbbbbbbb"}, {"name", "churn_model"}, {"project", "p-gone"},
-                       {"created", "2026-09-25T18:48:53.966Z"}}})}};
-    page.data["model_details"] = {
-        {"m-1-aaaaaaaa",
-         {{"exposed", true},
-          {"metrics", {{"held_out_auc", 0.88}, {"in_sample_auc", 0.95}}},
-          {"feature_schema", {{"features", json::array({"support_tickets"})}}}}},
-        {"m-2-bbbbbbbb", {{"exposed", false}, {"metrics", {{"in_sample_auc", 0.94}}}}}};
-    page.data["origin"] = "https://lake.example";
-    const std::string html = lake::api::web_ui_workspace(page, true);
-    EXPECT_NE(html.find(">retention</a>"), std::string::npos) << "the project by name";
-    EXPECT_NE(html.find("a deleted project"), std::string::npos);
-    EXPECT_NE(html.find("AUC 0.880 <small>held out</small>"), std::string::npos);
-    EXPECT_NE(html.find("in-sample only"), std::string::npos);
-    EXPECT_NE(html.find("2026-09-27 13:29 UTC"), std::string::npos);
-    EXPECT_NE(html.find(">published</span>"), std::string::npos);
-    EXPECT_NE(html.find("https://lake.example/v1/predict"), std::string::npos);
-    EXPECT_NE(html.find("&quot;support_tickets&quot;: 0"), std::string::npos)
-        << "a row keyed by the model's own features";
-    EXPECT_EQ(html.find(">Publish</button></form> <form"), std::string::npos)
-        << "one action per model, never both";
-}
-
-TEST(Workspaces, RunsShowPipelinesByNameAndSayWhyAFailureFailed) {
-    lake::api::WorkspacePage page;
-    page.section = "runs";
-    page.customer_id = std::string(customer);
-    page.state = {{"requested", true}, {"phase", "Ready"}, {"ready", true}};
-    page.data["names"] = {{"projects", {{"p-1", "retention"}}},
-                          {"graphs", {{"g-1", {{"name", "churn"}, {"project", "retention"}}}}}};
-    page.data["list_runs"] = {
-        {"runs",
-         json::array({{{"id", "r-1"}, {"graph", "g-1"}, {"project", "p-1"}, {"status", "succeeded"},
-                       {"created", "2026-09-27T13:29:22.572Z"}},
-                      {{"id", "r-2"}, {"graph", "g-gone"}, {"project", "p-gone"},
-                       {"status", "failed"}, {"created", "2026-09-26T15:46:54.278Z"}}})}};
-    const std::string html = lake::api::web_ui_workspace(page, true);
-    EXPECT_NE(html.find(">churn</a>"), std::string::npos);
-    EXPECT_NE(html.find(">retention</a>"), std::string::npos);
-    EXPECT_NE(html.find("a pipeline of a deleted project"), std::string::npos);
-    EXPECT_NE(html.find(">Why it failed</a>"), std::string::npos);
-    EXPECT_EQ(html.find(">r-1</a>"), std::string::npos) << "no raw run ids as the label";
-}
-
 // lake#463: a Zetta refusal keeps the field it names, so a caller repairs that field.
 TEST(Workspaces, ZettaCallerKeepsTheErrorPath) {
     const zetta::connect::HttpTransport previous = zetta::connect::default_http_transport();
@@ -1715,343 +1165,6 @@ TEST(Workspaces, ZettaCallerKeepsTheErrorPath) {
     EXPECT_EQ(called->error().code, "invalid_input");
     EXPECT_EQ(called->error().message, "required; set from_defaults: true");
     EXPECT_EQ(called->error().path, "/objective");
-}
-
-// lake#449: a dataset-level study's runs and models carry no project or pipeline; they are named
-// by their study, and the model a study promoted says so.
-TEST(Workspaces, StudyTrialsAndModelsAreNamedByTheirStudy) {
-    const json studies = {
-        {"studies",
-         json::array({{{"id", "study-1"},
-                       {"name", "churn tuning"},
-                       {"spec", {{"name", "churn tuning"}, {"project", ""}}},
-                       {"promoted_model", "m-trial-2"},
-                       {"trials",
-                        json::array({{{"number", 1}, {"run", "r-trial-1"}, {"model", "m-trial-1"}},
-                                     {{"number", 2}, {"run", "r-trial-2"}, {"model", "m-trial-2"}}})}}})}};
-    lake::api::WorkspacePage page;
-    page.section = "runs";
-    page.customer_id = std::string(customer);
-    page.state = {{"requested", true}, {"phase", "Ready"}, {"ready", true}};
-    page.data["list_studies"] = studies;
-    page.data["list_runs"] = {
-        {"runs",
-         json::array({{{"id", "r-trial-1"}, {"graph", ""}, {"project", ""}, {"pipeline_name", ""},
-                       {"project_name", ""}, {"status", "succeeded"}},
-                      {{"id", "r-loose"}, {"graph", ""}, {"project", ""}, {"pipeline_name", ""},
-                       {"project_name", ""}, {"status", "succeeded"}}})}};
-    std::string html = lake::api::web_ui_workspace(page, true);
-    EXPECT_NE(html.find("Trial 1 of study <a href=\"/train/experiment?customer_id="),
-              std::string::npos);
-    EXPECT_NE(html.find("study=study-1\">churn tuning</a>"), std::string::npos);
-    EXPECT_NE(html.find("a run outside any pipeline"), std::string::npos);
-    EXPECT_EQ(html.find("<span class=\"muted\">in</span> <a href=\"/design/project?customer_id="
-                        + std::string(customer) + "&amp;name=\"></a>"),
-              std::string::npos)
-        << "never a bare \"in\"";
-
-    page.section = "run";
-    page.subject = "r-trial-1";
-    page.data["get_run"] = {{"id", "r-trial-1"}, {"status", "succeeded"}, {"graph", ""}};
-    html = lake::api::web_ui_workspace(page, true);
-    EXPECT_NE(html.find("Trial 1 of study"), std::string::npos);
-
-    page.section = "models";
-    page.data["list_models"] = {
-        {"models",
-         json::array({{{"id", "m-trial-1"}, {"name", "churn"}, {"project", ""},
-                       {"project_name", ""}, {"run", "r-trial-1"}},
-                      {{"id", "m-trial-2"}, {"name", "churn"}, {"project", ""},
-                       {"project_name", ""}, {"run", "r-trial-2"}},
-                      {{"id", "m-loose"}, {"name", "loose"}, {"project", ""},
-                       {"project_name", ""}, {"run", "r-loose"}}})}};
-    html = lake::api::web_ui_workspace(page, true);
-    EXPECT_NE(html.find("Trial 2 of study"), std::string::npos);
-    EXPECT_EQ(html.find("a deleted project"), std::string::npos);
-    EXPECT_NE(html.find("no project"), std::string::npos) << "a model of no project";
-    const auto promoted = html.find("status-success\">promoted</span>");
-    ASSERT_NE(promoted, std::string::npos);
-    EXPECT_LT(html.find("m-trial-"), promoted);
-    EXPECT_EQ(html.find(">promoted</span>", promoted + 30), std::string::npos)
-        << "only the promoted model";
-}
-
-// lake#449: the report leads with the held-out score and its size, and Zetta's caveat on it.
-TEST(Workspaces, RunReportLeadsWithTheHeldOutScore) {
-    lake::api::WorkspacePage page;
-    page.section = "run";
-    page.subject = "r1";
-    page.customer_id = std::string(customer);
-    page.state = {{"requested", true}, {"phase", "Ready"}, {"ready", true}};
-    page.data["get_run"] = {{"id", "r1"}, {"status", "succeeded"}};
-    page.data["get_run_report"] = {
-        {"model",
-         {{"id", "m1"}, {"name", "churn"}, {"held_out_auc", 0.708}, {"held_out_log_loss", 0.52},
-          {"held_out_rows", 412}, {"in_sample_auc", 0.81}}},
-        {"missing", json::array({{{"field", "lineage"}, {"why", "no lineage"}}})}};
-    std::string html = lake::api::web_ui_workspace(page, true);
-    const auto score = html.find("Held-out AUC <strong>0.708</strong> on 412 rows the model did "
-                                 "not see");
-    ASSERT_NE(score, std::string::npos);
-    EXPECT_LT(score, html.find("What This Run Cannot Tell You"));
-    EXPECT_NE(html.find("Held-out log loss 0.520"), std::string::npos);
-    EXPECT_EQ(html.find("do not quote"), std::string::npos);
-
-    page.data["get_run_report"] = {
-        {"model", {{"held_out_auc", 1.0}, {"held_out_rows", 2}}},
-        {"caveats",
-         json::array({{{"field", "held_out_auc"},
-                       {"why", "measured on only 2 held-out rows. Do not quote it as a result"}}})}};
-    html = lake::api::web_ui_workspace(page, true);
-    EXPECT_NE(html.find("Held-out AUC <strong>1.000</strong> on 2 rows"), std::string::npos);
-    EXPECT_NE(html.find("do not quote</span> measured on only 2 held-out rows"), std::string::npos);
-
-    page.data["get_run_report"] = {{"model", {{"in_sample_auc", 0.9}}}};
-    html = lake::api::web_ui_workspace(page, true);
-    EXPECT_NE(html.find("No held-out score. In-sample AUC 0.900"), std::string::npos);
-}
-
-TEST(Workspaces, SolutionProjectShowsRunFeedbackAndReadableOperatingState) {
-    lake::api::WorkspacePage page;
-    page.section = "project";
-    page.customer_id = std::string(customer);
-    page.subject = "retention";
-    page.state = {{"requested", true}, {"phase", "Ready"}, {"ready", true}};
-    page.data["get_project"] = {
-        {"name", "retention"},
-        {"description", "Foundation awaiting owner confirmation."},
-        {"graphs", json::array({{{"id", "g-1"}, {"name", "S-1 retention"}}})}};
-    const json runs =
-        json::array({{{"id", "run-failed"},
-                      {"graph", "S-1 retention"},
-                      {"status", "failed"},
-                      {"stage", "M-2 Entity resolution"},
-                      {"error", "M-2 Entity resolution failed: entities need a 64-bit integer key"},
-                      {"created", "2026-09-30T12:00:02Z"}},
-                     {{"id", "run-running"},
-                      {"graph", "S-1 retention"},
-                      {"status", "running"},
-                      {"stage", "M-1 Propensity"},
-                      {"created", "2026-09-30T12:00:01Z"}}});
-    page.data["list_runs"] = {{"runs", runs}};
-    json solution{
-        {"graph", "S-1 retention"},
-        {"graph_id", "g-1"},
-        {"foundation", {{"scope", "project-1/S-1 retention"}}},
-        {"runs", runs},
-        {"sources", {{"missing_policy_predicates", json::array()}}},
-        {"stages",
-         json::array({{{"stage", 1}, {"name", "Propensity"}, {"kind", "model"}},
-                      {{"stage", 2}, {"name", "Entity resolution"}, {"kind", "transform"}}})}};
-    solution["policy"] = {
-        {"id", "policy-1"},
-        {"current_version", 2},
-        {"config",
-         {{"autonomy", "A1"},
-          {"threshold", 0.75},
-          {"tiers",
-           json::array({{{"name", "high"}, {"minimum_score", 0.8}, {"action", "send offer"}}})}}}};
-    solution["experiment"] = {
-        {"allocations", nullptr},
-        {"sizes", {{"assignments", 1676}, {"holdout_assignments", 165}}},
-        {"balance",
-         {{"balanced", true},
-          {"allocations",
-           json::array({{{"name", "project-1/S-1 retention/holdout"},
-                         {"tier", "holdout"},
-                         {"configured_fraction", 0.1},
-                         {"assignments", 165},
-                         {"expected", 167.6},
-                         {"balanced", true}},
-                        {{"name", "project-1/S-1 retention/csm_task"},
-                         {"tier", "treatment"},
-                         {"configured_fraction", 0.45},
-                         {"assignments", 754},
-                         {"expected", 754.2},
-                         {"balanced", true}},
-                        {{"name", "project-1/S-1 retention/retention_journey"},
-                         {"tier", "treatment"},
-                         {"configured_fraction", 0.45},
-                         {"assignments", 757},
-                         {"expected", 754.2},
-                         {"balanced", true}}})}}}};
-    solution["ledger"] = {{"entries",
-                           json::array({{{"id", "action-1"},
-                                         {"kind", "action"},
-                                         {"subject", "c00190"},
-                                         {"score_id", "score-1"},
-                                         {"score", 0.91},
-                                         {"decision", "allowed"},
-                                         {"action", "csm_task"},
-                                         {"actor_kind", "agent"},
-                                         {"actor", "solution-agent"},
-                                         {"model_version", "run:model-v7"},
-                                         {"policy_version", "policy-1:2"},
-                                         {"agent_version", "solution-foundation-v1"},
-                                         {"cell", "project-1/S-1 retention/csm_task"},
-                                         {"cost", 2.0},
-                                         {"currency", "USD"},
-                                         {"score_at", "2026-09-30T13:59:57Z"},
-                                         {"decision_at", "2026-09-30T13:59:58Z"},
-                                         {"action_at", "2026-09-30T13:59:59Z"},
-                                         {"recorded_at", "2026-09-30T14:00:00Z"}},
-                                        {{"id", "action-2"},
-                                         {"kind", "action"},
-                                         {"subject", "c00191"},
-                                         {"score_id", "decision-pending"},
-                                         {"score", 0.88},
-                                         {"decision", "decision-pending"},
-                                         {"action", "no_contact"},
-                                         {"actor_kind", "agent"},
-                                         {"actor", "solution-agent"},
-                                         {"model_version", "run:model-v7"},
-                                         {"policy_version", "2"},
-                                         {"agent_version", "solution-foundation-v1"},
-                                         {"cell", "project-1/S-1 retention/retention_journey"},
-                                         {"cost", 3.0},
-                                         {"currency", "USD"},
-                                         {"score_at", "2026-09-30T12:59:57Z"},
-                                         {"decision_at", "2026-09-30T12:59:58Z"},
-                                         {"action_at", "2026-09-30T12:59:59Z"},
-                                         {"recorded_at", "2026-09-30T13:00:00Z"}},
-                                        {{"id", "action-3"},
-                                         {"kind", "action"},
-                                         {"subject", "c00192"},
-                                         {"score_id", "decision-held"},
-                                         {"score", 0.84},
-                                         {"decision", "decision-held"},
-                                         {"action", "no_contact"},
-                                         {"actor_kind", "agent"},
-                                         {"actor", "solution-agent"},
-                                         {"model_version", "run:model-v7"},
-                                         {"policy_version", "2"},
-                                         {"agent_version", "solution-foundation-v1"},
-                                         {"cell", "project-1/S-1 retention/holdout"},
-                                         {"cost", 0.0},
-                                         {"currency", "USD"},
-                                         {"score_at", "2026-09-30T11:59:57Z"},
-                                         {"decision_at", "2026-09-30T11:59:58Z"},
-                                         {"action_at", "2026-09-30T11:59:59Z"},
-                                         {"recorded_at", "2026-09-30T12:00:00Z"}},
-                                        {{"id", "other-action"},
-                                         {"kind", "action"},
-                                         {"subject", "other-project-account"},
-                                         {"score", 0.99},
-                                         {"decision", "allowed"},
-                                         {"action", "csm_task"},
-                                         {"model_version", "other-model"},
-                                         {"policy_version", "other-policy"},
-                                         {"cell", "project-2/S-1 retention/csm_task"},
-                                         {"currency", "USD"},
-                                         {"recorded_at", "2026-09-30T15:00:00Z"}}})}};
-    solution["decisions"] = json::array({{{"id", "decision-pending"},
-                                          {"entity_id", "c00191"},
-                                          {"score", 0.88},
-                                          {"tier", "high"},
-                                          {"cell", "project-1/S-1 retention/retention_journey"},
-                                          {"action", "retention_journey"},
-                                          {"autonomy", "A1"},
-                                          {"status", "pending_approval"}},
-                                         {{"id", "decision-held"},
-                                          {"entity_id", "c00192"},
-                                          {"score", 0.84},
-                                          {"tier", "high"},
-                                          {"cell", "project-1/S-1 retention/holdout"},
-                                          {"action", "retention_journey"},
-                                          {"autonomy", "A1"},
-                                          {"status", "blocked"}}});
-    solution["monitor"] = {
-        {"psi_threshold", 0.2},
-        {"calibration_error_threshold", 0.05},
-        {"guardrails",
-         json::array(
-             {{{"bound", {{"name", "contact rate"}}}, {"value", 0.12}, {"breached", false}}})}};
-    const json checks = json::array(
-        {{{"name", "s1_entity_resolution"},
-          {"status", "fail"},
-          {"reason", "Entity keys are incompatible."}},
-         {{"name", "s4_pipeline"},
-          {"status", "pass"},
-          {"reason", "no bound S-4 Pipeline to validate"}},
-         {{"name", "schema_type"}, {"status", "pass"}, {"reason", "generic stage is valid"}}});
-    const json certificate{{"verdict", "fail"}, {"checks", checks}};
-    solution["roi"] = {
-        {"solution", "S-1"},
-        {"roi_statement",
-         {{"claimable", false},
-          {"reason", "Incrementality cannot be claimed: no holdout outcomes are available."}}},
-        {"correctness_certificate", certificate}};
-    page.data["solution_project"] = std::move(solution);
-
-    const std::string html = lake::api::web_ui_workspace(page, true);
-    EXPECT_NE(html.find("<strong>Last run failed at M-2 Entity resolution.</strong>"),
-              std::string::npos);
-    EXPECT_EQ(html.find("Foundation awaiting owner confirmation."), std::string::npos);
-    EXPECT_NE(html.find("M-2 Entity resolution failed: entities need a 64-bit integer key"),
-              std::string::npos);
-    EXPECT_NE(html.find(">running</span>"), std::string::npos);
-    EXPECT_NE(html.find("http-equiv=\"refresh\" content=\"3\""), std::string::npos);
-    EXPECT_NE(html.find("Open full run"), std::string::npos);
-    EXPECT_NE(html.find("Tiers and Thresholds"), std::string::npos);
-    EXPECT_EQ(html.find("No allocations have been configured."), std::string::npos);
-    EXPECT_NE(html.find("<strong>1,676 assignments.</strong> 165 holdout assignments."),
-              std::string::npos);
-    EXPECT_NE(html.find("csm_task</td><td>treatment</td><td>45.0%</td><td>754</td><td>754.2"
-                        "</td><td>Yes"),
-              std::string::npos);
-    EXPECT_NE(html.find("<dt>Decisions</dt><dd>3</dd>"), std::string::npos);
-    EXPECT_NE(html.find("<dt>Actions</dt><dd>1</dd>"), std::string::npos);
-    EXPECT_NE(html.find("<dt>Held</dt><dd>2</dd>"), std::string::npos);
-    EXPECT_NE(html.find("c00190"), std::string::npos);
-    EXPECT_NE(html.find("run:model-v7"), std::string::npos);
-    EXPECT_NE(html.find("policy-1:2"), std::string::npos);
-    EXPECT_NE(html.find("A1 · pending approval"), std::string::npos);
-    EXPECT_NE(html.find("Approve A1"), std::string::npos);
-    EXPECT_NE(html.find("Held · no action delivered"), std::string::npos);
-    EXPECT_EQ(html.find("other-project-account"), std::string::npos);
-    EXPECT_EQ(html.find("No decisions have been produced yet."), std::string::npos);
-    EXPECT_NE(html.find("Guardrails"), std::string::npos);
-    EXPECT_NE(html.find("Incrementality cannot be claimed: no holdout outcomes are available."),
-              std::string::npos);
-    const std::size_t verdict = html.find("<strong>Verdict:</strong>");
-    const std::size_t applicable = html.find("s1_entity_resolution");
-    ASSERT_NE(verdict, std::string::npos);
-    ASSERT_NE(applicable, std::string::npos);
-    EXPECT_LT(verdict, applicable);
-    EXPECT_NE(html.find("<summary>S-1 (1 checks)</summary>"), std::string::npos);
-    EXPECT_NE(html.find("Show all checks (2 not applicable)"), std::string::npos);
-    EXPECT_NE(html.find("<summary>View JSON</summary>"), std::string::npos);
-}
-
-TEST(Workspaces, IndexPageSearchesPublishesAndShowsHowToCallIt) {
-    lake::api::WorkspacePage page;
-    page.section = "index";
-    page.customer_id = std::string(customer);
-    page.subject = "i-1";
-    page.origin = "https://lake.example";
-    page.state = {{"requested", true}, {"phase", "Ready"}, {"ready", true}};
-    page.data["get_index"] = {{"id", "i-1"},
-                              {"table", "docs"},
-                              {"kind", "search"},
-                              {"fields", json::array({"title", "body"})},
-                              {"exposed", false}};
-    std::string html = lake::api::web_ui_workspace(page, true);
-    EXPECT_NE(html.find(">Publish</button>"), std::string::npos);
-    EXPECT_NE(html.find("Publish the index first"), std::string::npos);
-    EXPECT_EQ(html.find("Create a search key"), std::string::npos);
-    EXPECT_NE(html.find("<option>body</option>"), std::string::npos);
-
-    page.data["get_index"]["exposed"] = true;
-    page.data["search_query"] = "renewal";
-    page.data["search"] = {{"hits", json::array({{{"id", "doc-7"}, {"score", 2.5}}})},
-                           {"duration_ms", 1.2}};
-    html = lake::api::web_ui_workspace(page, true);
-    EXPECT_NE(html.find(">Unpublish</button>"), std::string::npos);
-    EXPECT_NE(html.find("doc-7"), std::string::npos);
-    EXPECT_NE(html.find("1 hits"), std::string::npos);
-    EXPECT_NE(html.find("value=\"search_index\""), std::string::npos) << "a key scoped to search";
-    EXPECT_NE(html.find("https://lake.example/v1/search_index?customer_id="), std::string::npos);
-    EXPECT_NE(html.find("MCP tool <code>search_index</code>"), std::string::npos);
 }
 
 TEST(Workspaces, ASearchKeyFromAnOlderSessionLastsAsLongAsTheSession) {
@@ -2156,54 +1269,6 @@ TEST(Workspaces, ConnectServiceFillsTheConnectionFromTheServiceItself) {
 
     const auto foreign = connect(w.customer_id, lake::control::new_uuid_v4());
     EXPECT_FALSE(foreign.ok) << "a service that is not the customer's is not found";
-}
-
-TEST(Workspaces, DataPageOffersTheSpacesServicesAndServicesWarnBeforeDeletingAUsedOne) {
-    lake::api::WorkspacePage page;
-    page.section = "data";
-    page.customer_id = std::string(customer);
-    page.state = {{"requested", true}, {"phase", "Ready"}, {"ready", true}};
-    page.data["list_connections"] = {
-        {"connections",
-         json::array(
-             {{{"name", "crm"},
-               {"connector",
-                {{"type", "postgres"}, {"host", "prod-svc-1-rw"}, {"database", "app"}}}}})}};
-    page.data["list_services"] = {{"services",
-                                   json::array({{{"id", "a"},
-                                                 {"name", "crm"},
-                                                 {"kind", "postgres"},
-                                                 {"phase", "Ready"},
-                                                 {"desired", "present"},
-                                                 {"connected", true},
-                                                 {"endpoint", "prod-svc-1-rw:5432"}},
-                                                {{"id", "b"},
-                                                 {"name", "cache"},
-                                                 {"kind", "valkey"},
-                                                 {"phase", "Ready"},
-                                                 {"desired", "present"},
-                                                 {"connected", true}},
-                                                {{"id", "c"},
-                                                 {"name", "workspace"},
-                                                 {"kind", "zetta"},
-                                                 {"default", true},
-                                                 {"phase", "Ready"},
-                                                 {"desired", "present"}}})}};
-    std::string html = lake::api::web_ui_workspace(page, true);
-    EXPECT_NE(html.find("Connect One of Your Services"), std::string::npos);
-    EXPECT_NE(html.find(">Refresh</button>"), std::string::npos) << "crm is already connected";
-    EXPECT_NE(html.find("The workspace can't read valkey yet; Postgres works today"),
-              std::string::npos);
-    EXPECT_EQ(html.find(">workspace</td>"), std::string::npos)
-        << "the workspace itself is not offered";
-    EXPECT_NE(html.find("action=\"/train/data/connect-service\""), std::string::npos);
-    EXPECT_NE(html.find("<td><a href=\"/services?customer_id="), std::string::npos)
-        << "the connection shows the service it came from";
-
-    page.section = "services";
-    page.data["list_services"]["limit"] = 5;
-    html = lake::api::web_ui_workspace(page, true);
-    EXPECT_NE(html.find("connection <code>crm</code> uses it"), std::string::npos);
 }
 
 TEST(Workspaces, EveryNewFeatureIsInOpenApiAndWorksOverMcp) {
@@ -2466,6 +1531,18 @@ TEST(Workspaces, DatasetRulesNameCsvIdAndEngineResults) {
     EXPECT_EQ(listed["datasets"][0]["kind"], "data");
     EXPECT_EQ(listed["datasets"][1]["id"], "entity_resolution_results/pairs_1a2b");
     EXPECT_EQ(listed["datasets"][1]["kind"], "result");
+
+    // `format` is what the person loaded; a name SQL cannot name says so (lake#594).
+    json csv = {{"name", "accounts"}, {"format", "jsonl"}, {"source_format", "csv"}};
+    datasets::annotate_one(csv);
+    EXPECT_EQ(csv["format"], "csv");
+    EXPECT_EQ(csv["storage_format"], "jsonl");
+    EXPECT_EQ(csv["sql_queryable"], true);
+    json old = {{"name", "ux-review-2026-10-01-accounts"}, {"format", "jsonl"}};
+    datasets::annotate_one(old);
+    EXPECT_EQ(old["format"], "jsonl") << "no source_format: the engine's format stays";
+    EXPECT_EQ(old["sql_queryable"], false);
+    EXPECT_NE(old["sql_note"].get<std::string>().find("load it again"), std::string::npos);
 }
 
 // Uploads are checked before they reach the workspace, a taken name is never renamed silently,
@@ -2617,206 +1694,6 @@ TEST(Workspaces, DatasetWritesAreCheckedAndIdsAgree) {
     EXPECT_EQ(without->value["kind"], "data");
 }
 
-// The Data page shows every name, keeps engine results apart and out of the pickers, and the
-// dataset page shows column types and offers more copies only when there is one (lake#447).
-TEST(Workspaces, DataPageNamesResultsColumnTypesAndUploadNotice) {
-    lake::api::WorkspacePage page;
-    page.section = "data";
-    page.customer_id = std::string(customer);
-    page.state = {{"requested", true}, {"phase", "Ready"}, {"ready", true}};
-    json listed = {{"datasets",
-                    json::array({{{"database", "datasets"}, {"dataset", "accounts"}},
-                                 {{"database", "entity_resolution_results"},
-                                  {"dataset", "pairs_1a2b"}},
-                                 {{"database", "churn_results"}, {"dataset", "scores_9"}}})}};
-    lake::api::datasets::annotate_list(listed);
-    page.data["list_datasets"] = listed;
-    std::string html = lake::api::web_ui_workspace(page, true);
-    EXPECT_NE(html.find("name=accounts\">accounts</a>"), std::string::npos)
-        << "the name shows (it was blank)";
-    const std::size_t results = html.find("<summary>Results (2)</summary>");
-    ASSERT_NE(results, std::string::npos);
-    EXPECT_GT(html.find("pairs_1a2b"), results) << "engine tables are grouped under Results";
-    EXPECT_LT(html.find("name=accounts\""), results);
-    EXPECT_NE(html.find("name=\"if_exists\" value=\"rename\""), std::string::npos);
-
-    page.data["loaded"] = {{"table", "accounts_2"},
-                           {"rows", "400"},
-                           {"database", "datasets"},
-                           {"format", "csv"},
-                           {"renamed_from", "accounts"}};
-    html = lake::api::web_ui_workspace(page, true);
-    EXPECT_NE(html.find("Loaded <strong>400</strong> rows from your CSV file into"),
-              std::string::npos);
-    EXPECT_NE(html.find("<strong>accounts</strong> was already taken, so it was saved as "
-                        "<strong>accounts_2</strong>"),
-              std::string::npos);
-    page.data.erase("loaded");
-
-    // Pickers offer only data a person loaded.
-    page.section = "project";
-    page.subject = "retention";
-    page.data["get_project"] = {{"name", "retention"}};
-    html = lake::api::web_ui_workspace(page, true);
-    EXPECT_NE(html.find("<option value=\"datasets.accounts\">accounts</option>"),
-              std::string::npos);
-    EXPECT_EQ(html.find("pairs_1a2b"), std::string::npos);
-    EXPECT_EQ(html.find("scores_9"), std::string::npos);
-    page.section = "indexes";
-    page.subject.clear();
-    html = lake::api::web_ui_workspace(page, true);
-    EXPECT_NE(html.find("<optgroup label=\"Results\"><option>pairs_1a2b</option>"),
-              std::string::npos);
-
-    page.section = "dataset";
-    page.subject = "accounts";
-    page.data = {{"get_dataset",
-                  {{"database", "datasets"},
-                   {"name", "accounts"},
-                   {"rows", 2},
-                   {"format", "jsonl"},
-                   {"columns", json::array({"id", "plan", "seats", "renewed"})},
-                   {"partitions",
-                    json::array({{{"partition_id", "p1"},
-                                  {"owner_nodes", json::array({"n1", "n2", "n3"})}}})}}},
-                 {"sample",
-                  {{"rows", json::array({{{"id", 1}, {"plan", "pro"}, {"seats", 2.5},
-                                          {"renewed", true}},
-                                         {{"id", 2}, {"plan", "team"}, {"seats", 3},
-                                          {"renewed", nullptr}}})}}},
-                 {"analyze_dataset",
-                  {{"columns", json::array({{{"name", "id"},
-                                             {"semantic_type", "identifier"},
-                                             {"null_rate", 0.0}},
-                                            {{"name", "plan"},
-                                             {"semantic_type", "categorical"},
-                                             {"null_rate", 0.5}}})}}}};
-    html = lake::api::web_ui_workspace(page, true);
-    EXPECT_NE(html.find("<td><code>id</code></td><td>integer</td><td>identifier</td><td>0%</td>"),
-              std::string::npos);
-    EXPECT_NE(html.find("<td><code>plan</code></td><td>text</td><td>categorical</td><td>50%</td>"),
-              std::string::npos);
-    EXPECT_NE(html.find("<td><code>seats</code></td><td>decimal</td>"), std::string::npos);
-    EXPECT_NE(html.find("<td><code>renewed</code></td><td>boolean</td>"), std::string::npos);
-    EXPECT_NE(html.find("<dt>Stored as</dt><dd>JSON rows</dd>"), std::string::npos);
-    EXPECT_EQ(html.find("<dt>Format</dt>"), std::string::npos);
-    EXPECT_NE(html.find("<dt>Copies</dt><dd>3</dd>"), std::string::npos);
-    EXPECT_EQ(html.find("Keep durable"), std::string::npos) << "three copies need no more";
-    EXPECT_EQ(html.find("pulled from a connection"), std::string::npos);
-    page.data["get_dataset"]["partitions"][0]["owner_nodes"] = json::array({"n1"});
-    html = lake::api::web_ui_workspace(page, true);
-    EXPECT_NE(html.find("Keep durable"), std::string::npos);
-    EXPECT_NE(html.find("This dataset has one copy"), std::string::npos);
-}
-
-TEST(Workspaces, DataPagesBrowseTablesShowADatasetAndQueryIt) {
-    lake::api::WorkspacePage page;
-    page.section = "data";
-    page.customer_id = std::string(customer);
-    page.subject = "crm";
-    page.state = {{"requested", true}, {"phase", "Ready"}, {"ready", true}};
-    page.data["list_connections"] = {
-        {"connections", json::array({{{"name", "crm"}, {"connector", {{"type", "postgres"}}}}})}};
-    page.data["list_datasets"] = {
-        {"datasets", json::array({{{"name", "accounts"}, {"database", "datasets"}}})}};
-    page.data["list_source_tables"] = {
-        {"tables",
-         json::array({{{"schema", "public"},
-                       {"table", "accounts"},
-                       {"kind", "BASE TABLE"},
-                       {"columns", json::array({{{"column", "id"}, {"type", "integer"}}})}}})}};
-    page.data["list_dataset_generators"] = {
-        {"generators", json::array({{{"kind", "base-agent"}, {"title", "Base agent"}}})}};
-    std::string html = lake::api::web_ui_workspace(page, true);
-    EXPECT_NE(html.find("Tables in crm"), std::string::npos);
-    EXPECT_NE(html.find("id integer"), std::string::npos);
-    EXPECT_NE(html.find("Browse tables"), std::string::npos);
-    EXPECT_NE(html.find("/train/dataset?customer_id="), std::string::npos);
-    EXPECT_NE(html.find("action=\"/train/data/generate\""), std::string::npos);
-    EXPECT_EQ(html.find("name=\"path\""), std::string::npos) << "no writing files on the node";
-    EXPECT_EQ(html.find("<th>Rows</th>"), std::string::npos);
-    EXPECT_EQ(html.find("<th>Bytes</th>"), std::string::npos);
-    EXPECT_NE(html.find("Open a dataset for its columns and their types"), std::string::npos);
-
-    page.section = "dataset";
-    page.subject = "accounts";
-    page.data = {{"get_dataset",
-                  {{"database", "datasets"},
-                   {"rows", 1234},
-                   {"expected_rows", 2000},
-                   {"size_bytes", 5678},
-                   {"format", "parquet"},
-                   {"columns", json::array({"id", "plan"})},
-                   {"partitions", json::array({{{"partition_id", "p1"}}})}}},
-                 {"sample", {{"rows", json::array({{{"id", 1}, {"plan", "pro"}}})}}}};
-    html = lake::api::web_ui_workspace(page, true);
-    EXPECT_NE(html.find("First Rows"), std::string::npos);
-    EXPECT_NE(html.find(">pro<"), std::string::npos);
-    EXPECT_NE(html.find("action=\"/train/dataset/promote\""), std::string::npos);
-    EXPECT_NE(html.find("<dt>Rows</dt><dd>1234</dd>"), std::string::npos);
-    EXPECT_NE(html.find("<dt>Bytes</dt><dd>5678</dd>"), std::string::npos);
-    EXPECT_NE(html.find("<dt>Stored as</dt><dd>parquet</dd>"), std::string::npos);
-    EXPECT_NE(html.find("<dt>Id</dt><dd><code>datasets/accounts</code></dd>"), std::string::npos);
-
-    page.section = "query";
-    page.data = {{"statement", "SELECT 1"},
-                 {"workspace_sql", {{"rows", json::array({{{"one", 1}}})}}}};
-    html = lake::api::web_ui_workspace(page, true);
-    EXPECT_NE(html.find("1 rows"), std::string::npos);
-}
-
-// The top bar's breadcrumb mirrors the URL (docs/ui/breadcrumb.md): stage, list, then the
-// entities by name, or by abbreviated id; every level but the current one is a link that keeps the
-// space.
-TEST(Workspaces, BreadcrumbMirrorsTheUrlWithNamesAndAbbreviatedIds) {
-    const auto trail = [](const std::string& html) {
-        const auto start = html.find("<nav class=\"breadcrumbs topbar-trail\"");
-        return start == std::string::npos ? std::string()
-                                          : html.substr(start, html.find("</nav>", start) - start);
-    };
-    const std::string space = "customer_id=" + std::string(customer);
-    lake::api::WorkspacePage page;
-    page.customer_id = std::string(customer);
-    page.state = {{"requested", true}, {"phase", "Ready"}, {"ready", true}};
-
-    page.section = "projects";
-    std::string crumbs = trail(lake::api::web_ui_workspace(page, true));
-    EXPECT_NE(crumbs.find("<a href=\"/design/projects?" + space + "\">Design</a>"),
-              std::string::npos)
-        << crumbs;
-    EXPECT_NE(crumbs.find("<span aria-current=\"page\">Projects</span>"), std::string::npos)
-        << crumbs;
-
-    page.section = "pipeline";
-    page.project = "retention";
-    page.subject = "churn";
-    crumbs = trail(lake::api::web_ui_workspace(page, true));
-    EXPECT_NE(crumbs.find(">Design</a>"), std::string::npos) << crumbs;
-    EXPECT_NE(crumbs.find(">Projects</a>"), std::string::npos) << crumbs;
-    EXPECT_NE(
-        crumbs.find("<a href=\"/design/project?" + space + "&amp;name=retention\">retention</a>"),
-        std::string::npos)
-        << crumbs;
-    EXPECT_NE(crumbs.find("<span aria-current=\"page\">churn</span>"), std::string::npos) << crumbs;
-
-    page.section = "run";
-    page.project.clear();
-    page.subject = "3c9e1a2b-7f00-4d2e-9b1a-0c5d6e7f8a9b";
-    crumbs = trail(lake::api::web_ui_workspace(page, true));
-    EXPECT_NE(crumbs.find(">Train</a>"), std::string::npos) << crumbs;
-    EXPECT_NE(crumbs.find("<a href=\"/train/runs?" + space + "\">Runs</a>"), std::string::npos)
-        << crumbs;
-    EXPECT_NE(crumbs.find("title=\"3c9e1a2b-7f00-4d2e-9b1a-0c5d6e7f8a9b\">3c9e1a2b…</span>"),
-              std::string::npos)
-        << crumbs;
-
-    page.section = "query";
-    page.subject.clear();
-    crumbs = trail(lake::api::web_ui_workspace(page, true));
-    EXPECT_NE(crumbs.find(">Data</a>"), std::string::npos) << crumbs;
-    EXPECT_NE(crumbs.find("<span aria-current=\"page\">Query</span>"), std::string::npos) << crumbs;
-}
-
 // Train > Agents (docs/api/train-agents.md, lake#229): the agents people build live in the
 // workspace's Zetta, and the Agent Library lists every specialized agent Orama ships.
 TEST(Workspaces, AgentCallsAreAllowListedAndChatIsAWriteZettaTakesWithGet) {
@@ -2950,98 +1827,6 @@ TEST(Workspaces, TalkToOffersOnlyRunningAgentsAPersonUses) {
                                                                   {"name", "Ask Orama"}}}));
     EXPECT_EQ(lake::control::agent_display_name("agent-experiments"), "ExperimentsAgent");
     EXPECT_EQ(lake::control::agent_display_name("a-1"), "a-1");
-}
-
-TEST(Workspaces, AgentsPageShowsYourAgentsTheStudioFormAndTheAgentLibrary) {
-    lake::api::WorkspacePage page;
-    page.section = "agents";
-    page.customer_id = std::string(customer);
-    page.customers = {{std::string(customer), "you", true}};
-    page.data["list_agent_library"] =
-        lake::control::agent_library_json({{"agent-ask-orama", "http://ask:8080"}});
-
-    // Before the workspace is ready the library still shows, beside Start your workspace.
-    const std::string waiting = lake::api::web_ui_workspace(page);
-    EXPECT_NE(waiting.find("Agent Library"), std::string::npos);
-    EXPECT_NE(waiting.find("Ask Orama"), std::string::npos);
-    EXPECT_NE(waiting.find("Project Corpus Generator"), std::string::npos);
-
-    page.state = {{"ready", true}, {"workspace", "ws-1"}};
-    page.data["list_agents"] = {
-        {"agents",
-         json::array({{{"id", "a-1"},
-                       {"name", "Renewal watcher"},
-                       {"kind", "custom"},
-                       {"runtime", "python"},
-                       {"purpose", "Flag renewals at risk"},
-                       {"skills", {"search", "summarize"}},
-                       {"trigger", "every Monday"},
-                       {"model_name", "gpt-4o"},
-                       {"status", "idle"}},
-                      {{"id", "a-2"}, {"name", "Hidden Orama agent"}, {"kind", "orama"}}})},
-        {"default_agent_id", ""}};
-    const std::string html = lake::api::web_ui_workspace(page);
-    EXPECT_NE(html.find("Your Agents"), std::string::npos);
-    EXPECT_NE(html.find("Renewal watcher"), std::string::npos);
-    EXPECT_NE(html.find("Conversation and unattended"), std::string::npos);
-    EXPECT_NE(html.find("Search data, Summarize and explain"), std::string::npos);
-    EXPECT_EQ(html.find("Hidden Orama agent"), std::string::npos)
-        << "Orama's agents are in the library, not in Your Agents";
-    for (const std::string_view box : {"name=\"purpose\"",
-                                       "name=\"work_area\"",
-                                       "name=\"manifesto\"",
-                                       "name=\"goal\"",
-                                       "name=\"skills\" value=\"generate-data\"",
-                                       "value=\"frontier\"",
-                                       "name=\"trigger\"",
-                                       "action=\"/train/agents/create\""}) {
-        EXPECT_NE(html.find(box), std::string::npos) << box;
-    }
-    EXPECT_LT(html.find("<h2>Your Agents</h2>"), html.find("<h2>Agent Library</h2>"));
-
-    // Train > Agents is the first Train link.
-    const std::string home = lake::api::web_ui_home(true);
-    EXPECT_NE(home.find("href=\"/train/agents\""), std::string::npos);
-    EXPECT_LT(home.find("href=\"/train/agents\""), home.find("href=\"/train/data\""));
-    lake::api::WebUiViewer viewer{true};
-    viewer.path = "/train/agent";
-    EXPECT_NE(lake::api::web_ui_home(viewer).find("href=\"/train/agents\" aria-current=\"page\""),
-              std::string::npos);
-}
-
-TEST(Workspaces, AgentPageShowsTheDefinitionPipelinesRunsAndATypedDelete) {
-    lake::api::WorkspacePage page;
-    page.section = "agent";
-    page.subject = "a-1";
-    page.customer_id = std::string(customer);
-    page.state = {{"ready", true}};
-    page.data["get_agent"] = {
-        {"id", "a-1"},
-        {"name", "Renewal watcher"},
-        {"runtime", "native"},
-        {"model_name", "Orama base model"},
-        {"work_area", {{"kind", "project"}, {"detail", "churn"}}},
-        {"manifesto", "Answer from company data only."},
-        {"pipelines",
-         json::array(
-             {{{"project", "churn"}, {"graph", "weekly"}, {"version", "2026-09-26T10:00:00Z"}}})}};
-    page.data["agent_training_status"] = {{"reason", "Never trained. Its schedule will train it."}};
-    page.data["approved_pipelines"] = json::array(
-        {{{"project", "churn"}, {"graph", "weekly"}}, {{"project", "churn"}, {"graph", "daily"}}});
-    const std::string html = lake::api::web_ui_workspace(page);
-    EXPECT_NE(html.find("Agent: Renewal watcher"), std::string::npos) << "titled by name, not id";
-    EXPECT_NE(html.find("A single project: churn"), std::string::npos);
-    EXPECT_NE(html.find("In your workspace"), std::string::npos);
-    EXPECT_NE(html.find("graph=weekly"), std::string::npos);
-    EXPECT_NE(html.find("This agent only talks"), std::string::npos);
-    EXPECT_NE(html.find("Never trained."), std::string::npos);
-    EXPECT_NE(html.find("action=\"/train/agent/delete\""), std::string::npos);
-    EXPECT_NE(html.find("action=\"/train/agent/revoke\""), std::string::npos);
-    EXPECT_NE(html.find("Approved Pipelines You Can Grant"), std::string::npos);
-    EXPECT_NE(html.find("value=\"daily\""), std::string::npos) << "an approved, ungranted one";
-    EXPECT_EQ(html.find("<li>weekly in churn <form"), std::string::npos)
-        << "a granted Pipeline is not offered again";
-    EXPECT_NE(html.find("Type <strong>Renewal watcher</strong>"), std::string::npos);
 }
 
 // ---- Agent launches, schedules and turns (docs/api/agent-launches.md, lake#231) ----
@@ -3260,6 +2045,151 @@ TEST(AgentRuns, CronExpressionsAreCheckedAsACronJobWouldTakeThem) {
     EXPECT_FALSE(normalize_cron("0 9 * * 1; rm"));
 }
 
+// zetta#1238: a compiled pipeline is named from the intent, and lake passes on the template its
+// steps started from; an engine that names none leaves `template` out.
+TEST(AgentRuns, ABuiltPipelineSaysWhichTemplateItStartedFrom) {
+    AgentRuns r;
+    r.w.caller->answers["capture_intent"] = {{"input_id", "in-1"}};
+    r.w.caller->answers["compile_intent"] = {{"name", "Predict which customers will cancel"},
+                                             {"template", "the M-1 churn template"}};
+    const auto built = r.call(
+        "compile_pipeline",
+        {{"project", "retention"}, {"intent", "Predict which customers will cancel next month"}});
+    ASSERT_TRUE(built.ok) << built.error.message;
+    EXPECT_EQ(built.value["graph"], "Predict which customers will cancel");
+    EXPECT_EQ(built.value["template"], "the M-1 churn template");
+
+    r.w.caller->answers["compile_intent"] = {{"name", "churn skeleton"}};
+    const auto older = r.call("compile_pipeline", {{"project", "retention"}, {"intent", "Churn"}});
+    ASSERT_TRUE(older.ok) << older.error.message;
+    EXPECT_FALSE(older.value.contains("template"));
+}
+
+// zetta#1246 (lake#615): compile_pipeline passes the chosen dataset's source and table and the
+// label and entity columns to the compiler as hints, so the steps are named from the data. A
+// connect step the engine already pointed is left as the engine named it; an older engine's step
+// is still pointed and renamed by lake.
+TEST(AgentRuns, ABuiltPipelineIsFittedToTheChosenDataset) {
+    AgentRuns r;
+    const auto sent = [&](const std::string& capability) {
+        for (auto call = r.w.caller->calls.rbegin(); call != r.w.caller->calls.rend(); ++call) {
+            if (call->first == capability) {
+                return call->second;
+            }
+        }
+        return json(nullptr);
+    };
+    r.w.caller->answers["capture_intent"] = {{"input_id", "in-1"}};
+    r.w.caller->answers["compile_intent"] = {{"name", "Predict downgrades"},
+                                             {"template", "the M-1 churn template"}};
+    const auto graph_with = [](json attributes) {
+        return json{{"graph_id", "g-1"},
+                    {"name", "Predict downgrades"},
+                    {"project", "retention"},
+                    {"approval", "proposed"},
+                    {"nodes",
+                     json::array({{{"id", "load_customers"},
+                                   {"kind", "connect"},
+                                   {"name", "Load subscriptions"},
+                                   {"attributes", std::move(attributes)}},
+                                  {{"id", "train"}, {"kind", "model"}, {"name", "Train"}}})},
+                    {"edges", json::array()}};
+    };
+    r.w.caller->answers["get_graph"] =
+        graph_with({{"source", "billing"}, {"table", "subscriptions"}});
+    r.w.caller->answers["save_graph"] = {{"graph_id", "g-1"}, {"name", "Predict downgrades"}};
+    const json input{{"project", "retention"},
+                     {"intent", "Predict which subscriptions downgrade"},
+                     {"dataset", "billing.subscriptions"},
+                     {"label_column", "downgraded"},
+                     {"entity_column", "account_id"}};
+    const auto built = r.call("compile_pipeline", input);
+    ASSERT_TRUE(built.ok) << built.error.message;
+    EXPECT_EQ(built.value["graph"], "Predict downgrades");
+    EXPECT_EQ(sent("compile_intent")["hints"],
+              json({{"source", "billing"},
+                    {"table", "subscriptions"},
+                    {"label_column", "downgraded"},
+                    {"entity_column", "account_id"}}));
+    EXPECT_TRUE(std::ranges::none_of(r.w.caller->calls, [](const auto& call) {
+        return call.first == "save_graph";
+    })) << "the engine already reads the table and named the step from it";
+
+    // An engine that ignores the hints: lake points and names the connect step itself.
+    r.w.caller->answers["get_graph"] = graph_with(json::object());
+    const auto older = r.call("compile_pipeline", input);
+    ASSERT_TRUE(older.ok) << older.error.message;
+    const json saved = sent("save_graph");
+    ASSERT_TRUE(saved.is_object());
+    EXPECT_EQ(saved["nodes"][0]["attributes"]["table"], "subscriptions");
+    EXPECT_EQ(saved["nodes"][0]["name"], "Load billing.subscriptions");
+
+    // Without a dataset or columns nothing is hinted, so the template keeps its own names.
+    const auto bare = r.call("compile_pipeline", {{"project", "retention"}, {"intent", "Churn"}});
+    ASSERT_TRUE(bare.ok) << bare.error.message;
+    EXPECT_FALSE(sent("compile_intent").contains("hints"));
+    // A dataset with no columns named: the source and table alone.
+    const auto table_only =
+        r.call("compile_pipeline",
+               {{"project", "retention"}, {"intent", "Churn"}, {"dataset", "subscriptions"}});
+    ASSERT_TRUE(table_only.ok) << table_only.error.message;
+    EXPECT_EQ(sent("compile_intent")["hints"],
+              json({{"source", "datasets"}, {"table", "subscriptions"}}));
+}
+
+TEST(AgentRuns, ScheduleTimeZonesAreIanaNames) {
+    using lake::control::checked_time_zone;
+    EXPECT_EQ(checked_time_zone("Etc/UTC"), "Etc/UTC");
+    EXPECT_EQ(checked_time_zone("America/Toronto"), "America/Toronto");
+    EXPECT_EQ(checked_time_zone("UTC"), "UTC");
+    EXPECT_FALSE(checked_time_zone("Mars/Olympus"));
+    EXPECT_FALSE(checked_time_zone(""));
+    EXPECT_FALSE(checked_time_zone("Factory")) << "not a zone a person means";
+    EXPECT_FALSE(checked_time_zone("../etc/passwd"));
+    const auto folded = checked_time_zone("europe/paris");
+    ASSERT_FALSE(folded);
+    EXPECT_NE(folded.error().find("'Europe/Paris'"), std::string::npos) << folded.error();
+    EXPECT_TRUE(std::ranges::is_sorted(lake::control::iana_time_zones()));
+}
+
+// lake#586: a person reads a schedule's state in lake's words, never Kubernetes's.
+TEST(AgentRuns, AScheduleStatusNeverShowsKubernetesText) {
+    using lake::control::agent_schedule_progress;
+    lake::control::AgentCronSchedule schedule{.time_zone = "Etc/UTC", .desired = "present"};
+    EXPECT_EQ(agent_schedule_progress(schedule).phase, "Pending");
+    schedule.phase = "Ready";
+    schedule.message = "scheduled";
+    schedule.observed_generation = 1;
+    EXPECT_EQ(agent_schedule_progress(schedule).message, "Scheduled.");
+
+    schedule.time_zone = "Mars/Olympus";
+    schedule.phase = "Failed";
+    schedule.message = "Kubernetes refused the schedule: CronJob.batch \"prod-as-32d98966e14c\" "
+                       "is invalid: spec.timeZone: Invalid value: \"Mars/Olympus\": unknown time "
+                       "zone Mars/Olympus";
+    auto progress = agent_schedule_progress(schedule);
+    EXPECT_EQ(progress.phase, "Failed");
+    EXPECT_NE(progress.message.find("time zone 'Mars/Olympus'"), std::string::npos);
+    for (const char* word : {"Kubernetes", "CronJob", "spec.", "prod-as-"}) {
+        EXPECT_EQ(progress.message.find(word), std::string::npos) << word;
+    }
+
+    schedule.time_zone = "Etc/UTC";
+    schedule.message = "Kubernetes refused the schedule: CronJob.batch \"prod-as-1\" is invalid";
+    progress = agent_schedule_progress(schedule);
+    EXPECT_EQ(progress.message.find("Kubernetes"), std::string::npos);
+    EXPECT_NE(progress.message.find("Remove it and add it again"), std::string::npos);
+
+    schedule.message = "agents are not enabled on this Lake (spec.agents.runtimeImage)";
+    progress = agent_schedule_progress(schedule);
+    EXPECT_EQ(progress.message.find("spec."), std::string::npos);
+    EXPECT_NE(progress.message.find("not enabled"), std::string::npos);
+
+    schedule.desired = "absent";
+    schedule.phase = "Stopped";
+    EXPECT_EQ(agent_schedule_progress(schedule).phase, "Stopped");
+}
+
 TEST(AgentRuns, AScheduleCredentialActsAsWhoeverSetTheSchedule) {
     lake::control::InMemoryStore store;
     const auto session = store.sign_in_clerk(minted("scheduler"));
@@ -3389,6 +2319,31 @@ TEST(AgentRuns, LaunchStopAndScheduleAPythonAgentButNeverANativeOne) {
     EXPECT_FALSE(r.call("schedule_agent",
                         {{"agent_id", "a-1"}, {"cron", "0 9 * * *"}, {"time_zone", "$(x)"}})
                      .ok);
+
+    // lake#586: a zone Kubernetes would refuse is refused at once, and no schedule is stored.
+    const std::size_t before =
+        r.call("list_agent_schedules", {{"agent_id", "a-1"}}).value["schedules"].size();
+    const auto martian = r.call("schedule_agent",
+                                {{"agent_id", "a-1"},
+                                 {"cron", "0 9 1 1 *"},
+                                 {"time_zone", "Mars/Olympus"},
+                                 {"input", "x"}});
+    ASSERT_FALSE(martian.ok);
+    EXPECT_EQ(martian.error.code, "invalid_input");
+    EXPECT_EQ(martian.error.path, "/time_zone");
+    EXPECT_NE(martian.error.message.find("Mars/Olympus"), std::string::npos);
+    const auto lowercase =
+        r.call("schedule_agent",
+               {{"agent_id", "a-1"}, {"cron", "0 9 * * *"}, {"time_zone", "america/toronto"}});
+    ASSERT_FALSE(lowercase.ok);
+    EXPECT_NE(lowercase.error.message.find("America/Toronto"), std::string::npos)
+        << lowercase.error.message;
+    const auto badcron = r.call("schedule_agent", {{"agent_id", "a-1"}, {"cron", "0 9 32 * *"}});
+    ASSERT_FALSE(badcron.ok);
+    EXPECT_EQ(badcron.error.path, "/cron");
+    EXPECT_EQ(r.call("list_agent_schedules", {{"agent_id", "a-1"}}).value["schedules"].size(),
+              before)
+        << "a refused schedule leaves no row";
 
     r.w.caller->answers["get_agent"] = {{"id", "n-1"}, {"name", "Native"}, {"runtime", "native"}};
     EXPECT_FALSE(r.call("launch_agent", {{"agent_id", "n-1"}}).ok);
@@ -4152,11 +3107,27 @@ TEST(AgentRuns, ApplicationAgentWritesAppsOnlyAfterTheProposalIsConfirmed) {
                         {"confirm", true},
                         {"files", json::array()},
                         {"app", {{"name", "agent-reports"}, {"mode", "image"}}}};
-    const auto confirmed = r.call(
-        "agent_turn",
-        {{"agent", "agent-application"},
-         {"message", "Confirm and deploy the reviewed proposal."},
-         {"context", {{"confirmed_proposal", proposal}}}});
+    ASSERT_TRUE(r.set_task_status(first->id,
+                                  "Succeeded",
+                                  "",
+                                  "",
+                                  {{"ok", true}, {"reply", "Review it."}, {"result", proposal}}));
+    // A confirmation names the turn that proposed it and the digest the person reviewed (lake#561).
+    const std::string proposal_sha = lake::api::agent_proposal_digest(proposal);
+    EXPECT_EQ(r.call("get_agent_task", {{"task_id", first->id}}).value["proposal_sha256"],
+              proposal_sha);
+    const auto unnamed = r.call("agent_turn",
+                                {{"agent", "agent-application"},
+                                 {"message", "Confirm and deploy the reviewed proposal."},
+                                 {"context", {{"confirmed_proposal", proposal}}}});
+    EXPECT_EQ(unnamed.error.path, "/proposal_task_id");
+    EXPECT_EQ(r.bus->events("agent-tasks.agent-application").size(), 1U) << "nothing started";
+    const auto confirmed = r.call("agent_turn",
+                                  {{"agent", "agent-application"},
+                                   {"message", "Confirm and deploy the reviewed proposal."},
+                                   {"proposal_task_id", first->id},
+                                   {"proposal_sha256", proposal_sha},
+                                   {"context", {{"confirmed_proposal", proposal}}}});
     ASSERT_TRUE(confirmed.ok) << confirmed.error.message;
     const auto second = r.task(confirmed.value["task_id"]);
     ASSERT_TRUE(second);
@@ -4183,11 +3154,13 @@ TEST(AgentRuns, ApplicationAgentWritesAppsOnlyAfterTheProposalIsConfirmed) {
     EXPECT_EQ(r.call("create_app", create_input).error.path, "/confirm_public")
         << "a person's own create_app acknowledges a public app as set_app_auth does";
 
-    const auto acknowledged = r.call(
-        "agent_turn",
-        {{"agent", "agent-application"},
-         {"message", "Confirm and deploy the reviewed proposal."},
-         {"context", {{"confirmed_proposal", proposal}, {"confirm_public", true}}}});
+    const auto acknowledged =
+        r.call("agent_turn",
+               {{"agent", "agent-application"},
+                {"message", "Confirm and deploy the reviewed proposal."},
+                {"proposal_task_id", first->id},
+                {"proposal_sha256", proposal_sha},
+                {"context", {{"confirmed_proposal", proposal}, {"confirm_public", true}}}});
     ASSERT_TRUE(acknowledged.ok) << acknowledged.error.message;
     const auto third = r.task(acknowledged.value["task_id"]);
     ASSERT_TRUE(third);
@@ -4288,7 +3261,7 @@ TEST(AgentRuns, AProjectAgentReplyIncludesTheQuestionAndAnswer) {
               std::string::npos);
 }
 
-TEST(AgentRuns, ExperimentsAgentGrantsEachTurnOnlyItsStudyOperations) {
+TEST(AgentRuns, ExperimentsAgentGrantsEachTurnOnlyItsExperimentOperations) {
     AgentRuns r;
     auto& config = const_cast<lake::control::WorkspaceConfig&>(r.w.service->config());
     config.agent_endpoints = {{"agent-experiments", "http://experiments:8080"}};
@@ -4325,18 +3298,20 @@ TEST(AgentRuns, ExperimentsAgentGrantsEachTurnOnlyItsStudyOperations) {
               "/train/experiments?customer_id=" + r.w.customer_id + "&task=" + first->id +
                   "#experiment-proposal");
 
-    const auto confirmed = r.call(
-        "agent_turn",
-        {{"agent", "agent-experiments"},
-         {"kind", "experiment"},
-         {"message", "Confirm and start the reviewed study proposal."},
-         {"context", {{"confirmed_proposal", proposal}}}});
+    const auto confirmed =
+        r.call("agent_turn",
+               {{"agent", "agent-experiments"},
+                {"kind", "experiment"},
+                {"message", "Confirm and start the reviewed experiment proposal."},
+                {"proposal_task_id", first->id},
+                {"proposal_sha256", review.value["proposal_sha256"]},
+                {"context", {{"confirmed_proposal", proposal}}}});
     ASSERT_TRUE(confirmed.ok) << confirmed.error.message;
     const auto second = r.task(confirmed.value["task_id"]);
     ASSERT_TRUE(second);
     EXPECT_NE(std::ranges::find(second->scopes, "workspace_act"), second->scopes.end());
     EXPECT_NE(std::ranges::find(second->scopes, "create_study"), second->scopes.end());
-    EXPECT_NE(std::ranges::find(second->scopes, "start_study"), second->scopes.end());
+    EXPECT_NE(std::ranges::find(second->scopes, "start_experiment"), second->scopes.end());
     EXPECT_EQ(std::ranges::find(second->scopes, "stop_trial"), second->scopes.end());
     const std::string confirmed_credential =
         "lat." + second->id + ".0123456789abcdef0123456789abcdef";
@@ -4361,15 +3336,16 @@ TEST(AgentRuns, ExperimentsAgentGrantsEachTurnOnlyItsStudyOperations) {
          {"input", {{"study", "study-one"}, {"run", "trial-1"}}}});
     EXPECT_EQ(refused.error.code, "unauthorized");
 
-    const auto status = r.call(
-        "agent_turn",
-        {{"agent", "agent-experiments"},
-         {"kind", "experiment_status"},
-         {"message", "Watch study-one"},
-         {"context", {{"study", "study-one"}}}});
+    const auto status = r.call("agent_turn",
+                               {{"agent", "agent-experiments"},
+                                {"kind", "experiment_status"},
+                                {"message", "Watch study-one"},
+                                {"context", {{"experiment_id", "study-one"}}}});
     ASSERT_TRUE(status.ok) << status.error.message;
     const auto status_task = r.task(status.value["task_id"]);
     ASSERT_TRUE(status_task);
+    // A lake caller names the experiment; ExperimentsAgent reads the engine's `study` (lake#561).
+    EXPECT_EQ(status_task->body["context"]["study"], "study-one");
     EXPECT_NE(std::ranges::find(status_task->scopes, "stop_trial"),
               status_task->scopes.end());
     EXPECT_NE(std::ranges::find(status_task->scopes, "stop_experiment_trial"),
@@ -4427,6 +3403,8 @@ TEST(AgentRuns, ExperimentsAgentGrantsEachTurnOnlyItsStudyOperations) {
         {{"capability", "promote_trial"},
          {"input", {{"study", "study-one"}, {"run", "trial-1"}}}});
     ASSERT_TRUE(promoted.ok) << promoted.error.message;
+    EXPECT_EQ(promoted.value["study"], "study-one")
+        << "workspace_act answers in the engine's names";
 
     EXPECT_EQ(r.call("agent_turn",
                      {{"agent", "agent-experiments"},
@@ -4612,8 +3590,8 @@ TEST(AgentRuns, AProjectAgentProposalIsCheckedThenAppliedApprovedAndRun) {
     EXPECT_EQ(r.w.caller->input["dataset_path"], "datasets.accounts");
     EXPECT_EQ(r.w.caller->input["holdout_fraction"], 0.2);
 
-    // The check graph is lake's, not a pipeline: the project page's Pipelines table, the agent
-    // page's approved pipelines and the pick after a build all skip it.
+    // The check graph is lake's, not a pipeline: the project's Pipelines, the agent's approved
+    // pipelines and the pick after a build all skip it.
     const json listed = json::array(
         {{{"id", "c-1"}, {"name", "Project Agent check M-1"}, {"approval", "approved"}},
          {{"id", "g-1"}, {"name", "churn"}, {"approval", "approved"}}});
@@ -4621,20 +3599,6 @@ TEST(AgentRuns, AProjectAgentProposalIsCheckedThenAppliedApprovedAndRun) {
               json::array({listed[1]}));
     EXPECT_TRUE(lake::api::is_project_agent_check_graph(listed[0]));
     EXPECT_FALSE(lake::api::is_project_agent_check_graph(listed[1]));
-    lake::api::WorkspacePage project;
-    project.section = "project";
-    project.customer_id = r.w.customer_id;
-    project.subject = "retention";
-    project.state = {{"requested", true}, {"phase", "Ready"}, {"ready", true}};
-    project.data["get_project"] = {{"name", "retention"}, {"graphs", listed}};
-    const std::string project_html = lake::api::web_ui_workspace(project, true);
-    EXPECT_NE(project_html.find("graph=churn"), std::string::npos);
-    EXPECT_EQ(project_html.find("Project Agent check"), std::string::npos)
-        << "the check graph is not listed as a pipeline";
-    project.data["get_project"]["graphs"] = json::array({listed[0]});
-    EXPECT_NE(lake::api::web_ui_workspace(project, true).find("No pipelines yet."),
-              std::string::npos)
-        << "a project holding only a check graph has no pipeline";
 }
 
 // lake#438: a Project Agent build turn gets the same confined compile check, and the pick of the
@@ -4749,6 +3713,7 @@ namespace {
 struct ReadyWorkspace {
     Workspaces w;
     lake::api::Registry registry;
+    std::string instance_kek; // empty: no workspace records
     ReadyWorkspace() {
         auto requested = w.run(w.service->request(w.customer_id));
         const auto workspace = w.store->get_service(requested->service_id);
@@ -4763,6 +3728,7 @@ struct ReadyWorkspace {
         context.authorized = true;
         context.acting_identity = "admin";
         context.operator_credential = true;
+        context.instance_kek = instance_kek;
         context.request_id = lake::control::new_uuid_v4();
         if (!input.contains("customer_id")) {
             input["customer_id"] = w.customer_id;
@@ -4871,7 +3837,48 @@ TEST(Workspaces, NamingEngineRefusalsCarryThePathAndLakeCodes) {
           {{"table_name", "t"}, {"format", "xml"}, {"content", "x"}, {"if_exists", "rename"}}}});
     EXPECT_EQ(format.error.code, "invalid_input");
     EXPECT_EQ(format.error.path, "/input/format");
-    EXPECT_EQ(format.error.message, "format: instance not found in required enum");
+    // Without the engine's OpenAPI document, the rule in lake's words (lake#591).
+    EXPECT_EQ(format.error.message, "format is not one of the values it accepts");
+
+    // With it, the values, as lake's own enum refusals list them.
+    r.w.caller->failure_for = "upload_dataset";
+    r.w.caller->answers["openapi.json"] = {
+        {"paths",
+         {{"/v1/upload_dataset",
+           {{"post",
+             {{"requestBody",
+               {{"content",
+                 {{"application/json",
+                   {{"schema",
+                     {{"properties",
+                       {{"format",
+                         {{"type", "string"}, {"enum", {"csv", "jsonl"}}}}}}}}}}}}}}}}}}}}};
+    const auto listed = r.call(
+        "workspace_act",
+        {{"capability", "upload_dataset"},
+         {"input",
+          {{"table_name", "t"}, {"format", "xml"}, {"content", "x"}, {"if_exists", "rename"}}}});
+    EXPECT_EQ(listed.error.path, "/input/format");
+    EXPECT_EQ(listed.error.message, "expected one of [\"csv\",\"jsonl\"]");
+
+    r.w.caller->failure = lake::control::ZettaControlError{
+        "invalid_argument",
+        "validation failed for additional property 'name': instance invalid as per false-schema"};
+    r.w.caller->failure_for = "create_index";
+    const auto unexpected =
+        r.call("workspace_act",
+               {{"capability", "create_index"}, {"input", {{"table", "t"}, {"name", "x"}}}});
+    EXPECT_EQ(unexpected.error.code, "invalid_input");
+    EXPECT_EQ(unexpected.error.path, "/input/name");
+    EXPECT_EQ(unexpected.error.message, "unexpected field name");
+    r.w.caller->failure = lake::control::ZettaControlError{
+        "not_found", "no table 't' (load the table first with add_dataset)"};
+    const auto named =
+        r.call("workspace_act", {{"capability", "create_index"}, {"input", {{"table", "t"}}}});
+    EXPECT_NE(named.error.message.find("workspace_act upload_dataset"), std::string::npos)
+        << named.error.message;
+    EXPECT_EQ(named.error.message.find("add_dataset"), std::string::npos);
+    r.w.caller->failure_for.clear();
 
     r.w.caller->failure =
         lake::control::ZettaControlError{"engine_error", "required property 'project' not found"};
@@ -4879,6 +3886,21 @@ TEST(Workspaces, NamingEngineRefusalsCarryThePathAndLakeCodes) {
         r.call("workspace_act", {{"capability", "approve_plan"}, {"input", json::object()}});
     EXPECT_EQ(required.error.code, "invalid_input");
     EXPECT_EQ(required.error.path, "/input/project");
+}
+
+// compile_pipeline takes `project` at the top level, so a missing project is refused there and
+// says how to make one (lake#591), though the step behind it is a workspace_act call.
+TEST(Workspaces, CompilePipelinePointsAtItsOwnProjectField) {
+    ReadyWorkspace r;
+    r.w.caller->failure =
+        lake::control::ZettaControlError{"not_found", "no project named 'churn' (or with that id)"};
+    r.w.caller->failure_for = "capture_intent";
+    const auto missing =
+        r.call("compile_pipeline", {{"project", "churn"}, {"intent", "Predict churn"}});
+    EXPECT_EQ(missing.error.code, "not_found");
+    EXPECT_EQ(missing.error.path, "/project");
+    EXPECT_NE(missing.error.message.find("workspace_act create_project"), std::string::npos)
+        << missing.error.message;
 }
 
 // Zetta refuses an empty name and a taken one with the same message; lake says which (lake#452).
@@ -4909,9 +3931,81 @@ TEST(Workspaces, CreateProjectSaysWhetherTheNameIsMissingOrTaken) {
     EXPECT_NE(other.error.code, "conflict") << "only the engine's name refusal is a clash";
 }
 
+// The decision a project should improve is lake's to keep (lake#577): the engine's project has no
+// field for it (its `intent` is a trace note it strips), so create_project keeps `decision` in the
+// workspace's records under the new project's id, get_project answers it beside the description,
+// and delete_project removes it.
+TEST(Workspaces, AProjectKeepsItsDecisionBesideItsDescription) {
+    ReadyWorkspace r;
+    r.instance_kek = lake::test::test_instance_kek();
+    const std::string id = lake::control::new_uuid_v4();
+    r.w.caller->answers["create_project"] = {{"name", "churn"}, {"owner", "admin"}};
+    r.w.caller->answers["get_project"] = {{"id", id},
+                                          {"name", "churn"},
+                                          {"description", "Which accounts will not renew?"},
+                                          {"inputs", json::array()},
+                                          {"graphs", json::array()}};
+    const auto created =
+        r.call("workspace_act",
+               {{"capability", "create_project"},
+                {"input",
+                 {{"name", "churn"},
+                  {"description", "Which accounts will not renew?"},
+                  {"decision", "  Which accounts the success team calls first each week  "}}}});
+    ASSERT_TRUE(created.ok) << created.error.message;
+    EXPECT_EQ(created.value["decision"], "Which accounts the success team calls first each week");
+    const json sent = r.sent("create_project");
+    EXPECT_FALSE(sent.contains("decision")) << "the engine's project has no such field";
+    EXPECT_EQ(sent["description"], "Which accounts will not renew?");
+
+    const auto read =
+        r.call("workspace_query", {{"capability", "get_project"}, {"input", {{"name", "churn"}}}});
+    ASSERT_TRUE(read.ok) << read.error.message;
+    EXPECT_EQ(read.value["description"], "Which accounts will not renew?");
+    EXPECT_EQ(read.value["decision"], "Which accounts the success team calls first each week")
+        << "three distinct strings, each in its place";
+
+    // Sealed in the workspace's records, not in PostgreSQL.
+    bool sealed = false;
+    for (auto& [url, tables] : r.w.caller->topics.records) {
+        for (const auto& [key, row] : tables.rows("project_decisions")) {
+            sealed = true;
+            EXPECT_EQ(key, id);
+            EXPECT_EQ(row.dump().find("success team"), std::string::npos) << "sealed at rest";
+        }
+    }
+    EXPECT_TRUE(sealed);
+
+    EXPECT_EQ(
+        r.call("workspace_act",
+               {{"capability", "create_project"}, {"input", {{"name", "other"}, {"decision", 7}}}})
+            .error.path,
+        "/input/decision");
+
+    r.w.caller->answers["delete_project"] = {{"name", "churn"},
+                                             {"id", id},
+                                             {"removed", {{"inputs", 0}, {"graphs", 0}}},
+                                             {"kept", {{"runs", 0}, {"models", 0}}}};
+    ASSERT_TRUE(
+        r.call("workspace_act", {{"capability", "delete_project"}, {"input", {{"name", "churn"}}}})
+            .ok);
+    const auto gone =
+        r.call("workspace_query", {{"capability", "get_project"}, {"input", {{"name", "churn"}}}});
+    ASSERT_TRUE(gone.ok);
+    EXPECT_FALSE(gone.value.contains("decision")) << "a deleted project's decision goes with it";
+
+    // A project created without a decision writes no record and reads none.
+    r.w.caller->calls.clear();
+    const auto plain =
+        r.call("workspace_act", {{"capability", "create_project"}, {"input", {{"name", "plain"}}}});
+    ASSERT_TRUE(plain.ok);
+    EXPECT_FALSE(plain.value.contains("decision"));
+    EXPECT_TRUE(r.sent("get_project").is_null());
+}
+
 // list_services states the status the Services page shows, and says why a service that cannot
 // progress on its own is stuck (lake#452).
-TEST(Workspaces, ServiceStatusIsTheSameInListServicesAndOnThePage) {
+TEST(Workspaces, ListServicesSaysEachServicesStatusAndWhy) {
     ReadyWorkspace r;
     const std::string workspace = r.w.workspace_id();
     lake::control::NewManagedService unassigned{r.w.customer_id, "sqlite", "test-sqlite", "taap:x"};
@@ -4952,34 +4046,6 @@ TEST(Workspaces, ServiceStatusIsTheSameInListServicesAndOnThePage) {
     EXPECT_EQ(by_name["old"]["status"], "Deleting");
     EXPECT_EQ(by_name["old"]["status_reason"], "Waiting for the operator to start deleting it.")
         << "the operator has not observed the withdrawal's generation";
-
-    lake::api::WorkspacePage page;
-    page.section = "services";
-    page.customer_id = r.w.customer_id;
-    page.data["list_services"] = listed->value;
-    const std::string html = lake::api::web_ui_workspace(page, true);
-    for (const auto& [name, service] : by_name) {
-        EXPECT_NE(html.find("<td>" + service["status"].get<std::string>() + "<"),
-                  std::string::npos)
-            << name << " shows list_services' status";
-    }
-    EXPECT_NE(html.find("belongs to none"), std::string::npos);
-    EXPECT_EQ(html.find(">service ready<"), std::string::npos)
-        << "the operator's earlier \"service ready\" is not shown under another status";
-
-    // A delete that has waited for days says so.
-    json stuck = listed->value;
-    for (json& service : stuck["services"]) {
-        if (service["name"] == "old") {
-            service["updated_at"] = "2026-09-26T20:15:24Z";
-            service.erase("status_reason");
-        }
-    }
-    page.data["list_services"] = stuck;
-    const std::string waited = lake::api::web_ui_workspace(page, true);
-    EXPECT_NE(waited.find("Deletion was requested"), std::string::npos);
-    EXPECT_NE(waited.find("days ago and the operator has not reported it deleted yet."),
-              std::string::npos);
 }
 
 // A deleted workspace's primary Zetta is history once the operator reports the workspace Deleted,

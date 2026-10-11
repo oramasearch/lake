@@ -142,7 +142,7 @@ does not update `secrets_versions`. (Since `0057` the data keys are workspace re
 
 | Table or change | Purpose |
 |---|---|
-| `secret_mount_routes` | One row per mount: its space, organization and workspace (`enforce_workspace_routing`: a live workspace of the same space, never changed). Content-free dispatch; no mount name, secret name, value or key. |
+| `secret_mount_routes` | One row per mount: its space, owning organization (NULL when the account owns the mount, [`0071`](#secret-mount-owners-migration)) and workspace (`enforce_workspace_routing`: a live workspace of the same space, never changed). Content-free dispatch; no mount name, secret name, value or key. |
 | `keystore.previous_wrapped_key`, `previous_version` | The customer KEK a rotation replaced, wrapped under its own version, kept until every workspace data key is rewrapped. |
 | `secrets_dynamic_leases` | Loses its foreign key to `secrets_mounts`; a new mount has no row there (lake#362 moves leases). |
 | `workspace_assignments` (`secrets_mounts`) | Each legacy mount's owner: `sole_workspace` or `needs_selection`. Its entries, versions, keys and data keys follow it. |
@@ -241,6 +241,7 @@ The migration follows PKI migration `0013`.
 | Table | Purpose |
 |---|---|
 | `customer_storage_quotas` | Explicit per-customer storage quota override used by metering and repository-write enforcement. A zero value disables that customer's quota. |
+| `customer_usage_limits` | An account's limit on one dimension of usage and the percentage it warns from ([`0072`](#usage-limits-migration), lake#564). Content-free; the usage itself stays in each workspace Zetta. |
 | `settings_guard` | Guard table for the settings-surface migration. |
 
 Customers without a row continue to use `LAKE_STORAGE_QUOTA_BYTES`. The operator schema copy is
@@ -791,6 +792,58 @@ The operator vendors this schema and selects `drop_moved_tables_guard`. Its
 `secrets_versions`, `secrets_encryption_keys` and `secrets_data_keys` among the statements the
 schema must contain; those four entries go, and its Postgres rehearsal query needs the new guard.
 
+## Secret mount owners migration
+
+`0071_secret_mount_owners` (lake#561) lets an account own a secret mount. A mount created without
+`organization_id` belongs to the customer that owns its workspace (an individual's personal space,
+or an organization's space), so its route has no organization: the migration drops `NOT NULL` from
+`secret_mount_routes.organization_id`, and such a route stores NULL there. Its policy object hangs
+under the customer's (`customer → environment secrets/<customer> → secret_mount`); an organization's
+mount keeps `organization → environment secrets/<customer>/<organization> → secret_mount`. The route
+stays content-free. Existing rows are untouched, nothing is dropped, and the statement is
+idempotent; guard `secret_mount_owners_guard`. The operator vendors the schema and selects that
+guard in its own pull request before a lake with this change is rolled. See
+[`../api/secrets.md`](../api/secrets.md#who-owns-a-mount-lake561).
+
+## Usage limits migration
+
+`0072_usage_limits` (lake#564) adds `customer_usage_limits` (customer, `dimension`, `limit_value`,
+`warn_percent` from 1 to 100, default 80, `updated_at`; primary key customer and dimension): an
+account's limit on one dimension of usage, in that dimension's unit
+([`../api/metering.md`](../api/metering.md#limits)). A counted dimension's limit is per UTC calendar
+month; storage's row only carries its warning percentage, since its limit is the enforced
+`customer_storage_quotas` quota. It is content-free account configuration beside that quota: the
+usage it is compared with stays in each workspace Zetta (`lake_usage`, `lake_storage`). Prices,
+plans and bills are billing's own tables ([billing migration](#billing-migration)). Nothing is
+dropped; idempotent; guard `usage_limits_guard`. The operator vendors the schema and selects that
+guard in its own pull request before a lake with this change is rolled.
+
+## Billing migration
+
+`0073_billing` (lake#564, decision 56) adds billing records, in the control plane as multitenancy
+([`../api/billing.md`](../api/billing.md)):
+
+- `billing_plans` (`id` text slug, `name`, `description`, three-letter `currency`, `base_micros`
+  monthly fee, `active`, `position`, timestamps) and `billing_plan_prices` (plan, `dimension`,
+  `unit_micros` for every `per` units beyond `included` units a month; primary key plan and
+  dimension, cascading with the plan);
+- `billing_subscriptions` (customer, `effective_from` on the first of a month, enforced by a check,
+  `plan_id`; primary key customer and `effective_from`; cascading with the customer);
+- `billing_invoices` (uuid `id`, `number` from a sequence, customer, `period` `YYYY-MM`, plan id and
+  name, currency, `total_micros`, `state` `due`/`paid`/`void`, `provider`, `provider_reference`,
+  `instructions`, `note`, issued, paid and voided times) with a partial unique index allowing one
+  invoice a customer and month that is not void. `customer_id` is not a foreign key: an invoice is
+  a financial record and outlives its account;
+- `billing_invoice_lines` (invoice, `position`, `kind` `plan`/`usage`, `dimension`, `description`,
+  `unit`, `quantity`, `included`, `billable`, `unit_micros`, `per`, `amount_micros`), cascading with
+  the invoice.
+
+The quantities are the only usage that reaches PostgreSQL: one number per dimension per invoiced
+month, frozen when the invoice is issued. The usage itself stays in each workspace Zetta. Lake
+writes these tables only where `LAKE_BILLING` is on; elsewhere they stay empty. Nothing is dropped;
+idempotent; guard `billing_guard`. The operator vendors the schema and selects that guard in its own
+pull request before a lake with this change is rolled.
+
 ## Repository workspaces migration
 
 `0051_repository_workspaces` adds `repositories.workspace_id` (references `workspaces`, index
@@ -829,7 +882,7 @@ NULL until `move_workspace_store` switches the workspace: from then on its repos
 from its own encrypted liquid store in bucket `lake_store` of its workspace Zetta
 ([`../architecture/workspace-store.md`](../architecture/workspace-store.md)). The column is the only
 thing PostgreSQL keeps about that store; the operator does not read it. Idempotent; guard
-`workspace_store_guard`; the latest guard is `drop_moved_tables_guard` (migration `0070`), which the operator selects.
+`workspace_store_guard`; the latest guard is `usage_limits_guard` (migration `0072`), which the operator selects.
 
 ## Metering workspaces migration
 

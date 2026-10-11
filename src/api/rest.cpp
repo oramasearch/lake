@@ -49,6 +49,36 @@ nlohmann::json coerce(const nlohmann::json& property, const std::string& raw) {
     return raw;
 }
 
+// One query value of an array input: a JSON array as written, or else a comma list, each piece
+// coerced by the declared `items` schema. A value that is neither stays one string item, and the
+// schema's own validation says what is wrong with it.
+std::vector<nlohmann::json> array_items(const nlohmann::json& property, const std::string& raw) {
+    const nlohmann::json item_schema = property.value("items", nlohmann::json::object());
+    std::vector<nlohmann::json> items;
+    if (!raw.empty() && raw.front() == '[') {
+        const nlohmann::json parsed = nlohmann::json::parse(raw, nullptr, false);
+        if (!parsed.is_discarded() && parsed.is_array()) {
+            for (const auto& item : parsed) {
+                items.push_back(item);
+            }
+            return items;
+        }
+    }
+    std::size_t start = 0;
+    while (start <= raw.size()) {
+        const std::size_t comma = raw.find(',', start);
+        const std::size_t end = comma == std::string::npos ? raw.size() : comma;
+        if (end > start) {
+            items.push_back(coerce(item_schema, raw.substr(start, end - start)));
+        }
+        if (comma == std::string::npos) {
+            break;
+        }
+        start = comma + 1;
+    }
+    return items;
+}
+
 nlohmann::json error_response(std::string_view description) {
     return {
         {"description", std::string(description)},
@@ -176,6 +206,19 @@ rest_input_from_query(const Capability& capability,
         if (key.empty()) {
             continue;
         }
+        if (properties.contains(key) && properties[key].value("type", "") == "array") {
+            // An array input (lake#576): repeated keys (`runs=a&runs=b`), a comma list
+            // (`runs=a,b`) or a JSON array (`runs=["a","b"]`), in any mix; each item is coerced
+            // by the declared `items` type. An empty value adds nothing.
+            nlohmann::json& items = input[key];
+            if (!items.is_array()) {
+                items = nlohmann::json::array();
+            }
+            for (nlohmann::json& item : array_items(properties[key], value)) {
+                items.push_back(std::move(item));
+            }
+            continue;
+        }
         input[key] =
             properties.contains(key) ? coerce(properties[key], value) : nlohmann::json(value);
     }
@@ -260,6 +303,11 @@ openapi_document(const Registry& registry, std::string_view version, SchemaAudie
                                             {"schema", it.value()}};
                 if (it.value().contains("description"))
                     parameter["description"] = it.value()["description"];
+                if (it.value().value("type", "") == "array") {
+                    // Repeated keys, `runs=a&runs=b` (lake#576); lake also takes a comma list.
+                    parameter["style"] = "form";
+                    parameter["explode"] = true;
+                }
                 parameters.push_back(std::move(parameter));
             }
             operation["parameters"] = std::move(parameters);
@@ -308,6 +356,54 @@ openapi_document(const Registry& registry, std::string_view version, SchemaAudie
         {"responses",
          {{"200", {{"description", "a JSON-RPC 2.0 response"}}},
           {"202", {{"description", "a notification was accepted"}}}}}};
+    // The two drive download routes stream a file's bytes rather than answering JSON, so they are
+    // not capabilities; they are described here so a client finds them (lake#587). Each runs the
+    // capability named in its description as the caller, which authorizes and audits the read.
+    const auto download = [](std::string id,
+                             std::string summary,
+                             std::string description,
+                             nlohmann::json parameters) {
+        nlohmann::json operation{{"operationId", std::move(id)},
+                                 {"summary", std::move(summary)},
+                                 {"description", std::move(description)},
+                                 {"tags", nlohmann::json::array({"download"})},
+                                 {"parameters", nlohmann::json::array()}};
+        for (const auto& [name, required] : parameters.items()) {
+            operation["parameters"].push_back({{"name", name},
+                                               {"in", "query"},
+                                               {"required", required.get<bool>()},
+                                               {"schema", {{"type", "string"}}}});
+        }
+        operation["responses"] = {
+            {"200",
+             {{"description",
+               "the file's bytes, with Content-Disposition naming the file and an ETag of its "
+               "digest"},
+              {"content",
+               {{"application/octet-stream",
+                 {{"schema", {{"type", "string"}, {"format", "binary"}}}}}}}}},
+            {"302", {{"description", "no credential: redirected to /sign-in"}}},
+            {"4XX", error_response("not found, or not allowed to read the file")}};
+        return operation;
+    };
+    paths["/drive/download"]["get"] =
+        download("drive_download",
+                 "Download a repository-drive file",
+                 "Streams one file of a repository drive as an attachment, authorized and audited "
+                 "by download_drive_file (`ref` defaults to main).",
+                 {{"repository_id", true}, {"ref", false}, {"path", true}});
+    paths["/drive/files/download"]["get"] =
+        download("drive_files_download",
+                 "Download a workspace file",
+                 "Streams one file of a workspace-files drive, 1 MiB at a time, after "
+                 "get_drive_entry authorizes and audits the read. `inline=1` shows images, PDF, "
+                 "text, CSV, Markdown, audio and video in the browser; anything else is an "
+                 "attachment.",
+                 {{"customer_id", true},
+                  {"workspace_id", true},
+                  {"drive_id", true},
+                  {"id", true},
+                  {"inline", false}});
     document["paths"] = std::move(paths);
     return document;
 }

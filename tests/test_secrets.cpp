@@ -8,11 +8,13 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <vector>
 
 #include <nlohmann/json.hpp>
 
 #include "api/secret_records_api.hpp"
 #include "api/workspace_records_api.hpp"
+#include "lake/api/audit_routing.hpp"
 #include "lake/api/capabilities.hpp"
 #include "lake/api/registry.hpp"
 #include "lake/api/server.hpp"
@@ -95,6 +97,10 @@ TEST_F(SecretsCapabilities, VersionHistoryDeleteUndeleteAndDestroy) {
                                   {"custom_metadata", {{"owner", "payments"}}}});
     ASSERT_TRUE(first.ok) << first.error.message;
     EXPECT_EQ(first.value.at("version"), 1);
+    // put_secret answers metadata only; read_secret is the one call with a value (lake#590).
+    EXPECT_FALSE(first.value.contains("value")) << first.value.dump();
+    EXPECT_EQ(first.value.dump().find("first"), std::string::npos) << first.value.dump();
+    EXPECT_EQ(first.value.at("name"), "database");
     const ApiResult second = call("put_secret",
                                   {{"mount_id", mount_id},
                                    {"name", "database"},
@@ -124,6 +130,19 @@ TEST_F(SecretsCapabilities, VersionHistoryDeleteUndeleteAndDestroy) {
         call("read_secret", {{"mount_id", mount_id}, {"name", "database"}, {"version", 1}});
     EXPECT_FALSE(deleted.ok);
     EXPECT_EQ(deleted.error.code, "not_found");
+    EXPECT_EQ(deleted.error.path, "/version");
+    // Every refusal names the field and says why (lake#592).
+    const ApiResult missing = call("read_secret", {{"mount_id", mount_id}, {"name", "nope"}});
+    EXPECT_EQ(missing.error.code, "not_found");
+    EXPECT_EQ(missing.error.message, "no secret named nope");
+    EXPECT_EQ(missing.error.path, "/name");
+    const ApiResult no_version =
+        call("read_secret", {{"mount_id", mount_id}, {"name", "database"}, {"version", 9}});
+    EXPECT_EQ(no_version.error.message, "secret database has no version 9");
+    EXPECT_EQ(no_version.error.path, "/version");
+    const ApiResult no_history =
+        call("secret_metadata", {{"mount_id", mount_id}, {"name", "nope"}});
+    EXPECT_EQ(no_history.error.path, "/name");
     ASSERT_TRUE(call("undelete_secret_versions",
                      {{"mount_id", mount_id}, {"name", "database"}, {"versions", {1}}})
                     .ok);
@@ -158,6 +177,99 @@ TEST_F(SecretsCapabilities, VersionHistoryDeleteUndeleteAndDestroy) {
         {{"mount_id", mount_id}, {"name", "database"}, {"value", {{"password", "third"}}}});
     ASSERT_TRUE(third.ok) << third.error.message;
     EXPECT_EQ(third.value.at("version"), 3) << "a number is never reused";
+}
+
+TEST_F(SecretsCapabilities, ListSecretsAnswersNamesAndStateNeverValues) {
+    const auto put = [this](const std::string& name, const std::string& password) {
+        const ApiResult result =
+            call("put_secret",
+                 {{"mount_id", mount_id}, {"name", name}, {"value", {{"password", password}}}});
+        ASSERT_TRUE(result.ok) << result.error.message;
+    };
+    put("database", "database-one");
+    put("database", "database-two");
+    put("api/token", "token-one");
+    put("api/key", "key-one");
+    ASSERT_TRUE(call("delete_secret_versions",
+                     {{"mount_id", mount_id}, {"name", "api/key"}, {"versions", {1}}})
+                    .ok);
+
+    const ApiResult all = call("list_secrets", {{"mount_id", mount_id}});
+    ASSERT_TRUE(all.ok) << all.error.message;
+    const json& items = all.value.at("items");
+    ASSERT_EQ(items.size(), 3u);
+    EXPECT_FALSE(all.value.contains("next_cursor"));
+    EXPECT_EQ(items.at(0).at("name"), "api/key") << "names are in order";
+    EXPECT_EQ(items.at(1).at("name"), "api/token");
+    EXPECT_EQ(items.at(2).at("name"), "database");
+    EXPECT_EQ(items.at(2).at("current_version"), 2);
+    EXPECT_FALSE(items.at(2).at("created_at").get<std::string>().empty());
+    EXPECT_FALSE(items.at(2).at("updated_at").get<std::string>().empty());
+    EXPECT_FALSE(items.at(2).at("deleted"));
+    EXPECT_TRUE(items.at(2).at("deleted_at").is_null());
+    EXPECT_TRUE(items.at(0).at("deleted")) << "the current version is deleted";
+    EXPECT_FALSE(items.at(0).at("deleted_at").is_null());
+    EXPECT_TRUE(items.at(0).at("destroyed_at").is_null());
+    const std::string dumped = all.value.dump();
+    for (const char* value : {"database-one", "database-two", "token-one", "key-one"}) {
+        EXPECT_EQ(dumped.find(value), std::string::npos) << "no value is listed: " << value;
+    }
+    for (const auto& item : items) {
+        EXPECT_FALSE(item.contains("value"));
+    }
+
+    const ApiResult prefixed = call("list_secrets", {{"mount_id", mount_id}, {"prefix", "api/"}});
+    ASSERT_TRUE(prefixed.ok) << prefixed.error.message;
+    ASSERT_EQ(prefixed.value.at("items").size(), 2u);
+
+    // One at a time: the cursor walks every name once.
+    std::vector<std::string> walked;
+    json input = {{"mount_id", mount_id}, {"limit", 1}};
+    for (int page = 0; page < 5; ++page) {
+        const ApiResult got = call("list_secrets", input);
+        ASSERT_TRUE(got.ok) << got.error.message;
+        for (const auto& item : got.value.at("items")) {
+            walked.push_back(item.at("name"));
+        }
+        if (!got.value.contains("next_cursor")) {
+            break;
+        }
+        input["cursor"] = got.value.at("next_cursor");
+    }
+    EXPECT_EQ(walked, (std::vector<std::string>{"api/key", "api/token", "database"}));
+
+    const ApiResult destroyed =
+        call("destroy_secret_versions",
+             {{"mount_id", mount_id}, {"name", "api/key"}, {"versions", {1}}});
+    ASSERT_TRUE(destroyed.ok) << destroyed.error.message;
+    const ApiResult after = call("list_secrets", {{"mount_id", mount_id}, {"prefix", "api/key"}});
+    ASSERT_TRUE(after.ok) << after.error.message;
+    ASSERT_EQ(after.value.at("items").size(), 1u);
+    EXPECT_TRUE(after.value.at("items").at(0).at("deleted"));
+    EXPECT_FALSE(after.value.at("items").at(0).at("destroyed_at").is_null());
+
+    const ApiResult unknown =
+        call("list_secrets", {{"mount_id", "00000000-0000-4000-8000-000000000000"}});
+    EXPECT_EQ(unknown.error.code, "not_found");
+    EXPECT_EQ(unknown.error.path, "/mount_id");
+    const ApiResult too_many = call("list_secrets", {{"mount_id", mount_id}, {"limit", 501}});
+    EXPECT_EQ(too_many.error.code, "invalid_input");
+
+    EXPECT_EQ(registry.find("list_secrets")->kind, lake::api::CapabilityKind::Read);
+    EXPECT_TRUE(registry.find("list_secrets")->authorizes_candidates);
+    EXPECT_EQ(lake::api::audit_log_of("list_secrets"), lake::api::AuditLog::Workspace);
+
+    // A caller with no grant on the mount is refused, audited, and reaches no workspace.
+    context.operator_credential = false;
+    context.acting_identity = "taap:1:ed25519:ungranted";
+    const auto calls = workspaces.records(workspace_id).calls.size();
+    const ApiResult denied = call("list_secrets", {{"mount_id", mount_id}});
+    EXPECT_EQ(denied.error.code, "unauthorized");
+    EXPECT_EQ(workspaces.records(workspace_id).calls.size(), calls);
+    const auto event = store->latest_audit_event();
+    ASSERT_TRUE(event) << event.error().message;
+    EXPECT_EQ(event->draft.outcome, "denied");
+    EXPECT_EQ(event->draft.object, "secret_mount/" + mount_id);
 }
 
 TEST_F(SecretsCapabilities, APutThatStoppedBeforeMovingTheEntryIsCompletedByTheNext) {

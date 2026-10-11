@@ -50,8 +50,8 @@ inline constexpr std::array<LibraryAgent, 9> agent_library{{
      true},
     {"agent-experiments",
      "ExperimentsAgent",
-     "Designs training studies, watches their trials, explains the result, and starts or promotes "
-     "work only after you confirm its proposal.",
+     "Designs training experiments, watches their trial runs, explains the result, and starts or "
+     "promotes work only after you confirm its proposal.",
      "Train → Experiments → Run an Experiment; Ask Orama; Project Agent",
      "service",
      true},

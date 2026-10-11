@@ -122,6 +122,11 @@ as a named exception: one instance-wide namespace with public reads.
   names is `500` to GET and HEAD, never answered from the instance registry; a push of the blob
   repairs it. A record without `object` (pushed before phase B, or before its workspace was
   switched) is streamed from `blobs/`, also in windows, until the copy below names its object.
+  `RegistryStore.PullsCountAgainstTheLaneForTheirWholeStreamAndOtherWorkspacesAnswer` covers the
+  slots and a long put holding the lane while forty HEAD pulls arrive: at most the lane's
+  admissions wait and at least 32 are refused, while another workspace answers. The put's store
+  write is held in the fake Zetta until the pulls are answered (lake#603); a 300 ms sleep used to
+  stand for "the put holds the lane", and under load the pulls could arrive before or after it.
 - **Workload credentials stay in their workspace.** A build pushes and reads only repositories
   routed to its own workspace, so a build cannot pull a base or cache image of another workspace
   of its space; an app pull token reads only its app's repository, only when the route names the
@@ -259,10 +264,15 @@ Phase B is `tests/test_registry_store.cpp`, a real lake server with workspace st
 (push and pull of a three-layer image, GET and HEAD, only ciphertext in the bucket, nothing in
 `blobs/` or `uploads/`, a repeated layer stored once, usage counted once),
 `RegistryStore.AChunkedUploadLandsInTheStoreAndAWrongDigestIsRefused`,
-`RegistryStore.ALargeLayerIsStreamedNeverHeldWhole` (a 304 MiB layer pulled while the resident set
-grows by less than 128 MiB; on glibc each reading first calls `malloc_trim`, so freed pages glibc
-keeps for reuse are not counted: about 110 MiB is held at the peak, the 64 MiB window cache and the
-windows in flight, lake#547),
+`RegistryStore.ALargeLayerIsStreamedNeverHeldWhole` (a 304 MiB layer pulled while the bytes the
+process holds in live allocations grow by less than 128 MiB; freed pages the allocator keeps for
+reuse are not counted. On glibc each reading is the resident set after `malloc_trim`, and about
+110 MiB is held at the peak, the 64 MiB window cache and the windows in flight, lake#547. On macOS
+each reading is the bytes in use in every malloc zone (`malloc_zone_statistics`), because the
+resident set there also counts pages malloc freed and kept: with six pulls at once it grew by 29 to
+136 MiB, and by 142 MiB once under `ctest -j 6`, while the bytes in use grew by 6 to 10 MiB,
+lake#616. The test then holds 64 MiB and checks that the measure rises by at least 48 MiB, so it
+cannot pass by seeing nothing),
 `RegistryStore.ABlobOfAnotherWorkspaceOrSpaceIsRefused`,
 `RegistryStore.TheCopyMovesInstanceBlobsIntoTheirStoresAndVerifiesThem` (plan, copy, rerun,
 verify, a missing, a corrupt and an unswitched blob unresolved, and pulls after the registry files

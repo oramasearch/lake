@@ -56,8 +56,8 @@ Accounts created so far: `steve@orama.com` (linked to the existing lake account,
 
 ### Letting anyone sign up (not the current setting)
 
-Set the instance's sign-up mode to public and change the invitation wording on the sign-up page
-(`web_ui_clerk_sign_in`) in the same change:
+Set the instance's sign-up mode to public and change the invitation wording on the web app's
+sign-up page (`INVITATION_NOTE` in `frontend/src/pages/account/signIn.ts`) in the same change:
 
 ```sh
 echo '{"auth_access_control": {"sign_up_mode": "public"}}' > patch.json

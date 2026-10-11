@@ -17,7 +17,6 @@
 #include "lake/api/capabilities.hpp"
 #include "lake/api/clerk.hpp"
 #include "lake/api/registry.hpp"
-#include "lake/api/web_ui.hpp"
 #include "lake/audit/audit.hpp"
 #include "lake/control/identity_crypto.hpp"
 #include "lake/control/memory_store.hpp"
@@ -320,71 +319,6 @@ TEST(Clerk, PostgresStoreSignsInLinksProvisionsAndHoldsTheSeed) {
     EXPECT_EQ(credentials[0][0].as<int>(), 2);
 }
 
-TEST(Clerk, SignInPageMountsClerkAndExchangesTheLakeTemplateToken) {
-    const auto config =
-        lake::api::clerk_config("pk_test_" + base64("example-123.clerk.accounts.dev$"));
-    ASSERT_TRUE(config);
-    const std::string page = lake::api::web_ui_clerk_sign_in(*config, "sign-in", "", false);
-    EXPECT_NE(page.find("data-clerk-publishable-key=\"" + config->publishable_key + "\""),
-              std::string::npos);
-    EXPECT_NE(page.find("src=\"https://example-123.clerk.accounts.dev/npm/@clerk/clerk-js@5/dist/"
-                        "clerk.browser.js\""),
-              std::string::npos);
-    EXPECT_NE(page.find("getToken({template:'lake'})"), std::string::npos);
-    EXPECT_NE(page.find("f.action='/identity/clerk-session'"), std::string::npos);
-    EXPECT_NE(page.find("mountSignIn"), std::string::npos);
-    EXPECT_NE(page.find("if(false)"), std::string::npos);
-    EXPECT_EQ(page.find("sk_"), std::string::npos);
-
-    const std::string signed_out =
-        lake::api::web_ui_clerk_sign_in(*config, "sign-in", "<bad>", true);
-    EXPECT_NE(signed_out.find("if(true){await window.Clerk.signOut()"), std::string::npos);
-    EXPECT_NE(signed_out.find("&lt;bad&gt;"), std::string::npos);
-    EXPECT_EQ(signed_out.find("<bad>"), std::string::npos);
-
-    const std::string sign_up = lake::api::web_ui_clerk_sign_in(*config, "sign-up", "", false);
-    EXPECT_NE(sign_up.find("mountSignUp"), std::string::npos);
-    EXPECT_NE(sign_up.find("Create Your Account"), std::string::npos);
-}
-
-// Under Clerk, sign-up is restricted: the visitor home page must not offer an account the
-// sign-up page then refuses (lake#448). Both say the same sentence about invitations.
-TEST(Clerk, VisitorsAreNotOfferedAnAccountTheSignUpPageRefuses) {
-    const auto config = lake::api::clerk_config("pk_test_" + base64("example-123.clerk.accounts.dev$"));
-    ASSERT_TRUE(config);
-    const std::string note(lake::api::web_ui_invitation_note);
-    const std::string sign_up = lake::api::web_ui_clerk_sign_in(*config, "sign-up", "", false);
-    EXPECT_NE(sign_up.find(note), std::string::npos);
-
-    lake::api::WebUiViewer visitor;
-    visitor.clerk = true;
-    const std::string home = lake::api::web_ui_home(visitor);
-    EXPECT_EQ(home.find("href=\"/sign-up\""), std::string::npos)
-        << "neither the actions nor the top bar link sign-up";
-    EXPECT_EQ(home.find("Create account"), std::string::npos);
-    EXPECT_NE(home.find(note), std::string::npos);
-    EXPECT_NE(home.find("href=\"/sign-in\""), std::string::npos);
-    EXPECT_NE(lake::api::web_ui_docs("concepts", visitor)->find("href=\"/sign-in\""),
-              std::string::npos);
-    EXPECT_EQ(lake::api::web_ui_docs("concepts", visitor)->find("href=\"/sign-up\""),
-              std::string::npos)
-        << "every page's top bar follows the same rule";
-
-    visitor.clerk = false;
-    EXPECT_NE(lake::api::web_ui_home(visitor).find("href=\"/sign-up\">Create account"),
-              std::string::npos)
-        << "without Clerk, password sign-up is open";
-}
-
-TEST(Clerk, AccountMenuOmitsLakePasskeysUnderClerk) {
-    lake::api::WebUiViewer viewer{true};
-    EXPECT_NE(lake::api::web_ui_home(viewer).find("href=\"/passkeys\""), std::string::npos);
-    viewer.clerk = true;
-    const std::string home = lake::api::web_ui_home(viewer);
-    EXPECT_EQ(home.find("href=\"/passkeys\""), std::string::npos);
-    EXPECT_NE(home.find("href=\"/tokens\""), std::string::npos);
-}
-
 TEST(Clerk, OperatorsRevokeEveryLiveSessionOfAUser) {
     lake::control::InMemoryStore store;
     const auto first = store.sign_in_clerk(minted("user_revoked", "revoked@example.test"));
@@ -417,18 +351,7 @@ TEST(Clerk, OperatorsRevokeEveryLiveSessionOfAUser) {
     EXPECT_FALSE(store.context_for(second->secret));
 }
 
-TEST(Clerk, AccountsSeeTheirOrganizationSectionAndOnlyTheirOwnActivity) {
-    const std::string account = lake::api::web_ui_home(true);
-    for (const std::string_view link : {"<p class=\"nav-label\">Organization</p>",
-                                        "href=\"/organizations\"",
-                                        "href=\"/secret-mounts\"",
-                                        "href=\"/metering\"",
-                                        "href=\"/activity\""}) {
-        EXPECT_NE(account.find(link), std::string::npos) << link;
-    }
-    EXPECT_EQ(lake::api::web_ui_home({true, true}).find("href=\"/activity\""), std::string::npos)
-        << "operators keep the instance audit under Administration";
-
+TEST(Clerk, AccountsSeeOnlyTheirOwnActivity) {
     lake::control::InMemoryStore store;
     const auto first = store.sign_in_clerk(minted("user_activity_a", "a@example.test"));
     const auto second = store.sign_in_clerk(minted("user_activity_b", "b@example.test"));

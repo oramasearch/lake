@@ -1,3 +1,12 @@
+#include <algorithm>
+#include <array>
+#include <filesystem>
+#include <map>
+#include <regex>
+#include <set>
+#include <string>
+#include <utility>
+
 #include <gtest/gtest.h>
 
 #include "lake/api/markdown.hpp"
@@ -36,23 +45,16 @@ TEST(Markdown, NeverPassesHtmlOrUnsafeLinksThrough) {
     EXPECT_NE(html.find("<code>&lt;b&gt;</code>"), std::string::npos);
 }
 
-TEST(Docs, EveryGuideRendersWithContentsAndTheNextGuide) {
+TEST(Docs, EveryGuideHasItsTitleAndRenders) {
     const auto& pages = lake::api::web_ui_guide();
-    ASSERT_GE(pages.size(), 7U);
+    ASSERT_GE(pages.size(), 30U);
     EXPECT_EQ(pages.front().slug, "index");
-    EXPECT_EQ(pages.front().title, "Getting started");
+    EXPECT_EQ(pages.front().title, "Getting Started");
     for (const auto& page : pages) {
-        const auto html = lake::api::web_ui_docs(page.slug, true);
-        ASSERT_TRUE(html) << page.slug;
-        EXPECT_NE(html->find("docs-contents"), std::string::npos);
-        EXPECT_NE(html->find("aria-current=\"page\">" + std::string(page.title)), std::string::npos)
-            << page.slug;
+        EXPECT_FALSE(page.title.empty()) << page.slug;
+        EXPECT_TRUE(page.markdown.starts_with("# " + std::string(page.title))) << page.slug;
+        EXPECT_NE(markdown_to_html(page.markdown).find("<h1 id="), std::string::npos) << page.slug;
     }
-    const auto first = lake::api::web_ui_docs("", false);
-    ASSERT_TRUE(first);
-    EXPECT_NE(first->find("Next: <a href=\"/docs/concepts\">Concepts</a>"), std::string::npos);
-    EXPECT_NE(first->find("href=\"/docs\""), std::string::npos) << "Docs is in the navigation";
-    EXPECT_FALSE(lake::api::web_ui_docs("nope", true));
 }
 
 #include <nlohmann/json.hpp>
@@ -80,125 +82,178 @@ TEST(Workspaces, TheWorkspaceOpenApiIsWrittenForCustomers) {
         << "only a permission note (with a colon) is removed";
 }
 
-TEST(WebUi, HomeStartsANewcomerOnTheDocsAndTheirData) {
-    const std::string home = lake::api::web_ui_home(true);
-    EXPECT_NE(home.find("href=\"/docs\">Getting started</a>"), std::string::npos);
-    EXPECT_NE(home.find("href=\"/train/data\">Load your data</a>"), std::string::npos);
-    EXPECT_EQ(home.find("requires access to its source"), std::string::npos);
+namespace {
+
+// The guide's text a reader sees as prose: code blocks and inline code spans removed.
+std::string prose_of(std::string_view markdown) {
+    std::string out;
+    bool block = false;
+    std::size_t start = 0;
+    while (start <= markdown.size()) {
+        const std::size_t end = std::min(markdown.find('\n', start), markdown.size());
+        const std::string_view line = markdown.substr(start, end - start);
+        if (line.starts_with("```")) {
+            block = !block;
+        } else if (!block) {
+            bool span = false;
+            for (const char c : line) {
+                if (c == '`') {
+                    span = !span;
+                } else if (!span) {
+                    out += c;
+                }
+            }
+            out += '\n';
+        }
+        if (end == markdown.size()) {
+            break;
+        }
+        start = end + 1;
+    }
+    return out;
 }
 
-TEST(WebUi, AskOramaOpensBesideThePageAndKnowsWhichPageItIs) {
-    // UX review 2026-09-27 (lake#258): Ask Orama left the page and lost which pipeline it was on.
-    lake::api::WebUiViewer viewer{true};
-    viewer.path = "/design/pipeline";
-    viewer.query = "customer_id=c-1&project=retention&graph=churn";
-    const std::string page = lake::api::web_ui_docs("", viewer).value();
-    EXPECT_NE(page.find("<details class=\"ask-dock\">"), std::string::npos);
-    EXPECT_NE(page.find("<iframe src=\"/ask?embed=1&amp;from=%2Fdesign%2Fpipeline%3Fcustomer_id%3Dc-1%"
-                        "26project%3Dretention%26graph%3Dchurn\""),
-              std::string::npos)
-        << "the panel is told the whole page, query included";
+} // namespace
 
-    lake::api::AskPage ask;
-    ask.embed = true;
-    ask.customer_id = "c-1";
-    ask.conversation_id = "conv-1";
-    ask.from = "/design/pipeline?project=retention&graph=churn";
-    const std::string embedded = lake::api::web_ui_ask(ask, true);
-    EXPECT_NE(embedded.find("<body class=\"ask-embedded\">"), std::string::npos);
-    EXPECT_EQ(embedded.find("primary-nav"), std::string::npos) << "no site frame in the panel";
-    EXPECT_NE(embedded.find("name=\"embed\" value=\"1\""), std::string::npos)
-        << "its forms stay in the panel";
-    EXPECT_NE(embedded.find("target=\"_top\">/design/pipeline</a>"), std::string::npos);
+// lake#561: the Docs navigation groups pages by section. Every page file is embedded, once, under a
+// section, and a section's pages are adjacent, so the navigation never repeats a section.
+TEST(Docs, EveryGuideFileIsEmbeddedOnceUnderASection) {
+    const auto& pages = lake::api::web_ui_guide();
+    std::set<std::string> slugs;
+    std::set<std::string> finished;
+    std::string current;
+    for (const auto& page : pages) {
+        EXPECT_TRUE(slugs.insert(std::string(page.slug)).second) << "twice: " << page.slug;
+        ASSERT_FALSE(page.section.empty()) << page.slug;
+        if (page.section != current) {
+            EXPECT_FALSE(finished.contains(std::string(page.section)))
+                << page.section << " is split around " << page.slug;
+            if (!current.empty()) {
+                finished.insert(current);
+            }
+            current = std::string(page.section);
+        }
+    }
+    EXPECT_EQ(pages.front().section, "Get Started");
+    const std::filesystem::path root =
+        std::filesystem::path(LAKE_TEST_SOURCE_DIR) / "docs" / "guide";
+    for (const auto& entry : std::filesystem::directory_iterator(root)) {
+        if (entry.path().extension() == ".md" && entry.path().filename() != "README.md") {
+            EXPECT_TRUE(slugs.contains(entry.path().stem().string()))
+                << entry.path().filename() << " is not in cmake/embed_guide.cmake's GUIDE_SECTIONS";
+        }
+    }
 }
 
-TEST(WebUi, ARunSaysWhatItReadAndWhenNothingWasTrained) {
-    // lake#251, lake#253: a structural run and an unread connect step are said on the run.
-    lake::api::WorkspacePage page;
-    page.section = "run";
-    page.customer_id = "c-1";
-    page.subject = "r-1";
-    page.state = {{"requested", true}, {"phase", "Ready"}, {"ready", true}};
-    page.data["get_run"] = {
-        {"status", "succeeded"},
-        {"logs",
-         nlohmann::json::array(
-             {{{"level", "warn"},
-               {"message", "structural: this pipeline is not churn-shaped, so its steps ran "
-                           "without training or scoring anything"}},
-              {{"level", "info"},
-               {"message", "connect: Load usage was not read: this run trained on datasets.a"}}})}};
-    page.data["get_run_report"] = {
-        {"dataset", {{"source", "datasets.a"}, {"not_used", nlohmann::json::array({"'plan'"})}}}};
-    const std::string html = lake::api::web_ui_workspace(page, true);
-    EXPECT_NE(html.find("<strong>Nothing was trained.</strong>"), std::string::npos);
-    EXPECT_NE(html.find("Load usage was not read: this run trained on datasets.a"),
-              std::string::npos);
-    EXPECT_NE(html.find("<dt>trained on</dt><dd>datasets.a</dd>"), std::string::npos);
-    EXPECT_NE(html.find("<dt>columns not used</dt>"), std::string::npos);
-
-    page.section = "project";
-    page.subject = "retention";
-    page.data = {{"get_project", {{"name", "retention"}, {"graphs", nlohmann::json::array()}}},
-                 {"list_datasets",
-                  {{"datasets",
-                    nlohmann::json::array({{{"name", "accounts"}, {"database", "datasets"}}})}}}};
-    const std::string project = lake::api::web_ui_workspace(page, true);
-    EXPECT_NE(project.find("<select name=\"dataset\">"), std::string::npos)
-        << "Build a Pipeline can start from the person's own data";
-    EXPECT_NE(project.find("<option value=\"datasets.accounts\">accounts</option>"),
-              std::string::npos);
+// Every link from one guide to another names a page that exists, and a #anchor names one of that
+// page's headings as the renderer anchors them.
+TEST(Docs, LinksBetweenGuidesResolve) {
+    const auto& pages = lake::api::web_ui_guide();
+    std::map<std::string, std::string> html;
+    for (const auto& page : pages) {
+        html[std::string(page.slug)] = markdown_to_html(page.markdown);
+    }
+    const std::regex link(R"re(href="/docs(?:/([a-z0-9-]+))?(?:#([a-z0-9-]+))?")re");
+    for (const auto& page : pages) {
+        const std::string& text = html[std::string(page.slug)];
+        for (auto it = std::sregex_iterator(text.begin(), text.end(), link);
+             it != std::sregex_iterator(); ++it) {
+            const std::string slug = (*it)[1].matched ? (*it)[1].str() : "index";
+            ASSERT_TRUE(html.contains(slug)) << page.slug << " links /docs/" << slug;
+            if ((*it)[2].matched) {
+                EXPECT_NE(html[slug].find("id=\"" + (*it)[2].str() + "\""), std::string::npos)
+                    << page.slug << " links /docs/" << slug << "#" << (*it)[2].str();
+            }
+        }
+    }
 }
 
-TEST(WebUi, AnAgentsMarkdownReplyRendersAndStaysEscaped) {
-    // UX review 2026-09-27 (2): Ask Orama answered with a markdown table shown as raw pipes.
-    lake::api::AskPage ask;
-    ask.customer_id = "c-1";
-    ask.conversation_id = "conv-1";
-    ask.messages = nlohmann::json::array(
-        {{{"role", "user"}, {"content", "**not bold** <b>me</b>"}},
-         {{"role", "assistant"},
-          {"content", "You have **2** models:\n\n| Model | AUC |\n|---|---:|\n| churn | 0.95 |\n\n"
-                      "<script>alert(1)</script>"}}});
-    const std::string page = lake::api::web_ui_ask(ask, true);
-    EXPECT_NE(page.find("<table>"), std::string::npos);
-    EXPECT_NE(page.find("<td>0.95</td>"), std::string::npos);
-    EXPECT_NE(page.find("<strong>2</strong>"), std::string::npos);
-    EXPECT_EQ(page.find("<script>alert"), std::string::npos) << "a reply cannot inject HTML";
-    EXPECT_NE(page.find("**not bold** &lt;b&gt;me&lt;/b&gt;"), std::string::npos)
-        << "the person's own words are shown as typed";
+// The product speaks of workspaces, never of a "space" or a "personal space" (Steve, 2026-10-10),
+// and never uses the banned word. Code spans and blocks may name fields such as `customer_id`.
+TEST(Docs, GuidesSpeakOfWorkspaces) {
+    const std::regex space(R"re(\bspaces?\b)re", std::regex::icase);
+    const std::regex banned(R"re(\bseams?\b)re", std::regex::icase);
+    for (const auto& page : lake::api::web_ui_guide()) {
+        const std::string prose = prose_of(page.markdown);
+        std::smatch found;
+        EXPECT_FALSE(std::regex_search(prose, found, space))
+            << page.slug << " says \"" << found.str() << "\" near: "
+            << prose.substr(static_cast<std::size_t>(std::max<long>(0, found.position() - 40)), 100);
+        EXPECT_FALSE(std::regex_search(prose, banned)) << page.slug;
+    }
 }
 
-TEST(WebUi, TheLatestScanIsTheRecommendationAndEarlierOnesFold) {
-    // lake#287: every scan added its Opportunities to the last one's, so ideas piled up.
-    lake::api::WorkspacePage page;
-    page.section = "discover";
-    page.customer_id = "c-1";
-    page.state = {{"requested", true}, {"phase", "Ready"}, {"ready", true}};
-    const auto row = [](std::string id, std::string task, std::string at, std::string status,
-                        std::string intent) {
-        return nlohmann::json{{"id", id}, {"task_id", task}, {"created_at", at},
-                              {"status", status}, {"intent", intent}, {"solution", "S-1"},
-                              {"methodology", "classifier"}, {"why", "because"},
-                              {"detail", nlohmann::json::object()}};
+// The guides speak of lake and the workspace, never of the engine underneath it (lake#601, as the
+// pages do since lake#583). Zetta stays only where a person picks it by name: it is a kind on
+// Ship -> Services, so the Services guide and the glossary's Service entry name it, and each says
+// once what it is. Every other line naming it fails. Code spans and blocks (a `zetta` kind key in
+// a request) are left out, as above.
+TEST(Docs, GuidesNameZettaOnlyWhereAPersonChoosesIt) {
+    struct Allowed {
+        std::string_view slug;
+        std::string_view line; // a fragment of the one prose line allowed to name Zetta
+        std::string_view reason;
     };
-    page.data["list_opportunities"] = {{"opportunities", nlohmann::json::array({
-        row("o-3", "scan-2", "2026-09-27T19:00:00Z", "new", "Predict churn and rank accounts"),
-        row("o-4", "scan-2", "2026-09-27T19:00:00Z", "not_yet", "Forecast revenue"),
-        row("o-1", "scan-1", "2026-09-27T12:00:00Z", "new", "Rank accounts for outreach"),
-        row("o-2", "scan-1", "2026-09-27T12:00:00Z", "project", "Score leads"),
-        row("o-5", "scan-1", "2026-09-27T12:00:00Z", "not_yet", "Old reason")})}};
-    const std::string html = lake::api::web_ui_workspace(page, true);
-    const auto recommended = html.find("<h2>Recommended</h2>");
-    const auto earlier = html.find("<summary>Earlier scans (1)</summary>");
-    ASSERT_NE(recommended, std::string::npos);
-    ASSERT_NE(earlier, std::string::npos);
-    const auto newest = html.find("Predict churn and rank accounts");
-    const auto older = html.find("Rank accounts for outreach");
-    EXPECT_TRUE(recommended < newest && newest < earlier) << "the latest scan leads";
-    EXPECT_GT(older, earlier) << "an untouched earlier idea folds under Earlier scans";
-    EXPECT_NE(html.find("value=\"o-1\""), std::string::npos) << "it can still be picked";
-    EXPECT_NE(html.find("Score leads"), std::string::npos) << "what a person acted on stays";
-    EXPECT_NE(html.find("Forecast revenue"), std::string::npos);
-    EXPECT_EQ(html.find("Old reason"), std::string::npos) << "Not Yet is the latest scan's";
+    static constexpr std::array<Allowed, 6> allowed{{
+        {"concepts",
+         "| **Service** | A database, stream or engine lake runs for you: Postgres, Zetta,",
+         "the glossary lists the Service kinds a person can create, Zetta among them, and says "
+         "what Zetta is"},
+        {"services",
+         "on its own cluster: Zetta, Postgres, Kafka,",
+         "the Services guide opens with the kinds of service a person can create"},
+        {"services",
+         "| **Zetta** | Orama's data and AI engine.",
+         "the Services glossary says once what the Zetta kind is"},
+        {"services",
+         "Choose the **Kind** (Zetta is first)",
+         "the Kind menu on Ship -> Services lists Zetta first, by that name"},
+        {"services",
+         "Once a service (other than Zetta) is Ready",
+         "a Zetta service has no connection dialog; the step names the kind a person picked"},
+        {"services",
+         "A Zetta service's admin token is never shown.",
+         "what a person who created a Zetta service does not get"},
+    }};
+    const std::regex engine(R"re(\bzetta\b)re", std::regex::icase);
+    std::set<std::pair<std::string, std::string>> used;
+    for (const auto& page : lake::api::web_ui_guide()) {
+        const std::string prose = prose_of(page.markdown);
+        std::size_t start = 0;
+        while (start < prose.size()) {
+            const std::size_t end = std::min(prose.find('\n', start), prose.size());
+            const std::string line = prose.substr(start, end - start);
+            start = end + 1;
+            if (!std::regex_search(line, engine)) {
+                continue;
+            }
+            const auto entry = std::ranges::find_if(allowed, [&](const Allowed& item) {
+                return item.slug == page.slug && line.find(item.line) != std::string::npos;
+            });
+            EXPECT_NE(entry, allowed.end())
+                << page.slug << " names Zetta to a person; say lake or the workspace: " << line;
+            if (entry != allowed.end()) {
+                used.emplace(std::string(entry->slug), std::string(entry->line));
+            }
+        }
+    }
+    for (const Allowed& item : allowed) {
+        EXPECT_TRUE(used.contains({std::string(item.slug), std::string(item.line)}))
+            << "an allowed line is gone; remove its entry: " << item.slug << ": " << item.line;
+    }
+}
+
+// A person runs an AI training experiment, as an experiment tracker says it, never a "study"
+// (Steve, 2026-10-10, lake#561). The engine's names (`study-events.*`, ExperimentsAgent's `study`
+// field) appear only in code spans and blocks, which the prose leaves out.
+TEST(Docs, GuidesSpeakOfExperiments) {
+    const std::regex study(R"re(\bstud(y|ies)\b)re", std::regex::icase);
+    for (const auto& page : lake::api::web_ui_guide()) {
+        const std::string prose = prose_of(page.markdown);
+        std::smatch found;
+        EXPECT_FALSE(std::regex_search(prose, found, study))
+            << page.slug << " says \"" << found.str() << "\" near: "
+            << prose.substr(static_cast<std::size_t>(std::max<long>(0, found.position() - 40)),
+                            100);
+    }
 }

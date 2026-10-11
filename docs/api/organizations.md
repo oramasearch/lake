@@ -8,17 +8,17 @@ through `accept_invitation`.
 
 | Capability | Kind | Required input | Result |
 |---|---|---|---|
-| `list_organizations` / `get_organization` | read | `limit` / `id` | organizations |
+| `list_organizations` / `get_organization` | read | `limit` / `id` | organizations; `get_organization` also names the organization's own space as `customer_id` (null when it has none, lake#561) |
 | `create_organization` | action | `taap_id?`, `display_name?`, `customer_id?` | organization |
 | `list_teams` / `get_team` | read | `organization_id` / `id` | teams |
 | `create_team` | action | `organization_id`, `name`, `display_name?` | team |
 | `list_memberships` / `get_membership` | read | scope (omit for your own) and `id` | memberships |
-| `create_membership` | action | organization, optional team, principal, role, attestation digest | membership |
+| `create_membership` | action | organization, optional team, principal, role; `attestation_digest` optional (lake signs it, lake#602) | membership with `attestation` |
 | `set_member_role` | action | membership `id`, role | membership |
 | `remove_member` | action | membership `id` | `{removed: true}` |
 | `list_invitations` | read | `organization_id?`, `team_id?`, `limit?` (omit the scope for yours) | invitations |
 | `create_invitation` | action | organization, optional team, email or handle, role, expiry | invitation |
-| `accept_invitation` | action | invitation, principal, attestation digest | membership |
+| `accept_invitation` | action | invitation, principal; `attestation_digest` optional (lake signs it, lake#602) | membership with `attestation` |
 | `create_organization_space` | action | `display_name`, `name?` | `{organization, customer, membership}` |
 | `convert_personal_space` | action | `customer_id`, `display_name` | `{organization, customer, membership, personal_customer}` |
 | `join_organization` | action | `invitation_id` | membership |
@@ -58,7 +58,7 @@ credential has no person behind it, so they refuse it; operators keep `create_or
   `attestation_digest` is `invitation/<invitation id>` and its `granted_by_taap_id` is the
   inviter. An invitation addressed to someone else, or expired, answers `401`; one already used
   answers `409`. `accept_invitation` remains the administrator's path for accepting on behalf of
-  a principal with separately produced evidence.
+  a principal; lake signs that membership's statement itself (below).
 - `list_memberships` without `organization_id` returns the caller's own memberships across
   organizations and teams. With neither a scope nor a person (an operator), both list
   capabilities answer `400 organization_id is required …`.
@@ -90,8 +90,23 @@ context when the identity work lands.
 
 ## Attestation evidence
 
-`attestation_digest` identifies the canonical signed `org_membership/1` attestation and
-`granted_by_taap_id` records its authority. Those two values are retained on both the membership
+Lake signs each membership's statement itself (lake#602). `create_membership` signs
+
+`{type: "lake.org_membership/1", organization_id, team_id, principal_type, principal_id,
+principal_taap_id, role, granted_by, issuer}`
+
+and `accept_invitation` the same with `invitation_id`, and the invitation's organization, team and
+role, both with lake's TAAP identity (purpose `org-membership`). `attestation_digest` is
+`sha256:<hex>` of the JSON of `{statement, signer, signature}`; the answer and the audit event carry
+`attestation: {statement, signer, signature, digest}`. A supplied `attestation_digest` is accepted
+only when it is that digest, and anything else is `invalid_input` at `/attestation_digest`; before
+lake#602 lake stored whatever the caller sent. The rule and its test are in
+[policy.md](policy.md#the-grants-attestation-lake602). `join_organization`,
+`create_organization_space` and `convert_personal_space` keep their evidence references
+(`invitation/<id>` and the like), which lake writes and the caller never supplied.
+
+`attestation_digest` identifies that signed statement and `granted_by_taap_id` records its
+authority. Those two values are retained on both the membership
 and the policy grant, so a verifier with the attestation and identity document can verify the
 statement offline. Lake does not invent another signature envelope. The identity core owns
 attestation storage and TAAP signature verification; this API retains the stable evidence link
@@ -114,9 +129,10 @@ coverage is in `tests/test_policy.cpp`; the production-store capability round tr
 `tests/test_postgres.cpp`. Self-service is covered by
 `Organizations.APersonCreatesAnOrganizationInvitesAndAColleagueJoinsItsSpace` and
 `Organizations.APersonalSpaceBecomesAnOrganizationAndItsOwnerGetsAFreshOne` (memory store),
-`PostgresCapabilities.OrganizationSpaceMembershipsCarryTheirGrantToTheSpace`, and the browser
-flows `HttpResponseIsolation.PersonCreatesAnOrganizationInvitesAndAColleagueJoins` and
-`HttpResponseIsolation.PersonalSpaceBecomesAnOrganizationAfterConfirmation` (memory and
-PostgreSQL). Add organization behavior in the store interface first, then expose a
-capability with object/action metadata and add its page renderer. Schema changes require the
+`PostgresCapabilities.OrganizationSpaceMembershipsCarryTheirGrantToTheSpace`, and the HTTP flows
+`HttpResponseIsolation.PersonCreatesAnOrganizationInvitesAndAColleagueJoins` and
+`HttpResponseIsolation.PersonalSpaceBecomesAnOrganization` (memory and PostgreSQL), which call the
+capabilities with a browser session; the type-the-handle confirmation is the web app's. Add
+organization behavior in the store interface first, then expose a capability with object/action
+metadata for the web app to call. Schema changes require the
 numbered migration and operator copy described in [`../control-plane/schema.md`](../control-plane/schema.md).

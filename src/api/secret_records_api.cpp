@@ -432,9 +432,13 @@ SecretTask<control::SecretVersion> MountSecrets::read(std::string name, std::uin
         co_return Result(std::unexpected(got.error()));
     }
     const auto entry = *got ? control::SecretEntryCodec::decode(**got) : std::nullopt;
-    const std::uint64_t selected = version == 0 && entry ? entry->current_version : version;
-    if (!entry || entry->mount_id != mount_id || entry->name != name || selected == 0) {
-        co_return failure<control::SecretVersion>("not_found", "secret version does not exist");
+    if (!entry || entry->mount_id != mount_id || entry->name != name) {
+        co_return failure<control::SecretVersion>("not_found", "no secret named " + name, "/name");
+    }
+    const std::uint64_t selected = version == 0 ? entry->current_version : version;
+    if (selected == 0) {
+        co_return failure<control::SecretVersion>(
+            "not_found", "secret " + name + " has no live version", "/name");
     }
     auto stored = control::settled(co_await records_.get(
         control::SecretVersionCodec::collection,
@@ -445,13 +449,24 @@ SecretTask<control::SecretVersion> MountSecrets::read(std::string name, std::uin
     const auto record = *stored ? control::SecretVersionCodec::decode(**stored) : std::nullopt;
     if (!record || record->mount_id != mount_id || record->name != name ||
         record->version != selected) {
-        co_return failure<control::SecretVersion>("not_found", "secret version does not exist");
+        co_return failure<control::SecretVersion>("not_found",
+                                                  "secret " + name + " has no version " +
+                                                      std::to_string(selected),
+                                                  version == 0 ? "/name" : "/version");
     }
+    const std::string at = version == 0 ? "/name" : "/version";
     if (!record->destroyed_at.empty()) {
-        co_return failure<control::SecretVersion>("not_found", "secret version was destroyed");
+        co_return failure<control::SecretVersion>("not_found",
+                                                  "version " + std::to_string(selected) +
+                                                      " of secret " + name + " was destroyed",
+                                                  at);
     }
     if (!record->deleted_at.empty()) {
-        co_return failure<control::SecretVersion>("not_found", "secret version is deleted");
+        co_return failure<control::SecretVersion>(
+            "not_found",
+            "version " + std::to_string(selected) + " of secret " + name +
+                " is deleted; undelete it with undelete_secret_versions",
+            at);
     }
     auto key = control::settled(co_await read_data_key(*store_, instance_kek_, records_,
                                                        route_.customer_id, "mount", mount_id, 1));
@@ -483,7 +498,7 @@ SecretTask<control::SecretMetadata> MountSecrets::metadata(std::string name) {
     }
     const auto entry = *got ? control::SecretEntryCodec::decode(**got) : std::nullopt;
     if (!entry || entry->mount_id != mount_id || entry->name != name) {
-        co_return failure<control::SecretMetadata>("not_found", "secret does not exist");
+        co_return failure<control::SecretMetadata>("not_found", "no secret named " + name, "/name");
     }
     auto listed = control::settled(co_await records_.list(
         control::SecretVersionCodec::collection,
@@ -505,6 +520,52 @@ SecretTask<control::SecretMetadata> MountSecrets::metadata(std::string name) {
     co_return Result(std::move(metadata));
 }
 
+SecretTask<SecretPage>
+MountSecrets::list(std::string prefix, std::string after, std::size_t limit) {
+    using Result = ZettaControlResult<SecretPage>;
+    const std::string& mount_id = route_.mount_id;
+    auto listed = control::settled(co_await records_.list(
+        control::SecretEntryCodec::collection, control::SecretEntryCodec::lookup(mount_id)));
+    if (!listed) {
+        co_return Result(std::unexpected(listed.error()));
+    }
+    std::vector<control::SecretEntry> entries;
+    for (const StoredRecord& stored : *listed) {
+        auto entry = control::SecretEntryCodec::decode(stored);
+        if (entry && entry->mount_id == mount_id && entry->name.starts_with(prefix) &&
+            (after.empty() || entry->name > after)) {
+            entries.push_back(std::move(*entry));
+        }
+    }
+    std::ranges::sort(entries, {}, &control::SecretEntry::name);
+    SecretPage page;
+    for (const control::SecretEntry& entry : entries) {
+        if (page.items.size() == limit) {
+            page.next_cursor = page.items.back().name;
+            break;
+        }
+        SecretListing item{
+            entry.name, entry.current_version, entry.created_at, entry.updated_at, "", ""};
+        if (entry.current_version > 0) {
+            auto stored = control::settled(
+                co_await records_.get(control::SecretVersionCodec::collection,
+                                      control::SecretVersionCodec::key(
+                                          records_, mount_id, entry.name, entry.current_version)));
+            if (!stored) {
+                co_return Result(std::unexpected(stored.error()));
+            }
+            const auto version =
+                *stored ? control::SecretVersionCodec::decode(**stored) : std::nullopt;
+            if (version && version->mount_id == mount_id && version->name == entry.name) {
+                item.deleted_at = version->deleted_at;
+                item.destroyed_at = version->destroyed_at;
+            }
+        }
+        page.items.push_back(std::move(item));
+    }
+    co_return Result(std::move(page));
+}
+
 SecretTask<control::SecretMetadata> MountSecrets::change(std::string name,
                                                          std::vector<std::uint64_t> versions,
                                                          control::SecretVersionAction action) {
@@ -522,7 +583,7 @@ SecretTask<control::SecretMetadata> MountSecrets::change(std::string name,
     }
     const auto entry = *got ? control::SecretEntryCodec::decode(**got) : std::nullopt;
     if (!entry || entry->mount_id != mount_id || entry->name != name) {
-        co_return failure<control::SecretMetadata>("not_found", "secret does not exist");
+        co_return failure<control::SecretMetadata>("not_found", "no secret named " + name, "/name");
     }
     const auto collection = control::SecretVersionCodec::collection;
     const std::string lookup = control::SecretVersionCodec::lookup(mount_id, name);
@@ -536,7 +597,9 @@ SecretTask<control::SecretMetadata> MountSecrets::change(std::string name,
         const auto record = *stored ? control::SecretVersionCodec::decode(**stored) : std::nullopt;
         if (!record || record->mount_id != mount_id || record->name != name) {
             co_return failure<control::SecretMetadata>("not_found",
-                                                       "secret version does not exist");
+                                                       "secret " + name + " has no version " +
+                                                           std::to_string(version),
+                                                       "/versions");
         }
         if (action == control::SecretVersionAction::Undelete && !record->destroyed_at.empty()) {
             co_return failure<control::SecretMetadata>(
@@ -588,7 +651,9 @@ SecretTask<control::SecretMetadata> MountSecrets::change(std::string name,
         }
         if (!*changed) {
             co_return failure<control::SecretMetadata>("not_found",
-                                                       "secret version does not exist");
+                                                       "secret " + name + " has no version " +
+                                                           std::to_string(version),
+                                                       "/versions");
         }
     }
     auto touched = control::settled(co_await rewrite(
@@ -612,7 +677,7 @@ SecretTask<control::EncryptionKey> MountSecrets::create_key(std::string name) {
     using Result = ZettaControlResult<control::EncryptionKey>;
     if (!control::valid_handle(name)) {
         co_return failure<control::EncryptionKey>(
-            "invalid_input", "encryption key name must be a lowercase handle", "/name");
+            "invalid_input", control::handle_rule("an encryption key's name"), "/name");
     }
     auto mount = control::settled(co_await this->mount());
     if (!mount) {
@@ -919,7 +984,7 @@ SecretTask<control::DerivedEncryptionKey> MountSecrets::derive(std::string paren
     using Result = ZettaControlResult<control::DerivedEncryptionKey>;
     if (!control::valid_handle(name)) {
         co_return failure<control::DerivedEncryptionKey>(
-            "invalid_input", "derived key name must be a lowercase handle", "/name");
+            "invalid_input", control::handle_rule("a derived key's name"), "/name");
     }
     auto parent = control::settled(co_await get_key(parent_name));
     if (!parent) {
@@ -1276,22 +1341,31 @@ SecretTask<control::SecretMount> create_secret_mount(const ApiContext& context,
                                                      control::SecretMount mount) {
     using Result = ZettaControlResult<control::SecretMount>;
     if (!control::valid_handle(mount.name)) {
-        co_return failure<control::SecretMount>("invalid_input",
-                                                "mount name must be a lowercase handle", "/name");
+        co_return failure<control::SecretMount>(
+            "invalid_input", control::handle_rule("a mount's name"), "/name");
     }
     if (!context.store) {
         co_return failure<control::SecretMount>("store_unavailable",
                                                 "no control-plane store is configured");
     }
     control::Store& store = *context.store;
-    // The organization must be inside the space before anything is written to the space's
-    // workspace, so a caller who names another space's workspace writes nothing there.
-    const auto organization = store.find_policy_object("organization", mount.organization_id);
+    // The owner must be inside the space before anything is written to the space's workspace, so
+    // a caller who names another space's workspace writes nothing there. Without an organization
+    // the owner is the customer itself (an account); with one, the organization must sit in the
+    // customer's namespace.
     const auto customer = store.find_policy_object("customer", mount.customer_id);
-    if (!organization || !customer || organization->parent_id != customer->id) {
+    if (!customer) {
         co_return failure<control::SecretMount>(
-            "invalid_input", "organization_id is not inside the customer namespace",
-            "/organization_id");
+            "invalid_input", "customer_id is unknown", "/customer_id");
+    }
+    if (!mount.organization_id.empty()) {
+        const auto organization = store.find_policy_object("organization", mount.organization_id);
+        if (!organization || organization->parent_id != customer->id) {
+            co_return failure<control::SecretMount>(
+                "invalid_input",
+                "organization_id is not inside the customer namespace",
+                "/organization_id");
+        }
     }
     auto opened = workspace_records(context, mount.customer_id, mount.workspace_id);
     if (!opened) {
@@ -1304,11 +1378,10 @@ SecretTask<control::SecretMount> create_secret_mount(const ApiContext& context,
     mount.created_at = control::record_instant(mount.at_us);
     mount.updated_at = mount.created_at;
 
-    // The name, claimed once in the workspace. A claim whose mount never got its route (a create
-    // that stopped part way) is taken over at the revision read.
-    const std::string claim_key =
-        control::secret_mount_name_key(records, mount.organization_id, mount.name);
-    const std::string claim_lookup = control::secret_mount_name_lookup(mount.organization_id);
+    // The name, claimed once in the workspace for its owner. A claim whose mount never got its
+    // route (a create that stopped part way) is taken over at the revision read.
+    const std::string claim_key = control::secret_mount_name_key(records, mount);
+    const std::string claim_lookup = control::secret_mount_name_lookup(mount);
     auto claimed = control::settled(co_await records.put(
         collection, claim_key, claim_lookup, control::secret_mount_name_claim(mount.id),
         RecordCondition{.if_absent = true}));
@@ -1356,11 +1429,12 @@ SecretTask<control::SecretMount> create_secret_mount(const ApiContext& context,
     auto route = store.create_secret_mount_route(
         {mount.id, mount.customer_id, mount.organization_id, mount.workspace_id, ""});
     if (!route) {
-        co_return Result(std::unexpected(
-            ZettaControlError{route.error().code, route.error().message,
-                              route.error().message.find("organization") != std::string::npos
-                                  ? "/organization_id"
-                                  : "/workspace_id"}));
+        co_return Result(std::unexpected(ZettaControlError{
+            route.error().code,
+            route.error().message,
+            route.error().message.find("organization") != std::string::npos ? "/organization_id"
+            : route.error().message.find("customer") != std::string::npos   ? "/customer_id"
+                                                                            : "/workspace_id"}));
     }
     co_return Result(std::move(mount));
 }

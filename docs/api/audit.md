@@ -136,10 +136,8 @@ renders it.
 
 `/activity` and `/audit` show the name (the recorded identity is the cell's title), the inner
 capability, and an order selector; `/activity` also has an **Include reads** checkbox
-(`?reads=all`). `tests/test_audit_isolation.cpp`
-(`ActivityIsNewestFirstNamedAndQuiet`, both stores), `tests/test_streams.cpp` (the acting agent of
-a task credential) and `tests/test_web_ui.cpp` (`ActivityPageNamesPrincipalsAndWorkspaceCapabilities`)
-cover it.
+(`?reads=all`). `tests/test_audit_isolation.cpp` (`ActivityIsNewestFirstNamedAndQuiet`, both
+stores) and `tests/test_streams.cpp` (the acting agent of a task credential) cover it.
 
 ## Which log
 

@@ -95,10 +95,10 @@ Lake capability and Zetta-shaped proxy calls, including clients that use the unp
 
 ExperimentsAgent has the independent topic and credential `agent-tasks.agent-experiments` /
 `agent-experiments`. Its task kinds are `experiment`, `experiment_status` and
-`experiment_explain`. The bus still carries only the task id. Study definitions, trials and
+`experiment_explain`. The bus still carries only the task id. Experiment definitions, trials and
 analysis remain in the selected workspace Zetta, reached with the claimed task credential. An
-initial proposal has no study write; a new task carrying the reviewed proposal receives only
-workspace `create_study` and its backing `start_study` capability in addition to its reads.
+initial proposal has no experiment write; a new task carrying the reviewed proposal receives only
+the engine's `create_study` and its backing `start_experiment` capability in addition to its reads.
 
 The service token (`LAKE_AGENT_SERVICE_TOKEN`) is never a bus credential: user-created agents on
 agent-runtime hold it too, and customer code must not be able to take another person's task. Long
@@ -286,9 +286,9 @@ Without the bus, a library agent's turn answers `store_unavailable`. A lake run 
 
 Native regression tests are `Stores/AgentLeases.*` (memory and PostgreSQL) and
 `AgentLeaseConfig.*`. They age clocks without sleeping, exercise three expiries, credential
-revocation, event/capability renewal, racing terminal writes, retry publication recovery, page
-messages, the indexed migration and schema reapplication. Run full CTest with local PostgreSQL
-in static and shared builds, including `PagePerformance.*`; see [local builds](../build/local.md).
+revocation, event/capability renewal, racing terminal writes, retry publication recovery, the
+retry notice as the task's message, the indexed migration and schema reapplication. Run full CTest
+with local PostgreSQL in static and shared builds; see [local builds](../build/local.md).
 To change policy, update both stores, config bounds, schema checks and these tests together.
 
 The [#389 regression](https://github.com/oramasearch/lake/issues/389) is covered locally by a fake
@@ -305,7 +305,7 @@ scenario. T1–T10 are the scenarios tracked at https://github.com/oramasearch/l
 through https://github.com/oramasearch/lake/issues/285. T11 builds a data App with
 ApplicationAgent, confirms the exact proposal, waits for deployment, and requests its URL. It
 prints one line per scenario and exits 1 when one fails. T12 gives ExperimentsAgent a goal,
-confirms its exact study, waits for trials and requests the explanation. Run the relevant scenario
+confirms its exact experiment, waits for trials and requests the explanation. Run the relevant scenario
 after a roll of lake, Zetta or an agent.
 
 ## Local lease proof (2026-09-30)

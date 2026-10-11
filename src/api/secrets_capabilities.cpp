@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <functional>
 #include <map>
+#include <optional>
 #include <set>
 #include <string>
 #include <vector>
@@ -44,18 +45,34 @@ json input_schema(json properties, json required = json::array()) {
     return schema;
 }
 
-std::expected<std::string, ApiError> organization_object(const json& input, ApiContext& context) {
-    context.audit_customer_id = input.at("customer_id");
+// The organization a new mount names, or empty when its account (the customer) owns it.
+std::string mount_organization(const json& input) {
+    const auto found = input.find("organization_id");
+    return found != input.end() && found->is_string() ? found->get<std::string>() : std::string();
+}
+
+// The policy object that decides who may create a mount: its owner's. That is the organization
+// named by `organization_id` (`admin` on the organization, as before), or, without one, the
+// customer that owns the workspace (`admin` on the customer, the same object an account's
+// environments hang under).
+std::expected<std::string, ApiError> mount_owner_object(const json& input, ApiContext& context) {
+    const std::string customer_id = input.at("customer_id");
+    const std::string organization_id = mount_organization(input);
+    context.audit_customer_id = customer_id;
     context.audit_kind = "secret_mount";
-    context.audit_object = "secret_mount/" + input.at("customer_id").get<std::string>() + "/" +
-                           input.at("organization_id").get<std::string>() + "/" +
+    context.audit_object = "secret_mount/" + customer_id + "/" +
+                           (organization_id.empty() ? "" : organization_id + "/") +
                            input.at("name").get<std::string>();
     context.audit_details = {{"mount", input.at("name")},
-                             {"workspace_id", input.value("workspace_id", "")}};
-    auto object = context.store->find_policy_object("organization", input.at("organization_id"));
+                             {"workspace_id", input.value("workspace_id", "")},
+                             {"owner_type", organization_id.empty() ? "customer" : "organization"}};
+    const bool account = organization_id.empty();
+    auto object = context.store->find_policy_object(account ? "customer" : "organization",
+                                                    account ? customer_id : organization_id);
     if (!object) {
-        return std::unexpected(
-            ApiError{object.error().code, object.error().message, "/organization_id"});
+        return std::unexpected(ApiError{object.error().code,
+                                        object.error().message,
+                                        account ? "/customer_id" : "/organization_id"});
     }
     return object->id;
 }
@@ -197,6 +214,32 @@ template <class T> ApiResult one_result(const control::ZettaControlResult<T>& ro
 using SecretHandler = std::function<liquid::runtime::task<ApiResult>(const json&, ApiContext&,
                                                                      MountSecrets&)>;
 
+// A list on one mount authorizes that mount itself (every list is candidate-authorizing): the
+// mount's route and policy object, read from PostgreSQL, decide before its workspace is reached.
+// Answers the refusal, or nullopt when the caller may read the mount.
+std::optional<ApiResult>
+refuse_unreadable_mount(const json& input, const std::string& audit_kind, ApiContext& context) {
+    const auto object = resolve_mount(input.at("mount_id"), audit_kind, context);
+    if (!object) {
+        return refused(object.error());
+    }
+    if (context.acting_identity != "admin") {
+        const auto decisions = control::authorize_batch(*context.store,
+                                                        context.acting_identity,
+                                                        {*object},
+                                                        "read",
+                                                        context.authorization_cache);
+        if (!decisions) {
+            return from_store_error(decisions.error());
+        }
+        if (!decisions->at(*object).allowed) {
+            return ApiResult::failure("unauthorized",
+                                      "principal is not allowed to read secret_mount");
+        }
+    }
+    return std::nullopt;
+}
+
 // A capability on one mount: the mount's records are opened in the workspace its route names.
 AsyncCapabilityHandler on_mount(SecretHandler handler) {
     return [handler = std::move(handler)](const json& input,
@@ -241,20 +284,21 @@ void register_mount_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "create_secret_mount",
         .title = "Create secret mount",
-        .description = "Create an organization secret mount in one workspace of a customer. The "
-                       "mount, its secrets and its keys live in that workspace's Zetta.",
+        .description = "Create a secret mount in one workspace of a customer. Without "
+                       "organization_id the customer (the account that owns the workspace) owns "
+                       "it; with one, that organization does. The mount, its secrets and its keys "
+                       "live in that workspace's Zetta.",
         .input_schema = input_schema({{"customer_id", {{"type", "string"}}},
                                       {"workspace_id", {{"type", "string"}}},
                                       {"organization_id", {{"type", "string"}}},
                                       {"name", {{"type", "string"}}},
                                       {"description", {{"type", "string"}}}},
-                                     json::array({"customer_id", "workspace_id",
-                                                  "organization_id", "name"})),
+                                     json::array({"customer_id", "workspace_id", "name"})),
         .output_schema = object_schema(),
         .kind = CapabilityKind::Action,
-        .object = "organization",
+        .object = "secret mount owner",
         .action = "admin",
-        .resolve_object = organization_object,
+        .resolve_object = mount_owner_object,
         .resolves_operator_audit_target = true,
         .async_handler = [](const json& input,
                             ApiContext& context) -> liquid::runtime::task<ApiResult> {
@@ -264,7 +308,7 @@ void register_mount_capabilities(Registry& registry) {
             control::SecretMount draft;
             draft.customer_id = input.at("customer_id");
             draft.workspace_id = input.at("workspace_id");
-            draft.organization_id = input.at("organization_id");
+            draft.organization_id = mount_organization(input);
             draft.name = input.at("name");
             draft.description = input.value("description", "");
             auto created = control::settled(co_await create_secret_mount(context, draft));
@@ -376,7 +420,9 @@ void register_static_secret_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "put_secret",
         .title = "Put secret",
-        .description = "Create a new immutable version of a key-value secret.",
+        .description = "Create a new immutable version of a key-value secret. Answers the new "
+                       "version's metadata (version, times, custom_metadata), never the value: "
+                       "read_secret is the one call that returns a value.",
         .input_schema = mount_input({{"name", {{"type", "string"}}},
                                      {"value", {{"type", "object"}}},
                                      {"custom_metadata", {{"type", "object"}}},
@@ -388,8 +434,8 @@ void register_static_secret_capabilities(Registry& registry) {
         .action = "write",
         .resolve_object = mount_object("secret"),
         .resolves_operator_audit_target = true,
-        .async_handler = on_mount([](const json& input, ApiContext& context,
-                                     MountSecrets& mount) -> liquid::runtime::task<ApiResult> {
+        .async_handler = on_mount([](const json& input, ApiContext& context, MountSecrets& mount)
+                                      -> liquid::runtime::task<ApiResult> {
             auto check = optional_version(input, "check_and_set");
             if (!check) {
                 co_return refused(check.error());
@@ -397,10 +443,14 @@ void register_static_secret_capabilities(Registry& registry) {
             auto result = control::settled(
                 co_await mount.put({input.at("mount_id"), input.at("name"), input.at("value"),
                                     input.value("custom_metadata", json::object()), *check}));
-            if (result) {
-                context.audit_details["version"] = result->version;
+            if (!result) {
+                co_return secret_records_failure(result.error());
             }
-            co_return one_result(result);
+            context.audit_details["version"] = result->version;
+            // Never the value (lake#590): a tool's answer lands in agent transcripts and logs.
+            json written = control::to_json(*result);
+            written.erase("value");
+            co_return ApiResult::success(std::move(written));
         })});
     registry.add(Capability{
         .name = "read_secret",
@@ -447,6 +497,68 @@ void register_static_secret_capabilities(Registry& registry) {
             }
             co_return one_result(result);
         })});
+    registry.add(Capability{
+        .name = "list_secrets",
+        .title = "List secrets",
+        .description = "List a mount's secrets by name, with each one's current version, times and "
+                       "deleted state. Values are never returned.",
+        .input_schema =
+            mount_input({{"prefix", {{"type", "string"}}},
+                         {"cursor", {{"type", "string"}}},
+                         {"limit", {{"type", "integer"}, {"minimum", 1}, {"maximum", 500}}}},
+                        json::array()),
+        .output_schema = {{"type", "object"},
+                          {"properties",
+                           {{"items", {{"type", "array"}}},
+                            {"next_cursor", {{"type", "string"}}}}}},
+        .kind = CapabilityKind::Read,
+        .object = "secret_mount",
+        .action = "read",
+        .resolve_object = mount_object("secret"),
+        // Like every list, it authorizes what it returns itself: here the one mount, before the
+        // mount's workspace is reached.
+        .authorizes_candidates = true,
+        .resolves_operator_audit_target = true,
+        .async_handler = [](const json& input,
+                            ApiContext& context) -> liquid::runtime::task<ApiResult> {
+            if (!context.store) {
+                co_return no_store();
+            }
+            if (auto refusal = refuse_unreadable_mount(input, "secret", context)) {
+                co_return std::move(*refusal);
+            }
+            auto mount = MountSecrets::open(context, input.at("mount_id"));
+            if (!mount) {
+                co_return refused(mount.error());
+            }
+            const std::string prefix = input.value("prefix", "");
+            if (!prefix.empty()) {
+                context.audit_details["prefix"] = prefix;
+            }
+            auto page = control::settled(co_await mount->list(
+                prefix, input.value("cursor", ""), static_cast<std::size_t>(limit_of(input))));
+            if (!page) {
+                co_return secret_records_failure(page.error());
+            }
+            json items = json::array();
+            for (const auto& item : page->items) {
+                items.push_back(
+                    {{"name", item.name},
+                     {"current_version", item.current_version},
+                     {"created_at", item.created_at},
+                     {"updated_at", item.updated_at},
+                     {"deleted", !item.deleted_at.empty()},
+                     {"deleted_at",
+                      item.deleted_at.empty() ? json(nullptr) : json(item.deleted_at)},
+                     {"destroyed_at",
+                      item.destroyed_at.empty() ? json(nullptr) : json(item.destroyed_at)}});
+            }
+            json value = {{"items", std::move(items)}};
+            if (!page->next_cursor.empty()) {
+                value["next_cursor"] = page->next_cursor;
+            }
+            co_return ApiResult::success(std::move(value));
+        }});
     const auto add_version_action = [&registry](std::string name,
                                                 std::string title,
                                                 std::string description,
@@ -597,23 +709,8 @@ void register_encryption_key_capabilities(Registry& registry) {
             if (!context.store) {
                 co_return no_store();
             }
-            const auto object = resolve_mount(input.at("mount_id"), "encryption", context);
-            if (!object) {
-                co_return refused(object.error());
-            }
-            if (context.acting_identity != "admin") {
-                const auto decisions = control::authorize_batch(*context.store,
-                                                                context.acting_identity,
-                                                                {*object},
-                                                                "read",
-                                                                context.authorization_cache);
-                if (!decisions) {
-                    co_return from_store_error(decisions.error());
-                }
-                if (!decisions->at(*object).allowed) {
-                    co_return ApiResult::failure("unauthorized",
-                                                 "principal is not allowed to read secret_mount");
-                }
+            if (auto refusal = refuse_unreadable_mount(input, "encryption", context)) {
+                co_return std::move(*refusal);
             }
             auto mount = MountSecrets::open(context, input.at("mount_id"));
             if (!mount) {

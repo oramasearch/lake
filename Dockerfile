@@ -21,6 +21,16 @@ FROM zetta_source AS zetta-source
 # named context too rather than being vendored under modules/.
 FROM liquid_source AS liquid-source
 
+# ---------- web app ----------
+# The web app (frontend/, docs/ui/web-app.md) is built with Node 22 and embedded into the binary
+# by the build stage below.
+FROM node:22-bookworm-slim AS frontend
+WORKDIR /frontend
+COPY frontend/package.json frontend/package-lock.json ./
+RUN npm ci --no-audit --no-fund
+COPY frontend/ ./
+RUN npm run build
+
 # ---------- build stage ----------
 FROM ubuntu:24.04 AS build
 ENV DEBIAN_FRONTEND=noninteractive
@@ -31,7 +41,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 # Argon2id EVP_KDF used by password credentials.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates wget gnupg lsb-release software-properties-common \
-      build-essential ninja-build git pkg-config libfuse3-dev fuse3 \
+      build-essential ninja-build git pkg-config libfuse3-dev fuse3 nodejs ccache \
       libstdc++-14-dev zlib1g-dev libssl-dev libpq-dev \
  && wget -qO /tmp/llvm.sh https://apt.llvm.org/llvm.sh && chmod +x /tmp/llvm.sh && /tmp/llvm.sh 19 \
  && rm -rf /var/lib/apt/lists/*
@@ -62,22 +72,32 @@ WORKDIR /src
 COPY . /src
 COPY --from=zetta-source . /opt/zetta
 COPY --from=liquid-source . /opt/liquid
+COPY --from=frontend /frontend/dist /opt/frontend-dist
 
 # Tests off (skips the GoogleTest fetch and the test targets). FetchContent pulls Boost 1.91 into
 # build/_deps at configure time (needs network). Build uses all cores.
 ARG LAKE_ZETTA_SOURCE_DIR=/opt/zetta
 ARG LAKE_LIQUID_SOURCE_DIR=/opt/liquid
 ARG LAKE_BUILD_REVISION=unknown
-RUN cmake -S . -B build -G Ninja \
+# ccache keeps every object file in a BuildKit cache mount that outlives the image, so a later
+# build recompiles only the sources that changed instead of all of lake, libliquid and the vendored
+# stack (docs/build/container-image.md). The source always sits at /src, so cache keys match.
+ENV CCACHE_DIR=/root/.cache/ccache CCACHE_MAXSIZE=8G CCACHE_COMPILERCHECK=content
+RUN --mount=type=cache,target=/root/.cache/ccache,id=lake-ccache \
+    cmake -S . -B build -G Ninja \
       -DCMAKE_BUILD_TYPE=Release \
       -DLAKE_BUILD_TESTS=OFF \
       -DLAKE_ZETTA_SOURCE_DIR="${LAKE_ZETTA_SOURCE_DIR}" \
       -DLAKE_LIQUID_SOURCE_DIR="${LAKE_LIQUID_SOURCE_DIR}" \
       -DLAKE_BUILD_REVISION="${LAKE_BUILD_REVISION}" \
+      -DLAKE_FRONTEND_DIST=/opt/frontend-dist \
       -DCMAKE_C_COMPILER=clang-19 \
       -DCMAKE_CXX_COMPILER=clang++-19 \
       -DOPENSSL_ROOT_DIR=/opt/openssl \
+      -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+      -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
  && cmake --build build --target lake -j "$(nproc)" \
+ && ccache --show-stats \
  && { strip build/lake || true; } \
  && ./build/lake version
 

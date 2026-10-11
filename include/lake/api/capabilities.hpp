@@ -1,11 +1,16 @@
 #pragma once
 
+#include <optional>
+
 #include "lake/api/registry.hpp"
 #include "lake/control/store.hpp"
 #include "lake/control/zetta_control.hpp"
+#include <chrono>
+#include <expected>
 #include <map>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include <liquid/runtime.hpp>
 
@@ -21,6 +26,32 @@ void register_export_capabilities(Registry& registry);
 void register_github_import_capabilities(Registry& registry);
 void register_pki_capabilities(Registry& registry);
 void register_metering_capabilities(Registry& registry);
+// Usage over time (lake#564, docs/api/metering.md#usage-over-time): usage_over_time,
+// usage_limits, set_usage_limit and record_model_usage.
+void register_usage_capabilities(Registry& registry);
+// Queues every build result of the space's repositories that finished in or after the UTC hour
+// `since_hour` ("YYYY-MM-DDTHH:00:00Z") for its repository's workspace records, as a
+// metering_usage read does (docs/api/metering.md#build-records); a result already recorded is
+// written once only. Answers how many were queued.
+std::expected<std::size_t, std::string> queue_repository_builds(ApiContext& context,
+                                                                const std::string& customer_id,
+                                                                std::string_view since_hour);
+// What one usage sample read (lake#564): workspaces sampled, readings and increments added, and a
+// sentence for each workspace or measure it could not read.
+struct UsageSampleReport {
+    std::size_t workspaces = 0;
+    std::size_t readings = 0;
+    std::size_t increments = 0;
+    std::vector<std::string> unmeasured;
+};
+// The owner loop's usage sample (docs/api/metering.md#what-the-sampler-reads): each live
+// workspace's stored bytes by kind, and `elapsed` of instance and volume time for each running
+// service, store and app, added to `context.usage_recorder`; it also queues new repository build
+// results for their workspace records. Never on a request path.
+liquid::runtime::task<UsageSampleReport>
+sample_usage(ApiContext& context,
+             std::chrono::seconds elapsed,
+             std::chrono::system_clock::time_point at = std::chrono::system_clock::now());
 void register_drive_capabilities(Registry& registry);
 void register_model_capabilities(Registry& registry);
 void register_transparency_capabilities(Registry& registry);
@@ -36,6 +67,48 @@ void register_experiment_capabilities(Registry& registry);
 // The operator's volumes (migration 0069, docs/api/volumes.md): set_workspace_storage,
 // request_volume_snapshot, volume_snapshots.
 void register_volume_capabilities(Registry& registry);
+// The reads lake's web app needs (lake#561, docs/api/web-app.md): viewer, my_permissions,
+// list_packages, list_docs, get_doc, mcp_setup.
+void register_console_capabilities(Registry& registry, std::string_view version);
+// Speech-to-text and workspace transcripts (lake#561, docs/api/transcripts.md): transcribe,
+// create_transcript, list_transcripts, get_transcript, update_transcript, delete_transcript.
+void register_transcript_capabilities(Registry& registry);
+// A workspace's own AI solutions beside Orama's read-only catalogue (lake#597,
+// docs/api/solutions.md): list_solutions, get_solution, create_solution, update_solution,
+// delete_solution, duplicate_solution.
+void register_solution_capabilities(Registry& registry);
+// Drives (lake#561, docs/api/drives.md): create_drive, list_drives, get_drive, rename_drive,
+// delete_drive; and a workspace-files or virtual drive's folders, files and shortcuts:
+// list_drive_entries, get_drive_entry, create_drive_folder_entry, create_drive_shortcut,
+// move_drive_entry, delete_drive_entry, begin_drive_upload, append_drive_upload,
+// finish_drive_upload, upload_drive_entries, read_drive_file, recent_drive_entries.
+void register_drives_capabilities(Registry& registry);
+// A finished workspace file, as GET /drive/files/download streams it. The route authorizes and
+// audits the read through get_drive_entry first; this reads the record again for the object key,
+// which no capability answers.
+struct WorkspaceFile {
+    std::string id;
+    std::string name;
+    std::string content_type;
+    std::string sha256;
+    std::string object_key;
+    std::uint64_t size = 0;
+};
+liquid::runtime::task<control::ZettaControlResult<WorkspaceFile>>
+find_workspace_file(ApiContext& context,
+                    std::string customer_id,
+                    std::string workspace_id,
+                    std::string drive_id,
+                    std::string id);
+// Plaintext [offset, offset + length) of a workspace file of `size` bytes.
+liquid::runtime::task<control::ZettaControlResult<std::string>>
+read_workspace_file(ApiContext& context,
+                    std::string customer_id,
+                    std::string workspace_id,
+                    std::string object_key,
+                    std::uint64_t size,
+                    std::uint64_t offset,
+                    std::uint64_t length);
 // The live workspace a new repository is created in (lake#315): `input.workspace_id` must name a
 // workspace of `input.customer_id`'s space that is not deleted. Anything else, including a missing
 // id, is invalid_input at /workspace_id; there is no default workspace.
@@ -58,6 +131,19 @@ boost::capy::task<std::invoke_result_t<Callable>> blocking_call(Callable callabl
     }
     co_return std::move(*ran);
 }
+// The repository a Hub-compatible id names: a repository id, `models/<id>`, `<space>/<name>` or
+// a bare `<name>` unique across spaces (the model page and the Hub routes, lake#561).
+control::Result<control::Repository> find_hub_repository(control::Store& store,
+                                                         std::string_view hub_id);
+// The spaces the caller may read, newest first, as list_customers answers them ({items}); the
+// web app's `viewer` lists the same spaces without a second audited call (lake#561).
+ApiResult readable_customers(ApiContext& context, int limit);
+// AgentCreator's structured answer, a question or a proposal: its `result` (agent-creator#1), or,
+// from an AgentCreator that answered before it had one, the JSON in its reply.
+nlohmann::json agent_creator_answer(const nlohmann::json& turn);
+// The digest a proposal is approved by: SHA-256 of its compact JSON as lake serializes it. Stored
+// with each Agent Factory proposal message, and checked by approve_agent_proposal (lake#561).
+std::string agent_proposal_digest(const nlohmann::json& proposal);
 // Customer Zetta workspaces: status, start, and allow-listed calls (docs/api/workspaces.md).
 void register_workspace_capabilities(Registry& registry);
 // The operator's one-shot copy of retired control-store tables into workspace Zettas
@@ -105,6 +191,13 @@ ApiResult workspace_failure(const control::ZettaControlError& error,
                             const nlohmann::json& input,
                             std::string_view prefix = {},
                             const std::map<std::string, std::string>& renamed = {});
+// The engine's words in a lake caller's terms (lake#591): a capability lake does not serve
+// (`add_dataset`, a bare `approve_plan`) named as the call that does.
+std::string engine_words_in_lake_terms(std::string text);
+// The `enum` the engine's OpenAPI document declares for one input field of one capability.
+std::optional<nlohmann::json> engine_input_enum(const nlohmann::json& openapi,
+                                                std::string_view capability,
+                                                std::string_view field);
 // Zetta's OpenAPI document reduced to the allow-listed paths, rebased under `base` (the agent
 // path of one workspace), so a client deriving its tools from it sees exactly what it may call.
 nlohmann::json workspace_openapi(const nlohmann::json& document, std::string_view base);
@@ -115,13 +208,19 @@ nlohmann::json workspace_openapi(const nlohmann::json& document, std::string_vie
 //
 // `methodology` ("M-3") asks the engine for that methodology's own pipeline (zetta#1061); an
 // engine that cannot run it answers not_supported. Empty = the engine picks from the words.
-liquid::runtime::task<ApiResult> compile_pipeline(ApiContext& context,
-                                                  std::string customer_id,
-                                                  std::string project,
-                                                  std::string intent,
-                                                  std::string dataset,
-                                                  nlohmann::json model = nullptr,
-                                                  std::string methodology = {});
+//
+// The compiler is given the dataset's source and table and the label and entity columns as
+// `hints` (zetta#1246), so the steps are named from the data: `columns` carries `label_column`
+// and `entity_column` when the caller knows them; the label falls back to the model's `target`.
+liquid::runtime::task<ApiResult>
+compile_pipeline(ApiContext& context,
+                 std::string customer_id,
+                 std::string project,
+                 std::string intent,
+                 std::string dataset,
+                 nlohmann::json model = nullptr,
+                 std::string methodology = {},
+                 nlohmann::json columns = nlohmann::json::object());
 // The workspace engine's methodologies (its list_methodologies answer, zetta#1061), or null
 // when the engine predates the registry: then only M-1 (churn / GBDT classification) runs.
 liquid::runtime::task<nlohmann::json> workspace_methodologies(ApiContext& context,

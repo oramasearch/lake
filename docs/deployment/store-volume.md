@@ -268,3 +268,6 @@ home is new) instead of serving `unauthorized`.
 processes with a fresh `LIQUID_HOME`, runs 32 first uses at once against each, then reads and
 commits through the operator token and checks that the pre-open opened each switched workspace's
 repository; without the start-time creation it fails, on `fd4ea84` (before lake#534) as on main.
+The pre-open runs beside those requests, so the test waits for its `repositories_preopened` event
+for both workspaces before it stops the server; a stop that came first drained the pre-open, which
+then logged nothing or 0 (lake#614).

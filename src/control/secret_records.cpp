@@ -53,21 +53,27 @@ std::optional<SecretMount> SecretMountCodec::decode(const StoredRecord& record) 
     mount.at_us = record.at_us;
     mount.created_at = record_instant(record.at_us);
     mount.updated_at = or_created(text(record.body, "updated_at"), record.at_us);
-    if (mount.customer_id.empty() || mount.organization_id.empty() || mount.name.empty()) {
+    // An empty organization is a mount its account owns (the workspace's customer).
+    if (mount.customer_id.empty() || mount.name.empty()) {
         return std::nullopt;
     }
     return mount;
 }
 
-std::string secret_mount_name_key(const WorkspaceRecords& records,
-                                  const std::string& organization_id,
-                                  const std::string& name) {
-    return records.index_of(SecretMountCodec::collection,
-                            "organization:" + organization_id + "\nname:" + name);
+std::string secret_mount_owner(const SecretMount& mount) {
+    return mount.organization_id.empty() ? "customer:" + mount.customer_id
+                                         : "organization:" + mount.organization_id;
 }
 
-std::string secret_mount_name_lookup(const std::string& organization_id) {
-    return "name-claims:" + organization_id;
+std::string secret_mount_name_key(const WorkspaceRecords& records, const SecretMount& mount) {
+    return records.index_of(SecretMountCodec::collection,
+                            secret_mount_owner(mount) + "\nname:" + mount.name);
+}
+
+std::string secret_mount_name_lookup(const SecretMount& mount) {
+    // An organization's claims keep the lookup they were written with.
+    return mount.organization_id.empty() ? "name-claims:" + secret_mount_owner(mount)
+                                         : "name-claims:" + mount.organization_id;
 }
 
 json secret_mount_name_claim(const std::string& mount_id) {

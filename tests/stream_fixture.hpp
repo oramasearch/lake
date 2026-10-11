@@ -3,10 +3,11 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>
-#include <optional>
 #include <fstream>
+#include <functional>
 #include <map>
 #include <mutex>
+#include <optional>
 #include <stdexcept>
 
 #include <pqxx/pqxx>
@@ -39,6 +40,11 @@ public:
     std::map<std::string, RecordTables> records;
     std::string first_url;
     std::vector<std::pair<std::string, json>> calls;
+    // Fixed answers for workspace capabilities the fake does not model (upload_dataset, ...).
+    std::map<std::string, json> answers;
+    // Answers that depend on the input (get_solution by id, …); nullopt falls through to the rest.
+    std::function<std::optional<control::ZettaControlResult<json>>(const std::string&, const json&)>
+        responder;
     std::string last_url, last_token;
     std::mutex mutex;
 
@@ -58,6 +64,14 @@ public:
         };
         if (RecordTables::handles(capability, input)) {
             co_return records[last_url].run(capability, input);
+        }
+        if (responder) {
+            if (auto answered = responder(capability, input)) {
+                co_return std::move(*answered);
+            }
+        }
+        if (const auto found = answers.find(capability); found != answers.end()) {
+            co_return found->second;
         }
         if (capability == "list_topics") {
             json rows = json::array();

@@ -1,110 +1,95 @@
 # Repository pages
 
-The repository UI is rendered on the server by the pure functions declared in
-`include/lake/api/web_ui.hpp`. Each route calls the same registry
-capability as REST and MCP, so authorization and audit recording have one path.
+The repository pages are web-app pages in `frontend/src/pages/repositories/` (the platform pages in
+`frontend/src/pages/apps/`). Each reads the registry capability REST and MCP callers use, so
+authorization and audit recording have one path. Their presentation rules are in
+[forge.md](forge.md).
 
-| Page | Route | Capability | Contents |
-|---|---|---|---|
-| Repository list | `GET /repositories` | `list_repositories` | repositories the caller may open |
-| Repository | `GET /repository?id=<id>` | `get_repository`, repository content, forge release, and effective-access reads | tree, recent changes, rendered README, refs and releases, clone/push commands, indexed language and size totals, lifecycle, and access |
-| Tree | `GET /repository/tree?id=<id>&ref=<ref>` | `repository_tree` | paths, kinds, blobs, modes, stable nodes, and sizes at the ref |
-| File | `GET /file?repository_id=<id>&ref=<ref>&path=<path>` | `repository_file`, `list_changes`, `change_diff` | highlighted or plain source, line/range anchors, blame, backing blob, and raw/download links |
-| Change log | `GET /changes?repository_id=<id>` | `list_changes` | libliquid change identities and metadata |
-| Change | `GET /change?repository_id=<id>&id=<change>` | `get_change`, `change_diff`, `list_reviews`, `list_review_comments`, `list_artifacts` | review title/message, compact identities, state, file stats, text-hunk views, anchored comments, conflict values, checks, and attestations |
-| Issues | `GET /issues?repository_id=<id>` | `list_issues` | issue state, labels and assignees with server-side query filtering |
-| Issue | `GET /issue?repository_id=<id>&id=<issue>` | `list_issues`, `list_issue_comments` | sanitized issue body and discussion, labels, assignees, and linked change identities |
-| Releases | `GET /releases?repository_id=<id>` | `list_releases` | sanitized notes, tag and change identity, artifact output and verified-attestation counts |
-| Webhooks | `GET /webhooks?repository_id=<id>` | `list_webhooks`, `list_webhook_deliveries`, `retry_webhook_delivery` | endpoint subscriptions plus durable delivery attempts and failed-attempt retry |
-| Branch protection | `GET /protection?repository_id=<id>` | `list_branch_protections`, `audit` | ref rules and their signed denied-update audit records |
-| Conflicts | `GET /conflicts?repository_id=<id>` | `list_conflicts`, `resolve_conflict` | unresolved conflict kind, region, explanation, reasons, values, and write-authorized resolution controls |
-| Artifacts | `GET /artifacts?repository_id=<id>` | `list_artifacts` | filtered cursor pages of libliquid build results |
-| Artifact | `GET /artifact?repository_id=<id>&id=<result>` | `get_artifact` | one result, outputs, timing, cache/divergence state, verified attestations and trace summary |
-| Repository access | `GET /repository/access?id=<id>` | `entity_effective_access` | direct and inherited effective access |
+| Page | Route | File | Capabilities | Contents |
+|---|---|---|---|---|
+| Repository list | `/repositories` | `RepositoriesPage.tsx` | `list_repositories`, `create_repository` | repositories the caller may open with their figures, search and workspace and visibility filters, and New repository (a drawer) |
+| Repository | `/repository?id=<id>` | `RepositoryPage.tsx` | `get_repository`, `repository_tree`, `repository_refs`, `repository_file`, `list_changes`, `list_releases`, `get_customer`, `get_workspace`, `entity_effective_access`, `build_image` | tree, recent changes, README, refs and releases, clone/push commands, language and size totals, lifecycle, workspace and access |
+| Tree | `/repository/tree?id=<id>&ref=<ref>` | `TreePage.tsx` | `repository_tree`, `list_changes`, `change_diff` | paths, kinds, modes and sizes at the ref, with each path's newest change |
+| File | `/file?repository_id=<id>&ref=<ref>&path=<path>` | `FilePage.tsx` | `repository_file`, `list_changes`, `change_diff` | highlighted or plain source, line/range anchors, blame, backing blob, raw/download links |
+| Change log | `/changes?repository_id=<id>` | `ChangesPage.tsx` | `list_changes` | change identities and metadata |
+| Change | `/change?repository_id=<id>&id=<change>` | `ChangePage.tsx` | `get_change`, `change_diff`, `list_reviews`, `list_review_comments`, `list_artifacts` | title and message, compact identities, state, file stats, text hunks, anchored comments, conflict values, checks and attestations |
+| Issues | `/issues?repository_id=<id>` | `IssuesPage.tsx`, `NewIssue.tsx` | `list_issues`, `my_permissions`, `issue_assignees`, `create_issue` | Open, Closed and All tabs, label and assignee chips and search, filtered in the page; New issue (a drawer) |
+| Issue | `/issue?repository_id=<id>&id=<issue>` | `IssuePage.tsx` | `list_issues`, `list_issue_comments`, `my_permissions`, `issue_assignees`, `update_issue`, `create_issue_comment` | the description and conversation with a comment box, editing, labels, assignees, close and reopen, references |
+| Releases | `/releases?repository_id=<id>` | `ReleasesPage.tsx` | `list_releases` | notes, tag and change identity, artifact outputs and verified attestations |
+| Webhooks | `/webhooks?repository_id=<id>` | `WebhooksPage.tsx` | `list_webhooks`, `list_webhook_deliveries`, `retry_webhook_delivery` | subscriptions, durable delivery attempts, failed-attempt retry |
+| Branch protection | `/protection?repository_id=<id>` | `ProtectionPage.tsx` | `list_branch_protections`, `audit` | ref rules and their signed refused-update records |
+| Conflicts | `/conflicts?repository_id=<id>` | `ConflictsPage.tsx` | `list_conflicts`, `resolve_conflict` | conflict kind, region, explanation, reasons, values, resolution |
+| Artifacts | `/artifacts?repository_id=<id>` | `ArtifactsPage.tsx` | `list_artifacts` | filtered cursor pages of build results |
+| Artifact | `/artifact?repository_id=<id>&id=<result>` | `ArtifactPage.tsx` | `get_artifact` | one result, outputs, timing, cache/divergence, attestations, trace summary |
+| Repository access | `/repository/access?id=<id>` | `../organizations/AccessPage.tsx` | `entity_effective_access` | direct and inherited effective access |
+| Environments, Environment, Logs, Export | `/environments`, `/environment`, `/logs`, `/exports` | `../apps/EnvironmentsPage.tsx`, `EnvironmentPage.tsx`, `LogsPage.tsx`, `ExportsPage.tsx` | `list_environments`, `get_environment`, `list_deployments`, `create_domain`, `delete_domain`, `environment_logs`, `list_exports` | the repository's environments, one environment's deployments and domains, its logs, its signed exports |
 
 ## Anonymous public read
 
-Unauthenticated calls may list and open only repositories whose visibility is `public`. A private
-or organization repository is omitted from the list and its direct page redirects to `/login`.
-The same rule covers repository refs, trees, files, logs, changes, conflict values and the artifact
-placeholder. Signed-in calls use the policy engine instead.
+A signed-out visitor sees only repositories whose visibility is `public`, in the list and by
+address. A private or organization repository is omitted from the list, and opening its address
+sends the visitor to `/sign-in?next=<address>` without saying whether it exists. The same rule covers refs, trees, files, logs,
+changes, conflict values and artifacts. Signed-in calls use the policy engine.
 
 ## Change diffs
 
 `change_diff` calls libliquid's public `repository::diff` with text hunks enabled. Each path keeps
-its added, removed, modified, moved, mode-changed, and conflicted status; old and new modes and blob
-digests remain visible. Text hunks include their old/new ranges and escaped removed/added lines.
-Conflict digests are values on the path instead of an error state. A change with no visible hunks
-renders the explicit empty state.
+its added, removed, modified, moved, mode-changed and conflicted status; old and new modes and blob
+digests stay visible. Text hunks include their old/new ranges and removed/added lines. Conflict
+digests are values on the path instead of an error state. A change with no visible hunks shows the
+explicit empty state.
 
-The conflicts page leads with plain conflict information rather than a digest list. Each card names
-the kind in person-facing words, the repository path and exact byte or stable-node region, Liquid's
-explanation, and every reason a suspicious proposal needs attention. Base, left, right, and optional
-proposal identities remain available as supporting evidence. Signed-in writers can keep either
-side, accept an available reviewed proposal, or supply prepared replacement text; the form calls
-`resolve_conflict` and the registry applies path authorization and signed audit.
+The conflicts page leads with plain conflict information rather than a digest list: the kind in
+person-facing words, the path and exact byte or stable-node region, Liquid's explanation, and every
+reason a suspicious proposal needs attention, with the base, left, right and proposal identities as
+evidence. A signed-in writer can keep either side, accept an available reviewed proposal, or supply
+prepared replacement text; `resolve_conflict` applies path authorization and signed audit.
 
-The change view groups those values into a forge review. Unified text is the server-rendered
-default, while one small script switches to an already-rendered side-by-side representation and
-copies the full change identity. Comments remain bound to their liquid text anchor. Review state,
-per-file statistics, check outcomes, and verified attestation counts are readable without that
-script.
-
-Issue list and detail routes likewise stay adapters over forge capabilities. State, label, and
-assignee filters are applied to the authorized list; detail lookup and comment association use
-their durable record identities. Bodies and comments share the server-side Markdown renderer, so
-stored raw HTML is displayed as text and never reaches the response as markup.
-
-Release, webhook, and protection pages also receive only capability results. Release records keep
-their artifact and verified-attestation evidence beside safe notes. Webhook history never receives
-the stored signing secret and retries create a new durable attempt. The protection page joins its
-rule list with signed refusal events by repository identity; it does not infer denials from the
-current rule set.
+Release, webhook and protection pages also read only capability results. Webhook history never
+receives the stored signing secret, and a retry creates a new durable attempt. The protection page
+joins its rule list with signed refusal events by repository; it does not infer denials from the
+current rules.
 
 Forge records live in the workspace Zetta of the repository's workspace (lake#341,
-[forge.md](../api/forge.md#where-forge-records-live)), so these pages keep their addresses and
-read them through the same capabilities: one `list_records` per kind they show (the home page and
-the releases, issues, protection and exports pages one; the change, issue and webhooks pages two).
-The repository home page and the change view do not wait for that workspace: when it cannot be read
-(for example while it is still starting), the home page says "Releases are unavailable" and the
-change view "Reviews are unavailable", with the reason, and render everything else. The pages that
-exist only to show forge records answer the workspace's error instead.
+[forge.md](../api/forge.md#where-forge-records-live)), so these pages keep their addresses and read
+them through the same capabilities. The repository home and the change view do not wait for that
+workspace: when it cannot be read (for example while it is starting), the home page says
+*Releases are unavailable* and the change view *Reviews are unavailable*, with the reason, and show
+everything else. The pages that exist only to show forge records show the workspace's error.
 
-The file browser resolves each path's newest change from those structural diffs. File pages map
-text-hunk ranges onto numbered source lines for blame. C and C++ source is parsed with liquid's
-tree-sitter grammar target before the renderer adds syntax roles; unknown extensions remain
-escaped plain text. The range script enhances ordinary line anchors and does not fetch data.
+The file and tree pages resolve each path's newest change from those structural diffs, one
+`change_diff` per change, a few at a time. File pages map text-hunk ranges onto numbered lines for
+blame.
 
 ## Artifact results
 
-`list_artifacts` maps the action, output path, content digest, cursor, and page-size filters to
-libliquid's `repository::results`. The returned cursor is opaque and the next-page link preserves
-the active filters. Lake authorizes the repository object and marks this candidate-returning list
-for the registry's batched-filter invariant before opening the customer repository.
+`list_artifacts` maps the action, output path, content digest, cursor and page-size filters to
+libliquid's `repository::results`. The returned cursor is opaque and the next-page link keeps the
+active filters. Lake authorizes the repository object and marks this list for the registry's
+batched-filter invariant before opening the repository.
 
-`get_artifact` loads one result and renders its outputs, phase timings, cache and divergence state,
-worker and timestamps. Provenance is verified against the signed result and action. Direct result
+`get_artifact` loads one result: its outputs, phase timings, cache and divergence state, worker
+and timestamps. Provenance is verified against the signed result and action. Direct result
 attestations, including reproducibility, use the registered TAAP profile verifier. Each SBOM report
-keeps libliquid's verification result. The page finds the retained build trace containing the
-result and summarizes wall time, action/dependency counts, and cache hits/misses. Missing trace or
+keeps libliquid's verification result. The page summarizes the retained build trace containing
+the result: wall time, action and dependency counts, cache hits and misses. Missing trace or
 attestation data is an explicit empty state.
 
 ## First repository
 
-Signed-in visitors with visible customers get the `POST /repository/create` form on
-`/repositories`. It collects the workspace, repository name, and description; new repositories
-are private. The workspace choice lists each live workspace of the viewer's spaces, grouped by
-space, with the remembered workspace preselected; the workspace names its space, so the form sends
-only `workspace_id`. A space without a workspace is sent to `/workspaces` first: a repository
-belongs to one workspace and there is no default (lake#315). The adapter calls `create_repository`
-through the registry and redirects to the repository home. The description is written to the
-chosen workspace's Zetta (lake#315 part 2), so the create waits for that workspace and is refused
-while it is not ready. `/repositories` and the repository home read descriptions there; a
-workspace that cannot be read shows "Unavailable" in the list and "Description unavailable: …" on
-the home page instead of failing the page. Authorization checks the space even
-when a request bypasses the form, and a `customer_id` that is not the workspace's space is refused.
-Password sign-up supplies the personal customer and inherited ownership before this page.
-See [sign-up-walkthrough.md](sign-up-walkthrough.md).
+A signed-in viewer with a space gets **Create a Repository** on `/repositories`. It asks for the
+workspace, the repository name and an optional description; new repositories are private. The
+workspace choice lists each live workspace of the viewer's spaces, grouped by space, with the
+current workspace preselected; the workspace names its space, so the call sends `workspace_id`
+(and its `customer_id`). A space without a workspace is told to create one on Workspaces first: a
+repository belongs to one workspace and there is no default (lake#315). `create_repository` then
+opens the repository home. The description is written to the chosen workspace's Zetta (lake#315
+part 2), so the create waits for that workspace and is refused while it is not ready. The list and
+the home page read descriptions there; a workspace that cannot be read shows *Unavailable* in the
+list and *Description unavailable: …* on the home page instead of failing the page. Authorization
+checks the space even when a call bypasses the page, and a `customer_id` that is not the
+workspace's space is refused. Password sign-up supplies the personal space and its ownership before
+this page; see [sign-up-walkthrough.md](sign-up-walkthrough.md).
 
 ## The owning workspace
 
@@ -116,13 +101,14 @@ The repository pages show it; they do not move under `/w/<workspace id>/`.
   not assign.
 - The repository home names its workspace beside the heading, with the same link, for a signed-in
   viewer who may read the space (`get_workspace`); an anonymous or outside reader of a public
-  repository is not told the space's workspace names. Its **Build image** form carries the
-  repository's `workspace_id`, which `build_image` requires.
+  repository is not told the space's workspace names. **Build image** sends the repository's
+  `workspace_id`, which `build_image` requires, and opens that workspace's Packages page, where
+  the build shows.
 
 Why not `/w/<id>/`: the workspace navigation in
 [workspace-data-plane.md](../architecture/workspace-data-plane.md) makes the path authoritative for
 Design, Train and Ship pages, where the person chooses the workspace and the page lists that
-workspace's objects. A repository page is addressed by the repository itself, which already names
+workspace's objects ([workspace-selection.md](workspace-selection.md)). A repository page is addressed by the repository itself, which already names
 its workspace and never changes it, so a workspace segment would only repeat it or contradict it.
 The same URLs are the public, anonymous addresses of public repositories, the clone and push
 addresses, and the links in webhooks, issues and releases; readers of those have no workspace
