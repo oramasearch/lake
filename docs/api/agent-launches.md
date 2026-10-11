@@ -156,15 +156,17 @@ service.
 
 Audit kinds: `agent.launch`, `agent.stop`, `agent.schedule`, `agent.unschedule`, `agent.turn`.
 
-## Model Tokens (lake#564)
+## Model Tokens (lake#564, lake#248)
 
-A launch, a schedule's run or a background turn reports the model tokens it spent with
-`record_model_usage {model_name, input_tokens, output_tokens}`, using its own credential (a library
-agent adds `task_id` with its bus credential). Lake counts them in the workspace the run belongs to,
-by agent, run and model; the Usage dashboard and the agent's page show them
-([metering](metering.md#model-tokens)). The capability is not in a launch's scopes because it needs
-none: lake authorizes it by the credential's kind and finds the run from it. agent-runtime and the
-library agents do not call it yet ([lake#248](https://github.com/oramasearch/lake/issues/248)).
+A launch, a schedule's run or a background turn calls its model through Lake's
+[model gateway](model-gateway.md): the OpenAI SDK with its base URL at `<LAKE_URL>/openai/v1` and its
+own credential (`LAKE_TOKEN`, or the turn's `lake_token`) as the API key. Lake sends the call to the
+provider with Orama's key and counts the provider's own token usage in the workspace the run belongs
+to, by agent, run and model; the Usage dashboard and the agent's page show them
+([metering](metering.md#model-tokens)). Agent pods hold no provider key. The capability
+(`model_completion`) is not in a launch's scopes because it needs none: lake authorizes it by the
+credential's kind and finds the run from it. `record_model_usage` remains only for a model call made
+outside Lake.
 
 ## Configuration
 

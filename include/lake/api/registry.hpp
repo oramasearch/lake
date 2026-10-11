@@ -132,6 +132,23 @@ struct Transcription {
 using Transcriber =
     std::function<std::expected<Transcription, ApiError>(const TranscriptionRequest& request)>;
 
+// The model gateway's provider (lake#248, docs/api/model-gateway.md, model_gateway.hpp).
+struct ModelProviderRequest {
+    std::string endpoint; // one of model_gateway_endpoints: chat/completions, responses, embeddings
+    std::string body;     // the prepared request, as JSON text
+    bool stream = false;
+};
+struct ModelProviderResponse {
+    int status = 0;
+    std::string body;  // JSON, or the whole server-sent event stream when the request streamed
+    std::string error; // the transport's failure, never the request
+};
+// Sends one request to the model provider with Lake's own key. The HTTP server injects one over
+// its outbound client when LAKE_OPENAI_API_KEY is set; tests inject a fake. Empty: no model
+// provider is configured. It blocks for the length of the exchange, so a handler runs it with
+// run_blocking.
+using ModelProvider = std::function<ModelProviderResponse(const ModelProviderRequest& request)>;
+
 enum class CapabilityKind { Read, Action };
 std::string_view to_string(CapabilityKind kind);
 
@@ -330,6 +347,9 @@ struct ApiContext {
     // Speech-to-text for transcribe and create_transcript (docs/api/transcripts.md); empty when
     // this lake has no OpenAI key.
     Transcriber transcriber;
+    // The model gateway's provider (model_completion, docs/api/model-gateway.md); empty when this
+    // lake has no OpenAI key.
+    ModelProvider model_provider;
     // The transport to workspace Zettas' object routes, for workspace files (drives with
     // `files` storage, docs/api/drives.md): the HTTP server's pooled client, or a test's fake.
     // Null: this lake keeps no workspace files.

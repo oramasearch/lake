@@ -43,7 +43,9 @@ Top to bottom:
   workload or model (**By Workload or Model**) and GPU class (**By GPU Class**, lake#643; "Unknown
   class" for a GPU the operator could not name) where the reading has them, each with its total and
   share.
-- **Limits.** One meter per limit (used of limit, percent, enforced or warns), red past the limit;
+- **Limits.** One meter per limit (used of limit, percent, and what it does at its line, `limitNote`:
+  storage refuses new repository writes, model tokens refuse agents' model calls through the
+  [model gateway](../api/model-gateway.md#limits), every other limit warns), red past the limit;
   **Set a limit** opens a dialog: what to limit, the limit in a person's unit (GiB, hours,
   vCPU-hours, GiB-hours, GPU-hours, instance-hours or a count, `toLimit`), and the warning
   percentage. Empty or 0 removes
@@ -84,7 +86,8 @@ tables scroll in their own box.
 ## Verify
 
 `frontend/tests/usage.test.ts`: windows and their previous periods, units, changes, two accounts
-added up, the stacked series with Other, the CSV, limits in a person's units, links, one thing's
+added up, the stacked series with Other, the CSV, limits in a person's units and what each does,
+links, one thing's
 usage, and the workspace selection. `npx tsc --noEmit -p .`, `npm test` and `npm run build` in
 `frontend/`.
 

@@ -120,7 +120,7 @@ void log_database_diagnostic(std::string_view code, std::string_view message) {
     std::println(stderr, "{}", entry.dump());
 }
 
-constexpr std::array<ErrorCode, 31> documented_error_codes{{
+constexpr std::array<ErrorCode, 32> documented_error_codes{{
     {"invalid_input", 400, "The input is at fault; `path` points at the field."},
     {"secret_required",
      400,
@@ -183,6 +183,10 @@ constexpr std::array<ErrorCode, 31> documented_error_codes{{
     {"workspace_not_ready", 503, "The workspace or service exists but is not ready yet."},
     {"busy", 503, "The resource is busy; retry."},
     {"rate_limited", 429, "Too many requests from this caller, or in all, are waiting; retry."},
+    {"usage_limit_reached",
+     429,
+     "The account has used its monthly limit on this dimension (model tokens); an administrator "
+     "raises or removes it with set_usage_limit."},
 }};
 
 // Other spellings of a documented code: the workspace engine's and liquid's.

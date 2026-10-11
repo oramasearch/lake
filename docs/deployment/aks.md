@@ -78,13 +78,27 @@ it rolls.
 ## Speech-to-text key
 
 Speech-to-text (`transcribe`, and `create_transcript` from audio, lake#561,
-[`../api/transcripts.md`](../api/transcripts.md)) needs `LAKE_OPENAI_API_KEY` in the lake pod.
-Without it both answer `not_supported` and the rest of lake is unaffected. `LAKE_TRANSCRIBE_MODEL`
-is optional (default `gpt-4o-transcribe`).
+[`../api/transcripts.md`](../api/transcripts.md)) and the model gateway (`/openai/v1/*`, every agent
+model call, lake#248, [`../api/model-gateway.md`](../api/model-gateway.md)) need
+`LAKE_OPENAI_API_KEY` in the lake pod. Without it they answer `not_supported` and the rest of lake is
+unaffected. `LAKE_TRANSCRIBE_MODEL` is optional (default `gpt-4o-transcribe`), and so is
+`LAKE_MODEL_PROVIDER_URL` (default `https://api.openai.com/v1`).
 
 On the dev cluster the key already exists as Secret `lake-prod-openai`, key `OPENAI_API_KEY`, in
-namespace `lake`, where the lake pods run (`spec.agents.openaiSecretName` names the same Secret for
-the agents). The Lake CRD's `spec.env` is a list of Kubernetes `EnvVar`s, so `valueFrom.secretKeyRef`
+namespace `lake`, where the lake pods run. `spec.agents.openaiSecretName` used to name the same
+Secret for the agents, which put the key into every agent pod; once the agents call their model
+through the gateway it is removed, so only lake holds the key:
+
+```sh
+kubectl --context orama-production-cluster-01 patch lake prod --type json -p '[
+  {"op": "remove", "path": "/spec/agents/openaiSecretName"}
+]'
+```
+
+The operator then stops setting `OPENAI_API_KEY` in agent pods and stops copying the Secret into
+workspace namespaces; copies it made before stay until deleted
+(`kubectl get secret -A --field-selector metadata.name=lake-prod-openai`, every namespace but
+`lake`). The Lake CRD's `spec.env` is a list of Kubernetes `EnvVar`s, so `valueFrom.secretKeyRef`
 is supported. The operator appends each entry after its own variables and skips only the names it
 manages (`lakeEnv` in the operator's `internal/controller/lake_controller.go`). The key never
 enters the CR.
@@ -99,7 +113,9 @@ kubectl --context orama-production-cluster-01 patch lake prod --type json -p '[
 ]'
 ```
 
-The Deployment rolls. To check it, `transcribe` a short clip; the answer names its `model`.
+The Deployment rolls. To check it, `transcribe` a short clip; the answer names its `model`. For the
+gateway, ask Ask Orama something and read the turn's workspace usage: `usage_over_time` with
+`dimensions: ["model_tokens"]` shows the tokens by agent `agent-ask-orama`.
 Removing the entry turns speech-to-text off again. An image built before lake#561 ignores the
 variable.
 

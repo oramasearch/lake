@@ -1,5 +1,11 @@
 # The `/v1` API and MCP
 
+lake#248: [model-gateway.md](model-gateway.md) documents the model gateway, `model_completion` and
+its OpenAI-compatible routes `POST /openai/v1/chat/completions`, `/responses` and `/embeddings`:
+every agent model call goes through Lake with Orama's own key and is counted as the run's workspace's
+`model_tokens`, the monthly `model_tokens` limit is enforced (`usage_limit_reached`, 429), and agents
+hold no provider key.
+
 lake#564 (decision 56, migration `0073_billing`): [billing.md](billing.md) documents billing, on only
 where `LAKE_BILLING` is (Orama Cloud): `price_list`, `set_price_list`, `billing_account`,
 `bill_preview`, `issue_invoice`, `list_invoices`, `get_invoice`, `record_invoice_payment` and
@@ -325,7 +331,8 @@ and `Experiments.CompareRunsAnswersItsGetFormWithRepeatedKeysOrACommaList`
 | `usage_over_time` | read | `customer_id`, `workspace_ids?`, `dimensions?`, `from`, `to`, `granularity` (`hour`, `day`, `month`) | each dimension of usage over the period, added up across the chosen workspaces, with breakdowns by workspace and kind (and by agent, launch, model or object where they apply), read from each workspace's own Zetta (lake#564) | [metering.md](metering.md#usage-over-time) |
 | `usage_limits`, `set_usage_limit` | read/action | `customer_id`; a `dimension`, `limit` and `warn_percent?` | the account's limits with this month's use and a state (ok, warning, over); storage's limit is the enforced quota (lake#564) | [metering.md](metering.md#limits) |
 | `price_list`, `set_price_list`, `billing_account`, `bill_preview`, `issue_invoice`, `list_invoices`, `get_invoice`, `record_invoice_payment`, `void_invoice` | read/action | the price list's rates and `effective_from`; a `customer_id`, `period` (`YYYY-MM`) or `invoice_id` | Orama Cloud's billing, registered only where `LAKE_BILLING` is on (absent on enterprise installs): one price list with a rate per usage dimension that every account is billed at (lake#635; time per minute, lake#637), the month's bill from its usage, invoices and their payment state, in PostgreSQL (decision 56, lake#564) | [billing.md](billing.md) |
-| `record_model_usage` | action | `model_name`, `input_tokens`, `output_tokens`, `task_id?` | an agent's own task, launch, schedule or bus credential reports the tokens a turn or run spent; lake adds them to that workspace's usage (lake#564, lake#248) | [metering.md](metering.md#model-tokens) |
+| `record_model_usage` | action | `model_name`, `input_tokens`, `output_tokens`, `task_id?` | an agent's own task, launch, schedule or bus credential reports the tokens of a model call made outside Lake; lake adds them to that workspace's usage (lake#564) | [metering.md](metering.md#model-tokens) |
+| `model_completion` | action | `endpoint` (`chat/completions`, `responses`, `embeddings`), `request` (the OpenAI body) | the model gateway: an agent's task, launch or schedule credential calls the model provider through Lake with Orama's key; the provider's answer, its tokens counted as the run's workspace's `model_tokens`, refused past the monthly limit; also served OpenAI-compatible at `POST /openai/v1/<endpoint>` (lake#248) | [model-gateway.md](model-gateway.md) |
 | `create_secret_mount`, `list_secret_mounts`, `get_secret_mount` | action/read | customer, `workspace_id`, optional organization (without it the account owns the mount, lake#561), mount fields | mount metadata with `owner_type` (in the mount's workspace Zetta) | [secrets.md](secrets.md) |
 | `put_secret`, `read_secret`, `secret_metadata` | action/read | mount, name, value/version/metadata fields | versioned value or history | [secrets.md](secrets.md) |
 | `list_secrets` | read | mount, `prefix?`, `cursor?`, `limit?` | a mount's secret paths with current version, times and deleted state; never values | [secrets.md](secrets.md) |
