@@ -124,7 +124,7 @@ function GatePanel({ state, customerId, returnTo }: { state: WorkspaceState; cus
     return (
       <div role="status">
         <Empty icon={Spinner} title="Preparing Your Workspace" action={<Status value={state.phase || "Not picked up yet"} tone="warning" />}>
-          lake asked for a Zetta cluster of your own, where your projects, data and models live apart from every other customer's.{" "}
+          lake is preparing a workspace of your own, where your projects, data and models live apart from every other customer's.{" "}
           {state.phase ? `Status: ${state.phase}.` : "It has not been picked up yet."}
           <div className="mt-1 text-[12px] text-ink-3">This page checks again every 15 seconds.</div>
         </Empty>
@@ -161,7 +161,7 @@ function GatePanel({ state, customerId, returnTo }: { state: WorkspaceState; cus
           </Button>
         }
       >
-        Design, Train and Ship run on a Zetta cluster of your own, so your projects, data and models are never shared with another customer. It takes a minute or two to
+        Design, Train and Ship run in a workspace of your own, so your projects, data and models are never shared with another customer. It takes a minute or two to
         prepare.
       </Empty>
     </div>

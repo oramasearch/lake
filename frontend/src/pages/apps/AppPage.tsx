@@ -424,14 +424,14 @@ export default function AppPage() {
             <div className="space-y-4">
               <Card
                 label="Binding"
-                title="Workspace Zetta"
+                title="Workspace Data"
                 actions={
                   <ActionButton
                     busy={runner.busy}
                     id="zetta"
-                    onClick={() => call("zetta", "set_app_zetta_binding", { attached: !hasZetta }, hasZetta ? "Zetta detached" : "Zetta attached")}
+                    onClick={() => call("zetta", "set_app_zetta_binding", { attached: !hasZetta }, hasZetta ? "Workspace data detached" : "Workspace data attached")}
                   >
-                    {hasZetta ? "Detach Zetta" : "Attach Zetta"}
+                    {hasZetta ? "Detach workspace data" : "Attach workspace data"}
                   </ActionButton>
                 }
               >

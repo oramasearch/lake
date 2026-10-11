@@ -98,6 +98,9 @@ the page is sent `Cache-Control: private, no-store`. Three more things keep late
 - **Effects have block bodies.** `useEffect(() => { … })`; the build checks it
   (`scripts/check-effects.mjs`).
 - **Words, not stored values.** Show labels, not codes; dates through `format.ts`.
+- **No page names Zetta.** Page text says lake or the workspace ("lake builds the steps", "sealed
+  in this workspace"); the engine's name is for comments, identifiers and addresses only.
+  `tests/copy.test.ts` fails the build on a page string that names it (lake#583).
 - **Title Case** for headings and rail items, sentence case for body text, buttons and labels
   (`docs/ui/design-system.md` → *Capitalization*).
 - **Copy stays as it was.** Headings, explanations, empty states and confirmations keep lake's

@@ -30,7 +30,7 @@ import {
 } from "./logic";
 import { FormError, GatePanel, Identifier, Markdown, Panel, PipelineSvg, Refusal, RunBadge, When, entityCrumb, useDesignTrail, useSubmit } from "./parts";
 
-const SUB = "The steps Zetta runs and how data flows between them. A changed pipeline is approved again before it runs.";
+const SUB = "The steps lake runs and how data flows between them. A changed pipeline is approved again before it runs.";
 
 export default function PipelinePage() {
   const [params] = useSearchParams();
@@ -797,9 +797,9 @@ function Govern({
               <Button type="submit" variant="primary" loading={approve.busy}>
                 Approve
               </Button>
-            </div>
-          </Form>
-        )}
+            )}
+          </div>
+        </Form>
         <Form
           onSubmit={() =>
             check.run(async () => {
@@ -810,7 +810,7 @@ function Govern({
           }
         >
           <FormError error={check.error} />
-          <p className="m-0 text-[12.5px] text-ink-2">Run Zetta's correctness checks without running anything.</p>
+          <p className="m-0 text-[12.5px] text-ink-2">Run lake's correctness checks without running anything.</p>
           <div>
             <Button type="submit" loading={check.busy}>
               Check

@@ -69,7 +69,7 @@ function bindingsSummary(app: Row): string {
   const zetta = bindings.zetta !== undefined && bindings.zetta !== null;
   const services = Array.isArray(bindings.services) ? bindings.services.length : 0;
   if (!zetta && services === 0) return "None";
-  return `${zetta ? "" : "No "}Zetta, ${services} service${services === 1 ? "" : "s"}`;
+  return `${zetta ? "Workspace data" : "No workspace data"}, ${services} service${services === 1 ? "" : "s"}`;
 }
 
 const SUB = "Create, deploy and operate customer applications with live rollout status.";
@@ -188,7 +188,7 @@ export default function AppsPage() {
             <Stat label="Apps" value={all.length} icon={Box} />
             <Stat label="Ready" value={ready} tone={ready ? "ok" : undefined} sub={`of ${all.length}`} />
             <Stat label="Failed" value={failed} tone={failed ? "bad" : undefined} />
-            <Stat label="With Zetta" value={withZetta} sub="bound to the workspace Zetta" />
+            <Stat label="With Workspace Data" value={withZetta} sub="bound to the workspace" />
           </StatRow>
           <Toolbar>
             <SearchInput value={search} onChange={setSearch} placeholder="Search apps…" label="Search apps" />

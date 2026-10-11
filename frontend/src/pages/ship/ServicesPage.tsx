@@ -243,7 +243,7 @@ function Services({ customerId, creating, setCreating }: { customerId: string; c
             </Button>
           }
         >
-          Pick a kind from the catalog below, or start with a Zetta.
+          Pick a kind from the catalog below to start one.
         </Empty>
       ) : (
         <>
@@ -381,7 +381,7 @@ function Services({ customerId, creating, setCreating }: { customerId: string; c
 /** The catalog: one card per kind with its usual start time; each opens the drawer on that kind. */
 function Catalog({ kinds, kindsQ, onPick }: { kinds: Kind[]; kindsQ: { isLoading: boolean; isError: boolean; error: unknown; refetch: () => unknown }; onPick: (kind: string) => void }) {
   return (
-    <Section title="Service Catalog" sub="Your workspace is the Zetta that Design, Train and Ship use. Each kind's usual start time is on its card.">
+    <Section title="Service Catalog" sub="Services run beside the workspace that Design, Train and Ship use. Each kind's usual start time is on its card.">
       {kindsQ.isLoading ? (
         <Skeleton lines={3} />
       ) : kindsQ.isError ? (

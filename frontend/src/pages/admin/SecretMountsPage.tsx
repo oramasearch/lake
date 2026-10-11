@@ -194,7 +194,7 @@ function NewMount({ workspaceId: initialWorkspace, organizationId: initialOrgani
   return (
     <Modal title="New Secret Mount" subtitle="A mount holds secrets and encryption keys in one workspace, for your account or one of your organizations." onClose={onClose} sheet>
       <Form onSubmit={submit} error={fieldFault ? null : error}>
-        <Field label="Workspace" required help="Its secrets and keys are sealed in this workspace's Zetta. It cannot be changed later." error={fieldError(error, "workspace_id")}>
+        <Field label="Workspace" required help="Its secrets and keys are sealed in this workspace. It cannot be changed later." error={fieldError(error, "workspace_id")}>
           <select
             value={workspaceId}
             onChange={(e) => {
