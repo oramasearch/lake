@@ -32,11 +32,13 @@ instance administrator's desired state for each workspace Zetta's volume size an
 snapshots of those volumes and of lake's store volume; [workspaces.md](workspaces.md#capabilities)
 the storage fields a workspace row gains.
 
-[experiments.md](experiments.md) documents eleven training study, trial, run-metric, comparison
-and bounded-live-read capabilities, with identical REST POST/MCP schemas and confirmed actions,
-plus the `agent_turn` contract used for ExperimentsAgent proposals. These names are distinct from
-the solutions holdout `get_experiment` operation. `start_study` leaves a missing objective and
-budgets to Zetta under `from_defaults`, and every experiment error keeps Zetta's `path`.
+[experiments.md](experiments.md) documents eleven training experiment, trial, run-metric,
+comparison and bounded-live-read capabilities, with identical REST POST/MCP schemas and confirmed
+actions, plus the `agent_turn` contract used for ExperimentsAgent proposals. Lake says experiment
+and `experiment_id` where the engine says study (lake#561, [names](experiments.md#names)); lake's
+`get_experiment` is distinct from the solutions holdout `get_experiment` that `workspace_query`
+reads. `start_experiment` leaves a missing objective and budgets to Zetta under `from_defaults`,
+and every experiment error keeps Zetta's `path`.
 
 [streams.md](streams.md) documents all nine topic/message operations on both REST POST and MCP,
 with closed input/output schemas, space permissions, system-topic refusal and bounded live reads.

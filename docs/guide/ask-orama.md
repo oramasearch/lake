@@ -15,7 +15,7 @@ agent does the job better.
   press **Confirm**; lake then runs it as you, with your permissions, and records it in the audit.
   Only a proposal lake stored in your own conversation can be confirmed.
 - **It delegates.** Ask Orama hands work to the right agent: the Project Agent for pipelines,
-  ApplicationAgent for apps, ExperimentsAgent for training studies, Auto-Suggest for ideas, or an
+  ApplicationAgent for apps, ExperimentsAgent for training experiments, Auto-Suggest for ideas, or an
   agent you built. Their proposals are reviewed the same way before anything is written.
 - **Conversations live in the workspace.** Every message is kept in the workspace Zetta of the
   workspace you asked in, sealed with its key. Another workspace never shows it, and only you can
@@ -99,8 +99,8 @@ and a **Confirm** button.
 A change to an existing pipeline goes to the Project Agent instead, and the answer shows **Review
 the proposed change**, which opens the pipeline page where you apply or discard it
 ([AI Projects and Pipelines](/docs/design)). An app goes to ApplicationAgent, whose full proposal you
-review before **Confirm and deploy** ([Apps](/docs/apps)); a training study goes to ExperimentsAgent,
-whose study you edit and confirm before it starts ([Experiments](/docs/experiments)).
+review before **Confirm and deploy** ([Apps](/docs/apps)); a training experiment goes to ExperimentsAgent,
+whose experiment you edit and confirm before it starts ([Experiments](/docs/experiments)).
 
 Through the API, confirm with `POST /v1/confirm_ask_proposal`, naming the stored message and the
 proposal's position in it:

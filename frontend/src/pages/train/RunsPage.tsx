@@ -1,6 +1,6 @@
 /** Train → Runs (web_ui.cpp workspace_content "runs"): every pipeline run with figures, a search
- * and status filters, its status and its report. Also the run and study helpers the Run and Models pages share (study_refs, run_subject,
- * trial_subject, when). */
+ * and status filters, its status and its report. Also the run and experiment helpers the Run and
+ * Models pages share (experimentRefs, RunSubject, TrialSubject, when). */
 import { useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { CheckCircle2, Loader, Play, XCircle } from "lucide-react";
@@ -18,24 +18,24 @@ export function when(timestamp: string): string {
   return `${timestamp.slice(0, 10)} ${timestamp.slice(11, 16)} UTC`;
 }
 
-export type StudyRef = { id: string; name: string; number?: unknown };
-export type StudyRefs = { byRun: Map<string, StudyRef>; byModel: Map<string, StudyRef>; promoted: Set<string> };
+export type ExperimentRef = { id: string; name: string; number?: unknown };
+export type ExperimentRefs = { byRun: Map<string, ExperimentRef>; byModel: Map<string, ExperimentRef>; promoted: Set<string> };
 
-/** Which study each trial run and trial model belongs to, and which models a study promoted
- * (lake#449), from `list_studies`. */
-export function studyRefs(studies: Row | undefined): StudyRefs {
-  const refs: StudyRefs = { byRun: new Map(), byModel: new Map(), promoted: new Set() };
-  for (const study of (studies?.studies ?? []) as Row[]) {
-    if (!study || typeof study !== "object") continue;
-    const spec = (study.spec ?? {}) as Row;
-    const ref: StudyRef = { id: text(study, "id"), name: text(study, "name") || text(spec, "name") };
-    for (const trial of (study.trials ?? []) as Row[]) {
+/** Which experiment each trial run and trial model belongs to, and which models an experiment
+ * promoted (lake#449), from the engine's `list_studies` (an experiment is the engine's study). */
+export function experimentRefs(listing: Row | undefined): ExperimentRefs {
+  const refs: ExperimentRefs = { byRun: new Map(), byModel: new Map(), promoted: new Set() };
+  for (const experiment of (listing?.studies ?? []) as Row[]) {
+    if (!experiment || typeof experiment !== "object") continue;
+    const spec = (experiment.spec ?? {}) as Row;
+    const ref: ExperimentRef = { id: text(experiment, "id"), name: text(experiment, "name") || text(spec, "name") };
+    for (const trial of (experiment.trials ?? []) as Row[]) {
       if (!trial || typeof trial !== "object") continue;
       const entry = { ...ref, number: trial.number };
       if (text(trial, "run")) refs.byRun.set(text(trial, "run"), entry);
       if (text(trial, "model")) refs.byModel.set(text(trial, "model"), entry);
     }
-    const promoted = text(study, "promoted_model");
+    const promoted = text(experiment, "promoted_model");
     if (promoted) {
       refs.promoted.add(promoted);
       if (!refs.byModel.has(promoted)) refs.byModel.set(promoted, ref);
@@ -44,20 +44,20 @@ export function studyRefs(studies: Row | undefined): StudyRefs {
   return refs;
 }
 
-/** The space's studies; a failure is not shown (the pages read them only to name trials). */
-export function useStudies() {
+/** The workspace's experiments; a failure is not shown (the pages read them only to name trials). */
+export function useExperimentRefs() {
   const q = useWq<Row>("list_studies");
-  return studyRefs(q.data);
+  return experimentRefs(q.data);
 }
 
-/** "Trial N of study <name>" (or "A trial of study <name>"), the study linked. */
-export function TrialSubject({ refOf }: { refOf: StudyRef }) {
+/** "Trial N of experiment <name>" (or "A trial of experiment <name>"), the experiment linked. */
+export function TrialSubject({ refOf }: { refOf: ExperimentRef }) {
   const path = useWsPath();
   const { customerId } = useWorkspace();
   return (
     <>
-      {typeof refOf.number === "number" ? `Trial ${refOf.number} of ` : "A trial of "}study{" "}
-      <Link to={path(`/train/experiment?${qs({ customer_id: customerId, study: refOf.id })}`)}>{refOf.name || refOf.id}</Link>
+      {typeof refOf.number === "number" ? `Trial ${refOf.number} of ` : "A trial of "}experiment{" "}
+      <Link to={path(`/train/experiment?${qs({ customer_id: customerId, experiment: refOf.id })}`)}>{refOf.name || refOf.id}</Link>
     </>
   );
 }
@@ -117,7 +117,7 @@ function Runs() {
   const path = useWsPath();
   const { customerId } = useWorkspace();
   const q = useWq<Row>("list_runs");
-  const studies = useStudies();
+  const experiments = useExperimentRefs();
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState<string | null>(null);
   const runs = useMemo(() => ((q.data?.runs ?? []) as Row[]).filter((run) => run && typeof run === "object"), [q.data]);
@@ -135,7 +135,7 @@ function Runs() {
   const shown = runs.filter((run) => {
     if (status && (text(run, "status") || "unknown") !== status) return false;
     if (!needle) return true;
-    const trial = studies.byRun.get(text(run, "id"));
+    const trial = experiments.byRun.get(text(run, "id"));
     const words = [text(run, "pipeline_name"), text(run, "project_name"), text(run, "graph"), text(run, "project"), text(run, "id"), trial?.name ?? ""].join(" ");
     return words.toLowerCase().includes(needle);
   });
@@ -179,7 +179,7 @@ function Runs() {
             label: "Pipeline",
             sort: (run) => (text(run, "pipeline_name") || text(run, "graph")).toLowerCase(),
             render: (run) => {
-              const trial = studies.byRun.get(text(run, "id"));
+              const trial = experiments.byRun.get(text(run, "id"));
               return (
                 <div className="min-w-0">
                   <div className="font-semibold">{trial ? <TrialSubject refOf={trial} /> : <RunSubject run={run} />}</div>

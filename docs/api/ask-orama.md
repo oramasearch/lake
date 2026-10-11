@@ -48,7 +48,8 @@ shows it and keeps it honest.
   ExperimentsAgent, Auto-Suggest, and any agent the person built; an unattended agent is started by proposing
   `launch_agent`. An ApplicationAgent delegation creates an `app` task, whose proposal is reviewed
   and confirmed before that agent receives App writes. An ExperimentsAgent delegation creates an
-  `experiment` task, whose editable study is reviewed before that agent receives `create_study`.
+  `experiment` task, whose editable experiment is reviewed before that agent receives the engine's
+  `create_study`.
 - **Conversations live in the workspace** (lake#370). Every message is a sealed record in the
   workspace Zetta of the workspace the conversation was held in (collection `lake_ask_messages`,
   [workspace-records.md](../architecture/workspace-records.md)): the person's text, and for Ask

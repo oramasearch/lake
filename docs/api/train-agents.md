@@ -67,7 +67,7 @@ training data rather than serving people. People do not create or delete library
 
 ExperimentsAgent is deployed from `oramasearch/agent-experiments:f5be471`. Lake gives it the
 independent `agent-experiments` bus topic and credential. It runs as a chat-capable service; its
-study records and trial data stay in the selected workspace Zetta.
+experiment records and trial data stay in the selected workspace Zetta.
 
 The page (2026-09-27, the UX review) says what each agent does for the person and where to use it,
 in plain words: *Agent · What it does for you · Where to use it* and a badge (*Available*, *Not

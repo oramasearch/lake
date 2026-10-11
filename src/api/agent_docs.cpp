@@ -30,16 +30,17 @@ struct GroupRule {
 constexpr std::array group_rules{
     GroupRule{
         "Experiments",
-        "Read training studies, run metrics, comparisons and bounded live events in a space. "
-        "These tools are distinct from the solutions holdout get_experiment. Start and stop "
-        "require write permission and the person's confirmation; promote_trial requires "
-        "space administration and confirmation. Curves are suppressed for differential privacy.",
+        "Read training experiments (each trial is one run of its settings), run metrics, "
+        "comparisons and bounded live events in a workspace. get_experiment is distinct from "
+        "the solutions holdout experiment that workspace_query's get_experiment reads. Start and "
+        "stop require write permission and the person's confirmation; promote_trial requires "
+        "admin on the account and confirmation. Curves are suppressed for differential privacy.",
         [](std::string_view n) {
-            return n == "list_experiments" || n == "get_experiment_study" ||
+            return n == "list_experiments" || n == "get_experiment" ||
                    n == "list_experiment_trials" || n == "get_experiment_analysis" ||
                    n == "tail_experiment_events" || n == "stop_experiment_trial" ||
-                   n == "get_run_metrics" || n == "compare_runs" || n == "start_study" ||
-                   n == "stop_study" || n == "promote_trial";
+                   n == "get_run_metrics" || n == "compare_runs" || n == "start_experiment" ||
+                   n == "stop_experiment" || n == "promote_trial";
         }},
     GroupRule{"Transcripts",
               "What people said, added to a workspace from a recording, an uploaded audio or "
