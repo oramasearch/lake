@@ -131,7 +131,7 @@ bucket an hour, kept 400 days, created by lake on first write:
 
 | Series | Kind | Labels | Written by |
 |---|---|---|---|
-| `lake_usage` | counter | `dimension`, and by dimension `kind`, `agent`, `launch_id`, `model`, `object_id` | the request path and the owner loop's sample, through the bounded `UsageRecorder` |
+| `lake_usage` | counter | `dimension`, and by dimension `kind`, `agent`, `launch_id`, `model`, `object_id`, `class` | the request path and the owner loop's sample, through the bounded `UsageRecorder` |
 | `lake_storage` | gauge (`last`) | `kind` | the owner loop's sample |
 
 The request path only adds to an in-memory value for (workspace, metric, hour, labels)
@@ -150,13 +150,19 @@ the lake Zetta. Telemetry: [`../serving/telemetry.md`](../serving/telemetry.md#t
 
 Each dimension has one unit. Billing's prices are set per dimension `name` and count its `unit`
 (`usage_dimensions()`, `src/api/usage_recorder.cpp`; [billing.md](billing.md#prices-and-bills)).
+`build_compute`, `run_compute` and `instances` are measured and charted but no longer priced
+(lake#643): compute is priced as `cpu`, `ram`, `gpu` and `vram`.
 
 | Dimension | Unit | Kinds | Where it comes from |
 |---|---|---|---|
+| `cpu` | `mcpu_seconds`: thousandths of a vCPU for a second | `workspace` (an engine), the service kind (`postgres`, `kafka`, …), `store`, `app`, `build`, `agent` (`object_id` is the workload) | what each workload is scheduled with, [below](#resources) |
+| `ram` | `mib_seconds`: a MiB of memory for a second | as `cpu` | as `cpu` |
+| `gpu` | `gpu_seconds` | as `cpu`, and `class` (`l4`, `a10g`, `a100`, `h100`, …; absent when unknown) | as `cpu` |
+| `vram` | `mib_seconds` of GPU memory | as `gpu` | as `cpu` |
 | `storage` | bytes, the latest reading of each period | `repositories`, `images`, `workspace_data`, `transcripts`, `drive_files` | the owner loop's sample, below |
 | `transfer` | bytes | `in`, `out` | the exact hourly repository transfer records (`lake_metering_usage`, above) |
-| `build_compute` | seconds | `repository`, `image` | the repository build records (above) and the operator's finished image builds, at the hour each finished |
-| `run_compute` | seconds | `run` | the workspace's runs (`list_runs`), training and experiment trials included, at the time each last changed |
+| `build_compute` | seconds | `repository`, `image` | the repository build records (above) and the operator's finished image builds, at the hour each finished; titled Build Time |
+| `run_compute` | seconds | `run` | the workspace's runs (`list_runs`), training and experiment trials included, at the time each last changed; titled Workspace Run Time. A run executes in its workspace's engine, so its CPU and RAM are the engine's, never counted twice |
 | `speech` | seconds | `transcript` | the audio length of each transcript made from audio (`create_transcript`), rounded up, when the speech-to-text model reports it (`whisper-1`); `gpt-4o-transcribe` reports tokens instead, which count as its `model_tokens` |
 | `calls` | calls | `api`, `mcp` | every capability call routed to the workspace, the same attribution as `lake_requests` ([telemetry](../serving/telemetry.md#the-workspace-request-series)), answered or refused |
 | `predictions` | calls | — (`object_id` is the model) | each answered `predict` of a model the workspace has |
@@ -182,16 +188,77 @@ never count one service twice, samples every live workspace on its maintenance t
   app that is running and ready, the seconds since the last sample (at most two intervals, so a gap
   while no lake owned the store root is not counted) times its instances, replicas and GiB. The
   workspace's own engine is a service, and counts.
+- **CPU, RAM, GPU and GPU memory** of every workload, from what the operator schedules it with
+  ([below](#resources)).
 - **Build results.** Repository build results that finished since a little before the last sample
   are queued for their workspace records, so `build_compute` does not wait for a `metering_usage`
   read.
+
+### Resources
+
+**Status: implemented (lake#643), not deployed; needs
+[orama-operator#288](https://github.com/oramasearch/orama-operator/pull/288), which vendors the
+schema and reports the resources.**
+Compute is metered by the resources each workload is **scheduled with**: each container's request,
+or its limit where it has none, as Kubernetes admitted it (a namespace's default request included).
+Steve, 2026-10-11: *"service minutes are actually cpu minutes and ram minutes (different prices)...
+and gpu minutes and vram minutes"*.
+
+**Where lake learns them.** The Orama operator writes `workload_resources` in lake's control
+PostgreSQL (migration `0075_workload_resources`, [schema](../control-plane/schema.md#workload-resources-migration)):
+one row per workload, the totals of its scheduled pods: `cpu_millis`, `memory_bytes`, `gpus`
+(`nvidia.com/gpu`), `gpu_class` (from the node's GPU product, lower case) and `vram_bytes` (the
+GPUs' memory), with `pods`, how many are scheduled now, and `observed_at`, when its numbers last
+changed (the operator writes a row only when they change, at most every 30 seconds per Lake, and
+only where the Lake runs services or builds). A row is numbers only, written only by the operator,
+like its status rows; lake never writes it outside tests. A build's or agent job's row stays until
+lake removes the build or launch, so its duration can be priced after its pods are gone. Lake creates the desired state of
+services, apps and builds but not their pod sizes, which the operator and its catalogue decide, so
+the operator is the one place that knows them.
+
+| `object_kind` | `object_id` | The workload |
+|---|---|---|
+| `workspace` | the workspace | its engine (the workspace Zetta) |
+| `service` | the service | a managed service (Postgres, Kafka, ClickHouse, …) |
+| `store` | the store | a store that runs pods (today every store is a volume or a bucket, and has no row) |
+| `app` | the app | its replicas |
+| `build` | the build | the image build's pod |
+| `agent_launch` | the launch | agent-runtime's Job (`job`) or Deployment (`service`) |
+
+**What the sampler records** (`sample_usage`, every fifteen minutes, by the store root's owner):
+
+- **A running workload**, one whose row has `pods` above 0 and whose object is live (a running
+  workspace, a present service or store, an app not deleted, a present `service`-mode launch): the
+  seconds since the last sample (at most two intervals) times its CPU, memory, GPUs and GPU memory.
+- **A build or an agent job** (`job`-mode launch) once, in the sample after it ends (`Succeeded`,
+  `Failed`, `Cancelled`, at its final status time): from its request to its final status, times what
+  its pods ran with (its row keeps them after the pods finish). The build and launch rows have no
+  start time, so time queued is included, as for build time. One that ended while no lake owned the
+  store root for more than two intervals is not counted; one ending as the root changes owner may be
+  counted twice (the series is approximate, like the request series).
+- **Pipeline runs, training and experiment trials** run in their workspace's engine: they are its
+  CPU and RAM, not counted again.
+
+Each value goes to the workload's workspace through the bounded `UsageRecorder` (the four together
+or none), in the hour bucket of the sample: `cpu` in mCPU-seconds (millicores × seconds), `ram` and
+`vram` in MiB-seconds (bytes × seconds ÷ MiB, rounded up), `gpu` in GPU-seconds, labelled `kind` and
+`object_id`, and `class` for `gpu` and `vram` when the operator knows it. Billing prices them per
+vCPU-minute, GiB-minute and GPU-minute ([billing.md](billing.md#prices-and-bills)).
+
+`usage_over_time` answers them with `by_object` and, for `gpu` and `vram`, `by_class` (`key` the
+class; `""` for a GPU of no known class).
 
 ### Not measured
 
 `usage_over_time` names these in `not_measured` whenever the dimension is asked for:
 
-- CPU and memory of services, stores and apps: the operator does not report them
-  ([lake#612](https://github.com/oramasearch/lake/issues/612)).
+- CPU, RAM, GPU and GPU memory of a running workload, or a build or agent job that ended in the
+  window, whose resources the operator has not reported (no `workload_resources` row): named, such as
+  "service orders" or "the engine of workspace home", and not counted. Until the orama-operator change
+  is deployed this is every workload. If the table cannot be read, the reading says so.
+- Agent cron runs (`agent_cron_runs`): `workload_resources` has no kind for them yet, so the operator
+  does not report them.
+- Lake's own pods and the library agents belong to no workspace, and are not billed.
 - Model tokens are counted only when an agent reports them; agent-runtime and the library agents do
   not yet ([lake#248](https://github.com/oramasearch/lake/issues/248)).
 - Speech-to-text for dictation outside a transcript (`transcribe`) belongs to no workspace
@@ -217,7 +284,8 @@ The answer: `periods` (each period's start), and for each dimension `title`, `un
 (`sum` or `last`), `total` (a counter's sum; a reading's latest period), `points` (one value per
 period, added up across the workspaces; a reading's periods without data are `null`),
 `by_workspace` and `by_kind` (`key`, `total`, `points`, largest first), `by_agent`, `by_launch` and
-`by_model` for `model_tokens`, and `by_object` for `instances`, `volumes` and `predictions`.
+`by_model` for `model_tokens`, `by_object` for `instances`, `volumes`, `predictions`, `cpu`, `ram`,
+`gpu` and `vram`, and `by_class` for `gpu` and `vram`.
 `workspaces[]` says which workspaces were read and why one was not; a workspace that could not be
 read never counts as zero. It needs `read` on the customer and is audited centrally as
 `metering.usage_over_time.read`. The existing `metering_usage` is unchanged.
@@ -260,7 +328,12 @@ backwards or too long window, and a stranger refused; each model's answered pred
 `UsageLimits.*` (a warning at 80%, over at 100%, storage's limit is the quota, `0` removes);
 `RecordModelUsage.*` (a launch credential's tokens in its workspace by agent, launch and model; a
 person refused); `UsageSample.*` (stored bytes by kind, instance and volume seconds of a running
-service and none for a pending one, a transcript's audio seconds rounded up).
+service and none for a pending one, a transcript's audio seconds rounded up; and
+`MetersCpuRamGpuAndGpuMemoryFromScheduledResources`, lake#643: a workspace engine, a service, a GPU
+app with its class, a finished build and agent job counted once for how long they ran, a workload
+without a row counted nothing and named in `not_measured`, and `by_object` and `by_class`).
+`PostgresBilling.WorkloadResourcesAndClassRatesFollowTheContract` reads and replaces
+`workload_resources` rows in both stores.
 `HttpServer.RequestLogsNameRoutesAndEachWorkspaceGetsItsOwnRequestSeries` counts calls through a
 real server and writes them only at stop. `SchemaConformance.*` validates the three readable
 capabilities' answers over REST and MCP.

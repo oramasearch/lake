@@ -1460,6 +1460,20 @@ Result<void> InMemoryStore::set_build_status(const std::string& id, BuildStatus 
     return {};
 }
 
+Result<void> InMemoryStore::age_build(const std::string& id, std::int64_t seconds) {
+    std::lock_guard lock(mutex_);
+    const auto build = std::ranges::find(builds_, id, &Build::id);
+    if (build == builds_.end()) {
+        return std::unexpected(StoreError{"not_found", "no build " + id});
+    }
+    const auto created = utc_seconds(build->created_at.substr(0, 19) + "Z");
+    if (!created) {
+        return std::unexpected(StoreError{"invalid_input", "build time is unreadable"});
+    }
+    build->created_at = std::format("{:%FT%TZ}", *created - std::chrono::seconds(seconds));
+    return {};
+}
+
 Result<std::vector<ManagedStore>> InMemoryStore::list_stores(const std::string& customer_id,
                                                              const std::string& workspace_id) {
     std::lock_guard lock(mutex_);
@@ -1661,6 +1675,7 @@ Result<void> InMemoryStore::set_agent_launch_status(const std::string& id,
     found->exit_code = exit_code;
     found->result = std::move(result);
     found->observed_generation = found->generation;
+    found->status_updated_at = now_iso8601();
     return {};
 }
 
@@ -2169,11 +2184,13 @@ Result<BillingPlan> InMemoryStore::put_billing_plan(const BillingPlan& plan) {
                                           "a plan needs an id of lower-case letters, digits and "
                                           "hyphens, a name and a three-letter currency"});
     }
-    std::set<std::string> seen;
+    std::set<std::pair<std::string, std::string>> seen;
     for (const BillingPrice& price : plan.prices) {
-        if (price.dimension.empty() || price.per == 0 || !seen.insert(price.dimension).second) {
-            return std::unexpected(StoreError{
-                "invalid_input", "each price needs its own dimension and a `per` above 0"});
+        if (price.dimension.empty() || price.per == 0 ||
+            !seen.insert({price.dimension, price.class_name}).second) {
+            return std::unexpected(
+                StoreError{"invalid_input",
+                           "each price needs its own dimension and class and a `per` above 0"});
         }
     }
     std::lock_guard lock(mutex_);
@@ -2181,9 +2198,34 @@ Result<BillingPlan> InMemoryStore::put_billing_plan(const BillingPlan& plan) {
     const auto found = billing_plans_.find(plan.id);
     stored.created_at = found == billing_plans_.end() ? now_iso8601() : found->second.created_at;
     stored.updated_at = now_iso8601();
-    std::ranges::sort(stored.prices, {}, &BillingPrice::dimension);
+    std::ranges::sort(stored.prices, [](const BillingPrice& left, const BillingPrice& right) {
+        return std::tie(left.dimension, left.class_name) <
+               std::tie(right.dimension, right.class_name);
+    });
     billing_plans_[plan.id] = stored;
     return stored;
+}
+
+Result<std::vector<WorkloadResources>> InMemoryStore::workload_resources() {
+    std::lock_guard lock(mutex_);
+    std::vector<WorkloadResources> rows;
+    for (const auto& [key, row] : workload_resources_) {
+        rows.push_back(row);
+    }
+    return rows;
+}
+
+Result<void> InMemoryStore::put_workload_resources(const WorkloadResources& row) {
+    static const std::set<std::string> kinds{
+        "workspace", "service", "store", "app", "build", "agent_launch"};
+    if (!kinds.contains(row.object_kind) || row.object_id.empty() || row.pods < 0 || row.gpus < 0) {
+        return std::unexpected(StoreError{"invalid_input", "not a workload resources row"});
+    }
+    std::lock_guard lock(mutex_);
+    WorkloadResources stored = row;
+    stored.observed_at = now_iso8601();
+    workload_resources_[{row.object_kind, row.object_id}] = std::move(stored);
+    return {};
 }
 
 Result<Invoice> InMemoryStore::create_invoice(const Invoice& invoice) {

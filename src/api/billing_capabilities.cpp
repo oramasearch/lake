@@ -13,6 +13,7 @@
 #include "lake/api/stripe.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <format>
@@ -98,13 +99,28 @@ Month this_month() {
 // ------------------------------------------------------------------------------------------------
 // Records as JSON.
 
+// A GPU class as a person reads it: "h100" is "H100".
+std::string class_title(std::string_view name) {
+    std::string out(name);
+    for (char& c : out) {
+        c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+    }
+    return out;
+}
+
 json price_json(const control::BillingPrice& price) {
     const UsageDimension* dimension = find_usage_dimension(price.dimension);
+    std::string title = dimension ? std::string(dimension->title) : price.dimension;
+    if (!price.class_name.empty()) {
+        title += " (" + class_title(price.class_name) + ")";
+    }
     return {{"dimension", price.dimension},
-            {"title", dimension ? dimension->title : std::string_view(price.dimension)},
+            {"class", price.class_name},
+            {"title", title},
             {"unit", dimension ? dimension->unit : std::string_view()},
             {"unit_micros", price.unit_micros},
-            {"per", price.per}};
+            {"per", price.per},
+            {"priced", dimension == nullptr || dimension->priced}};
 }
 
 json price_list_json(const PriceList& list) {
@@ -126,6 +142,7 @@ json optional_list_json(const std::optional<PriceList>& list) {
 json line_json(const control::InvoiceLine& line) {
     return {{"kind", line.kind},
             {"dimension", line.dimension},
+            {"class", line.class_name},
             {"description", line.description},
             {"unit", line.unit},
             {"quantity", line.quantity},
@@ -318,7 +335,7 @@ std::expected<PriceList, ApiResult> list_for(ApiContext& context, const Month& m
 
 struct Measured {
     std::optional<ApiResult> failure; // why the usage could not be read at all
-    std::map<std::string, std::uint64_t> quantities;
+    UsageQuantities quantities;
     bool complete = true;
     json unread = json::array();       // the workspaces whose usage could not be read
     json not_measured = json::array(); // what usage_over_time says it cannot include
@@ -340,8 +357,11 @@ liquid::runtime::task<Measured> measure(ApiContext& context,
                                         const PriceList& list) {
     Measured measured;
     json dimensions = json::array();
+    std::set<std::string> asked;
     for (const control::BillingPrice& price : list.prices) {
-        dimensions.push_back(price.dimension);
+        if (asked.insert(price.dimension).second) {
+            dimensions.push_back(price.dimension);
+        }
     }
     if (dimensions.empty()) {
         co_return measured;
@@ -388,9 +408,14 @@ liquid::runtime::task<Measured> measure(ApiContext& context,
                     ++count;
                 }
             }
-            measured.quantities[name] = count == 0 ? 0 : whole(sum / static_cast<double>(count));
+            measured.quantities.totals[name] =
+                count == 0 ? 0 : whole(sum / static_cast<double>(count));
         } else {
-            measured.quantities[name] = whole(entry.value("total", 0.0));
+            measured.quantities.totals[name] = whole(entry.value("total", 0.0));
+        }
+        for (const json& row : entry.value("by_class", json::array())) {
+            measured.quantities.by_class[name][row.value("key", "")] +=
+                whole(row.value("total", 0.0));
         }
     }
     co_return measured;
@@ -692,26 +717,61 @@ std::optional<PriceList> price_list_for(const std::vector<PriceList>& lists,
 }
 
 std::uint64_t billable_quantity(std::string_view unit, std::uint64_t quantity) {
-    // Time is billed by the minute (lake#637): the month's summed seconds, rounded up once to a
-    // whole minute, never each job, so many short jobs are not each charged a minute.
-    if (unit == "seconds" || unit == "instance_seconds") {
-        const std::uint64_t minutes = quantity / 60 + (quantity % 60 == 0 ? 0 : 1);
-        return minutes > max_amount / 60 ? max_amount : minutes * 60;
+    // Time is billed by the minute (lake#637, lake#643): the month's summed usage, rounded up once
+    // to a whole minute of the unit (a minute, a vCPU-minute, a GiB-minute), never each job, so
+    // many short jobs are not each charged a minute.
+    std::uint64_t minute = 0;
+    if (unit == "seconds" || unit == "instance_seconds" || unit == "gpu_seconds") {
+        minute = 60;
+    } else if (unit == "mcpu_seconds") {
+        minute = 60 * 1000;
+    } else if (unit == "mib_seconds") {
+        minute = 60 * 1024;
     }
-    return quantity;
+    if (minute == 0) {
+        return quantity;
+    }
+    const std::uint64_t minutes = quantity / minute + (quantity % minute == 0 ? 0 : 1);
+    return minutes > max_amount / minute ? max_amount : minutes * minute;
 }
 
-std::vector<control::InvoiceLine>
-bill_lines(const PriceList& list, const std::map<std::string, std::uint64_t>& quantities) {
+std::vector<control::InvoiceLine> bill_lines(const PriceList& list, const UsageQuantities& usage) {
+    // The classes rated on the list, by dimension: what their rates cover is not billed again at
+    // the dimension's default rate.
+    std::map<std::string, std::set<std::string>> rated;
+    for (const control::BillingPrice& price : list.prices) {
+        if (!price.class_name.empty()) {
+            rated[price.dimension].insert(price.class_name);
+        }
+    }
     std::vector<control::InvoiceLine> lines;
     for (const control::BillingPrice& price : list.prices) {
         const UsageDimension* dimension = find_usage_dimension(price.dimension);
-        const auto found = quantities.find(price.dimension);
-        const std::uint64_t quantity = found == quantities.end() ? 0 : found->second;
-        const std::string unit = dimension ? std::string(dimension->unit) : std::string();
-        const std::uint64_t billable = billable_quantity(unit, quantity);
+        const auto total = usage.totals.find(price.dimension);
+        std::uint64_t quantity = total == usage.totals.end() ? 0 : total->second;
+        const auto classes = usage.by_class.find(price.dimension);
+        const auto class_quantity = [&](const std::string& name) -> std::uint64_t {
+            if (classes == usage.by_class.end()) {
+                return 0;
+            }
+            const auto found = classes->second.find(name);
+            return found == classes->second.end() ? 0 : found->second;
+        };
+        const auto others = rated.find(price.dimension);
         std::string description =
             dimension ? std::string(dimension->title) : std::string(price.dimension);
+        if (!price.class_name.empty()) {
+            quantity = class_quantity(price.class_name);
+            description += " (" + class_title(price.class_name) + ")";
+        } else if (others != rated.end()) {
+            // The default rate bills every class without its own, and usage of no known class.
+            for (const std::string& name : others->second) {
+                quantity -= std::min(quantity, class_quantity(name));
+            }
+            description += ", other classes";
+        }
+        const std::string unit = dimension ? std::string(dimension->unit) : std::string();
+        const std::uint64_t billable = billable_quantity(unit, quantity);
         if (dimension && dimension->aggregation == "last") {
             description += ", average over the month";
         }
@@ -724,9 +784,15 @@ bill_lines(const PriceList& list, const std::map<std::string, std::uint64_t>& qu
                          billable,
                          price.unit_micros,
                          std::max<std::uint64_t>(price.per, 1),
-                         price_of(billable, price.unit_micros, price.per)});
+                         price_of(billable, price.unit_micros, price.per),
+                         price.class_name});
     }
     return lines;
+}
+
+std::vector<control::InvoiceLine>
+bill_lines(const PriceList& list, const std::map<std::string, std::uint64_t>& quantities) {
+    return bill_lines(list, UsageQuantities{quantities, {}});
 }
 
 std::shared_ptr<PaymentProviders> fixed_payment_providers(std::shared_ptr<PaymentProvider> provider,
@@ -905,7 +971,10 @@ void register_billing_capabilities(Registry& registry,
         .title = "Price list",
         .description =
             "Orama Cloud's price list: one rate per usage dimension, `unit_micros` (millionths of "
-            "the currency) for every `per` units of the dimension's unit. Lake is priced by usage "
+            "the currency) for every `per` units of the dimension's unit; GPU and GPU memory may "
+            "carry a rate per GPU `class` beside their default. Compute is priced as CPU "
+            "(vCPU-minutes), RAM, GPU and GPU memory (GiB-minutes and GPU-minutes) of what each "
+            "workload is scheduled with. Lake is priced by usage "
             "only: no plans, no monthly fee, nothing included; every account is billed at this "
             "list. `list` is the list in force for `period` (YYYY-MM; this month when left out), "
             "null before one is published; `next` is a list published for a later month, if any. "
@@ -961,18 +1030,27 @@ void register_billing_capabilities(Registry& registry,
             return ApiResult::success(std::move(out));
         }});
 
-    const json price_input =
-        object_schema({{"dimension", {{"type", "string"}, {"enum", dimension_names}}},
-                       {"unit_micros", integer_schema()},
-                       {"per", integer_schema(1)}},
-                      json::array({"dimension", "unit_micros"}));
+    const json price_input = object_schema(
+        {{"dimension", {{"type", "string"}, {"enum", dimension_names}}},
+         {"class",
+          {{"type", "string"},
+           {"pattern", "^([a-z0-9][a-z0-9-]{0,31})?$"},
+           {"description",
+            "a GPU class (l4, a10g, a100, h100) for gpu and vram: a rate for that class alone; "
+            "left out or empty, the dimension's rate for every other class"}}},
+         {"unit_micros", integer_schema()},
+         {"per", integer_schema(1)}},
+        json::array({"dimension", "unit_micros"}));
     registry.add(Capability{
         .name = "set_price_list",
         .title = "Publish the price list",
         .description =
             "Operator or instance administrator only. Publishes the price list: one rate per "
             "usage dimension (`unit_micros` for every `per` units of the dimension's unit; a "
-            "dimension without a rate is not charged), in `currency` (USD by default), in force "
+            "dimension without a rate is not charged), and for gpu and vram optionally one rate "
+            "per GPU `class` (the dimension's rate without a class bills every other class). "
+            "build_compute, run_compute and instances are no longer priced (lake#643). In "
+            "`currency` (USD by default), in force "
             "from the first day of `effective_from` (YYYY-MM; this month when left out). A month "
             "is billed at the list in force at its end, so a list published mid-month prices the "
             "whole month; invoices already issued keep their rates. Every publication is kept.",
@@ -1006,20 +1084,37 @@ void register_billing_capabilities(Registry& registry,
             row.currency = input.value("currency", "USD");
             row.base_micros = 0;
             row.active = true;
-            std::set<std::string> seen;
+            std::set<std::pair<std::string, std::string>> seen;
             const json prices = input.at("prices");
             for (std::size_t index = 0; index < prices.size(); ++index) {
                 const json& price = prices[index];
+                const std::string at = "/prices/" + std::to_string(index);
                 const std::string dimension = price.at("dimension");
-                if (!seen.insert(dimension).second) {
+                const std::string class_name = price.value("class", std::string());
+                const UsageDimension* known = find_usage_dimension(dimension);
+                if (known != nullptr && !known->priced) {
+                    return ApiResult::failure(
+                        "invalid_input",
+                        dimension + " is measured but no longer priced: compute is priced as "
+                                    "cpu, ram, gpu and vram (lake#643)",
+                        at + "/dimension");
+                }
+                if (!class_name.empty() && (known == nullptr || !known->classes)) {
+                    return ApiResult::failure(
+                        "invalid_input", dimension + " has no classes to rate", at + "/class");
+                }
+                if (!seen.insert({dimension, class_name}).second) {
                     return ApiResult::failure("invalid_input",
-                                              "each dimension has one rate",
-                                              "/prices/" + std::to_string(index) + "/dimension");
+                                              class_name.empty()
+                                                  ? "each dimension has one rate"
+                                                  : "each class of a dimension has one rate",
+                                              at + "/dimension");
                 }
                 row.prices.push_back({dimension,
                                       price.at("unit_micros").get<std::uint64_t>(),
                                       price.value("per", std::uint64_t{1}),
-                                      0});
+                                      0,
+                                      class_name});
             }
             auto lists = published_lists(context);
             if (!lists) {

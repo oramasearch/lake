@@ -18,8 +18,15 @@ sales"*.
   `set_price_list` replace them.
 - **A bill is usage × rate**, per dimension, and an invoice freezes each line's quantity and rate.
 - **Time is priced per minute** ([lake#637](https://github.com/oramasearch/lake/issues/637), Steve,
-  2026-10-11: *"make the pricing per minute, not per hour"*): build and run compute, service
-  instances and speech to text. Storage and volumes stay per GiB-month.
+  2026-10-11: *"make the pricing per minute, not per hour"*): compute and speech to text. Storage
+  and volumes stay per GiB-month.
+- **Compute is CPU, RAM, GPU and GPU memory, each at its own rate**
+  ([lake#643](https://github.com/oramasearch/lake/issues/643), Steve, 2026-10-11: *"service minutes
+  are actually cpu minutes and ram minutes (different prices)... and gpu minutes and vram
+  minutes"*): vCPU-minutes, GiB-minutes of RAM, GPU-minutes (a rate per GPU class) and GiB-minutes
+  of GPU memory, of the resources every workload is scheduled with
+  ([metering.md](metering.md#resources)). They replace instance-minutes and build and run
+  job-minutes on the price list.
 - **Metis is not on this list.** Metis is enterprise software, priced by Orama's sales team per
   customer; lake's price list prices Orama Cloud usage only.
 
@@ -215,19 +222,42 @@ answers ([metering.md](metering.md#dimensions)): `unit_micros` for every `per` u
 dimension's unit. Amounts are integer millionths of the list's three-letter `currency` (USD). A
 dimension without a rate is not charged. There is no fee and nothing is included.
 
-The bill for a month (`YYYY-MM`, a UTC calendar month) is one `usage` line per priced dimension, by
-dimension name, with `quantity` (the month's use), `billable` (what is charged; `included` is always
-0), the rate (`unit_micros`, `per`) and `amount_micros` = ⌈`billable` × `unit_micros` ÷ `per`⌉,
-capped at the largest bigint. The total is the sum of the lines.
+**GPU classes** (lake#643). `gpu` and `vram` may also carry one rate per GPU `class` (`l4`, `a10g`,
+`a100`, `h100`, or any lower-case class the operator reports): a price `{dimension, class,
+unit_micros, per}` bills that class's usage alone, and the dimension's rate without a class bills
+every other class and usage of no known class (a GPU the operator could not name). Without a rate
+for the dimension itself, a class without its own rate is not charged. Only `gpu` and `vram` have
+classes; `class` on any other dimension is `invalid_input`.
 
-**Time is billed by the minute on the month's total** (lake#637, `billable_quantity` in
-`include/lake/api/billing.hpp`). Usage is metered in seconds; for a dimension counted in `seconds`
-or `instance_seconds` (`build_compute`, `run_compute`, `speech`, `instances`), `billable` is the
-month's summed seconds rounded up once to a whole minute. A job is never rounded on its own: a
-hundred one-second builds are 100 seconds, billed as 2 minutes ($0.01), not 100 minutes. Every
-other dimension's `billable` is its `quantity`.
+**Retired from the list** (lake#643). `instances`, `build_compute` and `run_compute` are still
+measured and charted, but `set_price_list` refuses a rate for them (`invalid_input` at
+`/prices/<n>/dimension`): compute is priced as CPU, RAM, GPU and GPU memory. A list published before
+keeps its rates for them, so a month billed at it still bills them, and every invoice keeps its
+lines as issued.
 
-`quantity` for a counted dimension is the month's total across the account's live workspaces; for
+The bill for a month (`YYYY-MM`, a UTC calendar month) is one `usage` line per rate on the list, in
+list order, with `dimension`, `class` (empty but for a class rate), `quantity` (the month's use),
+`billable` (what is charged; `included` is always 0), the rate (`unit_micros`, `per`) and
+`amount_micros` = ⌈`billable` × `unit_micros` ÷ `per`⌉, capped at the largest bigint. The total is
+the sum of the lines. A class rate's line is described "GPU (H100)"; the dimension's own rate, when
+the list also rates classes, "GPU, other classes", and its quantity is what no class rate covers.
+
+**Time is billed by the minute on the month's total** (lake#637, lake#643, `billable_quantity` in
+`include/lake/api/billing.hpp`). Usage is metered by the second; `billable` is the month's summed
+usage rounded up once to a whole minute of its unit:
+
+| Unit | Dimensions | Rounded up to |
+|---|---|---|
+| `seconds`, `instance_seconds`, `gpu_seconds` | `speech`, `build_compute`, `run_compute`, `instances`, `gpu` | a minute (60) |
+| `mcpu_seconds` | `cpu` | a vCPU-minute (60,000 thousandths of a vCPU for a second) |
+| `mib_seconds` | `ram`, `vram` | a GiB-minute (61,440 MiB-seconds) |
+
+A job is never rounded on its own: a hundred one-second builds are 100 seconds, billed as 2 minutes,
+not 100 minutes, and half a vCPU for 61 seconds is billed as one vCPU-minute. Every other
+dimension's `billable` is its `quantity`.
+
+`quantity` for a counted dimension is the month's total across the account's live workspaces (a
+class rate's, that class's total, from `usage_over_time`'s `by_class`); for
 storage (a reading) it is the average of the month's daily readings, each the sum of every
 workspace's latest reading that day. Workspaces deleted before the bill is read are not included
 (decision 56's cost).
@@ -251,8 +281,9 @@ the new list for the next month.
 
 ### How the list is stored
 
-No migration: each publication is one `billing_plans` row (name `Usage`, `base_micros` 0, every
-price's `included` 0) with its rates in `billing_plan_prices`, under the id
+Each publication is one `billing_plans` row (name `Usage`, `base_micros` 0, every price's `included`
+0) with its rates in `billing_plan_prices` (keyed by dimension and `class` since migration
+`0075_workload_resources`, lake#643), under the id
 `usage-<YYYYMM>-<publish time in µs, 17 digits>`. The id sorts by the month the list applies from,
 then by when it was published, which is the rule above (`price_list_for`,
 `include/lake/api/billing.hpp`). Every publication is kept, so an invoice's `price_list_id` always
@@ -263,11 +294,12 @@ ignored.
 
 Orama Cloud's rates ([lake#623](https://github.com/oramasearch/lake/issues/623), Steve,
 2026-10-11: *"come up with sensible prices based on market rates for similar services"*; usage only
-since [lake#635](https://github.com/oramasearch/lake/issues/635)). Each rate is a public list price
-for the same resource, read on 2026-10-11 in US regions, times a stated margin: about 1.5–3× for
-infrastructure, for running it as a managed service, and the model provider's rate plus 20% for
-model tokens and speech to text. Prices are in USD. lake#623 carries the full research table with
-each reference's source URL.
+since [lake#635](https://github.com/oramasearch/lake/issues/635); compute as CPU, RAM, GPU and GPU
+memory since [lake#643](https://github.com/oramasearch/lake/issues/643)). Each rate is a public list
+price for the same resource, read on 2026-10-11 in US regions, on demand, times a stated margin:
+about 1.5–3× for infrastructure, for running it as a managed service, and the model provider's rate
+plus 20% for model tokens and speech to text. Prices are in USD. lake#623 and lake#643 carry the full
+research tables with each reference's source URL and date.
 
 **Metis is not on this list.** Metis is enterprise software priced by Orama's sales team; a
 customer talks to sales. Nothing here prices it.
@@ -281,49 +313,77 @@ needs the operator or the instance administrator; the payload is [below](#publis
 
 | Dimension | Rate | `unit_micros` | `per` | Reference rate (2026-10-11) | Margin |
 |---|---|---|---|---|---|
+| `cpu` | $0.0015 / vCPU-minute ($0.09 / vCPU-hour) | 1500 | 60000 mCPU-seconds | serverless containers and managed Kubernetes pods, per vCPU-hour: median of eleven public on-demand rates $0.0445 (range $0.024–0.086; hyperscalers $0.040–0.086) | 2.0× |
+| `ram` | $0.00017 / GiB-minute ($0.0102 / GiB-hour) | 170 | 61440 MiB-seconds | the same, per GiB-hour of memory: hyperscaler median $0.0050 (range $0.0036–0.0108) | 2.0× ($0.010 / hour is $0.000167 / minute, rounded to $0.00017) |
+| `gpu` (`l4`) | $0.0108 / GPU-minute ($0.648 / hour) | 10800 | 60 GPU-seconds | GPU-only on-demand price, CPU and memory billed apart: $0.672 / hour, less its memory share (24 GiB at $0.01) = $0.432 | 1.5× |
+| `gpu` (`a10g`) | $0.0215 / GPU-minute ($1.29 / hour) | 21500 | 60 | GPU-only $1.10 / hour, less 24 GiB at $0.01 = $0.86 | 1.5× |
+| `gpu` (`a100`) | $0.03875 / GPU-minute ($2.325 / hour) | 38750 | 60 | GPU-only $2.10 / hour (40 GB) and $2.20 (80 GB), less 40 or 80 GiB at $0.01 = $1.70 and $1.40; one class, their mean $1.55 | 1.5× |
+| `gpu` (`h100`) | $0.07875 / GPU-minute ($4.725 / hour) | 78750 | 60 | GPU-only $3.95 / hour, less 80 GiB at $0.01 = $3.15 | 1.5× |
+| `gpu` (other classes) | $0.03875 / GPU-minute | 38750 | 60 | a GPU of a class without its own rate, or of no known class, is billed as an A100 | — |
+| `vram` | $0.00025 / GiB-minute ($0.015 / GiB-hour) | 250 | 61440 MiB-seconds | no provider prices GPU memory apart: it is bundled into each GPU class, at an implied $0.024–0.14 / GiB-hour. Its share here is $0.01 / GiB-hour, below the lowest implied figure, so that each class's compute share above stays positive | 1.5× |
 | `storage` | $0.04 / GiB-month | 40000 | 1073741824 bytes | hyperscaler object storage $0.023 / GB-month (the others $0.015–0.020) | 1.7× |
 | `transfer` | $0.05 / GiB | 50000 | 1073741824 bytes | hyperscaler internet egress $0.087–0.12 / GB, ingress free | in and out are one dimension: ~1.1× a half-in, half-out blend, about half of egress alone |
-| `build_compute` | $0.005 / minute ($0.30 / hour) | 5000 | 60 seconds | serverless containers $0.0405 / vCPU-hour + $0.00445 / GB-hour ($0.099 / hour, $0.00165 / minute, for 2 vCPU, 4 GiB); hosted CI runner, 2 cores, $0.36 / hour ($0.006 / minute) | 3× containers, below the CI runner |
-| `run_compute` | $0.004 / minute ($0.24 / hour) | 4000 | 60 seconds | the same 2 vCPU, 4 GiB container, $0.099 / hour ($0.00165 / minute) | 2.4× |
 | `speech` | $0.0072 / minute | 7200 | 60 seconds | the model provider's speech-to-text rate, $0.006 / minute | provider + 20% |
 | `calls` | $2.00 / million | 2000000 | 1000000 calls | managed HTTP API gateway $1.00 / million (REST APIs $3.50) | 2× |
 | `predictions` | $0.01 / 1,000 | 10000 | 1000 calls | serverless CPU inference, about $4.55 / million requests at 2 GB | 2.2× |
 | `model_tokens` | $9.00 / million | 9000000 | 1000000 tokens | the model provider's per-token rate for lake's agents' default model: $5.00 / million input, $30.00 output; $7.27 / million at 10 input to 1 output | provider + 20%, rounded up |
-| `instances` | $0.00135 / instance-minute ($0.081 / hour) | 1350 | 60 instance-seconds | a small managed database or broker instance (2 vCPU, 2 GiB), $0.032–0.046 / hour ($0.00053–0.00077 / minute) | ~2× ($0.08 / hour is $0.001333 / minute, rounded to $0.00135) |
 | `volumes` | $0.20 / GiB-month | 200000 | 2628000 GiB-seconds (730 hours) | block volume $0.08 / GB-month | 2.5× |
 
-Two rates rest on an assumption, because a dimension counts less than its reference does:
+A GPU-hour, its memory included, is therefore 1.5× its GPU-only reference: an L4 $1.008 ($0.648 +
+24 GiB × $0.015), an A10G $1.65, an H100 $5.925; an A100 is $2.925 with 40 GiB (1.39×) and $3.525
+with 80 GiB (1.60×). CPU and RAM of the GPU's pod are billed as well, as they are by the GPU-only
+references.
 
-- **Compute is counted in seconds of a job, not vCPU-seconds** (the operator does not report CPU and
-  memory, [lake#612](https://github.com/oramasearch/lake/issues/612)), so a build or run is priced
-  as a 2 vCPU, 4 GiB job. An instance is priced as a small managed instance for the same reason.
+**How the references were chosen** (lake#643's research, read 2026-10-11; vendors are named only in
+the issue):
+
+- **CPU and RAM.** Separate per-vCPU and per-GiB on-demand rates of serverless container and
+  managed Kubernetes services, US regions: CPU $0.024–0.086 per vCPU-hour (median of eleven
+  $0.0445), RAM $0.0036–0.0108 per GiB-hour (hyperscaler median $0.0050). Virtual machines split
+  lower ($0.022–0.037 per vCPU-hour, $0.0029–0.0045 per GiB-hour); containers carry 1.3–2× over
+  them, as lake does.
+- **GPU.** The references are GPU-only prices, from providers that bill a GPU by the second with CPU
+  and memory billed apart, which is how lake meters it. Whole-instance GPU prices, CPU and memory
+  included, run 30–60% above them per GPU (an H100 at $6.15–12.29 per GPU-hour).
+- **GPU memory.** Nobody meters GPU memory per GiB; the market prices a GPU class, memory included
+  (fractional GPUs are sold by fixed slices). Lake meters it apart (Steve, lake#643), so each class's
+  GPU-only reference is split into a memory share at a flat $0.01 per GiB-hour and a compute share,
+  the rest.
+
+Two rates rest on an assumption:
+
+- **Compute is priced on what a workload is scheduled with** (requests, or limits without requests),
+  not on what it consumes. A workload that reserves 2 vCPU and idles pays for 2 vCPU, as on
+  serverless containers and managed Kubernetes pods; one that asks for nothing is given the
+  namespace's default request, and pays for that.
 - **`model_tokens` adds input and output together**, so its rate assumes 10 input tokens to each
   output token on the default model. Output-heavy use costs Orama more than it bills.
 
-Every workspace's own engine is an instance, so a workspace that runs all month costs about $59 in
-instance-minutes (43,800 × $0.00135) before anything else. There is no free allowance: usage limits warn
-and do not refuse ([metering.md](metering.md#limits)).
+A workspace's engine runs all month: at the operator's default (64 MiB, and 0.1 vCPU, the
+workspace namespace's default request) that is about $6.70 of CPU and $0.47 of RAM a month; at 1
+vCPU and 2 GiB, $66.96 and $15.18. There is no free allowance: usage limits warn and do not refuse
+([metering.md](metering.md#limits)).
 
 ### Worked bills
 
-A 31-day month at the list rates, computed as lake computes a bill (⌈billable × `unit_micros` ÷
-`per`⌉ per line; the hours below are whole minutes, so nothing rounds):
+A 31-day month (744 hours) at the list rates, computed as lake computes a bill (⌈billable ×
+`unit_micros` ÷ `per`⌉ per line, each rounded up once to a whole minute of its unit):
 
 | Example | Usage | Bill |
 |---|---|---|
-| Small | one workspace and one Postgres all month (1,488 instance-hours); 40 GiB stored, 120 GiB transfer, 30 build hours, 40 run hours, 200 speech minutes, 3 million calls, 200,000 predictions, 3 million tokens, 30 GiB-months of volumes | **$189.17**: instances $120.53, tokens $27.00, run $9.60, build $9.00, transfer $6.00, calls $6.00, volumes $6.00, predictions $2.00, storage $1.60, speech $1.44 |
-| Medium | five instances all month (3,720 hours); 300 GiB, 800 GiB, 120 and 300 hours, 1,500 minutes, 25 million calls, 3 million predictions, 15 million tokens, 250 GiB-months | **$737.12**: instances $301.32, tokens $135.00, run $72.00, calls $50.00, volumes $50.00, transfer $40.00, build $36.00, predictions $30.00, storage $12.00, speech $10.80 |
-| Large | twelve instances all month (8,928 hours); 3 TiB, 4 TiB, 600 and 2,000 hours, 10,000 minutes, 200 million calls, 50 million predictions, 80 million tokens, 2,000 GiB-months | **$3,802.85**: instances $723.17, tokens $720.00, predictions $500.00, run $480.00, calls $400.00, volumes $400.00, transfer $204.80, build $180.00, storage $122.88, speech $72.00 |
+| Small | a workspace engine of 1 vCPU and 2 GiB and a Postgres of 0.5 vCPU and 1 GiB all month; 30 build hours at 0.5 vCPU and 1 GiB; 40 GiB stored, 120 GiB transfer, 200 speech minutes, 3 million calls, 200,000 predictions, 3 million tokens, 30 GiB-months of volumes | **$174.90**: CPU $101.79, tokens $27.00, RAM $23.07, transfer $6.00, calls $6.00, volumes $6.00, predictions $2.00, storage $1.60, speech $1.44 |
+| Medium | workloads of 6 vCPU and 16 GiB all month; 120 build hours (0.5 vCPU, 1 GiB); an app on one L4 (24 GiB) with 4 vCPU and 16 GiB for 100 hours; 300 GiB, 800 GiB, 1,500 minutes, 25 million calls, 3 million predictions, 15 million tokens, 250 GiB-months | **$1,010.72**: CPU $443.16, RAM $138.96, tokens $135.00, L4 $64.80, calls $50.00, volumes $50.00, transfer $40.00, GPU memory $36.00, predictions $30.00, storage $12.00, speech $10.80 |
+| Large | workloads of 24 vCPU and 96 GiB all month; 600 build hours; a training job on one H100 (80 GiB) with 16 vCPU and 128 GiB for 200 hours; 3 TiB, 4 TiB, 10,000 minutes, 200 million calls, 50 million predictions, 80 million tokens, 2,000 GiB-months | **$6,522.48**: CPU $1,922.04, RAM $995.76, H100 $945.00, tokens $720.00, predictions $500.00, calls $400.00, volumes $400.00, GPU memory $240.00, transfer $204.80, storage $122.88, speech $72.00 |
 
 ### Revisit
 
 Revisit the price list every quarter, and sooner when:
 
 - a reference rate moves more than 15%, above all the model provider's rate for the default agent
-  model, which `model_tokens` passes through;
+  model, which `model_tokens` passes through, and GPU prices, which fall fastest;
 - lake's agents change their default model;
-- the operator reports CPU and memory (lake#612), so compute can be priced per vCPU-hour and
-  GiB-hour;
+- a GPU class the operator reports has no rate of its own (it is billed at the default rate), or one
+  class covers GPUs whose prices differ (`a100` covers 40 and 80 GB);
 - `model_tokens` is split into input and output, or into models, so each can carry its own rate.
 
 A change is a new `set_price_list`, normally for the next month ([When prices
@@ -331,12 +391,13 @@ change](#when-prices-change)). Issued invoices keep their lines.
 
 ### Publish the price list
 
-As the operator, once (amounts in millionths of a dollar, `per` in each dimension's unit; time per
+As the operator, once (amounts in millionths of a dollar, `per` in each dimension's unit; CPU per
+vCPU-minute, 60,000 mCPU-seconds; RAM and GPU memory per GiB-minute, 61,440 MiB-seconds; time per
 60 seconds, a minute):
 
 ```http
 POST /v1/set_price_list
-{"currency":"USD","prices":[{"dimension":"storage","unit_micros":40000,"per":1073741824},{"dimension":"transfer","unit_micros":50000,"per":1073741824},{"dimension":"build_compute","unit_micros":5000,"per":60},{"dimension":"run_compute","unit_micros":4000,"per":60},{"dimension":"speech","unit_micros":7200,"per":60},{"dimension":"calls","unit_micros":2000000,"per":1000000},{"dimension":"predictions","unit_micros":10000,"per":1000},{"dimension":"model_tokens","unit_micros":9000000,"per":1000000},{"dimension":"instances","unit_micros":1350,"per":60},{"dimension":"volumes","unit_micros":200000,"per":2628000}]}
+{"currency":"USD","prices":[{"dimension":"cpu","unit_micros":1500,"per":60000},{"dimension":"ram","unit_micros":170,"per":61440},{"dimension":"gpu","unit_micros":38750,"per":60},{"dimension":"gpu","class":"l4","unit_micros":10800,"per":60},{"dimension":"gpu","class":"a10g","unit_micros":21500,"per":60},{"dimension":"gpu","class":"a100","unit_micros":38750,"per":60},{"dimension":"gpu","class":"h100","unit_micros":78750,"per":60},{"dimension":"vram","unit_micros":250,"per":61440},{"dimension":"storage","unit_micros":40000,"per":1073741824},{"dimension":"transfer","unit_micros":50000,"per":1073741824},{"dimension":"speech","unit_micros":7200,"per":60},{"dimension":"calls","unit_micros":2000000,"per":1000000},{"dimension":"predictions","unit_micros":10000,"per":1000},{"dimension":"model_tokens","unit_micros":9000000,"per":1000000},{"dimension":"volumes","unit_micros":200000,"per":2628000}]}
 ```
 
 It applies from the start of this month; add `"effective_from": "YYYY-MM"` for another month. Then
@@ -348,8 +409,8 @@ pre-filled with these rates.
 
 | Capability | Kind | Who | Input | What it does |
 |---|---|---|---|---|
-| `price_list` | read | anyone signed in | `period?` (`YYYY-MM`; default this month), `include_history?` | `{period, list, next, history?}`: the list in force for the month (null before one is published), a list published for a later month (or null), and, for the operator with `include_history`, every publication, newest first. A list is `{id, effective_from, published_at, currency, prices}`, each price `{dimension, title, unit, unit_micros, per}`. |
-| `set_price_list` | action | operator, instance administrator | `prices`, `currency?` (default `USD`), `effective_from?` (`YYYY-MM`; default this month) | Publishes the price list, kept as a new publication. A dimension rated twice, an unknown dimension, `included` or a fee is `invalid_input`. Audit object `billing_price_list/<id>`, kind `billing.price_list.set`. |
+| `price_list` | read | anyone signed in | `period?` (`YYYY-MM`; default this month), `include_history?` | `{period, list, next, history?}`: the list in force for the month (null before one is published), a list published for a later month (or null), and, for the operator with `include_history`, every publication, newest first. A list is `{id, effective_from, published_at, currency, prices}`, each price `{dimension, class, title, unit, unit_micros, per, priced}` (`class` empty but for a GPU class rate; `priced` false for a dimension a list from before lake#643 rated and a new list may not). |
+| `set_price_list` | action | operator, instance administrator | `prices` (each `{dimension, class?, unit_micros, per?}`), `currency?` (default `USD`), `effective_from?` (`YYYY-MM`; default this month) | Publishes the price list, kept as a new publication. A dimension (or a dimension's class) rated twice, an unknown dimension, a retired one (`instances`, `build_compute`, `run_compute`), a `class` on a dimension without classes, `included` or a fee is `invalid_input`. Audit object `billing_price_list/<id>`, kind `billing.price_list.set`. |
 | `billing_account` | read | `read` on the customer | `customer_id` | `{customer_id, month, price_list, provider}`: the list the account is billed at this month (null before one is published) and the payment `provider`. |
 | `bill_preview` | read | `read` on the customer | `customer_id`, `period?` (`YYYY-MM`; default this month) | The bill for the month worked out now at the list in force for it; nothing is stored. `price_list` is `{id, effective_from}`. `complete` is false when a workspace's usage could not be read (`unread_workspaces`); `not_measured` repeats what `usage_over_time` cannot include; `invoice` is the month's issued invoice that is not void, or null. No list for the month is `conflict`. |
 | `issue_invoice` | action | operator, instance administrator | `customer_id`, `period` | Issues the invoice for a month that has ended (`conflict` before), at the list in force for it, with the lines frozen, then asks the provider for payment. Refused with `store_unavailable` while any workspace's usage cannot be read, never issued short; `conflict` when the month already has an invoice that is not void. Issued by hand today; automatic monthly issue is [lake#621](https://github.com/oramasearch/lake/issues/621). |
@@ -366,9 +427,11 @@ objects are `customer/<id>/billing` (kinds `billing.account.read`, `billing.bill
 An invoice is `{id, number, customer_id, period, price_list_id, currency, total_micros, state,
 provider, provider_reference, instructions, note, issued_at, paid_at, voided_at, payment_url,
 provider_status, lines}`; `state` is `due`, `paid` or `void`, and `number` increases across the
-instance. A line is `{kind, dimension, description, unit, quantity, included, billable, unit_micros,
-per, amount_micros}`, with `kind` `usage`, `included` 0, and `billable` the `quantity` charged
-(time rounded up to a whole minute on the month's total).
+instance. A line is `{kind, dimension, class, description, unit, quantity, included, billable,
+unit_micros, per, amount_micros}`, with `kind` `usage`, `class` the GPU class a class rate bills
+(empty otherwise, and on every line issued before lake#643), `included` 0, and `billable` the
+`quantity` charged (time rounded up to a whole minute of its unit on the month's total). An invoice
+issued before lake#643 keeps its `instances`, `build_compute` and `run_compute` lines as issued.
 
 ## Examples
 
@@ -410,6 +473,12 @@ POST /v1/record_invoice_payment
   and reissued, paid by hand; a workspace that does not answer holding the invoice
   back; a fake provider through the interface; and the enterprise switch removing every billing
   capability, `viewer.billing` and the Billing guide while usage stays.
+- `BillLines.ComputeIsBilledByTheVcpuGibAndGpuMinute` and
+  `Billing.ComputeIsPricedAsCpuRamGpuAndGpuMemory` (lake#643): CPU, RAM, GPU and GPU memory rounded
+  up once to a whole vCPU-, GiB- and GPU-minute; a GPU class at its own rate, the rest at the
+  default rate, nothing for an unrated class without one; the retired dimensions and a class on CPU
+  refused; a bill from two workspaces' compute and an L4; and an invoice issued at a list from before
+  lake#643 keeping its `instances` line after the new list is published.
 - `StripeSignature.*`, `StripeClient.*` and `StripeBilling.*` (`tests/test_stripe.cpp`, a fake
   Stripe): the signature with its tolerance window (bad, stale, future, several `v1`); forms and
   cents; a customer made once and kept; an invoice with its items, finalize and hosted URL, every
@@ -420,9 +489,11 @@ POST /v1/record_invoice_payment
   falling back to manual with a reason that names the variable in `billing_account`, `viewer` and
   `server_info`, never a value, and rotation by restart (lake#628); and the route answering only
   where the lake bills.
-- `PostgresBilling.PriceListsAndInvoicesFollowTheContract` and
-  `PostgresBilling.PaymentProviderCustomersAndNoticesFollowTheContract` (`tests/test_postgres.cpp`):
-  the migrations' tables and guards (`0073`, `0074`), and the store's contract on PostgreSQL.
+- `PostgresBilling.PriceListsAndInvoicesFollowTheContract`,
+  `PostgresBilling.PaymentProviderCustomersAndNoticesFollowTheContract` and
+  `PostgresBilling.WorkloadResourcesAndClassRatesFollowTheContract` (`tests/test_postgres.cpp`):
+  the migrations' tables and guards (`0073`, `0074`, `0075`), the price key of plan, dimension and
+  class, and the store's contract on PostgreSQL and in memory.
 - `SchemaConformance.EveryToolAndRequiredOutputUsesHttpContract` calls every billing tool over MCP
   and REST with billing on; `AuditRouting.EveryRegisteredCapabilityIsClassified` checks each is
   central.
@@ -431,7 +502,9 @@ POST /v1/record_invoice_payment
 
 - A new dimension priced: add it to `usage_dimensions()` ([metering.md](metering.md#dimensions)) and
   to `DIMENSIONS` and `LIST_RATES` in `frontend/src/pages/billing/billing.ts`; `set_price_list`
-  accepts it at once.
+  accepts it at once. A dimension no longer priced: `priced = false` in `usage_dimensions()`.
+- A new GPU class: publish a rate for it (`class`); the editor offers `GPU_CLASSES` and any class a
+  published list names. The operator names classes from the node's GPU product label.
 - New rates: publish a new list, normally for the next month, and update the [rates](#rates) table
   and its references here.
 - Another payment provider: implement `PaymentProvider` against the provider's HTTP API, choose it

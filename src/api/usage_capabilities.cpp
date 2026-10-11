@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cstdint>
 #include <deque>
+#include <expected>
 #include <format>
 #include <functional>
 #include <limits>
@@ -434,6 +435,150 @@ std::optional<std::uint64_t> elapsed_seconds(std::string_view started, std::stri
     return milliseconds / 1000 + (milliseconds % 1000 == 0 ? 0 : 1);
 }
 
+// ------------------------------------------------------------------------------------------------
+// Scheduled resources (lake#643, docs/api/metering.md#resources): what a workload is scheduled
+// with, as the Orama operator reports it in workload_resources, times how long it ran.
+
+using ResourceKey = std::pair<std::string, std::string>; // object kind, object id
+using ResourceRows = std::map<ResourceKey, control::WorkloadResources>;
+
+constexpr std::uint64_t mib = 1024 * 1024;
+
+bool resource_dimension(std::string_view name) {
+    return name == "cpu" || name == "ram" || name == "gpu" || name == "vram";
+}
+
+std::uint64_t capped(unsigned __int128 value) {
+    return value > std::numeric_limits<std::uint64_t>::max()
+               ? std::numeric_limits<std::uint64_t>::max()
+               : static_cast<std::uint64_t>(value);
+}
+
+// `amount` units held for `seconds`, in units of `unit` (rounded up): millicores times seconds
+// are mCPU-seconds; bytes times seconds over a MiB are MiB-seconds.
+std::uint64_t held_for(std::uint64_t amount, std::uint64_t seconds, std::uint64_t unit = 1) {
+    const unsigned __int128 product =
+        static_cast<unsigned __int128>(amount) * static_cast<unsigned __int128>(seconds);
+    return capped((product + unit - 1) / unit);
+}
+
+// What `row` used over `seconds`, one increment per resource dimension; GPU and GPU memory carry
+// the GPU class when the operator knows it.
+std::vector<UsageRecorder::Increment>
+resource_increments(const control::WorkloadResources& row, std::uint64_t seconds, Labels labels) {
+    std::vector<UsageRecorder::Increment> out;
+    if (seconds == 0) {
+        return out;
+    }
+    out.push_back({"cpu", held_for(row.cpu_millis, seconds), labels});
+    out.push_back({"ram", held_for(row.memory_bytes, seconds, mib), labels});
+    if (row.gpus > 0) {
+        Labels gpu = labels;
+        if (!row.gpu_class.empty()) {
+            gpu["class"] = row.gpu_class;
+        }
+        out.push_back({"gpu", held_for(static_cast<std::uint64_t>(row.gpus), seconds), gpu});
+        out.push_back({"vram", held_for(row.vram_bytes, seconds, mib), std::move(gpu)});
+    }
+    return out;
+}
+
+std::expected<ResourceRows, std::string> resource_rows(control::Store& store) {
+    const auto rows = store.workload_resources();
+    if (!rows) {
+        return std::unexpected(rows.error().message);
+    }
+    ResourceRows out;
+    for (const control::WorkloadResources& row : *rows) {
+        out.emplace(ResourceKey{row.object_kind, row.object_id}, row);
+    }
+    return out;
+}
+
+const control::WorkloadResources*
+resources_of(const ResourceRows& rows, std::string_view kind, const std::string& id) {
+    const auto found = rows.find(ResourceKey{std::string(kind), id});
+    return found == rows.end() ? nullptr : &found->second;
+}
+
+bool finished(std::string_view phase) {
+    return phase == "Succeeded" || phase == "Failed" || phase == "Cancelled";
+}
+
+// The running workloads of the chosen workspaces the operator has not reported the resources of,
+// by name, and the finished builds and agent jobs of [from, to) without them: their CPU, RAM, GPU
+// and VRAM are not counted (usage_over_time's not_measured).
+std::vector<std::string> unreported_workloads(control::Store& store,
+                                              const std::string& customer_id,
+                                              const std::vector<control::Workspace>& workspaces,
+                                              const ResourceRows& rows,
+                                              std::int64_t from_ms,
+                                              std::int64_t to_ms) {
+    std::set<std::string> chosen, engines;
+    std::vector<std::string> names;
+    for (const control::Workspace& workspace : workspaces) {
+        chosen.insert(workspace.id);
+        if (!workspace.zetta_service_id.empty()) {
+            engines.insert(workspace.zetta_service_id);
+        }
+        if (workspace.desired == "running" && !resources_of(rows, "workspace", workspace.id) &&
+            !resources_of(rows, "service", workspace.zetta_service_id)) {
+            names.push_back("the engine of workspace " + workspace.name);
+        }
+    }
+    if (const auto services = store.list_services(customer_id)) {
+        for (const control::ManagedService& service : *services) {
+            if (chosen.contains(service.workspace_id) && !engines.contains(service.id) &&
+                service.desired == "present" && !resources_of(rows, "service", service.id)) {
+                names.push_back("service " + service.name);
+            }
+        }
+    }
+    if (const auto apps = store.list_web_apps(customer_id)) {
+        for (const control::WebApp& app : *apps) {
+            if (chosen.contains(app.workspace_id) && app.desired == "running" &&
+                !resources_of(rows, "app", app.id)) {
+                names.push_back("app " + app.name);
+            }
+        }
+    }
+    std::size_t jobs = 0;
+    if (const auto builds = store.list_builds(customer_id)) {
+        for (const control::Build& build : *builds) {
+            const auto ended = utc_ms(build.updated_at);
+            if (chosen.contains(build.workspace_id) && finished(build.phase) && ended &&
+                *ended >= from_ms && *ended < to_ms && !resources_of(rows, "build", build.id)) {
+                ++jobs;
+            }
+        }
+    }
+    if (const auto launches = store.list_agent_launches(customer_id, "", 10000)) {
+        for (const control::AgentLaunch& launch : *launches) {
+            if (!chosen.contains(launch.workspace_id) ||
+                resources_of(rows, "agent_launch", launch.id)) {
+                continue;
+            }
+            if (launch.mode == "service" && launch.desired == "present") {
+                names.push_back("agent " +
+                                (launch.agent_name.empty() ? launch.agent_id : launch.agent_name));
+                continue;
+            }
+            const auto ended = utc_ms(launch.status_updated_at);
+            if (launch.mode == "job" && finished(launch.phase) && ended && *ended >= from_ms &&
+                *ended < to_ms) {
+                ++jobs;
+            }
+        }
+    }
+    if (jobs > 0) {
+        names.push_back(std::format("{} finished build{} and agent job{}",
+                                    jobs,
+                                    jobs == 1 ? "" : "s",
+                                    jobs == 1 ? "" : "s"));
+    }
+    return names;
+}
+
 // What usage_over_time needs about a request: the account, its chosen live workspaces, the
 // dimensions and the periods.
 struct UsageQuery {
@@ -458,8 +603,10 @@ liquid::runtime::task<UsageReading> read_usage(ApiContext& context, const UsageQ
     const auto wants = [&](std::string_view dimension) {
         return query.dimensions.contains(std::string(dimension));
     };
+    const bool wants_resources = wants("cpu") || wants("ram") || wants("gpu") || wants("vram");
     const bool wants_series = wants("calls") || wants("predictions") || wants("speech") ||
-                              wants("model_tokens") || wants("instances") || wants("volumes");
+                              wants("model_tokens") || wants("instances") || wants("volumes") ||
+                              wants_resources;
     const std::int64_t from_ms = periods.starts.empty() ? 0 : periods.starts.front();
     const std::int64_t to_ms = periods.end;
     const std::int64_t since_us = from_ms * 1000;
@@ -477,8 +624,8 @@ liquid::runtime::task<UsageReading> read_usage(ApiContext& context, const UsageQ
         if (wants_series) {
             json input = window;
             input["metric"] = std::string(UsageRecorder::usage_metric);
-            input["group_by"] =
-                json::array({"dimension", "kind", "agent", "launch_id", "model", "object_id"});
+            input["group_by"] = json::array(
+                {"dimension", "kind", "agent", "launch_id", "model", "object_id", "class"});
             pending.push_back(complete_read(query_series(bound, query.customer_id, input)));
         } else {
             pending.push_back(complete_read(nothing()));
@@ -720,7 +867,7 @@ liquid::runtime::task<UsageReading> read_usage(ApiContext& context, const UsageQ
             });
         }
         if (dimension.name == "instances" || dimension.name == "volumes" ||
-            dimension.name == "predictions") {
+            dimension.name == "predictions" || resource_dimension(dimension.name)) {
             entry["by_object"] = breakdown(
                 mine,
                 gauge,
@@ -728,14 +875,54 @@ liquid::runtime::task<UsageReading> read_usage(ApiContext& context, const UsageQ
                 [](const RawSeries& series) { return label(series, "object_id"); },
                 [](const RawSeries& series) { return json{{"kind", label(series, "kind")}}; });
         }
+        if (dimension.classes) {
+            entry["by_class"] = breakdown(mine, gauge, periods.size(), [](const RawSeries& series) {
+                return label(series, "class");
+            });
+            // Usage without a class (a GPU the operator could not name) is the `""` class.
+            double classed = 0;
+            for (const json& row : entry["by_class"]) {
+                classed += row.at("total").get<double>();
+            }
+            if (total - classed > 0.5) {
+                std::vector<std::optional<double>> unclassed(periods.size());
+                for (const RawSeries* series : mine) {
+                    if (label(*series, "class").empty()) {
+                        merge_into(unclassed, series->line);
+                    }
+                }
+                entry["by_class"].push_back({{"key", ""},
+                                             {"total", total - classed},
+                                             {"points", points_json(unclassed, gauge)}});
+            }
+        }
         reading.dimensions.push_back(std::move(entry));
     }
 
     // What this reading cannot include, measured or not.
-    if (wants("instances") || wants("volumes")) {
-        reading.not_measured.push_back(
-            "CPU and memory of managed services, stores and apps: the Orama operator does not "
-            "report them yet, so only instance and volume time is measured (lake#612).");
+    if (wants_resources && context.store) {
+        if (auto rows = resource_rows(*context.store)) {
+            const auto names = unreported_workloads(
+                *context.store, query.customer_id, query.workspaces, *rows, from_ms, to_ms);
+            if (!names.empty()) {
+                std::string list;
+                for (std::size_t index = 0; index < names.size() && index < 8; ++index) {
+                    list += (index == 0 ? "" : ", ") + names[index];
+                }
+                if (names.size() > 8) {
+                    list += std::format(" and {} more", names.size() - 8);
+                }
+                reading.not_measured.push_back(
+                    "CPU, RAM, GPU and GPU memory of " + list +
+                    ": the Orama operator has not reported the resources it schedules them with, "
+                    "so they are not counted (lake#643).");
+            }
+        } else {
+            reading.not_measured.push_back(
+                "CPU, RAM, GPU and GPU memory: the resources the Orama operator reports could not "
+                "be read: " +
+                rows.error());
+        }
     }
     if (wants("model_tokens")) {
         reading.not_measured.push_back(
@@ -1073,6 +1260,13 @@ liquid::runtime::task<UsageSampleReport> sample_usage(ApiContext& context,
             recorder->sample(workspace_id, kind, bytes, at);
             ++report.readings;
         };
+    // The resources the Orama operator reports for every workload (lake#643), read once a sample.
+    std::optional<ResourceRows> resources;
+    if (auto rows = resource_rows(*context.store)) {
+        resources = std::move(*rows);
+    } else {
+        report.unmeasured.push_back("Workload resources: " + rows.error());
+    }
     const auto spend = [&](const std::string& workspace_id,
                            std::string_view dimension,
                            std::uint64_t value,
@@ -1283,6 +1477,141 @@ liquid::runtime::task<UsageSampleReport> sample_usage(ApiContext& context,
             }
         } else {
             report.unmeasured.push_back("Apps of " + customer.id + ": " + apps.error().message);
+        }
+
+        // Scheduled resources (lake#643): CPU, RAM, GPU and GPU memory of every workload, from
+        // the requests (or limits) the operator schedules it with. A running workload counts the
+        // seconds since the last sample; a build or agent job counts once, from its request to its
+        // final status, in the sample after it ends.
+        if (resources) {
+            const auto charge = [&](const std::string& workspace_id,
+                                    const control::WorkloadResources& row,
+                                    std::uint64_t held,
+                                    Labels labels) {
+                auto increments = resource_increments(row, held, std::move(labels));
+                if (increments.empty()) {
+                    return;
+                }
+                report.increments += increments.size();
+                recorder->add_together(workspace_id, std::move(increments), at);
+            };
+            const auto running = [&](std::string_view kind,
+                                     const std::string& id) -> const control::WorkloadResources* {
+                const control::WorkloadResources* row = resources_of(*resources, kind, id);
+                return row != nullptr && row->pods > 0 ? row : nullptr;
+            };
+            const std::int64_t at_ms =
+                std::chrono::duration_cast<std::chrono::milliseconds>(at.time_since_epoch())
+                    .count();
+            const std::int64_t since_ms =
+                at_ms - std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count();
+            const auto ended_now = [&](std::string_view ended) {
+                const auto ms = utc_ms(ended);
+                return ms && *ms > since_ms && *ms <= at_ms;
+            };
+            std::set<std::string> engines;
+            for (const control::Workspace& workspace : live) {
+                engines.insert(workspace.zetta_service_id);
+                if (workspace.desired != "running") {
+                    continue;
+                }
+                const control::WorkloadResources* row = running("workspace", workspace.id);
+                if (row == nullptr && !workspace.zetta_service_id.empty()) {
+                    row = running("service", workspace.zetta_service_id);
+                }
+                if (row != nullptr) {
+                    charge(workspace.id,
+                           *row,
+                           seconds,
+                           {{"kind", "workspace"}, {"object_id", workspace.id}});
+                }
+            }
+            if (const auto services = context.store->list_services(customer.id)) {
+                for (const control::ManagedService& service : *services) {
+                    if (!live_ids.contains(service.workspace_id) || engines.contains(service.id) ||
+                        service.desired != "present") {
+                        continue;
+                    }
+                    if (const auto* row = running("service", service.id)) {
+                        charge(service.workspace_id,
+                               *row,
+                               seconds,
+                               {{"kind", service.kind}, {"object_id", service.id}});
+                    }
+                }
+            }
+            if (const auto stores = context.store->list_stores(customer.id)) {
+                for (const control::ManagedStore& store : *stores) {
+                    if (!live_ids.contains(store.workspace_id) || store.desired != "present") {
+                        continue;
+                    }
+                    if (const auto* row = running("store", store.id)) {
+                        charge(store.workspace_id,
+                               *row,
+                               seconds,
+                               {{"kind", "store"}, {"object_id", store.id}});
+                    }
+                }
+            }
+            if (const auto apps = context.store->list_web_apps(customer.id)) {
+                for (const control::WebApp& app : *apps) {
+                    if (!live_ids.contains(app.workspace_id) || app.desired == "deleted") {
+                        continue;
+                    }
+                    if (const auto* row = running("app", app.id)) {
+                        charge(app.workspace_id,
+                               *row,
+                               seconds,
+                               {{"kind", "app"}, {"object_id", app.id}});
+                    }
+                }
+            }
+            if (const auto builds = context.store->list_builds(customer.id)) {
+                for (const control::Build& build : *builds) {
+                    if (!live_ids.contains(build.workspace_id) || !finished(build.phase) ||
+                        !ended_now(build.updated_at)) {
+                        continue;
+                    }
+                    const auto* row = resources_of(*resources, "build", build.id);
+                    const auto ran = elapsed_seconds(build.created_at, build.updated_at);
+                    if (row != nullptr && ran) {
+                        charge(build.workspace_id,
+                               *row,
+                               *ran,
+                               {{"kind", "build"}, {"object_id", build.id}});
+                    }
+                }
+            } else {
+                report.unmeasured.push_back("Builds of " + customer.id + ": " +
+                                            builds.error().message);
+            }
+            if (const auto launches = context.store->list_agent_launches(customer.id, "", 10000)) {
+                for (const control::AgentLaunch& launch : *launches) {
+                    if (!live_ids.contains(launch.workspace_id)) {
+                        continue;
+                    }
+                    const Labels labels{{"kind", "agent"}, {"object_id", launch.id}};
+                    if (launch.mode == "service") {
+                        if (launch.desired == "present") {
+                            if (const auto* row = running("agent_launch", launch.id)) {
+                                charge(launch.workspace_id, *row, seconds, labels);
+                            }
+                        }
+                        continue;
+                    }
+                    if (!finished(launch.phase) || !ended_now(launch.status_updated_at)) {
+                        continue;
+                    }
+                    const auto* row = resources_of(*resources, "agent_launch", launch.id);
+                    const auto ran = elapsed_seconds(launch.created_at, launch.status_updated_at);
+                    if (row != nullptr && ran) {
+                        charge(launch.workspace_id, *row, *ran, labels);
+                    }
+                }
+            } else {
+                report.unmeasured.push_back("Agent launches of " + customer.id + ": " +
+                                            launches.error().message);
+            }
         }
 
         // Repository build results finished since a little before the last sample, for their

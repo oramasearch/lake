@@ -609,3 +609,173 @@ TEST(Billing, AnEnterpriseInstallHasNoBilling) {
 }
 
 } // namespace
+
+namespace {
+
+const json* class_line(const json& bill, const std::string& dimension, const std::string& name) {
+    for (const json& entry : bill["lines"]) {
+        if (entry["dimension"] == dimension && entry["class"] == name) {
+            return &entry;
+        }
+    }
+    return nullptr;
+}
+
+} // namespace
+
+// lake#643: compute is billed as CPU, RAM, GPU and GPU memory, each by the minute of its unit on
+// the month's total: a vCPU-minute (60,000 mCPU-seconds), a GiB-minute (61,440 MiB-seconds), a
+// GPU-minute.
+TEST(BillLines, ComputeIsBilledByTheVcpuGibAndGpuMinute) {
+    EXPECT_EQ(lake::api::billable_quantity("mcpu_seconds", 1), 60'000U);
+    EXPECT_EQ(lake::api::billable_quantity("mcpu_seconds", 60'000), 60'000U);
+    EXPECT_EQ(lake::api::billable_quantity("mcpu_seconds", 60'001), 120'000U);
+    EXPECT_EQ(lake::api::billable_quantity("mib_seconds", 61'439), 61'440U);
+    EXPECT_EQ(lake::api::billable_quantity("mib_seconds", 61'441), 122'880U);
+    EXPECT_EQ(lake::api::billable_quantity("gpu_seconds", 61), 120U);
+
+    // $0.0015 a vCPU-minute, $0.00017 a GiB-minute, $0.0108 an L4-minute, $0.07875 an
+    // H100-minute, $0.03875 a minute of any other GPU, $0.00025 a GiB-minute of GPU memory.
+    lake::api::PriceList list;
+    list.prices = {{"cpu", 1'500, 60'000, 0},
+                   {"ram", 170, 61'440, 0},
+                   {"gpu", 38'750, 60, 0},
+                   {"gpu", 10'800, 60, 0, "l4"},
+                   {"gpu", 78'750, 60, 0, "h100"},
+                   {"vram", 250, 61'440, 0}};
+    lake::api::UsageQuantities usage;
+    // Half a vCPU and 1 GiB for an hour; an L4 for an hour, an H100 for ten minutes and a GPU of
+    // no known class for a minute; 24 GiB of GPU memory for an hour.
+    usage.totals = {{"cpu", 500 * 3600},
+                    {"ram", 1024 * 3600},
+                    {"gpu", 3600 + 600 + 60},
+                    {"vram", 24 * 1024 * 3600}};
+    usage.by_class = {{"gpu", {{"l4", 3600}, {"h100", 600}, {"", 60}}},
+                      {"vram", {{"l4", 24 * 1024 * 3600}}}};
+    const auto lines = lake::api::bill_lines(list, usage);
+    ASSERT_EQ(lines.size(), 6U);
+    EXPECT_EQ(lines[0].amount_micros, 45'000U) << "30 vCPU-minutes";
+    EXPECT_EQ(lines[1].amount_micros, 10'200U) << "60 GiB-minutes";
+    EXPECT_EQ(lines[2].class_name, "");
+    EXPECT_EQ(lines[2].quantity, 60U) << "the default rate bills what no class rate covers";
+    EXPECT_EQ(lines[2].amount_micros, 38'750U);
+    EXPECT_NE(lines[2].description.find("other classes"), std::string::npos);
+    EXPECT_EQ(lines[3].class_name, "l4");
+    EXPECT_EQ(lines[3].quantity, 3600U);
+    EXPECT_EQ(lines[3].amount_micros, 648'000U) << "an L4-hour is $0.648";
+    EXPECT_NE(lines[3].description.find("(L4)"), std::string::npos);
+    EXPECT_EQ(lines[4].amount_micros, 787'500U) << "ten H100-minutes";
+    EXPECT_EQ(lines[5].amount_micros, 360'000U) << "24 GiB of GPU memory for an hour is $0.36";
+
+    // Without a default rate, a class without its own rate is not charged.
+    list.prices = {{"gpu", 10'800, 60, 0, "l4"}};
+    const auto only_l4 = lake::api::bill_lines(list, usage);
+    ASSERT_EQ(only_l4.size(), 1U);
+    EXPECT_EQ(only_l4[0].quantity, 3600U);
+}
+
+// lake#643: the price list rates CPU, RAM, GPU (one rate per class allowed) and GPU memory; build,
+// run and instance time are measured but no longer priced. A list published before keeps its rates
+// for them, and an invoice issued at it keeps its lines.
+TEST(Billing, ComputeIsPricedAsCpuRamGpuAndGpuMemory) {
+    BillingRig rig;
+    const auto refused = [&](json prices) {
+        return rig.call("set_price_list", {{"prices", std::move(prices)}}).error;
+    };
+    for (const char* retired : {"instances", "build_compute", "run_compute"}) {
+        const auto error =
+            refused(json::array({{{"dimension", retired}, {"unit_micros", 1000}, {"per", 60}}}));
+        EXPECT_EQ(error.code, "invalid_input") << retired;
+        EXPECT_EQ(error.path, "/prices/0/dimension") << retired;
+    }
+    EXPECT_EQ(
+        refused(
+            json::array(
+                {{{"dimension", "cpu"}, {"class", "h100"}, {"unit_micros", 1}, {"per", 60000}}}))
+            .path,
+        "/prices/0/class")
+        << "only GPU and GPU memory have classes";
+    EXPECT_EQ(
+        refused(
+            json::array({{{"dimension", "gpu"}, {"class", "l4"}, {"unit_micros", 1}, {"per", 60}},
+                         {{"dimension", "gpu"}, {"class", "l4"}, {"unit_micros", 2}, {"per", 60}}}))
+            .code,
+        "invalid_input");
+
+    // An invoice for two months ago, issued at a list from before lake#643 that rated instances.
+    const auto two_ago = this_month() - std::chrono::months{2};
+    const std::string old_period = month_name(first_of(two_ago));
+    lake::control::BillingPlan old;
+    old.id = lake::api::price_list_id(old_period, 1'700'000'000'000'000);
+    old.name = "Usage";
+    old.currency = "USD";
+    old.prices = {{"instances", 1'350, 60, 0}, {"calls", 1'000'000, 1000, 0}};
+    ASSERT_TRUE(rig.store->put_billing_plan(old));
+    const std::chrono::sys_time<std::chrono::hours> old_day{first_of(two_ago)};
+    rig.recorder.add(rig.home, "instances", 3600, {{"kind", "zetta"}}, old_day);
+    rig.flush();
+    const auto issued =
+        rig.call("issue_invoice", {{"customer_id", rig.customer}, {"period", old_period}});
+    ASSERT_TRUE(issued.ok) << issued.error.message;
+    const json* instances = line(issued.value, "instances");
+    ASSERT_NE(instances, nullptr);
+    EXPECT_EQ((*instances)["amount_micros"], 81'000);
+    EXPECT_EQ((*instances)["class"], "");
+
+    // The new list, in force since last month: CPU, RAM, GPU with an L4 rate, and GPU memory.
+    const auto last = this_month() - std::chrono::months{1};
+    const std::string period = month_name(first_of(last));
+    const auto published = rig.call(
+        "set_price_list",
+        {{"effective_from", period},
+         {"prices",
+          json::array(
+              {{{"dimension", "cpu"}, {"unit_micros", 1'500}, {"per", 60'000}},
+               {{"dimension", "ram"}, {"unit_micros", 170}, {"per", 61'440}},
+               {{"dimension", "gpu"}, {"unit_micros", 38'750}, {"per", 60}},
+               {{"dimension", "gpu"}, {"class", "l4"}, {"unit_micros", 10'800}, {"per", 60}},
+               {{"dimension", "vram"}, {"unit_micros", 250}, {"per", 61'440}}})}});
+    ASSERT_TRUE(published.ok) << published.error.message;
+    EXPECT_EQ(published.value["prices"].size(), 5U);
+    const std::chrono::sys_time<std::chrono::hours> day{first_of(last)};
+    // Two workspaces' compute: an hour of half a vCPU and 1 GiB in each, an L4-hour in home.
+    for (const std::string& workspace : {rig.home, rig.lab}) {
+        rig.recorder.add_together(workspace,
+                                  {{"cpu", 500 * 3600, {{"kind", "workspace"}}},
+                                   {"ram", 1024 * 3600, {{"kind", "workspace"}}}},
+                                  day);
+    }
+    rig.recorder.add_together(rig.home,
+                              {{"gpu", 3600, {{"kind", "app"}, {"class", "l4"}}},
+                               {"vram", 24 * 1024 * 3600, {{"kind", "app"}, {"class", "l4"}}}},
+                              day);
+    rig.recorder.add(rig.home, "instances", 3600, {{"kind", "zetta"}}, day);
+    rig.flush();
+    auto owner = rig.owner_context();
+    const auto bill =
+        rig.call("bill_preview", {{"customer_id", rig.customer}, {"period", period}}, owner);
+    ASSERT_TRUE(bill.ok) << bill.error.message;
+    EXPECT_EQ(bill.value["lines"].size(), 5U) << "instances are not priced any more";
+    EXPECT_EQ((*line(bill.value, "cpu"))["amount_micros"], 90'000) << "60 vCPU-minutes";
+    EXPECT_EQ((*line(bill.value, "ram"))["amount_micros"], 20'400) << "120 GiB-minutes";
+    const json* l4 = class_line(bill.value, "gpu", "l4");
+    ASSERT_NE(l4, nullptr);
+    EXPECT_EQ((*l4)["quantity"], 3600);
+    EXPECT_EQ((*l4)["amount_micros"], 648'000);
+    const json* other_gpus = class_line(bill.value, "gpu", "");
+    ASSERT_NE(other_gpus, nullptr);
+    EXPECT_EQ((*other_gpus)["quantity"], 0);
+    EXPECT_EQ((*line(bill.value, "vram"))["amount_micros"], 360'000);
+    EXPECT_EQ(bill.value["total_micros"], 90'000 + 20'400 + 648'000 + 360'000);
+    const auto issued_new =
+        rig.call("issue_invoice", {{"customer_id", rig.customer}, {"period", period}});
+    ASSERT_TRUE(issued_new.ok) << issued_new.error.message;
+    EXPECT_EQ((*class_line(issued_new.value, "gpu", "l4"))["unit_micros"], 10'800);
+
+    // The old invoice is unchanged: its instances line, at its rate.
+    const auto kept = rig.call(
+        "get_invoice", {{"customer_id", rig.customer}, {"invoice_id", issued.value["id"]}}, owner);
+    ASSERT_TRUE(kept.ok) << kept.error.message;
+    EXPECT_EQ(kept.value["lines"], issued.value["lines"]);
+    EXPECT_EQ(kept.value["total_micros"], issued.value["total_micros"]);
+}

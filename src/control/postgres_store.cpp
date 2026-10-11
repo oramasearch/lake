@@ -4670,7 +4670,9 @@ public:
         "COALESCE(ls.phase, ''), COALESCE(ls.message, ''), COALESCE(ls.endpoint, ''), "
         "ls.exit_code, COALESCE(ls.result, 'null'::jsonb)::text, "
         "COALESCE(ls.credential_sha256, ''), COALESCE(ls.observed_generation, 0), "
-        "COALESCE(l.workspace_id::text, ''), l.stop_reason";
+        "COALESCE(l.workspace_id::text, ''), l.stop_reason, "
+        "COALESCE(to_char(ls.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), "
+        "'')";
 
     static AgentLaunch launch_from(const pqxx::row& row) {
         AgentLaunch launch;
@@ -4701,6 +4703,7 @@ public:
         launch.observed_generation = row[21].as<std::int64_t>();
         launch.workspace_id = row[22].as<std::string>();
         launch.stop_reason = row[23].as<std::string>();
+        launch.status_updated_at = row[24].as<std::string>();
         return launch;
     }
 
@@ -5537,8 +5540,8 @@ public:
                     plans.push_back(std::move(plan));
                 }
                 const pqxx::result prices =
-                    tx.exec("SELECT plan_id, dimension, unit_micros, per, included "
-                            "FROM billing_plan_prices ORDER BY plan_id, dimension");
+                    tx.exec("SELECT plan_id, dimension, unit_micros, per, included, class "
+                            "FROM billing_plan_prices ORDER BY plan_id, dimension, class");
                 for (const auto& row : prices) {
                     const std::string plan_id = row[0].as<std::string>();
                     for (BillingPlan& plan : plans) {
@@ -5546,7 +5549,8 @@ public:
                             plan.prices.push_back({row[1].as<std::string>(),
                                                    row[2].as<std::uint64_t>(),
                                                    row[3].as<std::uint64_t>(),
-                                                   row[4].as<std::uint64_t>()});
+                                                   row[4].as<std::uint64_t>(),
+                                                   row[5].as<std::string>()});
                         }
                     }
                 }
@@ -5555,11 +5559,13 @@ public:
     }
 
     Result<BillingPlan> put_billing_plan(const BillingPlan& plan) override {
-        std::set<std::string> seen;
+        std::set<std::pair<std::string, std::string>> seen;
         for (const BillingPrice& price : plan.prices) {
-            if (price.dimension.empty() || price.per == 0 || !seen.insert(price.dimension).second) {
-                return std::unexpected(StoreError{
-                    "invalid_input", "each price needs its own dimension and a `per` above 0"});
+            if (price.dimension.empty() || price.per == 0 ||
+                !seen.insert({price.dimension, price.class_name}).second) {
+                return std::unexpected(
+                    StoreError{"invalid_input",
+                               "each price needs its own dimension and class and a `per` above 0"});
             }
         }
         auto written = with_tx<bool>([&](pqxx::work& tx) -> Result<bool> {
@@ -5579,12 +5585,13 @@ public:
             tx.exec_params("DELETE FROM billing_plan_prices WHERE plan_id = $1", plan.id);
             for (const BillingPrice& price : plan.prices) {
                 tx.exec_params("INSERT INTO billing_plan_prices (plan_id, dimension, unit_micros, "
-                               "per, included) VALUES ($1, $2, $3, $4, $5)",
+                               "per, included, class) VALUES ($1, $2, $3, $4, $5, $6)",
                                plan.id,
                                price.dimension,
                                price.unit_micros,
                                price.per,
-                               price.included);
+                               price.included,
+                               price.class_name);
             }
             return true;
         });
@@ -5601,6 +5608,55 @@ public:
             }
         }
         return std::unexpected(StoreError{"store_error", "plan " + plan.id + " was not kept"});
+    }
+
+    Result<std::vector<WorkloadResources>> workload_resources() override {
+        return with_tx<std::vector<WorkloadResources>>(
+            [&](pqxx::work& tx) -> Result<std::vector<WorkloadResources>> {
+                const pqxx::result rows = tx.exec(
+                    "SELECT object_kind, object_id::text, pods, cpu_millis, memory_bytes, gpus, "
+                    "gpu_class, vram_bytes, " +
+                    utc_column("observed_at") +
+                    " FROM workload_resources ORDER BY object_kind, object_id");
+                std::vector<WorkloadResources> out;
+                for (const auto& row : rows) {
+                    out.push_back({row[0].as<std::string>(),
+                                   row[1].as<std::string>(),
+                                   row[2].as<int>(),
+                                   row[3].as<std::uint64_t>(),
+                                   row[4].as<std::uint64_t>(),
+                                   row[5].as<int>(),
+                                   row[6].as<std::string>(),
+                                   row[7].as<std::uint64_t>(),
+                                   row[8].as<std::string>()});
+                }
+                return out;
+            });
+    }
+
+    Result<void> put_workload_resources(const WorkloadResources& row) override {
+        auto written = with_tx<bool>([&](pqxx::work& tx) -> Result<bool> {
+            tx.exec_params(
+                "INSERT INTO workload_resources (object_kind, object_id, pods, cpu_millis, "
+                "memory_bytes, gpus, gpu_class, vram_bytes) VALUES ($1, $2::uuid, $3, $4, $5, $6, "
+                "$7, $8) ON CONFLICT (object_kind, object_id) DO UPDATE SET pods = EXCLUDED.pods, "
+                "cpu_millis = EXCLUDED.cpu_millis, memory_bytes = EXCLUDED.memory_bytes, gpus = "
+                "EXCLUDED.gpus, gpu_class = EXCLUDED.gpu_class, vram_bytes = EXCLUDED.vram_bytes, "
+                "observed_at = now()",
+                row.object_kind,
+                row.object_id,
+                row.pods,
+                row.cpu_millis,
+                row.memory_bytes,
+                row.gpus,
+                row.gpu_class,
+                row.vram_bytes);
+            return true;
+        });
+        if (!written) {
+            return std::unexpected(written.error());
+        }
+        return {};
     }
 
     static std::string invoice_columns() {
@@ -5636,7 +5692,7 @@ public:
     static void read_lines(pqxx::work& tx, Invoice& invoice) {
         const pqxx::result rows = tx.exec_params(
             "SELECT kind, dimension, description, unit, quantity, included, billable, "
-            "unit_micros, per, amount_micros FROM billing_invoice_lines WHERE invoice_id = "
+            "unit_micros, per, amount_micros, class FROM billing_invoice_lines WHERE invoice_id = "
             "$1::uuid ORDER BY position",
             invoice.id);
         invoice.lines.clear();
@@ -5650,7 +5706,8 @@ public:
                                      row[6].as<std::uint64_t>(),
                                      row[7].as<std::uint64_t>(),
                                      row[8].as<std::uint64_t>(),
-                                     row[9].as<std::uint64_t>()});
+                                     row[9].as<std::uint64_t>(),
+                                     row[10].as<std::string>()});
         }
     }
 
@@ -5700,8 +5757,8 @@ public:
                 tx.exec_params(
                     "INSERT INTO billing_invoice_lines (invoice_id, position, kind, dimension, "
                     "description, unit, quantity, included, billable, unit_micros, per, "
-                    "amount_micros) VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, "
-                    "$12)",
+                    "amount_micros, class) VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, $9, $10, "
+                    "$11, $12, $13)",
                     id,
                     position++,
                     line.kind,
@@ -5713,7 +5770,8 @@ public:
                     line.billable,
                     line.unit_micros,
                     line.per,
-                    line.amount_micros);
+                    line.amount_micros,
+                    line.class_name);
             }
             return invoice_in(tx, id);
         });

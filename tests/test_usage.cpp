@@ -622,3 +622,133 @@ TEST(UsageSample, ReadsTheTokensATranscriptionModelReports) {
 }
 
 } // namespace
+
+// lake#643: compute is metered by the resources each workload is scheduled with, as the Orama
+// operator reports them in workload_resources: CPU in mCPU-seconds, RAM and GPU memory in
+// MiB-seconds, GPU seconds by class. A running workload counts the seconds since the last sample;
+// a build or an agent job counts once, from its request to its end, in the sample after it ends.
+TEST(UsageSample, MetersCpuRamGpuAndGpuMemoryFromScheduledResources) {
+    constexpr std::uint64_t mib = 1024 * 1024;
+    constexpr std::uint64_t gib = 1024 * mib;
+    UsageRig rig;
+    auto& store = *rig.store;
+    // The home workspace's engine, a Postgres of two instances and a GPU app run in home.
+    ASSERT_TRUE(store.put_workload_resources({"workspace", rig.home, 1, 250, 512 * mib}));
+    const auto service = store.create_service({.customer_id = rig.customer,
+                                               .kind = "postgres",
+                                               .name = "orders",
+                                               .instances = 2,
+                                               .workspace_id = rig.home});
+    ASSERT_TRUE(service) << service.error().message;
+    ASSERT_TRUE(store.put_workload_resources({"service", service->id, 2, 1000, 2 * gib}));
+    const auto unreported = store.create_service({.customer_id = rig.customer,
+                                                  .kind = "postgres",
+                                                  .name = "unreported",
+                                                  .workspace_id = rig.home});
+    ASSERT_TRUE(unreported);
+    const auto app = store.create_web_app({.customer_id = rig.customer,
+                                           .workspace_id = rig.home,
+                                           .name = "vision",
+                                           .mode = "image",
+                                           .image = "lake.example.test/usage-rig/vision:v1",
+                                           .framework = "container",
+                                           .port = 8080,
+                                           .host = "vision.apps.example.test"});
+    ASSERT_TRUE(app) << app.error().message;
+    ASSERT_TRUE(
+        store.put_workload_resources({"app", app->id, 1, 4000, 16 * gib, 1, "l4", 24 * gib}));
+    // An image build that ran ten minutes and an agent job that ran five, both finished now; their
+    // pods are gone and their rows keep what they ran with.
+    const auto repository =
+        store.create_repository({rig.customer, "models", "", "private", rig.lab});
+    ASSERT_TRUE(repository) << repository.error().message;
+    const auto build = store.create_build({.customer_id = rig.customer,
+                                           .workspace_id = rig.lab,
+                                           .repository = repository->id,
+                                           .revision = "abc",
+                                           .target = "lake.example.test/usage-rig/models:v1"});
+    ASSERT_TRUE(build) << build.error().message;
+    ASSERT_TRUE(store.age_build(build->id, 600));
+    ASSERT_TRUE(store.set_build_status(build->id, {.phase = "Succeeded"}));
+    ASSERT_TRUE(store.put_workload_resources({"build", build->id, 0, 2000, 4 * gib}));
+    const auto owner = store.get_customer(rig.customer);
+    ASSERT_TRUE(owner);
+    const auto job = store.create_agent_launch({.customer_id = rig.customer,
+                                                .agent_id = "agent-1",
+                                                .agent_name = "Churn Watcher",
+                                                .mode = "job",
+                                                .trigger = "manual",
+                                                .scopes = {"workspace_query"},
+                                                .created_by_user_id = owner->user_id,
+                                                .workspace_id = rig.lab});
+    ASSERT_TRUE(job) << job.error().message;
+    ASSERT_TRUE(store.age_agent_launch(job->id, 300));
+    ASSERT_TRUE(store.set_agent_launch_status(job->id, "Succeeded", "", "", ""));
+    ASSERT_TRUE(store.put_workload_resources({"agent_launch", job->id, 0, 500, gib}));
+
+    auto context = rig.context();
+    const auto now = std::chrono::system_clock::now() + std::chrono::seconds(1);
+    const auto report =
+        liquid::runtime::block_on(lake::api::sample_usage(context, std::chrono::seconds(900), now));
+    ASSERT_TRUE(report);
+    flush(rig.recorder);
+    auto& home = rig.workspaces.records(rig.home);
+    const auto total = [](auto& series, const json& labels) {
+        return series.metric_total("lake_usage", labels);
+    };
+    // 900 seconds of each running workload.
+    EXPECT_EQ(total(home, {{"dimension", "cpu"}, {"kind", "workspace"}}), 250 * 900);
+    EXPECT_EQ(total(home, {{"dimension", "ram"}, {"kind", "workspace"}}), 512 * 900);
+    EXPECT_EQ(total(home, {{"dimension", "cpu"}, {"object_id", service->id}}), 1000 * 900);
+    EXPECT_EQ(total(home, {{"dimension", "ram"}, {"kind", "postgres"}}), 2048 * 900);
+    EXPECT_EQ(total(home, {{"dimension", "cpu"}, {"kind", "app"}}), 4000 * 900);
+    EXPECT_EQ(total(home, {{"dimension", "gpu"}, {"class", "l4"}, {"object_id", app->id}}), 900);
+    EXPECT_EQ(total(home, {{"dimension", "vram"}, {"class", "l4"}}), 24 * 1024 * 900);
+    EXPECT_EQ(total(home, {{"object_id", unreported->id}}), 0)
+        << "nothing reported, nothing counted";
+    EXPECT_EQ(total(home, {{"dimension", "gpu"}, {"kind", "postgres"}}), 0)
+        << "no GPU, no GPU line";
+    // The build and the job once, for how long each ran, in their workspace.
+    auto& lab = rig.workspaces.records(rig.lab);
+    const double build_cpu = total(lab, {{"dimension", "cpu"}, {"kind", "build"}});
+    EXPECT_GE(build_cpu, 2000.0 * 600);
+    EXPECT_LE(build_cpu, 2000.0 * 602);
+    const double job_ram = total(lab, {{"dimension", "ram"}, {"kind", "agent"}});
+    EXPECT_GE(job_ram, 1024.0 * 300);
+    EXPECT_LE(job_ram, 1024.0 * 302);
+    EXPECT_EQ(total(lab, {{"dimension", "cpu"}, {"kind", "workspace"}}), 0)
+        << "lab's engine is not reported";
+
+    // A later sample counts the running workloads again, never the finished build or job.
+    const auto later = liquid::runtime::block_on(
+        lake::api::sample_usage(context, std::chrono::seconds(900), now + std::chrono::hours(2)));
+    ASSERT_TRUE(later);
+    flush(rig.recorder);
+    EXPECT_EQ(total(home, {{"dimension", "cpu"}, {"kind", "workspace"}}), 250 * 1800);
+    EXPECT_EQ(total(lab, {{"dimension", "cpu"}, {"kind", "build"}}), build_cpu);
+
+    // usage_over_time answers them by object and GPU class, and names what the operator has not
+    // reported.
+    const auto read = rig.call("usage_over_time",
+                               {{"customer_id", rig.customer},
+                                {"from", utc(now - std::chrono::hours(1))},
+                                {"to", utc(now + std::chrono::hours(3))},
+                                {"granularity", "hour"},
+                                {"dimensions", json::array({"cpu", "ram", "gpu", "vram"})}});
+    ASSERT_TRUE(read.ok) << read.error.message;
+    const json* cpu = dimension(read.value, "cpu");
+    ASSERT_NE(cpu, nullptr);
+    EXPECT_EQ((*cpu)["unit"], "mcpu_seconds");
+    EXPECT_EQ((*cpu)["by_object"][0]["key"], app->id) << "the largest first";
+    const json* gpu = dimension(read.value, "gpu");
+    ASSERT_NE(gpu, nullptr);
+    EXPECT_EQ((*gpu)["unit"], "gpu_seconds");
+    EXPECT_EQ((*gpu)["total"], 1800);
+    ASSERT_EQ((*gpu)["by_class"].size(), 1U);
+    EXPECT_EQ((*gpu)["by_class"][0]["key"], "l4");
+    std::string not_measured = read.value["not_measured"].dump();
+    EXPECT_NE(not_measured.find("service unreported"), std::string::npos) << not_measured;
+    EXPECT_NE(not_measured.find("the engine of workspace lab"), std::string::npos) << not_measured;
+    EXPECT_EQ(not_measured.find("service orders"), std::string::npos) << not_measured;
+    EXPECT_EQ(not_measured.find("lake#612"), std::string::npos) << "CPU and memory are measured";
+}

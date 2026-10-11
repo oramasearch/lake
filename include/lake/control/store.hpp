@@ -315,6 +315,9 @@ struct BillingPrice {
     std::uint64_t unit_micros = 0;
     std::uint64_t per = 1;      // units of the dimension's unit `unit_micros` buys
     std::uint64_t included = 0; // units a month the plan includes
+    // A class within the dimension (a GPU class such as `h100`, migration 0075, lake#643): a rate
+    // for that class alone. Empty: the dimension's default rate, for every class without its own.
+    std::string class_name;
 };
 struct BillingPlan {
     std::string id, name, description, currency = "USD";
@@ -329,6 +332,7 @@ struct InvoiceLine {
     std::string dimension, description, unit;
     std::uint64_t quantity = 0, included = 0, billable = 0, unit_micros = 0, per = 1,
                   amount_micros = 0;
+    std::string class_name; // the class this line bills (migration 0075); empty for the rest
 };
 struct Invoice {
     std::string id;
@@ -365,6 +369,21 @@ struct ManagedService {
     std::string phase, message, endpoint; // empty until the operator reports
     std::int64_t observed_generation = 0;
     std::string workspace_id;
+};
+// The resources a workload is scheduled with (migration 0075, lake#643,
+// docs/api/metering.md#resources), written only by the Orama operator: the totals of the
+// workload's scheduled pods, each container's request or, without one, its limit. `pods` is how
+// many are scheduled now; a build's or a job's row keeps what its pods ran with after they finish.
+struct WorkloadResources {
+    std::string object_kind; // workspace, service, store, app, build or agent_launch
+    std::string object_id;
+    int pods = 0;
+    std::uint64_t cpu_millis = 0;
+    std::uint64_t memory_bytes = 0;
+    int gpus = 0;
+    std::string gpu_class; // l4, a10g, a100, h100, ...; empty when unknown
+    std::uint64_t vram_bytes = 0;
+    std::string observed_at;
 };
 struct Workspace {
     std::string id, customer_id, name, environment;
@@ -699,6 +718,8 @@ struct AgentLaunch {
     std::string workspace_id;
     // Why lake withdrew the launch itself, e.g. the operator never started it (lake#442).
     std::string stop_reason;
+    // When the operator last wrote the launch's status: a finished job's end (lake#643).
+    std::string status_updated_at;
 };
 struct NewAgentLaunch {
     std::string customer_id, agent_id, agent_name, mode, trigger;
@@ -1453,6 +1474,11 @@ public:
     // account already has an invoice for the period that is not void); set_invoice_state moves a
     // due invoice to paid or void (conflict from any other state).
     virtual Result<std::vector<BillingPlan>> billing_plans() = 0;
+    // The resources each workload is scheduled with (migration 0075, lake#643), every row. The
+    // Orama operator writes them; put_workload_resources is the same write, for tests and local
+    // demos (it replaces the row of the kind and id).
+    virtual Result<std::vector<WorkloadResources>> workload_resources() = 0;
+    virtual Result<void> put_workload_resources(const WorkloadResources& row) = 0;
     virtual Result<BillingPlan> put_billing_plan(const BillingPlan& plan) = 0;
     virtual Result<Invoice> create_invoice(const Invoice& invoice) = 0;
     virtual Result<std::vector<Invoice>> list_invoices(const std::string& customer_id) = 0;

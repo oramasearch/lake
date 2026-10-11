@@ -28,9 +28,10 @@ namespace lake::api {
 // time-series.md), one bucket an hour, kept 400 days:
 //
 // - `lake_usage`, a counter labelled `dimension` and, by dimension, `kind`, `agent`, `launch_id`,
-//   `model` and `object_id`: API and MCP calls, each model's answered predictions, speech-to-text
-//   seconds, model tokens, and the instance and volume seconds of managed services, stores and
-//   apps;
+//   `model`, `object_id` and `class`: API and MCP calls, each model's answered predictions,
+//   speech-to-text seconds, model tokens, the instance and volume seconds of managed services,
+//   stores and apps, and the CPU, RAM, GPU and VRAM seconds every workload is scheduled with
+//   (lake#643);
 // - `lake_storage`, a gauge labelled `kind` (repositories, images, workspace_data, transcripts,
 //   drive_files): the workspace's stored bytes, sampled by the owner loop.
 //
@@ -130,13 +131,21 @@ private:
 };
 
 // The dimensions `lake_usage` and `lake_storage` carry, and every other dimension usage_over_time
-// answers (docs/api/metering.md#dimensions). `unit` is what a value counts. A price per dimension,
-// when billing is designed, is keyed by `name` and multiplies `unit`; nothing here prices.
+// answers (docs/api/metering.md#dimensions). `unit` is what a value counts. Billing's price list
+// (docs/api/billing.md) keys a rate by `name` and multiplies `unit`; nothing here prices.
 struct UsageDimension {
     std::string_view name;
-    std::string_view unit;        // bytes, seconds, calls, tokens, instance_seconds, gib_seconds
+    // bytes, seconds, calls, tokens, instance_seconds, gib_seconds, mcpu_seconds (thousandths of a
+    // vCPU for a second), mib_seconds (a MiB for a second) or gpu_seconds
+    std::string_view unit;
     std::string_view aggregation; // sum (a counter over the period) or last (a reading)
     std::string_view title;
+    // Whether the price list may rate it. Build, run and instance time are measured but no longer
+    // priced: compute is priced as CPU, RAM, GPU and VRAM (lake#643). A list published before
+    // keeps its rates for them.
+    bool priced = true;
+    // Whether its usage carries a `class` label (a GPU class) and the price list may rate a class.
+    bool classes = false;
 };
 const std::vector<UsageDimension>& usage_dimensions();
 const UsageDimension* find_usage_dimension(std::string_view name);

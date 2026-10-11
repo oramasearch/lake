@@ -247,8 +247,13 @@ export default function AppPage() {
             <UsageThisMonth
               customerId={customerId}
               workspaceId={workspaceId ?? ""}
-              match={[{ dimension: "instances", breakdown: "by_object", keys: [appId], label: "Instance time" }]}
-              note="Replicas times the time each ran ready."
+              match={[
+                { dimension: "cpu", breakdown: "by_object", keys: [appId], label: "CPU" },
+                { dimension: "ram", breakdown: "by_object", keys: [appId], label: "RAM" },
+                { dimension: "gpu", breakdown: "by_object", keys: [appId], label: "GPU" },
+                { dimension: "instances", breakdown: "by_object", keys: [appId], label: "Instance time" },
+              ]}
+              note="CPU, RAM and GPU are what the app's replicas are scheduled with, for as long as they run."
             />
             <Card label="Danger zone" title="Delete App" tone="exception">
               <form className="row-form flex flex-col gap-3" onSubmit={submit("delete", (form) => call("delete", "delete_app", { confirm: form.confirm ?? "" }, `Deletion of ${name} requested`))}>

@@ -179,6 +179,16 @@ lake's own platform credentials, environment variables of the hosting platform (
 Orama's deployments; `spec.env` with a `secretKeyRef` on the dev cluster), never a user's secret
 store; without them, the manual provider, said on the Billing page and in `viewer`/`server_info`. Not deployed; the operator must vendor the schema
 and select `payment_provider_guard`. See `docs/api/billing.md#stripe`.
+Compute is priced as CPU, RAM, GPU and GPU memory (lake#643, migration `0075_workload_resources`):
+the Orama operator writes `workload_resources`, what each workload (a workspace engine, service,
+store, app, image build, agent launch) is scheduled with (requests, or limits without requests;
+GPUs, their class and memory); the store root's owner records `cpu`, `ram`, `gpu` (by class) and
+`vram` seconds in each workspace's `lake_usage`, and the price list rates them per vCPU-, GiB- and
+GPU-minute, with a GPU rate per class (`billing_plan_prices.class`). `instances`, `build_compute` and
+`run_compute` stay measured but are no longer priced; issued invoices keep their lines. Not deployed;
+the operator must vendor the schema, select `workload_resources_guard` and report the resources
+(orama-operator#288).
+See `docs/api/metering.md#resources` and `docs/api/billing.md#price-list`.
 A user's secret reaches a Kubernetes Secret only as a sealed projection (lake#625, decision 58, no
 migration): lake has two levels of secrets, Orama's platform credentials as environment variables
 of the hosting platform and users' workspace secrets in the secret store (`docs/deployment/secrets.md`).
@@ -644,7 +654,7 @@ one adapter TU) and the pure renderers in `include/zetta/api/web_ui.hpp`.
 - **Schema.** `db/schema.sql` is the source of truth; the operator carries a byte-identical
   vendored copy at `internal/controller/assets/lake-schema.sql` and applies it per Lake as an
   owned `PostgresSchema` (one transaction, guarded on the table the **newest** migration creates,
-  `payment_provider_guard` in the source tree, versioned by content hash).
+  `workload_resources_guard` in the source tree, versioned by content hash).
   Change the schema HERE, then copy it into the operator in the same change; the operator's test
   checks the copy carries the source-of-truth header. Migrations are single-shot today
   (incremental migrations are the PostgresSchema follow-up), so until then a schema change means

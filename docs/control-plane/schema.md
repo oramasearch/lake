@@ -869,6 +869,28 @@ environment variables of the hosting platform (lake#628). Nothing is dropped; id
 The operator vendors the schema and selects that guard in its own pull request before a lake with
 this change is rolled.
 
+## Workload resources migration
+
+`0075_workload_resources` (lake#643) prices compute by the resources each workload is scheduled
+with ([`../api/metering.md#resources`](../api/metering.md#resources)):
+
+- `workload_resources` (`object_kind` `workspace`, `service`, `store`, `app`, `build` or
+  `agent_launch`; `object_id`; `pods`; `cpu_millis`; `memory_bytes`; `gpus`; `gpu_class`;
+  `vram_bytes`; `observed_at`; primary key kind and id), written only by the Orama operator: the
+  totals of a workload's scheduled pods, each container's request or, where it has none, its
+  limit. `pods` is how many are scheduled now; a build's or a job's row keeps what its pods ran
+  with after they finish, with `pods` 0. Numbers only. Lake's owner loop reads it and records
+  CPU, RAM, GPU and VRAM seconds in each workspace Zetta; nothing about usage is kept here;
+- `billing_plan_prices.class` and `billing_invoice_lines.class` (a GPU class such as `h100`, empty
+  for a dimension's default rate), with the price's primary key now (`plan_id`, `dimension`,
+  `class`), so the price list can carry one GPU rate per class.
+
+Nothing is dropped; idempotent (the primary key is dropped and added again on every run); guard
+`workload_resources_guard`. The operator vendors the schema, selects that guard and fills the table
+in its own pull request ([orama-operator#288](https://github.com/oramasearch/orama-operator/pull/288))
+before a lake with this change is rolled. `OperatorContract.*` prepares that pull request's
+statements against this schema.
+
 ## Repository workspaces migration
 
 `0051_repository_workspaces` adds `repositories.workspace_id` (references `workspaces`, index

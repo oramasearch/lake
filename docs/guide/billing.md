@@ -15,7 +15,8 @@ Metis is not billed here. It is enterprise software priced by Orama's sales team
 | Term | What it is |
 |---|---|
 | **Price list** | Orama's rates, one for each kind of usage (a dimension, as on Usage). Every account is billed at it. |
-| **Rate** | An amount for every so many units of one dimension: "$2.00 per 1M calls", "$0.005 per minute" of build compute, "$0.04 per 1 GiB" a month of storage. |
+| **Rate** | An amount for every so many units of one dimension: "$2.00 per 1M calls", "$0.0015 per vCPU-minute" of CPU, "$0.04 per 1 GiB" a month of storage. GPUs have a rate per GPU class (L4, A10G, A100, H100). |
+| **Compute** | What your workloads are scheduled with, each at its own rate: CPU (vCPU-minutes), RAM (GiB-minutes), GPU (GPU-minutes, by class) and GPU memory (GiB-minutes). A workload is your workspace's engine, a service, an app, an image build or an agent run. |
 | **Bill** | One UTC calendar month: one line per dimension with what was used, its rate and its cost (usage × rate), and the total. |
 | **Invoice** | A month's bill once Orama issues it, after the month ends. Its lines and rates are kept as issued; later usage or new rates never change it. |
 | **State** | An invoice is **due** until it is **paid**, or **void** if Orama cancels it (the month can then be invoiced again). |
@@ -28,20 +29,34 @@ The rates apply to every account; there is nothing to choose or sign up for.
 
 | Usage | Rate |
 |---|---|
+| CPU | $0.0015 per vCPU-minute ($0.09 per vCPU-hour) |
+| RAM | $0.00017 per GiB-minute ($0.0102 per GiB-hour) |
+| GPU, NVIDIA L4 | $0.0108 per GPU-minute ($0.648 per hour) |
+| GPU, NVIDIA A10G | $0.0215 per GPU-minute ($1.29 per hour) |
+| GPU, NVIDIA A100 | $0.03875 per GPU-minute ($2.325 per hour) |
+| GPU, NVIDIA H100 | $0.07875 per GPU-minute ($4.725 per hour) |
+| GPU, any other class | $0.03875 per GPU-minute |
+| GPU memory | $0.00025 per GiB-minute ($0.015 per GiB-hour) |
 | Storage | $0.04 per GiB-month |
 | Transfer | $0.05 per GiB |
-| Build compute | $0.005 per minute |
-| Workspace run compute | $0.004 per minute |
 | Speech to text | $0.0072 per minute |
 | API and MCP calls | $2.00 per million |
 | Model predictions | $0.01 per 1,000 |
 | Model tokens | $9.00 per million |
-| Service and app instances | $0.00135 per instance-minute |
 | Service and store volumes | $0.20 per GiB-month |
 
-Time is billed by the minute on the month's total: your workspaces' seconds of each kind are added
-up over the month and rounded up once to a whole minute, so many short jobs are never each charged
-a minute.
+Compute is what each workload is scheduled with: the CPU and memory its containers request (or
+their limit, when they request nothing), its GPUs and their memory, for as long as it runs. A
+pipeline run or a training job inside your workspace runs on your workspace's engine, so it is that
+engine's CPU and RAM. An image build or an agent job is billed from when it was requested to when it
+finished.
+
+Time is billed by the minute on the month's total: your workspaces' usage of each kind is added up
+over the month and rounded up once to a whole minute (a vCPU-minute, a GiB-minute, a GPU-minute), so
+many short jobs are never each charged a minute.
+
+Invoices from before compute was priced this way keep their lines as issued, such as **Service and
+App Instances** or **Build Compute**.
 
 These are Orama Cloud's list rates; the Lake you use answers its own with `price_list`, which is
 what you are billed at.

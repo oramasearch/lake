@@ -94,7 +94,8 @@ Usage over time (lake#564): `record_request` also adds each routed capability ca
 `usage_recorder.cpp`'s `UsageRecorder` (`calls`, `api` or `mcp`), as `predict` adds a model's
 answered predictions and `create_transcript` the audio's seconds or tokens; `ApiServer::drain`
 flushes it every `usage_flush_interval` and, as the store root's owner, schedules
-`usage_capabilities.cpp`'s `sample_usage` (stored bytes, instance and volume time, new build results)
+`usage_capabilities.cpp`'s `sample_usage` (stored bytes, instance and volume time, CPU, RAM, GPU and
+GPU memory from the operator's `workload_resources` (lake#643), new build results)
 every `usage_sample_interval`. `usage_capabilities.cpp` registers `usage_over_time`, `usage_limits`,
 `set_usage_limit` and `record_model_usage`; `metering_capabilities.cpp`'s `queue_repository_builds`
 is the build-record queueing the sample shares with `metering_usage`. See

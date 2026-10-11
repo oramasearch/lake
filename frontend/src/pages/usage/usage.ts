@@ -22,6 +22,8 @@ export type Dimension = {
   by_launch?: Breakdown[];
   by_model?: Breakdown[];
   by_object?: Breakdown[];
+  /** GPU and GPU memory by GPU class (lake#643); "" is a GPU of no known class. */
+  by_class?: Breakdown[];
 };
 
 export type Reading = {
@@ -87,6 +89,12 @@ function hours(seconds: number): string {
   return h === 0 ? "0" : h < 10 ? h.toFixed(1).replace(/\.0$/, "") : Math.round(h).toLocaleString("en-US");
 }
 
+/** Resource-seconds (vCPU, GiB or GPU) by the minute under an hour, else by the hour: "30 vCPU-min",
+ * "1.5 GiB-h". */
+function held(seconds: number, what: string): string {
+  return seconds < 3600 ? `${Math.round(seconds / 60).toLocaleString("en-US")} ${what}-min` : `${hours(seconds)} ${what}-h`;
+}
+
 function count(value: number): string {
   if (Math.abs(value) >= 1_000_000) return `${(value / 1_000_000).toFixed(1).replace(/\.0$/, "")}M`;
   if (Math.abs(value) >= 10_000) return `${(value / 1000).toFixed(1).replace(/\.0$/, "")}k`;
@@ -105,6 +113,12 @@ export function formatValue(value: number | null | undefined, unit: string): str
       return `${hours(value)} instance-h`;
     case "gib_seconds":
       return `${hours(value)} GiB-h`;
+    case "mcpu_seconds":
+      return held(value / 1000, "vCPU");
+    case "mib_seconds":
+      return held(value / 1024, "GiB");
+    case "gpu_seconds":
+      return held(value, "GPU");
     case "tokens":
       return `${count(value)} tokens`;
     case "calls":
@@ -166,6 +180,7 @@ export function mergeReadings(readings: Reading[]): Reading | null {
         by_launch: d.by_launch || found.by_launch ? mergeBreakdowns(found.by_launch, d.by_launch) : undefined,
         by_model: d.by_model || found.by_model ? mergeBreakdowns(found.by_model, d.by_model) : undefined,
         by_object: d.by_object || found.by_object ? mergeBreakdowns(found.by_object, d.by_object) : undefined,
+        by_class: d.by_class || found.by_class ? mergeBreakdowns(found.by_class, d.by_class) : undefined,
       });
     }
   }
@@ -205,6 +220,23 @@ const KIND_NAMES: Record<string, string> = {
   store: "Stores",
   app: "Apps",
   zetta: "Workspace engine",
+  workspace: "Workspace engines",
+  build: "Image builds",
+  agent: "Agents",
+  postgres: "Postgres",
+  kafka: "Kafka",
+  clickhouse: "ClickHouse",
+  tidb: "TiDB",
+  cassandra: "Cassandra",
+  valkey: "Valkey",
+  sqlite: "SQLite",
+  duckdb: "DuckDB",
+  polars: "Polars",
+  l4: "L4",
+  a10g: "A10G",
+  a100: "A100",
+  h100: "H100",
+  "": "Unknown class",
 };
 
 /** The stacked chart's series for one dimension, by workspace or by kind: the largest `top`
@@ -236,7 +268,8 @@ function csvCell(value: unknown): string {
 }
 
 /** The reading as CSV: one row per dimension, breakdown and period, in each dimension's own unit
- * (bytes, seconds, calls, tokens, instance-seconds, GiB-seconds), so a spreadsheet adds them up
+ * (bytes, seconds, calls, tokens, instance-seconds, GiB-seconds, mCPU-seconds, MiB-seconds,
+ * GPU-seconds), so a spreadsheet adds them up
  * exactly. */
 export function toCsv(reading: Reading, names: Record<string, string> = {}): string {
   const rows: unknown[][] = [["dimension", "unit", "breakdown", "name", "period", "value"]];
@@ -249,6 +282,7 @@ export function toCsv(reading: Reading, names: Record<string, string> = {}): str
       ["launch", d.by_launch ?? []],
       ["model", d.by_model ?? []],
       ["object", d.by_object ?? []],
+      ["class", d.by_class ?? []],
     ] as const) {
       for (const row of list) {
         reading.periods.forEach((period, i) => rows.push([d.dimension, d.unit, breakdown, breakdown === "workspace" ? breakdownName(row, names) : row.key, period, row.points[i] ?? ""]));
@@ -258,7 +292,8 @@ export function toCsv(reading: Reading, names: Record<string, string> = {}): str
   return rows.map((r) => r.map(csvCell).join(",")).join("\n") + "\n";
 }
 
-/** A limit typed in a person's unit (GiB, hours, instance-hours, GiB-hours, a count) in the
+/** A limit typed in a person's unit (GiB, hours, instance-hours, GiB-hours, vCPU-hours, GPU-hours,
+ * a count) in the
  * dimension's own unit, and back. */
 export function limitScale(unit: string): { label: string; factor: number } {
   switch (unit) {
@@ -270,6 +305,12 @@ export function limitScale(unit: string): { label: string; factor: number } {
       return { label: "instance-hours", factor: 3600 };
     case "gib_seconds":
       return { label: "GiB-hours", factor: 3600 };
+    case "mcpu_seconds":
+      return { label: "vCPU-hours", factor: 3_600_000 };
+    case "mib_seconds":
+      return { label: "GiB-hours", factor: 3600 * 1024 };
+    case "gpu_seconds":
+      return { label: "GPU-hours", factor: 3600 };
     case "tokens":
       return { label: "tokens", factor: 1 };
     default:

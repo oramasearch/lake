@@ -3,7 +3,7 @@
  * and the rail that shows Billing only where the lake bills. `npm test`; the build runs it. */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { DIMENSIONS, LIST_RATES, billedNote, invoiceTone, lineSentence, monthLabel, months, money, owed, paymentSummary, payOnline, priceLabel, providerStatus, quantityLabel, rateRows, ratesInput, recordedByHand } from "../src/pages/billing/billing.ts";
+import { DIMENSIONS, GPU_CLASSES, LIST_RATES, billedNote, invoiceTone, lineSentence, monthLabel, months, money, owed, paymentSummary, payOnline, priceLabel, providerStatus, quantityLabel, rateRows, ratesInput, recordedByHand, rowTitle } from "../src/pages/billing/billing.ts";
 import { billingVisible } from "../src/routes/nav.ts";
 
 test("an amount is in its currency, to the cent unless a price has fractions of one", () => {
@@ -34,9 +34,32 @@ test("time is priced and billed by the minute, on the month's total (lake#637)",
   assert.equal(billedNote(builds), "billed as 2 min");
   assert.equal(lineSentence(builds, "USD"), "2 min × $0.005 per minute = $0.01");
   assert.equal(billedNote({ quantity: 120, billable: 120, unit: "seconds" }), "");
-  for (const rate of LIST_RATES.filter((r) => ["build_compute", "run_compute", "speech", "instances"].includes(r.dimension))) {
+  for (const rate of LIST_RATES.filter((r) => ["speech", "gpu"].includes(r.dimension))) {
     assert.equal(rate.per, 60, `${rate.dimension} is priced per minute`);
   }
+});
+
+test("compute is priced per vCPU-minute, GiB-minute and GPU-minute, a rate per GPU class (lake#643)", () => {
+  assert.equal(priceLabel({ unit_micros: 1_500, per: 60_000, unit: "mcpu_seconds" }, "USD"), "$0.0015 per vCPU-minute");
+  assert.equal(priceLabel({ unit_micros: 170, per: 61_440, unit: "mib_seconds" }, "USD"), "$0.00017 per GiB-minute");
+  assert.equal(priceLabel({ unit_micros: 10_800, per: 60, unit: "gpu_seconds" }, "USD"), "$0.0108 per GPU-minute");
+  assert.equal(priceLabel({ unit_micros: 90_000, per: 3_600_000, unit: "mcpu_seconds" }, "USD"), "$0.09 per vCPU-hour");
+  // Half a vCPU for 61 seconds: 30,500 mCPU-seconds, billed as one vCPU-minute.
+  const cpu = { quantity: 30_500, billable: 60_000, unit: "mcpu_seconds", unit_micros: 1_500, per: 60_000, amount_micros: 1_500 };
+  assert.equal(billedNote(cpu), "billed as 1 vCPU-min");
+  for (const rate of LIST_RATES.filter((r) => r.dimension === "cpu")) assert.equal(rate.per, 60_000, "per vCPU-minute");
+  for (const rate of LIST_RATES.filter((r) => r.dimension === "ram" || r.dimension === "vram")) assert.equal(rate.per, 61_440, "per GiB-minute");
+  // The retired time dimensions are not on the list any more.
+  for (const retired of ["instances", "build_compute", "run_compute"]) {
+    assert.equal(DIMENSIONS.some((d) => d.name === retired), false, retired);
+    assert.equal(LIST_RATES.some((r) => r.dimension === retired), false, retired);
+  }
+  // Every GPU class the editor offers has a list rate, and so does a GPU of no known class.
+  for (const name of GPU_CLASSES) assert.ok(LIST_RATES.some((r) => r.dimension === "gpu" && r.class === name), name);
+  assert.ok(LIST_RATES.some((r) => r.dimension === "gpu" && !r.class));
+  assert.equal(rowTitle({ dimension: "gpu", class: "h100" }), "GPU (H100)");
+  assert.equal(rowTitle({ dimension: "gpu", class: "" }), "GPU, other classes");
+  assert.equal(rowTitle({ dimension: "cpu", class: "" }), "CPU");
 });
 
 test("a bill covers a UTC month, and January's month before is December", () => {
@@ -62,32 +85,47 @@ test("an invoice's state is a chip, and what is owed adds up the due ones by cur
   assert.deepEqual(owed([]), []);
 });
 
-test("the price list editor starts from the published list, or the list rates, one row a dimension", () => {
-  assert.equal(DIMENSIONS.length, 10);
-  assert.equal(LIST_RATES.length, 10, "the list rates price every dimension");
+test("the price list editor starts from the published list, or the list rates, one row a dimension and GPU class", () => {
+  assert.equal(DIMENSIONS.length, 11);
   const fresh = rateRows(null);
-  assert.equal(fresh.length, 10);
-  assert.deepEqual(fresh[0], { dimension: "storage", rate: "0.04", per: String(1024 ** 3) });
-  assert.deepEqual(fresh.find((r) => r.dimension === "model_tokens"), { dimension: "model_tokens", rate: "9", per: "1000000" });
-  const published = rateRows([{ dimension: "calls", unit_micros: 1_500_000, per: 1_000_000 }]);
-  assert.deepEqual(published.find((r) => r.dimension === "calls"), { dimension: "calls", rate: "1.5", per: "1000000" });
-  assert.deepEqual(published.find((r) => r.dimension === "storage"), { dimension: "storage", rate: "", per: "1" }, "a dimension the list does not price starts empty");
+  // Eleven dimensions, plus four GPU classes each for GPU and GPU memory.
+  assert.equal(fresh.length, 11 + 2 * GPU_CLASSES.length);
+  assert.deepEqual(fresh[0], { dimension: "cpu", class: "", rate: "0.0015", per: "60000" });
+  assert.deepEqual(fresh.find((r) => r.dimension === "gpu" && r.class === "h100"), { dimension: "gpu", class: "h100", rate: "0.07875", per: "60" });
+  assert.deepEqual(fresh.find((r) => r.dimension === "vram" && r.class === "l4"), { dimension: "vram", class: "l4", rate: "", per: "1" }, "GPU memory has one rate for every class");
+  assert.deepEqual(fresh.find((r) => r.dimension === "model_tokens"), { dimension: "model_tokens", class: "", rate: "9", per: "1000000" });
+  const published = rateRows([
+    { dimension: "calls", unit_micros: 1_500_000, per: 1_000_000 },
+    { dimension: "gpu", class: "b200", unit_micros: 120_000, per: 60 },
+    { dimension: "instances", unit_micros: 1_350, per: 60 },
+  ]);
+  assert.deepEqual(published.find((r) => r.dimension === "calls"), { dimension: "calls", class: "", rate: "1.5", per: "1000000" });
+  assert.deepEqual(published.find((r) => r.dimension === "storage"), { dimension: "storage", class: "", rate: "", per: "1" }, "a dimension the list does not price starts empty");
+  assert.deepEqual(published.find((r) => r.class === "b200"), { dimension: "gpu", class: "b200", rate: "0.12", per: "60" }, "a class the list names gets its row");
+  assert.equal(published.some((r) => r.dimension === "instances"), false, "a retired dimension is not carried over");
 });
 
-test("the editor's rows become set_price_list's prices: millionths, whole units, empty rates left out", () => {
-  assert.deepEqual(ratesInput(rateRows(null)), { prices: LIST_RATES });
+test("the editor's rows become set_price_list's prices: millionths, whole units, classes, empty rates left out", () => {
+  assert.deepEqual(ratesInput(rateRows(null)), { prices: LIST_RATES.slice().sort((a, b) => order(a) - order(b)) });
   assert.deepEqual(
     ratesInput([
-      { dimension: "calls", rate: "0.0004", per: "" },
-      { dimension: "storage", rate: " ", per: "1" },
+      { dimension: "calls", class: "", rate: "0.0004", per: "" },
+      { dimension: "storage", class: "", rate: " ", per: "1" },
+      { dimension: "gpu", class: "l4", rate: "0.0108", per: "60" },
     ]),
-    { prices: [{ dimension: "calls", unit_micros: 400, per: 1 }] },
+    { prices: [{ dimension: "calls", unit_micros: 400, per: 1 }, { dimension: "gpu", class: "l4", unit_micros: 10_800, per: 60 }] },
   );
-  assert.deepEqual(ratesInput([{ dimension: "calls", rate: "1", per: "1" }, { dimension: "speech", rate: "-1", per: "60" }]), { bad: 1 });
-  assert.deepEqual(ratesInput([{ dimension: "calls", rate: "1", per: "0" }]), { bad: 0 });
-  assert.deepEqual(ratesInput([{ dimension: "calls", rate: "1", per: "1.5" }]), { bad: 0 });
-  assert.deepEqual(ratesInput([{ dimension: "calls", rate: "free", per: "1" }]), { bad: 0 });
+  assert.deepEqual(ratesInput([{ dimension: "calls", class: "", rate: "1", per: "1" }, { dimension: "speech", class: "", rate: "-1", per: "60" }]), { bad: 1 });
+  assert.deepEqual(ratesInput([{ dimension: "calls", class: "", rate: "1", per: "0" }]), { bad: 0 });
+  assert.deepEqual(ratesInput([{ dimension: "calls", class: "", rate: "1", per: "1.5" }]), { bad: 0 });
+  assert.deepEqual(ratesInput([{ dimension: "calls", class: "", rate: "free", per: "1" }]), { bad: 0 });
 });
+
+// The editor's row order: dimensions as DIMENSIONS lists them, each followed by its GPU classes.
+function order(rate: { dimension: string; class?: string }): number {
+  const rows = rateRows(null);
+  return rows.findIndex((r) => r.dimension === rate.dimension && r.class === (rate.class ?? ""));
+}
 
 test("Billing is in the rail only where the lake bills", () => {
   assert.equal(billingVisible({ billing: true }, { billing: true }), true);

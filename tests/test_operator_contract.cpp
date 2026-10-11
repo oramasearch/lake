@@ -5,7 +5,8 @@
 //
 // The statements below are copied verbatim from oramasearch/orama-operator at 188f8ac
 // (internal/controller/*_pgx.go); the workspace and volume snapshot statements (operator#259,
-// operator#260) are copied from oramasearch/orama-operator at 6c32fea (PR #267). When the operator changes one of them, copy it here again; when
+// operator#260) are copied from oramasearch/orama-operator at 6c32fea (PR #267), and the workload
+// resources statements (lake#643) from b70dab1 (PR #288). When the operator changes one of them, copy it here again; when
 // lake changes a table the operator reads, this test says which statement breaks.
 
 #include "lake/control/agent_runs.hpp"
@@ -244,6 +245,62 @@ ON CONFLICT (target) DO UPDATE SET
     message = EXCLUDED.message,
     updated_at = now())";
 
+// internal/controller/lake_workload_resources_pgx.go (oramasearch/orama-operator#288 at b70dab1,
+// lake#643)
+constexpr std::string_view listWorkloadResourcesSQL =
+    R"(SELECT object_kind, object_id::text, pods, cpu_millis, memory_bytes, gpus, gpu_class, vram_bytes
+  FROM workload_resources
+ ORDER BY object_kind, object_id)";
+
+// internal/controller/lake_workload_resources_pgx.go
+constexpr std::string_view listWorkloadObjectsSQL =
+    R"(SELECT 'workspace', w.id::text, COALESCE(w.namespace, ''), w.desired, '', ''
+  FROM workspaces w
+ WHERE ($2::boolean AND NOT (w.desired = 'deleted' AND COALESCE(w.phase, '') = 'Deleted'))
+    OR w.id = ANY($1::text[]::uuid[])
+UNION ALL
+SELECT 'service', s.id::text, COALESCE(w.namespace, ''), s.desired, s.kind, s.slug
+  FROM services s
+  JOIN workspaces w ON w.id = s.workspace_id
+  LEFT JOIN service_status st ON st.service_id = s.id
+ WHERE NOT EXISTS (SELECT 1 FROM workspaces z WHERE z.zetta_service_id = s.id)
+   AND (($2::boolean AND NOT (s.desired = 'absent' AND COALESCE(st.phase, '') = 'Deleted'))
+        OR s.id = ANY($1::text[]::uuid[]))
+UNION ALL
+SELECT 'app', a.id::text, COALESCE(w.namespace, ''), a.desired, a.mode, ''
+  FROM apps a
+  JOIN workspaces w ON w.id = a.workspace_id
+ WHERE ($2::boolean AND NOT (a.desired = 'deleted' AND COALESCE(a.phase, '') = 'Deleted'))
+    OR a.id = ANY($1::text[]::uuid[])
+UNION ALL
+SELECT 'build', b.id::text, '', b.desired, '', ''
+  FROM builds b
+ WHERE b.id = ANY($1::text[]::uuid[])
+UNION ALL
+SELECT 'agent_launch', l.id::text, COALESCE(w.namespace, ''), l.desired, l.mode, l.slug
+  FROM agent_launches l
+  JOIN workspaces w ON w.id = l.workspace_id
+ WHERE ($2::boolean AND l.mode = 'service' AND l.desired = 'present')
+    OR l.id = ANY($1::text[]::uuid[]))";
+
+// internal/controller/lake_workload_resources_pgx.go
+constexpr std::string_view upsertWorkloadResourcesSQL =
+    R"(INSERT INTO workload_resources (object_kind, object_id, pods, cpu_millis, memory_bytes,
+    gpus, gpu_class, vram_bytes, observed_at)
+VALUES ($1, $2::uuid, $3, $4, $5, $6, $7, $8, now())
+ON CONFLICT (object_kind, object_id) DO UPDATE SET
+    pods = EXCLUDED.pods,
+    cpu_millis = EXCLUDED.cpu_millis,
+    memory_bytes = EXCLUDED.memory_bytes,
+    gpus = EXCLUDED.gpus,
+    gpu_class = EXCLUDED.gpu_class,
+    vram_bytes = EXCLUDED.vram_bytes,
+    observed_at = now())";
+
+// internal/controller/lake_workload_resources_pgx.go
+constexpr std::string_view deleteWorkloadResourcesSQL =
+    R"(DELETE FROM workload_resources WHERE object_kind = $1 AND object_id = $2::uuid)";
+
 const std::vector<OperatorStatement>& operator_statements() {
     static const std::vector<OperatorStatement> statements{
         {"lake_stores_pgx.go", "listStoresSQL", listStoresSQL, true},
@@ -266,6 +323,12 @@ const std::vector<OperatorStatement>& operator_statements() {
          listVolumeSnapshotPoliciesSQL, true},
         {"lake_volume_snapshots_pgx.go", "upsertVolumeSnapshotStatusSQL",
          upsertVolumeSnapshotStatusSQL},
+        {"lake_workload_resources_pgx.go", "listWorkloadResourcesSQL", listWorkloadResourcesSQL},
+        {"lake_workload_resources_pgx.go", "listWorkloadObjectsSQL", listWorkloadObjectsSQL},
+        {"lake_workload_resources_pgx.go", "upsertWorkloadResourcesSQL",
+         upsertWorkloadResourcesSQL},
+        {"lake_workload_resources_pgx.go", "deleteWorkloadResourcesSQL",
+         deleteWorkloadResourcesSQL},
     };
     return statements;
 }
