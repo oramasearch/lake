@@ -135,8 +135,8 @@ native agents still answer within the call (a follow-up).
 | **ExperimentsAgent** (`agent-experiments`) | its service | an `experiment`, `experiment_status` or `experiment_explain` task and a credential for the selected workspace adapter. Proposal turns can read planning inputs (including `validate_study`, the no-side-effect preflight of `create_study`) but cannot write. A later `experiment` task carrying `context.confirmed_proposal`, with `proposal_task_id` and `proposal_sha256` naming the stored proposal it confirms (checked by `agent_turn`; only the experiment, the agent's `study`, may be edited), receives workspace `create_study` and backing `start_experiment`; status receives trial monitoring/stop tools, and explanation receives promotion only with its own confirmation. Experiment data remains in workspace Zetta |
 | **Auto-Suggest** (`agent-autosuggest`) | its service | the workspace's profile, which lake builds (`list_datasets`, then `get_dataset` for up to twelve); no key: it reads nothing itself |
 | **AgentCreator** (`agent-creator`) | its service | a turn key limited to `workspace_query` / `workspace_openapi` |
-| a **native** agent of the space | the workspace's `chat` (`GET`) | the message |
-| a **Python** agent of the space | its running `service` launch | the message and conversation id; with no running service lake starts one and answers `status: starting` |
+| a **native** agent of the account | the workspace's `chat` (`GET`) | the message |
+| a **Python** agent of the account | its running `service` launch | the message and conversation id; with no running service lake starts one and answers `status: starting` |
 
 A turn key is revoked when the turn ends. Offline library agents and library agents this lake
 does not run are refused. lake presents `LAKE_AGENT_SERVICE_TOKEN` as the bearer to every agent

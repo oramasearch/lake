@@ -9,7 +9,7 @@ take a pool and use the same credential, device, session, and identity-document 
 own `lake` pool. A credential from one pool is never considered by another pool.
 
 The registration records a display name, exact allowed origins, redirect URIs, an optional custom
-sign-in host, a JSON theme, and the **workspace** of the space the application belongs to
+sign-in host, a JSON theme, and the **workspace** of the account the application belongs to
 (`workspace_id`, required and never changed). That workspace's Zetta holds the application's
 settings, the name, origins, redirect URIs and theme ([Where settings live](#where-settings-live-lake351)),
 its users and organizations ([Where users and organizations live](#where-users-and-organizations-live-lake353-lake354)),
@@ -56,12 +56,12 @@ deleting one removes this pool's credentials and sessions. Neither action touche
 
 An application's settings, its display name, allowed origins, redirect URIs and hosted-page theme,
 are one record in the workspace Zetta of the application's workspace: the sealed collection
-`lake_auth_applications`, keyed by the application id and found by its space (`customer:<id>`)
+`lake_auth_applications`, keyed by the application id and found by its account (`customer:<id>`)
 ([workspace-records.md](../architecture/workspace-records.md)). Nothing falls back to PostgreSQL,
 to another workspace or to the lake Zetta.
 
 - **What stays central.** `auth_applications` keeps only the routing that finds an application
-  before any workspace is read: `id`; `customer_id` (its space, and the parent of its policy
+  before any workspace is read: `id`; `customer_id` (its account, and the parent of its policy
   object); `pool_id` (`app:<id>`, which the pool's sessions, credentials and tokens name);
   `custom_sign_in_domain` (the `Host` a custom-domain page is requested on, unique across lake, and
   the issuer host of its tokens); `workspace_id` (`0049`); `created_at` and `updated_at`. None of
@@ -138,7 +138,7 @@ is lake's own account of the person (the `users` row, the pool's credentials and
   and the hosted pages call them through `Registry::call_async`; a synchronous `Registry::call`
   answers `capability requires asynchronous dispatch`.
 - **Reading and writing.** The user and organization capabilities take the application's
-  `workspace_id`. A missing, malformed, unknown, foreign or other workspace of the space is
+  `workspace_id`. A missing, malformed, unknown, foreign or other workspace of the account is
   `invalid_input` at `/workspace_id`; the pages pass the application's own. An organization
   rename claims the new name first, writes the organization over the revision it read and then
   releases the old name; a concurrent change is `conflict` and releases the new claim.
@@ -279,7 +279,7 @@ another workspace or to the lake Zetta.
 - **Writing.** Every lifecycle event (sign-up, sign-in, MFA changes, user and organization
   changes) is appended to the application's workspace before the caller is answered, as it was
   written to the control store before. An application with no workspace yet (a legacy
-  registration whose space had several workspaces) answers `workspace_not_ready`, and so does a
+  registration whose account had several workspaces) answers `workspace_not_ready`, and so does a
   workspace that is not ready. The event is then not recorded and the action that raised it fails.
 - **Exactly one sender per attempt.** Each attempt is a record keyed by the blind index of
   `event, webhook, attempt`. Lake claims it with `if_absent` and a `pending` outcome before it
@@ -292,7 +292,7 @@ another workspace or to the lake Zetta.
   `retry_application_webhook`, as before, so lake keeps no due-delivery index anywhere.
 - **Reading.** `list_application_webhook_events` and `retry_application_webhook` take the
   application's `workspace_id`. A missing, malformed, unknown, foreign or other workspace of the
-  space is `invalid_input` at `/workspace_id`; the page passes the application's own. A listing is
+  account is `invalid_input` at `/workspace_id`; the page passes the application's own. A listing is
   two record reads: the newest events, then the attempts back to the oldest of them.
 - **Retention and deletion.** Events and attempts are kept until their workspace is deleted, which
   deletes its Zetta and its records. The application's events then can no longer be written, so
@@ -333,7 +333,7 @@ lake Zetta.
   lifecycle event lists the application's webhooks in the same workspace (one `list_records`) and
   opens the secret of each subscribed webhook to sign its delivery. `create_application_webhook`,
   `list_application_webhooks` and `rotate_application_signing_key` take the application's
-  `workspace_id`; a missing, malformed, unknown, foreign or other workspace of the space is
+  `workspace_id`; a missing, malformed, unknown, foreign or other workspace of the account is
   `invalid_input` at `/workspace_id`. The application page passes the application's own.
 - **Not ready, or no workspace.** A workspace that is not ready, or a legacy application with none,
   answers `workspace_not_ready`: no token is issued, no JWKS is served and no webhook is created.
@@ -362,7 +362,7 @@ The confirming call names what it confirms, and `agent_turn` checks it against t
 rather than trusting the caller's copy (lake#561):
 
 ```json
-{"customer_id":"space-id","workspace_id":"workspace-id","agent":"agent-application","kind":"app","message":"Confirm and deploy the reviewed proposal.","proposal_task_id":"task-id","proposal_sha256":"<proposal_sha256 from get_agent_task>","context":{"confirmed_proposal":{"kind":"proposal","confirm":true,"files":[],"app":{"name":"customer-health","auth":"none"}},"confirm_public":true}}
+{"customer_id":"account-id","workspace_id":"workspace-id","agent":"agent-application","kind":"app","message":"Confirm and deploy the reviewed proposal.","proposal_task_id":"task-id","proposal_sha256":"<proposal_sha256 from get_agent_task>","context":{"confirmed_proposal":{"kind":"proposal","confirm":true,"files":[],"app":{"name":"customer-health","auth":"none"}},"confirm_public":true}}
 ```
 
 `proposal_task_id` must be a finished `agent-application` `app` turn of this workspace that the
@@ -395,13 +395,13 @@ records a failed webhook delivery followed by its successful retry, suspends the
 pool isolation. Its policy case proves application lists filter inaccessible registrations and
 reject access to another application's user list. `ApplicationHttp` submits the hosted forms,
 renders every custom-domain entry page, and reads the raw JWKS route.
-`ApplicationAuth.EventsAndDeliveriesLiveInTheApplicationsWorkspace` covers two spaces, two
-workspaces in one space, missing, malformed, unknown and foreign `workspace_id`, a reader who may
+`ApplicationAuth.EventsAndDeliveriesLiveInTheApplicationsWorkspace` covers two accounts, two
+workspaces in one account, missing, malformed, unknown and foreign `workspace_id`, a reader who may
 list but not retry, a workspace that is not ready, and workspace deletion.
 `ApplicationAuth.AnAttemptIsClaimedOnceAndSentOnce` proves a claimed attempt is not sent by a
 second caller and that an abandoned claim does not block retries.
 `ApplicationAuth.UsersAndOrganizationsLiveInTheApplicationsWorkspace` covers users and
-organizations in two spaces and two workspaces of one space: sealed records and claims only at the
+organizations in two accounts and two workspaces of one account: sealed records and claims only at the
 application's own endpoint, a second sign-up with the same email (in any case) and a second
 organization with the same TAAP identity or name refused, a fresh claim holding and an abandoned one
 taken over, a sign-up completed at the next sign-in, an account that is not a user refused with no
@@ -411,12 +411,12 @@ ready, and workspace deletion. `WorkspaceRecordStores.TheOneShotCopyMovesApplica
 covers their copy in both stores and `PostgresApplicationUsers.MigrationRecordsEachRowsOwnerForTheCopy`
 migration `0055`.
 `ApplicationAuth.KeysAndWebhooksLiveInTheApplicationsWorkspace` covers keys and webhooks in two
-spaces with two workspaces each: sealed records only at the application's endpoint and none in the
+accounts with two workspaces each: sealed records only at the application's endpoint and none in the
 control store, the anonymous JWKS by application id, tokens verifying with the application's key
 only, missing, malformed, unknown and foreign `workspace_id` for every caller, deliveries signed
 with the opened secret, rotation, least privilege, a workspace that is not ready, and deletion.
 `ApplicationAuth.AConcurrentRotationIsRereadNotLost` races two rotations and a stale write.
-`ApplicationAuth.SettingsLiveInTheApplicationsWorkspace` covers settings in two spaces with two
+`ApplicationAuth.SettingsLiveInTheApplicationsWorkspace` covers settings in two accounts with two
 workspaces each: one sealed record only at the application's endpoint and none in the routing row,
 reads and listings filled from the workspace, the theme changed with missing, malformed, unknown and
 foreign `workspace_id` refused and a raced change reread, a cross-origin sign-in allowed only from
@@ -431,7 +431,7 @@ covers migration `0049`, and `WorkspaceRecordStores.TheOneShotCopyMovesApplicati
 the copy in both stores. `PostgresApplicationCredentials.MigrationRecordsEachRowsOwnerForTheCopy`
 covers migration `0056`, and `WorkspaceRecordStores.TheOneShotCopyMovesApplicationKeysAndWebhooks`
 the key and webhook copy in both stores, including signing with copied keys and secrets.
-`ApplicationAuth.AuthorizationCodesLiveInTheApplicationsWorkspace` covers codes in two spaces with
+`ApplicationAuth.AuthorizationCodesLiveInTheApplicationsWorkspace` covers codes in two accounts with
 two workspaces each: one sealed record under a blind key only at the application's endpoint and the
 collection's retention, an exchange through another application refused, one redemption and a
 replay refused, two racing exchanges (the other's delete first, and a stale revision) refused, an

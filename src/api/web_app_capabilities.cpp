@@ -67,7 +67,7 @@ std::expected<control::WebApp, ApiResult> owned_app(const json& input, ApiContex
     auto app = context.store->get_web_app(input.at("app_id"));
     if (!app || app->customer_id != input.at("customer_id").get<std::string>() ||
         app->workspace_id != input.at("workspace_id").get<std::string>()) {
-        return std::unexpected(ApiResult::failure("not_found", "no such app in this space"));
+        return std::unexpected(ApiResult::failure("not_found", "no such app in this account"));
     }
     return *app;
 }
@@ -424,7 +424,7 @@ normalized_bindings(const json& value, const std::string& customer_id, ApiContex
         if (!service) {
             return std::unexpected(ApiResult::failure(
                 "not_found",
-                "no such service in this space (use a live service's id or unique name)",
+                "no such service in this account (use a live service's id or unique name)",
                 "/bindings/services"));
         }
         if (std::ranges::find(output["services"], json(service->id)) == output["services"].end()) {
@@ -524,7 +524,7 @@ std::optional<ApiResult> validate_source_repository(const json& input, ApiContex
         context.store->get_repository(input.at("source").at("repository").get<std::string>());
     if (!repository || repository->customer_id != input.at("customer_id").get<std::string>()) {
         return ApiResult::failure(
-            "not_found", "no such repository in this space", "/source/repository");
+            "not_found", "no such repository in this account", "/source/repository");
     }
     return std::nullopt;
 }
@@ -541,7 +541,7 @@ json event_input_schema() {
 std::expected<std::string, ApiError> event_customer_object(const json& input, ApiContext& context) {
     const auto app = context.store->get_web_app(input.at("app_id"));
     if (!app || (input.contains("customer_id") && input.at("customer_id") != app->customer_id)) {
-        return std::unexpected(ApiError{"not_found", "no such app in this space", "/app_id"});
+        return std::unexpected(ApiError{"not_found", "no such app in this account", "/app_id"});
     }
     return customer_object({{"customer_id", app->customer_id}}, context);
 }
@@ -585,7 +585,7 @@ void register_web_app_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "list_apps",
         .title = "List apps",
-        .description = "List the Ship apps in a space, including desired and observed state.",
+        .description = "List the Ship apps in an account, including desired and observed state.",
         .input_schema = input_schema(json::object()),
         .output_schema = {{"type", "object"}},
         .kind = CapabilityKind::Read,
@@ -610,7 +610,7 @@ void register_web_app_capabilities(Registry& registry) {
                 }
                 if (!decision->allowed) {
                     return ApiResult::failure("unauthorized",
-                                              "principal is not allowed to read this space's apps");
+                                              "principal is not allowed to read this account's apps");
                 }
             }
             auto apps = context.store->list_web_apps(input.at("customer_id"));
@@ -1044,7 +1044,7 @@ void register_web_app_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "scale_app",
         .title = "Scale app",
-        .description = "Set desired replicas within the space's aggregate quota.",
+        .description = "Set desired replicas within the account's aggregate quota.",
         .input_schema = app_input_schema(
             {{"replicas", {{"type", "integer"}, {"minimum", 1}, {"maximum", 100}}}},
             json::array({"replicas"})),
@@ -1065,7 +1065,7 @@ void register_web_app_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "set_app_zetta_binding",
         .title = "Set app Zetta binding",
-        .description = "Attach or detach read-only access to the space's workspace Zetta.",
+        .description = "Attach or detach read-only access to the account's workspace Zetta.",
         .input_schema =
             app_input_schema({{"attached", {{"type", "boolean"}}}}, json::array({"attached"})),
         .output_schema = {{"type", "object"}},
@@ -1115,7 +1115,7 @@ void register_web_app_capabilities(Registry& registry) {
             if (!service) {
                 co_return ApiResult::failure(
                     "not_found",
-                    "no such service in this space (use a live service's id or unique name)");
+                    "no such service in this account (use a live service's id or unique name)");
             }
             json services = app->bindings.value("services", json::array());
             if (std::ranges::find(services, json(service->id)) == services.end()) {
@@ -1272,7 +1272,7 @@ void register_web_app_capabilities(Registry& registry) {
             if (!app ||
                 app->workspace_id != input.at("workspace_id").get<std::string>() ||
                 (input.contains("customer_id") && input.at("customer_id") != app->customer_id)) {
-                co_return ApiResult::failure("not_found", "no such app in this space");
+                co_return ApiResult::failure("not_found", "no such app in this account");
             }
             if (!input.contains("event") && !input.contains("type")) {
                 co_return ApiResult::failure("invalid_input", "event or type is required");

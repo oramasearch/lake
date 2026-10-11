@@ -10,10 +10,10 @@ shows it and keeps it honest.
 - **Ask Orama** in the top bar of every signed-in page. It opens `/ask?from=<the page>`, so the
   conversation knows where it started.
 - `/ask`: the conversation, a **Talk to** selector (Ask Orama first, then the library's other running
-  chat agents a person uses, then the space's own chat-capable agents), and a message box. The
+  chat agents a person uses, then the account's own chat-capable agents), and a message box. The
   library's internal tooling (Eval Generator and the two corpus generators, `internal: true` in
   `list_agent_library`) is never offered, even where it runs (lake#451); `control::talk_to_agents`
-  builds the list. The space's own agents come from Zetta's `list_agents`, which took 380–690 ms on
+  builds the list. The account's own agents come from Zetta's `list_agents`, which took 380–690 ms on
   the dev site, so the web app adds them to the selector once that read answers, and the agent a
   conversation talks to stays selected meanwhile (lake#446).
   *Start a new
@@ -54,7 +54,7 @@ shows it and keeps it honest.
   workspace Zetta of the workspace the conversation was held in (collection `lake_ask_messages`,
   [workspace-records.md](../architecture/workspace-records.md)): the person's text, and for Ask
   Orama's the reply with its proposals, reads, delegations and trace id. The page's `/w/<id>/`
-  workspace owns it; another workspace of the same space never shows it. Only the person who had a
+  workspace owns it; another workspace of the same account never shows it. Only the person who had a
   conversation reads it back, from any replica. A workspace that is not ready shows the error
   instead of falling back anywhere. Lake's PostgreSQL `ask_messages` table (migration `0030`) was copied
   into the workspace Zettas by the operator's one-shot copy and dropped by migration
@@ -79,7 +79,7 @@ conversation) and is audited in that workspace's log.
 
 - **`send_ask_message`** stores the person's message first; a message the workspace did not store
   is an error and nothing is asked. It then calls `agent_turn`. A library agent answers in the
-  background: the value carries `task_id`. An agent of the space answers at once: its reply is
+  background: the value carries `task_id`. An agent of the account answers at once: its reply is
   stored and `reply_id` names it.
 - **`settle_ask_turn`** reads the turn as `get_agent_task` does (`task` is that value). While the
   turn is `pending` or `running`, `settled` is false and nothing is written. Once it finished, the
@@ -112,7 +112,7 @@ For example, the web app's `send_ask_message` (`POST /w/<workspace_id>/v1/send_a
 
 ## Verify
 
-`Stores/WorkspaceRecordStores.*` (lake#370): two spaces with two workspaces each keep one
+`Stores/WorkspaceRecordStores.*` (lake#370): two accounts with two workspaces each keep one
 conversation id apart per workspace; foreign, missing, malformed and unknown workspace ids are
 refused; a deleted workspace's conversations go with it; the operator copy moves and verifies
 earlier rows.

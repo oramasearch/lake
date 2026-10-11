@@ -556,7 +556,7 @@ Result<Identity> identity(control::Store& store, const IdentityOptions& options)
             }
             if (configured->taap_id != current->taap_id) {
                 return std::unexpected(Error{
-                    "conflict", "LAKE_IDENTITY_SEED does not match the stored lake identity"});
+                    "conflict", "LAKE_IDENTITY_SEED does not match the stored Lake identity"});
             }
         }
         return *current;
@@ -615,7 +615,7 @@ Result<nlohmann::json> sign_passkey_binding(control::Store& store,
         {"protocol_version", "TAAP/1"},
         {"attestation_identifier", control::new_uuid_v4()},
         {"authority_identifier", current->taap_id},
-        {"authority_display_name", "lake"},
+        {"authority_display_name", "Lake"},
         {"subject_identifier", subject_taap_id},
         {"attestation_profile", "passkey_binding/1"},
         {"asserted_attributes", {{"credential_id", credential_id}, {"pool_id", pool_id}}},
@@ -719,7 +719,7 @@ Result<nlohmann::json> sign_offline_grant(control::Store& store,
         {"protocol_version", "TAAP/1"},
         {"attestation_identifier", grant_id},
         {"authority_identifier", current->taap_id},
-        {"authority_display_name", "lake"},
+        {"authority_display_name", "Lake"},
         {"subject_identifier", subject_taap_id},
         {"attestation_profile", "offline_grant/1"},
         {"asserted_attributes",
@@ -1006,7 +1006,7 @@ Result<std::vector<std::byte>> sign_taap(control::Store& store,
         return std::unexpected(current.error());
     }
     if (current->taap_id != expected_signer) {
-        return std::unexpected(Error{"conflict", "lake identity rotated before TAAP signing"});
+        return std::unexpected(Error{"conflict", "Lake identity rotated before TAAP signing"});
     }
     const auto seed = seed_for(*current, effective_options);
     if (!seed) {

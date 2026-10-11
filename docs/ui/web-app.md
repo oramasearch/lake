@@ -34,7 +34,7 @@ Orama design tokens, the same IBM Plex faces and the same component classes the 
 | `src/lib/ui.tsx` | The kit: `Page`, `Section`, `Card`, `Grid`, `KeyValue`, `Button`, `Actions`, `Tabs`, `StateTabs`, `Badge`, `Status`, `Notice`, `Empty`, `Skeleton`, `ErrorBlock`, `Query`, `DataTable`, `CopyBlock`, `Mono`, `Kbd`, `Field`, `Form`, `fieldError`. |
 | `src/lib/overlay.tsx` | `Modal` (with `sheet`, a full-screen sheet on a phone, and `SheetActions` pinned above the keyboard), `Drawer`, `ConfirmButton` (with `typed`, Confirm stays disabled until that exact text is typed, for an action that cannot be undone; with `danger`, a quiet trigger confirms with a danger button). The only surfaces with a shadow. |
 | `src/lib/toast.tsx` | `useToast()` for a short confirmation after a write. |
-| `src/lib/session.tsx` | `useSession()`: the `viewer` read (who is signed in, the operator, the spaces and their workspaces, Clerk), the current workspace and space. |
+| `src/lib/session.tsx` | `useSession()`: the `viewer` read (who is signed in, the operator, the accounts and their workspaces, Clerk), the current workspace and account. |
 | `src/lib/trail.tsx` | `useTrail([...])` sets a page's breadcrumb; `entityCrumb` shortens ids. |
 | `src/lib/format.ts` | Dates (a date-only value keeps its day in every time zone), numbers, `bytes`, `shortId`. |
 | `src/routes.tsx`, `src/routes/types.ts`, `src/routes/nav.ts` | The route registry. Each page group owns `src/pages/<group>/routes.ts`; `routes.tsx` joins them and holds the rail (`NAV`) in lake's order. `nav.ts` holds the rules that need no page code: the Home group (`HOME_NAV`) and which rail item a path makes current (`currentNavIn`), tested by `tests/home.test.ts`. |

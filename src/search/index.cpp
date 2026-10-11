@@ -751,7 +751,7 @@ struct Service::Impl {
         if (configured) {
             return std::unexpected(Error{
                 "store_unavailable",
-                "search reads repositories only through lake's repository store, which is closed"});
+                "search reads repositories only through Lake's repository store, which is closed"});
         }
         struct Owned {
             liquid::store store;
@@ -2847,7 +2847,7 @@ Service::query(const Query& query, const std::string& principal, control::Store&
             return !query.spaces || query.spaces->contains(space);
         };
         const Error not_searchable{"invalid_input",
-                                   "workspace_id must name a workspace Zetta in this space"};
+                                   "workspace_id must name a workspace Zetta in this account"};
 
         // Which indexes the query reads: one workspace's, a repository's own, or a space's (or
         // every permitted space's) index on lake's volume with each of its switched workspaces'.

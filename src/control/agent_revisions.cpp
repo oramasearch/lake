@@ -81,8 +81,8 @@ list_agent_revisions(WorkspaceRecords& records, std::string customer_id, std::st
     if (!listed) {
         co_return ZettaControlResult<std::vector<AgentRevision>>(std::unexpected(listed.error()));
     }
-    // A record copied in from another space or agent does not open under this lookup, but say so
-    // twice: only this agent's revisions in this space.
+    // A record copied in from another account or agent does not open under this lookup, but say so
+    // twice: only this agent's revisions in this account.
     std::erase_if(*listed, [&](const AgentRevision& revision) {
         return revision.customer_id != customer_id || revision.agent_id != agent_id;
     });

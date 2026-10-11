@@ -17,7 +17,7 @@ export function engagement(agent: Row): string {
 /* ------------------------------------------------------------------ reads */
 
 /** A named engine read in the page's workspace (`list_agents`, `get_agent`,
- * `agent_training_status`, `list_models`, `list_projects`): `GET /v1/<name>` with the space and
+ * `agent_training_status`, `list_models`, `list_projects`): `GET /v1/<name>` with the account and
  * workspace, as REST and MCP callers call it. */
 export function useEngineRead<T = Row>(
   name: string | null,

@@ -8,7 +8,7 @@ through `accept_invitation`.
 
 | Capability | Kind | Required input | Result |
 |---|---|---|---|
-| `list_organizations` / `get_organization` | read | `limit` / `id` | organizations; `get_organization` also names the organization's own space as `customer_id` (null when it has none, lake#561) |
+| `list_organizations` / `get_organization` | read | `limit` / `id` | organizations; `get_organization` also names the organization's own account as `customer_id` (null when it has none, lake#561) |
 | `create_organization` | action | `taap_id?`, `display_name?`, `customer_id?` | organization |
 | `list_teams` / `get_team` | read | `organization_id` / `id` | teams |
 | `create_team` | action | `organization_id`, `name`, `display_name?` | team |
@@ -35,24 +35,24 @@ These capabilities serve a signed-in person (a session or token with a user). An
 credential has no person behind it, so they refuse it; operators keep `create_organization` and
 `create_customer`.
 
-- `create_organization_space` creates, in one transaction, the organization, its own space (an
+- `create_organization_space` creates, in one transaction, the organization, its own account (an
   `organization` customer; `name` is its handle and is generated when omitted), the caller's
   `owner` membership, and the derived grants. The membership's evidence is
   `create_organization_space/<request id>`, granted by the caller, like the
   `sign_up_password/<document hash>` evidence of sign-up provisioning: a provenance reference,
   not a new attestation format. An invalid handle answers `400`, a taken one `409`.
-- `convert_personal_space` turns the caller's own personal space (an `individual` customer whose
-  `user_id` is the caller) into an organization's space. The customer keeps its id and handle, so
+- `convert_personal_space` turns the caller's own personal account (an `individual` customer whose
+  `user_id` is the caller) into an organization's account. The customer keeps its id and handle, so
   its repositories, stores, workspaces, apps and links stay where they are; it becomes
   `customer_type: organization` with a new organization, and the caller becomes that
-  organization's `owner`. In the same transaction lake provisions the caller a fresh personal space
-  with a generated handle and an `admin` grant, as sign-up does. Someone else's space answers
-  `401`; a space that is already an organization's answers `409`. The browser form also asks the
+  organization's `owner`. In the same transaction lake provisions the caller a fresh personal account
+  with a generated handle and an `admin` grant, as sign-up does. Someone else's account answers
+  `401`; an account that is already an organization's answers `409`. The browser form also asks the
   person to type the handle before it calls the capability. The caller's existing direct `admin`
-  grant on the converted space is kept.
+  grant on the converted account is kept.
 - `list_invitations` without `organization_id` returns the pending, unexpired invitations
   addressed to the caller: `email` invitations matching the caller's email, case-insensitively,
-  and `handle` invitations matching the handle of the caller's personal space. Each item also
+  and `handle` invitations matching the handle of the caller's personal account. Each item also
   carries `organization_name`, because the invitee cannot read the organization until they join.
 - `join_organization` accepts one of those invitations as the caller. The membership's
   `attestation_digest` is `invitation/<invitation id>` and its `granted_by_taap_id` is the
@@ -73,16 +73,16 @@ teams, members, invitations, and grants below that organization, but cannot act 
 organization or on a customer that merely parents it. A customer administrator can create an
 organization with `customer_id`; the new organization object becomes a child of that customer.
 
-**An organization's own space.** When the organization has its own space (the `organization`
+**An organization's own account.** When the organization has its own account (the `organization`
 customer whose `organization_id` is that organization), an organization-scope membership also
-derives the same grant, with the same evidence, on that space's customer object. Owners and
-admins therefore administer the space and its repositories, and members read them; a team
-membership does not reach the space. Every store path keeps the two grants together:
+derives the same grant, with the same evidence, on that account's customer object. Owners and
+admins therefore administer the account and its repositories, and members read them; a team
+membership does not reach the account. Every store path keeps the two grants together:
 `create_membership`, `accept_invitation`, `join_organization`, `create_organization_space`,
 `convert_personal_space`, `set_member_role`, and `remove_member`. When the principal already
-holds that role on the space by another grant (for example, the sign-up grant of a converted
-personal space), no second grant is written and that grant is left alone on removal.
-Memberships created before this rule have no space grant; there is no backfill.
+holds that role on the account by another grant (for example, the sign-up grant of a converted
+personal account), no second grant is written and that grant is left alone on removal.
+Memberships created before this rule have no account grant; there is no backfill.
 
 The operator admin token remains a break-glass credential and is evaluated by the same
 `authorize` function. User credentials provide their TAAP principal through the shared request

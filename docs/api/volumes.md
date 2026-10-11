@@ -18,7 +18,7 @@ a workspace Zetta (decision 51).
 ## Capabilities
 
 The three are for the operator credential and the instance administrator only; anyone else,
-including a space's owner, is answered `unauthorized`. They are control plane, so their audit
+including an account's owner, is answered `unauthorized`. They are control plane, so their audit
 events stay in the central log (decision 52, [audit.md](audit.md#which-log)).
 
 | Capability | Kind | Input | What it does |

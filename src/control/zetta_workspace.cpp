@@ -100,8 +100,8 @@ ServiceCondition service_condition(const ManagedService& service, bool connected
         // operator reconciles services through their workspace, so it no longer sees this one.
         return {"Unassigned",
                 "This service was created before workspaces and belongs to none, so the operator "
-                "no longer manages it: lake cannot connect to it, and deleting it would not "
-                "finish. An administrator of this lake has to assign it to a workspace or remove "
+                "no longer manages it: Lake cannot connect to it, and deleting it would not "
+                "finish. An administrator of this Lake has to assign it to a workspace or remove "
                 "it."};
     }
     if (service.desired == "absent") {
@@ -115,7 +115,7 @@ ServiceCondition service_condition(const ManagedService& service, bool connected
     }
     if (service.phase == "Ready" && !connected) {
         return {"Connecting",
-                "The operator reports it ready; lake is waiting for its connection to arrive."};
+                "The operator reports it ready; Lake is waiting for its connection to arrive."};
     }
     return {service.phase.empty() ? "Waiting for the operator" : service.phase, {}};
 }
@@ -265,7 +265,7 @@ Result<ManagedService> WorkspaceService::create_service(NewManagedService servic
     if (!service.workspace_id.empty()) {
         const auto workspace = store_->get_workspace(service.workspace_id);
         if (!workspace || workspace->customer_id != service.customer_id || workspace->desired != "running") {
-            return std::unexpected(StoreError{"invalid_input", "workspace_id must name a running workspace in this space"});
+            return std::unexpected(StoreError{"invalid_input", "workspace_id must name a running workspace in this account"});
         }
     }
     service.max_per_customer = config_.max_per_customer;
@@ -279,14 +279,14 @@ Result<ManagedService> WorkspaceService::workspace(const std::string& customer_i
     }
     const auto row = store_->get_workspace(workspace_id);
     if (!row || row->customer_id != customer_id || row->desired == "deleted") {
-        return std::unexpected(StoreError{"invalid_input", "workspace_id is not a workspace in this space"});
+        return std::unexpected(StoreError{"invalid_input", "workspace_id is not a workspace in this account"});
     }
     if (row->desired != "running" || row->zetta_service_id.empty()) {
         return std::unexpected(StoreError{"workspace_not_ready", "workspace_id is not running"});
     }
     auto found = service(customer_id, row->zetta_service_id);
     if (!found || found->kind != "zetta" || found->desired != "present") {
-        return std::unexpected(StoreError{"invalid_input", "workspace_id is not a workspace Zetta in this space"});
+        return std::unexpected(StoreError{"invalid_input", "workspace_id is not a workspace Zetta in this account"});
     }
     return found;
 }
@@ -348,7 +348,7 @@ Result<ManagedStore> WorkspaceService::create_store(NewManagedStore store) {
     if (!provider->available) {
         return std::unexpected(StoreError{"invalid_input",
                                           std::string(provider->label) +
-                                              " is not available on this lake yet: " +
+                                              " is not available on this Lake yet: " +
                                               std::string(provider->unavailable_reason)});
     }
     return store_->create_store(store);

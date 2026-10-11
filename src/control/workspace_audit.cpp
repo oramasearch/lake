@@ -195,7 +195,7 @@ append_workspace_audit_event(WorkspaceRecords& records,
         if (!*there) {
             co_return failed<Tail>(ZettaControlError{
                 "conflict",
-                "a place in the workspace audit is taken by a record lake cannot read"});
+                "a place in the workspace audit is taken by a record Lake cannot read"});
         }
         if ((*there)->event.id == pending.id) {
             co_return ZettaControlResult<Tail>(Tail{place, (*there)->event.digest});

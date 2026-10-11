@@ -110,7 +110,7 @@ space, edited and deleted at the revision read, with the paging and excerpt help
 `lake_solutions`, found by the space, edited and deleted at the revision read, with the rules a
 solution keeps and the copy of one of Orama's catalogue entries; it was never a PostgreSQL table.
 `agent_revisions.cpp` is an agent's definition revisions (lake#653): one append-only record per
-`create_agent` or `update_agent` in `lake_agent_revisions`, found by the space and the agent's id,
+`create_agent` or `update_agent` in `lake_agent_revisions`, found by the account and the agent's id,
 and `agent_definition_of`, the fields of an engine agent a person designs.
 `stream_owners.cpp` is the second
 (lake#379): one `if_absent` record per topic, keyed by the topic's blind index; the stores hold no

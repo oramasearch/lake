@@ -234,7 +234,7 @@ WorkspaceRecords::write(RecordCollection collection, StoredRecord record, std::s
         co_return records_failure<StoredRecord>("store_error", "the collection name is invalid");
     }
     if (!key_safe(record.id)) {
-        co_return records_failure<StoredRecord>("invalid_input", "a record id must be a lake id");
+        co_return records_failure<StoredRecord>("invalid_input", "a record id must be a Lake id");
     }
     const std::string key = index_of(collection, lookup);
     if (key.empty()) {

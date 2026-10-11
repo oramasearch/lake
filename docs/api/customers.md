@@ -34,7 +34,7 @@ curl -H "$H" 'https://lake.oramadev.net/v1/list_customers?limit=5'
 curl -H "$H" 'https://lake.oramadev.net/v1/get_customer?customer_id=<customer id>'
 ```
 
-`get_customer` names the space `customer_id`, as every other capability does (lake#450). The old
+`get_customer` names the account `customer_id`, as every other capability does (lake#450). The old
 `id` is still accepted as a deprecated alias ([naming.md](naming.md)); passing both with different
 values answers `400` at `/id`.
 
@@ -58,6 +58,6 @@ An ordinary Lake password sign-up now creates its individual customer and a cust
 inside the account transaction. See [provisioning.md](provisioning.md).
 
 A person can also start an organization with its own `organization` customer, or turn their
-personal space into one (`create_organization_space`, `convert_personal_space`). Conversion is
+personal account into one (`create_organization_space`, `convert_personal_space`). Conversion is
 the one change of `customer_type`: the row keeps its id and handle. See
 [organizations.md](organizations.md#self-service-an-organization-a-person-runs).

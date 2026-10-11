@@ -59,14 +59,14 @@ The engine keeps one record per agent and overwrites it on every `update_agent`.
 definition it wrote: after the engine accepts a `create_agent` or `update_agent`, through the
 named capability, `workspace_act` or an agent's turn, Lake appends one sealed record to the
 collection `lake_agent_revisions` of the agent's workspace Zetta
-([workspace records](../architecture/workspace-records.md)), found by the space and the agent's id
+([workspace records](../architecture/workspace-records.md)), found by the account and the agent's id
 (`control::AgentRevision`, `include/lake/control/agent_revisions.hpp`). Its body is the fields a
 person designs (`agent_definition_of`: everything `create_agent` takes except `status`), who made
 it, and `create` or `update`. The answer carries `definition_revision`: `{recorded: true, id,
 created_at}`, or `{recorded: false, message}` when the record could not be written. The change has
 happened either way, so that is never the call's failure.
 
-`list_agent_revisions` (read on the space) answers them newest first, each numbered from the first,
+`list_agent_revisions` (read on the account) answers them newest first, each numbered from the first,
 with who made it (`created_by_name`) and the definition it set. **Restore** on the Design page is
 `update_agent` with that definition, kept as a new revision. Revisions are not the engine's
 **trained versions** (`agent_training_status`'s `versions`, the checkpoints training produced),

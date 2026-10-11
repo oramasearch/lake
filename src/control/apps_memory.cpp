@@ -47,7 +47,7 @@ Result<Application> InMemoryStore::create_application(const NewApplication& inpu
                    value.desired != "deleted";
         })) {
         return std::unexpected(
-            StoreError{"invalid_input", "workspace_id must name a workspace in this space"});
+            StoreError{"invalid_input", "workspace_id must name a workspace in this account"});
     }
     if (std::ranges::any_of(applications_, [&](const Application& value) {
             return value.id == input.id || value.pool_id == input.pool_id ||
