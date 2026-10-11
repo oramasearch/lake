@@ -16,7 +16,8 @@ std::string rest_path(const Capability& capability);    // "/v1/<name>"
 std::string rest_method(const Capability& capability);  // "GET" for reads, "POST" for actions
 
 // Query parameters → input document, each value coerced by its declared type; undeclared keys
-// stay strings so validation rejects them with the schema's own reason.
+// stay strings so validation rejects them with the schema's own reason. An array input takes
+// repeated keys, a comma list or a JSON array, each item coerced by its `items` type (lake#576).
 nlohmann::json rest_input_from_query(const Capability& capability,
                                      const std::vector<std::pair<std::string, std::string>>& query);
 

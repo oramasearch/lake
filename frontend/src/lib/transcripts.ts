@@ -14,6 +14,8 @@ export type TranscriptRow = {
   seconds?: number | null;
   created_at?: string;
   created_by?: string;
+  /** The author's display name, or null when lake has none (lake#579). */
+  created_by_name?: string | null;
 };
 
 /** `get_transcript`, `create_transcript` and `update_transcript` answer the whole record. */
@@ -71,4 +73,11 @@ export const ASK_CONTEXT_CHARS = 20_000;
 export function transcriptAskPage(t: { id: string; title: string; text: string }): Record<string, string> {
   const text = t.text.length > ASK_CONTEXT_CHARS ? `${t.text.slice(0, ASK_CONTEXT_CHARS)}\n\n[The transcript continues; only its first ${ASK_CONTEXT_CHARS} characters are included.]` : t.text;
   return { path: "/transcript", id: t.id, kind: "transcript", title: t.title, transcript: text };
+}
+
+/** Who added a transcript, in words (lake#579): "you" for the person viewing, else the author's
+ * display name. A raw user id is never shown: with no name it says nothing. */
+export function authorLabel(row: { created_by?: string; created_by_name?: string | null }, viewerUserId?: string | null): string {
+  if (row.created_by && viewerUserId && row.created_by === viewerUserId) return "you";
+  return (row.created_by_name ?? "").trim();
 }

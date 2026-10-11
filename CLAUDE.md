@@ -63,7 +63,8 @@ the space's people (`drive_share_people`) and lake signs the grant's attestation
 made-up digest (lake#585); `download_drive_file` answers the bytes and a `download_url` (lake#587);
 a resent chunk answers the true `received`, and unfinished uploads are listed and expire after
 24 hours (lake#588); `load_drive_dataset` loads a drive's CSV or JSONL file (lake#593); the web app
-retries a 503 read once (lake#573, `docs/ui/web-app.md#a-read-answered-503`).
+retries an edge 503 read under the one `shouldRetry` rule and names who answered (lake#573,
+`docs/ui/web-app.md#a-read-answered-503`).
 
 Every future deployment image receives OCI revision and creation labels. The binary reports the
 same embedded revision through `GET /v1/server_info`; details are in

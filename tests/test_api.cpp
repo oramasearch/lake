@@ -3632,6 +3632,32 @@ TEST(Rest, PathsMethodsAndQueryCoercion) {
     EXPECT_EQ(rest_status(ApiResult::failure("store_unavailable", "")), 503);
 }
 
+// A GET read's array input (lake#576): repeated keys, a comma list and a JSON array all decode
+// as the array, each item coerced by the declared item type.
+TEST(Rest, ArrayInputsDecodeFromRepeatedKeysCommaListsAndJsonArrays) {
+    Surface s;
+    const auto permissions = s.registry.find("my_permissions");
+    ASSERT_NE(permissions, nullptr);
+    EXPECT_EQ(rest_input_from_query(*permissions, {{"actions", "read"}, {"actions", "admin"}})
+                  .at("actions"),
+              json::array({"read", "admin"}));
+    EXPECT_EQ(rest_input_from_query(*permissions, {{"actions", "read,admin"}}).at("actions"),
+              json::array({"read", "admin"}));
+    EXPECT_EQ(
+        rest_input_from_query(*permissions, {{"actions", R"(["read","admin"])"}}).at("actions"),
+        json::array({"read", "admin"}));
+    EXPECT_EQ(rest_input_from_query(*permissions, {{"actions", "read"}}).at("actions"),
+              json::array({"read"}));
+    EXPECT_EQ(rest_input_from_query(*permissions, {{"actions", ""}}).at("actions"), json::array());
+    Capability numbers{
+        .name = "numbers",
+        .input_schema = {
+            {"type", "object"},
+            {"properties", {{"steps", {{"type", "array"}, {"items", {{"type", "integer"}}}}}}}}};
+    EXPECT_EQ(rest_input_from_query(numbers, {{"steps", "1,2"}, {"steps", "3"}}).at("steps"),
+              json::array({1, 2, 3}));
+}
+
 // lake#594: a newcomer reads every operation by a human title, and an MCP client warns only before
 // a delete or destroy.
 TEST(Mcp, EveryToolHasAHumanTitleAndOnlyDeletesAreDestructive) {

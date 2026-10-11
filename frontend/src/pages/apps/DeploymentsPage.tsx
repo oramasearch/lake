@@ -7,6 +7,7 @@ import { Link } from "react-router-dom";
 import { useQueries } from "@tanstack/react-query";
 import { FolderGit2, Globe, Rocket } from "lucide-react";
 import { read, useList, type Row } from "@/lib/api";
+import { isNotSetUp } from "@/lib/errors";
 import { relative } from "@/lib/format";
 import { type Column, DataTable, Empty, ErrorBlock, FilterChips, Mono, Page, SearchInput, Skeleton, Stat, StatRow, Status, toneOf, Toolbar } from "@/lib/ui";
 import { abbreviated, repositoryName, StaleBanner, text, UrlText, type Repository } from "./shared";
@@ -36,6 +37,9 @@ export default function DeploymentsPage() {
     for (const environment of value.items ?? []) rows.push({ repository, environment });
   });
   const pending = environments.some((q) => q.isLoading);
+  // A lake without the platform mirror answers every repository `not_supported` at once, and
+  // nothing asks again (lake#575): the page says so once instead of an empty list.
+  const notSetUp = environments.find((q) => isNotSetUp(q.error));
   const phaseCounts = new Map<string, number>();
   for (const row of rows) {
     const p = text(row.environment, "phase") || "unknown";
@@ -54,6 +58,14 @@ export default function DeploymentsPage() {
     return (
       <Page eyebrow="Ship" title="Deployments" sub={SUB}>
         <ErrorBlock error={repositories.error} retry={() => void repositories.refetch()} what="repositories" />
+      </Page>
+    );
+  }
+
+  if (notSetUp) {
+    return (
+      <Page eyebrow="Ship" title="Deployments" sub={SUB}>
+        <NotSetUp />
       </Page>
     );
   }
@@ -140,5 +152,15 @@ export default function DeploymentsPage() {
         </>
       )}
     </Page>
+  );
+}
+
+/** Deployments on a lake started without the cluster operator's platform source: one plain
+ * state, and what turns them on (docs/api/platform.md, lake#575). */
+function NotSetUp() {
+  return (
+    <Empty icon={Rocket} title="Deployments Are Not Set Up on This Lake">
+      An operator turns them on by connecting this lake to the cluster operator's platform source. Until then, lake has no environments to show.
+    </Empty>
   );
 }

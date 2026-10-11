@@ -51,7 +51,9 @@ A workspace-files upload sends each file at its relative path and lake makes the
   dataset, project, agent or model by name and a web address typed. `targets.ts` checks the target
   as lake does (`targetProblem`), sends only its kind's fields (`cleanTarget`), and maps each
   shortcut to the page it opens (`targetHref`); a broken shortcut shows a **Broken** chip with the
-  reason and no link.
+  reason and no link. Choosing a target suggests the shortcut's name; focusing **Name** selects the
+  suggestion, so typing replaces it rather than appending to it, and once the person has typed a
+  name a new target leaves it alone (`nameAfterTarget`, `selectsOnFocus`, lake#580).
 - **Load as dataset** (lake#593). A CSV or JSONL file's menu (`datasetFormat` in `paths.ts`)
   opens `LoadDataset`: a dataset name started from the file's name (`datasetName`) and the
   take-the-next-free-name box; it calls `load_drive_dataset` with the drive and the item's key and

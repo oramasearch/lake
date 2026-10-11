@@ -83,6 +83,8 @@ struct TranscriptPage {
     std::vector<Transcript> items;
     std::string next_cursor;
     bool cursor_found = true;
+    // Every transcript the query keeps, on every page (lake#574: Home's figure reads it).
+    std::size_t total = 0;
 };
 TranscriptPage page_transcripts(const std::vector<Transcript>& transcripts,
                                 const std::string& query,

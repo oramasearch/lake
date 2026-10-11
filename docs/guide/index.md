@@ -85,7 +85,7 @@ Data](/docs/load-data). Recordings and meeting notes go to **Data → Transcript
 - REST: `POST /v1/workspace_act` with this body:
 
 ```json
-{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "capability": "create_project", "input": {"name": "retention", "description": "Keep accounts from churning", "intent": "Which accounts customer success calls first each week"}}
+{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "capability": "create_project", "input": {"name": "retention", "description": "Keep accounts from churning", "decision": "Which accounts customer success calls first each week"}}
 ```
 
 - MCP: `workspace_act` with the same input.

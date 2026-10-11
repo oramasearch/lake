@@ -13,7 +13,8 @@ import { useToast } from "@/lib/toast";
 import { useTrail } from "@/lib/trail";
 import { openAsk } from "@/lib/ask";
 import { appendDictation, spokenLength } from "@/lib/dictation";
-import { sourceLabel, transcriptAskPage, wordCount, type Transcript } from "@/lib/transcripts";
+import { authorLabel, sourceLabel, transcriptAskPage, wordCount, type Transcript } from "@/lib/transcripts";
+import { useSession } from "@/lib/session";
 import { DictateButton, DictationError, RecordingBar, useRecorder } from "@/components/dictation/Dictate";
 import { WorkspaceGate } from "@/components/WorkspaceGate";
 import { useSpaceRead, useWorkspace, useWsPath } from "@/pages/train/workspace";
@@ -54,6 +55,8 @@ function TranscriptView({ t }: { t: Transcript }) {
   const { customerId, workspaceId } = useWorkspace();
   const [editing, setEditing] = useState(false);
   const [copied, setCopied] = useState(false);
+  const { viewer } = useSession();
+  const author = authorLabel(t, viewer.user_id);
   const words = wordCount(t.text ?? "");
   const length = spokenLength(t.seconds);
 
@@ -85,7 +88,7 @@ function TranscriptView({ t }: { t: Transcript }) {
       sub={
         <>
           {t.created_at ? `Added ${dateTime(t.created_at)}` : ""}
-          {t.created_by ? ` by ${t.created_by}` : ""}
+          {author ? ` by ${author}` : ""}
         </>
       }
       actions={

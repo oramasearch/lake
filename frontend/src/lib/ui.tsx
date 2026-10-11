@@ -14,8 +14,10 @@ import {
 } from "react";
 import { Link, NavLink } from "react-router-dom";
 import type { UseQueryResult } from "@tanstack/react-query";
-import { Check, Copy, Inbox, Loader2 } from "lucide-react";
+import { Check, Copy, Inbox, Loader2, Upload as UploadIcon } from "lucide-react";
 import { ApiError, isSignedIn } from "./api";
+import { isNotSetUp } from "./errors";
+import { bytes } from "./format";
 
 export function cx(...parts: unknown[]): string {
   return parts.filter(Boolean).join(" ");
@@ -499,11 +501,15 @@ export function Skeleton({ lines = 3 }: { lines?: number }) {
   );
 }
 
-/** A failed read, in words, with Retry. A failed read never looks like an empty list. */
+/** A failed read, in words, with Retry. A failed read never looks like an empty list. A
+ * `not_supported` answer says the feature is not set up on this lake, with lake's words on what
+ * turns it on, and offers no Retry (lake#575). */
 export function ErrorBlock({ error, retry, what }: { error: unknown; retry?: () => void; what?: string }) {
   const e = error instanceof ApiError ? error : null;
-  const title =
-    e?.status === 403
+  const notSetUp = isNotSetUp(e);
+  const title = notSetUp
+    ? "Not set up on this lake"
+    : e?.status === 403
       ? "You don't have access to this"
       : e?.status === 404
         ? "Not found"
@@ -517,7 +523,7 @@ export function ErrorBlock({ error, retry, what }: { error: unknown; retry?: () 
     <div className="error" role="alert">
       <strong className="block">{title}</strong>
       <span>{message}</span>
-      {retry && e?.status !== 403 && e?.status !== 404 && (
+      {retry && !notSetUp && e?.status !== 403 && e?.status !== 404 && (
         <div className="mt-2">
           <Button onClick={retry}>Retry</Button>
         </div>
@@ -775,4 +781,65 @@ export function FormError({ error }: { error: unknown }) {
 export function fieldError(error: unknown, field: string): string | undefined {
   if (error instanceof ApiError && error.path && (error.path === `/${field}` || error.path.startsWith(`/${field}/`))) return error.message;
   return undefined;
+}
+
+/* ------------------------------------------------------------------ file picker */
+
+/** One file, chosen by pressing the zone or dropped on it (lake#582): the kit's styled drop zone in
+ * place of the browser's plain "Choose File" input. It shows the chosen file's name and size, and
+ * the input inside stays keyboard-reachable (the zone shows its focus). */
+export function FilePicker({
+  file,
+  onFile,
+  accept,
+  name,
+  prompt = "Choose a file or drop it here",
+  hint,
+  disabled,
+}: {
+  file: File | null;
+  onFile: (file: File | null) => void;
+  accept?: string;
+  name?: string;
+  prompt?: string;
+  hint?: ReactNode;
+  disabled?: boolean;
+}) {
+  const [active, setActive] = useState(false);
+  const over = (event: React.DragEvent) => {
+    event.preventDefault();
+    if (!disabled) setActive(true);
+  };
+  const leave = (event: React.DragEvent) => {
+    event.preventDefault();
+    setActive(false);
+  };
+  return (
+    <label
+      className="file-picker"
+      data-active={active ? "true" : undefined}
+      data-chosen={file ? "true" : undefined}
+      onDragEnter={over}
+      onDragOver={over}
+      onDragLeave={leave}
+      onDrop={(event) => {
+        leave(event);
+        if (!disabled && event.dataTransfer.files.length) onFile(event.dataTransfer.files[0]);
+      }}
+    >
+      <UploadIcon size={18} aria-hidden />
+      {file ? (
+        <>
+          <span className="font-semibold text-ink break-all">{file.name}</span>
+          <span className="text-[12px] text-ink-3">{bytes(file.size)} · press to choose another</span>
+        </>
+      ) : (
+        <>
+          <span className="text-ink">{prompt}</span>
+          {hint && <span className="text-[12px] text-ink-3">{hint}</span>}
+        </>
+      )}
+      <input type="file" name={name} accept={accept} className="sr-only" disabled={disabled} onChange={(e) => onFile(e.target.files?.[0] ?? null)} />
+    </label>
+  );
 }

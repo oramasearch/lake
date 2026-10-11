@@ -7,7 +7,7 @@
  * secret, and the cookie is resolved by the same `context_for` as a bearer, so the app can do
  * nothing the API cannot. */
 import { QueryClient, useMutation, useQuery, type UseQueryOptions } from "@tanstack/react-query";
-import { edgeSource, readRetryDelay } from "./retry";
+import { edgeSource, pollUnlessFailed, shouldRetry } from "./errors";
 
 export class ApiError extends Error {
   constructor(
@@ -131,29 +131,17 @@ async function unwrap<T>(response: Response): Promise<T> {
   return unwrapBody<T>(response, await response.json().catch(() => null));
 }
 
-/** Sends a read, and once more after a short pause when it answered 503 from the edge or with
- * lake's Retry-After (lake#573, `readRetryDelay`). A read changes nothing, so sending it again is
- * safe; an action is never sent twice. */
+/** Sends a read. Whether a failed one is asked again is `shouldRetry`'s one rule (lib/errors.ts),
+ * applied by the query client; an answer that is not lake's names who sent it (lake#573). */
 async function sendRead<T>(url: string, init: RequestInit): Promise<T> {
-  for (let attempt = 0; ; attempt++) {
-    let response: Response;
-    try {
-      response = await fetch(url, init);
-    } catch (error) {
-      if ((error as Error).name === "AbortError") throw error;
-      throw new ApiError(0, "network", "Lake could not be reached. Check your connection and retry.");
-    }
-    const body = await response.json().catch(() => null);
-    const delay = readRetryDelay(response.status, lakeAnswered(body), response.headers.get("retry-after"), attempt);
-    if (delay === null) return unwrapBody<T>(response, body);
-    await new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(resolve, delay);
-      init.signal?.addEventListener("abort", () => {
-        clearTimeout(timer);
-        reject(new DOMException("The read was cancelled.", "AbortError"));
-      });
-    });
+  let response: Response;
+  try {
+    response = await fetch(url, init);
+  } catch (error) {
+    if ((error as Error).name === "AbortError") throw error;
+    throw new ApiError(0, "network", "Lake could not be reached. Check your connection and retry.");
   }
+  return unwrap<T>(response);
 }
 
 /** Call a read capability: `read("list_repositories", {customer_id})`. */
@@ -225,9 +213,9 @@ export const queryClient = new QueryClient({
   defaultOptions: {
     queries: {
       staleTime: 15_000,
-      // A 4xx is the answer (not found, not allowed, a bad id): show it at once. Only a network
-      // failure or a 5xx is worth retrying.
-      retry: (count, error) => !(error instanceof ApiError && error.status >= 400 && error.status < 500) && count < 2,
+      // A 4xx, `not_supported` and `store_unavailable` are shown at once; only another network
+      // or server failure is asked again (lib/errors.ts, lake#575).
+      retry: shouldRetry,
       refetchOnWindowFocus: false,
     },
   },
@@ -241,6 +229,7 @@ export function useRead<T = Row>(name: string | null, input?: Params, options?: 
     queryKey: [name, scope, input ?? {}],
     queryFn: ({ signal }) => read<T>(name!, input, { workspace, signal }),
     ...queryOptions,
+    refetchInterval: pollUnlessFailed(queryOptions.refetchInterval),
     // After the caller's options: a null name never reads, whatever `enabled` says.
     enabled: !!name && (queryOptions.enabled ?? true),
   });
@@ -270,6 +259,7 @@ export function useList<T = Row>(
     queryKey: [name, scope, input ?? {}, pick ?? ""],
     queryFn: async ({ signal }) => listOf<T>(await read<unknown>(name!, input, { workspace, signal }), pick),
     ...queryOptions,
+    refetchInterval: pollUnlessFailed(queryOptions.refetchInterval),
     enabled: !!name && (queryOptions.enabled ?? true),
   });
 }
@@ -293,6 +283,7 @@ export function usePostRead<T = Row>(name: string | null, input: Row = {}, optio
     queryKey: [name, scope, "post", input],
     queryFn: ({ signal }) => postRead<T>(name!, input, { workspace, signal }),
     ...queryOptions,
+    refetchInterval: pollUnlessFailed(queryOptions.refetchInterval),
     enabled: !!name && (queryOptions.enabled ?? true),
   });
 }

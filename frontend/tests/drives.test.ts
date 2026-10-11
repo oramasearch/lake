@@ -3,7 +3,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { ancestors, chunkBySize, chunkRanges, cleanPath, datasetFormat, datasetName, driveSlug, expandTo, isWithin, joinPath, nameOf, parentOf, planMoves, planUpload, rangeSelect, sortEntries, validName } from "../src/pages/drives/paths.ts";
-import { cleanTarget, storageLabel, targetHref, targetProblem } from "../src/pages/drives/targets.ts";
+import { cleanTarget, nameAfterTarget, selectsOnFocus, storageLabel, targetHref, targetProblem } from "../src/pages/drives/targets.ts";
 import { folderKey, matchLink, matchWhere, parentKey, type DriveMatch } from "../src/pages/drives/search.ts";
 
 test("drive paths", () => {
@@ -120,6 +120,15 @@ test("Load as dataset is offered for CSV and JSONL files, under a name SQL can q
   assert.equal(datasetName("--.csv"), "dataset");
   assert.equal(datasetName("a".repeat(80) + ".csv").length, 63);
   assert.match(datasetName("Ünïcode name.jsonl"), /^[A-Za-z_][A-Za-z0-9_]{0,62}$/);
+});
+
+test("New shortcut: a suggested name is replaced by typing, a typed one is kept (lake#580)", () => {
+  assert.equal(nameAfterTarget("", false, "app-e2e-notes"), "app-e2e-notes");
+  assert.equal(nameAfterTarget("app-e2e-notes", false, "other"), "other", "a new target suggests again");
+  assert.equal(nameAfterTarget("notes app source", true, "app-e2e-notes"), "notes app source", "what was typed stays");
+  assert.equal(selectsOnFocus("app-e2e-notes", false), true, "focus selects the suggestion, so typing replaces it");
+  assert.equal(selectsOnFocus("notes app source", true), false);
+  assert.equal(selectsOnFocus("", false), false);
 });
 
 test("where a drive search match opens", () => {

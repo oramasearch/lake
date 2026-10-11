@@ -30,6 +30,7 @@
 #include "workspace_records_api.hpp"
 #include "lake/control/ask_messages.hpp"
 #include "lake/control/opportunities.hpp"
+#include "lake/control/project_decisions.hpp"
 
 namespace lake::api {
 
@@ -61,6 +62,97 @@ call_workspace(ApiContext& context,
     }
     co_return std::move(*completed);
 }
+
+namespace {
+
+std::string trimmed_text(std::string text) {
+    const auto first = text.find_first_not_of(" \t\r\n");
+    if (first == std::string::npos) {
+        return {};
+    }
+    const auto last = text.find_last_not_of(" \t\r\n");
+    return text.substr(first, last - first + 1);
+}
+
+// A project's decision around the engine's project calls (lake#577,
+// docs/api/workspaces.md#a-projects-decision): `create_project` writes the decision it was sent
+// under the new project's id, `get_project` answers it as `decision`, and `delete_project` removes
+// it. Answers a refusal only when a decision that was sent could not be kept.
+liquid::runtime::task<std::optional<ApiResult>>
+project_decision_step(ApiContext& context,
+                      const nlohmann::json& input,
+                      const std::string& capability,
+                      const std::string& project_name,
+                      const std::string& decision,
+                      nlohmann::json& value) {
+    const std::string customer_id = input.at("customer_id");
+    const std::string workspace_id = input.value("workspace_id", context.workspace_id);
+    if (capability == "create_project" && decision.empty()) {
+        co_return std::nullopt;
+    }
+    auto records = workspace_records(context, customer_id, workspace_id);
+    if (!records) {
+        if (capability != "create_project") {
+            co_return std::nullopt;
+        }
+        co_return ApiResult::failure(records.error().code,
+                                     "the project was created, but its decision was not kept: " +
+                                         records.error().message);
+    }
+    if (capability == "get_project") {
+        const std::string id = value.value("id", std::string());
+        if (id.empty()) {
+            co_return std::nullopt;
+        }
+        // A decision that cannot be read now leaves the project readable without it.
+        auto found =
+            control::settled(co_await control::get_project_decision(*records, customer_id, id));
+        if (found && *found) {
+            value["decision"] = (*found)->decision;
+        }
+        co_return std::nullopt;
+    }
+    if (capability == "delete_project") {
+        const std::string id = value.value("id", std::string());
+        if (!id.empty()) {
+            static_cast<void>(control::settled(
+                co_await control::remove_project_decision(*records, customer_id, id)));
+        }
+        co_return std::nullopt;
+    }
+    // create_project: the engine answers the name only, so its id is read back.
+    auto project = control::settled(co_await call_workspace(context,
+                                                            customer_id,
+                                                            "get_project",
+                                                            workspace_uses_get("get_project"),
+                                                            {{"name", project_name}}));
+    const std::string id =
+        project && project->is_object() ? project->value("id", std::string()) : std::string();
+    if (id.empty()) {
+        co_return ApiResult::failure(project ? "store_error" : project.error().code,
+                                     "the project was created, but its decision was not kept: " +
+                                         (project ? std::string("the workspace did not name its id")
+                                                  : project.error().message));
+    }
+    control::ProjectDecision kept{.project_id = id,
+                                  .customer_id = customer_id,
+                                  .project = project_name,
+                                  .decision = decision,
+                                  .created_by = context.acting_user_id.empty()
+                                                    ? context.acting_identity
+                                                    : context.acting_user_id};
+    auto written =
+        control::settled(co_await control::record_project_decision(*records, std::move(kept)));
+    if (!written) {
+        co_return ApiResult::failure(written.error().code,
+                                     "the project was created, but its decision was not kept: " +
+                                         written.error().message);
+    }
+    value["decision"] = written->decision;
+    co_return std::nullopt;
+}
+
+} // namespace
 
 nlohmann::json agent_creator_answer(const nlohmann::json& turn) {
     if (const nlohmann::json result = turn.value("result", nlohmann::json());
@@ -666,6 +758,28 @@ void register_workspace_call(Registry& registry, bool read) {
                         "invalid_input", "a project needs a name", "/input/name");
                 }
             }
+            // A project's decision is lake's to keep (lake#577): the engine's project has no
+            // field for it, so it is taken out here and written to the project's workspace
+            // records once the engine has created the project.
+            std::string decision;
+            if (!read && capability == "create_project" && arguments.contains("decision")) {
+                const json& field = arguments.at("decision");
+                if (!field.is_null() && !field.is_string()) {
+                    co_return ApiResult::failure(
+                        "invalid_input", "the decision is text", "/input/decision");
+                }
+                if (field.is_string()) {
+                    decision = trimmed_text(field.get<std::string>());
+                }
+                if (decision.size() > control::max_project_decision_bytes) {
+                    co_return ApiResult::failure(
+                        "invalid_input",
+                        "the decision is longer than " +
+                            std::to_string(control::max_project_decision_bytes) + " bytes",
+                        "/input/decision");
+                }
+                arguments.erase("decision");
+            }
             // One name per concept (lake#450): `run` or `run_id`, `model` or `model_id`, as the
             // engine capability takes it.
             const auto renamed = canonical_workspace_input(capability, arguments);
@@ -736,6 +850,18 @@ void register_workspace_call(Registry& registry, bool read) {
                 co_return failed;
             }
             json value = std::move(**called);
+            if (value.is_object() &&
+                (capability == "create_project" || capability == "get_project" ||
+                 capability == "delete_project")) {
+                auto step = co_await project_decision_step(
+                    context, input, capability, project_name, decision, value);
+                if (!step) {
+                    co_return ApiResult::failure("store_error", step.error().message);
+                }
+                if (*step) {
+                    co_return std::move(**step);
+                }
+            }
             if (value.is_object() &&
                 (capability == "expose_model" || capability == "unexpose_model" ||
                  capability == "expose_index" || capability == "unexpose_index")) {

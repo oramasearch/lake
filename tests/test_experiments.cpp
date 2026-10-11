@@ -273,6 +273,31 @@ TEST_F(Experiments, RestAndMcpExposeMatchingSchemasAndCallEveryOperation) {
     }
 }
 
+// A read with an array input is callable with GET (lake#576): repeated keys, a comma list or a
+// JSON array decode as the array, and OpenAPI says the key repeats.
+TEST_F(Experiments, CompareRunsAnswersItsGetFormWithRepeatedKeysOrACommaList) {
+    lake::api::ApiServer server({.port = 0,
+                                 .store = store,
+                                 .workspaces = workspace->service,
+                                 .admin_token = "experiment-operator"});
+    ASSERT_TRUE(server.start()) << server.reason();
+    const std::string scope = "customer_id=" + customer + "&workspace_id=" + workspace->id;
+    for (const std::string runs :
+         {"runs=run-a&runs=dp-run", "runs=run-a,dp-run", "runs=%5B%22run-a%22,%22dp-run%22%5D"}) {
+        const auto answer =
+            json::parse(request(server.port(), "GET", "/v1/compare_runs?" + scope + "&" + runs));
+        ASSERT_TRUE(answer.at("ok").get<bool>()) << runs << answer;
+        EXPECT_EQ(answer.at("value").at("details").size(), 2) << runs;
+    }
+    const auto openapi = json::parse(request(server.port(), "GET", "/v1/openapi.json"));
+    const auto parameters = openapi.at("paths").at("/v1/compare_runs").at("get").at("parameters");
+    const auto runs = std::ranges::find_if(
+        parameters, [](const json& parameter) { return parameter.at("name") == "runs"; });
+    ASSERT_NE(runs, parameters.end());
+    EXPECT_EQ(runs->at("style"), "form");
+    EXPECT_EQ(runs->at("explode"), true);
+}
+
 // lake#561: lake says experiment and `experiment_id`; the engine's study names stay on the engine
 // side of the call. workspace_act speaks the engine's names in and out.
 TEST_F(Experiments, LakeSaysExperimentAndTheEngineKeepsItsStudyNames) {

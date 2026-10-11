@@ -466,6 +466,33 @@ table + .panel,
   border-color: var(--lake-action);
   background: var(--lake-action-soft);
 }
+/* The kit's one-file picker (ui.tsx FilePicker, lake#582): the drop zone's look at form size. */
+.file-picker {
+  min-height: 6rem;
+  display: grid;
+  justify-items: center;
+  align-content: center;
+  gap: var(--lake-space-1);
+  padding: var(--lake-space-4);
+  border: 0.125rem dashed var(--lake-border-strong);
+  border-radius: var(--lake-panel-radius);
+  background: var(--lake-layer);
+  color: var(--lake-text-secondary);
+  text-align: center;
+  cursor: pointer;
+}
+.file-picker:hover,
+.file-picker[data-active='true'] {
+  border-color: var(--lake-action);
+  background: var(--lake-action-soft);
+}
+.file-picker[data-chosen='true'] {
+  border-style: solid;
+}
+.file-picker:focus-within {
+  outline: 0.125rem solid var(--lake-focus);
+  outline-offset: 0.125rem;
+}
 .document-preview,
 .media-preview,
 .image-preview {

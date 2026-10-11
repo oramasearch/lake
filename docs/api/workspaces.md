@@ -84,6 +84,31 @@ use with one message that names neither. `workspace_act` refuses an empty or bla
 non-empty name as `conflict` at `/input/name`: *a project named '<name>' already exists in this
 workspace; choose another name*. The Design page shows the same message.
 
+<a id="a-projects-decision"></a>
+**A project's decision (lake#577).** The New Project drawer asks for "The decision it should
+improve", a field of its own beside the description. The engine's project keeps a name, an owner
+and a description only, and the `intent` its inputs accept is a reserved note it records on the
+call's trace and strips before validation, so a decision sent as `intent` was discarded and the
+project page showed the description in its place. Lake keeps the decision itself:
+
+- `workspace_act create_project` takes `input.decision` (text, trimmed, at most 4,000 bytes; any
+  other type is `invalid_input` at `/input/decision`), sends the engine everything else, reads the
+  new project's id back with one `get_project`, and writes the decision once (`if_absent`) as a
+  sealed record of `lake_project_decisions` in the workspace Zetta, keyed by that id and found by
+  the space (`include/lake/control/project_decisions.hpp`). The answer carries `decision`. If the
+  decision cannot be written the call answers that error, saying the project was created but its
+  decision was not kept.
+- `workspace_query get_project` adds `decision` beside `description` when the project has one. A
+  decision that cannot be read now leaves the project readable without it.
+- `workspace_act delete_project` removes it. A project created again under the same name has a new
+  id, so it never inherits the old decision.
+
+Nothing about a decision is in PostgreSQL. The web app sends `decision` from the drawer and shows
+it on the project page's Decision card, with the description below it, and as each project's line
+on the Projects list. `Workspaces.AProjectKeepsItsDecisionBesideItsDescription`
+(`tests/test_workspaces.cpp`) creates a project with three distinct strings and reads each back in
+its place.
+
 **Dataset rules (lake#447).** `workspace_query` and `workspace_act` apply these on top of Zetta:
 
 - `list_datasets` rows gain `id` (`<database>/<name>`) and `kind` (`data` or `result`);

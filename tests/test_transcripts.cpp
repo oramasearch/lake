@@ -244,12 +244,15 @@ TEST(Transcripts, PagesFilterIgnoringCaseAndFollowTheCursor) {
     EXPECT_EQ(page.items[0].id, "e");
     EXPECT_EQ(page.items[1].id, "c");
     EXPECT_EQ(page.next_cursor, "c");
+    EXPECT_EQ(page.total, 4U) << "total counts every match, not the page (lake#574)";
     page = lake::control::page_transcripts(all, "budget", 2, page.next_cursor);
+    EXPECT_EQ(page.total, 4U) << "on every page";
     ASSERT_EQ(page.items.size(), 2U);
     EXPECT_EQ(page.items[0].id, "b");
     EXPECT_EQ(page.items[1].id, "a") << "a title matches too";
     EXPECT_TRUE(page.next_cursor.empty());
     EXPECT_EQ(lake::control::page_transcripts(all, "", 10, "").items.size(), 5U);
+    EXPECT_EQ(lake::control::page_transcripts(all, "", 1, "").total, 5U);
     EXPECT_FALSE(lake::control::page_transcripts(all, "", 10, "zz").cursor_found);
 }
 

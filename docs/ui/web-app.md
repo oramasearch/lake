@@ -98,6 +98,9 @@ the page is sent `Cache-Control: private, no-store`. Three more things keep late
 - **Effects have block bodies.** `useEffect(() => { … })`; the build checks it
   (`scripts/check-effects.mjs`).
 - **Words, not stored values.** Show labels, not codes; dates through `format.ts`.
+- **No page names Zetta.** Page text says lake or the workspace ("lake builds the steps", "sealed
+  in this workspace"); the engine's name is for comments, identifiers and addresses only.
+  `tests/copy.test.ts` fails the build on a page string that names it (lake#583).
 - **Title Case** for headings and rail items, sentence case for body text, buttons and labels
   (`docs/ui/design-system.md` → *Capitalization*).
 - **Copy stays as it was.** Headings, explanations, empty states and confirmations keep lake's
@@ -117,13 +120,28 @@ the page is sent `Cache-Control: private, no-store`. Three more things keep late
   so a page's code loads the first time it is opened. A tab opened before a deploy asks for chunk
   names the new build no longer has; the first failed import reloads the page once, and a second
   within a minute shows the error instead of looping.
-- **Reads are cached for 15 seconds** and are not refetched on window focus. A `4xx` is shown at
-  once; only a network failure or a `5xx` is retried, twice (`queryClient` in `src/lib/api.ts`).
-- **A read answered 503 is sent once more first** ([below](#a-read-answered-503)).
+- **Reads are cached for 15 seconds** and are not refetched on window focus. A `4xx`,
+  `not_supported` (501) and `store_unavailable` (503) are shown at once and never asked again on
+  their own; only another network or server failure is retried, twice (`shouldRetry` in
+  `src/lib/errors.ts`, handed to `queryClient` in `src/lib/api.ts`; lake#575). Asking again
+  changes nothing until an operator configures a feature, and a store that is not reachable
+  answers at once, so retrying only made a page wait (Deployments asked six times and never said
+  it was not set up).
+- **`not_supported` reads as "Not set up on this lake".** `ErrorBlock` titles it so, shows lake's
+  message (what turns the feature on) and offers no Retry. Ship → Deployments shows one plain
+  state instead: "Deployments Are Not Set Up on This Lake" and what an operator connects
+  ([platform](../api/platform.md#a-lake-without-the-platform-mirror)).
+- **A read answered 503 by the edge** is one of those retried; its error names who answered
+  ([below](#a-read-answered-503)).
 - **Every successful write refreshes every read on screen.** Reads that must be sent as `POST`
   (`workspace_query`, the `delete_workspace` dry run) go through `postRead`/`usePostRead`, which
   refresh nothing; calling them through `act` would refetch themselves forever.
-- **Live views** poll or long-poll their capability and stop when the page closes:
+- **Live views** poll or long-poll their capability and stop when the page closes. Each also
+  stops on an answer polling cannot change (a `4xx`, `not_supported`, `store_unavailable`;
+  `stopsPolling`/`pollUnlessFailed` in `src/lib/errors.ts`): every read hook (`useRead`, `useList`,
+  `usePostRead`, both `useWq`) wraps its `refetchInterval` with `pollUnlessFailed`, and the
+  long-poll loops (app events, build logs, environment logs, experiments) end there and show the
+  error. A Retry that succeeds starts the polling again.
 
 | What | How |
 |---|---|
@@ -137,15 +155,14 @@ the page is sent `Cache-Control: private, no-store`. Three more things keep late
 
 ### A Read Answered 503
 
-`read` and `postRead` (`sendRead` in `src/lib/api.ts`, the rule in `src/lib/retry.ts`) send a read
-once more, after 400 ms, when it answered 503 and the answer is not lake's own (no `{ok, …}` body:
-the edge or the connection in between answered), and when lake's own 503 carries `Retry-After`
-(a workspace store moving or handed off, a server out of request workers), waiting what it says
-between 250 ms and 2 s. Lake's 503 without `Retry-After` (something not set up) is not sent again,
-and an action never is: a write may have happened. A read cancelled meanwhile stops waiting. An
-error that is not lake's answer reads "Lake did not answer (HTTP 503 from cloudflare, ray …)":
-`ApiError.edge` keeps the `server` and `cf-ray` headers, so a report says where the answer came
-from. `tests/retry.test.ts` covers the rule.
+There is one retry rule, `shouldRetry` in `src/lib/errors.ts` (above). A 503 whose body is not
+lake's (no `{ok, …}`: the edge or the connection in between answered) becomes an `ApiError` with
+code `unavailable`, so it is retried like any server failure, twice with React Query's backoff,
+before the page shows it. Lake's own `store_unavailable` 503 is shown at once, and an action is
+never sent again: a write may have happened. An error that is not lake's answer reads "Lake did not
+answer (HTTP 503 from cloudflare, ray …)": `ApiError.edge` keeps the `server` and `cf-ray`
+headers (`edgeSource`), so a report says where the answer came from. `tests/errors.test.ts`
+covers both.
 
 **What lake#573 found.** The review saw `workspace_status`, `list_drives`, `recent_drive_entries`
 and `list_repositories` fail right after creating a repository drive at 23:55:12Z on 2026-10-10,

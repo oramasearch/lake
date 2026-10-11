@@ -20,6 +20,7 @@
 #include "lake/api/capabilities.hpp"
 #include "lake/api/markdown.hpp"
 #include "lake/api/registry.hpp"
+#include "lake/api/rest.hpp"
 #include "lake/api/web_ui.hpp"
 
 namespace {
@@ -135,6 +136,17 @@ json query_input(std::string_view query, const lake::api::Capability& capability
                 input[key] = json::parse(value, nullptr, false);
             } else if (type == "boolean") {
                 input[key] = value == "true";
+            } else if (type == "array") {
+                // Decoded as the REST adapter decodes it: repeated keys, a comma list or a JSON
+                // array (lake#576).
+                json& items = input[key];
+                if (!items.is_array()) {
+                    items = json::array();
+                }
+                for (const json& item :
+                     lake::api::rest_input_from_query(capability, {{key, value}}).at(key)) {
+                    items.push_back(item);
+                }
             } else {
                 input[key] = value;
             }

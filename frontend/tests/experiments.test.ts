@@ -5,7 +5,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { ema, metricData, nextCursor, parameterDiff, type RunDetail } from "../src/pages/experiments/transforms.ts";
+import { canCompare, chosenRuns, ema, metricData, nextCursor, parameterDiff, type RunDetail } from "../src/pages/experiments/transforms.ts";
 
 const points = [
   { step: 1, value: 4, time: "2026-09-28T00:00:00Z" },
@@ -59,4 +59,16 @@ test("the live read resumes after the last event it saw", () => {
   assert.equal(nextCursor({ events: [{ sequence: 10 }, { sequence: 11 }], next_sequence: 100 }, 10), 12);
   assert.equal(nextCursor({ events: [], next_sequence: 100 }, 12), 100);
   assert.equal(nextCursor({ events: [{ sequence: 1 }], next_sequence: 2 }, 12), 12);
+});
+
+test("Compare Runs compares only two to eight chosen runs (lake#576)", () => {
+  assert.deepEqual(chosenRuns(""), []);
+  assert.deepEqual(chosenRuns(null), []);
+  assert.deepEqual(chosenRuns("a"), ["a"]);
+  assert.deepEqual(chosenRuns(" a , b,,a "), ["a", "b"]);
+  assert.equal(canCompare(chosenRuns("")), false);
+  assert.equal(canCompare(chosenRuns("a")), false);
+  assert.equal(canCompare(chosenRuns("a,a")), false, "the same run twice is one run");
+  assert.equal(canCompare(chosenRuns("a,b")), true);
+  assert.equal(canCompare(chosenRuns("a,b,c,d,e,f,g,h,i")), false);
 });

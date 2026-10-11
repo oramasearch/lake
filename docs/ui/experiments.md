@@ -68,6 +68,11 @@ guides have the same check in `Docs.GuidesSpeakOfExperiments`.
 - **Run** and **Compare** put the charts' toolbar in a card and each metric group in a card.
   Compare adds figures and the runs compared, as links. On every page except the list, the header
   holds All experiments and the **Live updates** switch with its status.
+- **Compare with fewer than two runs** (or more than eight) shows "Choose Two or More Runs to
+  Compare" with a way back to the tracked runs, and calls nothing: `compare_runs` takes two to
+  eight distinct runs, and the page used to send the empty list and show lake's 400
+  (`chosenRuns`, `canCompare` in `transforms.ts`, lake#576). A REST client can also call
+  `GET /v1/compare_runs?customer_id=<space>&workspace_id=<workspace>&runs=<r1>&runs=<r2>` ([arrays in a query string](../api/README.md#arrays-in-a-query-string)).
 
 ## Run an Experiment
 

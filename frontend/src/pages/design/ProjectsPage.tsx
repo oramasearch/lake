@@ -65,7 +65,7 @@ function Projects({ onNew }: { onNew: () => void }) {
     const detail = details[index]?.data as J | undefined;
     if (!detail) return { name, line: "", pipelines: null, approved: null, state: null };
     const { state, pipelines, approved } = projectState(withoutProjectAgentChecks<J>(detail.graphs));
-    return { name, line: text(detail, "intent") || text(detail, "description"), pipelines, approved, state };
+    return { name, line: text(detail, "decision") || text(detail, "description"), pipelines, approved, state };
   });
   const known = rows.every((r) => r.pipelines !== null);
   const counts = new Map<ProjectState, number>();
@@ -155,7 +155,7 @@ function Projects({ onNew }: { onNew: () => void }) {
                       {r.name}
                     </Link>
                     <div className="max-w-[60ch] truncate text-[12px] text-ink-3" title={r.line}>
-                      {r.line || (r.pipelines === null ? "…" : "No intent recorded")}
+                      {r.line || (r.pipelines === null ? "…" : "No decision recorded")}
                     </div>
                   </div>
                 ),
@@ -177,26 +177,27 @@ function NewProject({ onClose }: { onClose: () => void }) {
   const navigate = useNavigate();
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
-  const [intent, setIntent] = useState("");
+  const [decision, setDecision] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
   const submit = async () => {
     setBusy(true);
     setError(null);
     try {
-      // An empty description or intent is left out, as the form handler did.
-      await wa(scope, "create_project", { name, ...(description ? { description } : {}), ...(intent ? { intent } : {}) });
+      // An empty description or decision is left out. The decision is lake's to keep (lake#577):
+      // the engine's project has no field for it, and its `intent` is a trace note it discards.
+      await wa(scope, "create_project", { name, ...(description ? { description } : {}), ...(decision.trim() ? { decision } : {}) });
       navigate(ws(`/design/project?${qs({ name })}`));
     } catch (e) {
       setError(e);
       setBusy(false);
     }
   };
-  const inField = ["name", "description", "intent"].some((f) => fieldError(error, f) || fieldError(error, `input/${f}`));
+  const inField = ["name", "description", "decision"].some((f) => fieldError(error, f) || fieldError(error, `input/${f}`));
   return (
     <Drawer
       title="New Project"
-      subtitle="Start from the decision it should improve; Zetta builds its pipelines from that."
+      subtitle="Start from the decision it should improve, then build its pipelines on the project page."
       onClose={onClose}
       footer={
         <>
@@ -215,13 +216,13 @@ function NewProject({ onClose }: { onClose: () => void }) {
         <Field label="Description" error={fieldError(error, "description") ?? fieldError(error, "input/description")}>
           <input name="description" placeholder="Which enterprise accounts will not renew?" value={description} onChange={(e) => setDescription(e.target.value)} />
         </Field>
-        <Field label="The decision it should improve" error={fieldError(error, "intent") ?? fieldError(error, "input/intent")}>
+        <Field label="The decision it should improve" error={fieldError(error, "decision") ?? fieldError(error, "input/decision")}>
           <textarea
-            name="intent"
+            name="decision"
             rows={4}
             placeholder="Which accounts the team calls first each week, measured by accounts saved per quarter"
-            value={intent}
-            onChange={(e) => setIntent(e.target.value)}
+            value={decision}
+            onChange={(e) => setDecision(e.target.value)}
           />
         </Field>
       </Form>

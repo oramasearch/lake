@@ -150,7 +150,7 @@ export default function StreamsPage() {
           )}
           <div className="space-y-4">
             {groups.map((group) => (
-              <Card key={group.zetta} label="Topics" title={group.zetta === "bus" ? "Lake Bus" : "Workspace Zetta"} padded={false} actions={<span className="font-mono text-[12px] text-ink-3">{(group.topics ?? []).length}</span>}>
+              <Card key={group.zetta} label="Topics" title={group.zetta === "bus" ? "Lake Bus" : "Workspace"} padded={false} actions={<span className="font-mono text-[12px] text-ink-3">{(group.topics ?? []).length}</span>}>
                 {group.error ? (
                   <div className="px-4 pt-3">
                     <Banner tone="warn">{group.error}</Banner>
@@ -160,7 +160,7 @@ export default function StreamsPage() {
                   rows={group.topics ?? []}
                   columns={columns(group.zetta)}
                   rowKey={(topic) => String(topic.topic ?? "")}
-                  caption={group.zetta === "bus" ? "Lake bus topics" : "Workspace Zetta topics"}
+                  caption={group.zetta === "bus" ? "Lake bus topics" : "Workspace topics"}
                 />
               </Card>
             ))}
@@ -174,7 +174,7 @@ export default function StreamsPage() {
       {creating && permissions.canWrite && (
         <Drawer
           title="New Topic"
-          subtitle="New topics live on this workspace's Zetta."
+          subtitle="New topics live in this workspace."
           onClose={() => {
             setCreating(false);
             runner.setError(null);

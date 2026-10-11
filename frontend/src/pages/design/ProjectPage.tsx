@@ -10,6 +10,7 @@ import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { useQueries } from "@tanstack/react-query";
 import { FileCode2, FolderKanban, Plus, Sparkles, Trash2, Workflow } from "lucide-react";
 import { act } from "@/lib/api";
+import { pollUnlessFailed } from "@/lib/errors";
 import { Drawer, Modal } from "@/lib/overlay";
 import { useToast } from "@/lib/toast";
 import { Banner, Button, Chip, DataTable, Empty, ErrorBlock, Field, Form, KeyValue, Page, Skeleton, Split, StateTabs, Status } from "@/lib/ui";
@@ -88,7 +89,7 @@ function ProjectBody({ name, building, onBuilding }: { name: string; building: b
     queries: graphs.map((graph) => ({
       queryKey: ["workspace_query", scope.customerId, scope.workspaceId, "get_graph", { project: name, graph: text(graph, "name") }],
       queryFn: ({ signal }: { signal: AbortSignal }) => wq<J>(scope, "get_graph", { project: name, graph: text(graph, "name") }, signal),
-      refetchInterval: interval,
+      refetchInterval: pollUnlessFailed(interval),
     })),
   });
 
@@ -145,8 +146,9 @@ function ProjectBody({ name, building, onBuilding }: { name: string; building: b
         />
       </Panel>
       <Panel label="Decision" title="What It Should Improve">
-        <p className="m-0 text-[13px]">{text(p, "intent") || text(p, "description") || <span className="text-ink-3">No description.</span>}</p>
-        {text(p, "intent") && text(p, "description") && <p className="mb-0 mt-2 text-[12.5px] text-ink-2">{text(p, "description")}</p>}
+        {/* The decision (lake#577) and, below it, the description: each in its own place. */}
+        <p className="m-0 text-[13px]">{text(p, "decision") || <span className="text-ink-3">No decision recorded.</span>}</p>
+        {text(p, "description") && <p className="mb-0 mt-2 text-[12.5px] text-ink-2">{text(p, "description")}</p>}
       </Panel>
       <Panel label="Dataset">
         <p className="m-0 font-mono text-[12.5px] break-all">{dataset || <span className="font-sans text-ink-3">Chosen when you build or run a pipeline.</span>}</p>
@@ -209,9 +211,9 @@ function ProjectBody({ name, building, onBuilding }: { name: string; building: b
                   {graphs.length === 0
                     ? designing
                       ? "Designing…"
-                      : "No pipelines yet. Describe what the project should predict or answer, and Zetta builds one."
+                      : "No pipelines yet. Describe what the project should predict or answer, and lake builds one."
                     : summary.approved === 0
-                      ? "Zetta verifies and runs only an approved pipeline: approve one on the Pipelines tab."
+                      ? "lake verifies and runs only an approved pipeline: approve one on the Pipelines tab."
                       : `${summary.approved} of ${summary.pipelines} pipelines approved.`}
                 </p>
               )}
@@ -257,7 +259,7 @@ function Pipelines({ project, graphs, designing, onBuild }: { project: string; g
         rowKey={(graph) => text(graph, "id") || text(graph, "name")}
         empty={
           <Empty compact icon={Workflow} title={designing ? "Designing…" : "No Pipelines Yet"}>
-            {designing ? "The Project Agent is designing this project's pipeline." : "Describe what the project should predict or answer, and Zetta builds one."}
+            {designing ? "The Project Agent is designing this project's pipeline." : "Describe what the project should predict or answer, and lake builds one."}
           </Empty>
         }
         columns={[
@@ -363,7 +365,7 @@ function BuildPipeline({ project, datasets, methodologies, onClose }: { project:
   return (
     <Drawer
       title="Build a Pipeline"
-      subtitle="Describe what it should predict or answer; Zetta builds the steps."
+      subtitle="Describe what it should predict or answer; lake builds the steps."
       onClose={onClose}
       footer={
         <>
@@ -392,7 +394,7 @@ function BuildPipeline({ project, datasets, methodologies, onClose }: { project:
         {runnable.length > 0 && (
           <Field label="Methodology" help="Only the methodologies this workspace's engine runs are listed.">
             <select name="methodology" value={methodology} onChange={(e) => setMethodology(e.target.value)}>
-              <option value="">Let Zetta choose from the description</option>
+              <option value="">Let lake choose from the description</option>
               {runnable.map((m) => (
                 <option key={text(m, "id")} value={text(m, "id")}>
                   {text(m, "name")} ({text(m, "id")})
@@ -483,7 +485,7 @@ function CreatePipeline({ project, from }: { project: string; from: From }) {
           <Field label="Name">
             <input name="name" placeholder="python program" value={name} onChange={(e) => setName(e.target.value)} />
           </Field>
-          <Field label="Python pipeline" required help="Zetta reads it and lowers it to a pipeline; the code never runs.">
+          <Field label="Python pipeline" required help="lake reads it and lowers it to a pipeline; the code never runs.">
             <textarea name="source" rows={6} className="font-mono" value={content} onChange={(e) => setContent(e.target.value)} />
           </Field>
           <div>

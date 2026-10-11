@@ -26,6 +26,7 @@ import {
   Server,
 } from "lucide-react";
 import { postRead, read, type Row } from "@/lib/api";
+import { pollUnlessFailed } from "@/lib/errors";
 import { useSession, type WorkspaceChoice } from "@/lib/session";
 import { useTrail } from "@/lib/trail";
 import { Button, Card, Empty, Page, Skeleton, Status, cx } from "@/lib/ui";
@@ -61,7 +62,8 @@ async function figuresOf(w: WorkspaceChoice, signal: AbortSignal): Promise<Figur
   const engine = (capability: string) => postRead<Row>("workspace_query", { ...base, capability, input: {} }, opts).catch(() => null);
   const [sql, transcripts, projects, agents, runs, models, indexes, apps] = await Promise.all([
     ready ? read<Row>("workspace_sql", { ...base, statement: "SELECT count(*) AS n FROM system.datasets" }, opts).catch(() => null) : null,
-    ready ? read<Row>("list_transcripts", { ...base, limit: 500 }, opts).catch(() => null) : null,
+    // One row is enough: lake counts them in `total` (list_transcripts allows at most 100 a page; lake#574).
+    ready ? read<Row>("list_transcripts", { ...base, limit: 1 }, opts).catch(() => null) : null,
     ready ? engine("list_projects") : null,
     ready ? engine("list_agents") : null,
     ready ? engine("list_runs") : null,
@@ -74,7 +76,7 @@ async function figuresOf(w: WorkspaceChoice, signal: AbortSignal): Promise<Figur
     ready,
     phase,
     datasets: n === undefined || n === null ? null : Number(n),
-    transcripts: count(transcripts, "transcripts"),
+    transcripts: typeof transcripts?.total === "number" ? transcripts.total : count(transcripts, "transcripts"),
     projects: count(projects, "projects"),
     agents: Array.isArray(agents?.agents) ? (agents!.agents as Row[]).filter((a) => a.kind !== "orama").length : null,
     runs: Array.isArray(runs?.runs) ? (runs!.runs as Row[]) : null,
@@ -142,7 +144,7 @@ export default function CommandCenter() {
       queryKey: ["home-figures", w.id],
       queryFn: ({ signal }: { signal: AbortSignal }) => figuresOf(w, signal),
       staleTime: 30_000,
-      refetchInterval: 60_000,
+      refetchInterval: pollUnlessFailed(60_000),
     })),
   });
   const repositories = useQuery({

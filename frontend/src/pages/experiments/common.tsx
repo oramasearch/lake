@@ -12,6 +12,7 @@ import { useConfirm } from "@/pages/streams/common";
 import "@/styles/experiments.css";
 import { Chart, ChartContext, newRegistry, viewAction } from "./Chart";
 import { cell, ema, metricData, nextCursor, parameterDiff, type RunDetail } from "./transforms";
+import { stopsPolling } from "@/lib/errors";
 
 export type Mode = "list" | "experiment" | "run" | "compare";
 
@@ -217,6 +218,11 @@ export function useFollow(live: boolean, targets: () => Target[], refresh: () =>
           }
         } catch (error) {
           if (signal.aborted) break;
+          // An answer asking again cannot change ends the follow (lib/errors.ts, lake#575).
+          if (stopsPolling(error)) {
+            setStatus(`Stopped · ${describe(error)}`);
+            break;
+          }
           setStatus(`Reconnecting · ${describe(error)}`);
         }
         await pause(Math.max(1000, 10000 - (Date.now() - began)), signal);

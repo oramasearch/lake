@@ -6,6 +6,7 @@
  * calls them again, forever; reads over POST go through lib's `postRead`, which refreshes nothing. */
 import { useQuery, type UseQueryOptions } from "@tanstack/react-query";
 import { act, postRead, useRead, type Params, type Row } from "@/lib/api";
+import { pollUnlessFailed } from "@/lib/errors";
 import { useSession } from "@/lib/session";
 
 export { postRead };
@@ -35,6 +36,7 @@ export function useWq<T = Row>(capability: string | null, input: Row = {}, optio
     queryKey: ["workspace_query", scope.customerId, scope.workspaceId, capability, input],
     queryFn: ({ signal }) => wq<T>(scope, capability!, input, signal),
     ...options,
+    refetchInterval: pollUnlessFailed(options?.refetchInterval),
     enabled: !!capability && !!scope.customerId && !!scope.workspaceId && (options?.enabled ?? true),
   });
 }
