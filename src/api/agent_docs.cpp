@@ -166,19 +166,23 @@ constexpr std::array group_rules{
                          n == "confirm_solution" || n == "get_ask_conversation" ||
                          n == "send_ask_message" || n == "settle_ask_turn" ||
                          n == "confirm_ask_proposal" || n == "approve_agent_proposal" ||
-                         n == "latest_agent_task" || engine_capability_group(n) == "Agents";
+                         n == "latest_agent_task" || n == "delete_ask_conversation" ||
+                         engine_capability_group(n) == "Agents";
               }},
     GroupRule{"Workspace: Design, Train and Ship",
               "Your workspace: projects and pipelines, data, runs, models and search indexes, and "
-              "publishing models (with traffic and monitoring) and indexes. Every capability "
-              "of the workspace engine is also its own tool, in the groups below; "
+              "publishing models (with traffic and monitoring) and indexes. delete_dataset, "
+              "delete_model, delete_run and delete_index remove one (try `dry_run: true` first). "
+              "Every capability of the workspace engine is also its own tool, in the groups below; "
               "workspace_query and workspace_act still reach each by name.",
               [](std::string_view n) {
                   return contains_any(n, {"pipeline"}) || n.starts_with("workspace_") ||
                          n == "start_workspace" || n == "delete_workspace" || n == "search_index" ||
                          n == "predict" || n == "model_traffic" || n == "list_runs" ||
                          n.ends_with("_workspace") || n.ends_with("_workspaces") ||
-                         n == "set_workspace_storage" || n == "copy_workspace_records";
+                         n == "set_workspace_storage" || n == "copy_workspace_records" ||
+                         n == "delete_dataset" || n == "delete_model" || n == "delete_run" ||
+                         n == "delete_index";
               }},
     GroupRule{
         "Apps and packages",

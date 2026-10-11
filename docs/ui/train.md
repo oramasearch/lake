@@ -39,6 +39,15 @@ helpers the Run and Models pages share (`useExperimentRefs`, `TrialSubject`).
   no connections) shows none. Upload picks its file with the kit's `FilePicker` (`lib/ui.tsx`): a
   dashed zone to press or drop a file on, which then shows the file's name and size.
 
+## Deleting a Dataset or a Run (lake#645)
+
+Data → Dataset has **Delete dataset** in its Actions card, confirmed by typing the dataset's name;
+the dialog lists its rows, size and the search indexes built on it (`delete_dataset
+{dry_run: true}`). Train → Run has **Delete** in its header once the run has finished, confirmed by
+the first eight characters of its id; the models it trained are kept (`delete_run`). Both go back
+to their list. An older workspace engine answers that it cannot delete yet, which the dialog shows.
+See [deletion.md](deletion.md).
+
 ## How to verify
 
 `npx tsc --noEmit -p .`, `npm test` and `npm run build` from `frontend/` (the build also runs

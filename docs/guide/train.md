@@ -271,6 +271,13 @@ A successful run registers a model version. Compare it on **Train → Models**, 
 call it from your code on [Models and Search Indexes](/docs/ship). Experiments use the same held-out names as their objectives
 ([Experiments](/docs/experiments)).
 
+## Delete a Run
+
+Once a run has finished, open it and press **Delete**, type the first eight characters of its id and
+press **Delete run**. The run and its report go; the models it trained stay (delete one from Ship →
+Model). REST: `POST /v1/delete_run` with `customer_id`, `workspace_id` and `id`; MCP: `delete_run`;
+`"dry_run": true` checks first.
+
 ## Permissions
 
 | What | Needs |

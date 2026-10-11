@@ -41,6 +41,7 @@ ancestor or linked device is revoked or expires. The complete derivation and mig
 | `create_object` | `admin` on `parent_id` | child object |
 | `list_grants` | `admin` on `object_id` | direct grants |
 | `create_grant` | `admin` on `object_id` | grant, with the attestation lake signed for it |
+| `revoke_grant` | `admin` on the grant's object | the revoked grant ([below](#revoking-a-grant)) |
 | `effective_access` | `share` on `object_id` | direct and inherited access |
 | `entity_effective_access` | `share` on the resolved repository, organization, or team | its policy object and direct and inherited access |
 
@@ -49,6 +50,16 @@ team pages link to `/repository/access?id=…`, `/organization/access?id=…`, a
 `/team/access?id=…` through `entity_effective_access`. Effective access returns the
 principal, role, allowed actions, source object, and whether the grant is inherited. This is the
 sharing view required by the product design.
+
+## Revoking a grant
+
+`revoke_grant {grant_id, dry_run?}` (lake#645) needs `admin` on the grant's object, as
+`create_grant` does, and removes that one grant; the answer is the grant as it was, with
+`dry_run`. Two grants are kept, each `409 conflict` with the reason: one a membership carries
+(the same principal and attestation digest as a membership), which goes with the membership
+(`remove_member`), and the last `admin` grant on an account (`customer` object), so an account always
+has an administrator. The event is central (`grant.revoke`, naming the principal, object and
+role).
 
 ## The grant's attestation (lake#602)
 

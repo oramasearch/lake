@@ -241,6 +241,18 @@ workspace and records the query.
 For an index over `account_id` and `plan`, each hit's `fields` holds that row's `account_id` and
 `plan`. Ask for some fields only with `&fields=plan` (repeat it, or comma-separate, for more).
 
+## Delete a Model Version or a Search Index
+
+- On Ship → Model, press **Delete**, type the model's name and press **Delete model version**. That
+  version's trained model goes, and stops answering if it was published; its other versions and
+  the run that trained it stay. REST `POST /v1/delete_model`, MCP `delete_model`.
+- On Ship → Search Index, press **Delete**, type the indexed table's name and press **Delete
+  index**. The index goes, and stops answering if it was published; the dataset stays. REST
+  `POST /v1/delete_index`, MCP `delete_index`.
+
+Both take `customer_id`, `workspace_id` and `id`, and `"dry_run": true` to check first. Neither can
+be undone.
+
 ## Limits
 
 - Only a **published** model or index answers `predict` or `search_index`. Publishing is per model

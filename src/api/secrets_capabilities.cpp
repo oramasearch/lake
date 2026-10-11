@@ -414,6 +414,63 @@ void register_mount_capabilities(Registry& registry) {
                                      MountSecrets& mount) -> liquid::runtime::task<ApiResult> {
             co_return one_result(control::settled(co_await mount.mount()));
         })});
+    // lake#645, docs/api/secrets.md#deleting-a-mount.
+    registry.add(Capability{
+        .name = "delete_secret_mount",
+        .title = "Delete a secret mount",
+        .description =
+            "Delete a secret mount and everything in it, which cannot be recovered: every secret "
+            "with all its versions, its named keys and their data keys, its dynamic leases, and "
+            "its access grants. They are removed from the mount's workspace Zetta. `confirm` must "
+            "be the mount's name. `dry_run: true` deletes nothing and lists what would go, with "
+            "counts and the secrets' names.",
+        .input_schema = mount_input(
+            {{"confirm", {{"type", "string"}}}, {"dry_run", {{"type", "boolean"}}}}, json::array()),
+        .output_schema = object_schema(),
+        .kind = CapabilityKind::Action,
+        .object = "secret_mount",
+        .action = "admin",
+        .resolve_object = mount_object("secret_mount"),
+        .resolves_operator_audit_target = true,
+        .async_handler = on_mount([](const json& input, ApiContext& context, MountSecrets& mount)
+                                      -> liquid::runtime::task<ApiResult> {
+            const bool dry_run = input.value("dry_run", false);
+            // The route goes with the mount, so the event is routed to its workspace here.
+            context.audit_workspace_id = mount.route().workspace_id;
+            context.audit_kind = dry_run ? "secret_mount.delete.plan" : "secret_mount.delete";
+            auto settings = control::settled(co_await mount.mount());
+            const std::string name = settings ? settings->name : std::string();
+            if (!settings && settings.error().code != "not_found") {
+                co_return secret_records_failure(settings.error());
+            }
+            // A mount whose record is already gone (a deletion stopped part way) is confirmed by
+            // its id.
+            const std::string expected = name.empty() ? mount.route().mount_id : name;
+            const bool confirmed = input.contains("confirm") && input.at("confirm") == expected;
+            if (!confirmed && (!dry_run || input.contains("confirm"))) {
+                co_return ApiResult::failure(
+                    "invalid_input", "confirm must match the mount's name", "/confirm");
+            }
+            auto removed = control::settled(co_await mount.remove_all(dry_run));
+            if (!removed) {
+                co_return secret_records_failure(removed.error());
+            }
+            if (!dry_run) {
+                if (auto route = context.store->delete_secret_mount_route(mount.route().mount_id);
+                    !route) {
+                    co_return from_store_error(route.error());
+                }
+            }
+            json value{{"mount_id", mount.route().mount_id},
+                       {"name", name},
+                       {"workspace_id", mount.route().workspace_id},
+                       {"dry_run", dry_run},
+                       {"deleted", !dry_run},
+                       {"counts", removed->at("counts")},
+                       {"secrets", removed->at("secrets")}};
+            context.audit_details["counts"] = value["counts"];
+            co_return ApiResult::success(std::move(value));
+        })});
 }
 
 void register_static_secret_capabilities(Registry& registry) {

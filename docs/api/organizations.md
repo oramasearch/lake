@@ -122,6 +122,36 @@ membership, its member policy object, and the matching derived grant. It refuses
 owner, including when that owner is the acting principal. Both actions require `admin` on the
 membership's organization or team and are recorded by the registry audit path.
 
+## Deleting an organization
+
+`delete_organization {organization_id, confirm, dry_run?}` (lake#645, migration
+`0076_organization_deletion`) deletes an organization. Only an owner of the organization (an
+organization-scope `owner` membership) or the instance operator may; `admin` on the organization
+is checked first, as for every action on it. `confirm` must be its handle (its account's name), or
+its id when it has no account.
+
+It is **refused while the organization's account still has a workspace** that is not deleted: the
+`409 conflict` names each one, and the person deletes them first with `delete_workspace`, which
+removes their Zettas and everything in them. `dry_run: true` deletes nothing and answers
+`{organization_id, display_name, customer_id, handle, workspaces, counts, dry_run, deleted}`:
+`workspaces` lists those in the way (`id`, `name`, `environment`) and `counts` how many teams,
+memberships, invitations, SSO providers, federation issuers, secret mount routes, policy objects
+and grants would go. Without a dry run, one transaction removes those (and the organization's
+recovery attempts and the leases of its mounts), deletes the policy objects of the organization
+and its account (their children and every grant on them go with them), and marks the
+`organizations` and `customers` rows `deleted_at`. The rows stay because the central audit chain
+names the account; from then on no read or list answers them, nobody holds access to the account,
+and its handle stays retired. The event is central (`organization.delete`, with the counts).
+Lake Console's organization page carries it ([../ui/deletion.md](../ui/deletion.md)).
+
+## Revoking an invitation
+
+`revoke_invitation {invitation_id, dry_run?}` (lake#645) needs `admin` on the invitation's
+organization or team, like `create_invitation`. A pending invitation becomes `revoked` and
+`accept_invitation` and `join_organization` refuse it; it stays listed, as revoked. An accepted,
+expired or already revoked invitation is `409 conflict` (an accepted one is a membership:
+`remove_member`). `dry_run: true` answers the invitation unchanged. The event is central.
+
 ## Verify and change
 
 Run the unit and Postgres tests documented in [`../build/ci.md`](../build/ci.md). The acceptance

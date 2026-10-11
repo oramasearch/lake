@@ -164,6 +164,15 @@ cleaning, and OpenAI's multipart request and answer. The HTTP exchange is the in
 `TranscriptPost`, which `http_server.cpp` builds over its outbound client when
 `LAKE_OPENAI_API_KEY` is set. See `docs/api/transcripts.md`.
 
+`deletion_capabilities.cpp` registers what deletes a workspace's data (lake#645):
+`delete_dataset`, `delete_model`, `delete_run` and `delete_index`, named capabilities over the
+workspace engine's own deletes that answer `not_supported` from an older engine, and
+`delete_ask_conversation`, which removes one person's message records from the workspace Zetta.
+`delete_organization`, `revoke_invitation` and `revoke_grant` sit beside their siblings in
+`capabilities.cpp`, and `delete_secret_mount` in `secrets_capabilities.cpp` over
+`MountSecrets::remove_all` (`secret_records_api.cpp`). Each takes `dry_run`. See
+`docs/api/deletion.md`.
+
 `solution_capabilities.cpp` registers the six solution capabilities (lake#597): a workspace's own
 solutions are sealed `lake_solutions` records in the workspace Zetta, listed and read beside Orama's
 catalogue, which it reads through the workspace's engine (`list_solutions`, `get_solution`);

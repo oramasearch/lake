@@ -28,6 +28,13 @@ and promoting a version. **Ship → Models** is about serving it: calling it, wh
 answers go and how it is doing. Each page links to the other for the same version, and Search
 opens a model's training page.
 
+## Deleting a Model Version or a Search Index (lake#645)
+
+Ship → Model has **Delete** in its header: it removes that version's trained model (`delete_model`),
+confirmed by the model's name, and keeps the run that trained it and the other versions. Ship →
+Search Index has **Delete** in its header (`delete_index`), confirmed by the indexed table's name;
+the dataset stays. A published one stops answering. See [deletion.md](deletion.md).
+
 ## How to verify
 
 `npx tsc --noEmit -p .`, `npm test` and `npm run build` from `frontend/` (the build also runs

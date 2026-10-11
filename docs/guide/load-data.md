@@ -245,6 +245,19 @@ Anything that does not start with `SELECT` or `WITH`, several statements, and wr
 before they reach the workspace. A column no row carries is an error that names the table's
 columns.
 
+## Delete a Dataset
+
+1. Open the dataset from **Datasets**.
+2. In **Actions**, press **Delete dataset**. The dialog lists its rows, its size and the search
+   indexes built on it, which go with it.
+3. Type the dataset's name and press **Delete dataset**.
+
+- REST: `POST /v1/delete_dataset` with `{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "id":
+  "<database>/<dataset>"}`; add `"dry_run": true` to check first.
+- MCP: `delete_dataset`.
+
+Delete a dataset no run is still reading: the deletion does not wait for one. It cannot be undone.
+
 ## Storage
 
 The **Storage** card (*Buckets, Filesystems and Volumes*) holds storage for your services, private
