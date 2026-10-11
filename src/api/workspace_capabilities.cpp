@@ -691,6 +691,60 @@ void published_call(json& value, const std::string& capability, const json& inpu
 // (docs/api/workspaces.md): workspace_query and workspace_act, and each named engine capability
 // (docs/api/engine-capabilities.md, lake#650), run this. `input` is {customer_id, workspace_id,
 // capability, input}; a refusal's path points below `/input`.
+// A pipeline step that runs a workspace methodology (lake#655, zetta#1261): the engine never runs
+// its Python, so its `run` answers `runner_required` with what the run needs, and Lake dispatches
+// it to the methodology runner as a training run of that pipeline. Answers the queued run.
+ApiResult take(std::expected<ApiResult, liquid::error> completed);
+
+liquid::runtime::task<ApiResult> dispatch_methodology_run(ApiContext& context,
+                                                          const std::string& customer_id,
+                                                          const std::string& workspace_id,
+                                                          const json& details) {
+    if (context.registry == nullptr || !details.is_object()) {
+        co_return ApiResult::failure("store_error",
+                                     "the engine asked Lake's methodology runner to run this "
+                                     "pipeline, and Lake could not read what to run");
+    }
+    json request{{"customer_id", customer_id},
+                 {"workspace_id", workspace_id},
+                 {"id", details.value("methodology", std::string())},
+                 {"dataset", details.value("dataset_path", std::string())}};
+    if (const std::string target = details.value("target", std::string()); !target.empty()) {
+        request["target"] = target;
+    }
+    if (const json params = details.value("params", json()); params.is_object()) {
+        request["params"] = params;
+    }
+    if (const json holdout = details.value("holdout_fraction", json());
+        holdout.is_number() && holdout.get<double>() > 0 && holdout.get<double>() <= 0.5) {
+        request["holdout_fraction"] = holdout;
+    }
+    for (const auto& [key, named] :
+         {std::pair{"project", "project_name"}, std::pair{"graph", "graph_name"}}) {
+        std::string value = details.value(named, std::string());
+        if (value.empty()) {
+            value = details.value(key, std::string());
+        }
+        if (!value.empty()) {
+            request[key] = value;
+        }
+    }
+    ApiContext inner = context;
+    inner.audit_kind.clear();
+    inner.audit_details = json();
+    auto ran = co_await context.registry->call_async("run_methodology", request, inner);
+    if (!ran) {
+        co_return ApiResult::failure("store_error", ran.error().message);
+    }
+    if (!ran->ok) {
+        co_return *ran;
+    }
+    co_return ApiResult::success({{"runner", "lake"},
+                                  {"status", "queued"},
+                                  {"methodology", request["id"]},
+                                  {"methodology_run", ran->value.value("run", json())}});
+}
+
 liquid::runtime::task<ApiResult> workspace_call(bool read, json input, ApiContext& context) {
         if (!context.workspaces) {
             co_return unavailable();
@@ -855,6 +909,12 @@ liquid::runtime::task<ApiResult> workspace_call(bool read, json input, ApiContex
             co_return ApiResult::failure("store_unavailable", called.error().message);
         }
         if (!*called) {
+            if (capability == "run" && called->error().code == "runner_required") {
+                co_return take(co_await dispatch_methodology_run(context,
+                                                                 input.at("customer_id"),
+                                                                 input.at("workspace_id"),
+                                                                 called->error().details));
+            }
             if (capability == "create_project" &&
                 called->error().message.starts_with("create_project rejected")) {
                 // The name is not empty (checked above), so it is in use.
@@ -2424,11 +2484,23 @@ void register_parity_capabilities(Registry& registry) {
                     run[key] = input.at(key);
                 }
             }
-            const ApiResult ran = take(co_await zetta(context, customer, "run", false, run));
-            if (!ran.ok) {
-                co_return ran;
+            auto called = co_await call_workspace(context, customer, "run", false, run);
+            if (called && !*called && called->error().code == "runner_required") {
+                // A workspace methodology's pipeline runs in Lake's methodology runner (lake#655).
+                const ApiResult queued = take(co_await dispatch_methodology_run(
+                    context, customer, input.at("workspace_id"), called->error().details));
+                if (!queued.ok) {
+                    co_return queued;
+                }
+                co_return ApiResult::success({{"gate", gate.value}, {"run", queued.value}});
             }
-            co_return ApiResult::success({{"gate", gate.value}, {"run", ran.value}});
+            if (!called) {
+                co_return ApiResult::failure("store_unavailable", called.error().message);
+            }
+            if (!*called) {
+                co_return workspace_failure(called->error(), run);
+            }
+            co_return ApiResult::success({{"gate", gate.value}, {"run", **called}});
         }});
     registry.add(Capability{
         .name = "create_pipeline",
@@ -3250,6 +3322,15 @@ json find_methodology(const json& methodologies,
         return std::string();
     };
     if (!methodologies.is_array()) return nullptr;
+    // A workspace's own methodology (lake#655) is named by its whole id, W-<8 hex>.
+    for (std::size_t at = methodology.find("W-"); at != std::string_view::npos;
+         at = methodology.find("W-", at + 2)) {
+        const std::string id(methodology.substr(at, 10));
+        for (const json& entry : methodologies) {
+            if (id.size() == 10 && entry.value("id", std::string()) == id)
+                return entry;
+        }
+    }
     if (const std::string id = token(methodology, 'M'); !id.empty()) {
         for (const json& entry : methodologies) {
             if (entry.value("id", std::string()) == id) return entry;

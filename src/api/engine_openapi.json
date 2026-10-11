@@ -426,7 +426,7 @@
             "type": "string"
           },
           "methodology": {
-            "description": "methodology id or model kind; takes precedence",
+            "description": "methodology id (a catalogue M-n or a workspace W-<8 hex>) or model kind; takes precedence",
             "minLength": 1,
             "type": "string"
           },
@@ -4564,5 +4564,5 @@
     }
   },
   "engine_version": "0.1.1",
-  "zetta_revision": "386c3884"
+  "zetta_revision": "3ef23d32"
 }

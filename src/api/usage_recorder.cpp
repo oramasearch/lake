@@ -149,6 +149,12 @@ const std::vector<CapabilityMeter>& capability_meters() {
         {"complete_mcp_connection_sign_in",
          {"calls", "transfer"},
          "the discovery after a sign-in; the token exchange is a call"},
+        // A workspace methodology's runs (lake#655): its sandbox pod's resources, charged once for
+        // the time its code ran (methodology_run); the image build is build's.
+        {"validate_methodology",
+         {"cpu", "ram", "gpu", "vram"},
+         "its sample run in the sandbox, and its image build once per revision"},
+        {"run_methodology", {"cpu", "ram", "gpu", "vram"}, "as validate_methodology, on a dataset"},
     };
     return meters;
 }
@@ -210,6 +216,10 @@ const std::vector<std::pair<std::string_view, std::string_view>>& calls_only_cap
         {"create_review", "a forge record"},
         {"create_review_comment", "a forge record"},
         {"create_solution", "a solution record"},
+        {"create_methodology",
+         "a repository commit and a registry entry; its files are its repository's storage"},
+        {"duplicate_methodology", "as create_methodology"},
+        {"draft_methodology", "drafted files, kept nowhere"},
         {"create_webhook", "a forge record"},
         {"resolve_conflict", "a repository change, stored as its repository's storage"},
         {"resolve_drive_share_link", "a link's metadata"},
@@ -235,7 +245,8 @@ const std::vector<std::pair<std::string_view, std::string_view>>& calls_only_cap
 
 const std::vector<std::string_view>& metered_workload_kinds() {
     static const std::vector<std::string_view> kinds{
-        "workspace", "service", "store", "app", "build", "agent_launch", "agent_cron_run"};
+        "workspace", "service", "store", "app", "build", "agent_launch", "agent_cron_run",
+        "methodology_run"};
     return kinds;
 }
 

@@ -236,6 +236,7 @@ the operator is the one place that knows them.
 | `build` | the build | the image build's pod |
 | `agent_launch` | the launch | agent-runtime's Job (`job`) or Deployment (`service`) |
 | `agent_cron_run` | the run (`agent_cron_runs.id`) | one Job an agent's cron schedule started (lake#658, migration `0077_metered_jobs`) |
+| `methodology_run` | the run | a workspace methodology's sandbox pod, the code itself (lake#655, migration `0078`); counted once after it finishes, for `started_at` to `finished_at` of that pod, as kind `methodology` ([methodologies.md](methodologies.md#metering)) |
 
 **What the sampler records** (`sample_usage`, every fifteen minutes, by the store root's owner):
 

@@ -52,6 +52,7 @@
 #include "lake/control/mcp_connections.hpp"
 #include "lake/control/memory_store.hpp"
 #include "lake/control/metering.hpp"
+#include "lake/control/methodologies.hpp"
 #include "lake/control/oci_records.hpp"
 #include "lake/control/opportunities.hpp"
 #include "lake/control/platform.hpp"
@@ -67,6 +68,7 @@
 #include "lake/control/zetta_control.hpp"
 #include "lake/control/zetta_workspace.hpp"
 #include "lake/transparency/log.hpp"
+#include "methodology_repositories.hpp"
 #include "mcp_test_server.hpp"
 #include "postgres_fixture.hpp"
 #include "record_fixture.hpp"
@@ -325,6 +327,11 @@ struct TwoSpaces {
     std::string database_uri; // empty: the in-memory store
     // Speech-to-text for transcribe and audio transcripts; empty: not configured.
     lake::api::Transcriber transcriber;
+    // Repositories and image builds, for workspace methodologies (lake#655); unset: none.
+    lake::api::SyncStore* sync_store = nullptr;
+    std::string methodology_runtime_image;
+    std::string internal_url;
+    std::string public_host;
     // MCP connections' transport (lake#652); null: none. Tests reach a local test server.
     std::shared_ptr<lake::api::McpHttp> mcp_http;
     lake::api::UsageRecorder* usage_recorder = nullptr;
@@ -392,6 +399,10 @@ struct TwoSpaces {
         context.scopes = space.principal.scopes;
         context.request_id = lake::control::new_uuid_v4();
         context.transcriber = transcriber;
+        context.sync_store = sync_store;
+        context.methodology_runtime_image = methodology_runtime_image;
+        context.internal_url = internal_url;
+        context.public_host = public_host;
         context.mcp_http = mcp_http;
         context.mcp_allow_private_addresses = true;
         context.external_origin = "https://lake.test";
@@ -4539,4 +4550,498 @@ TEST(WorkspaceRecords, ImageTagsMoveAtTheRevisionReadAndManifestsAreWrittenOnce)
     EXPECT_EQ(listed->front().digest, second.digest);
     EXPECT_TRUE(run(lake::control::list_oci_tags(records, "customer-2", "web"))->empty());
     EXPECT_FALSE(*run(lake::control::get_oci_tag(records, "customer-1", "web", "v2")));
+}
+
+// lake#655 (docs/api/methodologies.md): a workspace creates its own methodologies from Python
+// code, kept in one of its repositories and registered by its engine next to Orama's, which stay
+// read-only. Validate checks the code before anything runs, then runs the interface in the
+// sandbox; a run's data goes in and its result comes out only through the run's own credential,
+// which reaches nothing else; a training run's model is registered by the engine.
+TEST_P(WorkspaceRecordStores, MethodologiesAreTheWorkspacesOwnAndOramasStayReadOnly) {
+    auto store = make_store();
+    if (!store) {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
+    }
+    TwoSpaces t(store, database_uri_);
+    lake::test::MethodologyRepositories repositories;
+    t.sync_store = &repositories;
+    t.methodology_runtime_image = "registry.test/oramasearch/methodology-runtime:1";
+    t.internal_url = "http://lake.test";
+    t.public_host = "lake.example.test";
+    const auto& first = t.spaces[0];
+    const auto& second = t.spaces[1];
+    const auto in = [&](const auto& space, std::size_t workspace, json input) {
+        input["customer_id"] = space.customer_id;
+        input["workspace_id"] = space.workspaces[workspace];
+        return input;
+    };
+
+    // The engine's registry: Orama's catalogue, read-only, and the workspace's own (zetta#1261).
+    const json m1{{"id", "M-1"},
+                  {"name", "Tabular supervised learning"},
+                  {"family", "The tabular decision core"},
+                  {"model_kinds", {"gbdt"}},
+                  {"inputs", json::array({{{"role", "label"}, {"required", true}}})},
+                  {"outputs", {"model"}},
+                  {"metrics", {"held_out_auc"}},
+                  {"runnable", true},
+                  {"source", "orama"},
+                  {"editable", false}};
+    std::map<std::string, json> own;
+    std::vector<json> recorded_runs;
+    int next_id = 0;
+    t.zetta->responder =
+        [&](const std::string& capability,
+            const json& input) -> std::optional<lake::control::ZettaControlResult<json>> {
+        using Result = lake::control::ZettaControlResult<json>;
+        const auto missing = [] {
+            return Result(std::unexpected(
+                lake::control::ZettaControlError{"not_found", "no such methodology"}));
+        };
+        if (capability == "get_methodology") {
+            const std::string id = input.value("id", std::string());
+            if (id == "M-1") {
+                return Result(json{{"methodology", m1}});
+            }
+            const auto found = own.find(id);
+            return found == own.end() ? missing() : Result(json{{"methodology", found->second}});
+        }
+        if (capability == "list_methodologies") {
+            json all = json::array({m1});
+            for (const auto& [id, entry] : own) {
+                all.push_back(entry);
+            }
+            return Result(json{{"methodologies", all}});
+        }
+        if (capability == "register_methodology") {
+            char id[16];
+            std::snprintf(id, sizeof(id), "W-%08x", ++next_id);
+            json entry = input;
+            entry["id"] = id;
+            entry["source"] = "workspace";
+            entry["editable"] = true;
+            entry["validation"] = {{"status", "not_validated"}, {"findings", json::array()}};
+            own[id] = entry;
+            return Result(json{{"methodology", entry}});
+        }
+        if (capability == "update_methodology") {
+            const std::string id = input.value("id", std::string());
+            const auto found = own.find(id);
+            if (found == own.end()) {
+                return missing();
+            }
+            const std::string before = found->second["code"].value("revision", std::string());
+            for (const auto& [key, value] : input.items()) {
+                found->second[key] = value;
+            }
+            if (found->second["code"].value("revision", std::string()) != before &&
+                !input.contains("validation")) {
+                found->second["validation"] = {{"status", "not_validated"}};
+            }
+            return Result(json{{"methodology", found->second}});
+        }
+        if (capability == "delete_methodology") {
+            own.erase(input.value("id", std::string()));
+            return Result(json{{"removed", true}, {"id", input.value("id", std::string())}});
+        }
+        if (capability == "record_methodology_run") {
+            recorded_runs.push_back(input);
+            return Result(json{{"model_id", "model-" + std::to_string(recorded_runs.size())}});
+        }
+        if (capability == "run") {
+            // A pipeline whose step is a workspace methodology: the engine hands it to Lake's
+            // runner (zetta#1261).
+            return Result(std::unexpected(lake::control::ZettaControlError{
+                "runner_required",
+                "this pipeline's methodology runs in Lake's methodology runner",
+                "",
+                {{"methodology", input.value("methodology_under_test", std::string())},
+                 {"dataset_path", "sales.payers"},
+                 {"params", {{"epochs", 20}}},
+                 {"target", "late"},
+                 {"holdout_fraction", 0.25},
+                 {"project", "p-1"},
+                 {"project_name", "collections"},
+                 {"graph", "g-1"},
+                 {"graph_name", "late payers"}}}));
+        }
+        if (capability == "sql") {
+            const std::string statement = input.value("statement", std::string());
+            if (statement.starts_with("SELECT COUNT(*) FROM sales.payers")) {
+                return Result(json{{"columns", {"count"}}, {"rows", {{{"count", 3}}}}});
+            }
+            if (statement.starts_with("SELECT * FROM sales.payers")) {
+                return Result(json{{"columns", {"days", "amount", "late"}},
+                                   {"rows",
+                                    {{{"days", 30}, {"amount", 10.5}, {"late", 1}},
+                                     {{"days", 3}, {"amount", 2.0}, {"late", 0}},
+                                     {{"days", 45}, {"amount", 99.0}, {"late", 1}}}}});
+            }
+        }
+        return std::nullopt;
+    };
+
+    // Create one from a description: a private repository with a drafted manifest, Python and lock.
+    const auto created = t.call(
+        first,
+        "create_methodology",
+        in(first, 0, {{"name", "Late payers"}, {"description", "Which customers will pay late?"}}));
+    ASSERT_TRUE(created.ok) << created.error.code << ": " << created.error.message;
+    const json entry = created.value["methodology"];
+    const std::string id = entry["id"];
+    EXPECT_TRUE(lake::control::workspace_methodology_id(id));
+    EXPECT_EQ(entry["source"], "workspace");
+    EXPECT_EQ(entry["editable"], true);
+    EXPECT_EQ(entry["runnable"], false) << "not validated yet";
+    EXPECT_EQ(created.value["ready_to_validate"], true);
+    const std::string repository_id = entry["code"]["repository_id"];
+    const auto repository = t.store->get_repository(repository_id);
+    ASSERT_TRUE(repository);
+    EXPECT_EQ(repository->name, "methodology-late-payers");
+    EXPECT_EQ(repository->workspace_id, first.workspaces[0]);
+    EXPECT_EQ(entry["code"]["revision"], repositories.repositories[repository_id].back().id);
+    EXPECT_TRUE(repositories.repositories[repository_id].back().files.contains("methodology.py"));
+    EXPECT_EQ(entry["target"]["kind"], "binary");
+
+    // Read it with its source; Orama's reads read-only.
+    const auto read =
+        t.call(first, "get_methodology", in(first, 0, {{"id", id}, {"include_source", true}}));
+    ASSERT_TRUE(read.ok) << read.error.message;
+    EXPECT_EQ(read.value["source"]["files"].size(), 3U);
+    EXPECT_EQ(read.value["source"]["available"], true);
+    const auto orama = t.call(first, "get_methodology", in(first, 0, {{"id", "M-1"}}));
+    ASSERT_TRUE(orama.ok);
+    EXPECT_EQ(orama.value["methodology"]["source"], "orama");
+    EXPECT_EQ(orama.value["methodology"]["editable"], false);
+
+    // Orama's are read-only, refused by the server with the reason.
+    for (const std::string capability : {"update_methodology", "delete_methodology"}) {
+        json change = in(first, 0, {{"id", "M-1"}});
+        if (capability == "update_methodology") {
+            change["name"] = "Mine now";
+        }
+        const auto refused = t.call(first, capability, change);
+        EXPECT_EQ(refused.error.code, "forbidden") << capability;
+        EXPECT_NE(refused.error.message.find("duplicate_methodology"), std::string::npos);
+    }
+
+    // Duplicate Orama's: its description, with a template, in a new repository of the workspace.
+    const auto copied = t.call(first, "duplicate_methodology", in(first, 0, {{"id", "M-1"}}));
+    ASSERT_TRUE(copied.ok) << copied.error.message;
+    EXPECT_EQ(copied.value["methodology"]["duplicated_from"], "M-1");
+    EXPECT_NE(copied.value["methodology"]["description"].get<std::string>().find(
+                  "Duplicated from Orama's M-1"),
+              std::string::npos);
+    // Duplicate one of the workspace's own: its Python source is copied.
+    const auto again = t.call(
+        first, "duplicate_methodology", in(first, 0, {{"id", id}, {"name", "Late payers, EMEA"}}));
+    ASSERT_TRUE(again.ok) << again.error.message;
+    const std::string copy_repository = again.value["methodology"]["code"]["repository_id"];
+    EXPECT_NE(copy_repository, repository_id);
+    EXPECT_EQ(repositories.repositories[copy_repository].back().files.at("methodology.py"),
+              repositories.repositories[repository_id].back().files.at("methodology.py"));
+    EXPECT_EQ(again.value["methodology"]["name"], "Late payers, EMEA");
+
+    // Not usable before Validate; training is refused with the reason.
+    const auto early =
+        t.call(first,
+               "run_methodology",
+               in(first, 0, {{"id", id}, {"dataset", "sales.payers"}, {"target", "late"}}));
+    EXPECT_EQ(early.error.code, "conflict");
+
+    // Validate a broken methodology: what is missing is answered at once, and nothing runs.
+    const auto broken = t.call(
+        first,
+        "create_methodology",
+        in(first,
+           0,
+           {{"name", "Broken"},
+            {"files",
+             json::array(
+                 {{{"path", "methodology.json"},
+                   {"contents",
+                    repositories.repositories[repository_id].back().files.at("methodology.json")}},
+                  {{"path", "methodology.py"},
+                   {"contents", "def fit(data, params):\n    return 1\n"}},
+                  {{"path", "requirements.lock"}, {"contents", "numpy==2.1.3\n"}}})}}));
+    ASSERT_TRUE(broken.ok) << broken.error.message;
+    EXPECT_EQ(broken.value["ready_to_validate"], false);
+    const std::string broken_id = broken.value["methodology"]["id"];
+    const auto refused = t.call(first, "validate_methodology", in(first, 0, {{"id", broken_id}}));
+    ASSERT_TRUE(refused.ok) << refused.error.message;
+    EXPECT_EQ(refused.value["ready"], false);
+    EXPECT_TRUE(refused.value["run"].is_null());
+    std::set<std::string> failing;
+    for (const json& finding : refused.value["findings"]) {
+        if (!finding["ok"].get<bool>()) {
+            failing.insert(finding["check"].get<std::string>());
+        }
+    }
+    EXPECT_EQ(failing,
+              (std::set<std::string>{
+                  "entrypoint.explain", "entrypoint.predict", "entrypoint.score", "packages"}));
+    EXPECT_EQ(own[broken_id]["validation"]["status"], "failed");
+    EXPECT_TRUE(
+        t.store->list_methodology_runs(first.customer_id, first.workspaces[0], broken_id, 10)
+            ->empty());
+
+    // Validate a good one: its image is built by the build path, and a validate run is queued.
+    const auto validating = t.call(first, "validate_methodology", in(first, 0, {{"id", id}}));
+    ASSERT_TRUE(validating.ok) << validating.error.code << ": " << validating.error.message;
+    EXPECT_EQ(validating.value["ready"], true);
+    const std::string validate_run = validating.value["run"]["id"];
+    const auto row = t.store->get_methodology_run(validate_run);
+    ASSERT_TRUE(row);
+    EXPECT_EQ(row->mode, "validate");
+    EXPECT_EQ(row->runtime_image, "registry.test/oramasearch/methodology-runtime:1");
+    EXPECT_FALSE(row->network) << "no network unless granted";
+    EXPECT_FALSE(row->build_id.empty());
+    const auto build = t.store->get_build(row->build_id);
+    ASSERT_TRUE(build);
+    EXPECT_EQ(build->revision, entry["code"]["revision"].get<std::string>());
+    EXPECT_TRUE(build->dockerfile.starts_with("inline:ARG METHODOLOGY_RUNTIME_IMAGE"));
+    EXPECT_EQ(build->build_args.value("METHODOLOGY_RUNTIME_IMAGE", std::string()),
+              "registry.test/oramasearch/methodology-runtime:1");
+    EXPECT_EQ(own[id]["validation"]["status"], "running");
+
+    // The operator reports the run with the credential it generated for the stage and collect pods.
+    const std::string secret = "lmr." + validate_run + "." + std::string(48, 'a');
+    const auto report =
+        [&](const std::string& run, const std::string& phase, const std::string& credential) {
+            lake::control::MethodologyRunStatus status;
+            status.phase = phase;
+            status.credential_sha256 = credential.empty()
+                                           ? std::string()
+                                           : lake::control::identity_crypto::sha256_hex(credential);
+            if (phase == "Collecting" || phase == "Succeeded") {
+                status.started_at = "2026-10-11T10:00:00Z";
+                status.finished_at = "2026-10-11T10:01:30Z";
+                status.exit_code = 0;
+            }
+            ASSERT_TRUE(t.store->put_methodology_run_status(run, status));
+        };
+    report(validate_run, "Staging", secret);
+    const auto runner = [&](const std::string& credential) {
+        lake::api::ApiContext context;
+        context.store = t.store.get();
+        context.workspaces = t.service.get();
+        context.instance_kek = std::string(kek);
+        context.sync_store = &repositories;
+        const auto principal = t.store->context_for(credential);
+        if (principal) {
+            context.authorized = true;
+            context.session_credential = true;
+            context.acting_user_id = principal->user_id;
+            context.acting_identity = principal->taap_id;
+            context.credential_session_id = principal->session_id;
+            context.credential_kind = principal->kind;
+            context.credential_workload_id = principal->workload_id;
+            context.credential_customer_id = principal->workload_customer_id;
+            context.credential_token_hash = principal->workload_token_hash;
+            context.scopes = principal->scopes;
+        }
+        context.request_id = lake::control::new_uuid_v4();
+        return context;
+    };
+    const auto as_runner =
+        [&](const std::string& credential, const std::string& capability, json input) {
+            auto context = runner(credential);
+            const auto completed =
+                liquid::runtime::block_on(t.registry.call_async(capability, input, context));
+            EXPECT_TRUE(completed);
+            return *completed;
+        };
+    ASSERT_TRUE(t.store->context_for(secret)) << "the credential the operator reported resolves";
+    EXPECT_FALSE(t.store->context_for("lmr." + validate_run + "." + std::string(48, 'b')))
+        << "a wrong secret is no credential";
+
+    // Data in: the spec and the validation sample, a page at a time.
+    const auto page =
+        as_runner(secret, "methodology_run_input", {{"run_id", validate_run}, {"limit", 150}});
+    ASSERT_TRUE(page.ok) << page.error.code << ": " << page.error.message;
+    EXPECT_EQ(page.value["spec"]["mode"], "validate");
+    EXPECT_EQ(page.value["spec"]["target"], "target");
+    EXPECT_EQ(page.value["spec"]["network"], false);
+    EXPECT_EQ(page.value["rows"].size(), 150U);
+    EXPECT_EQ(page.value["total_rows"], 200);
+    EXPECT_EQ(page.value["next_offset"], 150);
+    const auto rest =
+        as_runner(secret, "methodology_run_input", {{"run_id", validate_run}, {"offset", 150}});
+    EXPECT_EQ(rest.value["rows"].size(), 50U);
+    EXPECT_TRUE(rest.value["next_offset"].is_null());
+
+    // The run's credential reaches nothing else: no workspace, no other run, no repository.
+    for (const auto& [capability, input] : std::vector<std::pair<std::string, json>>{
+             {"workspace_query",
+              in(first, 0, {{"capability", "list_datasets"}, {"input", json::object()}})},
+             {"get_methodology", in(first, 0, {{"id", id}})},
+             {"list_methodology_runs", in(first, 0, json::object())},
+             {"repository_file",
+              {{"id", repository_id}, {"ref", "main"}, {"path", "methodology.py"}}},
+             {"methodology_run_input", {{"run_id", lake::control::new_uuid_v4()}}}}) {
+        const auto denied = as_runner(secret, capability, input);
+        EXPECT_FALSE(denied.ok) << capability;
+        EXPECT_EQ(denied.error.code, "unauthorized") << capability;
+    }
+    // And a person cannot call the runner's capabilities.
+    const auto person = t.call(first, "methodology_run_input", {{"run_id", validate_run}});
+    EXPECT_FALSE(person.ok);
+
+    // Result out, once: Validate passes and the methodology becomes usable.
+    report(validate_run, "Collecting", secret);
+    const json passed{{"status", "ok"},
+                      {"findings",
+                       json::array({{{"check", "interface"},
+                                     {"ok", true},
+                                     {"message", "fit, predict and score answer"}}})},
+                      {"metrics", {{"in_sample_auc", 0.97}, {"held_out_auc", 0.91}}},
+                      {"rows", {{"train", 160}, {"held_out", 40}}}};
+    const auto out = as_runner(secret,
+                               "methodology_run_output",
+                               {{"run_id", validate_run}, {"result", passed}, {"log", "fitted\n"}});
+    ASSERT_TRUE(out.ok) << out.error.code << ": " << out.error.message;
+    EXPECT_TRUE(out.value["model_id"].is_null()) << "Validate keeps no model";
+    EXPECT_EQ(own[id]["validation"]["status"], "passed");
+    EXPECT_EQ(own[id]["validation"]["run_id"], validate_run);
+    const auto twice =
+        as_runner(secret, "methodology_run_output", {{"run_id", validate_run}, {"result", passed}});
+    EXPECT_EQ(twice.error.code, "conflict");
+    EXPECT_NE(twice.error.message.find("already recorded"), std::string::npos);
+    report(validate_run, "Succeeded", "");
+    EXPECT_FALSE(t.store->context_for(secret)) << "a finished run's credential is gone";
+
+    const auto listed =
+        t.call(first, "list_methodology_runs", in(first, 0, {{"methodology_id", id}}));
+    ASSERT_TRUE(listed.ok) << listed.error.message;
+    ASSERT_EQ(listed.value["runs"].size(), 1U);
+    EXPECT_EQ(listed.value["runs"][0]["phase"], "Succeeded");
+    EXPECT_EQ(listed.value["runs"][0]["outcome"], "passed");
+
+    // Train: parameters are checked, the dataset is read through the engine, the model registered.
+    const auto bad_params = t.call(first,
+                                   "run_methodology",
+                                   in(first,
+                                      0,
+                                      {{"id", id},
+                                       {"dataset", "sales.payers"},
+                                       {"target", "late"},
+                                       {"params", {{"epochs", "many"}}}}));
+    EXPECT_EQ(bad_params.error.code, "invalid_input");
+    EXPECT_EQ(bad_params.error.path, "/params/epochs");
+    const auto no_target =
+        t.call(first, "run_methodology", in(first, 0, {{"id", id}, {"dataset", "sales.payers"}}));
+    EXPECT_EQ(no_target.error.path, "/target");
+    const auto training = t.call(first,
+                                 "run_methodology",
+                                 in(first,
+                                    0,
+                                    {{"id", id},
+                                     {"dataset", "sales.payers"},
+                                     {"target", "late"},
+                                     {"params", {{"epochs", 50}}}}));
+    ASSERT_TRUE(training.ok) << training.error.code << ": " << training.error.message;
+    const std::string train_run = training.value["run"]["id"];
+    EXPECT_EQ(t.store->get_methodology_run(train_run)->build_id, row->build_id)
+        << "the validated revision's image is used again";
+    const std::string train_secret = "lmr." + train_run + "." + std::string(48, 'c');
+    report(train_run, "Staging", train_secret);
+    const auto data = as_runner(train_secret, "methodology_run_input", {{"run_id", train_run}});
+    ASSERT_TRUE(data.ok) << data.error.message;
+    EXPECT_EQ(data.value["total_rows"], 3);
+    EXPECT_EQ(data.value["spec"]["features"], (json{"days", "amount"}));
+    EXPECT_EQ(data.value["spec"]["params"]["epochs"], 50);
+    EXPECT_EQ(data.value["rows"][0]["days"], 30);
+    EXPECT_FALSE(as_runner(secret, "methodology_run_input", {{"run_id", train_run}}).ok)
+        << "one run's credential never reads another's data";
+    report(train_run, "Collecting", train_secret);
+    const auto trained =
+        as_runner(train_secret,
+                  "methodology_run_output",
+                  {{"run_id", train_run},
+                   {"result",
+                    {{"status", "ok"},
+                     {"metrics", {{"in_sample_auc", 0.99}, {"held_out_auc", 0.88}, {"note", "x"}}},
+                     {"rows", {{"train", 2}, {"held_out", 1}}},
+                     {"artifact_format", "pickle"}}},
+                   {"artifact_base64", "aGVsbG8="}});
+    ASSERT_TRUE(trained.ok) << trained.error.code << ": " << trained.error.message;
+    EXPECT_EQ(trained.value["model_id"], "model-1");
+    ASSERT_EQ(recorded_runs.size(), 1U);
+    EXPECT_EQ(recorded_runs[0]["methodology"], id);
+    EXPECT_EQ(recorded_runs[0]["artifact_base64"], "aGVsbG8=");
+    EXPECT_EQ(recorded_runs[0]["metrics"], (json{{"in_sample_auc", 0.99}, {"held_out_auc", 0.88}}))
+        << "only numbers named in_sample_ or held_out_ are metrics";
+    EXPECT_EQ(recorded_runs[0]["dataset_path"], "sales.payers");
+    const auto got = t.call(first, "get_methodology_run", in(first, 0, {{"run_id", train_run}}));
+    ASSERT_TRUE(got.ok) << got.error.message;
+    EXPECT_EQ(got.value["run"]["model_id"], "model-1");
+    EXPECT_EQ(got.value["run"]["result"]["dropped_metrics"], (json{"note"}));
+
+    // A pipeline using it as a step: the engine's run hands it to the runner, as a training run
+    // of that pipeline.
+    const auto step = t.call(first,
+                             "workspace_act",
+                             in(first,
+                                0,
+                                {{"capability", "run"},
+                                 {"input",
+                                  {{"project", "collections"},
+                                   {"graph", "late payers"},
+                                   {"methodology_under_test", id}}}}));
+    ASSERT_TRUE(step.ok) << step.error.code << ": " << step.error.message;
+    EXPECT_EQ(step.value["runner"], "lake");
+    const std::string step_run = step.value["methodology_run"]["id"];
+    const auto step_record =
+        t.call(first, "get_methodology_run", in(first, 0, {{"run_id", step_run}}));
+    ASSERT_TRUE(step_record.ok) << step_record.error.message;
+    EXPECT_EQ(step_record.value["run"]["project"], "collections");
+    EXPECT_EQ(step_record.value["run"]["graph"], "late payers");
+    EXPECT_EQ(step_record.value["run"]["params"]["epochs"], 20);
+    EXPECT_EQ(step_record.value["run"]["holdout_fraction"], 0.25);
+    ASSERT_TRUE(t.store->withdraw_methodology_run(step_run, "test"));
+
+    // The run's record is sealed in the workspace Zetta; the dispatch row holds no content.
+    for (const auto& [key, record] :
+         t.zetta->records["http://" + first.workspaces[0] + ".test"].rows("methodology_runs")) {
+        EXPECT_EQ(record.dump().find("sales.payers"), std::string::npos) << "sealed at rest";
+        EXPECT_EQ(record.dump().find("lmr."), std::string::npos);
+    }
+
+    // Another workspace and another space see none of it.
+    EXPECT_EQ(
+        t.call(first, "get_methodology_run", in(first, 1, {{"run_id", train_run}})).error.code,
+        "not_found");
+    EXPECT_FALSE(t.call(second, "get_methodology_run", in(first, 0, {{"run_id", train_run}})).ok);
+    EXPECT_FALSE(
+        t.call(second, "update_methodology", in(first, 0, {{"id", id}, {"name", "x"}})).ok);
+
+    // Edit: the code is committed, a new revision must be validated again.
+    const auto edited =
+        t.call(first,
+               "update_methodology",
+               in(first,
+                  0,
+                  {{"id", id},
+                   {"name", "Late payers v2"},
+                   {"files", json::array({{{"path", "notes.md"}, {"contents", "# Notes\n"}}})}}));
+    ASSERT_TRUE(edited.ok) << edited.error.code << ": " << edited.error.message;
+    EXPECT_EQ(edited.value["methodology"]["name"], "Late payers v2");
+    EXPECT_EQ(edited.value["methodology"]["runnable"], false) << "a new revision needs Validate";
+    EXPECT_TRUE(repositories.repositories[repository_id].back().files.contains("notes.md"));
+    EXPECT_NE(repositories.repositories[repository_id]
+                  .back()
+                  .files.at("methodology.json")
+                  .find("Late payers v2"),
+              std::string::npos)
+        << "the name is the manifest's";
+
+    // Delete: its runs stop, its repository stays.
+    const auto pending = t.call(first, "validate_methodology", in(first, 0, {{"id", id}}));
+    ASSERT_TRUE(pending.ok) << pending.error.message;
+    const auto deleted = t.call(first, "delete_methodology", in(first, 0, {{"id", id}}));
+    ASSERT_TRUE(deleted.ok) << deleted.error.message;
+    EXPECT_EQ(deleted.value["repository_id"], repository_id);
+    EXPECT_EQ(t.store->get_methodology_run(pending.value["run"]["id"])->desired, "absent");
+    EXPECT_TRUE(t.store->get_repository(repository_id));
+    EXPECT_FALSE(own.contains(id));
 }

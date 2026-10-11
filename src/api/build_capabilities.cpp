@@ -158,8 +158,8 @@ std::optional<std::string> invalid_build_args(const json& arguments) {
     if (!arguments.is_object()) {
         return "build_args must be an object of string values";
     }
-    static constexpr std::array<std::string_view, 3> allowed{
-        "PYTHON_VERSION", "APP_DEPS", "APP_RUNTIME_IMAGE"};
+    static constexpr std::array<std::string_view, 4> allowed{
+        "PYTHON_VERSION", "APP_DEPS", "APP_RUNTIME_IMAGE", "METHODOLOGY_RUNTIME_IMAGE"};
     for (const auto& [name, value] : arguments.items()) {
         if (!value.is_string()) {
             return "build argument " + name + " must be a string";

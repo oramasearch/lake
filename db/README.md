@@ -348,6 +348,16 @@ Migration `0077_metered_jobs` (lake#658) lets `workload_resources` hold `agent_c
 resources of each run an agent's cron schedule starts (`object_id` the `agent_cron_runs` id), so a
 cron run's CPU, RAM, GPU and GPU memory are metered like a job-mode launch's. Lake charges every
 finished build, job launch and cron run once, in its workspace Zetta. Nothing is dropped;
-idempotent. The latest guard is `metered_jobs_guard`; the operator must vendor this schema, select
+idempotent. The guard was `metered_jobs_guard`; the operator must vendor this schema, select
 that guard and report cron runs before rollout. See
 [schema.md](../docs/control-plane/schema.md#metered-jobs-migration).
+
+Migration `0078_methodology_runs` (lake#655) adds `methodology_runs`, one row per run of a
+workspace's own methodology (lake writes it and notifies `lake_services`), and
+`methodology_run_status` (the Orama operator writes it: phase, message, exit code, the SHA-256 of
+the run's credential, when the sandbox pod started and finished), and the `methodology_run` kind of
+`workload_resources`. Ids, images, resources and phases only: parameters, data, metrics and the
+artifact stay in the workspace Zetta. Nothing is dropped; idempotent. The latest guard is
+`methodology_runs_guard`; the operator must vendor this schema, select that guard and run the
+pods (orama-operator#291) before rollout. See
+[schema.md](../docs/control-plane/schema.md#methodology-runs-migration).

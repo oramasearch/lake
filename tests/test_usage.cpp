@@ -910,6 +910,67 @@ TEST(UsageSample, ChargesEachFinishedJobOnceWheneverItsResourcesAreReported) {
     EXPECT_GE((*cpu)["total"].get<double>(), build_cpu + run_cpu);
 }
 
+// lake#655: a workspace methodology's run is charged once, for the time its code ran (its sandbox
+// pod's start to finish), at the resources the operator recorded before its sandbox existed, even
+// though no pod of it was ever seen (the row has `pods` 0 from the start). Its stage and collect
+// pods, and a run still under way, are not charged.
+TEST(UsageSample, ChargesAMethodologyRunOnceWhetherOrNotItsPodWasSeen) {
+    constexpr std::uint64_t gib = 1024ULL * 1024 * 1024;
+    UsageRig rig;
+    auto& store = *rig.store;
+    lake::control::NewMethodologyRun request{.customer_id = rig.customer,
+                                             .workspace_id = rig.lab,
+                                             .methodology_id = "W-0a1b2c3d",
+                                             .mode = "train",
+                                             .runtime_image = "registry.test/methodology-runtime:1",
+                                             .cpu_millis = 2000,
+                                             .memory_bytes = static_cast<std::int64_t>(4 * gib),
+                                             .timeout_seconds = 3600};
+    const auto finished = store.create_methodology_run(request);
+    ASSERT_TRUE(finished) << finished.error().message;
+    const auto running = store.create_methodology_run(request);
+    ASSERT_TRUE(running) << running.error().message;
+    const auto now = std::chrono::system_clock::now();
+    const auto at = [](std::chrono::system_clock::time_point point) {
+        return std::format("{:%FT%TZ}", std::chrono::floor<std::chrono::seconds>(point));
+    };
+    // Recorded before the sandbox existed (pods 0); the pods were gone before any pass saw them.
+    ASSERT_TRUE(store.put_workload_resources({"methodology_run", finished->id, 0, 2000, 4 * gib}));
+    ASSERT_TRUE(store.put_workload_resources({"methodology_run", running->id, 0, 2000, 4 * gib}));
+    ASSERT_TRUE(store.put_methodology_run_status(
+        finished->id,
+        {.phase = "Succeeded",
+         .exit_code = 0,
+         .started_at = at(now - std::chrono::seconds(95)),
+         .finished_at = at(now)}));
+    ASSERT_TRUE(store.put_methodology_run_status(
+        running->id, {.phase = "Running", .started_at = at(now - std::chrono::seconds(30))}));
+
+    auto context = rig.context();
+    const auto later = now + std::chrono::hours(1);
+    ASSERT_TRUE(liquid::runtime::block_on(
+        lake::api::sample_usage(context, std::chrono::seconds(900), later)));
+    flush(rig.recorder);
+    auto& lab = rig.workspaces.records(rig.lab);
+    const auto total = [&lab](const json& labels) {
+        return lab.metric_total("lake_usage", labels);
+    };
+    const double cpu = total({{"dimension", "cpu"}, {"kind", "methodology"}, {"object_id", finished->id}});
+    EXPECT_GE(cpu, 2000.0 * 94);
+    EXPECT_LE(cpu, 2000.0 * 96);
+    const double ram = total({{"dimension", "ram"}, {"object_id", finished->id}});
+    EXPECT_GE(ram, 4096.0 * 94);
+    EXPECT_LE(ram, 4096.0 * 96);
+    EXPECT_EQ(total({{"dimension", "cpu"}, {"object_id", running->id}}), 0)
+        << "a run under way is charged once it has finished";
+
+    ASSERT_TRUE(liquid::runtime::block_on(lake::api::sample_usage(
+        context, std::chrono::seconds(900), later + std::chrono::hours(1))));
+    flush(rig.recorder);
+    EXPECT_EQ(total({{"dimension", "cpu"}, {"object_id", finished->id}}), cpu) << "charged once";
+    EXPECT_EQ(lab.rows("metering_job_records").size(), 1U);
+}
+
 // lake#658: the engine's own report of what it holds (Zetta storage_usage) becomes storage by
 // kind: its datasets as workspace data, and its models, indexes, run artifacts, topics, files and
 // the workspace's own buckets, never lake's store or workspace-files buckets. An engine without

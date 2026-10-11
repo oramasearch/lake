@@ -46,6 +46,11 @@ An agent's definition revisions (lake#653) are lake's own record about an engine
 `lake_agent_revisions`, append-only, found by the account and the agent's id, one written after each
 `create_agent` or `update_agent` the engine accepts, since the engine keeps only an agent's latest
 definition ([train-agents.md](../api/train-agents.md#definition-revisions)).
+A workspace methodology's runs (lake#655) follow: `lake_methodology_runs`, one record per run found by
+the space and methodology, holding what it read (dataset, target, features, parameters) and what it
+produced (result, metrics, log, model id), written `if_absent` when it is queued and changed once,
+at the revision read, when its result comes back. The dispatch row `methodology_runs` stays in
+PostgreSQL with ids, images, resources and phases only ([methodologies.md](../api/methodologies.md#where-a-run-lives)).
 
 The rule it implements is in [workspace-data-plane.md](workspace-data-plane.md): everything goes in
 a workspace Zetta, including credentials, secrets and metrics. Lake's PostgreSQL and the lake Zetta

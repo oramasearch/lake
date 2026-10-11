@@ -86,6 +86,12 @@ void register_transcript_capabilities(Registry& registry);
 // docs/api/solutions.md): list_solutions, get_solution, create_solution, update_solution,
 // delete_solution, duplicate_solution.
 void register_solution_capabilities(Registry& registry);
+// A workspace's own methodologies from Python code beside Orama's read-only catalogue (lake#655,
+// docs/api/methodologies.md): draft_methodology, create_methodology, get_methodology,
+// update_methodology, delete_methodology, duplicate_methodology, validate_methodology,
+// run_methodology, list_methodology_runs, get_methodology_run, stop_methodology_run, and the
+// runner's methodology_run_input and methodology_run_output.
+void register_methodology_capabilities(Registry& registry);
 // Deleting what a workspace holds (lake#645, docs/api/deletion.md): delete_dataset, delete_model,
 // delete_run, delete_index (the workspace's engine) and delete_ask_conversation (its records).
 void register_deletion_capabilities(Registry& registry);
