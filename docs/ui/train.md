@@ -26,6 +26,17 @@ happens. A header action that needs the workspace (Load data, New agent) shows o
 Library; `datasets.tsx` the lean dataset list and `ObjectTable`; `RunsPage.tsx` the run and study
 helpers the Run and Models pages share.
 
+## Run Report Evidence and Load Data (lake#581, lake#582)
+
+- **Most at Risk** shows each ranked row's rank, entity and risk, and its evidence in words: the
+  engine's evidence columns as "feature = value" chips and the row's `reason_codes` as its top
+  reasons with their effect ("tenure_months raises risk by 0.42"). Nothing there is raw JSON; the
+  whole report stays under **The raw report** (`evidenceOf`, `pages/train/evidence.ts`).
+- **Load Data** keeps its primary action (Upload, Generate or Pull dataset) in the drawer's
+  footer beside Cancel, as every other drawer does; a tab with nothing to act on (no generators,
+  no connections) shows none. Upload picks its file with the kit's `FilePicker` (`lib/ui.tsx`): a
+  dashed zone to press or drop a file on, which then shows the file's name and size.
+
 ## How to verify
 
 `npx tsc --noEmit -p .`, `npm test` and `npm run build` from `frontend/` (the build also runs
