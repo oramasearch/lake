@@ -287,6 +287,13 @@ public:
                                       const std::string& state,
                                       const std::string& provider_reference,
                                       const std::string& note) override;
+    Result<std::string> billing_provider_customer(const std::string& customer_id,
+                                                  const std::string& provider) override;
+    Result<std::string>
+    set_billing_provider_customer(const std::string& customer_id,
+                                  const std::string& provider,
+                                  const std::string& provider_customer_id) override;
+    Result<PaymentEventResult> apply_payment_event(const PaymentEvent& event) override;
     Result<std::uint64_t> set_storage_quota(const std::string& customer_id,
                                             std::uint64_t quota_bytes) override;
     Result<PkiAuthorityRecord> create_pki_authority(const NewPkiAuthorityRecord& value,
@@ -468,6 +475,8 @@ private:
     std::map<std::string, BillingPlan> billing_plans_;
     std::vector<BillingSubscription> billing_subscriptions_;
     std::vector<Invoice> invoices_;
+    std::map<std::pair<std::string, std::string>, std::string> billing_provider_customers_;
+    std::set<std::pair<std::string, std::string>> payment_events_;
     std::vector<ManagedService> services_;
     std::vector<Workspace> workspaces_;
     std::vector<WorkspaceDeletion> workspace_deletions_;

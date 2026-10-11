@@ -80,6 +80,8 @@ int usage() {
     std::println(
         "  LAKE_BILLING=on turns billing on (Orama Cloud); unset or off, as on an enterprise "
         "install, billing is absent. LAKE_BILLING_INSTRUCTIONS tells accounts how to pay");
+    std::println("  LAKE_BILLING_SECRETS the secret mount id whose `stripe` secret holds Stripe's "
+                 "keys; unset or empty, invoices are paid outside lake");
     std::println("  LAKE_LOG_MODE air-gapped, witnessed (default), or anchored when "
                  "LAKE_STORE_ROOT is set");
     std::println("  LAKE_LOG_WITNESSES JSON witness endpoint/public_key records; "
@@ -156,6 +158,9 @@ int main(int argc, char** argv) {
     // enterprise install leaves it unset and has no billing capability or page.
     opts.billing = lake::api::billing_enabled(env_or("LAKE_BILLING", ""));
     opts.billing_instructions = env_or("LAKE_BILLING_INSTRUCTIONS", "");
+    // Stripe (decision 57): the secret mount holding the `stripe` secret. Only the mount's id is
+    // configuration; the keys stay in lake's secret store and are read at use, never from env.
+    opts.billing_secrets = env_or("LAKE_BILLING_SECRETS", "");
     opts.store_root = env_or("LAKE_STORE_ROOT", "");
     opts.store_owner_wait = std::chrono::seconds{env_u64("LAKE_STORE_OWNER_WAIT_SECONDS", 90)};
     opts.drain_timeout = std::chrono::seconds{env_u64("LAKE_DRAIN_SECONDS", 20)};

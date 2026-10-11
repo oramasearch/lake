@@ -1210,6 +1210,97 @@ TEST(PostgresBilling, PlansSubscriptionsAndInvoicesFollowTheContract) {
     EXPECT_EQ(store->list_invoices(customer->id)->size(), 2U);
 }
 
+TEST(PostgresBilling, PaymentProviderCustomersAndNoticesFollowTheContract) {
+    const char* uri = lake::test::postgres_uri();
+    if (uri == nullptr || std::string(uri).empty()) {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not set";
+    }
+    auto store = lake::control::make_postgres_store(
+        uri, "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff");
+    ASSERT_TRUE(store->ping()) << store->ping().error().message;
+    {
+        pqxx::connection connection(uri);
+        pqxx::work tx(connection);
+        for (const char* table :
+             {"billing_accounts", "billing_payment_events", "payment_provider_guard"}) {
+            EXPECT_FALSE(
+                tx.exec_params("SELECT to_regclass($1)", std::string(table))[0][0].is_null())
+                << table;
+        }
+        EXPECT_FALSE(
+            tx.exec("SELECT 1 FROM schema_migrations WHERE version = '0074_payment_provider'")
+                .empty());
+    }
+    const std::string suffix = lake::control::new_uuid_v4().substr(0, 8);
+    const auto user = store->create_user(
+        {"taap:1:ed25519:pay-" + suffix, "pay-" + suffix + "@example.com", "Payments"});
+    ASSERT_TRUE(user) << user.error().message;
+    const auto customer = store->create_customer({"individual", user->id, "", "pay-" + suffix});
+    ASSERT_TRUE(customer) << customer.error().message;
+
+    // The provider's customer id: none, then kept once.
+    EXPECT_EQ(*store->billing_provider_customer(customer->id, "stripe"), "");
+    EXPECT_EQ(*store->set_billing_provider_customer(customer->id, "stripe", "cus_1"), "cus_1");
+    EXPECT_EQ(*store->set_billing_provider_customer(customer->id, "stripe", "cus_2"), "cus_1")
+        << "the first id is kept";
+    EXPECT_EQ(*store->billing_provider_customer(customer->id, "stripe"), "cus_1");
+    EXPECT_EQ(store->billing_provider_customer(lake::control::new_uuid_v4(), "stripe").error().code,
+              "not_found");
+
+    const std::string plan_id = "pay-" + suffix;
+    lake::control::BillingPlan plan;
+    plan.id = plan_id;
+    plan.name = "Pay";
+    plan.base_micros = 1'000'000;
+    ASSERT_TRUE(store->put_billing_plan(plan));
+    lake::control::Invoice invoice;
+    invoice.customer_id = customer->id;
+    invoice.period = "2026-09";
+    invoice.plan_id = plan_id;
+    invoice.plan_name = "Pay";
+    invoice.currency = "USD";
+    invoice.total_micros = 1'000'000;
+    invoice.provider = "stripe";
+    invoice.provider_reference = "in_" + suffix;
+    invoice.payment_url = "https://invoice.stripe.com/i/" + suffix;
+    invoice.provider_status = "open";
+    invoice.lines = {{"plan", "", "Pay plan, 2026-09", "month", 1, 0, 1, 1'000'000, 1, 1'000'000}};
+    const auto issued = store->create_invoice(invoice);
+    ASSERT_TRUE(issued) << issued.error().message;
+    EXPECT_EQ(issued->payment_url, invoice.payment_url);
+    EXPECT_EQ(issued->provider_status, "open");
+
+    const auto apply = [&](std::string id, std::string state, std::string status) {
+        return store->apply_payment_event(
+            {"stripe", "evt_" + id + suffix, "invoice.x", "in_" + suffix, state, status, ""});
+    };
+    const auto failed = apply("failed", "", "payment_failed");
+    ASSERT_TRUE(failed) << failed.error().message;
+    EXPECT_TRUE(failed->matched && failed->changed);
+    EXPECT_EQ(failed->invoice.state, "due");
+    EXPECT_EQ(failed->invoice.provider_status, "payment_failed");
+    const auto paid = apply("paid", "paid", "paid");
+    ASSERT_TRUE(paid) << paid.error().message;
+    EXPECT_TRUE(paid->changed);
+    EXPECT_EQ(paid->invoice.state, "paid");
+    EXPECT_FALSE(paid->invoice.paid_at.empty());
+    EXPECT_EQ(paid->invoice.provider_reference, "in_" + suffix);
+    const auto duplicate = apply("paid", "paid", "paid");
+    ASSERT_TRUE(duplicate);
+    EXPECT_TRUE(duplicate->duplicate);
+    const auto late = apply("void", "void", "void");
+    ASSERT_TRUE(late);
+    EXPECT_TRUE(late->matched);
+    EXPECT_FALSE(late->changed) << "a paid invoice is never voided";
+    const auto foreign = store->apply_payment_event(
+        {"stripe", "evt_foreign" + suffix, "invoice.paid", "in_none", "paid", "paid", ""});
+    ASSERT_TRUE(foreign);
+    EXPECT_FALSE(foreign->matched);
+    EXPECT_EQ(store->apply_payment_event({"stripe", "", "", "", "", "", ""}).error().code,
+              "invalid_input");
+    EXPECT_EQ(store->get_invoice(issued->id)->state, "paid");
+}
+
 TEST(PostgresServices, CreateListAndWithdrawFollowTheContract) {
     const char* uri = lake::test::postgres_uri();
     if (uri == nullptr || std::string(uri).empty()) {

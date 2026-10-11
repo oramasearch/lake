@@ -105,7 +105,11 @@ the manual `PaymentProvider`; `ApiServer` calls `register_billing_capabilities` 
 `ServerOptions::billing` is on (`LAKE_BILLING`). A bill reads usage by calling `usage_over_time`
 through the registry as the same caller. `console_capabilities.cpp`'s `viewer` answers `billing`,
 and `list_docs`/`get_doc` leave out the Billing guide where billing is off. See
-[billing](../../docs/api/billing.md).
+[billing](../../docs/api/billing.md). `stripe.cpp` is the Stripe provider (lake#620, decision 57):
+form-encoded REST calls with an Idempotency-Key through the server's outbound client, and the
+webhook signature check with OpenSSL's HMAC; the payment provider in use is resolved at every call
+from the secret mount `LAKE_BILLING_SECRETS` names, and `http_server.cpp` serves
+`POST /billing/stripe/webhook` through `receive_payment_notice`.
 
 `datasets.cpp` holds the workspace dataset rules lake applies on top of Zetta (lake#447): engine
 result databases, SQL-queryable names, CSV row checks with line numbers, and the one

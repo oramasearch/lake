@@ -32,6 +32,7 @@ tick.
 | `GET /v1/server_info` | `{ok, value: {name, node, version, revision, api, store}}`, no auth; `revision` is the full source commit embedded at image build time, or `unknown` for a build that did not supply it |
 | `POST /session` | the operator token form: a matching token becomes the Strict `lake_session` cookie and redirects to `/repositories`; a wrong one redirects to `/login?error=…` |
 | `POST /logout` | revokes the session, clears the cookie and redirects to `/` (to `/sign-in?signed_out=1` under Clerk) |
+| `POST /billing/stripe/webhook` | Stripe's payment notices (lake#620, [billing.md](../api/billing.md#webhooks)): no lake credential, the `Stripe-Signature` HMAC with a five-minute window is checked against the webhook secret in lake's secret store; each event applied once by id and audited centrally; `404` where the lake does not bill or has no Stripe keys |
 | `POST /identity/clerk-session` | exchanges a Clerk session token for the `lake_session` cookie ([`../api/clerk.md`](../api/clerk.md)) |
 | `GET /v1/oauth/<provider>/callback` | OAuth authorization-code callback with one-use state, PKCE, and verified provider identity; sets the cookie and redirects |
 | `GET /file/raw`, `/file/download`, `/drive/download`, `/exports/download`, `/share/<token>/download` | the bytes of a repository file, a Drive file, a signed export or a shared file; without a credential a protected download redirects to `/sign-in` |

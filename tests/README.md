@@ -475,7 +475,11 @@ Billing (lake#564): `test_billing.cpp` covers prices and bill lines, choosing a 
 month, a month's bill from two workspaces' usage, invoices frozen, voided, reissued and paid, an
 unread workspace holding an invoice back, a fake `PaymentProvider`, and the `LAKE_BILLING` switch
 leaving every billing capability, `viewer.billing` and the Billing guide absent;
-`PostgresBilling.*` in `test_postgres.cpp` covers the store on PostgreSQL.
+`PostgresBilling.*` in `test_postgres.cpp` covers the store on PostgreSQL. Stripe (lake#620):
+`test_stripe.cpp` runs lake's Stripe client against a fake Stripe (customers, invoices and items,
+finalize, voids, idempotency keys, a retry that bills once, rounding to the cent), the webhook
+signature and its window, notices applied once per event id with the central audit, the keys read
+from a secret mount with rotation and the manual fallback, and the route only where the lake bills.
 
 The audit split by subject (decision 52, lake#317): `test_workspace_records.cpp`'s
 `AuditEventsAboutAWorkspaceLiveInItsOwnChain` covers the `AuditRecorder` and the readers across two

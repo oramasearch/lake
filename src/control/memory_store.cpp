@@ -2310,6 +2310,80 @@ Result<Invoice> InMemoryStore::set_invoice_state(const std::string& id,
     return std::unexpected(StoreError{"not_found", "no invoice " + id});
 }
 
+Result<std::string> InMemoryStore::billing_provider_customer(const std::string& customer_id,
+                                                             const std::string& provider) {
+    std::lock_guard lock(mutex_);
+    if (std::ranges::none_of(
+            customers_, [&](const Customer& customer) { return customer.id == customer_id; })) {
+        return std::unexpected(StoreError{"not_found", "no customer " + customer_id});
+    }
+    const auto found = billing_provider_customers_.find({customer_id, provider});
+    return found == billing_provider_customers_.end() ? std::string() : found->second;
+}
+
+Result<std::string>
+InMemoryStore::set_billing_provider_customer(const std::string& customer_id,
+                                             const std::string& provider,
+                                             const std::string& provider_customer_id) {
+    if (provider.empty() || provider_customer_id.empty() || provider_customer_id.size() > 255) {
+        return std::unexpected(
+            StoreError{"invalid_input", "a provider and its customer id are required"});
+    }
+    std::lock_guard lock(mutex_);
+    if (std::ranges::none_of(
+            customers_, [&](const Customer& customer) { return customer.id == customer_id; })) {
+        return std::unexpected(StoreError{"not_found", "no customer " + customer_id});
+    }
+    return billing_provider_customers_.try_emplace({customer_id, provider}, provider_customer_id)
+        .first->second;
+}
+
+Result<PaymentEventResult> InMemoryStore::apply_payment_event(const PaymentEvent& event) {
+    if (event.provider.empty() || event.event_id.empty() || event.event_id.size() > 255 ||
+        (!event.state.empty() && event.state != "paid" && event.state != "void")) {
+        return std::unexpected(StoreError{"invalid_input",
+                                          "a payment event needs its provider, "
+                                          "its id and a state of paid or void"});
+    }
+    std::lock_guard lock(mutex_);
+    PaymentEventResult result;
+    if (!payment_events_.insert({event.provider, event.event_id}).second) {
+        result.duplicate = true;
+        return result;
+    }
+    for (Invoice& invoice : invoices_) {
+        if (event.reference.empty() || invoice.provider != event.provider ||
+            invoice.provider_reference != event.reference) {
+            continue;
+        }
+        result.matched = true;
+        if (invoice.state == "due") {
+            if (!event.state.empty()) {
+                invoice.state = event.state;
+                (event.state == "paid" ? invoice.paid_at : invoice.voided_at) = now_iso8601();
+                if (!event.note.empty()) {
+                    invoice.note = event.note;
+                }
+                result.changed = true;
+            }
+            if (!event.provider_status.empty() &&
+                invoice.provider_status != event.provider_status) {
+                invoice.provider_status = event.provider_status;
+                result.changed = true;
+            }
+        } else if (!event.state.empty() && event.state == invoice.state &&
+                   !event.provider_status.empty() &&
+                   invoice.provider_status != event.provider_status) {
+            // The provider confirms what lake already did (a void lake asked for).
+            invoice.provider_status = event.provider_status;
+            result.changed = true;
+        }
+        result.invoice = invoice;
+        break;
+    }
+    return result;
+}
+
 Result<User> InMemoryStore::get_user(const std::string& id) {
     std::lock_guard lock(mutex_);
     for (const auto& u : users_)

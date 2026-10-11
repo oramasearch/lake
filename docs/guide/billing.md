@@ -18,6 +18,7 @@ item and the billing tools are absent there, and usage is tracked as usual.
 | **Bill** | One UTC calendar month on the plan in effect on its first day: the fee, then one line per priced dimension with what was used, what is charged and the amount. |
 | **Invoice** | A month's bill once Orama issues it, after the month ends. Its lines are kept as issued; later usage never changes it. |
 | **State** | An invoice is **due** until it is **paid**, or **void** if Orama cancels it (the month can then be invoiced again). |
+| **Stripe** | Where invoices are paid on Orama Cloud: each invoice has a page on Stripe, and Stripe tells lake when it is paid. |
 | **Storage on a bill** | The average of each day's storage reading over the month, across your workspaces. |
 
 ## Choose a Plan
@@ -70,9 +71,24 @@ Pay** while it is due. **Print** prints it.
 
 ## Pay an Invoice
 
-Each invoice says how to pay it. Today Orama issues invoices and collects payment outside lake (for
-example by bank transfer), then records the payment, and the invoice shows **paid** with its
-reference. Card payment through a payment provider is not available yet.
+Orama Cloud takes payment through Stripe.
+
+1. Open the invoice from **Invoices** on **Organization → Billing**.
+2. Press **Pay with Stripe**. Stripe's invoice page opens, with the same lines and total.
+3. Pay by card or bank account there.
+4. Come back to the invoice. It shows **paid** once Stripe tells lake, usually within a minute.
+
+The **Stripe** row on the invoice says where the payment stands: **Awaiting payment**, **Payment
+failed** (pay again on Stripe's page with another card or account), **Paid** or **Void**.
+
+If the Billing page's **Payment** figure says **Invoice only**, card payment is not set up on this
+lake. Orama then sends payment details with each invoice (**How to Pay**), collects the payment
+outside lake, and records it; the invoice shows **paid** with the payment's reference.
+
+The invoice, through the API, carries the same: `payment_url` (Stripe's page) and `provider_status`.
+
+- REST: `GET /v1/get_invoice?customer_id=<customer id>&invoice_id=<invoice id>`.
+- MCP: `get_invoice` with `{"customer_id": "<customer id>", "invoice_id": "<invoice id>"}`.
 
 ## Limits
 
@@ -90,6 +106,7 @@ reference. Card payment through a payment provider is not available yet.
 | See your account's plan, bill and invoices | `read` on the account |
 | Choose a plan | `admin` on the account |
 | Set prices, issue an invoice, record a payment, void an invoice | The lake operator |
+| Pay an invoice on Stripe | Anyone with the invoice's Stripe page |
 
 ## Troubleshooting
 
@@ -98,6 +115,8 @@ reference. Card payment through a payment provider is not available yet.
 | **Choose a Plan** and no bill | Your account has no plan yet. Choose one; it applies from the start of this month. |
 | **Some Usage Could Not Be Read** | A workspace did not answer when the bill was read. Open the page again later; the invoice waits until every workspace answers. |
 | No **Billing** item in the rail | This lake does not bill (an enterprise install). Usage is still under **Organization → Usage**. |
+| No **Pay with Stripe** on a due invoice | Card payment is not set up on this lake (**Payment** says **Invoice only**), or the invoice was issued before it was. Follow **How to Pay**. |
+| Paid on Stripe, still **due** in lake | Stripe's notice has not arrived yet. Open the invoice again in a minute; Stripe keeps retrying until lake answers. |
 
 ## Related Pages
 
