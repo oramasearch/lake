@@ -342,7 +342,7 @@ constexpr std::array group_rules{
 };
 
 // The order groups are shown in.
-constexpr std::array<std::string_view, 28> group_order{"Workspace: Design, Train and Ship",
+constexpr std::array<std::string_view, 29> group_order{"Workspace: Design, Train and Ship",
                                                        "Projects and pipelines",
                                                        "Training and runs",
                                                        "Experiments",
