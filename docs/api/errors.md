@@ -117,6 +117,21 @@ lacks a scope or a grant is still 403 `unauthorized`.
   registry points `path` at that field when the handler gave none.
 - **A space that does not own the workspace** is refused at `/customer_id` (`customer_id is not the
   space that owns workspace …`); an unknown workspace at `/workspace_id`.
+- **A database constraint the input broke** (lake#592). PostgreSQL's diagnostic never reaches a
+  caller (it is logged as `api_store_error`); `constraint_rules` in `src/api/registry.cpp` turns
+  the constraints an input can break into the rule, at the field. The field is the caller's `path`
+  when the handler gave one, so `create_drive`'s `repository_name` reads *"repository_name is 1 to
+  256 lowercase letters, digits and hyphens, starting and ending with a letter or digit"* at
+  `/repository_name`, and otherwise the constraint's own field: an empty `attestation_digest` is
+  *"attestation_digest is required: …"* at `/attestation_digest`, and a second identical grant
+  *"principal_taap_id already holds this role here: the item is already shared with that person in
+  that role"* at `/principal_taap_id`. The in-memory store names the same constraints in its
+  messages. Only a diagnostic for a constraint not in the table still answers the generic *"the
+  request contains invalid data"*; add the constraint to the table when an input can reach it.
+- **Secrets** name the secret and the field: *"no secret named nope"* at `/name`, *"secret database
+  has no version 9"* at `/version` (or `/versions` for the version changes), *"version 1 of secret
+  database is deleted; undelete it with undelete_secret_versions"*. A mount, key or derived key name
+  states the handle rule (`control::handle_rule`).
 
 ## Other HTTP answers
 

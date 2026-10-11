@@ -130,6 +130,18 @@ TEST_F(SecretsCapabilities, VersionHistoryDeleteUndeleteAndDestroy) {
         call("read_secret", {{"mount_id", mount_id}, {"name", "database"}, {"version", 1}});
     EXPECT_FALSE(deleted.ok);
     EXPECT_EQ(deleted.error.code, "not_found");
+    EXPECT_EQ(deleted.error.path, "/version");
+    // Every refusal names the field and says why (lake#592).
+    const ApiResult missing = call("read_secret", {{"mount_id", mount_id}, {"name", "nope"}});
+    EXPECT_EQ(missing.error.code, "not_found");
+    EXPECT_EQ(missing.error.message, "no secret named nope");
+    EXPECT_EQ(missing.error.path, "/name");
+    const ApiResult no_version =
+        call("read_secret", {{"mount_id", mount_id}, {"name", "database"}, {"version", 9}});
+    EXPECT_EQ(no_version.error.message, "secret database has no version 9");
+    EXPECT_EQ(no_version.error.path, "/version");
+    const ApiResult no_history = call("secret_metadata", {{"mount_id", mount_id}, {"name", "nope"}});
+    EXPECT_EQ(no_history.error.path, "/name");
     ASSERT_TRUE(call("undelete_secret_versions",
                      {{"mount_id", mount_id}, {"name", "database"}, {"versions", {1}}})
                     .ok);

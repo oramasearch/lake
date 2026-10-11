@@ -432,9 +432,13 @@ SecretTask<control::SecretVersion> MountSecrets::read(std::string name, std::uin
         co_return Result(std::unexpected(got.error()));
     }
     const auto entry = *got ? control::SecretEntryCodec::decode(**got) : std::nullopt;
-    const std::uint64_t selected = version == 0 && entry ? entry->current_version : version;
-    if (!entry || entry->mount_id != mount_id || entry->name != name || selected == 0) {
-        co_return failure<control::SecretVersion>("not_found", "secret version does not exist");
+    if (!entry || entry->mount_id != mount_id || entry->name != name) {
+        co_return failure<control::SecretVersion>("not_found", "no secret named " + name, "/name");
+    }
+    const std::uint64_t selected = version == 0 ? entry->current_version : version;
+    if (selected == 0) {
+        co_return failure<control::SecretVersion>(
+            "not_found", "secret " + name + " has no live version", "/name");
     }
     auto stored = control::settled(co_await records_.get(
         control::SecretVersionCodec::collection,
@@ -445,13 +449,24 @@ SecretTask<control::SecretVersion> MountSecrets::read(std::string name, std::uin
     const auto record = *stored ? control::SecretVersionCodec::decode(**stored) : std::nullopt;
     if (!record || record->mount_id != mount_id || record->name != name ||
         record->version != selected) {
-        co_return failure<control::SecretVersion>("not_found", "secret version does not exist");
+        co_return failure<control::SecretVersion>(
+            "not_found",
+            "secret " + name + " has no version " + std::to_string(selected),
+            version == 0 ? "/name" : "/version");
     }
+    const std::string at = version == 0 ? "/name" : "/version";
     if (!record->destroyed_at.empty()) {
-        co_return failure<control::SecretVersion>("not_found", "secret version was destroyed");
+        co_return failure<control::SecretVersion>(
+            "not_found",
+            "version " + std::to_string(selected) + " of secret " + name + " was destroyed",
+            at);
     }
     if (!record->deleted_at.empty()) {
-        co_return failure<control::SecretVersion>("not_found", "secret version is deleted");
+        co_return failure<control::SecretVersion>(
+            "not_found",
+            "version " + std::to_string(selected) + " of secret " + name +
+                " is deleted; undelete it with undelete_secret_versions",
+            at);
     }
     auto key = control::settled(co_await read_data_key(*store_, instance_kek_, records_,
                                                        route_.customer_id, "mount", mount_id, 1));
@@ -483,7 +498,7 @@ SecretTask<control::SecretMetadata> MountSecrets::metadata(std::string name) {
     }
     const auto entry = *got ? control::SecretEntryCodec::decode(**got) : std::nullopt;
     if (!entry || entry->mount_id != mount_id || entry->name != name) {
-        co_return failure<control::SecretMetadata>("not_found", "secret does not exist");
+        co_return failure<control::SecretMetadata>("not_found", "no secret named " + name, "/name");
     }
     auto listed = control::settled(co_await records_.list(
         control::SecretVersionCodec::collection,
@@ -568,7 +583,7 @@ SecretTask<control::SecretMetadata> MountSecrets::change(std::string name,
     }
     const auto entry = *got ? control::SecretEntryCodec::decode(**got) : std::nullopt;
     if (!entry || entry->mount_id != mount_id || entry->name != name) {
-        co_return failure<control::SecretMetadata>("not_found", "secret does not exist");
+        co_return failure<control::SecretMetadata>("not_found", "no secret named " + name, "/name");
     }
     const auto collection = control::SecretVersionCodec::collection;
     const std::string lookup = control::SecretVersionCodec::lookup(mount_id, name);
@@ -581,8 +596,10 @@ SecretTask<control::SecretMetadata> MountSecrets::change(std::string name,
         }
         const auto record = *stored ? control::SecretVersionCodec::decode(**stored) : std::nullopt;
         if (!record || record->mount_id != mount_id || record->name != name) {
-            co_return failure<control::SecretMetadata>("not_found",
-                                                       "secret version does not exist");
+            co_return failure<control::SecretMetadata>(
+                "not_found",
+                "secret " + name + " has no version " + std::to_string(version),
+                "/versions");
         }
         if (action == control::SecretVersionAction::Undelete && !record->destroyed_at.empty()) {
             co_return failure<control::SecretMetadata>(
@@ -633,8 +650,10 @@ SecretTask<control::SecretMetadata> MountSecrets::change(std::string name,
             co_return Result(std::unexpected(changed.error()));
         }
         if (!*changed) {
-            co_return failure<control::SecretMetadata>("not_found",
-                                                       "secret version does not exist");
+            co_return failure<control::SecretMetadata>(
+                "not_found",
+                "secret " + name + " has no version " + std::to_string(version),
+                "/versions");
         }
     }
     auto touched = control::settled(co_await rewrite(
@@ -658,7 +677,7 @@ SecretTask<control::EncryptionKey> MountSecrets::create_key(std::string name) {
     using Result = ZettaControlResult<control::EncryptionKey>;
     if (!control::valid_handle(name)) {
         co_return failure<control::EncryptionKey>(
-            "invalid_input", "encryption key name must be a lowercase handle", "/name");
+            "invalid_input", control::handle_rule("an encryption key's name"), "/name");
     }
     auto mount = control::settled(co_await this->mount());
     if (!mount) {
@@ -965,7 +984,7 @@ SecretTask<control::DerivedEncryptionKey> MountSecrets::derive(std::string paren
     using Result = ZettaControlResult<control::DerivedEncryptionKey>;
     if (!control::valid_handle(name)) {
         co_return failure<control::DerivedEncryptionKey>(
-            "invalid_input", "derived key name must be a lowercase handle", "/name");
+            "invalid_input", control::handle_rule("a derived key's name"), "/name");
     }
     auto parent = control::settled(co_await get_key(parent_name));
     if (!parent) {
@@ -1322,8 +1341,8 @@ SecretTask<control::SecretMount> create_secret_mount(const ApiContext& context,
                                                      control::SecretMount mount) {
     using Result = ZettaControlResult<control::SecretMount>;
     if (!control::valid_handle(mount.name)) {
-        co_return failure<control::SecretMount>("invalid_input",
-                                                "mount name must be a lowercase handle", "/name");
+        co_return failure<control::SecretMount>(
+            "invalid_input", control::handle_rule("a mount's name"), "/name");
     }
     if (!context.store) {
         co_return failure<control::SecretMount>("store_unavailable",

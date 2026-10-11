@@ -57,6 +57,65 @@ std::string product_store_message(std::string_view code) {
     return "the control-plane store could not complete the request";
 }
 
+// A database constraint the caller's input can break, said as the rule and the field (lake#592).
+// `field` is the input the rule is about when the caller's path does not already name one; the
+// message is written with the field the caller sent, so create_drive's `repository_name` and
+// create_repository's `name` each read as their own.
+struct ConstraintRule {
+    std::string_view constraint;
+    std::string_view field;
+    std::string_view rule; // follows "<field> "
+};
+
+constexpr std::array<ConstraintRule, 17> constraint_rules{{
+    {"repository_name_format",
+     "name",
+     "is 1 to 256 lowercase letters, digits and hyphens, starting and ending with a letter or "
+     "digit"},
+    {"customer_name_format",
+     "name",
+     "is 1 to 256 lowercase letters, digits and hyphens, starting and ending with a letter or "
+     "digit"},
+    {"team_name_format",
+     "name",
+     "is 1 to 256 lowercase letters, digits and hyphens, starting and ending with a letter or "
+     "digit"},
+    {"teams_name_format",
+     "name",
+     "is 1 to 256 lowercase letters, digits and hyphens, starting and ending with a letter or "
+     "digit"},
+    {"service_name_format",
+     "name",
+     "is 1 to 31 lowercase letters, digits and hyphens, starting with a letter"},
+    {"store_name_format",
+     "name",
+     "is 1 to 31 lowercase letters, digits and hyphens, starting with a letter"},
+    {"app_name_format",
+     "name",
+     "is 1 to 31 lowercase letters, digits and hyphens, starting with a letter and not ending "
+     "with a hyphen"},
+    {"grants_role_check",
+     "role",
+     "is one of \"read\", \"write\", \"admin\", \"deploy\", \"review\", \"share\""},
+    {"memberships_role_check", "role", "is one of \"owner\", \"admin\", \"member\""},
+    {"invitations_role_check", "role", "is one of \"owner\", \"admin\", \"member\""},
+    {"invitations_invitee_type_check", "invitee_type", "is one of \"email\", \"handle\""},
+    {"grants_attestation_check",
+     "attestation_digest",
+     "is required: the digest of the signed statement that records this grant"},
+    {"memberships_attestation_check",
+     "attestation_digest",
+     "is required: the digest of the signed statement that records this membership"},
+    {"grants_principal_object_role_unique",
+     "principal_taap_id",
+     "already holds this role here: the item is already shared with that person in that role"},
+    {"memberships_scope_principal_unique",
+     "principal_id",
+     "is already a member here"},
+    {"invitations_expiry_check", "expires_in_seconds", "must be in the future"},
+    {"audit_retention_floor_check", "retention_days", "is at least 400 days"},
+}};
+
 void log_database_diagnostic(std::string_view code, std::string_view message) {
     const nlohmann::json entry = {
         {"event", "api_store_error"}, {"code", code}, {"detail", message}};
@@ -211,8 +270,22 @@ ApiResult ApiResult::failure(std::string code, std::string message, std::string 
         message = code.empty() ? message : code + ": " + message;
         code = "store_error";
     }
-    if (contains_database_diagnostic(message)) {
+    const bool diagnostic = contains_database_diagnostic(message);
+    if (diagnostic) {
         log_database_diagnostic(code, message);
+    }
+    // PostgreSQL names the constraint in its diagnostic and the in-memory store in its message;
+    // either way the caller gets the rule and the field, never the constraint's name.
+    const auto rule = std::ranges::find_if(constraint_rules, [&](const ConstraintRule& known) {
+        return message.contains(known.constraint);
+    });
+    if (rule != constraint_rules.end()) {
+        if (path.empty()) {
+            path = "/" + std::string(rule->field);
+        }
+        const std::string field = path.substr(path.find_last_of('/') + 1);
+        message = field + " " + std::string(rule->rule);
+    } else if (diagnostic) {
         message = product_store_message(code);
     }
     ApiResult result;

@@ -7182,6 +7182,41 @@ TEST(ApiErrors, NoCodeAnswersAStatusCloudflareReplaces) {
     EXPECT_EQ(body["error"]["message"], "table \"no_such_table\" does not exist");
 }
 
+// A database constraint the input broke is said as the rule, at the field (lake#592): never "the
+// request contains invalid data" with an empty path, and never the constraint's name.
+TEST(ApiErrors, ABrokenConstraintIsSaidAsItsRuleAtItsField) {
+    const ApiResult named = ApiResult::failure(
+        "invalid_input",
+        "ERROR:  new row for relation \"repositories\" violates check constraint "
+        "\"repository_name_format\"",
+        "/repository_name");
+    EXPECT_EQ(named.error.path, "/repository_name");
+    EXPECT_EQ(named.error.message,
+              "repository_name is 1 to 256 lowercase letters, digits and hyphens, starting and "
+              "ending with a letter or digit");
+    const ApiResult unnamed = ApiResult::failure(
+        "invalid_input",
+        "ERROR:  new row for relation \"grants\" violates check constraint "
+        "\"grants_attestation_check\"");
+    EXPECT_EQ(unnamed.error.path, "/attestation_digest");
+    EXPECT_TRUE(unnamed.error.message.starts_with("attestation_digest is required"));
+    const ApiResult taken = ApiResult::failure(
+        "conflict",
+        "ERROR:  duplicate key value violates unique constraint "
+        "\"grants_principal_object_role_unique\"\nDETAIL:  Key (…) already exists.");
+    EXPECT_EQ(taken.error.path, "/principal_taap_id");
+    EXPECT_NE(taken.error.message.find("already shared with that person"), std::string::npos);
+    // The in-memory store names the same constraints without a diagnostic.
+    const ApiResult memory =
+        ApiResult::failure("invalid_input", "name must match repository_name_format");
+    EXPECT_EQ(memory.error.path, "/name");
+    EXPECT_TRUE(memory.error.message.starts_with("name is 1 to 256 lowercase"));
+    // An unknown diagnostic still never leaks.
+    const ApiResult other =
+        ApiResult::failure("invalid_input", "ERROR:  something \"secret_table\" DETAIL: x");
+    EXPECT_EQ(other.error.message, "the request contains invalid data");
+}
+
 TEST(ApiErrors, RestSaysWhetherACredentialIsMissingInvalidOrExpired) {
     auto store = std::make_shared<lake::control::InMemoryStore>();
     const auto user =

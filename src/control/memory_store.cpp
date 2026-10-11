@@ -5043,10 +5043,16 @@ InMemoryStore::policy_paths(const std::vector<std::string>& requested_object_ids
 
 Result<Grant> InMemoryStore::create_grant(const NewGrant& in) {
     std::lock_guard lock(mutex_);
-    if (in.principal_taap_id.empty() || !valid_policy_role(in.role) ||
-        in.attestation_digest.empty() || in.granted_by_taap_id.empty()) {
+    // The messages name PostgreSQL's constraints, which ApiResult::failure says as rules.
+    if (in.principal_taap_id.empty() || in.granted_by_taap_id.empty()) {
         return std::unexpected(
-            StoreError{"invalid_input", "principal, role, and attestation evidence are required"});
+            StoreError{"invalid_input", "a principal and a granting identity are required"});
+    }
+    if (!valid_policy_role(in.role)) {
+        return std::unexpected(StoreError{"invalid_input", "grants_role_check"});
+    }
+    if (in.attestation_digest.empty()) {
+        return std::unexpected(StoreError{"invalid_input", "grants_attestation_check"});
     }
     const auto object = std::ranges::find_if(
         policy_objects_, [&](const PolicyObject& row) { return row.id == in.object_id; });
@@ -5062,7 +5068,8 @@ Result<Grant> InMemoryStore::create_grant(const NewGrant& in) {
             return grant.principal_taap_id == in.principal_taap_id &&
                    grant.object_id == in.object_id && grant.role == in.role;
         })) {
-        return std::unexpected(StoreError{"conflict", "grant already exists"});
+        return std::unexpected(
+            StoreError{"conflict", "grant already exists (grants_principal_object_role_unique)"});
     }
     const std::string now = now_iso8601();
     grants_.push_back(Grant{new_uuid_v4(),
