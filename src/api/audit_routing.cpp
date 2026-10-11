@@ -190,8 +190,6 @@ constexpr std::array central = std::to_array<std::string_view>({
     "test_sso_provider",
     "timestamp_checkpoint",
     "timestamp_evidence",
-    // Speech-to-text names no workspace and keeps nothing (docs/api/transcripts.md, lake#561).
-    "transcribe",
     "transparency_checkpoint",
     "transparency_consistency_proof",
     "transparency_identity_scan",
@@ -450,6 +448,8 @@ constexpr std::array workspace = std::to_array<std::string_view>({
     "store_connection",
     "suspend_application_user",
     "tail_experiment_events",
+    // Dictation is the speech-to-text usage of the workspace it is dictated in (lake#613).
+    "transcribe",
     "transfer_repository",
     "unbind_service_from_app",
     "undelete_secret_versions",

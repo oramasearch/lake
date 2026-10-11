@@ -84,6 +84,26 @@ std::optional<MeteredBuild> build_of(const StoredRecord& record, const std::stri
     return build;
 }
 
+std::optional<MeteredJob> job_of(const StoredRecord& record, const std::string& customer_id) {
+    if (record.schema_version != 1 || !record.body.is_object() ||
+        record.body.value("customer_id", std::string()) != customer_id) {
+        return std::nullopt;
+    }
+    MeteredJob job{customer_id,
+                   record.body.value("kind", std::string()),
+                   record.body.value("object_id", std::string()),
+                   record.body.value("hour", std::string()),
+                   unsigned_field(record.body, "seconds")};
+    if (job.kind.empty() || job.object_id.empty() || !metering_hour_us(job.hour)) {
+        return std::nullopt;
+    }
+    return job;
+}
+
+std::string job_key(const MeteredJob& job) {
+    return job.kind + ":" + job.object_id;
+}
+
 } // namespace
 
 std::optional<std::int64_t> metering_hour_us(std::string_view hour) {
@@ -208,6 +228,56 @@ liquid::runtime::task<ZettaControlResult<bool>> record_metered_build(WorkspaceRe
         co_return ZettaControlResult<bool>(std::unexpected(written.error()));
     }
     co_return ZettaControlResult<bool>(true);
+}
+
+liquid::runtime::task<ZettaControlResult<bool>> record_metered_job(WorkspaceRecords& records,
+                                                                   MeteredJob job) {
+    const auto at_us = metering_hour_us(job.hour);
+    if (job.customer_id.empty() || job.kind.empty() || job.object_id.empty() || !at_us) {
+        co_return failure<bool>("invalid_input", "a job record needs its space, kind, id and hour");
+    }
+    const auto collection = MeteredJobCodec::collection;
+    const std::string key = records.index_of(collection, job_key(job));
+    if (key.empty()) {
+        co_return failure<bool>("store_error", "could not index the job");
+    }
+    auto written = settled(co_await records.put(collection,
+                                                key,
+                                                lookup_of(job.customer_id),
+                                                {{"customer_id", job.customer_id},
+                                                 {"kind", job.kind},
+                                                 {"object_id", job.object_id},
+                                                 {"hour", job.hour},
+                                                 {"seconds", job.seconds}},
+                                                RecordCondition{.if_absent = true},
+                                                1,
+                                                *at_us));
+    if (!written) {
+        if (written.error().code == "conflict") {
+            co_return ZettaControlResult<bool>(false); // charged before
+        }
+        co_return ZettaControlResult<bool>(std::unexpected(written.error()));
+    }
+    co_return ZettaControlResult<bool>(true);
+}
+
+liquid::runtime::task<ZettaControlResult<std::vector<MeteredJob>>>
+list_metered_jobs(WorkspaceRecords& records, std::string customer_id, std::int64_t since_us) {
+    using Jobs = std::vector<MeteredJob>;
+    const auto collection = MeteredJobCodec::collection;
+    auto stored = settled(co_await records.list(collection, lookup_of(customer_id), 0, since_us));
+    if (!stored) {
+        co_return ZettaControlResult<Jobs>(std::unexpected(stored.error()));
+    }
+    Jobs jobs;
+    for (const StoredRecord& record : *stored) {
+        auto job = job_of(record, customer_id);
+        // The key binds the job: a record moved under another job's key does not count.
+        if (job && record.id == records.index_of(collection, job_key(*job))) {
+            jobs.push_back(std::move(*job));
+        }
+    }
+    co_return ZettaControlResult<Jobs>(std::move(jobs));
 }
 
 liquid::runtime::task<ZettaControlResult<std::vector<MeteredTransfer>>>

@@ -28,6 +28,7 @@
 #include "lake/api/capabilities.hpp"
 #include "lake/api/registry.hpp"
 #include "lake/api/server.hpp"
+#include "lake/api/usage_recorder.hpp"
 #include "lake/audit/audit.hpp"
 #include "lake/control/drive_files.hpp"
 #include "lake/control/drives.hpp"
@@ -127,6 +128,8 @@ struct Spaces {
         std::make_shared<lake::test::FakeZettaObjects>();
     std::shared_ptr<lake::control::WorkspaceService> service;
     lake::api::Registry registry;
+    // Each call's usage (lake#658: drive uploads and reads are transfer), written on flush.
+    std::unique_ptr<lake::api::UsageRecorder> usage;
     struct Space {
         lake::control::Principal principal;
         std::string customer_id;
@@ -138,6 +141,7 @@ struct Spaces {
         std::filesystem::create_directories(dir);
         service = std::make_shared<lake::control::WorkspaceService>(
             lake::control::WorkspaceConfig{dir.string(), 0}, store, zetta);
+        usage = std::make_unique<lake::api::UsageRecorder>(store.get(), service.get());
         lake::api::register_core_capabilities(registry, "test");
         for (const std::string name : {"first", "second"}) {
             const auto session =
@@ -183,6 +187,7 @@ struct Spaces {
         context.credential_session_id = space.principal.session_id;
         context.scopes = space.principal.scopes;
         context.request_id = lake::control::new_uuid_v4();
+        context.usage_recorder = usage.get();
         return context;
     }
 
@@ -534,6 +539,53 @@ TEST(Drives, AWorkspaceFilesDriveKeepsFoldersFilesAndTheirBytes) {
 
 // lake#588: a chunk sent again after the last answers what the upload holds, and an upload left
 // unfinished is listed apart until it expires, when the next upload of its name takes the name.
+// lake#658: the bytes a workspace-files drive takes in and hands out are its workspace's
+// transfer, `in` for uploads (whole files and chunks) and `out` for reads; another workspace's
+// transfer is untouched.
+TEST(Drives, UploadsAndReadsAreTheWorkspacesTransfer) {
+    Spaces s;
+    const auto& first = s.spaces[0];
+    const std::string home = first.workspaces[0];
+    const ApiResult drive = s.in(first, "create_drive", {{"name", "Shared"}, {"storage", "files"}});
+    ASSERT_TRUE(drive.ok) << drive.error.message;
+    const std::string id = drive.value["id"];
+    const std::string small = pattern(3000);
+    const ApiResult uploaded =
+        s.in(first,
+             "upload_drive_entries",
+             {{"drive_id", id},
+              {"files", json::array({{{"name", "a.txt"}, {"content", base64(small)}}})}});
+    ASSERT_TRUE(uploaded.ok) << uploaded.error.message;
+    const std::string bytes = pattern(MiB + 500);
+    const ApiResult begun = s.in(
+        first, "begin_drive_upload", {{"drive_id", id}, {"path", "b.bin"}, {"size", bytes.size()}});
+    ASSERT_TRUE(begun.ok) << begun.error.message;
+    const std::string file = begun.value["entry"]["id"];
+    for (const std::uint64_t offset : {std::uint64_t{0}, MiB}) {
+        ASSERT_TRUE(s.in(first,
+                         "append_drive_upload",
+                         {{"drive_id", id},
+                          {"id", file},
+                          {"offset", offset},
+                          {"content", base64(bytes.substr(offset, offset == 0 ? MiB : 500))}})
+                        .ok);
+    }
+    ASSERT_TRUE(s.in(first, "finish_drive_upload", {{"drive_id", id}, {"id", file}}).ok);
+    const ApiResult read = s.in(first,
+                                "read_drive_file",
+                                {{"drive_id", id}, {"id", file}, {"offset", 0}, {"length", 1000}});
+    ASSERT_TRUE(read.ok) << read.error.message;
+
+    static_cast<void>(liquid::runtime::block_on(s.usage->flush()));
+    auto& series = s.zetta->records[Spaces::url(home)];
+    EXPECT_EQ(series.metric_total("lake_usage", {{"dimension", "transfer"}, {"kind", "in"}}),
+              3000 + MiB + 500);
+    EXPECT_EQ(series.metric_total("lake_usage", {{"dimension", "transfer"}, {"kind", "out"}}),
+              1000);
+    EXPECT_EQ(s.zetta->records[Spaces::url(first.workspaces[1])].metric_total("lake_usage"), 0)
+        << "the other workspace moved nothing";
+}
+
 TEST(Drives, AResentChunkAnswersTheUploadAndAbandonedUploadsExpire) {
     Spaces s;
     const auto& first = s.spaces[0];

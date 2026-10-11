@@ -135,15 +135,17 @@ panel and the full page), and in **Paste** and **Edit Transcript**. Tap it, spea
 the text is added after what is already in the box, to edit or send. A dictation stops itself
 after 10 minutes. A phone keyboard's own dictation works too and needs none of this.
 
-Dictation calls `transcribe`, which turns audio into text without storing anything:
+Dictation calls `transcribe`, which turns audio into text without storing anything, in the workspace
+you work in: its minutes are that workspace's **Speech to Text** usage. Without a workspace chosen,
+the microphone does not dictate.
 
 `POST /v1/transcribe`
 
 ```json
-{"name": "memo.m4a", "audio_base64": "<base64 of memo.m4a>"}
+{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "name": "memo.m4a", "audio_base64": "<base64 of memo.m4a>"}
 ```
 
-It answers the text and the model used. Any signed-in caller may use it.
+It answers the text and the model used.
 
 ## Speech-to-Text That Is Not Configured
 
@@ -158,7 +160,7 @@ a banner, the microphones hide, and **Upload text** and **Paste** still work.
 |---|---|
 | List, search and read transcripts | `read` |
 | Add, edit and delete transcripts | `write` |
-| Dictate (`transcribe`) | to be signed in |
+| Dictate (`transcribe`) | `write` |
 
 You hold `admin` on your own workspaces. In an organization, owners and admins can add and change
 transcripts; members read them unless they were granted `write`. A transcript of another workspace

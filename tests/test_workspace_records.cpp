@@ -685,7 +685,7 @@ TEST_P(WorkspaceRecordStores, TranscriptsLiveInTheirWorkspaceAndKeepNoAudio) {
     // Without a key, speech-to-text is refused and nothing is written.
     const std::string audio = "data:audio/webm;codecs=opus;base64,c3BlZWNo"; // "speech"
     const auto unconfigured =
-        t.call(first, "transcribe", {{"name", "memo"}, {"audio_base64", audio}});
+        t.call(first, "transcribe", in(first, 0, {{"name", "memo"}, {"audio_base64", audio}}));
     EXPECT_EQ(unconfigured.error.code, "not_supported");
     EXPECT_EQ(unconfigured.error.message, "Speech-to-text is not configured on this Lake.");
     const auto unconfigured_create =
@@ -707,8 +707,10 @@ TEST_P(WorkspaceRecordStores, TranscriptsLiveInTheirWorkspaceAndKeepNoAudio) {
             "We agreed to ship the budget on Friday.", 42.5, "gpt-4o-transcribe"};
     };
 
-    const auto transcribed = t.call(
-        first, "transcribe", {{"name", "memo"}, {"audio_base64", audio}, {"language", "en"}});
+    const auto transcribed =
+        t.call(first,
+               "transcribe",
+               in(first, 0, {{"name", "memo"}, {"audio_base64", audio}, {"language", "en"}}));
     ASSERT_TRUE(transcribed.ok) << transcribed.error.message;
     EXPECT_EQ(transcribed.value,
               (json{{"text", "We agreed to ship the budget on Friday."},
@@ -719,13 +721,13 @@ TEST_P(WorkspaceRecordStores, TranscriptsLiveInTheirWorkspaceAndKeepNoAudio) {
     EXPECT_EQ(heard[0].file_name, "memo.webm");
     EXPECT_EQ(heard[0].mime, "audio/webm");
     EXPECT_EQ(heard[0].language, "en");
-    const auto failing =
-        t.call(first, "transcribe", {{"name", "x.wav"}, {"audio_base64", "c2lsZW5jZQ=="}});
+    const auto failing = t.call(
+        first, "transcribe", in(first, 0, {{"name", "x.wav"}, {"audio_base64", "c2lsZW5jZQ=="}}));
     EXPECT_EQ(failing.error.code, "engine_error");
     // A text file is refused before it reaches the speech service (lake#594).
     const std::size_t sent_before = heard.size();
     const auto text_file =
-        t.call(first, "transcribe", {{"name", "memo.txt"}, {"audio_base64", audio}});
+        t.call(first, "transcribe", in(first, 0, {{"name", "memo.txt"}, {"audio_base64", audio}}));
     EXPECT_EQ(text_file.error.code, "invalid_input");
     EXPECT_EQ(text_file.error.path, "/name");
     EXPECT_NE(text_file.error.message.find("memo.txt is not audio or video"), std::string::npos);

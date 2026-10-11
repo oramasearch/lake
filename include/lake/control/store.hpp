@@ -375,7 +375,7 @@ struct ManagedService {
 // workload's scheduled pods, each container's request or, without one, its limit. `pods` is how
 // many are scheduled now; a build's or a job's row keeps what its pods ran with after they finish.
 struct WorkloadResources {
-    std::string object_kind; // workspace, service, store, app, build or agent_launch
+    std::string object_kind; // workspace, service, store, app, build, agent_launch, agent_cron_run
     std::string object_id;
     int pods = 0;
     std::uint64_t cpu_millis = 0;

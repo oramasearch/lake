@@ -27,6 +27,7 @@ add_executable(lake-tests test_main.cpp test_web_ui.cpp test_web_app.cpp test_ma
   test_drives.cpp
   test_request_series.cpp
   test_usage.cpp
+  test_usage_contract.cpp
   test_billing.cpp
   test_stripe.cpp
   test_sealed_delivery.cpp

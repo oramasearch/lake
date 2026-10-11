@@ -92,11 +92,14 @@ the path. See [telemetry](../../docs/serving/telemetry.md#request-logs).
 
 Usage over time (lake#564): `record_request` also adds each routed capability call to
 `usage_recorder.cpp`'s `UsageRecorder` (`calls`, `api` or `mcp`), as `predict` adds a model's
-answered predictions and `create_transcript` the audio's seconds or tokens; `ApiServer::drain`
-flushes it every `usage_flush_interval` and, as the store root's owner, schedules
-`usage_capabilities.cpp`'s `sample_usage` (stored bytes, instance and volume time, CPU, RAM, GPU and
-GPU memory from the operator's `workload_resources` (lake#643), new build results)
-every `usage_sample_interval`. `usage_capabilities.cpp` registers `usage_over_time`, `usage_limits`,
+answered predictions, `search_index` an index's answered searches, `create_transcript` and
+`transcribe` the audio's seconds or tokens, and the file, drive, Hub and image paths their bytes as
+`transfer` (`record_workspace_transfer`, `stream_blob`'s `metered_workspace`; lake#658);
+`ApiServer::drain` flushes it every `usage_flush_interval` and, as the store root's owner, schedules
+`usage_capabilities.cpp`'s `sample_usage` (stored bytes, the engine's `storage_usage` by kind,
+instance and volume time, CPU, RAM, GPU and GPU memory from the operator's `workload_resources`
+(lake#643), each finished build, job and cron run once, new build results) every
+`usage_sample_interval`. `usage_capabilities.cpp` registers `usage_over_time`, `usage_limits`,
 `set_usage_limit` and `record_model_usage`; `metering_capabilities.cpp`'s `queue_repository_builds`
 is the build-record queueing the sample shares with `metering_usage`. See
 [metering](../../docs/api/metering.md#usage-over-time).

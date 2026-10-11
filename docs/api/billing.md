@@ -229,11 +229,13 @@ every other class and usage of no known class (a GPU the operator could not name
 for the dimension itself, a class without its own rate is not charged. Only `gpu` and `vram` have
 classes; `class` on any other dimension is `invalid_input`.
 
-**Retired from the list** (lake#643). `instances`, `build_compute` and `run_compute` are still
-measured and charted, but `set_price_list` refuses a rate for them (`invalid_input` at
-`/prices/<n>/dimension`): compute is priced as CPU, RAM, GPU and GPU memory. A list published before
-keeps its rates for them, so a month billed at it still bills them, and every invoice keeps its
-lines as issued.
+**Retired from the list** (lake#643), **kept as detail** (lake#658). `instances`, `build_compute`
+and `run_compute` are still measured and charted as detail of the compute that is billed (how long
+services, builds and runs ran), and never billed: `set_price_list` refuses a rate for them
+(`invalid_input` at `/prices/<n>/dimension`), `usage_over_time` answers them with `billed: false`
+and the Usage page marks their tiles *Detail, not billed*. Compute is priced as CPU, RAM, GPU and GPU
+memory. A list published before lake#643 keeps its rates for them, so a month billed at it still
+bills them, and every invoice keeps its lines as issued.
 
 The bill for a month (`YYYY-MM`, a UTC calendar month) is one `usage` line per rate on the list, in
 list order, with `dimension`, `class` (empty but for a class rate), `quantity` (the month's use),
@@ -326,6 +328,7 @@ needs the operator or the instance administrator; the payload is [below](#publis
 | `speech` | $0.0072 / minute | 7200 | 60 seconds | the model provider's speech-to-text rate, $0.006 / minute | provider + 20% |
 | `calls` | $2.00 / million | 2000000 | 1000000 calls | managed HTTP API gateway $1.00 / million (REST APIs $3.50) | 2× |
 | `predictions` | $0.01 / 1,000 | 10000 | 1000 calls | serverless CPU inference, about $4.55 / million requests at 2 GB | 2.2× |
+| `searches` | $0.01 / 1,000 | 10000 | 1000 calls | the same serverless request reference: a search of a published index is one request served by the workspace engine, whose CPU, RAM and volume are billed apart. Hosted search services charge about $0.50 / 1,000 searches, the index's compute included (lake#658) | 2.2× |
 | `model_tokens` | $9.00 / million | 9000000 | 1000000 tokens | the model provider's per-token rate for lake's agents' default model: $5.00 / million input, $30.00 output; $7.27 / million at 10 input to 1 output | provider + 20%, rounded up |
 | `volumes` | $0.20 / GiB-month | 200000 | 2628000 GiB-seconds (730 hours) | block volume $0.08 / GB-month | 2.5× |
 
@@ -397,7 +400,7 @@ vCPU-minute, 60,000 mCPU-seconds; RAM and GPU memory per GiB-minute, 61,440 MiB-
 
 ```http
 POST /v1/set_price_list
-{"currency":"USD","prices":[{"dimension":"cpu","unit_micros":1500,"per":60000},{"dimension":"ram","unit_micros":170,"per":61440},{"dimension":"gpu","unit_micros":38750,"per":60},{"dimension":"gpu","class":"l4","unit_micros":10800,"per":60},{"dimension":"gpu","class":"a10g","unit_micros":21500,"per":60},{"dimension":"gpu","class":"a100","unit_micros":38750,"per":60},{"dimension":"gpu","class":"h100","unit_micros":78750,"per":60},{"dimension":"vram","unit_micros":250,"per":61440},{"dimension":"storage","unit_micros":40000,"per":1073741824},{"dimension":"transfer","unit_micros":50000,"per":1073741824},{"dimension":"speech","unit_micros":7200,"per":60},{"dimension":"calls","unit_micros":2000000,"per":1000000},{"dimension":"predictions","unit_micros":10000,"per":1000},{"dimension":"model_tokens","unit_micros":9000000,"per":1000000},{"dimension":"volumes","unit_micros":200000,"per":2628000}]}
+{"currency":"USD","prices":[{"dimension":"cpu","unit_micros":1500,"per":60000},{"dimension":"ram","unit_micros":170,"per":61440},{"dimension":"gpu","unit_micros":38750,"per":60},{"dimension":"gpu","class":"l4","unit_micros":10800,"per":60},{"dimension":"gpu","class":"a10g","unit_micros":21500,"per":60},{"dimension":"gpu","class":"a100","unit_micros":38750,"per":60},{"dimension":"gpu","class":"h100","unit_micros":78750,"per":60},{"dimension":"vram","unit_micros":250,"per":61440},{"dimension":"storage","unit_micros":40000,"per":1073741824},{"dimension":"transfer","unit_micros":50000,"per":1073741824},{"dimension":"speech","unit_micros":7200,"per":60},{"dimension":"calls","unit_micros":2000000,"per":1000000},{"dimension":"predictions","unit_micros":10000,"per":1000},{"dimension":"searches","unit_micros":10000,"per":1000},{"dimension":"model_tokens","unit_micros":9000000,"per":1000000},{"dimension":"volumes","unit_micros":200000,"per":2628000}]}
 ```
 
 It applies from the start of this month; add `"effective_from": "YYYY-MM"` for another month. Then
@@ -473,6 +476,9 @@ POST /v1/record_invoice_payment
   and reissued, paid by hand; a workspace that does not answer holding the invoice
   back; a fake provider through the interface; and the enterprise switch removing every billing
   capability, `viewer.billing` and the Billing guide while usage stays.
+- `UsageContract.EveryBilledDimensionHasARateOnThePublishedList` (`tests/test_usage_contract.cpp`,
+  lake#658): every dimension the list may rate has a rate in the payload [above](#publish-the-price-list)
+  and in the web app's `LIST_RATES`, and the payload rates nothing else.
 - `BillLines.ComputeIsBilledByTheVcpuGibAndGpuMinute` and
   `Billing.ComputeIsPricedAsCpuRamGpuAndGpuMemory` (lake#643): CPU, RAM, GPU and GPU memory rounded
   up once to a whole vCPU-, GiB- and GPU-minute; a GPU class at its own rate, the rest at the
@@ -500,9 +506,11 @@ POST /v1/record_invoice_payment
 
 ## Change
 
-- A new dimension priced: add it to `usage_dimensions()` ([metering.md](metering.md#dimensions)) and
-  to `DIMENSIONS` and `LIST_RATES` in `frontend/src/pages/billing/billing.ts`; `set_price_list`
-  accepts it at once. A dimension no longer priced: `priced = false` in `usage_dimensions()`.
+- A new dimension priced: add it to `usage_dimensions()` ([metering.md](metering.md#dimensions)), to
+  `DIMENSIONS` and `LIST_RATES` in `frontend/src/pages/billing/billing.ts`, to the [rates](#rates)
+  and the payload [above](#publish-the-price-list); `set_price_list` accepts it at once, and
+  `UsageContract.*` fails until all of them carry it. A dimension no longer priced: `priced = false`
+  in `usage_dimensions()`; it becomes detail (`billed: false`).
 - A new GPU class: publish a rate for it (`class`); the editor offers `GPU_CLASSES` and any class a
   published list names. The operator names classes from the node's GPU product label.
 - New rates: publish a new list, normally for the next month, and update the [rates](#rates) table

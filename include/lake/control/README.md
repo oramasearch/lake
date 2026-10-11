@@ -117,7 +117,9 @@ workspace, and `transfer_repository` is no longer part of `Store`.
 
 `metering.hpp` holds repository usage in workspace Zettas (lake#348, lake#349): the
 `lake_metering_usage` hourly transfer counters, added to with a conditional write, and the
-`lake_metering_build_records` per-result records, written `if_absent`. `store.hpp` has no
+`lake_metering_build_records` per-result records, written `if_absent`, and (lake#658) the
+`lake_metering_job_records` that a finished build, agent job or cron run was charged, written
+`if_absent` before its resources are added to the usage series. `store.hpp` has no
 metering store methods: the retired tables and their legacy reads are gone (migration `0070`).
 `store.hpp`'s `UsageLimit`, `usage_limits` and `set_usage_limit` are an account's per-dimension
 usage limits (migration `0072_usage_limits`, lake#564): content-free configuration; the usage stays

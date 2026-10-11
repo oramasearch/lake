@@ -1442,6 +1442,7 @@ liquid::runtime::task<ApiResult> append_drive_upload(const json& input, ApiConte
         co_return failed(written.error());
     }
     context.audit_details["entry_id"] = entry.id;
+    record_workspace_transfer(context, input.at("workspace_id"), content->size(), 0);
     // What the object holds now, not where this chunk ended (lake#588): a chunk sent again after
     // later ones (an answer lost, a client starting over) answers how much the upload has, so a
     // client that trusts `complete` finishes instead of sending everything again.
@@ -1585,6 +1586,7 @@ liquid::runtime::task<ApiResult> upload_drive_entries(const json& input, ApiCont
     }
     context.audit_details["files"] = items.size();
     context.audit_details["bytes"] = total;
+    record_workspace_transfer(context, input.at("workspace_id"), total, 0);
     co_return ApiResult::success({{"items", std::move(items)}});
 }
 
@@ -1629,6 +1631,7 @@ liquid::runtime::task<ApiResult> read_drive_file(const json& input, ApiContext& 
     }
     context.audit_details["entry_id"] = entry.id;
     context.audit_details["bytes"] = bytes->size();
+    record_workspace_transfer(context, input.at("workspace_id"), 0, bytes->size());
     co_return ApiResult::success({{"id", entry.id},
                                   {"name", entry.name},
                                   {"size", entry.size},

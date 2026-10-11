@@ -18,6 +18,7 @@ import { useWorkspaceSelection, WorkspaceToggles } from "@/components/WorkspaceT
 import { UsageChart } from "./UsageChart";
 import {
   RANGES,
+  billingNote,
   breakdownName,
   change,
   formatValue,
@@ -240,6 +241,7 @@ function Figures({ reading, before, previousLabel, selected, hrefFor }: { readin
                 <span className="inline-flex items-center gap-1">
                   {Arrow && <Arrow size={12} aria-hidden />}
                   {prior === undefined ? (d.aggregation === "last" ? "latest reading" : "this period") : `${moved.text} vs ${previousLabel}`}
+                  {billingNote(d) && <span>· {billingNote(d)}</span>}
                 </span>
               }
             />

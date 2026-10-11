@@ -5025,7 +5025,9 @@ public:
                     "s.created_by_taap_id, to_char(r.started_at AT TIME ZONE 'UTC', "
                     "'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), to_char(r.updated_at AT TIME ZONE 'UTC', "
                     "'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), r.phase, r.message, r.exit_code, "
-                    "r.result::text, COALESCE(s.workspace_id::text, '') FROM agent_cron_runs r "
+                    "r.result::text, COALESCE(s.workspace_id::text, ''), "
+                    "COALESCE(to_char(r.finished_at AT TIME ZONE 'UTC', "
+                    "'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), '') FROM agent_cron_runs r "
                     "JOIN agent_cron_schedules s ON s.id = r.schedule_id WHERE s.customer_id = "
                     "$1::uuid AND ($2 = '' OR s.agent_id = $2) AND ($4 = '' OR s.workspace_id = "
                     "NULLIF($4, '')::uuid) ORDER BY r.started_at DESC, r.id LIMIT $3",
@@ -5056,6 +5058,8 @@ public:
                     }
                     run.result = nlohmann::json::parse(row[13].as<std::string>(), nullptr, false);
                     run.workspace_id = row[14].as<std::string>();
+                    // When it finished (lake#658: a finished run's duration is charged).
+                    run.status_updated_at = row[15].as<std::string>();
                     run.observed_generation = 1; // the operator wrote the row
                     runs.push_back(std::move(run));
                 }

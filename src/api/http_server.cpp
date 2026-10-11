@@ -10076,7 +10076,8 @@ struct ApiServer::Impl {
                 return static_cast<std::uint64_t>(window->size());
             },
             false,
-            StreamedFile{show ? found->content_type : std::string("application/octet-stream")});
+            StreamedFile{show ? found->content_type : std::string("application/octet-stream")},
+            workspace_id);
     }
 
     liquid::runtime::task<ApiResult>
@@ -10548,6 +10549,11 @@ struct ApiServer::Impl {
                                               true,
                                               "BLOB_UPLOAD_INVALID");
         }
+        // A tenant push's bytes are its workspace's transfer in (lake#658), whether or not the
+        // blob is finished; instance-registry names belong to no workspace (lake#662).
+        if (*authorized && usage_recorder) {
+            usage_recorder->add_transfer((**authorized).workspace_id, bytes_read, 0);
+        }
         if (!finish) {
             route.res.set(boost::http::field::location,
                           "/v2/" + repository + "/blobs/uploads/" + upload);
@@ -10773,13 +10779,28 @@ struct ApiServer::Impl {
     struct StreamedFile {
         std::string content_type;
     };
+    //
+    // `metered_workspace` is the workspace whose transfer the bytes are (lake#658): what was sent,
+    // whole or not, is added to its `transfer` `out` when the stream ends.
     boost::http::route_task stream_blob(boost::http::route_params& route,
                                         std::string digest,
                                         std::uint64_t size,
                                         BlobReader read,
                                         bool head,
-                                        std::optional<StreamedFile> file = std::nullopt) {
+                                        std::optional<StreamedFile> file = std::nullopt,
+                                        std::string metered_workspace = {}) {
         namespace http = boost::http;
+        struct Metered {
+            UsageRecorder* recorder;
+            std::string workspace_id;
+            std::uint64_t sent = 0;
+            ~Metered() {
+                if (recorder != nullptr) {
+                    recorder->add_transfer(workspace_id, 0, sent);
+                }
+            }
+        } metered{metered_workspace.empty() ? nullptr : usage_recorder.get(),
+                  std::move(metered_workspace)};
         const auto refuse = [&](const SyncStoreError& error) -> http::route_task {
             if (!file) {
                 return registry_store_error(route, error);
@@ -10879,10 +10900,12 @@ struct ApiServer::Impl {
                     if (send_error) {
                         co_return http::route_error(send_error);
                     }
+                    metered.sent = size;
                     co_return http::route_done;
                 }
                 auto [send_error] =
                     co_await boost::capy::timeout(route.res_body.commit(copied), idle);
+                metered.sent = sent + offset;
                 if (send_error) {
                     if (send_error == boost::capy::error::timeout) {
                         std::cerr << nlohmann::json{{"event", "oci_blob_stream_idle"},
@@ -10953,13 +10976,17 @@ struct ApiServer::Impl {
                 return sync_store.read_workspace_blob(
                     customer_id, workspace_id, object, offset, into, false);
             },
-            head);
+            head,
+            std::nullopt,
+            workspace_id);
     }
 
     // A tenant blob whose record names no store object yet: streamed from the instance registry's
     // file, never read whole.
-    boost::http::route_task
-    serve_instance_blob(boost::http::route_params& route, std::string digest, bool head) {
+    boost::http::route_task serve_instance_blob(boost::http::route_params& route,
+                                                std::string digest,
+                                                bool head,
+                                                std::string metered_workspace) {
         const auto file = artifacts.blob_file(digest);
         std::error_code error;
         const std::uintmax_t size = file ? std::filesystem::file_size(*file, error) : 0;
@@ -10983,7 +11010,9 @@ struct ApiServer::Impl {
                 }
                 return static_cast<std::uint64_t>(input.gcount());
             },
-            head);
+            head,
+            std::nullopt,
+            std::move(metered_workspace));
     }
 
     boost::http::route_task serve_oci_blob(boost::http::route_params& route, bool head) {
@@ -11064,7 +11093,7 @@ struct ApiServer::Impl {
                 co_return co_await serve_workspace_blob(
                     route, tenant->customer_id, tenant->workspace_id, std::move(**recorded), head);
             }
-            co_return co_await serve_instance_blob(route, digest, head);
+            co_return co_await serve_instance_blob(route, digest, head, tenant->workspace_id);
         } else if (!artifacts.repository_has_blob(repository, digest)) {
             co_return co_await registry_error(
                 route, boost::http::status::not_found, "blob is unknown in this repository", true);

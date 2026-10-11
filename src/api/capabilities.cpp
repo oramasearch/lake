@@ -4050,6 +4050,8 @@ void register_repository_capabilities(Registry& registry) {
             if (!file) {
                 return from_sync_store_error(file.error());
             }
+            // The file's bytes leave its repository's workspace (lake#658).
+            record_workspace_transfer(ctx, repository->workspace_id, 0, file->size);
             json out = repository_file_json(*file);
             if (in.value("units", false)) {
                 if (auto units = web_ui_source_units(file->path, file->contents)) {

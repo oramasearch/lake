@@ -4,6 +4,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  billingNote,
+  breakdownName,
   change,
   formatValue,
   fromLimit,
@@ -173,4 +175,13 @@ test("the workspace selection: the URL, then what was remembered, then every wor
   assert.deepEqual(toggleWorkspace([], true, "b"), ["b"]);
   assert.deepEqual(toggleWorkspace(["a", "b"], false, "b"), ["a"]);
   assert.deepEqual(toggleWorkspace(["a"], false, "a"), []);
+});
+
+test("build, run and instance time read as detail that is not billed (lake#658)", () => {
+  assert.equal(billingNote({ billed: false }), "Detail, not billed");
+  assert.equal(billingNote({ billed: true }), null);
+  assert.equal(billingNote({}), null, "a reading from before lake#658 says nothing");
+  assert.equal(breakdownName({ key: "models", total: 0, points: [] }), "Models");
+  assert.equal(breakdownName({ key: "indexes", total: 0, points: [] }), "Indexes");
+  assert.equal(breakdownName({ key: "dictation", total: 0, points: [] }), "Dictation");
 });

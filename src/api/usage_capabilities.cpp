@@ -26,11 +26,13 @@
 #include "lake/api/usage_recorder.hpp"
 #include "lake/control/agent_bus.hpp"
 #include "lake/control/builds.hpp"
+#include "lake/control/drive_files.hpp"
 #include "lake/control/drives.hpp"
 #include "lake/control/metering.hpp"
 #include "lake/control/store.hpp"
 #include "lake/control/transcripts.hpp"
 #include "lake/control/web_apps.hpp"
+#include "lake/control/workspace_store.hpp"
 #include "lake/control/zetta_workspace.hpp"
 #include "workspace_records_api.hpp"
 
@@ -505,9 +507,188 @@ bool finished(std::string_view phase) {
     return phase == "Succeeded" || phase == "Failed" || phase == "Cancelled";
 }
 
+// The kinds of Zetta's storage_usage lake records, and the `lake_storage` kind each becomes
+// (lake#658). Datasets keep their name from before, `workspace_data`.
+const std::vector<std::pair<std::string_view, std::string_view>>& engine_storage_kinds() {
+    static const std::vector<std::pair<std::string_view, std::string_view>> kinds{
+        {"datasets", "workspace_data"},
+        {"models", "models"},
+        {"indexes", "indexes"},
+        {"runs", "runs"},
+        {"streams", "streams"},
+        {"files", "files"},
+        {"buckets", "buckets"},
+    };
+    return kinds;
+}
+
+// A workload charged once for how long it ran (lake#658): an image build, a job-mode agent launch
+// or an agent cron run that has finished. It ran from its request (a cron run: its start) to its
+// final status, so time queued is included for builds and launches, as for build time.
+struct FinishedJob {
+    std::string row_kind;   // its workload_resources kind: build, agent_launch or agent_cron_run
+    std::string usage_kind; // its kind in the usage series: build or agent
+    std::string id, workspace_id, started, ended;
+};
+
+struct FinishedJobs {
+    std::vector<FinishedJob> jobs;
+    std::vector<std::string> problems;
+};
+
+// The account's finished jobs in `workspaces`.
+FinishedJobs finished_jobs(control::Store& store,
+                           const std::string& customer_id,
+                           const std::set<std::string>& workspaces) {
+    FinishedJobs out;
+    if (const auto builds = store.list_builds(customer_id)) {
+        for (const control::Build& build : *builds) {
+            if (workspaces.contains(build.workspace_id) && finished(build.phase)) {
+                out.jobs.push_back({"build",
+                                    "build",
+                                    build.id,
+                                    build.workspace_id,
+                                    build.created_at,
+                                    build.updated_at});
+            }
+        }
+    } else {
+        out.problems.push_back("Builds: " + builds.error().message);
+    }
+    if (const auto launches = store.list_agent_launches(customer_id, "", 10000)) {
+        for (const control::AgentLaunch& launch : *launches) {
+            if (workspaces.contains(launch.workspace_id) && launch.mode == "job" &&
+                finished(launch.phase) && !launch.status_updated_at.empty()) {
+                out.jobs.push_back({"agent_launch",
+                                    "agent",
+                                    launch.id,
+                                    launch.workspace_id,
+                                    launch.created_at,
+                                    launch.status_updated_at});
+            }
+        }
+    } else {
+        out.problems.push_back("Agent launches: " + launches.error().message);
+    }
+    if (const auto runs = store.list_agent_cron_runs(customer_id, "", 10000)) {
+        for (const control::AgentLaunch& run : *runs) {
+            if (workspaces.contains(run.workspace_id) && finished(run.phase) &&
+                !run.status_updated_at.empty()) {
+                out.jobs.push_back({"agent_cron_run",
+                                    "agent",
+                                    run.id,
+                                    run.workspace_id,
+                                    run.created_at,
+                                    run.status_updated_at});
+            }
+        }
+    } else {
+        out.problems.push_back("Agent cron runs: " + runs.error().message);
+    }
+    return out;
+}
+
+// The usage series keeps 400 days; a job that ended before them is not charged.
+constexpr std::int64_t series_retention_ms = 400 * day_ms;
+// At most this many jobs are charged per workspace in one sample, so a first sample after a long
+// gap spreads its writes over the following ones.
+constexpr std::size_t jobs_per_sample = 500;
+
+std::chrono::system_clock::time_point time_of(std::int64_t ms) {
+    return std::chrono::system_clock::time_point{std::chrono::milliseconds(ms)};
+}
+
+// Charges every finished job that has its resources reported and was not charged before: its
+// CPU, RAM, GPU and GPU memory for how long it ran, in the hour it ended, after recording
+// `if_absent` in its workspace that it was charged (lake_metering_job_records). A job whose
+// record was written but whose usage was lost (a crash before the flush) is not charged again:
+// at most once, never twice.
+liquid::runtime::task<void> charge_finished_jobs(ApiContext& context,
+                                                 const std::string& customer_id,
+                                                 const std::vector<FinishedJob>& jobs,
+                                                 const ResourceRows& resources,
+                                                 std::chrono::system_clock::time_point at,
+                                                 UsageSampleReport& report) {
+    const std::int64_t now_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(at.time_since_epoch()).count();
+    const std::int64_t horizon_ms = now_ms - series_retention_ms;
+    struct Candidate {
+        const FinishedJob* job;
+        const control::WorkloadResources* row;
+        std::int64_t ended_ms;
+        std::uint64_t seconds;
+    };
+    std::map<std::string, std::vector<Candidate>> by_workspace;
+    for (const FinishedJob& job : jobs) {
+        const auto* row = resources_of(resources, job.row_kind, job.id);
+        const auto ended = utc_ms(job.ended);
+        const auto ran = elapsed_seconds(job.started, job.ended);
+        if (row == nullptr || !ended || !ran || *ended < horizon_ms || *ended > now_ms) {
+            continue;
+        }
+        by_workspace[job.workspace_id].push_back({&job, row, *ended, *ran});
+    }
+    for (auto& [workspace_id, candidates] : by_workspace) {
+        auto records = workspace_records(context, customer_id, workspace_id);
+        if (!records) {
+            report.unmeasured.push_back("Finished jobs of workspace " + workspace_id + ": " +
+                                        records.error().message);
+            continue;
+        }
+        auto charged = control::settled(
+            co_await control::list_metered_jobs(*records, customer_id, horizon_ms * 1000));
+        if (!charged) {
+            report.unmeasured.push_back("Finished jobs of workspace " + workspace_id + ": " +
+                                        charged.error().message);
+            continue;
+        }
+        std::set<std::string> seen;
+        for (const control::MeteredJob& job : *charged) {
+            seen.insert(job.kind + ":" + job.object_id);
+        }
+        std::ranges::stable_sort(candidates, {}, &Candidate::ended_ms);
+        std::size_t written = 0;
+        for (const Candidate& candidate : candidates) {
+            const FinishedJob& job = *candidate.job;
+            if (seen.contains(job.row_kind + ":" + job.id)) {
+                continue;
+            }
+            if (written == jobs_per_sample) {
+                break;
+            }
+            ++written;
+            auto recorded = control::settled(co_await control::record_metered_job(
+                *records,
+                {customer_id,
+                 job.row_kind,
+                 job.id,
+                 utc_text(floor_to(candidate.ended_ms, hour_ms)),
+                 candidate.seconds}));
+            if (!recorded) {
+                report.unmeasured.push_back("Job " + job.id + ": " + recorded.error().message);
+                continue;
+            }
+            if (!*recorded) {
+                continue; // another lake charged it first
+            }
+            auto increments =
+                resource_increments(*candidate.row,
+                                    candidate.seconds,
+                                    {{"kind", job.usage_kind}, {"object_id", job.id}});
+            if (increments.empty()) {
+                continue;
+            }
+            report.increments += increments.size();
+            context.usage_recorder->add_together(
+                workspace_id, std::move(increments), time_of(candidate.ended_ms));
+        }
+    }
+    co_return {};
+}
+
 // The running workloads of the chosen workspaces the operator has not reported the resources of,
-// by name, and the finished builds and agent jobs of [from, to) without them: their CPU, RAM, GPU
-// and VRAM are not counted (usage_over_time's not_measured).
+// by name, and the finished builds, agent jobs and cron runs of [from, to) without them: their
+// CPU, RAM, GPU and VRAM are not counted (usage_over_time's not_measured).
 std::vector<std::string> unreported_workloads(control::Store& store,
                                               const std::string& customer_id,
                                               const std::vector<control::Workspace>& workspaces,
@@ -542,37 +723,27 @@ std::vector<std::string> unreported_workloads(control::Store& store,
             }
         }
     }
-    std::size_t jobs = 0;
-    if (const auto builds = store.list_builds(customer_id)) {
-        for (const control::Build& build : *builds) {
-            const auto ended = utc_ms(build.updated_at);
-            if (chosen.contains(build.workspace_id) && finished(build.phase) && ended &&
-                *ended >= from_ms && *ended < to_ms && !resources_of(rows, "build", build.id)) {
-                ++jobs;
+    if (const auto launches = store.list_agent_launches(customer_id, "", 10000)) {
+        for (const control::AgentLaunch& launch : *launches) {
+            if (chosen.contains(launch.workspace_id) && launch.mode == "service" &&
+                launch.desired == "present" && !resources_of(rows, "agent_launch", launch.id)) {
+                names.push_back("agent " +
+                                (launch.agent_name.empty() ? launch.agent_id : launch.agent_name));
             }
         }
     }
-    if (const auto launches = store.list_agent_launches(customer_id, "", 10000)) {
-        for (const control::AgentLaunch& launch : *launches) {
-            if (!chosen.contains(launch.workspace_id) ||
-                resources_of(rows, "agent_launch", launch.id)) {
-                continue;
-            }
-            if (launch.mode == "service" && launch.desired == "present") {
-                names.push_back("agent " +
-                                (launch.agent_name.empty() ? launch.agent_id : launch.agent_name));
-                continue;
-            }
-            const auto ended = utc_ms(launch.status_updated_at);
-            if (launch.mode == "job" && finished(launch.phase) && ended && *ended >= from_ms &&
-                *ended < to_ms) {
-                ++jobs;
-            }
+    std::size_t jobs = 0;
+    for (const FinishedJob& job : finished_jobs(store, customer_id, chosen).jobs) {
+        const auto ended = utc_ms(job.ended);
+        if (ended && *ended >= from_ms && *ended < to_ms &&
+            !resources_of(rows, job.row_kind, job.id)) {
+            ++jobs;
         }
     }
     if (jobs > 0) {
-        names.push_back(std::format("{} finished build{} and agent job{}",
+        names.push_back(std::format("{} finished build{}, agent job{} and cron run{}",
                                     jobs,
+                                    jobs == 1 ? "" : "s",
                                     jobs == 1 ? "" : "s",
                                     jobs == 1 ? "" : "s"));
     }
@@ -604,9 +775,9 @@ liquid::runtime::task<UsageReading> read_usage(ApiContext& context, const UsageQ
         return query.dimensions.contains(std::string(dimension));
     };
     const bool wants_resources = wants("cpu") || wants("ram") || wants("gpu") || wants("vram");
-    const bool wants_series = wants("calls") || wants("predictions") || wants("speech") ||
-                              wants("model_tokens") || wants("instances") || wants("volumes") ||
-                              wants_resources;
+    const bool wants_series = wants("calls") || wants("predictions") || wants("searches") ||
+                              wants("speech") || wants("model_tokens") || wants("instances") ||
+                              wants("volumes") || wants("transfer") || wants_resources;
     const std::int64_t from_ms = periods.starts.empty() ? 0 : periods.starts.front();
     const std::int64_t to_ms = periods.end;
     const std::int64_t since_us = from_ms * 1000;
@@ -834,10 +1005,13 @@ liquid::runtime::task<UsageReading> read_usage(ApiContext& context, const UsageQ
         }
         const double total = total_of(all, gauge);
         reading.totals[std::string(dimension.name)] = total;
+        // `billed` (lake#658): whether the price list may rate it. Build, run and instance time
+        // are kept as detail and never billed: compute is billed as CPU, RAM, GPU and VRAM.
         json entry{{"dimension", dimension.name},
                    {"title", dimension.title},
                    {"unit", dimension.unit},
                    {"aggregation", dimension.aggregation},
+                   {"billed", dimension.priced},
                    {"total", total},
                    {"points", points_json(all, gauge)}};
         entry["by_workspace"] = breakdown(
@@ -867,7 +1041,8 @@ liquid::runtime::task<UsageReading> read_usage(ApiContext& context, const UsageQ
             });
         }
         if (dimension.name == "instances" || dimension.name == "volumes" ||
-            dimension.name == "predictions" || resource_dimension(dimension.name)) {
+            dimension.name == "predictions" || dimension.name == "searches" ||
+            resource_dimension(dimension.name)) {
             entry["by_object"] = breakdown(
                 mine,
                 gauge,
@@ -929,15 +1104,38 @@ liquid::runtime::task<UsageReading> read_usage(ApiContext& context, const UsageQ
             "Model tokens: counted only when an agent reports them with record_model_usage; "
             "agent-runtime and the library agents do not report them yet (lake#248).");
     }
-    if (wants("speech")) {
-        reading.not_measured.push_back(
-            "Speech-to-text for dictation outside a transcript (transcribe) belongs to no "
-            "workspace; only transcripts made from audio are counted (lake#613).");
-    }
     if (wants("storage")) {
+        // A workspace sampled in the window whose engine reported no models (its Zetta has no
+        // storage_usage yet): its models, indexes, run artifacts, topics, files and buckets are
+        // not in its storage (lake#658).
+        std::set<std::string> sampled, reported;
+        for (const auto& [key, series] : accumulator.series()) {
+            if (series.dimension != "storage") {
+                continue;
+            }
+            sampled.insert(series.workspace_id);
+            if (label(series, "kind") == "models") {
+                reported.insert(series.workspace_id);
+            }
+        }
+        std::string unreported;
+        for (const control::Workspace& workspace : query.workspaces) {
+            if (sampled.contains(workspace.id) && !reported.contains(workspace.id)) {
+                unreported += (unreported.empty() ? "" : ", ") + workspace.name;
+            }
+        }
+        if (!unreported.empty()) {
+            reading.not_measured.push_back(
+                "Model files, indexes, run artifacts, topics, files and buckets inside workspace " +
+                unreported +
+                ": its engine does not report their size yet (it needs a Zetta with "
+                "storage_usage), so only its datasets are counted (lake#658).");
+        }
+    }
+    if (wants("transfer")) {
         reading.not_measured.push_back(
-            "Model files and indexes inside a workspace: the workspace does not report their size "
-            "yet.");
+            "Transfer of apps through the ingress: the Orama operator does not report it yet "
+            "(lake#661).");
     }
     co_return reading;
 }
@@ -1237,6 +1435,15 @@ std::expected<std::string, ApiError> agent_object(const json&, ApiContext&) {
 
 } // namespace
 
+void record_workspace_transfer(const ApiContext& context,
+                               const std::string& workspace_id,
+                               std::uint64_t in,
+                               std::uint64_t out) {
+    if (context.usage_recorder != nullptr) {
+        context.usage_recorder->add_transfer(workspace_id, in, out);
+    }
+}
+
 // ------------------------------------------------------------------------------------------------
 // The owner loop's sample.
 
@@ -1378,7 +1585,46 @@ liquid::runtime::task<UsageSampleReport> sample_usage(ApiContext& context,
                     }
                 }
             }
-            sample(workspace.id, "workspace_data", data_bytes);
+            // Everything else the engine holds (lake#658): its models, indexes, run artifacts,
+            // topics, files and buckets, from Zetta's storage_usage; its datasets from there too,
+            // whole databases rather than row chunks. An engine without the capability reports
+            // only the datasets above, and usage_over_time says what it cannot include.
+            auto stored = control::settled(
+                co_await call_workspace(bound, customer.id, "storage_usage", true, json::object()));
+            if (stored && stored->is_object() && stored->contains("kinds") &&
+                stored->at("kinds").is_object()) {
+                const auto bytes_of = [](const json& value) -> std::uint64_t {
+                    return value.is_number_unsigned() ? value.get<std::uint64_t>()
+                           : value.is_number_integer()
+                               ? static_cast<std::uint64_t>(
+                                     std::max<std::int64_t>(0, value.get<std::int64_t>()))
+                               : 0;
+                };
+                const json kinds = stored->value("kinds", json::object());
+                for (const auto& [kind, name] : engine_storage_kinds()) {
+                    if (kind == "buckets") {
+                        continue;
+                    }
+                    sample(workspace.id, name, bytes_of(kinds.value(std::string(kind), json(0))));
+                }
+                // The workspace's own buckets, never lake's: the store and workspace files are
+                // `repositories` and `drive_files` already.
+                std::uint64_t buckets = 0;
+                for (const json& bucket : stored->value("buckets", json::array())) {
+                    const std::string name = bucket.value("bucket", std::string());
+                    if (name != control::workspace_store_bucket &&
+                        name != control::drive_files_bucket) {
+                        buckets += bytes_of(bucket.value("bytes", json(0)));
+                    }
+                }
+                sample(workspace.id, "buckets", buckets);
+            } else {
+                report.unmeasured.push_back(
+                    "Workspace " + workspace.name + " engine storage: " +
+                    (stored ? std::string("the engine reports no storage_usage")
+                            : stored.error().message));
+                sample(workspace.id, "workspace_data", data_bytes);
+            }
             auto records = workspace_records(context, customer.id, workspace.id);
             if (!records) {
                 report.unmeasured.push_back("Workspace " + workspace.name +
@@ -1481,8 +1727,8 @@ liquid::runtime::task<UsageSampleReport> sample_usage(ApiContext& context,
 
         // Scheduled resources (lake#643): CPU, RAM, GPU and GPU memory of every workload, from
         // the requests (or limits) the operator schedules it with. A running workload counts the
-        // seconds since the last sample; a build or agent job counts once, from its request to its
-        // final status, in the sample after it ends.
+        // seconds since the last sample; a finished build, agent job or cron run counts once, for
+        // how long it ran, in the hour it ended (lake#658).
         if (resources) {
             const auto charge = [&](const std::string& workspace_id,
                                     const control::WorkloadResources& row,
@@ -1499,15 +1745,6 @@ liquid::runtime::task<UsageSampleReport> sample_usage(ApiContext& context,
                                      const std::string& id) -> const control::WorkloadResources* {
                 const control::WorkloadResources* row = resources_of(*resources, kind, id);
                 return row != nullptr && row->pods > 0 ? row : nullptr;
-            };
-            const std::int64_t at_ms =
-                std::chrono::duration_cast<std::chrono::milliseconds>(at.time_since_epoch())
-                    .count();
-            const std::int64_t since_ms =
-                at_ms - std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count();
-            const auto ended_now = [&](std::string_view ended) {
-                const auto ms = utc_ms(ended);
-                return ms && *ms > since_ms && *ms <= at_ms;
             };
             std::set<std::string> engines;
             for (const control::Workspace& workspace : live) {
@@ -1566,52 +1803,31 @@ liquid::runtime::task<UsageSampleReport> sample_usage(ApiContext& context,
                     }
                 }
             }
-            if (const auto builds = context.store->list_builds(customer.id)) {
-                for (const control::Build& build : *builds) {
-                    if (!live_ids.contains(build.workspace_id) || !finished(build.phase) ||
-                        !ended_now(build.updated_at)) {
-                        continue;
-                    }
-                    const auto* row = resources_of(*resources, "build", build.id);
-                    const auto ran = elapsed_seconds(build.created_at, build.updated_at);
-                    if (row != nullptr && ran) {
-                        charge(build.workspace_id,
-                               *row,
-                               *ran,
-                               {{"kind", "build"}, {"object_id", build.id}});
-                    }
-                }
-            } else {
-                report.unmeasured.push_back("Builds of " + customer.id + ": " +
-                                            builds.error().message);
-            }
             if (const auto launches = context.store->list_agent_launches(customer.id, "", 10000)) {
                 for (const control::AgentLaunch& launch : *launches) {
-                    if (!live_ids.contains(launch.workspace_id)) {
+                    if (!live_ids.contains(launch.workspace_id) || launch.mode != "service" ||
+                        launch.desired != "present") {
                         continue;
                     }
-                    const Labels labels{{"kind", "agent"}, {"object_id", launch.id}};
-                    if (launch.mode == "service") {
-                        if (launch.desired == "present") {
-                            if (const auto* row = running("agent_launch", launch.id)) {
-                                charge(launch.workspace_id, *row, seconds, labels);
-                            }
-                        }
-                        continue;
-                    }
-                    if (!finished(launch.phase) || !ended_now(launch.status_updated_at)) {
-                        continue;
-                    }
-                    const auto* row = resources_of(*resources, "agent_launch", launch.id);
-                    const auto ran = elapsed_seconds(launch.created_at, launch.status_updated_at);
-                    if (row != nullptr && ran) {
-                        charge(launch.workspace_id, *row, *ran, labels);
+                    if (const auto* row = running("agent_launch", launch.id)) {
+                        charge(launch.workspace_id,
+                               *row,
+                               seconds,
+                               {{"kind", "agent"}, {"object_id", launch.id}});
                     }
                 }
             } else {
                 report.unmeasured.push_back("Agent launches of " + customer.id + ": " +
                                             launches.error().message);
             }
+            // Builds, job launches and cron runs (lake#658): each finished one is charged once,
+            // whenever lake first finds it finished with its resources reported.
+            auto jobs = finished_jobs(*context.store, customer.id, live_ids);
+            for (const std::string& problem : jobs.problems) {
+                report.unmeasured.push_back(problem + " of " + customer.id);
+            }
+            static_cast<void>(co_await charge_finished_jobs(
+                context, customer.id, jobs.jobs, *resources, at, report));
         }
 
         // Repository build results finished since a little before the last sample, for their
@@ -1639,8 +1855,10 @@ void register_usage_capabilities(Registry& registry) {
             "workspaces of one account (all of them when `workspace_ids` is left out), with each "
             "dimension's total, a value per period, and breakdowns by workspace and by kind (model "
             "tokens also by agent, launch and model; instances and volumes by service, store or "
-            "app). Read from each workspace's own Zetta. `from` is rounded down and `to` up to "
-            "whole periods; an hour granularity covers at most 100 days.",
+            "app; CPU, RAM, GPU, GPU memory, predictions and searches by object). `billed` says "
+            "whether the price list bills the dimension; build, run and instance time are detail "
+            "and never billed. Read from each workspace's own Zetta. `from` is rounded down and "
+            "`to` up to whole periods; an hour granularity covers at most 100 days.",
         .input_schema = {{"type", "object"},
                          {"properties",
                           {{"customer_id", {{"type", "string"}}},

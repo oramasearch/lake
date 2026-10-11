@@ -444,8 +444,10 @@ TEST(SchemaConformance, EveryToolAndRequiredOutputUsesHttpContract) {
     http.call("delete_stream_messages", stream_delete);
     stream["confirm_name"] = "schema-orders";
     http.call("delete_stream", stream);
-    http.call("transcribe", {{"name", "memo.webm"}, {"audio_base64", "c3BlZWNo"}});
     const json transcript_scope{{"customer_id", customer.id}, {"workspace_id", experiments.id}};
+    auto dictation = transcript_scope;
+    dictation.update({{"name", "memo.webm"}, {"audio_base64", "c3BlZWNo"}});
+    http.call("transcribe", dictation);
     auto transcript_input = transcript_scope;
     transcript_input.update({{"title", "Schema call"}, {"source", "text"}, {"text", "words"}});
     const auto transcript = http.call("create_transcript", transcript_input);

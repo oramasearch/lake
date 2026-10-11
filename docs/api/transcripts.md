@@ -10,7 +10,7 @@ by OpenAI with lake's own key, and **the audio is never kept**.
 
 | Capability | Kind | Input | Output |
 |---|---|---|---|
-| `transcribe` | action, any signed-in caller | `{name, audio_base64, language?}` | `{text, seconds?, model}` |
+| `transcribe` | action, `write` on the space | `{customer_id, workspace_id, name, audio_base64, language?}` | `{text, seconds?, model}` |
 | `create_transcript` | action, `write` on the space | `{customer_id, workspace_id, title, text?, audio_base64?, audio_name?, language?, source, recorded_at?}` | the transcript |
 | `list_transcripts` | read, `read` on the space | `{customer_id, workspace_id, q?, limit?, cursor?}` | `{transcripts: [{id, title, excerpt, source, seconds, created_at, created_by, created_by_name}], total, next_cursor?}` |
 | `get_transcript` | read, `read` on the space | `{customer_id, workspace_id, id}` | the transcript |
@@ -25,8 +25,11 @@ created_by_name}`:
   `gpt-4o-transcribe` reports usage in tokens, so its transcripts have `null`; `whisper-1` reports
   seconds. Either is the workspace's usage (lake#564): the seconds as `speech`, the tokens as
   `model_tokens` of that model, counted off the request path when the audio is heard
-  ([metering](metering.md#dimensions)). Dictation through `transcribe` names no workspace and is not
-  counted ([lake#613](https://github.com/oramasearch/lake/issues/613)).
+  ([metering](metering.md#dimensions)).
+- Dictation through `transcribe` names the workspace it is dictated in (lake#613): whoever may
+  write the workspace may dictate in it, and its seconds (`speech`, `kind` `dictation`) or tokens
+  (`model_tokens` of the model) are that workspace's usage, counted the same way. Its audit event
+  goes to that workspace's log. A dictation that names no workspace is `invalid_input`.
 - `language` is the ISO-639-1 code the person gave, otherwise `null`.
 - `recorded_at` is when it was said, as the person gave it (an RFC 3339 date or instant), otherwise
   `null`.
@@ -102,7 +105,7 @@ workspace instead; that is not built.
   OpenAI and drop it.
 - Lake writes no audio to a record, a file, a log or the audit. The record's body has no audio field
   (the test reads the opened body to check).
-- The audit event of `transcribe` names only the model. The audit event of `create_transcript`
+- The audit event of `transcribe` names only the model, in the workspace's log. The audit event of `create_transcript`
   names the transcript and its source, never its text.
 - The request log names the route pattern and ids only ([telemetry](../serving/telemetry.md)).
 

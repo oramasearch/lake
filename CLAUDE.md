@@ -189,6 +189,17 @@ GPU-minute, with a GPU rate per class (`billing_plan_prices.class`). `instances`
 the operator must vendor the schema, select `workload_resources_guard` and report the resources
 (orama-operator#288).
 See `docs/api/metering.md#resources` and `docs/api/billing.md#price-list`.
+Every kind of usage is metered and billed (lake#658, migration `0076_metered_jobs`): a finished
+build, job launch or agent cron run (new `workload_resources` kind `agent_cron_run`) is charged once
+whenever lake first finds its resources reported, in the hour it ended, recorded `if_absent` in its
+workspace (`lake_metering_job_records`); `transcribe` names its workspace (lake#613); Zetta's
+`storage_usage` adds `storage` kinds `models`, `indexes`, `runs`, `streams`, `files`, `buckets`;
+`search_index` counts the priced `searches`; drive, image, file and Hub bytes count as `transfer`;
+`instances`, `build_compute`, `run_compute` are unbilled detail (`billed: false`).
+`tests/test_usage_contract.cpp` fails on an unmetered capability, workload kind or store type, or a
+billed dimension without a list rate. Not deployed; the operator must vendor the schema, select
+`metered_jobs_guard` and report cron runs and job templates. See
+`docs/api/metering.md#what-is-metered-where`.
 A user's secret reaches a Kubernetes Secret only as a sealed projection (lake#625, decision 58, no
 migration): lake has two levels of secrets, Orama's platform credentials as environment variables
 of the hosting platform and users' workspace secrets in the secret store (`docs/deployment/secrets.md`).
@@ -654,7 +665,7 @@ one adapter TU) and the pure renderers in `include/zetta/api/web_ui.hpp`.
 - **Schema.** `db/schema.sql` is the source of truth; the operator carries a byte-identical
   vendored copy at `internal/controller/assets/lake-schema.sql` and applies it per Lake as an
   owned `PostgresSchema` (one transaction, guarded on the table the **newest** migration creates,
-  `workload_resources_guard` in the source tree, versioned by content hash).
+  `metered_jobs_guard` in the source tree, versioned by content hash).
   Change the schema HERE, then copy it into the operator in the same change; the operator's test
   checks the copy carries the source-of-truth header. Migrations are single-shot today
   (incremental migrations are the PostgresSchema follow-up), so until then a schema change means

@@ -66,8 +66,11 @@ by the audit route and the request series. `usage_recorder.hpp` declares `UsageR
 per-workspace `lake_usage` counter and `lake_storage` readings (lake#564, `ApiContext::usage_recorder`,
 `ServerOptions::usage_flush_interval`, `usage_max_pending`, `usage_sample_interval`), and
 `usage_dimensions()`, each dimension's unit, whether the price list may rate it and whether it has
-GPU classes (lake#643); `capabilities.hpp` declares `sample_usage` and
-`queue_repository_builds`, and `images.hpp`'s `ImageBytes` splits image bytes by workspace.
+GPU classes (lake#643), `add_transfer` for bytes moved outside repository sync, and (lake#658) the
+metering contract's tables: `capability_meters()`, `calls_only_capabilities()`,
+`metered_workload_kinds()` and `metered_store_types()`; `capabilities.hpp` declares `sample_usage`,
+`record_workspace_transfer` and `queue_repository_builds`, and `images.hpp`'s `ImageBytes` splits
+image bytes by workspace.
 `registry.hpp`'s `Transcription` carries the tokens a speech-to-text model reports. See
 [metering](../../../docs/api/metering.md#usage-over-time). `billing.hpp`'s `UsageQuantities` and `bill_lines` price a GPU class at its own rate (lake#643).
 `billing.hpp` declares billing (lake#564,

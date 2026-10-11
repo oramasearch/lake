@@ -38,6 +38,14 @@ std::expected<std::size_t, std::string> queue_repository_builds(ApiContext& cont
                                                                 std::string_view since_hour);
 // What one usage sample read (lake#564): workspaces sampled, readings and increments added, and a
 // sentence for each workspace or measure it could not read.
+// Transfer outside repository sync (lake#658, docs/api/metering.md#dimensions): adds the bytes a
+// capability accepted into (`in`) or answered from (`out`) a workspace to that workspace's
+// `transfer`, through the context's usage recorder. Only an in-memory increment; nothing without a
+// recorder or a workspace.
+void record_workspace_transfer(const ApiContext& context,
+                               const std::string& workspace_id,
+                               std::uint64_t in,
+                               std::uint64_t out);
 struct UsageSampleReport {
     std::size_t workspaces = 0;
     std::size_t readings = 0;

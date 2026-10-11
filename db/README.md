@@ -336,3 +336,11 @@ dimension and class) and `billing_invoice_lines`, so GPU time can carry a rate p
 only; usage stays in each workspace Zetta. Nothing is dropped; idempotent. The latest guard is
 `workload_resources_guard`; the operator must vendor this schema, select that guard and report the
 resources before rollout. See [schema.md](../docs/control-plane/schema.md#workload-resources-migration).
+
+Migration `0076_metered_jobs` (lake#658) lets `workload_resources` hold `agent_cron_run` rows, the
+resources of each run an agent's cron schedule starts (`object_id` the `agent_cron_runs` id), so a
+cron run's CPU, RAM, GPU and GPU memory are metered like a job-mode launch's. Lake charges every
+finished build, job launch and cron run once, in its workspace Zetta. Nothing is dropped;
+idempotent. The latest guard is `metered_jobs_guard`; the operator must vendor this schema, select
+that guard and report cron runs before rollout. See
+[schema.md](../docs/control-plane/schema.md#metered-jobs-migration).

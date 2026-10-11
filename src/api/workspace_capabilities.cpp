@@ -1685,6 +1685,14 @@ void register_search_capabilities(Registry& registry) {
             if (!*found) {
                 co_return workspace_failure(found->error(), input);
             }
+            // The index's answered searches over time, for what serving it costs (lake#658),
+            // added off the request path like predict's predictions.
+            if (context.usage_recorder != nullptr) {
+                context.usage_recorder->add(input.value("workspace_id", context.workspace_id),
+                                            "searches",
+                                            1,
+                                            {{"object_id", index}});
+            }
             co_return ApiResult::success(**found);
         },
         .input_aliases = {{"index", "index_id"}}});
