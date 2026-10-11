@@ -462,6 +462,25 @@ TEST(SchemaConformance, EveryToolAndRequiredOutputUsesHttpContract) {
     transcript_edit["title"] = "Schema call, edited";
     http.call("update_transcript", transcript_edit);
     http.call("delete_transcript", transcript_id);
+    // A workspace's own solutions (docs/api/solutions.md, lake#597).
+    auto solution_input = transcript_scope;
+    solution_input.update({{"name", "Schema solution"},
+                           {"problem", "Late payments"},
+                           {"decision", "Who to call first"},
+                           {"measurement", {{"metric", "days sales outstanding"}}},
+                           {"methodologies", json::array({"M-1"})}});
+    const auto solution = http.call("create_solution", solution_input);
+    http.call("list_solutions", transcript_scope);
+    auto solution_id = transcript_scope;
+    solution_id["id"] = solution.at("solution").at("id");
+    http.call("get_solution", solution_id);
+    auto solution_edit = solution_id;
+    solution_edit["name"] = "Schema solution, edited";
+    http.call("update_solution", solution_edit);
+    const auto copy = http.call("duplicate_solution", solution_id);
+    auto copy_id = transcript_scope;
+    copy_id["id"] = copy.at("solution").at("id");
+    http.call("delete_solution", copy_id);
     // Drives (docs/api/drives.md): a workspace-files drive in the workspace Zetta's fake object
     // store, and a virtual one.
     auto drive_input = transcript_scope;
