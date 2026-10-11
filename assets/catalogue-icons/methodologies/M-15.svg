@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" role="img" aria-label="Three paths from one start, the best-paying one highlighted">
+<title>M-15 Bandits &amp; sequential decisioning</title>
+<style>.l,.a{fill:none;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round}.l{stroke:currentColor}.a{stroke:var(--cat-accent,#0f62fe)}.d{fill:var(--cat-accent,#0f62fe)}.t{fill:var(--cat-tint,#0f62fe33)}.s{stroke-dasharray:2 2.5}</style>
+<circle class="l" cx="4" cy="12" r="2"/>
+<path class="l" d="M6 12h12M5.75 13c3.5 5.5 7 6 12.25 6"/>
+<circle class="l" cx="19.75" cy="12" r="1.5"/>
+<circle class="l" cx="19.75" cy="19" r="1.5"/>
+<path class="a" d="M5.75 11c3.5-5.5 7-6 12.25-6"/>
+<circle class="d" cx="19.75" cy="5" r="1.75"/>
+</svg>

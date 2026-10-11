@@ -5,11 +5,11 @@
 
 /** Every place search looks, in the order they are shown. `federatedPlaces.tsx` gives each its
  * read; the top bar and Data → Search show them in this order. */
-export const PLACE_IDS = ["repositories", "code", "datasets", "transcripts", "projects", "agents", "models", "drives", "docs"] as const;
+export const PLACE_IDS = ["repositories", "code", "datasets", "transcripts", "projects", "solutions", "agents", "models", "drives", "docs"] as const;
 export type PlaceId = (typeof PLACE_IDS)[number];
 
 /** Places whose items live in a workspace, searched in every workspace the person has. */
-export const WORKSPACE_PLACES: readonly PlaceId[] = ["datasets", "transcripts", "projects", "agents", "models", "drives"];
+export const WORKSPACE_PLACES: readonly PlaceId[] = ["datasets", "transcripts", "projects", "solutions", "agents", "models", "drives"];
 
 /** One workspace a search runs in. */
 export type Scope = { customerId: string; workspaceId: string; name?: string };
@@ -19,7 +19,8 @@ export type CodeOptions = { ref: string; change: string; history: boolean; repos
  * hit's repository and line); `code` sets the title as code. `detail` is the second line: where it
  * lives, or the text around the match. `workspace` names the workspace it came from when the person
  * has more than one. `to` is a page of the app; `href` a URL the browser opens itself (a file, in a
- * new tab when `newTab`, saved when `download`). `icon` is a lucide icon (`federatedPlaces.tsx`). */
+ * new tab when `newTab`, saved when `download`). `icon` is a component drawn at a size (a lucide icon, or a
+ * solution's or methodology's catalogue icon, `federatedPlaces.tsx`). */
 export type Hit = {
   key: string;
   title: string;

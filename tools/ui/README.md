@@ -18,6 +18,12 @@ pages link (`/style-<hash>.css`, with its `/style.css` compatibility alias), and
 every governed text, status, focus, and boundary pair, and fails below the documented threshold.
 See [`docs/ui/design-system.md`](../../docs/ui/design-system.md).
 
+`export-catalogue-icons.mjs` writes the solution and methodology icons (lake#639) as standalone SVG
+files under `assets/catalogue-icons/`, for the website. The source of record is
+`frontend/src/lib/catalogueIcons.ts`. `--check` fails on a missing, stale or extra file (the frontend
+test `catalogue-icons.test.ts` checks the same), and `--preview <file.html>` also writes a review
+page. See [`docs/ui/catalogue-icons.md`](../../docs/ui/catalogue-icons.md).
+
 `screenshot.sh` renders the static visual-direction mocks in
 [`docs/design/ui/mocks/`](../../docs/design/ui/mocks/README.md) at 1440×900 with the pinned
 Puppeteer Chromium image (`screenshot_driver.mjs` runs inside it). It takes no arguments.

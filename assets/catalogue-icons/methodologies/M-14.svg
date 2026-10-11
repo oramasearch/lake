@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" role="img" aria-label="A sound wave">
+<title>M-14 Speech &amp; audio analytics</title>
+<style>.l,.a{fill:none;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round}.l{stroke:currentColor}.a{stroke:var(--cat-accent,#0f62fe)}.d{fill:var(--cat-accent,#0f62fe)}.t{fill:var(--cat-tint,#0f62fe33)}.s{stroke-dasharray:2 2.5}</style>
+<path class="l" d="M4 10v4M19.5 10.5v3M7.5 7v10"/>
+<path class="a" d="M11 4v16M14.5 8v8"/>
+<path class="l" d="M17 9.5v5"/>
+</svg>

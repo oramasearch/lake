@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" role="img" aria-label="Servers guarded by a shield">
+<title>B-8 IT &amp; Security Operations</title>
+<style>.l,.a{fill:none;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round}.l{stroke:currentColor}.a{stroke:var(--cat-accent,#8e6a00)}.d{fill:var(--cat-accent,#8e6a00)}.t{fill:var(--cat-tint,#8e6a0033)}.s{stroke-dasharray:2 2.5}</style>
+<path class="t" d="M18.5 11l3.5 1.5v3c0 2.5-1.5 4.3-3.5 5.5-2-1.2-3.5-3-3.5-5.5v-3z"/>
+<rect class="l" x="3" y="4" width="10" height="5" rx="1.25"/>
+<rect class="l" x="3" y="11" width="10" height="5" rx="1.25"/>
+<circle class="d" cx="6" cy="6.5" r="0.9"/>
+<circle class="d" cx="6" cy="13.5" r="0.9"/>
+<path class="l" d="M3 18.5h7"/>
+<path class="a" d="M18.5 11l3.5 1.5v3c0 2.5-1.5 4.3-3.5 5.5-2-1.2-3.5-3-3.5-5.5v-3z"/>
+</svg>

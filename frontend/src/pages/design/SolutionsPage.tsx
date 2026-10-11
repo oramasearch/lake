@@ -9,9 +9,10 @@ import { act } from "@/lib/api";
 import { Drawer } from "@/lib/overlay";
 import { Badge, Banner, Button, Card, Empty, ErrorBlock, FilterChips, Grid, Page, SearchInput, Section, Skeleton, Stat, StatRow, Toolbar } from "@/lib/ui";
 import { WorkspaceGate, useWorkspaceStatus } from "@/components/WorkspaceGate";
+import { SolutionIcon } from "@/components/CatalogueIcon";
 import { qs, useScope, useScopedRead, useWsPath } from "./api";
 import { filterSolutions, runsBadge, solutionForm, solutionInput, solutionSource, sourceLabel, text, type J, type SolutionSource } from "./logic";
-import { MethodologyChips } from "./catalogue";
+import { MethodologyChips, useMethodologyFamilies } from "./catalogue";
 import { RunsBadge, useDesignTrail, useSubmit } from "./parts";
 import { SolutionFields } from "./SolutionForm";
 
@@ -131,6 +132,7 @@ function Solutions({ onNew }: { onNew: () => void }) {
 
 function SolutionCards({ entries }: { entries: J[] }) {
   const ws = useWsPath();
+  const families = useMethodologyFamilies();
   return (
     <Grid className="grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
       {entries.map((entry, index) => {
@@ -139,6 +141,7 @@ function SolutionCards({ entries }: { entries: J[] }) {
           <Card
             key={text(entry, "id") || index}
             to={ws(`/design/solution?${qs({ id: text(entry, "id") })}`)}
+            icon={<SolutionIcon entry={entry} size={32} families={families} />}
             label={own ? undefined : text(entry, "id")}
             title={text(entry, "name")}
             actions={

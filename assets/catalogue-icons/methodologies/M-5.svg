@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" role="img" aria-label="A survival curve stepping down over time">
+<title>M-5 Survival / time-to-event</title>
+<style>.l,.a{fill:none;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round}.l{stroke:currentColor}.a{stroke:var(--cat-accent,#0f62fe)}.d{fill:var(--cat-accent,#0f62fe)}.t{fill:var(--cat-tint,#0f62fe33)}.s{stroke-dasharray:2 2.5}</style>
+<path class="l" d="M3 3v18h18"/>
+<path class="a" d="M6 5.5h3.5V9H13v4h3v4h4"/>
+<circle class="d" cx="20" cy="17" r="1.25"/>
+</svg>
