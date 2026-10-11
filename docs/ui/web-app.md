@@ -119,6 +119,7 @@ the page is sent `Cache-Control: private, no-store`. Three more things keep late
   within a minute shows the error instead of looping.
 - **Reads are cached for 15 seconds** and are not refetched on window focus. A `4xx` is shown at
   once; only a network failure or a `5xx` is retried, twice (`queryClient` in `src/lib/api.ts`).
+- **A read answered 503 is sent once more first** ([below](#a-read-answered-503)).
 - **Every successful write refreshes every read on screen.** Reads that must be sent as `POST`
   (`workspace_query`, the `delete_workspace` dry run) go through `postRead`/`usePostRead`, which
   refresh nothing; calling them through `act` would refetch themselves forever.
@@ -133,6 +134,33 @@ the page is sent `Cache-Control: private, no-store`. Three more things keep late
 | Environment logs | `environment_logs` every 3 s from `next_since`, appending lines |
 | Experiments | `tail_experiment_events` long polls ([experiments.md](experiments.md#live-updates)) |
 | Streams Live | `browse_stream` forward long polls ([streams.md](streams.md)) |
+
+### A Read Answered 503
+
+`read` and `postRead` (`sendRead` in `src/lib/api.ts`, the rule in `src/lib/retry.ts`) send a read
+once more, after 400 ms, when it answered 503 and the answer is not lake's own (no `{ok, …}` body:
+the edge or the connection in between answered), and when lake's own 503 carries `Retry-After`
+(a workspace store moving or handed off, a server out of request workers), waiting what it says
+between 250 ms and 2 s. Lake's 503 without `Retry-After` (something not set up) is not sent again,
+and an action never is: a write may have happened. A read cancelled meanwhile stops waiting. An
+error that is not lake's answer reads "Lake did not answer (HTTP 503 from cloudflare, ray …)":
+`ApiError.edge` keeps the `server` and `cf-ray` headers, so a report says where the answer came
+from. `tests/retry.test.ts` covers the rule.
+
+**What lake#573 found.** The review saw `workspace_status`, `list_drives`, `recent_drive_entries`
+and `list_repositories` fail right after creating a repository drive at 23:55:12Z on 2026-10-10,
+while lake logged 200s. ingress-nginx's log for that second shows `list_drives` (request
+`6d5318bd…`) and `workspace_status` (`da0d50f9…`) as **499** after 3 and 15 ms: the client closed
+them, and lake's own log has the same request ids finishing 200 in 28 and 21 ms, after the client
+had gone. The other two never reached nginx. `create_drive` itself answered 200 in 664 ms and
+nothing about its connection was wrong. What closed them was the page: every successful write
+refreshes every read on screen (`refreshAfterWrite`), and New drive then navigates into the new
+drive, unmounting the Drives page and cancelling the refreshes it had just started (React Query
+aborts them through their `AbortSignal`); the client tooling recorded those cancelled requests as
+failures. Five repository drives created in a row over REST at 00:35Z on 2026-10-11, each followed
+by the same four reads at once, all answered 200 through Cloudflare (`server: cloudflare`,
+`cf-ray` present). A cancelled read never reaches an error block (React Query drops it), so a 503
+retry is a guard for a real edge 503, and the headers it keeps answer the next report.
 
 ## What the browser keeps
 

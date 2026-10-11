@@ -7,6 +7,7 @@
  * secret, and the cookie is resolved by the same `context_for` as a bearer, so the app can do
  * nothing the API cannot. */
 import { QueryClient, useMutation, useQuery, type UseQueryOptions } from "@tanstack/react-query";
+import { edgeSource, readRetryDelay } from "./retry";
 
 export class ApiError extends Error {
   constructor(
@@ -15,6 +16,8 @@ export class ApiError extends Error {
     message: string,
     /** JSON pointer to the input field at fault, when the input is at fault. */
     public path = "",
+    /** Who answered when lake did not (the `server` header and Cloudflare's ray), lake#573. */
+    public edge = "",
   ) {
     super(message);
   }
@@ -40,12 +43,12 @@ export function isSignedIn(): boolean {
   return announceSessionEnd;
 }
 
-function failure(status: number, code: string, message: string, path = ""): ApiError {
+function failure(status: number, code: string, message: string, path = "", edge = ""): ApiError {
   if (status === 401) {
     if (announceSessionEnd) sessionEndedListeners.forEach((listener) => listener());
     return new ApiError(401, code, announceSessionEnd ? SESSION_ENDED : message, path);
   }
-  return new ApiError(status, code, message, path);
+  return new ApiError(status, code, message, path, edge);
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -98,29 +101,68 @@ function prefix(options?: CallOptions): string {
   return workspacePrefix;
 }
 
-async function unwrap<T>(response: Response): Promise<T> {
-  const body = await response.json().catch(() => null);
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type Body = any;
+
+/** Lake's own answer is `{ok, ...}`; anything else came from the edge or the connection. */
+function lakeAnswered(body: Body): boolean {
+  return !!body && typeof body === "object" && typeof body.ok === "boolean";
+}
+
+function unwrapBody<T>(response: Response, body: Body): T {
   if (!response.ok || !body || body.ok === false) {
+    if (!lakeAnswered(body)) {
+      const edge = edgeSource(response.headers.get("server"), response.headers.get("cf-ray"));
+      throw failure(
+        response.status,
+        "unavailable",
+        `Lake did not answer (HTTP ${response.status}${edge ? ` from ${edge}` : ""}). Retry in a moment.`,
+        "",
+        edge,
+      );
+    }
     const error = body?.error ?? {};
     throw failure(response.status, error.code ?? "error", error.message ?? response.statusText ?? "The request failed.", error.path ?? "");
   }
   return body.value as T;
 }
 
+async function unwrap<T>(response: Response): Promise<T> {
+  return unwrapBody<T>(response, await response.json().catch(() => null));
+}
+
+/** Sends a read, and once more after a short pause when it answered 503 from the edge or with
+ * lake's Retry-After (lake#573, `readRetryDelay`). A read changes nothing, so sending it again is
+ * safe; an action is never sent twice. */
+async function sendRead<T>(url: string, init: RequestInit): Promise<T> {
+  for (let attempt = 0; ; attempt++) {
+    let response: Response;
+    try {
+      response = await fetch(url, init);
+    } catch (error) {
+      if ((error as Error).name === "AbortError") throw error;
+      throw new ApiError(0, "network", "Lake could not be reached. Check your connection and retry.");
+    }
+    const body = await response.json().catch(() => null);
+    const delay = readRetryDelay(response.status, lakeAnswered(body), response.headers.get("retry-after"), attempt);
+    if (delay === null) return unwrapBody<T>(response, body);
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(resolve, delay);
+      init.signal?.addEventListener("abort", () => {
+        clearTimeout(timer);
+        reject(new DOMException("The read was cancelled.", "AbortError"));
+      });
+    });
+  }
+}
+
 /** Call a read capability: `read("list_repositories", {customer_id})`. */
 export async function read<T = Row>(name: string, input?: Params, options?: CallOptions): Promise<T> {
-  let response: Response;
-  try {
-    response = await fetch(`${prefix(options)}/v1/${name}${query(input)}`, {
-      headers: { Accept: "application/json" },
-      credentials: "same-origin",
-      signal: options?.signal,
-    });
-  } catch (error) {
-    if ((error as Error).name === "AbortError") throw error;
-    throw new ApiError(0, "network", "Lake could not be reached. Check your connection and retry.");
-  }
-  return unwrap<T>(response);
+  return sendRead<T>(`${prefix(options)}/v1/${name}${query(input)}`, {
+    headers: { Accept: "application/json" },
+    credentials: "same-origin",
+    signal: options?.signal,
+  });
 }
 
 /** Call an action capability: `act("create_repository", {name, customer_id})`. */
@@ -147,20 +189,13 @@ export async function act<T = Row>(name: string, input: Row = {}, options?: Call
  * like `act`, but it changes nothing, so it refreshes no other read. Inside a query, use this or
  * `usePostRead`, never `act`: `act` refreshes every read, including the one that called it. */
 export async function postRead<T = Row>(name: string, input: Row = {}, options?: CallOptions): Promise<T> {
-  let response: Response;
-  try {
-    response = await fetch(`${prefix(options)}/v1/${name}`, {
-      method: "POST",
-      headers: { Accept: "application/json", "Content-Type": "application/json" },
-      credentials: "same-origin",
-      body: JSON.stringify(input),
-      signal: options?.signal,
-    });
-  } catch (error) {
-    if ((error as Error).name === "AbortError") throw error;
-    throw new ApiError(0, "network", "Lake could not be reached. Check your connection and retry.");
-  }
-  return unwrap<T>(response);
+  return sendRead<T>(`${prefix(options)}/v1/${name}`, {
+    method: "POST",
+    headers: { Accept: "application/json", "Content-Type": "application/json" },
+    credentials: "same-origin",
+    body: JSON.stringify(input),
+    signal: options?.signal,
+  });
 }
 
 /** A non-capability endpoint that answers JSON (sign-in, `/session`): same error handling. */
