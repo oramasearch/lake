@@ -3,9 +3,11 @@
 A **dataset** is a table in your workspace: the data its pipelines train on, its search indexes
 cover and its agents read. Every dataset lives in the workspace it was loaded into; another workspace never sees it.
 
-Open **Data → Datasets** to see them. The page has four figures (Datasets, Run outputs,
-Connections, Stores), the datasets table, the **Connections** card and the **Storage** card. Its
-header has **Query with SQL** and **Load data**, which appear once the workspace is ready.
+Open **Data → Datasets** to see them. The page has three figures (Datasets, Run outputs, Stores),
+the datasets table and the **Storage** card. Its header has **Query with SQL** and **Load data**,
+which appear once the workspace is ready. The databases the workspace reads are on **Data →
+Connections** ([Connections](/docs/connections)); an old link to Datasets' connections opens that
+page.
 
 There are three ways to bring data in, all under **Load data**:
 
@@ -113,51 +115,15 @@ generators.
 
 Generated data is for demos and tests: it is synthetic, not drawn from your records.
 
-## Connect a Database
+## Pull a Table From a Connection
 
-A **connection** is a database the workspace reads from. The **Connections** card on
-**Data → Datasets** (*Databases Your Data Lives In*) lists them with where they point, the service
-they came from and when they were saved.
+A **connection** is a database the workspace reads from. Connections have their own page,
+**Data → Connections** ([Connections](/docs/connections)): add one there, browse its tables, and
+load one into a dataset from the table's row. Datasets offers the same pull:
 
-### Connect One of Your Services
-
-When the workspace runs a Postgres service (**Ship → Services**), the Connections card offers it
-under **Connect One of Your Services**. Press **Connect** beside a Ready service, or **Refresh** for
-one already connected. The workspace reaches it inside the cluster with the credential Lake already
-holds; you type no password, and none is shown. Other service kinds are not connectable yet and say
-so.
-
-`POST /v1/connect_service`
-
-```json
-{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "service_id": "<service id>"}
-```
-
-Add `"name"` to choose the connection's name; it defaults to the service's name. The MCP tool is
-`connect_service`.
-
-### Add a Connection to Another Database
-
-1. On the Connections card press **Add connection**.
-2. Fill in **Name** (letters, digits, `_` and `-`), **Type** (**Postgres** or **Snowflake**), the
-   host and port or the Snowflake account, warehouse and role, **Database**, **Schema**, **User**
-   and **Password or access token**.
-3. Press **Save connection**.
-
-Use a read-only account: only a single `SELECT` ever runs against it. The password is sent to the
-workspace once, which stores it and never returns it; Lake keeps no copy. Through the API this is
-`create_connection` inside `workspace_act`; `list_connections` inside `workspace_query` lists
-connections without their credentials.
-
-### Browse a Connection's Tables
-
-**Browse tables** on a connection's row lists its tables with their kind and columns, without
-pulling anything. Through the API it is `list_source_tables` inside `workspace_query`.
-
-### Pull a Table Into a Dataset
-
-1. Press **Load data** and choose **From a connection**.
-2. Choose the connection under **From**.
+1. Press **Load data** and choose **From a connection**. With no connection yet, the drawer links
+   to **Connections** to add one.
+2. Choose the connection under **From** (the workspace's existing connections).
 3. Write one read-only **Query**, for example `SELECT account_id, plan, seats FROM accounts`.
 4. Name the dataset under **Dataset name**.
 5. Optionally limit **At most this many rows** (a whole number).
@@ -171,11 +137,6 @@ pulling anything. Through the API it is `list_source_tables` inside `workspace_q
 
 The credential stays with the workspace: the pull names the saved connection, so the password does
 not travel again.
-
-### Remove a Connection
-
-**Remove** on a connection's row asks first, then removes it (`delete_connection` inside
-`workspace_act`). Datasets already pulled from it stay.
 
 ## Look at a Dataset
 
@@ -306,6 +267,7 @@ members hold `read` unless they were granted more ([Grants and Effective Access]
 - [Getting Started](/docs)
 - [Workspaces](/docs/workspaces)
 - [Drives](/docs/drives): keep files, and load a CSV from one
+- [Connections](/docs/connections): the databases a workspace reads, and pulling a table
 - [Services and Storage](/docs/services)
 - [AI Projects and Pipelines](/docs/design): train on a dataset
 - [Search](/docs/search)

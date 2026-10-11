@@ -77,11 +77,11 @@ and your workspace, not from the internet.
 
 ### Use a Postgres Service as a Data Source
 
-1. Open **Data → Datasets**.
+1. Open **Data → Connections** ([Connections](/docs/connections)).
 2. Under **Connect One of Your Services**, press **Connect** next to a Ready Postgres service (or
    **Refresh** to renew an existing connection). Nothing is typed: the workspace uses the credential
    Lake already holds.
-3. Pull tables from the new connection into datasets ([Datasets and Loading Data](/docs/load-data)).
+3. Open the new connection and load its tables into datasets ([Connections](/docs/connections)).
 
 - REST: `POST /v1/connect_service`:
 

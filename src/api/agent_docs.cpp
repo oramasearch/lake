@@ -359,8 +359,8 @@ constexpr std::string_view rules =
 constexpr std::string_view what_lake_does =
     "- **Data**: repositories (liquid version control with reviews, issues and releases), drives "
     "in three kinds (workspace files, a repository with history, or virtual folders of "
-    "shortcuts), datasets, transcripts with speech-to-text, and search across everything you can "
-    "open.\n"
+    "shortcuts), datasets, connections (the databases a workspace reads, on the Connections "
+    "page), transcripts with speech-to-text, and search across everything you can open.\n"
     "- **Design**: AI projects and their pipelines, Orama's AI solutions and your own.\n"
     "- **Train**: runs, experiments and their trials, agents, streams and models.\n"
     "- **Ship**: published models with traffic and monitoring, search indexes, apps, services and "
@@ -467,7 +467,22 @@ const std::vector<Flow>& flows() {
           {"create_service", "`kind: \"postgres\"`, a `name`; optional `instances`, `storage_gi`"},
           {"list_services", "poll until the service is `Ready`"},
           {"service_connection", "its endpoint and credentials (keep them secret)"},
-          {"connect_service", "make it a Train → Data connection of your workspace"}}},
+          {"connect_service", "make it a connection of your workspace (Data → Connections)"}}},
+        {"Read a database through a connection",
+         "A connection is a database the workspace reads (Postgres or Snowflake), listed on the "
+         "Lake Console's Data → Connections page; its credential is sealed in the workspace and "
+         "never returned.",
+         {{"workspace_act",
+           "`capability: \"create_connection\"`, `input: {name, connector: {type: \"postgres\", "
+           "host, port, user, database, token}}`"},
+          {"workspace_query", "`capability: \"list_connections\"`: each with its connector and "
+                              "`credential` state"},
+          {"workspace_query",
+           "`capability: \"list_source_tables\"`, `input: {connection, include_columns: true}`"},
+          {"workspace_act",
+           "`capability: \"create_dataset_from_query\"`, `input: {connection, query, "
+           "table_name}`: one read-only SELECT loaded into a dataset"},
+          {"workspace_act", "`capability: \"delete_connection\"`, `input: {name}`"}}},
         {"Create a volume",
          "A store is a bucket, filesystem, network filesystem or volume Lake provisions for your "
          "workspace; today a cluster volume.",
