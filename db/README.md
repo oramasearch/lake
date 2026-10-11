@@ -336,3 +336,13 @@ dimension and class) and `billing_invoice_lines`, so GPU time can carry a rate p
 only; usage stays in each workspace Zetta. Nothing is dropped; idempotent. The latest guard is
 `workload_resources_guard`; the operator must vendor this schema, select that guard and report the
 resources before rollout. See [schema.md](../docs/control-plane/schema.md#workload-resources-migration).
+
+Migration `0078_methodology_runs` (lake#655) adds `methodology_runs`, one row per run of a
+workspace's own methodology (lake writes it and notifies `lake_services`), and
+`methodology_run_status` (the Orama operator writes it: phase, message, exit code, the SHA-256 of
+the run's credential, when the sandbox pod started and finished), and the `methodology_run` kind of
+`workload_resources`. Ids, images, resources and phases only: parameters, data, metrics and the
+artifact stay in the workspace Zetta. Nothing is dropped; idempotent. The latest guard is
+`methodology_runs_guard`; the operator must vendor this schema, select that guard and run the
+pods (orama-operator#291) before rollout. See
+[schema.md](../docs/control-plane/schema.md#methodology-runs-migration).
