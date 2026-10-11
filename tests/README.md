@@ -465,6 +465,12 @@ bound, build records once), and `PostgresSync.PushAndPullUsePostgresControlPlane
 pull flushed into the repository's workspace, no metering table in PostgreSQL, and the flush on
 stop.
 
+Usage over time (lake#564): `test_usage.cpp` covers `UsageRecorder` (bounded, flushed, values added
+together dropped together, readings keeping their latest, deleted and refusing workspaces),
+`usage_over_time` across workspaces by hour, day and month and its refusals, limits, `record_model_usage`,
+the owner loop's `sample_usage` and the speech-to-text seconds and tokens of a transcript.
+`record_fixture.hpp`'s time series now answers a gauge's `last` reading per step.
+
 The audit split by subject (decision 52, lake#317): `test_workspace_records.cpp`'s
 `AuditEventsAboutAWorkspaceLiveInItsOwnChain` covers the `AuditRecorder` and the readers across two
 spaces with two workspaces each (a call writes nothing until the flush, control-plane calls,

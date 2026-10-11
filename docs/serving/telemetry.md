@@ -53,6 +53,12 @@ The exported metric families are:
   series, written by the owner loop every ten seconds ([below](#the-workspace-request-series),
   lake#384); `lake_request_series_model_calls_written_total` counts the `predict` calls written to
   the per-model series ([below](#the-per-model-prediction-series), lake#599)
+- `lake_usage_points_written_total`, `lake_usage_flush_errors_total`,
+  `lake_usage_dropped_total{reason}` (`bound`, `workspace_deleted`, `refused`) and the gauge
+  `lake_usage_pending`: usage on its way to each workspace's `lake_usage` and `lake_storage` series,
+  written by the owner loop every ten seconds; `lake_usage_samples_total` and
+  `lake_usage_sample_errors_total` count the store root owner's fifteen-minute samples and what each
+  could not read ([below](#the-workspace-usage-series), lake#564)
 - `lake_workspace_store_requests_total{kind,outcome}` and
   `lake_workspace_store_request_duration_seconds{kind}`: each request lake sends to a workspace
   Zetta's object routes for a switched workspace's repository store, one count per attempt
@@ -182,6 +188,31 @@ of a model's training data to compare against.
 
 **Change.** A new per-model measure is a new counter metric added in `add_model_call` and read in
 `model_traffic` (`src/api/workspace_capabilities.cpp`); never add a row's content as a label.
+
+### The workspace usage series
+
+Usage over time (lake#564) is kept in each workspace Zetta beside `lake_requests`, in two series of
+its own with an hour's resolution and 400 days' retention: the counter `lake_usage` (labelled
+`dimension` and, by dimension, `kind`, `agent`, `launch_id`, `model`, `object_id`) and the gauge
+`lake_storage` (labelled `kind`). Every capability call counted in `lake_requests` is also one
+`calls` increment in `lake_usage` (`kind` `mcp` for `/mcp` and `/w/:workspace_id/mcp`, else `api`),
+through the bounded `UsageRecorder` (`include/lake/api/usage_recorder.hpp`), never on the request's
+critical path: the request adds to memory and the owner loop writes. `lake_requests` keeps its
+minute resolution and 30 days for traffic; `lake_usage` keeps the hourly totals for usage. The
+store root's owner also samples each workspace's stored bytes and its services' instance and volume
+time every fifteen minutes. What each dimension means, how it is read and what is not measured are
+in [metering](../api/metering.md#usage-over-time).
+
+Read it with the workspace's `query_metric`, for example
+`{"metric":"lake_usage","from_ms":…,"to_ms":…,"step_ms":3600000,"group_by":["dimension","kind"]}`,
+or across workspaces with `usage_over_time`.
+
+**Verify.** `UsageRecorder.*` and `UsageSample.*` (`tests/test_usage.cpp`) and
+`HttpServer.RequestLogsNameRoutesAndEachWorkspaceGetsItsOwnRequestSeries`, which counts a real
+server's calls into `lake_usage` and writes them only at stop.
+
+**Change.** A new dimension is a row in `usage_dimensions()` and an increment where lake sees it;
+keep its labels bounded, as for `lake_requests`.
 
 ## Why
 

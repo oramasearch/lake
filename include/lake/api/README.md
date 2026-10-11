@@ -62,7 +62,13 @@ the bounded queue of workspace audit events on their way to each workspace's cha
 `ApiContext::audit_workspace_id` carries the workspace a call acted on, and
 `ServerOptions::audit_flush_interval` (one second) and `audit_max_pending` (65,536) configure it.
 `audit_routing.hpp`'s `acted_workspace` is the one lookup of the workspace a call acted on, shared
-by the audit route and the request series. `request_recorder.hpp` declares `RequestRecorder`, the
+by the audit route and the request series. `usage_recorder.hpp` declares `UsageRecorder`, the bounded
+per-workspace `lake_usage` counter and `lake_storage` readings (lake#564, `ApiContext::usage_recorder`,
+`ServerOptions::usage_flush_interval`, `usage_max_pending`, `usage_sample_interval`), and
+`usage_dimensions()`, each dimension's unit; `capabilities.hpp` declares `sample_usage` and
+`queue_repository_builds`, and `images.hpp`'s `ImageBytes` splits image bytes by workspace.
+`registry.hpp`'s `Transcription` carries the tokens a speech-to-text model reports. See
+[metering](../../../docs/api/metering.md#usage-over-time). `request_recorder.hpp` declares `RequestRecorder`, the
 bounded per-workspace `lake_requests` counts on their way to each workspace Zetta's time series
 (decision 54 S9, lake#384); `registry.hpp`'s `RequestAttribution` (`ApiContext::request_attribution`)
 is what one HTTP request's capability calls resolved: its outermost capability, its workspace and

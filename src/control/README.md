@@ -147,7 +147,9 @@ Both stores refuse `create_repository` without a live workspace of the repositor
 filter `list_repositories` by an optional workspace; `transfer_repository` is gone from the store
 interface because the routing trigger keeps a repository's space fixed.
 Repository usage lives in workspace Zettas (lake#348, lake#349, `metering.cpp`). Neither store
-writes or reads metering rows any more; `0070` drops the retired tables.
+writes or reads metering rows any more; `0070` drops the retired tables. Both stores keep an
+account's usage limits (`customer_usage_limits`, migration `0072`, lake#564); a limit of 0 deletes
+the row.
 `application_credential_records.cpp` keeps an application's signing keys and webhooks in its
 workspace (lake#352, lake#355). The stores no longer write or read `auth_app_signing_keys` or
 `auth_app_webhooks`: they envelope and open the credentials with the keystore

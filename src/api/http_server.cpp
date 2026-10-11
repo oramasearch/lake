@@ -5,12 +5,13 @@
 // OpenAPI document and MCP (POST /mcp). Every capability call goes through
 // Registry::call so authorization, validation and audit remain centralized.
 
+#include "forge_records_api.hpp"
+#include "http_connections.hpp"
 #include "lake/api/audit_recorder.hpp"
 #include "lake/api/metering_recorder.hpp"
 #include "lake/api/request_recorder.hpp"
 #include "lake/api/server.hpp"
-#include "forge_records_api.hpp"
-#include "http_connections.hpp"
+#include "lake/api/usage_recorder.hpp"
 #include "lake/thread.hpp"
 
 #include "lake/control/agents.hpp"
@@ -6980,6 +6981,12 @@ struct ApiServer::Impl {
     std::unique_ptr<RequestRecorder> request_recorder;
     std::chrono::steady_clock::time_point next_request_series_flush{};
     RequestRecorder::Totals reported_request_series;
+    // Usage over time on its way to each workspace Zetta (lake#564); null without workspaces.
+    std::unique_ptr<UsageRecorder> usage_recorder;
+    std::chrono::steady_clock::time_point next_usage_flush{};
+    std::chrono::steady_clock::time_point next_usage_sample{};
+    std::chrono::steady_clock::time_point last_usage_sample{};
+    UsageRecorder::Totals reported_usage;
     mutable LiquidCustomerStores sync_store;
     ArtifactRegistry artifacts;
     // The instance registry's tenant images, for the workspace deletion cascade (lake#514).
@@ -8081,6 +8088,13 @@ struct ApiServer::Impl {
             request_recorder->add(
                 resolved.workspace_id, std::string(route_pattern), capability, status_code);
         }
+        // The same attribution counts the workspace's API and MCP calls over time (lake#564).
+        if (usage_recorder && !resolved.workspace_id.empty() && !capability.empty()) {
+            usage_recorder->add(resolved.workspace_id,
+                                "calls",
+                                1,
+                                {{"kind", route_pattern.ends_with("/mcp") ? "mcp" : "api"}});
+        }
 
         // Route patterns and identifiers only, never the raw path (decision 54 S9).
         RequestLogEntry entry{.ts = log_timestamp(),
@@ -8392,6 +8406,7 @@ struct ApiServer::Impl {
         ctx.metering_recorder = metering_recorder.get();
         ctx.audit_recorder = audit_recorder.get();
         ctx.request_recorder = request_recorder.get();
+        ctx.usage_recorder = usage_recorder.get();
         if (artifacts.available()) {
             ctx.workspace_content = &workspace_content;
         }
@@ -12047,6 +12062,78 @@ struct ApiServer::Impl {
             "lake_request_series_pending", {}, static_cast<double>(request_recorder->pending()));
     }
 
+    // Writes the usage counted since the last flush to each workspace Zetta's `lake_usage` and
+    // `lake_storage` series, off the request path (lake#564), and reports what was written, kept
+    // or dropped.
+    void flush_usage() {
+        if (!usage_recorder) {
+            return;
+        }
+        static_cast<void>(liquid::runtime::block_on(usage_recorder->flush()));
+        const UsageRecorder::Totals now = usage_recorder->totals();
+        const auto report = [this](const char* name,
+                                   const telemetry::Labels& labels,
+                                   std::uint64_t current,
+                                   std::uint64_t& reported) {
+            if (current > reported) {
+                metrics.increment_counter(name, labels, static_cast<double>(current - reported));
+                reported = current;
+            }
+        };
+        report("lake_usage_points_written_total", {}, now.points, reported_usage.points);
+        report("lake_usage_flush_errors_total", {}, now.flush_errors, reported_usage.flush_errors);
+        report("lake_usage_dropped_total",
+               {{"reason", "bound"}},
+               now.dropped_bound,
+               reported_usage.dropped_bound);
+        report("lake_usage_dropped_total",
+               {{"reason", "workspace_deleted"}},
+               now.dropped_workspace_deleted,
+               reported_usage.dropped_workspace_deleted);
+        report("lake_usage_dropped_total",
+               {{"reason", "refused"}},
+               now.dropped_refused,
+               reported_usage.dropped_refused);
+        metrics.set_gauge("lake_usage_pending", {}, static_cast<double>(usage_recorder->pending()));
+    }
+
+    // The store root's owner samples every workspace's stored bytes and the instance and volume
+    // time of its services, stores and apps since the last sample (lake#564). Runs on the
+    // maintenance thread: it reads repository stores and workspace Zettas.
+    void sample_usage() {
+        if (!usage_recorder) {
+            return;
+        }
+        const auto now = std::chrono::steady_clock::now();
+        const auto interval = std::max<std::chrono::steady_clock::duration>(
+            options.usage_sample_interval, std::chrono::seconds(1));
+        // The time since the last sample, at most two intervals: a gap while no lake owned the
+        // store root is not counted as if nothing had changed.
+        auto elapsed = last_usage_sample == std::chrono::steady_clock::time_point{}
+                           ? interval
+                           : std::min(now - last_usage_sample, 2 * interval);
+        last_usage_sample = now;
+        ApiContext context;
+        context.store = options.store.get();
+        context.workspaces = options.workspaces.get();
+        context.sync_store = &sync_store;
+        context.instance_kek = options.instance_kek;
+        context.metering_recorder = metering_recorder.get();
+        context.usage_recorder = usage_recorder.get();
+        const auto sampled = liquid::runtime::block_on(
+            api::sample_usage(context, std::chrono::duration_cast<std::chrono::seconds>(elapsed)));
+        if (!sampled) {
+            metrics.increment_counter("lake_usage_sample_errors_total");
+            return;
+        }
+        metrics.increment_counter("lake_usage_samples_total");
+        if (!sampled->unmeasured.empty()) {
+            metrics.increment_counter("lake_usage_sample_errors_total",
+                                      {},
+                                      static_cast<double>(sampled->unmeasured.size()));
+        }
+    }
+
     void log_store_owner(nlohmann::json event) const {
         event["event"] = "store_owner";
         event["node"] = options.node_name;
@@ -13658,6 +13745,12 @@ bool ApiServer::start() {
             impl.options.request_series_max_pending);
         impl.next_request_series_flush =
             std::chrono::steady_clock::now() + impl.options.request_series_flush_interval;
+        impl.usage_recorder = std::make_unique<UsageRecorder>(impl.options.store.get(),
+                                                              impl.options.workspaces.get(),
+                                                              impl.options.usage_max_pending);
+        impl.next_usage_flush =
+            std::chrono::steady_clock::now() + impl.options.usage_flush_interval;
+        impl.next_usage_sample = std::chrono::steady_clock::now();
     }
     impl.server->start();
     impl.io_thread = lake::Thread([&impl] { impl.io_context.run(); });
@@ -13745,6 +13838,7 @@ void ApiServer::stop() {
     impl.flush_metering();
     impl.flush_audit();
     impl.flush_request_series();
+    impl.flush_usage();
     // In-flight requests have finished: close every store (releasing liquid's per-store owner
     // locks), then the root lock, so the next owner opens a store nobody is writing.
     // A maintenance job in progress finishes (its Zetta calls are bounded); queued ones are dropped.
@@ -13849,6 +13943,22 @@ void ApiServer::drain() {
          impl_->request_recorder->pending() * 2 >= impl_->options.request_series_max_pending)) {
         impl_->next_request_series_flush = now + impl_->options.request_series_flush_interval;
         impl_->flush_request_series();
+    }
+    if (impl_->usage_recorder &&
+        (now >= impl_->next_usage_flush ||
+         impl_->usage_recorder->pending() * 2 >= impl_->options.usage_max_pending)) {
+        impl_->next_usage_flush = now + impl_->options.usage_flush_interval;
+        impl_->flush_usage();
+    }
+    // Stored bytes and service time are sampled by the store root's owner only, so several lakes
+    // never count one service twice (lake#564).
+    if (impl_->usage_recorder &&
+        (impl_->options.store_root.empty() ||
+         impl_->store_root_state.load() == StoreRootState::open) &&
+        now >= impl_->next_usage_sample) {
+        impl_->next_usage_sample = now + impl_->options.usage_sample_interval;
+        Impl* impl = impl_.get();
+        impl_->schedule_maintenance("usage sample", [impl] { impl->sample_usage(); });
     }
     // The registry and search segments live under the store root: only its owner removes them.
     if (impl_->options.store &&

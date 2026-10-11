@@ -201,6 +201,16 @@ struct ServerOptions {
     // lake#384). Zero writes on every drain() tick.
     std::chrono::milliseconds request_series_flush_interval{std::chrono::seconds(10)};
     std::size_t request_series_max_pending = 16384;
+    // Usage over time (lake#564, docs/api/metering.md#usage-over-time): calls, speech-to-text
+    // seconds and model tokens are held in memory and written to each workspace Zetta's
+    // `lake_usage` series by the owner loop at this interval, at once when half of
+    // `usage_max_pending` is held, and once more on stop. Every `usage_sample_interval` the store
+    // root's owner samples each workspace's stored bytes and the instance and volume time of its
+    // services, stores and apps (only the owner, so one lake counts them once). Zero runs on every
+    // drain() tick.
+    std::chrono::milliseconds usage_flush_interval{std::chrono::seconds(10)};
+    std::size_t usage_max_pending = 8192;
+    std::chrono::milliseconds usage_sample_interval{std::chrono::minutes(15)};
     // Dynamic-secret leases that are due (expired, or revoked and not yet settled) are settled in
     // their workspaces by the owner loop at this interval (docs/api/secrets.md, lake#362). It
     // reads the control store's due index, never every workspace. Zero settles on every drain().

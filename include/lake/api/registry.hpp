@@ -121,6 +121,10 @@ struct Transcription {
     std::string text;
     std::optional<double> seconds; // the audio's length, when the provider reports it
     std::string model;
+    // The tokens the provider counted, when it reports usage in tokens (gpt-4o-transcribe) rather
+    // than seconds (lake#564).
+    std::optional<std::uint64_t> input_tokens;
+    std::optional<std::uint64_t> output_tokens;
 };
 // Turns audio into text. The HTTP server injects one over its outbound client when
 // LAKE_OPENAI_API_KEY is set; tests inject a fake. Empty: speech-to-text is not configured.
@@ -235,6 +239,7 @@ void forget_execution_context(const void* context);
 class MeteringRecorder;
 class AuditRecorder;
 class RequestRecorder;
+class UsageRecorder;
 
 struct WorkspaceCallTiming {
     std::atomic<std::size_t> count{0};
@@ -411,6 +416,10 @@ struct ApiContext {
     // The per-workspace request and per-model prediction series (docs/serving/telemetry.md):
     // `predict` counts each call of a model here (lake#599). Null: nothing is counted.
     RequestRecorder* request_recorder = nullptr;
+    // Usage over time in each workspace Zetta (lake#564, docs/api/metering.md#usage-over-time):
+    // calls, speech-to-text seconds and model tokens are added here, off the request path. Null:
+    // nothing is recorded.
+    UsageRecorder* usage_recorder = nullptr;
 };
 
 using CapabilityHandler =

@@ -23,7 +23,10 @@ created_by_name}`:
 - `source` is `recording`, `upload` or `text`, as the person chose.
 - `seconds` is the audio's length when the speech-to-text model reports it, otherwise `null`.
   `gpt-4o-transcribe` reports usage in tokens, so its transcripts have `null`; `whisper-1` reports
-  seconds.
+  seconds. Either is the workspace's usage (lake#564): the seconds as `speech`, the tokens as
+  `model_tokens` of that model, counted off the request path when the audio is heard
+  ([metering](metering.md#dimensions)). Dictation through `transcribe` names no workspace and is not
+  counted ([lake#613](https://github.com/oramasearch/lake/issues/613)).
 - `language` is the ISO-639-1 code the person gave, otherwise `null`.
 - `recorded_at` is when it was said, as the person gave it (an RFC 3339 date or instant), otherwise
   `null`.

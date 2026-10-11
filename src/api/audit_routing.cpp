@@ -166,6 +166,8 @@ constexpr std::array central = std::to_array<std::string_view>({
     "set_customer_credential_policy",
     "set_member_role",
     "set_storage_quota",
+    // Usage limits are account configuration beside the storage quota (lake#564).
+    "set_usage_limit",
     "set_workspace_storage",
     "sign_in_passkey",
     "sign_in_password",
@@ -194,6 +196,9 @@ constexpr std::array central = std::to_array<std::string_view>({
     "update_workspace",
     "upsert_scim_group",
     "upsert_scim_user",
+    // A reading of usage across an account's workspaces (lake#564).
+    "usage_limits",
+    "usage_over_time",
     "verify_agent_session_drip",
     "verify_audit",
     "verify_mfa",
@@ -381,6 +386,7 @@ constexpr std::array workspace = std::to_array<std::string_view>({
     "receive_app_events",
     "receive_build_events",
     "recent_drive_entries",
+    "record_model_usage",
     "refs",
     "register_application",
     "reindex_artifacts",

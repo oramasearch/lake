@@ -5,9 +5,12 @@
 #include "lake/api/registry.hpp"
 #include "lake/control/store.hpp"
 #include "lake/control/zetta_control.hpp"
+#include <chrono>
+#include <expected>
 #include <map>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include <liquid/runtime.hpp>
 
@@ -23,6 +26,32 @@ void register_export_capabilities(Registry& registry);
 void register_github_import_capabilities(Registry& registry);
 void register_pki_capabilities(Registry& registry);
 void register_metering_capabilities(Registry& registry);
+// Usage over time (lake#564, docs/api/metering.md#usage-over-time): usage_over_time,
+// usage_limits, set_usage_limit and record_model_usage.
+void register_usage_capabilities(Registry& registry);
+// Queues every build result of the space's repositories that finished in or after the UTC hour
+// `since_hour` ("YYYY-MM-DDTHH:00:00Z") for its repository's workspace records, as a
+// metering_usage read does (docs/api/metering.md#build-records); a result already recorded is
+// written once only. Answers how many were queued.
+std::expected<std::size_t, std::string> queue_repository_builds(ApiContext& context,
+                                                                const std::string& customer_id,
+                                                                std::string_view since_hour);
+// What one usage sample read (lake#564): workspaces sampled, readings and increments added, and a
+// sentence for each workspace or measure it could not read.
+struct UsageSampleReport {
+    std::size_t workspaces = 0;
+    std::size_t readings = 0;
+    std::size_t increments = 0;
+    std::vector<std::string> unmeasured;
+};
+// The owner loop's usage sample (docs/api/metering.md#what-the-sampler-reads): each live
+// workspace's stored bytes by kind, and `elapsed` of instance and volume time for each running
+// service, store and app, added to `context.usage_recorder`; it also queues new repository build
+// results for their workspace records. Never on a request path.
+liquid::runtime::task<UsageSampleReport>
+sample_usage(ApiContext& context,
+             std::chrono::seconds elapsed,
+             std::chrono::system_clock::time_point at = std::chrono::system_clock::now());
 void register_drive_capabilities(Registry& registry);
 void register_model_capabilities(Registry& registry);
 void register_transparency_capabilities(Registry& registry);

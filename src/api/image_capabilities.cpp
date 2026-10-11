@@ -190,6 +190,7 @@ liquid::runtime::task<ImageBytes> tenant_image_bytes(ApiContext& context,
     // digest one workspace stores and another still reads from the instance registry is in both.
     std::map<std::string, std::set<std::string>> stored_in;
     std::map<std::string, std::uint64_t> stored_sizes;
+    std::map<std::string, std::map<std::string, std::uint64_t>> workspace_sizes;
     for (const control::OciRepositoryRoute& route : *routes) {
         if (failed.contains(route.workspace_id)) {
             continue;
@@ -225,11 +226,16 @@ liquid::runtime::task<ImageBytes> tenant_image_bytes(ApiContext& context,
             continue;
         }
         const std::set<std::string>& stored = stored_in[route.workspace_id];
+        std::map<std::string, std::uint64_t>& mine = workspace_sizes[route.workspace_id];
         for (const control::OciTag& tag : *tags) {
             sizes[tag.digest] = tag.manifest_size;
+            mine[tag.digest] = tag.manifest_size;
             for (const control::OciReference& reference : tag.references) {
                 (stored.contains(reference.digest) ? stored_sizes : sizes)[reference.digest] =
                     reference.size;
+                if (!stored.contains(reference.digest)) {
+                    mine[reference.digest] = reference.size;
+                }
             }
         }
     }
@@ -239,6 +245,17 @@ liquid::runtime::task<ImageBytes> tenant_image_bytes(ApiContext& context,
     for (const auto& [digest, size] : stored_sizes) {
         result.stored_bytes += size;
     }
+    for (const auto& [workspace_id, digests] : workspace_sizes) {
+        if (failed.contains(workspace_id)) {
+            continue;
+        }
+        std::uint64_t total = 0;
+        for (const auto& [digest, size] : digests) {
+            total += size;
+        }
+        result.workspace_bytes[workspace_id] = total;
+    }
+    result.unmeasured_workspaces = std::move(failed);
     co_return result;
 }
 

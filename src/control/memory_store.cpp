@@ -2096,6 +2096,44 @@ Result<std::uint64_t> InMemoryStore::set_storage_quota(const std::string& custom
     return quota_bytes;
 }
 
+Result<std::vector<UsageLimit>> InMemoryStore::usage_limits(const std::string& customer_id) {
+    std::lock_guard lock(mutex_);
+    if (std::ranges::none_of(
+            customers_, [&](const Customer& customer) { return customer.id == customer_id; })) {
+        return std::unexpected(StoreError{"not_found", "no customer " + customer_id});
+    }
+    std::vector<UsageLimit> rows;
+    for (const auto& [key, limit] : usage_limits_) {
+        if (key.first == customer_id) {
+            rows.push_back(limit);
+        }
+    }
+    return rows;
+}
+
+Result<UsageLimit> InMemoryStore::set_usage_limit(const UsageLimit& limit) {
+    std::lock_guard lock(mutex_);
+    if (std::ranges::none_of(customers_, [&](const Customer& customer) {
+            return customer.id == limit.customer_id;
+        })) {
+        return std::unexpected(StoreError{"not_found", "no customer " + limit.customer_id});
+    }
+    if (limit.dimension.empty() || limit.warn_percent < 1 || limit.warn_percent > 100) {
+        return std::unexpected(StoreError{"invalid_input",
+                                          "a dimension and a warning percentage "
+                                          "from 1 to 100 are required"});
+    }
+    const auto key = std::make_pair(limit.customer_id, limit.dimension);
+    if (limit.limit == 0) {
+        usage_limits_.erase(key);
+        return limit;
+    }
+    UsageLimit stored = limit;
+    stored.updated_at = now_iso8601();
+    usage_limits_[key] = stored;
+    return stored;
+}
+
 Result<User> InMemoryStore::get_user(const std::string& id) {
     std::lock_guard lock(mutex_);
     for (const auto& u : users_)

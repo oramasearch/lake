@@ -543,6 +543,18 @@ TEST(SchemaConformance, EveryToolAndRequiredOutputUsesHttpContract) {
     http.call("set_storage_quota", {{"customer_id", customer.id}, {"quota_bytes", 0}});
     http.call("metering_usage", {{"customer_id", customer.id}});
     http.read("metering_usage", "?customer_id=" + customer.id);
+    // Usage over time (lake#564): a reading, the limits and setting one.
+    http.call("set_usage_limit",
+              {{"customer_id", customer.id}, {"dimension", "calls"}, {"limit", 1000}});
+    http.call("usage_limits", {{"customer_id", customer.id}});
+    http.call("usage_over_time",
+              {{"customer_id", customer.id},
+               {"from", "2026-10-01T00:00:00Z"},
+               {"to", "2026-10-03T00:00:00Z"},
+               {"granularity", "day"}});
+    http.read("usage_over_time",
+              "?customer_id=" + customer.id +
+                  "&from=2026-10-01T00:00:00Z&to=2026-10-02T00:00:00Z&granularity=hour");
     http.call("list_conflicts", {{"id", repository.id}});
     http.read("list_conflicts", "?id=" + repository.id);
     http.call("resolve_conflict",
