@@ -12,6 +12,7 @@ import { entityCrumb, useTrail } from "@/lib/trail";
 import { Banner, Button, Card, Chip, DataTable, Empty, ErrorBlock, Field, KeyValue, Mono, Skeleton, Split, StateTabs, Status } from "@/lib/ui";
 import { AGENT_SKILLS, engagement, modelLabel, runsWhere } from "./agents";
 import { WorkspaceFrame, qs, text, timeAgo, useAsync, useSpaceRead, useWorkspace, useWq, useWsPath, wa, wq } from "./workspace";
+import { UsageThisMonth } from "../usage/UsageThisMonth";
 
 export default function AgentPage() {
   const [params] = useSearchParams();
@@ -70,6 +71,7 @@ export default function AgentPage() {
 type Tab = "overview" | "runs" | "schedules" | "training";
 
 function AgentContent({ agent }: { agent: Row }) {
+  const scope = useWorkspace();
   const id = text(agent, "id");
   const runtime = text(agent, "runtime");
   const native = !runtime || runtime === "native";
@@ -125,6 +127,12 @@ function AgentContent({ agent }: { agent: Row }) {
                 <p className="muted m-0 text-[12px]">Deleting the agent also removes its schedules.</p>
               </div>
             </Card>
+            <UsageThisMonth
+              customerId={scope.customerId}
+              workspaceId={scope.workspaceId}
+              match={[{ dimension: "model_tokens", breakdown: "by_agent", keys: [text(agent, "name"), id], label: "Model tokens" }]}
+              note="Counted when the agent reports the tokens it spends."
+            />
           </>
         }
       >

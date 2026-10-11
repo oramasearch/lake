@@ -15,6 +15,7 @@ import { Button, Card, type Column, DataTable, Empty, ErrorBlock, KeyValue, Page
 import { AppPhase, AppUrl, decimal, formValues } from "./AppsPage";
 import { PageError, pause, qs, QueryTabs, storedNumber, storeNumber, streamHref, Terminal, useQueryTab, useRunner, useWorkspaceLink } from "./shared";
 import { stopsPolling } from "@/lib/errors";
+import { UsageThisMonth } from "../usage/UsageThisMonth";
 
 type AppEvent = Row & { sequence?: number; type?: string; message?: string; status?: Row };
 
@@ -242,6 +243,12 @@ export default function AppPage() {
               </div>
             </Card>
 
+            <UsageThisMonth
+              customerId={customerId}
+              workspaceId={workspaceId ?? ""}
+              match={[{ dimension: "instances", breakdown: "by_object", keys: [appId], label: "Instance time" }]}
+              note="Replicas times the time each ran ready."
+            />
             <Card label="Danger zone" title="Delete App" tone="exception">
               <form className="row-form flex flex-col gap-3" onSubmit={submit("delete", (form) => call("delete", "delete_app", { confirm: form.confirm ?? "" }, `Deletion of ${name} requested`))}>
                 <p className="m-0 text-[13px] text-ink-2">

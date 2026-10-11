@@ -626,6 +626,14 @@ public:
     control::Result<control::ManagedStore> withdraw_store(const std::string& id) override {
         return call("withdraw_store", [&] { return store_->withdraw_store(id); });
     }
+    control::Result<std::vector<control::UsageLimit>>
+    usage_limits(const std::string& customer_id) override {
+        return call("usage_limits", [&] { return store_->usage_limits(customer_id); });
+    }
+    control::Result<control::UsageLimit>
+    set_usage_limit(const control::UsageLimit& limit) override {
+        return call("set_usage_limit", [&] { return store_->set_usage_limit(limit); });
+    }
     control::Result<std::uint64_t> set_storage_quota(const std::string& customer_id,
                                                      std::uint64_t quota_bytes) override {
         return call("set_storage_quota",

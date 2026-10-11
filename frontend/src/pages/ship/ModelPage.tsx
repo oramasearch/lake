@@ -21,6 +21,7 @@ import { WorkspaceFrame, cellText, qs, text, useSpaceRead, useWorkspace, useWsPa
 import { errorRate, featuresOf, filledSteps, groupOf, parseRows, predictCurl, predictKeys, sampleRow, trafficOf, versionNumber, type ModelGroup } from "../train/models";
 import { SourceText, VersionChip, useModelGroups, useModelLinks } from "../train/modelParts";
 import { CopyMono, useOrigin } from "./parts";
+import { UsageThisMonth } from "../usage/UsageThisMonth";
 
 type View = "inference" | "access" | "destinations" | "monitoring";
 const VIEWS: View[] = ["inference", "access", "destinations", "monitoring"];
@@ -131,6 +132,11 @@ function Side({ group, version }: { group: ModelGroup; version: Row }) {
   };
   return (
     <>
+      <UsageThisMonth
+        customerId={scope.customerId}
+        workspaceId={scope.workspaceId}
+        match={[{ dimension: "predictions", breakdown: "by_object", keys: [id], label: "Predictions answered" }]}
+      />
       <Card label="Serving" title={on ? `v${n} answers outside calls` : `v${n} is not published`}>
         <div className="space-y-2">
           {on ? (

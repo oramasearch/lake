@@ -1,0 +1,20 @@
+/* Usage (lake#564): the stacked uPlot chart in lake's tokens, as Train → Experiments styles its
+ * charts. Scoped to `.usage-chart`. */
+.usage-chart .uplot {
+  font-family: var(--lake-font-sans);
+  color: var(--lake-text-primary);
+}
+
+.usage-chart .u-legend {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: start;
+  gap: 0 var(--lake-space-2);
+  color: var(--lake-text-primary);
+  font-size: 12px;
+}
+
+.usage-chart .u-cursor-x,
+.usage-chart .u-cursor-y {
+  border-color: var(--lake-text-tertiary);
+}

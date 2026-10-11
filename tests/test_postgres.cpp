@@ -1039,6 +1039,49 @@ TEST(PostgresSecrets, LeaseRoutesAreAContentFreeDueIndex) {
 
 } // namespace
 
+TEST(PostgresUsageLimits, OneLimitPerDimensionAndZeroRemovesIt) {
+    const char* uri = lake::test::postgres_uri();
+    if (uri == nullptr || std::string(uri).empty()) {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not set";
+    }
+    auto store = lake::control::make_postgres_store(
+        uri, "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff");
+    ASSERT_TRUE(store->ping()) << store->ping().error().message;
+    const std::string suffix = lake::control::new_uuid_v4().substr(0, 8);
+    const auto user = store->create_user(
+        {"taap:1:ed25519:lim-" + suffix, "lim-" + suffix + "@example.com", "Limits"});
+    ASSERT_TRUE(user) << user.error().message;
+    const auto customer = store->create_customer({"individual", user->id, "", "lim-" + suffix});
+    ASSERT_TRUE(customer) << customer.error().message;
+
+    // Migration 0072: the table and its guard.
+    {
+        pqxx::connection connection(uri);
+        pqxx::work tx(connection);
+        EXPECT_FALSE(tx.exec("SELECT to_regclass('customer_usage_limits')")[0][0].is_null());
+        EXPECT_FALSE(tx.exec("SELECT to_regclass('usage_limits_guard')")[0][0].is_null());
+    }
+    const auto none = store->usage_limits(customer->id);
+    ASSERT_TRUE(none) << none.error().message;
+    EXPECT_TRUE(none->empty());
+    ASSERT_TRUE(store->set_usage_limit({customer->id, "calls", 1000, 80, {}}));
+    const auto replaced = store->set_usage_limit({customer->id, "calls", 5000, 90, {}});
+    ASSERT_TRUE(replaced) << replaced.error().message;
+    EXPECT_FALSE(replaced->updated_at.empty());
+    ASSERT_TRUE(store->set_usage_limit({customer->id, "storage", 4096, 75, {}}));
+    const auto both = store->usage_limits(customer->id);
+    ASSERT_TRUE(both);
+    ASSERT_EQ(both->size(), 2U);
+    EXPECT_EQ((*both)[0].dimension, "calls");
+    EXPECT_EQ((*both)[0].limit, 5000U);
+    EXPECT_EQ((*both)[0].warn_percent, 90);
+    ASSERT_TRUE(store->set_usage_limit({customer->id, "calls", 0, 80, {}}));
+    EXPECT_EQ(store->usage_limits(customer->id)->size(), 1U);
+    EXPECT_EQ(store->set_usage_limit({customer->id, "calls", 10, 0, {}}).error().code,
+              "invalid_input");
+    EXPECT_EQ(store->usage_limits(lake::control::new_uuid_v4()).error().code, "not_found");
+}
+
 TEST(PostgresServices, CreateListAndWithdrawFollowTheContract) {
     const char* uri = lake::test::postgres_uri();
     if (uri == nullptr || std::string(uri).empty()) {

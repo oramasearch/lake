@@ -274,6 +274,8 @@ add_library(lake-core STATIC
   src/api/metering_recorder.cpp
   src/api/audit_recorder.cpp
   src/api/request_recorder.cpp
+  src/api/usage_recorder.cpp
+  src/api/usage_capabilities.cpp
   src/api/audit_routing.cpp
   src/api/audit_logs.cpp
   src/api/drive.cpp

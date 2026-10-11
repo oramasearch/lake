@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <map>
 #include <optional>
 #include <string>
@@ -12,6 +13,7 @@
 
 #include "lake/api/capabilities.hpp"
 #include "lake/api/transcription.hpp"
+#include "lake/api/usage_recorder.hpp"
 #include "lake/control/store.hpp"
 #include "lake/control/transcripts.hpp"
 #include "workspace_records_api.hpp"
@@ -373,6 +375,24 @@ liquid::runtime::task<ApiResult> create_transcript(const json& input, ApiContext
         }
         transcript.text = trimmed(std::move(done->text));
         transcript.seconds = done->seconds;
+        // The audio was heard, whatever happens to the transcript: its seconds are the
+        // workspace's speech-to-text usage (lake#564), counted off the request path.
+        if (context.usage_recorder && done->seconds && *done->seconds > 0) {
+            context.usage_recorder->add(workspace_id,
+                                        "speech",
+                                        static_cast<std::uint64_t>(std::ceil(*done->seconds)),
+                                        {{"kind", "transcript"}});
+        }
+        // A model that reports tokens instead (gpt-4o-transcribe): its tokens, by model.
+        if (context.usage_recorder && (done->input_tokens || done->output_tokens)) {
+            context.usage_recorder->add_together(workspace_id,
+                                                 {{"model_tokens",
+                                                   done->input_tokens.value_or(0),
+                                                   {{"kind", "input"}, {"model", done->model}}},
+                                                  {"model_tokens",
+                                                   done->output_tokens.value_or(0),
+                                                   {{"kind", "output"}, {"model", done->model}}}});
+        }
         if (transcript.text.empty()) {
             co_return ApiResult::failure(
                 "invalid_input", "no speech was heard in the audio", "/audio_base64");

@@ -131,6 +131,9 @@ export default function SecretMountsPage() {
   );
 }
 
+/** The Owner select's value for "the account that owns the workspace" (no organization). */
+const ACCOUNT_OWNER = "account";
+
 /** New Mount: one workspace, chosen here and never changed, and its owner: the account that owns
  * the workspace (the default) or an organization the person administers inside that space. */
 function NewMount({ workspaceId: initialWorkspace, organizationId: initialOrganization, onClose }: { workspaceId: string; organizationId: string; onClose: () => void }) {
@@ -221,9 +224,11 @@ function NewMount({ workspaceId: initialWorkspace, organizationId: initialOrgani
           help="Who administers the mount and grants access to it: the account that owns the workspace, or an organization you administer in that account's space."
           error={fieldError(error, "organization_id") ?? fieldError(error, "customer_id")}
         >
-          <select value={chosen} onChange={(e) => setOwnerChoice(e.target.value)} disabled={!workspace}>
+          {/* The account's option needs a non-empty value: a required <select> whose value is "" is
+              invalid, and the browser would refuse to submit (lake#619). */}
+          <select value={chosen || ACCOUNT_OWNER} onChange={(e) => setOwnerChoice(e.target.value === ACCOUNT_OWNER ? "" : e.target.value)} disabled={!workspace}>
             {options.map((o) => (
-              <option key={o.organizationId || "account"} value={o.organizationId}>
+              <option key={o.organizationId || ACCOUNT_OWNER} value={o.organizationId || ACCOUNT_OWNER}>
                 {o.label}
               </option>
             ))}

@@ -301,6 +301,12 @@ must vendor this schema, drop the four `CREATE TABLE IF NOT EXISTS secrets_*` en
 Migration `0071_secret_mount_owners` (lake#561) drops `NOT NULL` from
 `secret_mount_routes.organization_id`: a secret mount created without an organization belongs to
 the account that owns its workspace, and its route stores NULL there. Nothing else changes and
-nothing is dropped; idempotent. The latest guard is `secret_mount_owners_guard`; the operator must
-vendor this schema and select that guard before rollout. See
+nothing is dropped; idempotent. Its guard is `secret_mount_owners_guard`. See
 [schema.md](../docs/control-plane/schema.md#secret-mount-owners-migration).
+
+Migration `0072_usage_limits` (lake#564) adds `customer_usage_limits`: an account's limit on one
+dimension of usage (customer, dimension, limit in the dimension's unit, warning percentage), the
+content-free configuration `usage_limits` reads and `set_usage_limit` writes. The usage it is
+compared with stays in each workspace Zetta; no price, plan or bill is stored. Nothing is dropped;
+idempotent. The latest guard is `usage_limits_guard`; the operator must vendor this schema and select
+that guard before rollout. See [schema.md](../docs/control-plane/schema.md#usage-limits-migration).
