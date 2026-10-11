@@ -2,7 +2,7 @@
 
 Ship is where what you trained and indexed leaves lake. This page covers the two things your own
 code calls: **published models**, which score your records, and **published search indexes**,
-which answer full-text searches. Both run in your workspace's own Zetta; lake checks the key, the
+which answer full-text searches. Both run in your workspace; lake checks the key, the
 workspace and that the model or index is published, and records every call.
 
 Every call on this page names two ids. `customer_id` is the id of the account that owns your
@@ -240,7 +240,7 @@ published, runs the search in your workspace and records the query.
 - Only a **published** model or index answers `predict` or `search_index`. Publishing is per model
   and per index.
 - A model or index is reached only through lake (`/v1/predict`, `/v1/search_index` or the MCP tools
-  of the same names), never at your workspace Zetta's own address.
+  of the same names), never at your workspace's own address.
 - `search_index` answers at most 100 hits per call.
 - A model's calls are counted by the minute and kept 30 days; `model_traffic` reads at most 31 days
   and 10,000 steps at once. Counts can lag by up to ten seconds, and a lake that stops abruptly can
@@ -266,7 +266,7 @@ published, runs the search in your workspace and records the query.
 | `invalid_input` at `/rows/2/tenure` | Row 2 lacks the feature `tenure`. | Send every feature the model reads; the Call drawer lists them. |
 | `invalid_input` at `/workspace_id` or `/customer_id` | The workspace is unknown, or is not one of that account's workspaces. | Copy both ids from the page address or the Call drawer. |
 | A refusal saying the model or index is not published | It was never published, or was unpublished. | Publish it on Ship → Models or the index page. |
-| `workspace_not_ready` (503) | The workspace Zetta is starting or stopped. | Open any Design, Train or Ship page and wait until it is ready, or start it ([Workspaces](/docs/workspaces)). |
+| `workspace_not_ready` (503) | The workspace is starting or stopped. | Open any Design, Train or Ship page and wait until it is ready, or start it ([Workspaces](/docs/workspaces)). |
 | `not_found` | No model or index with that id in this workspace. | Check the id and the workspace; ids are per workspace. |
 
 ## Related Pages

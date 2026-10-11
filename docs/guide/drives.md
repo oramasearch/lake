@@ -9,7 +9,7 @@ drive opens in the same file manager: folders, uploads with progress, drag to mo
 
 - **Drive.** A named place for files in one workspace. Its name is unique in the workspace. Other
   workspaces never see it, and deleting the workspace deletes its drives.
-- **Workspace files.** Files and folders kept in the workspace Zetta, encrypted with a key that
+- **Workspace files.** Files and folders kept in the workspace itself, encrypted with a key that
   belongs to that workspace alone. Moving or renaming a file changes only its record: the bytes
   are never copied. Workspace files have **no history**: a file you replace or delete is gone.
 - **Repository drive.** A drive whose files are a repository of the workspace. Every upload, move
@@ -180,8 +180,8 @@ sharing ([Grants and Effective Access](/docs/access)).
   again.
 - **"a dataset is loaded from a CSV or JSONL file"**: **Load as dataset** reads files ending
   `.csv`, `.jsonl` or `.ndjson`, of at most 16 MiB.
-- **"this lake keeps no workspace files"**: this lake has no workspace Zetta. Use a repository
-  drive.
+- **"this lake keeps no workspace files"**: this lake has no workspace storage for files. Use a
+  repository drive.
 
 ## Related Pages
 

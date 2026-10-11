@@ -17,7 +17,7 @@ your organization's), and usually `workspace_id`, the workspace the build or ima
 | Term | What it is |
 |---|---|
 | **Container image** | An OCI image in lake's registry. Your images are named `<handle>/<name>`, where `<handle>` is your account's handle, and belong to one workspace. |
-| **Image repository** | One image name, `<handle>/<name>`, with its tags. Lake routes each to one workspace, whose Zetta holds its manifests and tags; the name never moves. |
+| **Image repository** | One image name, `<handle>/<name>`, with its tags. Lake routes each to one workspace, which holds its manifests and tags; the name never moves. |
 | **npm package**, **Python distribution** | Packages published to the lake instance. They are public reads: anyone can install them. |
 | **Build** | One in-cluster image build: a repository, a revision, a Dockerfile and a target `name:tag`. Its phases are queued, fetching, building, pushing and done, or it fails or is cancelled. |
 | **App build** | A build of a Ship app's own image from the app runtime, with the app's dependencies installed ([Apps](/docs/apps#build-the-apps-image)). |

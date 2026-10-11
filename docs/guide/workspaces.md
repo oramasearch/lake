@@ -1,6 +1,6 @@
 # Workspaces
 
-A workspace is an isolated environment with an Orama Zetta cluster of its own. Your datasets,
+A workspace is an isolated environment with an engine of its own. Your datasets,
 projects, pipelines, runs, models, search indexes, transcripts, topics and Ask Orama conversations
 live in it, sealed with the workspace's own key and kept apart from every other customer's. Your
 account can have many workspaces, for example one per environment, and every Design, Train and Ship
@@ -15,7 +15,7 @@ page works in exactly one of them.
   that owns your workspaces: yours, or your organization's) and `workspace_id`. A call without
   `workspace_id` is refused; lake never picks a default.
 - **Desired state and observed phase.** Creating, stopping or deleting a workspace records what you
-  asked for. The Orama operator then provisions or removes the Zetta cluster and reports its phase
+  asked for. The Orama operator then provisions or removes the workspace's engine and reports its phase
   (for example `Ready` or `Failed`). A workspace is *ready* when the operator reports it ready and
   lake can reach it.
 - **What stays outside a workspace.** Repositories, organizations, your account pages, Services,
@@ -107,8 +107,8 @@ workspace's.
 
 ## Rename, Stop and Start a Workspace
 
-There is no button for this on the site; use the API. Stopping withdraws the workspace's Zetta
-cluster and keeps its data; starting brings it back.
+There is no button for this on the site; use the API. Stopping withdraws the workspace's engine
+and keeps its data; starting brings it back.
 
 Through the REST API, send `POST /v1/update_workspace` with this body:
 
@@ -121,7 +121,7 @@ Through MCP, call `update_workspace` with the same input.
 
 ## Storage Size
 
-Each workspace's Zetta volumes have a desired size, `storage_gi`, 5 GiB by default. **Ship →
+Each workspace's volumes have a desired size, `storage_gi`, 5 GiB by default. **Ship →
 Workspaces** shows the size requested and, when it differs, the size the operator observed. Only
 the operator or the instance administrator changes it, and a size never goes down. Ask your lake's
 operator for more room. How much your account stores in all is on **Organization → Usage**
@@ -134,7 +134,7 @@ are the only copy left.
 
 1. Open **Ship → Workspaces** and press **Delete** on the workspace's row.
 2. The dialog lists what goes, with counts:
-   - its Zetta, with every record, dataset, topic and store in it, and its own audit history;
+   - its engine, with every record, dataset, topic and store in it, and its own audit history;
    - its repositories, live ones and deleted ones still retained (their retention ends now and their
      names become free);
    - its apps;

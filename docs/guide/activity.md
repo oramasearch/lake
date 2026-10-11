@@ -14,7 +14,7 @@ shows everyone's.
 | **Event** | One recorded call: when, the principal (with a readable name), the action and, for a workspace call, the inner capability, the object, the outcome, and the event's digest. |
 | **Outcome** | `success`, `denied` (no permission) or `failure` (an error). |
 | **Central log** | Lake's own log, for sign-in, sessions, tokens, users, organizations, memberships, grants, workspaces themselves, SSO and SCIM, and other control-plane events. |
-| **Workspace audit** | Each workspace's own log, kept in its Zetta, for events about that workspace's data: datasets and SQL, repositories and pushes, apps, builds, secrets, streams, agents, experiments, Ask Orama and Design. |
+| **Workspace audit** | Each workspace's own log, kept in the workspace itself, for events about that workspace's data: datasets and SQL, repositories and pushes, apps, builds, secrets, streams, agents, experiments, Ask Orama and Design. |
 | **Chain** | Each log is a hash chain: every event carries the digest of the one before it and lake's signature. |
 | **Transparency log** | An append-only public log of signed statements (such as agent session delegations and dynamic-secret lease events), with signed checkpoints anyone can check. |
 
@@ -122,7 +122,7 @@ recorded. A workspace call records its capability and identifiers, not its data.
 | What you see | Why, and what to do |
 |---|---|
 | Your activity looks empty | Successful reads are hidden; turn on **Include reads**, or widen **From** and **To**. |
-| *The audit of workspace … could not be read* | That workspace's Zetta is not ready or was unreachable. The other logs are shown; try again once the workspace is ready. |
+| *The audit of workspace … could not be read* | That workspace is not ready or could not be reached. The other logs are shown; try again once the workspace is ready. |
 | An event shows *being written* | It is queued for its workspace's audit and has no signature yet. It is written within about a second. |
 | `unauthorized` on `audit` | Only the operator reads the whole log; use `my_audit` for your own. |
 | `invalid_input` on `set_audit_retention` | The value is below 400 days. |

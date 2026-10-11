@@ -44,7 +44,7 @@ for **Confirm and start experiment**.
 | Term | What it means |
 |---|---|
 | **Engagement** | *Conversation* (answers when you talk to it) or *Runs on its own* (it has a trigger). |
-| **Orama base model** | The agent runs inside your workspace's Zetta, on its GPU when there is one. Its instructions are its system prompt. |
+| **Orama base model** | The agent runs inside your workspace's engine, on its GPU when there is one. Its instructions are its system prompt. |
 | **Frontier model** | The agent runs on lake's agent runtime with a frontier model (OpenAI). Only these agents can be run unattended and scheduled. |
 | **Work area** | Where it works: anywhere in this workspace, one project, or specific datasets. |
 | **Skills** | What it may do: *Search data*, *Generate a dataset*, *Train a Model*, *Summarize and explain*, *Call the API*. Granted, never assumed. |

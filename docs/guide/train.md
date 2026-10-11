@@ -20,7 +20,7 @@ of the account that owns your workspaces (yours, or your organization's).
 | **Pipeline** | An execution graph: the steps that turn data into a result (connect, clean, model, index, serve, act), joined by edges. Its id is the `graph` of every call. |
 | **Methodology** | The modelling method a pipeline uses: churn classification, segmentation, forecasting, anomaly detection, survival, uplift and the rest (**Design → Methodologies**). |
 | **Approval** | A pipeline runs only once it is approved, and must be approved again after any change. |
-| **Check** | Zetta's correctness checks, run without training anything. |
+| **Check** | The workspace's correctness checks, run without training anything. |
 | **Run** | One execution of a pipeline, with its report, lineage, outputs, log and trace. |
 | **Hold-out** | The share of rows kept out of training to measure the model honestly. |
 | **Held-out score** | The score on those rows: `held_out_auc`, `held_out_log_loss`, `held_out_accuracy`, `held_out_rmse` or `held_out_mae`. A score measured on the rows the model learned from is *in-sample* and flatters it. |
@@ -117,8 +117,8 @@ refused and nothing is saved. **A saved change needs approval again before the p
 
 ## Approve, Check and Run
 
-1. **Approve** the pipeline. Zetta verifies and runs only an approved pipeline.
-2. **Check** runs Zetta's correctness checks without running anything. Each check is listed with its
+1. **Approve** the pipeline. The workspace verifies and runs only an approved pipeline.
+2. **Check** runs the workspace's correctness checks without running anything. Each check is listed with its
    reason.
 3. **Check and run** checks and, when the checks pass, trains. Fill in the **Run settings**:
    - **Train on**: the dataset to learn from.
@@ -175,7 +175,7 @@ named as the report names it:
 
 For example *Held-out AUC 0.708 on 412 rows the model did not see* (`held_out_rows` is the count).
 
-- **Do not quote.** When Zetta attaches a caveat to a score, for example because it was measured on
+- **Do not quote.** When the workspace attaches a caveat to a score, for example because it was measured on
   too few rows, the figure is marked **Do not quote** with the reason.
 - **No hold-out.** A run without a hold-out says *No held-out score was measured for this run*. If
   it reports an in-sample AUC, the page says it was measured on the rows the model learned from and
@@ -293,7 +293,7 @@ A scoped key needs each capability it calls by name ([Tokens and Keys](/docs/tok
 
 | Answer | What to do |
 |---|---|
-| `workspace_not_ready` | The workspace Zetta is starting. Wait until **Design → Projects** stops saying it is being prepared ([Workspaces](/docs/workspaces)). |
+| `workspace_not_ready` | The workspace is starting. Wait until **Design → Projects** stops saying it is being prepared ([Workspaces](/docs/workspaces)). |
 | `not_approved` | Approve the pipeline, then run it again. |
 | `gate_blocked`, or `run_pipeline` answers only `gate` | A check failed; the message names it. Fix the step and approve again. |
 | `invalid_input` at `/workspace_id` or `/customer_id` | The workspace is not one of that account's live workspaces. |

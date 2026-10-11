@@ -17,8 +17,8 @@ agent does the job better.
 - **It delegates.** Ask Orama hands work to the right agent: the Project Agent for pipelines,
   ApplicationAgent for apps, ExperimentsAgent for training experiments, Auto-Suggest for ideas, or an
   agent you built. Their proposals are reviewed the same way before anything is written.
-- **Conversations live in the workspace.** Every message is kept in the workspace Zetta of the
-  workspace you asked in, sealed with its key. Another workspace never shows it, and only you can
+- **Conversations live in the workspace.** Every message is kept in the workspace you asked
+  in, sealed with its key. Another workspace never shows it, and only you can
   read your conversation back.
 - **Agents work in the background.** After you send a message the page returns at once and shows
   who is working. You can leave and come back; the answer is kept.

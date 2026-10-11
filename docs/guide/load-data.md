@@ -1,8 +1,7 @@
 # Datasets and Loading Data
 
 A **dataset** is a table in your workspace: the data its pipelines train on, its search indexes
-cover and its agents read. Every dataset lives in the workspace Zetta of the workspace it was loaded
-into; another workspace never sees it.
+cover and its agents read. Every dataset lives in the workspace it was loaded into; another workspace never sees it.
 
 Open **Data → Datasets** to see them. The page has four figures (Datasets, Run outputs,
 Connections, Stores), the datasets table, the **Connections** card and the **Storage** card. Its

@@ -24,7 +24,7 @@ Details: [Workspaces](/docs/workspaces), [The Workspace Prefix](/docs/developer#
 
 ### What does `workspace_not_ready` mean?
 
-The workspace exists but its Zetta is not ready: it is being prepared, it was stopped, or it was
+The workspace exists but is not ready: it is being prepared, it was stopped, or it was
 never started. A Design, Train or Ship page shows which:
 
 - **Preparing Your Workspace**: wait; the page checks again every 15 seconds.
@@ -52,7 +52,7 @@ Details: [Workspaces](/docs/workspaces).
 ### How do I delete a workspace, and what goes with it?
 
 Open **Ship → Workspaces**, press **Delete** on its row, read the list of everything that goes with
-it (its Zetta and every record in it, its repositories, apps, unfinished builds and images, with
+it (every record in it, its repositories, apps, unfinished builds and images, with
 counts), type the workspace's name and press **Delete workspace and everything in it**. It cannot
 be undone, and it needs `admin` on the account that owns the workspace.
 
@@ -68,7 +68,7 @@ Details: [Workspaces](/docs/workspaces).
 
 What you put in a workspace (datasets, runs, models, transcripts, Ask Orama conversations,
 repository descriptions, issues and reviews, secrets, the workspace's own audit) is kept in that
-workspace's own Orama Zetta, sealed with the workspace's key. lake's central database keeps only
+workspace itself, sealed with the workspace's key. lake's central database keeps only
 accounts, memberships, grants, sign-in and the routing that says which workspace holds what.
 Recordings sent for speech-to-text are never kept. Details: [Security Model](/docs/security#where-your-data-lives).
 

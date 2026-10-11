@@ -1,9 +1,11 @@
 #include <algorithm>
+#include <array>
 #include <filesystem>
 #include <map>
 #include <regex>
 #include <set>
 #include <string>
+#include <utility>
 
 #include <gtest/gtest.h>
 
@@ -178,6 +180,66 @@ TEST(Docs, GuidesSpeakOfWorkspaces) {
             << page.slug << " says \"" << found.str() << "\" near: "
             << prose.substr(static_cast<std::size_t>(std::max<long>(0, found.position() - 40)), 100);
         EXPECT_FALSE(std::regex_search(prose, banned)) << page.slug;
+    }
+}
+
+// The guides speak of lake and the workspace, never of the engine underneath it (lake#601, as the
+// pages do since lake#583). Zetta stays only where a person picks it by name: it is a kind on
+// Ship -> Services, so the Services guide and the glossary's Service entry name it, and each says
+// once what it is. Every other line naming it fails. Code spans and blocks (a `zetta` kind key in
+// a request) are left out, as above.
+TEST(Docs, GuidesNameZettaOnlyWhereAPersonChoosesIt) {
+    struct Allowed {
+        std::string_view slug;
+        std::string_view line; // a fragment of the one prose line allowed to name Zetta
+        std::string_view reason;
+    };
+    static constexpr std::array<Allowed, 6> allowed{{
+        {"concepts",
+         "| **Service** | A database, stream or engine lake runs for you: Postgres, Zetta,",
+         "the glossary lists the Service kinds a person can create, Zetta among them, and says "
+         "what Zetta is"},
+        {"services",
+         "on its own cluster: Zetta, Postgres, Kafka,",
+         "the Services guide opens with the kinds of service a person can create"},
+        {"services",
+         "| **Zetta** | Orama's data and AI engine.",
+         "the Services glossary says once what the Zetta kind is"},
+        {"services",
+         "Choose the **Kind** (Zetta is first)",
+         "the Kind menu on Ship -> Services lists Zetta first, by that name"},
+        {"services",
+         "Once a service (other than Zetta) is Ready",
+         "a Zetta service has no connection dialog; the step names the kind a person picked"},
+        {"services",
+         "A Zetta service's admin token is never shown.",
+         "what a person who created a Zetta service does not get"},
+    }};
+    const std::regex engine(R"re(\bzetta\b)re", std::regex::icase);
+    std::set<std::pair<std::string, std::string>> used;
+    for (const auto& page : lake::api::web_ui_guide()) {
+        const std::string prose = prose_of(page.markdown);
+        std::size_t start = 0;
+        while (start < prose.size()) {
+            const std::size_t end = std::min(prose.find('\n', start), prose.size());
+            const std::string line = prose.substr(start, end - start);
+            start = end + 1;
+            if (!std::regex_search(line, engine)) {
+                continue;
+            }
+            const auto entry = std::ranges::find_if(allowed, [&](const Allowed& item) {
+                return item.slug == page.slug && line.find(item.line) != std::string::npos;
+            });
+            EXPECT_NE(entry, allowed.end())
+                << page.slug << " names Zetta to a person; say lake or the workspace: " << line;
+            if (entry != allowed.end()) {
+                used.emplace(std::string(entry->slug), std::string(entry->line));
+            }
+        }
+    }
+    for (const Allowed& item : allowed) {
+        EXPECT_TRUE(used.contains({std::string(item.slug), std::string(item.line)}))
+            << "an allowed line is gone; remove its entry: " << item.slug << ": " << item.line;
     }
 }
 

@@ -21,7 +21,7 @@ you show it; key material is never shown anywhere.
 | **Dynamic secret lease** | A generated username and password for a role, returned once and valid for a limited time, renewable and revocable. |
 | **Account key (KEK)** | The key that wraps every mount's data keys for one account. It can be rotated. |
 
-Everything about a mount (its secrets, versions and keys) is sealed in that workspace's Zetta.
+Everything about a mount (its secrets, versions and keys) is sealed in that workspace.
 Deleting the workspace deletes its mounts.
 
 ## Find Your Secret Mounts
@@ -282,7 +282,7 @@ lifecycle events are also appended to lake's transparency log ([Activity and Aud
 | `conflict` at `/name` | A mount with that name already exists in that workspace for that owner. |
 | `invalid_input` at `/organization_id` | The organization is not inside the account that owns the workspace. Choose that account as the owner, or an organization of it. |
 | `conflict` at `/check_and_set` | Another write changed the secret first. Read it again and retry. |
-| `workspace_not_ready` | The mount's workspace Zetta is not running yet. See [Workspaces](/docs/workspaces). |
+| `workspace_not_ready` | The mount's workspace is not running yet. See [Workspaces](/docs/workspaces). |
 | `not_found` at `/lease_id` | The lease id is unknown or malformed. |
 | `unauthorized` | You have no `read` or `write` grant on the mount. |
 
