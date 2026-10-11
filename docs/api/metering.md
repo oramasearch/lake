@@ -162,7 +162,7 @@ three, and the Usage page marks their tiles *Detail, not billed*.
 | `gpu` | `gpu_seconds` | as `cpu`, and `class` (`l4`, `a10g`, `a100`, `h100`, …; absent when unknown) | as `cpu` |
 | `vram` | `mib_seconds` of GPU memory | as `gpu` | as `cpu` |
 | `storage` | bytes, the latest reading of each period | `repositories`, `images`, `workspace_data`, `transcripts`, `drive_files`, and what the engine holds: `models`, `indexes`, `runs` (run artifacts and experiments), `streams` (topics), `files`, `buckets` (the workspace's own) | the owner loop's sample, below |
-| `transfer` | bytes | `in`, `out` | the exact hourly repository transfer records (`lake_metering_usage`, above), plus every other byte lake moves for a workspace (lake#658): drive uploads and reads, tenant image pushes and pulls, repository file reads, Hub `resolve` downloads, LFS staging and commits, shared-file downloads |
+| `transfer` | bytes | `in`, `out` | the exact hourly repository transfer records (`lake_metering_usage`, above), plus every other byte lake moves for a workspace (lake#658): drive uploads and reads, tenant image pushes and pulls, repository file reads, Hub `resolve` downloads, LFS staging and commits, shared-file downloads, and any other caller that adds `transfer` to the workspace's `lake_usage` through the usage recorder (an MCP connection's bytes, say): `usage_over_time` and the bill read every `transfer` row of the series, whatever its labels, beside the repository records |
 | `build_compute` | seconds | `repository`, `image` | the repository build records (above) and the operator's finished image builds, at the hour each finished; titled Build Time |
 | `run_compute` | seconds | `run` | the workspace's runs (`list_runs`), training and experiment trials included, at the time each last changed; titled Workspace Run Time. A run executes in its workspace's engine, so its CPU and RAM are the engine's, never counted twice |
 | `speech` | seconds | `transcript`, `dictation` | the audio length of each transcript made from audio (`create_transcript`) and of each dictation (`transcribe`, in the workspace it names, lake#613), rounded up: what the speech-to-text model reports (`whisper-1`), else what lake measures from the recording ([transcripts.md](transcripts.md#how-long-a-recording-is)). The tokens `gpt-4o-transcribe` reports are audit detail only and never `model_tokens` (lake#658): speech is billed once, by the minute |
@@ -397,7 +397,7 @@ named, then charged once in the hour each ended, with one job record each, and n
 `UsageSample.RecordsWhatTheEngineHoldsByKind` (`storage_usage`'s kinds, lake's buckets left out, an
 older engine's datasets and its workspace named); `UsageOverTime.CountsDictationInTheWorkspaceItWasDictatedIn`;
 `UsageOverTime.CountsEachIndexsAnsweredSearches`; `UsageOverTime.AddsTransferOutsideSyncAndSaysWhatIsNotBilled`;
-`Drives.UploadsAndReadsAreTheWorkspacesTransfer`; and `UsageContract.*` (above).
+`Drives.UploadsAndReadsAreTheWorkspacesTransfer`; `UsageContract.TransferFromAnyRecorderCallerIsShownAndBilled` (`tests/test_billing.cpp`: a `transfer` row an arbitrary caller records, with labels of its own, is in `usage_over_time` and on the month's bill); and `UsageContract.*` (above).
 `HttpServer.RequestLogsNameRoutesAndEachWorkspaceGetsItsOwnRequestSeries` counts calls through a
 real server and writes them only at stop. `SchemaConformance.*` validates the three readable
 capabilities' answers over REST and MCP.

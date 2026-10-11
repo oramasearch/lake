@@ -779,3 +779,48 @@ TEST(Billing, ComputeIsPricedAsCpuRamGpuAndGpuMemory) {
     EXPECT_EQ(kept.value["lines"], issued.value["lines"]);
     EXPECT_EQ(kept.value["total_micros"], issued.value["total_micros"]);
 }
+
+// lake#658, the metering contract: `transfer` is read from every source written to a workspace's
+// `lake_usage`, not only from the repository records. Any caller of the usage recorder (an MCP
+// connection's bytes, a drive download, one made up here) with its own labels is in
+// usage_over_time, added to the repository's exact records, and on the month's bill.
+TEST(UsageContract, TransferFromAnyRecorderCallerIsShownAndBilled) {
+    BillingRig rig;
+    auto list = rig.price_list(month_name(first_of(this_month() - std::chrono::months{2})));
+    list["prices"].push_back({{"dimension", "transfer"}, {"unit_micros", 50'000}, {"per", gib}});
+    ASSERT_TRUE(rig.call("set_price_list", list).ok);
+    const auto last = this_month() - std::chrono::months{1};
+    const std::chrono::sys_time<std::chrono::hours> day1{first_of(last)};
+    // An arbitrary caller, with labels of its own, and the shared helper; two workspaces.
+    rig.recorder.add(rig.home,
+                     "transfer",
+                     3 * gib,
+                     {{"kind", "out"}, {"object_id", "mcp-connection-1"}, {"source", "mcp"}},
+                     day1 + std::chrono::hours(2));
+    rig.recorder.add_transfer(rig.lab, gib, 0, day1 + std::chrono::hours(30));
+    rig.flush();
+
+    const std::string period = month_name(first_of(last));
+    auto owner = rig.owner_context();
+    const auto read = rig.call("usage_over_time",
+                               {{"customer_id", rig.customer},
+                                {"from", period + "-01T00:00:00Z"},
+                                {"to", month_name(first_of(this_month())) + "-01T00:00:00Z"},
+                                {"granularity", "day"},
+                                {"dimensions", json::array({"transfer"})}},
+                               owner);
+    ASSERT_TRUE(read.ok) << read.error.message;
+    ASSERT_EQ(read.value["dimensions"].size(), 1U);
+    const json& transfer = read.value["dimensions"][0];
+    EXPECT_EQ(transfer["total"].get<double>(), 4.0 * gib);
+    EXPECT_TRUE(transfer["billed"].get<bool>());
+    EXPECT_EQ(transfer["by_workspace"].size(), 2U);
+
+    const auto bill =
+        rig.call("bill_preview", {{"customer_id", rig.customer}, {"period", period}}, owner);
+    ASSERT_TRUE(bill.ok) << bill.error.message;
+    const json* billed = line(bill.value, "transfer");
+    ASSERT_NE(billed, nullptr) << bill.value.dump();
+    EXPECT_EQ((*billed)["quantity"], 4 * gib);
+    EXPECT_EQ((*billed)["amount_micros"], 200'000) << "4 GiB at $0.05";
+}
