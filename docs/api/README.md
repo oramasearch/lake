@@ -8,6 +8,9 @@ implementation, and the switch that leaves them absent on an enterprise install.
 (decision 57, migration `0074_payment_provider`): Stripe is the payment provider, with its keys in
 lake's own secret store and its webhook at `POST /billing/stripe/webhook`
 ([billing.md#stripe](billing.md#stripe)).
+lake#623: [billing.md](billing.md#price-list) carries Orama Cloud's price list (Free, Team and
+Business), each unit price with its reference rate, date and margin, worked bills, and when to
+revisit it.
 lake#561: [drives.md](drives.md) documents drives (repository, workspace files, virtual) and workspace files in the workspace Zetta. [transcripts.md](transcripts.md) documents speech-to-text (`transcribe`) and the
 workspace transcripts kept in the workspace Zetta (`create_transcript`, `list_transcripts`,
 `get_transcript`, `update_transcript`, `delete_transcript`), the audio never kept.
