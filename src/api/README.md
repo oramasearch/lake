@@ -93,7 +93,8 @@ the path. See [telemetry](../../docs/serving/telemetry.md#request-logs).
 Usage over time (lake#564): `record_request` also adds each routed capability call to
 `usage_recorder.cpp`'s `UsageRecorder` (`calls`, `api` or `mcp`), as `predict` adds a model's
 answered predictions, `search_index` an index's answered searches, `create_transcript` and
-`transcribe` the audio's seconds or tokens, and the file, drive, Hub and image paths their bytes as
+`transcribe` the audio's seconds (`audio_duration.cpp` measures a recording's length when the
+model reports none; tokens are never billed), and the file, drive, Hub and image paths their bytes as
 `transfer` (`record_workspace_transfer`, `stream_blob`'s `metered_workspace`; lake#658);
 `ApiServer::drain` flushes it every `usage_flush_interval` and, as the store root's owner, schedules
 `usage_capabilities.cpp`'s `sample_usage` (stored bytes, the engine's `storage_usage` by kind,

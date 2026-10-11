@@ -119,10 +119,13 @@ struct TranscriptionRequest {
 };
 struct Transcription {
     std::string text;
-    std::optional<double> seconds; // the audio's length, when the provider reports it
+    // The audio's length: what the provider reports (whisper-1), else what lake measured from the
+    // recording (audio_duration_seconds, lake#658).
+    std::optional<double> seconds;
     std::string model;
     // The tokens the provider counted, when it reports usage in tokens (gpt-4o-transcribe) rather
-    // than seconds (lake#564).
+    // than seconds. Detail for the audit only: speech is billed by the minute, never as tokens
+    // (lake#658).
     std::optional<std::uint64_t> input_tokens;
     std::optional<std::uint64_t> output_tokens;
 };

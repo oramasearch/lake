@@ -38,6 +38,56 @@ std::string space(lake::control::Store& store, const std::string& handle) {
     return customer->id;
 }
 
+// A 16 kHz mono 16-bit WAV of `seconds` of silence.
+std::string wav(double seconds) {
+    const auto put = [](std::string& out, std::uint32_t value, int width) {
+        for (int index = 0; index < width; ++index) {
+            out.push_back(static_cast<char>((value >> (8 * index)) & 0xFF));
+        }
+    };
+    const auto bytes = static_cast<std::uint32_t>(seconds * 32000);
+    std::string out = "RIFF";
+    put(out, 36 + bytes, 4);
+    out += "WAVEfmt ";
+    put(out, 16, 4);
+    put(out, 1, 2);
+    put(out, 1, 2);
+    put(out, 16000, 4);
+    put(out, 32000, 4);
+    put(out, 2, 2);
+    put(out, 16, 2);
+    out += "data";
+    put(out, bytes, 4);
+    out.append(bytes, '\0');
+    return out;
+}
+
+std::string base64(std::string_view bytes) {
+    static constexpr char alphabet[] =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string out;
+    std::size_t index = 0;
+    for (; index + 2 < bytes.size(); index += 3) {
+        const std::uint32_t n = (static_cast<unsigned char>(bytes[index]) << 16) |
+                                (static_cast<unsigned char>(bytes[index + 1]) << 8) |
+                                static_cast<unsigned char>(bytes[index + 2]);
+        for (int shift = 18; shift >= 0; shift -= 6) {
+            out.push_back(alphabet[(n >> shift) & 63]);
+        }
+    }
+    if (index < bytes.size()) {
+        std::uint32_t n = static_cast<unsigned char>(bytes[index]) << 16;
+        if (index + 1 < bytes.size()) {
+            n |= static_cast<unsigned char>(bytes[index + 1]) << 8;
+        }
+        out.push_back(alphabet[(n >> 18) & 63]);
+        out.push_back(alphabet[(n >> 12) & 63]);
+        out.push_back(index + 1 < bytes.size() ? alphabet[(n >> 6) & 63] : '=');
+        out.push_back('=');
+    }
+    return out;
+}
+
 void flush(UsageRecorder& recorder) {
     static_cast<void>(liquid::runtime::block_on(recorder.flush()));
 }
@@ -559,30 +609,29 @@ TEST(UsageSample, CountsTheSecondsOfATranscriptMadeFromAudio) {
               62)
         << "61.2 seconds, rounded up";
 
-    // gpt-4o-transcribe reports tokens, not seconds: they count as its model tokens.
+    // gpt-4o-transcribe reports tokens, not seconds (lake#658): the speech is billed by the
+    // minutes lake measures from the recording, never as model tokens.
     context.transcriber = [](const lake::api::TranscriptionRequest&) {
         lake::api::Transcription heard{"another call", std::nullopt, "gpt-4o-transcribe"};
         heard.input_tokens = 900;
         heard.output_tokens = 40;
         return std::expected<lake::api::Transcription, lake::api::ApiError>(heard);
     };
-    ASSERT_TRUE(rig.call("create_transcript",
-                         {{"customer_id", rig.customer},
-                          {"workspace_id", rig.home},
-                          {"title", "Second call"},
-                          {"source", "recording"},
-                          {"audio_base64", "AAAA"},
-                          {"audio_name", "call.webm"}},
-                         context)
-                    .ok);
+    const auto second = rig.call("create_transcript",
+                                 {{"customer_id", rig.customer},
+                                  {"workspace_id", rig.home},
+                                  {"title", "Second call"},
+                                  {"source", "recording"},
+                                  {"audio_base64", base64(wav(30.5))},
+                                  {"audio_name", "call.wav"}},
+                                 context);
+    ASSERT_TRUE(second.ok) << second.error.message;
+    EXPECT_EQ(second.value["seconds"], 30.5) << "the measured length is the transcript's";
     flush(rig.recorder);
     auto& series = rig.workspaces.records(rig.home);
-    EXPECT_EQ(
-        series.metric_total(
-            "lake_usage",
-            {{"dimension", "model_tokens"}, {"model", "gpt-4o-transcribe"}, {"kind", "input"}}),
-        900);
-    EXPECT_EQ(series.metric_total("lake_usage", {{"dimension", "speech"}}), 62);
+    EXPECT_EQ(series.metric_total("lake_usage", {{"dimension", "model_tokens"}}), 0)
+        << "speech is never billed twice";
+    EXPECT_EQ(series.metric_total("lake_usage", {{"dimension", "speech"}}), 62 + 31);
 }
 
 TEST(UsageOverTime, CountsEachModelsAnsweredPredictions) {
@@ -954,14 +1003,19 @@ TEST(UsageOverTime, CountsDictationInTheWorkspaceItWasDictatedIn) {
         tokens.output_tokens = 12;
         return std::expected<lake::api::Transcription, lake::api::ApiError>(tokens);
     };
+    json measured = dictation;
+    measured["audio_base64"] = base64(wav(4.25));
+    measured["name"] = "dictation.wav";
+    ASSERT_TRUE(rig.call("transcribe", measured, context).ok);
+    // A recording whose length cannot be read counts nothing (and the audit says so).
     ASSERT_TRUE(rig.call("transcribe", dictation, context).ok);
     flush(rig.recorder);
     auto& lab = rig.workspaces.records(rig.lab);
-    EXPECT_EQ(lab.metric_total("lake_usage", {{"dimension", "speech"}, {"kind", "dictation"}}), 8)
-        << "7.2 seconds, rounded up";
-    EXPECT_EQ(lab.metric_total("lake_usage",
-                               {{"dimension", "model_tokens"}, {"model", "gpt-4o-transcribe"}}),
-              312);
+    EXPECT_EQ(lab.metric_total("lake_usage", {{"dimension", "speech"}, {"kind", "dictation"}}),
+              8 + 5)
+        << "7.2 seconds reported and 4.25 measured, each rounded up";
+    EXPECT_EQ(lab.metric_total("lake_usage", {{"dimension", "model_tokens"}}), 0)
+        << "a dictation records speech and no model tokens";
     EXPECT_EQ(
         rig.workspaces.records(rig.home).metric_total("lake_usage", {{"dimension", "speech"}}), 0);
 
@@ -977,7 +1031,7 @@ TEST(UsageOverTime, CountsDictationInTheWorkspaceItWasDictatedIn) {
                   {"granularity", "hour"},
                   {"dimensions", json::array({"speech"})}});
     ASSERT_TRUE(read.ok) << read.error.message;
-    EXPECT_EQ(dimension(read.value, "speech")->at("total"), 8);
+    EXPECT_EQ(dimension(read.value, "speech")->at("total"), 13);
     EXPECT_EQ(read.value["not_measured"].dump().find("dictation"), std::string::npos)
         << "nothing about dictation is left unmeasured";
 }

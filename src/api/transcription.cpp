@@ -458,7 +458,8 @@ parse_openai_transcription(int status, std::string_view body, std::string_view m
                usage.contains("seconds") && usage.at("seconds").is_number()) {
         out.seconds = usage.at("seconds").get<double>();
     }
-    // gpt-4o-transcribe counts tokens instead (lake#564): kept for the workspace's usage.
+    // gpt-4o-transcribe counts tokens instead: kept as unbilled detail for the audit; the
+    // speech is billed by its measured minutes (lake#658).
     if (const nlohmann::json usage = parsed.value("usage", nlohmann::json());
         usage.is_object() && usage.value("type", std::string()) == "tokens") {
         const auto tokens = [&](const char* name) -> std::optional<std::uint64_t> {

@@ -275,6 +275,8 @@ liquid::runtime::task<Heard> transcribe_audio(ApiContext& context,
         co_return refused_audio(
             ApiResult::failure(audio.error().code, audio.error().message, audio.error().path));
     }
+    // Its length, measured before the bytes go: billed when the model reports none (lake#658).
+    const std::optional<double> measured = audio_duration_seconds(audio->bytes);
     TranscriptionRequest request{.file_name = audio_file_name(name, audio->mime),
                                  .mime = {},
                                  .audio = std::move(audio->bytes),
@@ -295,6 +297,9 @@ liquid::runtime::task<Heard> transcribe_audio(ApiContext& context,
         const std::string code = ran->error.code.empty() ? "engine_error" : ran->error.code;
         co_return refused_audio(ApiResult::failure(code, ran->error.message));
     }
+    if (!ran->transcription->seconds) {
+        ran->transcription->seconds = measured;
+    }
     co_return Heard{std::move(ran->transcription), {}};
 }
 
@@ -309,31 +314,28 @@ std::expected<Transcription, ApiResult> heard(std::expected<Heard, liquid::error
     return std::move(*awaited->transcription);
 }
 
-// Speech-to-text usage of one heard recording, in its workspace (lake#564, lake#613): its audio
-// seconds, rounded up, as `speech` of `kind` (transcript or dictation) when the model reports its
-// length (whisper-1), and the tokens a model reports instead (gpt-4o-transcribe) as its
-// `model_tokens`, by model. Only adds to the in-memory recorder.
+// Speech-to-text usage of one heard recording, in its workspace (lake#564, lake#613, lake#658):
+// its audio seconds, rounded up, as `speech` of `kind` (transcript or dictation): what the model
+// reports (whisper-1), else what lake measured from the recording. Speech is billed by the minute
+// only: tokens a model reports (gpt-4o-transcribe) go to the audit as detail, never to
+// `model_tokens`. A recording whose length could not be read counts nothing and says so in the
+// audit. Only adds to the in-memory recorder.
 void record_speech(ApiContext& context,
                    const std::string& workspace_id,
                    const Transcription& done,
                    std::string_view kind) {
-    if (context.usage_recorder == nullptr || workspace_id.empty()) {
+    if (done.input_tokens || done.output_tokens) {
+        context.audit_details["speech_tokens"] = {{"input", done.input_tokens.value_or(0)},
+                                                  {"output", done.output_tokens.value_or(0)}};
+    }
+    if (!done.seconds || *done.seconds <= 0) {
+        context.audit_details["speech_seconds"] = nullptr; // not measured
         return;
     }
-    if (done.seconds && *done.seconds > 0) {
-        context.usage_recorder->add(workspace_id,
-                                    "speech",
-                                    static_cast<std::uint64_t>(std::ceil(*done.seconds)),
-                                    {{"kind", std::string(kind)}});
-    }
-    if (done.input_tokens || done.output_tokens) {
-        context.usage_recorder->add_together(workspace_id,
-                                             {{"model_tokens",
-                                               done.input_tokens.value_or(0),
-                                               {{"kind", "input"}, {"model", done.model}}},
-                                              {"model_tokens",
-                                               done.output_tokens.value_or(0),
-                                               {{"kind", "output"}, {"model", done.model}}}});
+    const auto seconds = static_cast<std::uint64_t>(std::ceil(*done.seconds));
+    context.audit_details["speech_seconds"] = seconds;
+    if (context.usage_recorder != nullptr && !workspace_id.empty()) {
+        context.usage_recorder->add(workspace_id, "speech", seconds, {{"kind", std::string(kind)}});
     }
 }
 

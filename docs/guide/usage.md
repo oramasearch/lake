@@ -24,8 +24,8 @@ Billing** turns it into a monthly bill on your plan; an enterprise install has n
 | **Transfer** | The bytes you send to and receive from your workspaces: repository pushes and pulls, drive uploads and downloads, image pushes and pulls, file and model downloads. |
 | **Instance time** | How long each service and app ran ready, times its instances or replicas. Your workspace's own engine is a service, and counts. |
 | **Volume time** | The size of each running service's and store's volumes, times how long it ran. |
-| **Model tokens** | The tokens an agent reports it spent, by agent, run and model, and the tokens a speech-to-text model reports for a transcript or a dictation. |
-| **Speech to text** | The minutes of audio transcribed: transcripts made from audio, and dictation in the workspace you dictate in. |
+| **Model tokens** | The tokens an agent reports it spent, by agent, run and model. Speech to text is never counted here: it is billed by the minute only. |
+| **Speech to text** | The minutes of audio transcribed: transcripts made from audio, and dictation in the workspace you dictate in. Lake measures each recording's length from the file when the model does not report it. |
 | **Index searches** | Each answered search of a published index, by index. |
 | **Limit** | A ceiling on one dimension with a warning percentage. The storage limit is enforced on new repository writes; every other limit warns and refuses nothing. |
 | **Repository storage limit** | The storage limit: above it, new repository writes are refused; what is stored stays readable. |
