@@ -289,7 +289,7 @@ From an agent or your code:
   `load_drive_model` takes a drive's file (`drive_id`, `id`) instead. `move_model_to_project` takes
   `model_id` and `project_name`. `delete_model` takes each version's `id`.
 - MCP: the same names with the same input.
-- A workspace whose engine predates these answers `not_supported`, saying it needs a newer Zetta.
+- A workspace whose engine predates these answers `not_supported`, saying it needs a newer engine.
 
 ### Promote a Version to Ship
 
