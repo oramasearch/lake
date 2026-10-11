@@ -54,10 +54,11 @@ The microphone is in Ask Orama's message box, and in the text of a new or edited
 A dictation stops by itself after 10 minutes. Your phone keyboard's own dictation key also works and
 needs none of this.
 
-Through the API, dictation is `POST /v1/transcribe` with the audio as base64:
+Through the API, dictation is `POST /v1/transcribe` with the audio as base64, in the workspace
+whose speech-to-text usage it is:
 
 ```json
-{"name": "memo.m4a", "audio_base64": "<base64 audio>"}
+{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "name": "memo.m4a", "audio_base64": "<base64 audio>"}
 ```
 
 Through MCP, call `transcribe` with the same input. It answers the `text`.

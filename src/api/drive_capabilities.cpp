@@ -860,6 +860,8 @@ ApiResult shared_file_result(const json& input, ApiContext& context, bool downlo
                                    std::back_inserter(context.sync_response),
                                    [](char byte) { return static_cast<std::byte>(byte); });
         }
+        // A shared file's bytes leave its repository's workspace (lake#658).
+        record_workspace_transfer(context, repository.workspace_id, 0, file->size);
         std::string encoded((context.sync_response.size() + 2) / 3 * 4, '\0');
         // Keep each OpenSSL length within int, with padding only in the final block.
         constexpr std::size_t block_size = 3 * 1024 * 1024;
@@ -1171,6 +1173,7 @@ void register_drive_capabilities(Registry& registry) {
                                        std::back_inserter(context.sync_response),
                                        [](char value) { return static_cast<std::byte>(value); });
             }
+            record_workspace_transfer(context, repository->workspace_id, 0, file->size);
             context.audit_customer_id = repository->customer_id;
             context.audit_kind = "drive.file.downloaded";
             context.audit_object = "repository/" + repository->id + "/path/" + file->path;
@@ -1323,6 +1326,11 @@ void register_drive_capabilities(Registry& registry) {
                                       .contents = std::move(*contents)});
             }
             const std::string audit_path = input.at("path");
+            std::uint64_t uploaded = 0;
+            for (const auto& operation : operations) {
+                uploaded += operation.contents.size();
+            }
+            record_workspace_transfer(context, repository->workspace_id, uploaded, 0);
             return committed_drive_change(
                 *repository,
                 "drive.files.uploaded",

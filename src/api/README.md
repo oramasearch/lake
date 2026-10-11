@@ -92,6 +92,17 @@ the path. See [telemetry](../../docs/serving/telemetry.md#request-logs).
 
 Usage over time (lake#564): `record_request` also adds each routed capability call to
 `usage_recorder.cpp`'s `UsageRecorder` (`calls`, `api` or `mcp`), as `predict` adds a model's
+answered predictions, `search_index` an index's answered searches, `create_transcript` and
+`transcribe` the audio's seconds (`audio_duration.cpp` measures a recording's length when the
+model reports none; tokens are never billed), and the file, drive, Hub and image paths their bytes as
+`transfer` (`record_workspace_transfer`, `stream_blob`'s `metered_workspace`; lake#658);
+`ApiServer::drain` flushes it every `usage_flush_interval` and, as the store root's owner, schedules
+`usage_capabilities.cpp`'s `sample_usage` (stored bytes, the engine's `storage_usage` by kind,
+instance and volume time, CPU, RAM, GPU and GPU memory from the operator's `workload_resources`
+(lake#643), each finished build, job and cron run once, new build results) every
+`usage_sample_interval`. `usage_capabilities.cpp` registers `usage_over_time`, `usage_limits`,
+`set_usage_limit` and `record_model_usage`; `metering_capabilities.cpp`'s `queue_repository_builds`
+is the build-record queueing the sample shares with `metering_usage`. See
 answered predictions and `create_transcript` the audio's seconds or tokens; `ApiServer::drain`
 flushes it every `usage_flush_interval` and, as the store root's owner, schedules
 `usage_capabilities.cpp`'s `sample_usage` (stored bytes, instance and volume time, CPU, RAM, GPU and
@@ -144,6 +155,12 @@ capability already covers as a named capability (lake#650): the engine's input s
 and a handler that is `call_workspace_capability`, the `workspace_query`/`workspace_act` path, so
 policy, agent scopes, audit and caching are the same. `granted_by_scope` lets a credential that may
 call `workspace_query` or `workspace_act` call them. See
+[`engine-capabilities.md`](../../docs/api/engine-capabilities.md). The standalone-model
+capabilities (`train_model`, `retrain_model`, `register_model`, `move_model_to_project`, lake#654)
+are named this way; `workspace_call` answers an engine that does not know an allow-listed name
+`not_supported`, saying it needs a newer Zetta. `drives_capabilities.cpp`'s `load_drive_model`
+reads a drive's model file as the caller and sends it to `register_model`
+([`models.md`](../../docs/api/models.md#a-standalone-model-lake654)).
 [`engine-capabilities.md`](../../docs/api/engine-capabilities.md).
 After the engine accepts a `create_agent` or `update_agent`, `workspace_call` keeps the definition
 as a revision in the agent's workspace (`agent_revision_step`, lake#653) and answers
@@ -174,6 +191,22 @@ cleaning, and OpenAI's multipart request and answer. The HTTP exchange is the in
 `TranscriptPost`, which `http_server.cpp` builds over its outbound client when
 `LAKE_OPENAI_API_KEY` is set. See `docs/api/transcripts.md`.
 
+`mcp_client.cpp` is Lake's MCP client (decision 60, lake#652): initialize and sessions, the lists and
+calls, notifications, the event-stream reader and every bound on a hostile server.
+`http_server.cpp`'s `McpOutboundHttp` is its transport: an io thread of its own, `enough` to stop
+reading once the answer is in, a byte limit, a deadline on resolution, connection, handshake and
+exchange, and no address that is not public unless `LAKE_MCP_ALLOW_PRIVATE_ADDRESSES=1`. See
+`docs/api/mcp-connections.md#the-client`.
+`mcp_connection_capabilities.cpp` registers the MCP connection capabilities (lake#652): records
+through `control::mcp_connections`, the credential read from the workspace's secret store as Lake
+(`as_lake`, never answered), discovery merged into the person's tool decisions, who may call a
+change (a person, or an agent with a person's per-tool grant and its `mcp:<prefix>` skill),
+metering through the `UsageRecorder` (`calls`, `transfer`), the audit read back for a connection's
+calls, and the re-export `mcp.cpp` calls for `/w/<workspace>/mcp`. `mcp_connection_streams.cpp` is
+`McpStreamWorker`, run by the store root's owner on the maintenance thread: notifications mirrored to
+a connection's topic, one agent job per input event as the person who set the streams, and each
+finished job's result on the output topic; `mcp_connection_internal.hpp` lends it the connection's
+bearer, never a capability.
 `deletion_capabilities.cpp` registers what deletes a workspace's data (lake#645):
 `delete_dataset`, `delete_model`, `delete_run` and `delete_index`, named capabilities over the
 workspace engine's own deletes that answer `not_supported` from an older engine, and

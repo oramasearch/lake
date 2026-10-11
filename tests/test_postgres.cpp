@@ -3175,3 +3175,76 @@ TEST(PostgresBilling, WorkloadResourcesAndClassRatesFollowTheContract) {
     workload_resources_and_classes_follow_the_contract(*store,
                                                        lake::control::new_uuid_v4().substr(0, 8));
 }
+
+// lake#658, migration 0077_metered_jobs: an agent cron run's resources are a workload_resources
+// kind, and a cron run's finish time reaches lake so its duration can be charged.
+TEST(PostgresBilling, CronRunsAreAWorkloadKindAndTheirEndIsRead) {
+    const char* uri = lake::test::postgres_uri();
+    if (uri == nullptr || std::string(uri).empty()) {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not set";
+    }
+    auto store = lake::control::make_postgres_store(
+        uri, "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff");
+    ASSERT_TRUE(store->ping()) << store->ping().error().message;
+    const std::string run = lake::control::new_uuid_v4();
+    {
+        pqxx::connection connection(uri);
+        pqxx::work tx(connection);
+        EXPECT_FALSE(
+            tx.exec_params("SELECT to_regclass($1)", std::string("metered_jobs_guard"))[0][0]
+                .is_null());
+        EXPECT_FALSE(
+            tx.exec("SELECT 1 FROM schema_migrations WHERE version = '0077_metered_jobs'").empty());
+        tx.exec_params("INSERT INTO workload_resources (object_kind, object_id, cpu_millis) "
+                       "VALUES ('agent_cron_run', $1::uuid, 250)",
+                       run);
+        tx.commit();
+    }
+    {
+        pqxx::connection connection(uri);
+        pqxx::work tx(connection);
+        EXPECT_THROW(tx.exec("INSERT INTO workload_resources (object_kind, object_id) "
+                             "VALUES ('cron', gen_random_uuid())"),
+                     pqxx::check_violation);
+    }
+    const auto rows = store->workload_resources();
+    ASSERT_TRUE(rows) << rows.error().message;
+    EXPECT_TRUE(std::ranges::any_of(*rows, [&](const auto& row) {
+        return row.object_kind == "agent_cron_run" && row.object_id == run && row.cpu_millis == 250;
+    }));
+    ASSERT_TRUE(store->put_workload_resources({"agent_cron_run", run, 0, 500, 1024}));
+
+    // A finished cron run answers its end as status_updated_at.
+    const auto user = store->create_user(
+        {"taap:1:ed25519:cron-" + run, run + "@example.test", "cron-" + run.substr(0, 8)});
+    ASSERT_TRUE(user) << user.error().message;
+    const auto customer =
+        store->create_customer({"individual", user->id, "", "cron-" + run.substr(0, 8)});
+    ASSERT_TRUE(customer) << customer.error().message;
+    const auto workspace = store->create_workspace({customer->id, "home", "dev", ""});
+    ASSERT_TRUE(workspace) << workspace.error().message;
+    const auto schedule = store->create_agent_cron_schedule({.customer_id = customer->id,
+                                                             .agent_id = "agent-1",
+                                                             .agent_name = "Nightly",
+                                                             .cron = "0 3 * * *",
+                                                             .time_zone = "Etc/UTC",
+                                                             .scopes = {"workspace_query"},
+                                                             .created_by_user_id = user->id,
+                                                             .workspace_id = workspace->id});
+    ASSERT_TRUE(schedule) << schedule.error().message;
+    {
+        pqxx::connection connection(uri);
+        pqxx::work tx(connection);
+        tx.exec_params("INSERT INTO agent_cron_runs (id, schedule_id, job_name, phase, started_at, "
+                       "finished_at) VALUES ($1::uuid, $2::uuid, 'nightly-1', 'Succeeded', "
+                       "'2026-10-11T03:00:00Z', '2026-10-11T03:02:30Z')",
+                       run,
+                       schedule->id);
+        tx.commit();
+    }
+    const auto runs = store->list_agent_cron_runs(customer->id, "", 10);
+    ASSERT_TRUE(runs) << runs.error().message;
+    ASSERT_EQ(runs->size(), 1U);
+    EXPECT_EQ(runs->front().created_at, "2026-10-11T03:00:00Z");
+    EXPECT_EQ(runs->front().status_updated_at, "2026-10-11T03:02:30Z");
+}

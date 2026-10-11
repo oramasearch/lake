@@ -1,10 +1,11 @@
-/** Train → Models (lake#599): every model the workspace trained, as a model with its versions: the
+/** Train → Models (lake#599): every model of the workspace, as a model with its versions: the
  * latest held-out score, the runs and experiments that trained it, the features it learned from,
  * and whether a version is serving. A row opens the model's training page; serving is Ship →
- * Models. A model uploaded on its own is a model repository (Data → Repositories). */
+ * Models. New model makes one on its own (lake#654): trained from a dataset, or brought from a
+ * file (NewModel.tsx). */
 import { useMemo, useState } from "react";
 import { Link } from "react-router-dom";
-import { Brain, FlaskConical, Globe, Layers, Sparkles } from "lucide-react";
+import { Brain, FlaskConical, Globe, Layers, Plus } from "lucide-react";
 import { relative } from "@/lib/format";
 import { useTrail } from "@/lib/trail";
 import { Banner, Button, Chip, DataTable, Empty, FilterChips, Mono, SearchInput, Stat, StatRow, Status, Toolbar } from "@/lib/ui";
@@ -12,11 +13,13 @@ import { WorkspaceFrame, qs, text, useWorkspace, useWsPath } from "./workspace";
 import { when } from "./RunsPage";
 import { datasetOf, featuresOf, type ModelGroup } from "./models";
 import { ScoreText, SourceText, VersionChip, useModelGroups, useModelLinks } from "./modelParts";
+import { NewModelDialog } from "./NewModel";
 
 export default function TrainModelsPage() {
   const path = useWsPath();
   const { customerId } = useWorkspace();
   const space = qs({ customer_id: customerId });
+  const [creating, setCreating] = useState(false);
   useTrail([
     { label: "Train", to: path(`/train/agents?${space}`) },
     { label: "Models", to: path(`/train/models?${space}`) },
@@ -25,21 +28,21 @@ export default function TrainModelsPage() {
     <WorkspaceFrame
       eyebrow="Train"
       title="Models"
-      sub="Every model this workspace trained: its versions, held-out scores and what it learned from."
+      sub="Every model of this workspace: its versions, held-out scores and what it learned from."
       actions={
-        <Button variant="primary" to={path(`/design/projects?${space}`)}>
-          <Sparkles size={14} aria-hidden /> Train a model
+        <Button variant="primary" onClick={() => setCreating(true)}>
+          <Plus size={14} aria-hidden /> New model
         </Button>
       }
     >
-      {() => <Models />}
+      {() => <Models onNew={() => setCreating(true)} creating={creating} onClosed={() => setCreating(false)} />}
     </WorkspaceFrame>
   );
 }
 
-type Source = "pipeline" | "experiment" | "none";
+type Source = "pipeline" | "experiment" | "standalone" | "none";
 
-function Models() {
+function Models({ onNew, creating, onClosed }: { onNew: () => void; creating: boolean; onClosed: () => void }) {
   const path = useWsPath();
   const { customerId } = useWorkspace();
   const links = useModelLinks();
@@ -53,9 +56,9 @@ function Models() {
     }
     return undefined;
   };
-  const sourceOf = (group: ModelGroup): Source => (group.pipeline ? "pipeline" : experimentOf(group) ? "experiment" : "none");
+  const sourceOf = (group: ModelGroup): Source => (group.standalone ? "standalone" : group.pipeline ? "pipeline" : experimentOf(group) ? "experiment" : "none");
   const counts = useMemo(() => {
-    const out = { pipeline: 0, experiment: 0, none: 0 };
+    const out = { pipeline: 0, experiment: 0, standalone: 0, none: 0 };
     for (const group of groups) out[sourceOf(group)] += 1;
     return out;
     // sourceOf reads the experiments the groups were made from.
@@ -65,7 +68,7 @@ function Models() {
   const rows = groups.filter((group) => {
     if (source && sourceOf(group) !== source) return false;
     if (!lower) return true;
-    const words = [group.name, group.kind, group.pipeline, group.projectName, experimentOf(group)?.name ?? "", ...featuresOf(group.latest), ...group.versions.map((v) => text(v, "id"))];
+    const words = [group.name, group.kind, group.standalone ? "standalone" : group.pipeline, group.standalone ? "" : group.projectName, experimentOf(group)?.name ?? "", ...featuresOf(group.latest), ...group.versions.map((v) => text(v, "id"))];
     return words.join(" ").toLowerCase().includes(lower);
   });
   const versions = groups.reduce((sum, group) => sum + group.versions.length, 0);
@@ -80,7 +83,7 @@ function Models() {
           <StatRow>
             <Stat label="Models" value={groups.length} icon={Brain} sub={`${versions} trained ${versions === 1 ? "version" : "versions"}`} />
             <Stat label="Held-out score" value={scored} icon={Layers} sub="measured on rows the model did not see" />
-            <Stat label="From experiments" value={counts.experiment} icon={FlaskConical} sub={`${counts.pipeline} from pipelines`} />
+            <Stat label="From experiments" value={counts.experiment} icon={FlaskConical} sub={`${counts.pipeline} from pipelines, ${counts.standalone} standalone`} />
             <Stat label="Serving" value={serving} icon={Globe} tone={serving ? "ok" : undefined} sub="a version published in Ship" to={links.shipList} />
           </StatRow>
           <Toolbar>
@@ -92,6 +95,7 @@ function Models() {
               options={[
                 { id: "pipeline", label: "Pipeline", count: counts.pipeline },
                 { id: "experiment", label: "Experiment", count: counts.experiment },
+                { id: "standalone", label: "Standalone", count: counts.standalone },
                 { id: "none", label: "No pipeline", count: counts.none },
               ]}
             />
@@ -107,8 +111,19 @@ function Models() {
         initialSort={{ key: "trained", dir: "descending" }}
         empty={
           groups.length === 0 ? (
-            <Empty icon={Brain} title="No models yet" action={<Button to={projects}>Open projects</Button>}>
-              Run a pipeline with a model step, or start an experiment, and its model appears here.
+            <Empty
+              icon={Brain}
+              title="No models yet"
+              action={
+                <div className="flex flex-wrap justify-center gap-2">
+                  <Button variant="primary" onClick={onNew}>
+                    <Plus size={14} aria-hidden /> New model
+                  </Button>
+                  <Button to={projects}>Open projects</Button>
+                </div>
+              }
+            >
+              Train one from a dataset or bring one from a file. A project&apos;s pipeline run and an experiment add theirs here too.
             </Empty>
           ) : (
             <Empty compact title="No model matches">
@@ -216,11 +231,12 @@ function Models() {
       />
       {q.data && (
         <div className="mt-4">
-          <Banner tone="quiet" title="Uploaded Models">
-            A model uploaded on its own, with no pipeline, is a model repository: open it from <Link to="/repositories">Repositories</Link>. Lake does not list model repositories on this page yet.
+          <Banner tone="quiet" title="Model Files">
+            A model repository keeps model files with their history (<Link to="/repositories">Repositories</Link>). To score or serve one here, use New model, then Bring one.
           </Banner>
         </div>
       )}
+      {creating && <NewModelDialog groups={groups} onClose={onClosed} />}
     </>
   );
 }

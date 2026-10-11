@@ -10,7 +10,7 @@ by OpenAI with lake's own key, and **the audio is never kept**.
 
 | Capability | Kind | Input | Output |
 |---|---|---|---|
-| `transcribe` | action, any signed-in caller | `{name, audio_base64, language?}` | `{text, seconds?, model}` |
+| `transcribe` | action, `write` on the account | `{customer_id, workspace_id, name, audio_base64, language?}` | `{text, seconds?, model}` |
 | `create_transcript` | action, `write` on the account | `{customer_id, workspace_id, title, text?, audio_base64?, audio_name?, language?, source, recorded_at?}` | the transcript |
 | `list_transcripts` | read, `read` on the account | `{customer_id, workspace_id, q?, limit?, cursor?}` | `{transcripts: [{id, title, excerpt, source, seconds, created_at, created_by, created_by_name}], total, next_cursor?}` |
 | `get_transcript` | read, `read` on the account | `{customer_id, workspace_id, id}` | the transcript |
@@ -21,12 +21,16 @@ A transcript is `{id, title, text, source, seconds, language, recorded_at, creat
 created_by_name}`:
 
 - `source` is `recording`, `upload` or `text`, as the person chose.
-- `seconds` is the audio's length when the speech-to-text model reports it, otherwise `null`.
-  `gpt-4o-transcribe` reports usage in tokens, so its transcripts have `null`; `whisper-1` reports
-  seconds. Either is the workspace's usage (lake#564): the seconds as `speech`, the tokens as
-  `model_tokens` of that model, counted off the request path when the audio is heard
-  ([metering](metering.md#dimensions)). Dictation through `transcribe` names no workspace and is not
-  counted ([lake#613](https://github.com/oramasearch/lake/issues/613)).
+- `seconds` is the audio's length: what the speech-to-text model reports (`whisper-1`), else what
+  lake measured from the recording ([below](#how-long-a-recording-is)), else `null`. It is the
+  workspace's usage (lake#564) as `speech`, counted off the request path when the audio is heard
+  ([metering](metering.md#dimensions)). Speech is billed by the minute only: the tokens
+  `gpt-4o-transcribe` reports go to the audit event as unbilled detail (`speech_tokens`) and never
+  to `model_tokens` (lake#658), so no recording is billed twice.
+- Dictation through `transcribe` names the workspace it is dictated in (lake#613): whoever may
+  write the workspace may dictate in it, and its seconds (`speech`, `kind` `dictation`) are that
+  workspace's usage, counted the same way. Its audit event goes to that workspace's log. A
+  dictation that names no workspace is `invalid_input`.
 - `language` is the ISO-639-1 code the person gave, otherwise `null`.
 - `recorded_at` is when it was said, as the person gave it (an RFC 3339 date or instant), otherwise
   `null`.
@@ -96,13 +100,24 @@ Each transcript is one sealed record in the collection `lake_transcripts` of its
 and pages in lake. A workspace with thousands of long transcripts will want a search index in the
 workspace instead; that is not built.
 
+## How long a recording is
+
+`gpt-4o-transcribe`, the default model, reports tokens, not seconds, so lake measures the audio it
+is about to send (`audio_duration_seconds`, `src/api/audio_duration.cpp`, lake#658), from the
+container's own bytes and never by guessing: WAV (the data chunk over the byte rate), FLAC
+(STREAMINFO), Ogg Opus and Vorbis (the last page's granule position), WebM and Matroska (the
+segment's Duration, or for a browser's recording without one the latest block's time), MP4 and M4A
+(the movie header, or a fragmented recording's summed sample durations) and MP3 (a Xing, Info or
+VBRI frame count, else the bit rate). The model's own figure wins when it reports one. A recording
+lake cannot read counts no speech; its audit event says `speech_seconds: null`.
+
 ## The audio is never kept
 
 - `transcribe` and `create_transcript` decode the audio into memory for the one call, send it to
   OpenAI and drop it.
 - Lake writes no audio to a record, a file, a log or the audit. The record's body has no audio field
   (the test reads the opened body to check).
-- The audit event of `transcribe` names only the model. The audit event of `create_transcript`
+- The audit event of `transcribe` names only the model, in the workspace's log. The audit event of `create_transcript`
   names the transcript and its source, never its text.
 - The request log names the route pattern and ids only ([telemetry](../serving/telemetry.md)).
 

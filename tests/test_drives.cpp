@@ -28,6 +28,7 @@
 #include "lake/api/capabilities.hpp"
 #include "lake/api/registry.hpp"
 #include "lake/api/server.hpp"
+#include "lake/api/usage_recorder.hpp"
 #include "lake/audit/audit.hpp"
 #include "lake/control/drive_files.hpp"
 #include "lake/control/drives.hpp"
@@ -128,6 +129,8 @@ struct Spaces {
         std::make_shared<lake::test::FakeZettaObjects>();
     std::shared_ptr<lake::control::WorkspaceService> service;
     lake::api::Registry registry;
+    // Each call's usage (lake#658: drive uploads and reads are transfer), written on flush.
+    std::unique_ptr<lake::api::UsageRecorder> usage;
     struct Space {
         lake::control::Principal principal;
         std::string customer_id;
@@ -141,6 +144,7 @@ struct Spaces {
         std::filesystem::create_directories(dir);
         service = std::make_shared<lake::control::WorkspaceService>(
             lake::control::WorkspaceConfig{dir.string(), 0}, store, zetta);
+        usage = std::make_unique<lake::api::UsageRecorder>(store.get(), service.get());
         lake::api::register_core_capabilities(registry, "test");
         for (const std::string name : {"first", "second"}) {
             const auto session =
@@ -187,6 +191,7 @@ struct Spaces {
         context.credential_session_id = space.principal.session_id;
         context.scopes = space.principal.scopes;
         context.request_id = lake::control::new_uuid_v4();
+        context.usage_recorder = usage.get();
         return context;
     }
 
@@ -667,6 +672,53 @@ TEST(Drives, AWorkspaceFilesDriveKeepsFoldersFilesAndTheirBytes) {
 
 // lake#588: a chunk sent again after the last answers what the upload holds, and an upload left
 // unfinished is listed apart until it expires, when the next upload of its name takes the name.
+// lake#658: the bytes a workspace-files drive takes in and hands out are its workspace's
+// transfer, `in` for uploads (whole files and chunks) and `out` for reads; another workspace's
+// transfer is untouched.
+TEST(Drives, UploadsAndReadsAreTheWorkspacesTransfer) {
+    Spaces s;
+    const auto& first = s.spaces[0];
+    const std::string home = first.workspaces[0];
+    const ApiResult drive = s.in(first, "create_drive", {{"name", "Shared"}, {"storage", "files"}});
+    ASSERT_TRUE(drive.ok) << drive.error.message;
+    const std::string id = drive.value["id"];
+    const std::string small = pattern(3000);
+    const ApiResult uploaded =
+        s.in(first,
+             "upload_drive_entries",
+             {{"drive_id", id},
+              {"files", json::array({{{"name", "a.txt"}, {"content", base64(small)}}})}});
+    ASSERT_TRUE(uploaded.ok) << uploaded.error.message;
+    const std::string bytes = pattern(MiB + 500);
+    const ApiResult begun = s.in(
+        first, "begin_drive_upload", {{"drive_id", id}, {"path", "b.bin"}, {"size", bytes.size()}});
+    ASSERT_TRUE(begun.ok) << begun.error.message;
+    const std::string file = begun.value["entry"]["id"];
+    for (const std::uint64_t offset : {std::uint64_t{0}, MiB}) {
+        ASSERT_TRUE(s.in(first,
+                         "append_drive_upload",
+                         {{"drive_id", id},
+                          {"id", file},
+                          {"offset", offset},
+                          {"content", base64(bytes.substr(offset, offset == 0 ? MiB : 500))}})
+                        .ok);
+    }
+    ASSERT_TRUE(s.in(first, "finish_drive_upload", {{"drive_id", id}, {"id", file}}).ok);
+    const ApiResult read = s.in(first,
+                                "read_drive_file",
+                                {{"drive_id", id}, {"id", file}, {"offset", 0}, {"length", 1000}});
+    ASSERT_TRUE(read.ok) << read.error.message;
+
+    static_cast<void>(liquid::runtime::block_on(s.usage->flush()));
+    auto& series = s.zetta->records[Spaces::url(home)];
+    EXPECT_EQ(series.metric_total("lake_usage", {{"dimension", "transfer"}, {"kind", "in"}}),
+              3000 + MiB + 500);
+    EXPECT_EQ(series.metric_total("lake_usage", {{"dimension", "transfer"}, {"kind", "out"}}),
+              1000);
+    EXPECT_EQ(s.zetta->records[Spaces::url(first.workspaces[1])].metric_total("lake_usage"), 0)
+        << "the other workspace moved nothing";
+}
+
 TEST(Drives, AResentChunkAnswersTheUploadAndAbandonedUploadsExpire) {
     Spaces s;
     const auto& first = s.spaces[0];
@@ -1010,6 +1062,7 @@ TEST(Drives, EveryDriveCapabilityIsAuditedInItsWorkspace) {
                              "read_drive_file",
                              "recent_drive_entries",
                              "load_drive_dataset",
+                             "load_drive_model",
                              "drive_share_people",
                              "search_drives"}) {
         EXPECT_EQ(lake::api::audit_log_of(name), lake::api::AuditLog::Workspace) << name;
@@ -1337,6 +1390,55 @@ TEST(DrivesHttp, ARepositoryDriveWriteIsSearchedDownloadedAndLoaded) {
                          {"table_name", "notes"}})["error"]["path"],
               "/format")
         << "only CSV and JSONL load";
+
+    // Bring a model file (lake#654): its text goes to the engine's register_model, with where it
+    // came from; the engine's refusal of the file points at the file.
+    const std::string weights = R"({"objective":"binary_logistic","trees":[]})";
+    const json kept = lake.call(
+        "upload_drive_files",
+        {{"repository_id", repository_id},
+         {"ref", "main"},
+         {"path", ""},
+         {"files", json::array({{{"path", "models/churn.json"}, {"content", base64(weights)}}})}},
+        false);
+    ASSERT_TRUE(kept.value("ok", false)) << kept.dump();
+    lake.spaces.zetta->answers["register_model"] = {
+        {"model_id", "m-9"}, {"name", "partner churn"}, {"standalone", true}};
+    const json brought = lake.call("load_drive_model",
+                                   {{"drive_id", drive["value"]["id"]},
+                                    {"id", "models/churn.json"},
+                                    {"name", "partner churn"},
+                                    {"metrics", {{"held_out_auc", 0.8}}}});
+    ASSERT_TRUE(brought.value("ok", false)) << brought.dump();
+    EXPECT_EQ(brought["value"]["model_id"], "m-9");
+    EXPECT_EQ(brought["value"]["source"]["name"], "churn.json");
+    const auto registered = std::ranges::find_if(
+        lake.spaces.zetta->calls, [](const auto& call) { return call.first == "register_model"; });
+    ASSERT_NE(registered, lake.spaces.zetta->calls.end());
+    EXPECT_EQ(registered->second["weights"], weights);
+    EXPECT_EQ(registered->second["name"], "partner churn");
+    EXPECT_EQ(registered->second["metrics"]["held_out_auc"], 0.8);
+    EXPECT_EQ(registered->second["source"], "drive Docs: churn.json");
+    EXPECT_EQ(lake.call("load_drive_model",
+                        {{"drive_id", drive["value"]["id"]}, {"id", "models/churn.json"}})["error"]
+                       ["path"],
+              "/name")
+        << "a new model is named";
+    lake.spaces.zetta->responder = [](const std::string& capability, const json&)
+        -> std::optional<lake::control::ZettaControlResult<json>> {
+        if (capability != "register_model") {
+            return std::nullopt;
+        }
+        return std::unexpected(lake::control::ZettaControlError{
+            "not_supported", "/weights: the engine reads gradient-boosted tree models", "/weights"});
+    };
+    const json refused = lake.call("load_drive_model",
+                                   {{"drive_id", drive["value"]["id"]},
+                                    {"id", "models/churn.json"},
+                                    {"name", "other"}});
+    EXPECT_EQ(refused["error"]["code"], "not_supported") << refused.dump();
+    EXPECT_EQ(refused["error"]["path"], "/id") << refused.dump();
+    lake.spaces.zetta->responder = nullptr;
 
     const json deleted =
         lake.call("delete_drive_path",

@@ -41,6 +41,7 @@ audited in the workspace's own log ([audit.md](audit.md#which-log)).
 | `read_drive_file` | read | `drive_id`, `id`, `offset?`, `length?` | `{id, name, size, content_type, sha256, offset, content_base64}` |
 | `recent_drive_entries` | read | `limit?` (1 to 100, default 20) | `{items: [{drive: {id, name}, entry}]}` |
 | `load_drive_dataset` | action | `drive_id`, `id`, `table_name`, `format?`, `if_exists?` | `upload_dataset`'s answer, with `source: {drive_id, id, name}` |
+| `load_drive_model` | action | `drive_id`, `id`, `name` or `version_of`, `kind?`, `metrics?` | `register_model`'s answer (`model_id`, …), with `source: {drive_id, id, name}` ([models.md](models.md#a-standalone-model-lake654)) |
 
 | `search_drives` | read | `q` (1 to 255 bytes), `drive_id?`, `limit?` (1 to 200, default 50) | `{items: [match], truncated, skipped: [{drive, reason}]}` ([Search](#search)) |
 
@@ -241,6 +242,16 @@ its errors come back at this call's fields (`/table_name`, and `/id` for the con
 MiB (`size_invalid` at `/id`), as `upload_dataset` takes. Nothing is stored anywhere but the
 dataset. The Drives page offers it as **Load as dataset** on a CSV or JSONL file.
 
+## A Drive File as a Model (lake#654)
+
+`load_drive_model` brings a model file of a drive into the workspace as a standalone model, the same
+way: `id` is the file, a virtual drive is refused at `/drive_id`, the bytes are read as the caller,
+and the text goes to the workspace engine's `register_model` through `workspace_act` with `name`
+(or `version_of`), `kind?`, `metrics?` and `source` (`drive <drive name>: <file name>`). A new model
+needs `name` (`invalid_input` at `/name` before a byte is read). The engine's refusal of the file
+(`not_supported` for a format it cannot read) comes back at `/id`. At most 16 MiB. Train → Models'
+**New model**, Bring one, A drive offers it ([models.md](models.md#a-standalone-model-lake654)).
+
 ## Search
 
 `search_drives` finds the drives, folders, files and shortcuts of the workspace whose **name**
@@ -356,7 +367,9 @@ storage quota yet. The workspace Zetta's own volume is the bound.
 - `DrivesHttp.ARepositoryDriveWriteIsSearchedDownloadedAndLoaded` (lake#584, lake#587, lake#593):
   a drive write found by hot search, then moved and deleted; `download_drive_file`'s bytes, media
   type and `download_url`, whose route serves `text/csv` with the file's name; both download routes
-  in OpenAPI; and `load_drive_dataset` sending the CSV to `upload_dataset`.
+  in OpenAPI; and `load_drive_dataset` sending the CSV to `upload_dataset`; `load_drive_model`
+  sending a model file's text, its name, metrics and source to `register_model`, refusing a new
+  model with no name at `/name`, and the engine's refusal of the file at `/id` (lake#654).
   `DrivesHttp.AWorkspaceFileDownloadStreamsItsBytes` checks `Content-Disposition` and loads a JSONL
   workspace file.
 

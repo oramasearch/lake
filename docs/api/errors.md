@@ -41,6 +41,7 @@ Every capability answers a failure the same way on REST and MCP:
 | `unrecoverable` | 409 | The request cannot succeed as asked, such as recovering a key only a lost device held. |
 | `not_approved` | 409 | The workspace action needs an approval it does not have yet: approve the plan or the decision first. |
 | `gate_blocked` | 409 | A pipeline gate refused the run; the message names the failing check. |
+| `sign_in_required` | 409 | An MCP connection's server needs a person to sign in again, or its credential is missing or refused ([MCP connections](mcp-connections.md#signing-in)). |
 | `invalid_chain` | 409 | The audit log's hash chain is broken: an event is missing or was changed. |
 | `size_invalid` | 413 | The request body is larger than the limit. |
 | `engine_error` | 422 | The workspace engine or the outside service refused the call; the message is its. |

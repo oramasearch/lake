@@ -31,7 +31,7 @@ The page is described in [../ui/drives.md](../ui/drives.md#storage).
   ([drives.md](drives.md#store-drives)), browsed in place. A volume reads *Shown, not browsed*:
   its contents belong to the service that mounts it. No bucket or filesystem provider is offered
   or browsable yet ([lake#664](https://github.com/oramasearch/lake/issues/664)). Which services and
-  apps mount a store, and how much it holds, are not recorded yet
+  apps mount a store, and how much of it is used, are not recorded yet
   ([lake#666](https://github.com/oramasearch/lake/issues/666)).
 - **Show connection** (once Ready): answers with the Data page itself, showing every field the
   operator delivered (for a volume: `claim`, `namespace`, `size_gi`, `storage_class`) once. It is

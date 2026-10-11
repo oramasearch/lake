@@ -14,6 +14,14 @@ for the Streams contracts and `docs/api/experiments.md` for the Experiments oper
 OpenAI's request and answer) and `openai_transcriber`. `registry.hpp` declares the `Transcriber`
 injected dependency on `ApiContext` and `ServerOptions` (lake#561, `docs/api/transcripts.md`).
 
+`mcp_client.hpp` is Lake as an MCP client (decision 60, lake#652, `docs/api/mcp-connections.md`):
+`McpClient` speaks Streamable HTTP and HTTP+SSE over an injected `McpHttp` (the server's transport,
+`make_mcp_http`, or a test's), with `McpLimits` bounding every exchange; `SseParser`,
+`parse_mcp_url`, `resolve_mcp_url` and `mcp_public_address` are the pure parts. `ApiContext` and
+`ServerOptions` carry the transport (`mcp_http`) and `mcp_allow_private_addresses`.
+`mcp_connections.hpp` registers a workspace's MCP connection capabilities and answers what Lake's
+own MCP endpoint re-exports (`exported_mcp_tools`, `call_exported_mcp_tool`). `registry.hpp`'s
+`acting_agent` names the agent whose credential made a call.
 `model_gateway.hpp` declares the model gateway's pure helpers (`prepare_model_request`,
 `model_usage`, `model_provider_failure`) and `openai_model_provider`. `registry.hpp` declares the
 `ModelProvider` injected dependency on `ApiContext`, and `server.hpp` the provider and its URL on
@@ -71,8 +79,11 @@ by the audit route and the request series. `usage_recorder.hpp` declares `UsageR
 per-workspace `lake_usage` counter and `lake_storage` readings (lake#564, `ApiContext::usage_recorder`,
 `ServerOptions::usage_flush_interval`, `usage_max_pending`, `usage_sample_interval`), and
 `usage_dimensions()`, each dimension's unit, whether the price list may rate it and whether it has
-GPU classes (lake#643); `capabilities.hpp` declares `sample_usage` and
-`queue_repository_builds`, and `images.hpp`'s `ImageBytes` splits image bytes by workspace.
+GPU classes (lake#643), `add_transfer` for bytes moved outside repository sync, and (lake#658) the
+metering contract's tables: `capability_meters()`, `calls_only_capabilities()`,
+`metered_workload_kinds()` and `metered_store_types()`; `capabilities.hpp` declares `sample_usage`,
+`record_workspace_transfer` and `queue_repository_builds`, and `images.hpp`'s `ImageBytes` splits
+image bytes by workspace.
 `registry.hpp`'s `Transcription` carries the tokens a speech-to-text model reports. See
 [metering](../../../docs/api/metering.md#usage-over-time). `billing.hpp`'s `UsageQuantities` and `bill_lines` price a GPU class at its own rate (lake#643).
 `billing.hpp` declares billing (lake#564,

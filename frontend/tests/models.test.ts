@@ -6,6 +6,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  broughtFrom,
   compareVersions,
   errorRate,
   featuresOf,
@@ -13,14 +14,19 @@ import {
   groupModels,
   groupOf,
   heldOutScore,
+  holdoutOf,
+  isBrought,
   measuredFigures,
   modelSteps,
+  nameProblem,
+  needsTarget,
   parseRows,
   predictCurl,
   predictKeys,
   sampleRow,
   scoreSeries,
   trafficOf,
+  trainingOf,
   versionNumber,
 } from "../src/pages/train/models.ts";
 
@@ -154,4 +160,74 @@ test("a model's traffic, its error rate and its quiet steps", () => {
 test("a model's features read by name whatever key the trainer used, never as JSON", () => {
   const model = { feature_schema: { features: ["tenure", { name: "plan" }, { encoded_name: "monthly_value", kind: "float", column: null }, { column: "region" }, { kind: "float" }] } };
   assert.deepEqual(featuresOf(model), ["tenure", "plan", "monthly_value", "region"]);
+});
+
+/* ------------------------------------------------------------------ standalone models (lake#654) */
+
+const standalone = (id: string, created: string, extra: Record<string, unknown> = {}) => ({
+  id,
+  name: "churn",
+  kind: "classifier",
+  project: "p-internal",
+  project_name: "churn (standalone model)",
+  pipeline_name: "churn",
+  run: `run-${id}`,
+  created,
+  metrics: { held_out_auc: 0.8 },
+  feature_schema: { features: ["tenure"] },
+  standalone: true,
+  ...extra,
+});
+
+test("a standalone model's records are its versions, and it says it is standalone", () => {
+  const groups = groupModels([...records, standalone("s1", "2026-10-07T10:00:00Z"), standalone("s2", "2026-10-08T10:00:00Z")]);
+  const model = groupOf(groups, "s1")!;
+  assert.deepEqual(model.versions.map((v) => v.id), ["s2", "s1"]);
+  assert.equal(model.standalone, true);
+  assert.equal(model.brought, false);
+  // A project's churn model of the same name is another model.
+  assert.notEqual(groupOf(groups, "a")!.key, model.key);
+  assert.equal(groupOf(groups, "a")!.standalone, false);
+});
+
+test("a brought model groups by its project and says where it came from", () => {
+  const brought = (id: string, created: string) =>
+    standalone(id, created, { name: "partner", pipeline_name: "", run: "", project: "p-b", feature_schema: { features: ["a"], brought: true, source: "drive Docs: partner.json" } });
+  const groups = groupModels([brought("b1", "2026-10-01T00:00:00Z"), brought("b2", "2026-10-02T00:00:00Z")]);
+  assert.equal(groups.length, 1);
+  assert.equal(groups[0].brought, true);
+  assert.equal(isBrought(groups[0].latest), true);
+  assert.equal(broughtFrom(groups[0].latest), "drive Docs: partner.json");
+  assert.deepEqual(groups[0].runs, []);
+});
+
+test("what a standalone model trains on is read from its pipeline's model step", () => {
+  const graph = {
+    nodes: [
+      { id: "load", kind: "connect", attributes: { source: "datasets", table: "accounts" } },
+      { id: "fit", kind: "model", attributes: { standalone_training: { dataset_path: "datasets.accounts", target: "churned", methodology: "M-1", holdout_fraction: 0.2 } } },
+    ],
+  };
+  assert.deepEqual(trainingOf(graph), { dataset: "datasets.accounts", target: "churned", methodology: "M-1", entity: "", holdout: 0.2 });
+  assert.equal(trainingOf({ nodes: [{ id: "fit", kind: "model", attributes: {} }] }), null);
+  assert.equal(trainingOf(null), null);
+});
+
+test("a methodology needs a target when its label input is required", () => {
+  assert.equal(needsTarget({ inputs: [{ role: "entity", required: true }, { role: "label", required: true }] }), true);
+  assert.equal(needsTarget({ inputs: [{ role: "entity", required: true }, { role: "feature", required: true }] }), false);
+  assert.equal(needsTarget({ inputs: [{ role: "label", required: false }] }), false);
+  assert.equal(needsTarget(null), false);
+});
+
+test("a new model's name and held-out share are checked before they are sent", () => {
+  const groups = groupModels([standalone("s1", "2026-10-07T10:00:00Z"), ...records]);
+  assert.equal(nameProblem("  ", groups), "Name the model.");
+  assert.match(nameProblem("churn", groups)!, /exists/);
+  assert.equal(nameProblem("upsell", groups), null, "a project's model of that name is not a standalone model");
+  assert.deepEqual(holdoutOf(""), { value: null });
+  assert.deepEqual(holdoutOf("0.25"), { value: 0.25 });
+  assert.deepEqual(holdoutOf("20%"), { value: 0.2 });
+  assert.ok("error" in holdoutOf("1.5"));
+  assert.ok("error" in holdoutOf("abc"));
 });

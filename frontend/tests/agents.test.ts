@@ -168,8 +168,13 @@ test("the skills are the runtime's, vendored from agent-runtime's skills.json, n
     assert.deepEqual(AGENT_SKILLS, vendored);
     // The engine accepts every one: create_agent's schema in Lake's vendored engine OpenAPI.
     const engine = JSON.parse(readFileSync(new URL("../../src/api/engine_openapi.json", import.meta.url), "utf8"));
-    const accepted = engine.capabilities.create_agent.input_schema.properties.skills.items.enum;
-    for (const skill of OFFERED_SKILLS) assert.ok(accepted.includes(skill), `${skill} is accepted by create_agent`);
+    // A skill is one of the named ones or an MCP connection's, mcp:<prefix> (zetta#1267, lake#652).
+    const item = engine.capabilities.create_agent.input_schema.properties.skills.items;
+    const named = item.anyOf.find((choice: {enum?: string[]}) => Array.isArray(choice.enum));
+    const mcp = item.anyOf.find((choice: {pattern?: string}) => typeof choice.pattern === "string");
+    for (const skill of OFFERED_SKILLS) assert.ok(named.enum.includes(skill), `${skill} is accepted by create_agent`);
+    assert.ok(new RegExp(mcp.pattern).test("mcp:ticket_desk"), "an MCP connection's skill is accepted");
+    assert.ok(!new RegExp(mcp.pattern).test("mcp:Ticket-Desk"), "only a prefix Lake makes");
     assert.equal(skillLabel("search"), vendored.find(([key]: [string, string]) => key === "search")[1]);
     assert.equal(skillLabel("read-drives"), "Read drives", "a skill the runtime no longer lists is shown by its name");
     assert.equal(skillLabel("mcp:github"), "MCP: github");

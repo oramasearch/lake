@@ -276,7 +276,7 @@ constexpr std::array<std::string_view, 47> workspace_reads = {"server_info",
                                                               "list_ledger",
                                                               "get_monitor",
                                                               "get_roi_readout"};
-constexpr std::array<std::string_view, 41> workspace_actions = {"create_project",
+constexpr std::array<std::string_view, 45> workspace_actions = {"create_project",
                                                                 "create_study",
                                                                 "stop_study",
                                                                 "stop_trial",
@@ -316,6 +316,13 @@ constexpr std::array<std::string_view, 41> workspace_actions = {"create_project"
                                                                 "delete_agent",
                                                                 "set_training_schedule",
                                                                 "agent_run",
+                                                                // A model made on its own, not as
+                                                                // a project pipeline's step
+                                                                // (lake#654).
+                                                                "train_model",
+                                                                "retrain_model",
+                                                                "register_model",
+                                                                "move_model_to_project",
                                                                 // A read in Zetta, called with GET,
                                                                 // but it loads a model and spends
                                                                 // compute: `write` in lake.
@@ -856,6 +863,15 @@ liquid::runtime::task<ApiResult> workspace_call(bool read, json input, ApiContex
                     "a project named '" + project_name +
                         "' already exists in this workspace; choose another name",
                     "/input/name");
+            }
+            // An engine older than the capability (allow-listed here, unknown there) says so in
+            // words a person can act on, not as a missing route (lake#654).
+            if (called->error().code == "unknown_capability") {
+                co_return ApiResult::failure(
+                    "not_supported",
+                    "this workspace's engine does not have " +
+                        std::string(engine_capability_name(capability)) +
+                        " yet; it needs a newer Zetta. Nothing was changed.");
             }
             // Point at the field the workspace names (lake#256, lake#450), in lake's codes.
             ApiResult failed = workspace_failure(called->error(), sent, "/input", renamed);
@@ -1754,6 +1770,14 @@ void register_search_capabilities(Registry& registry) {
             }
             if (!*found) {
                 co_return workspace_failure(found->error(), input);
+            }
+            // The index's answered searches over time, for what serving it costs (lake#658),
+            // added off the request path like predict's predictions.
+            if (context.usage_recorder != nullptr) {
+                context.usage_recorder->add(input.value("workspace_id", context.workspace_id),
+                                            "searches",
+                                            1,
+                                            {{"object_id", index}});
             }
             co_return ApiResult::success(**found);
         },
@@ -4530,8 +4554,17 @@ liquid::runtime::task<ApiResult> confirm_ask_proposal(const json& input, ApiCont
     const std::string capability = proposal.value("capability", std::string());
     context.audit_details = {
         {"ask_confirm", true}, {"conversation_id", conversation_id}, {"capability", capability}};
-    const ApiResult done = called(
-        co_await call_capability(context, capability, proposal.value("input", json::object())));
+    // A proposal runs in the conversation's workspace when its input names none (an MCP
+    // connection's call_mcp_tool from Ask Orama, lake#652).
+    json proposed = proposal.value("input", json::object());
+    if (proposed.is_object() && !proposed.contains("workspace_id") && context.registry != nullptr) {
+        if (const auto target = context.registry->find(capability);
+            target && target->input_schema.contains("properties") &&
+            target->input_schema.at("properties").contains("workspace_id")) {
+            proposed["workspace_id"] = workspace_id;
+        }
+    }
+    const ApiResult done = called(co_await call_capability(context, capability, proposed));
     context.audit_details["ok"] = done.ok;
     auto outcome = control::settled(co_await append_message(
         context,
