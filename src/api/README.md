@@ -155,6 +155,13 @@ cleaning, and OpenAI's multipart request and answer. The HTTP exchange is the in
 `TranscriptPost`, which `http_server.cpp` builds over its outbound client when
 `LAKE_OPENAI_API_KEY` is set. See `docs/api/transcripts.md`.
 
+`mcp_client.cpp` is Lake's MCP client (decision 60, lake#652): initialize and sessions, the lists and
+calls, notifications, the event-stream reader and every bound on a hostile server.
+`http_server.cpp`'s `McpOutboundHttp` is its transport: an io thread of its own, `enough` to stop
+reading once the answer is in, a byte limit, a deadline on resolution, connection, handshake and
+exchange, and no address that is not public unless `LAKE_MCP_ALLOW_PRIVATE_ADDRESSES=1`. See
+`docs/api/mcp-connections.md#the-client`.
+
 `solution_capabilities.cpp` registers the six solution capabilities (lake#597): a workspace's own
 solutions are sealed `lake_solutions` records in the workspace Zetta, listed and read beside Orama's
 catalogue, which it reads through the workspace's engine (`list_solutions`, `get_solution`);

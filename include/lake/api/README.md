@@ -14,6 +14,12 @@ for the Streams contracts and `docs/api/experiments.md` for the Experiments oper
 OpenAI's request and answer) and `openai_transcriber`. `registry.hpp` declares the `Transcriber`
 injected dependency on `ApiContext` and `ServerOptions` (lake#561, `docs/api/transcripts.md`).
 
+`mcp_client.hpp` is Lake as an MCP client (decision 60, lake#652, `docs/api/mcp-connections.md`):
+`McpClient` speaks Streamable HTTP and HTTP+SSE over an injected `McpHttp` (the server's transport,
+`make_mcp_http`, or a test's), with `McpLimits` bounding every exchange; `SseParser`,
+`parse_mcp_url`, `resolve_mcp_url` and `mcp_public_address` are the pure parts. `ApiContext` and
+`ServerOptions` carry the transport (`mcp_http`) and `mcp_allow_private_addresses`.
+
 `ServerOptions::external_origin` is trusted instance configuration for repository terminal
 instructions (`repository_external_origin`). It takes precedence over `https://` plus the trusted
 identity/platform `public_host`; with neither value, lake names no origin. See

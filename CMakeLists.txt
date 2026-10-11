@@ -253,6 +253,7 @@ add_library(lake-core STATIC
   src/api/transcript_capabilities.cpp
   src/api/drives_capabilities.cpp
   src/api/transcription.cpp
+  src/api/mcp_client.cpp
   src/api/workspace_store_capabilities.cpp
   src/api/datasets.cpp
   src/api/stream_capabilities.cpp

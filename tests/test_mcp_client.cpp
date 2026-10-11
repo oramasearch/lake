@@ -1,0 +1,389 @@
+// Lake as an MCP client (decision 60, lake#652, docs/api/mcp-connections.md#the-client): the pure
+// protocol pieces, then the client against a local test MCP server over the server's own outbound
+// transport, honest and hostile.
+
+#include <chrono>
+#include <string>
+#include <vector>
+
+#include <gtest/gtest.h>
+#include <nlohmann/json.hpp>
+
+#include "lake/api/mcp_client.hpp"
+#include "mcp_test_server.hpp"
+
+namespace {
+
+using json = nlohmann::json;
+using lake::api::McpClient;
+using lake::api::McpClientOptions;
+using lake::test::McpTestServer;
+
+TEST(McpClient, EventStreamsParseAsTheWhatwgRulesSay) {
+    lake::api::SseParser parser;
+    auto events = parser.feed(": a comment\r\nevent: endpoint\r\ndata: /messages\r\n\r\nda");
+    ASSERT_EQ(events.size(), 1U);
+    EXPECT_EQ(events[0].event, "endpoint");
+    EXPECT_EQ(events[0].data, "/messages");
+    events = parser.feed("ta: {\"a\":\ndata: 1}\n\nid: 7\rdata:x\r\r");
+    ASSERT_EQ(events.size(), 2U);
+    EXPECT_EQ(events[0].event, "message");
+    EXPECT_EQ(events[0].data, "{\"a\":\n1}") << "data lines join with a line feed";
+    EXPECT_EQ(events[1].id, "7");
+    EXPECT_EQ(events[1].data, "x");
+    EXPECT_TRUE(parser.feed("event: nothing\n\n").empty()) << "an event without data is dropped";
+}
+
+TEST(McpClient, ServerUrlsAreHttpsWithoutUserInfoOrFragments) {
+    const auto good = lake::api::parse_mcp_url("https://MCP.Example.com/v1/mcp?x=1", false);
+    ASSERT_TRUE(good) << good.error();
+    EXPECT_EQ(good->host, "mcp.example.com");
+    EXPECT_EQ(good->port, "443");
+    EXPECT_EQ(good->path, "/v1/mcp?x=1");
+    EXPECT_EQ(good->origin(), "https://mcp.example.com");
+    EXPECT_EQ(lake::api::parse_mcp_url("https://[2606:4700::1]:8443", false)->origin(),
+              "https://[2606:4700::1]:8443");
+    for (const std::string bad : {"http://mcp.example.com/mcp",
+                                  "ftp://x",
+                                  "https://user@x.com/",
+                                  "https://x.com/#frag",
+                                  "https://x.com:99999/",
+                                  "https:// x.com",
+                                  "https://x.com:8a/",
+                                  "https://"}) {
+        EXPECT_FALSE(lake::api::parse_mcp_url(bad, false)) << bad;
+    }
+    EXPECT_FALSE(lake::api::parse_mcp_url("http://127.0.0.1:9/mcp", false));
+    EXPECT_TRUE(lake::api::parse_mcp_url("http://127.0.0.1:9/mcp", true)) << "tests only";
+    EXPECT_FALSE(lake::api::parse_mcp_url("http://10.0.0.1/mcp", true))
+        << "plain http is loopback only";
+
+    const auto base = *lake::api::parse_mcp_url("https://mcp.example.com/a/sse", false);
+    EXPECT_EQ(*lake::api::resolve_mcp_url(base, "/messages?s=1"),
+              "https://mcp.example.com/messages?s=1");
+    EXPECT_EQ(*lake::api::resolve_mcp_url(base, "messages"), "https://mcp.example.com/a/messages");
+    EXPECT_EQ(*lake::api::resolve_mcp_url(base, "https://mcp.example.com/m"),
+              "https://mcp.example.com/m");
+    for (const std::string elsewhere : {"https://evil.example/m",
+                                        "//evil.example/m",
+                                        "http://mcp.example.com/m",
+                                        "javascript://x"}) {
+        EXPECT_FALSE(lake::api::resolve_mcp_url(base, elsewhere)) << elsewhere;
+    }
+}
+
+TEST(McpClient, OnlyPublicAddressesAreReachable) {
+    using bytes = std::vector<std::uint8_t>;
+    for (const bytes& refused : {bytes{127, 0, 0, 1},
+                                 bytes{10, 1, 2, 3},
+                                 bytes{172, 16, 0, 1},
+                                 bytes{172, 31, 255, 255},
+                                 bytes{192, 168, 1, 1},
+                                 bytes{169, 254, 169, 254},
+                                 bytes{100, 64, 0, 1},
+                                 bytes{0, 0, 0, 0},
+                                 bytes{224, 0, 0, 1},
+                                 bytes{255, 255, 255, 255}}) {
+        EXPECT_FALSE(lake::api::mcp_public_address(refused))
+            << int(refused[0]) << "." << int(refused[1]);
+    }
+    EXPECT_TRUE(lake::api::mcp_public_address({8, 8, 8, 8}));
+    EXPECT_TRUE(lake::api::mcp_public_address({172, 32, 0, 1}));
+    bytes loopback6(16, 0);
+    loopback6[15] = 1;
+    EXPECT_FALSE(lake::api::mcp_public_address(loopback6));
+    bytes mapped(16, 0);
+    mapped[10] = mapped[11] = 0xFF;
+    mapped[12] = 10;
+    EXPECT_FALSE(lake::api::mcp_public_address(mapped)) << "IPv4-mapped 10.0.0.0";
+    mapped[12] = 8;
+    mapped[13] = 8;
+    mapped[14] = 8;
+    mapped[15] = 8;
+    EXPECT_TRUE(lake::api::mcp_public_address(mapped));
+    bytes nat64{0x00, 0x64, 0xFF, 0x9B, 0, 0, 0, 0, 0, 0, 0, 0, 169, 254, 169, 254};
+    EXPECT_FALSE(lake::api::mcp_public_address(nat64)) << "the metadata address through NAT64";
+    bytes unique(16, 0);
+    unique[0] = 0xFD;
+    EXPECT_FALSE(lake::api::mcp_public_address(unique));
+    bytes link(16, 0);
+    link[0] = 0xFE;
+    link[1] = 0x80;
+    EXPECT_FALSE(lake::api::mcp_public_address(link));
+    bytes cloudflare(16, 0);
+    cloudflare[0] = 0x26;
+    cloudflare[1] = 0x06;
+    cloudflare[2] = 0x47;
+    EXPECT_TRUE(lake::api::mcp_public_address(cloudflare));
+}
+
+TEST(McpClient, AToolIsKeptOnlyWithinBounds) {
+    lake::api::McpLimits limits;
+    limits.max_description_bytes = 10;
+    limits.max_schema_bytes = 200;
+    const auto kept =
+        lake::api::mcp_tool_from({{"name", "search.v2"},
+                                  {"description", "Searches the whole archive \xC3\xA9tc"},
+                                  {"inputSchema", {{"properties", {{"q", {{"type", "string"}}}}}}},
+                                  {"annotations", {{"readOnlyHint", true}, {"title", "Search"}}}},
+                                 limits);
+    ASSERT_TRUE(kept) << kept.error();
+    EXPECT_EQ(kept->description, "Searches t");
+    EXPECT_EQ(kept->title, "Search");
+    EXPECT_EQ(kept->input_schema.at("type"), "object");
+    EXPECT_EQ(kept->read_only_hint, true);
+    EXPECT_FALSE(kept->destructive_hint);
+    for (const json& bad :
+         {json{{"name", "has space"}, {"inputSchema", {{"type", "object"}}}},
+          json{{"name", std::string(129, 'a')}, {"inputSchema", {{"type", "object"}}}},
+          json{{"name", "x"}, {"inputSchema", {{"type", "string"}}}},
+          json{{"name", "x"}},
+          json{{"name", "x"},
+               {"inputSchema", {{"type", "object"}, {"description", std::string(300, 'a')}}}},
+          json("not an object")}) {
+        EXPECT_FALSE(lake::api::mcp_tool_from(bad, limits)) << bad.dump().substr(0, 80);
+    }
+    const auto round = lake::api::mcp_tool_from_json(lake::api::mcp_tool_json(*kept));
+    ASSERT_TRUE(round);
+    EXPECT_EQ(round->name, "search.v2");
+    EXPECT_EQ(round->read_only_hint, true);
+}
+
+McpClientOptions options_for(const McpTestServer& server) {
+    McpClientOptions options;
+    options.url = server.url();
+    options.allow_private_addresses = true;
+    options.limits.timeout = std::chrono::milliseconds(3000);
+    options.client_version = "test";
+    return options;
+}
+
+TEST(McpClient, DiscoversToolsResourcesAndPromptsOverStreamableHttp) {
+    McpTestServer server;
+    McpClient client(lake::api::make_mcp_http(true), options_for(server));
+    const auto found = client.discover();
+    ASSERT_TRUE(found) << lake::api::mcp_error_text(found.error());
+    EXPECT_EQ(found->transport, "streamable_http");
+    EXPECT_EQ(found->server.name, "test-server");
+    EXPECT_EQ(found->server.protocol_version, "2025-06-18");
+    EXPECT_TRUE(found->server.resources_subscribe);
+    ASSERT_EQ(found->tools.size(), 4U) << "both pages of tools/list";
+    EXPECT_EQ(found->tools[0].name, "echo");
+    EXPECT_EQ(found->tools[0].read_only_hint, true);
+    EXPECT_EQ(found->tools[1].read_only_hint, false);
+    EXPECT_FALSE(found->tools[2].read_only_hint) << "inject proposes nothing";
+    ASSERT_EQ(found->resources.size(), 1U);
+    EXPECT_EQ(found->resources[0].uri, "memo://inbox");
+    ASSERT_EQ(found->prompts.size(), 1U);
+
+    const auto called = client.call_tool("echo", {{"text", "hello"}});
+    ASSERT_TRUE(called) << lake::api::mcp_error_text(called.error());
+    EXPECT_EQ(called->at("structuredContent").at("echo").at("text"), "hello");
+    client.close();
+
+    // initialize, then the session on every later request with the negotiated version.
+    const auto seen = server.seen();
+    ASSERT_GE(seen.size(), 6U);
+    EXPECT_EQ(seen[0].rpc.at("method"), "initialize");
+    EXPECT_EQ(seen[0].rpc.at("params").at("capabilities"), json::object())
+        << "Lake declares no sampling, roots or elicitation";
+    EXPECT_EQ(seen[0].headers.count("mcp-session-id"), 0U);
+    EXPECT_EQ(seen[1].rpc.at("method"), "notifications/initialized");
+    for (std::size_t i = 1; i < seen.size(); ++i) {
+        EXPECT_TRUE(seen[i].headers.at("mcp-session-id").starts_with("session-")) << i;
+        EXPECT_EQ(seen[i].headers.at("mcp-protocol-version"), "2025-06-18") << i;
+        EXPECT_EQ(seen[i].headers.at("user-agent"), "Lake-MCP-Client/test");
+    }
+    EXPECT_EQ(seen.back().method, "DELETE") << "close ends the session";
+    EXPECT_GT(client.traffic().sent_bytes, 0U);
+    EXPECT_GT(client.traffic().received_bytes, 0U);
+}
+
+TEST(McpClient, AnEventStreamAnswerIsReadUntilItsAnswerAndNoLonger) {
+    McpTestServer server;
+    server.answer = "sse_keep_open";
+    server.notify_before_answer = true;
+    server.wrong_id_first = true;
+    server.server_request_first = true;
+    auto options = options_for(server);
+    options.limits.timeout = std::chrono::milliseconds(5000);
+    McpClient client(lake::api::make_mcp_http(true), options);
+    const auto started = std::chrono::steady_clock::now();
+    const auto called = client.call_tool("echo", {{"text", "mine"}});
+    const auto took = std::chrono::steady_clock::now() - started;
+    ASSERT_TRUE(called) << lake::api::mcp_error_text(called.error());
+    EXPECT_EQ(called->at("structuredContent").at("echo").at("text"), "mine")
+        << "the answer to another id is not this call's";
+    EXPECT_LT(took, std::chrono::milliseconds(2500))
+        << "a stream left open after the answer does not hold the call to its deadline";
+    const auto notes = client.take_notifications();
+    ASSERT_EQ(notes.size(), 1U);
+    EXPECT_EQ(notes[0].method, "notifications/message");
+    for (const auto& request : server.seen()) {
+        EXPECT_NE(request.rpc.value("id", json()), json(9999))
+            << "a server request is never answered";
+    }
+}
+
+TEST(McpClient, AHostileServerIsBoundedByDeadlineSizeAndShape) {
+    {
+        McpTestServer server;
+        server.slow_ms = 1500;
+        auto options = options_for(server);
+        options.limits.timeout = std::chrono::milliseconds(400);
+        McpClient client(lake::api::make_mcp_http(true), options);
+        ASSERT_TRUE(client.initialize());
+        const auto started = std::chrono::steady_clock::now();
+        const auto called = client.call_tool("echo", {{"text", "x"}});
+        ASSERT_FALSE(called);
+        EXPECT_EQ(called.error().kind, "timeout");
+        EXPECT_LT(std::chrono::steady_clock::now() - started, std::chrono::milliseconds(1400));
+    }
+    {
+        McpTestServer server;
+        server.huge_bytes = 300'000;
+        auto options = options_for(server);
+        options.limits.max_response_bytes = 64 * 1024;
+        McpClient client(lake::api::make_mcp_http(true), options);
+        const auto called = client.call_tool("echo", {{"text", "x"}});
+        ASSERT_FALSE(called);
+        EXPECT_EQ(called.error().kind, "too_large");
+    }
+    {
+        McpTestServer server;
+        server.huge_bytes = 300'000;
+        server.answer = "sse";
+        auto options = options_for(server);
+        options.limits.max_response_bytes = 64 * 1024;
+        McpClient client(lake::api::make_mcp_http(true), options);
+        const auto called = client.call_tool("echo", {{"text", "x"}});
+        ASSERT_FALSE(called);
+        EXPECT_EQ(called.error().kind, "too_large") << "on an event stream too";
+    }
+    {
+        McpTestServer server;
+        server.garbage = true;
+        McpClient client(lake::api::make_mcp_http(true), options_for(server));
+        const auto called = client.call_tool("echo", {{"text", "x"}});
+        ASSERT_FALSE(called);
+        EXPECT_EQ(called.error().kind, "protocol");
+    }
+    {
+        McpTestServer server;
+        server.endless_events = true;
+        auto options = options_for(server);
+        options.limits.max_events = 50;
+        McpClient client(lake::api::make_mcp_http(true), options);
+        const auto started = std::chrono::steady_clock::now();
+        const auto called = client.call_tool("echo", {{"text", "x"}});
+        ASSERT_FALSE(called);
+        EXPECT_LT(std::chrono::steady_clock::now() - started, std::chrono::milliseconds(2500))
+            << "events that never answer stop at the event bound, not the deadline";
+    }
+    {
+        McpTestServer server;
+        server.protocol_version = "1999-01-01";
+        McpClient client(lake::api::make_mcp_http(true), options_for(server));
+        const auto started = client.initialize();
+        ASSERT_FALSE(started);
+        EXPECT_EQ(started.error().kind, "unsupported_version");
+    }
+    {
+        McpTestServer server;
+        server.tools = json::array(
+            {{{"name", "ok"}, {"inputSchema", {{"type", "object"}}}},
+             {{"name", "bad name"}, {"inputSchema", {{"type", "object"}}}},
+             {{"name", "ok"}, {"inputSchema", {{"type", "object"}}}},
+             {{"name", "big"},
+              {"inputSchema", {{"type", "object"}, {"description", std::string(40'000, 'x')}}}}});
+        McpClient client(lake::api::make_mcp_http(true), options_for(server));
+        const auto found = client.discover();
+        ASSERT_TRUE(found);
+        ASSERT_EQ(found->tools.size(), 1U);
+        EXPECT_EQ(found->skipped.size(), 3U) << found->skipped.size();
+    }
+}
+
+TEST(McpClient, SignInIsAskedForWithTheResourceMetadata) {
+    McpTestServer server;
+    server.required_bearer = "right";
+    McpClient refused(lake::api::make_mcp_http(true), options_for(server));
+    const auto started = refused.initialize();
+    ASSERT_FALSE(started);
+    EXPECT_EQ(started.error().kind, "auth_required");
+    EXPECT_EQ(started.error().resource_metadata,
+              server.base() + "/.well-known/oauth-protected-resource/mcp");
+    auto options = options_for(server);
+    options.credential.bearer = "right";
+    McpClient accepted(lake::api::make_mcp_http(true), options);
+    EXPECT_TRUE(accepted.initialize());
+}
+
+TEST(McpClient, AnExpiredSessionIsStartedAgainOnce) {
+    McpTestServer server;
+    McpClient client(lake::api::make_mcp_http(true), options_for(server));
+    ASSERT_TRUE(client.initialize());
+    const std::string first = client.session_id();
+    server.expire_session_once = true;
+    const auto called = client.call_tool("echo", {{"text", "again"}});
+    ASSERT_TRUE(called) << lake::api::mcp_error_text(called.error());
+    EXPECT_NE(client.session_id(), first);
+    EXPECT_EQ(server.calls("initialize").size(), 2U);
+}
+
+TEST(McpClient, TheOlderHttpSseTransportIsUsedWhenTheServerHasNoOther) {
+    McpTestServer server;
+    server.transport = "sse";
+    McpClient client(lake::api::make_mcp_http(true), options_for(server));
+    const auto found = client.discover();
+    ASSERT_TRUE(found) << lake::api::mcp_error_text(found.error());
+    EXPECT_EQ(found->transport, "sse");
+    EXPECT_EQ(found->tools.size(), 4U);
+    const auto called = client.call_tool("echo", {{"text", "old"}});
+    ASSERT_TRUE(called) << lake::api::mcp_error_text(called.error());
+    EXPECT_EQ(called->at("structuredContent").at("echo").at("text"), "old");
+    client.close();
+}
+
+TEST(McpClient, NotificationsArriveOnTheGetStream) {
+    McpTestServer server;
+    McpClient client(lake::api::make_mcp_http(true), options_for(server));
+    ASSERT_TRUE(client.initialize());
+    ASSERT_TRUE(client.subscribe_resource("memo://inbox"));
+    EXPECT_EQ(server.subscribed().count("memo://inbox"), 1U);
+    std::vector<lake::api::McpNotification> got;
+    for (int i = 0; i < 20 && got.size() < 3; ++i) {
+        auto heard = client.listen(std::chrono::milliseconds(500));
+        if (!heard) {
+            break;
+        }
+        got.insert(got.end(), heard->begin(), heard->end());
+    }
+    ASSERT_EQ(got.size(), 3U);
+    EXPECT_EQ(got[0].method, "notifications/resources/updated");
+    EXPECT_EQ(got[2].params.at("n"), 2);
+
+    McpTestServer quiet;
+    quiet.no_get_stream = true;
+    McpClient other(lake::api::make_mcp_http(true), options_for(quiet));
+    const auto heard = other.listen(std::chrono::milliseconds(200));
+    ASSERT_FALSE(heard);
+    EXPECT_EQ(heard.error().kind, "not_supported");
+}
+
+TEST(McpClient, ThePublicTransportRefusesPrivateAddresses) {
+    McpTestServer server;
+    McpClientOptions options;
+    options.url =
+        "https://127.0.0.1:" + server.base().substr(server.base().rfind(':') + 1) + "/mcp";
+    options.limits.timeout = std::chrono::milliseconds(2000);
+    McpClient client(lake::api::make_mcp_http(false), options);
+    const auto started = client.initialize();
+    ASSERT_FALSE(started);
+    EXPECT_EQ(started.error().kind, "unreachable");
+    EXPECT_NE(started.error().message.find("not a public address"), std::string::npos)
+        << started.error().message;
+    EXPECT_TRUE(server.seen().empty()) << "nothing was sent";
+}
+
+} // namespace

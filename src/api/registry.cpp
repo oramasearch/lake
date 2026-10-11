@@ -849,7 +849,7 @@ CallState prepare_call(std::shared_ptr<const Capability> capability,
 
 // The agent a task, launch or schedule credential belongs to. Those credentials act as the person
 // who started the agent, so the audit principal names the person; this names the agent (lake#445).
-std::string acting_agent(const ApiContext& context) {
+std::string acting_agent_of(const ApiContext& context) {
     const auto id_after = [&](std::string_view prefix) -> std::string {
         return context.credential_session_id.starts_with(prefix)
                    ? context.credential_session_id.substr(prefix.size())
@@ -942,7 +942,7 @@ ApiResult finish_call(const Capability* capability,
                                  : (name == "set_audit_retention" ? "retention" : "capability");
     nlohmann::json details = context.audit_details;
     details["error_code"] = result.ok ? "" : result.error.code;
-    if (const std::string agent = acting_agent(context); !agent.empty()) {
+    if (const std::string agent = acting_agent_of(context); !agent.empty()) {
         details["acting_agent"] = agent;
     }
     const audit::EventDraft event{
@@ -991,6 +991,10 @@ ApiResult finish_call(const Capability* capability,
 }
 
 } // namespace
+
+std::string acting_agent(const ApiContext& context) {
+    return context.store == nullptr ? std::string() : acting_agent_of(context);
+}
 
 SchemaAudience schema_audience(const ApiContext& context) {
     return context.credential_kind == "agent_task" ? SchemaAudience::AgentTask

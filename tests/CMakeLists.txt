@@ -23,6 +23,7 @@ add_executable(lake-tests test_main.cpp test_web_ui.cpp test_web_app.cpp test_ma
   test_workspaces.cpp
   test_workspace_records.cpp
   test_transcripts.cpp
+  test_mcp_client.cpp
   test_solutions.cpp
   test_drives.cpp
   test_request_series.cpp

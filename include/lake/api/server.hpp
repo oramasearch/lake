@@ -157,6 +157,11 @@ struct ServerOptions {
     // An injected transcriber (tests); empty: OpenAI over the server's outbound client when
     // `openai_api_key` is set.
     Transcriber transcriber;
+    // MCP connections (decision 60, docs/api/mcp-connections.md#the-client): whether a connection
+    // may reach loopback and private addresses (LAKE_MCP_ALLOW_PRIVATE_ADDRESSES=1, local
+    // development and tests only), and an injected transport (tests); null: the server's own.
+    bool mcp_allow_private_addresses = false;
+    std::shared_ptr<McpHttp> mcp_http;
     // Configured external attestation verifiers. Lake owns their invocation but
     // callers retain their lifetime for the server lifetime.
     control::callers::TokenReviewer* token_reviewer = nullptr;
