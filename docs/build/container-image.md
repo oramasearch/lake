@@ -79,4 +79,7 @@ is defined for `src/version.cpp` alone, so a new revision invalidates one object
 against the BuildKit pod; it clears every cache, this one included.
 
 The web app is built in its own Node 22 stage (`frontend`) and embedded with
-`-DLAKE_FRONTEND_DIST`; see [docs/ui/web-app.md](../ui/web-app.md).
+`-DLAKE_FRONTEND_DIST`; see [docs/ui/web-app.md](../ui/web-app.md). The stage copies `frontend/` and also
+`assets/catalogue-icons/`, because the frontend's test suite (run by `npm run build`) checks that the
+exported icon copies match the source (lake#639); a test that reads another folder needs it copied here
+too.
