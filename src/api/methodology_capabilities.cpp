@@ -2071,7 +2071,7 @@ void register_methodology_capabilities(Registry& registry) {
         "Duplicate a methodology",
         "Copy a methodology into a new editable one of the workspace's own, in a new repository, "
         "named `name` or \"<name> (copy)\". From the workspace's own: its files, Python source "
-        "included. From Orama's: its description and search space, with a Python template for "
+        "included. From Orama's: its description and the ranges of its parameters, with a Python template for "
         "its kind of target, since Orama's run natively in the engine and have no Python source.",
         workspace_input({{"id", id}, {"name", text()}}, json::array({"id"})),
         one,

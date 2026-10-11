@@ -143,7 +143,7 @@ Lake's templates; a draft written by Ask Orama from the description is lake#688.
 A copy is a new methodology of the workspace's own, in a new repository, named `name` or "<name>
 (copy)". From one of the workspace's own, every file is copied, its Python source included. From
 one of Orama's, which run natively and have no Python source, the copy carries its description
-(what it makes, needs and is measured by), its search space as parameters, and the template for its
+(what it makes, needs and is measured by), the ranges its parameters are tuned over, and the template for its
 kind of target; `duplicated_from` names where it came from.
 
 ### Editing
