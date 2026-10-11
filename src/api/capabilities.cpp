@@ -2037,8 +2037,8 @@ void register_server_info(Registry& registry, std::string_view version) {
                  // (lake#605).
                  {"deployments", ctx.platform != nullptr},
                  // Whether this lake bills and how invoices are paid
-                 // (lake#620): the manual provider when Stripe's keys are
-                 // not in the billing secret.
+                 // (lake#620): the manual provider when lake was started
+                 // without Stripe's keys (lake#628). Never a key.
                  {"billing", billing_registered(ctx.registry)},
                  {"payment_provider", payment.is_null() ? json(nullptr) : payment["provider"]},
                  {"online_payment", !payment.is_null() && payment["online_payment"] == true}});

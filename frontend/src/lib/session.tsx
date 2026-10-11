@@ -37,7 +37,7 @@ export type Viewer = {
   /** Whether this lake bills (LAKE_BILLING, lake#564): Billing's pages exist only then. */
   billing?: boolean;
   /** How invoices are paid where it bills (lake#620): Stripe, or invoice only and why. */
-  billing_payment?: { provider: string; title: string; online_payment: boolean; reason: string; checked_at: string } | null;
+  billing_payment?: { provider: string; title: string; online_payment: boolean; reason: string } | null;
   /** Lake configuration the forms need (the agent models offered by "Create an Agent"). */
   config?: { base_agent_model?: string; frontier_model?: string };
   version?: string;

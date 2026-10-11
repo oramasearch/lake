@@ -82,7 +82,8 @@ The **Stripe** row on the invoice says where the payment stands: **Awaiting paym
 failed** (pay again on Stripe's page with another card or account), **Paid** or **Void**.
 
 If the Billing page's **Payment** figure says **Invoice only**, card payment is not set up on this
-lake. Orama then sends payment details with each invoice (**How to Pay**), collects the payment
+lake. Setting it up is Orama's: Stripe's keys are settings of the platform lake runs on, never
+secrets in your workspace. Orama then sends payment details with each invoice (**How to Pay**), collects the payment
 outside lake, and records it; the invoice shows **paid** with the payment's reference.
 
 The invoice, through the API, carries the same: `payment_url` (Stripe's page) and `provider_status`.

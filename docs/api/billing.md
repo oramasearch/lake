@@ -59,24 +59,24 @@ interface with:
   `record_invoice_payment` (true for the manual provider; false for Stripe, which reports payments
   itself).
 
-Lake ships two implementations. **Stripe** ([below](#stripe)) where its keys are in lake's secret
-store, and **manual** ("Invoice only") everywhere else: lake issues the invoice, Orama collects
+Lake ships two implementations. **Stripe** ([below](#stripe)) where lake was started with its keys,
+and **manual** ("Invoice only") everywhere else: lake issues the invoice, Orama collects
 payment outside lake, and the operator records it. A provider is lake's own code against the
 provider's HTTP API through lake's outbound client, never a third-party SDK (liquid-bridge
 `CLAUDE.md`, "We write our own"). Tests inject a fake through `register_billing_capabilities` or
 `ServerOptions::payment_providers`.
 
-Which provider is in use is decided at use, every time (`PaymentProviders`): the billing
-capabilities and the notice route ask for the current one, so keys put, rotated or removed while
-lake runs take effect without a restart. `record_invoice_payment` goes by the invoice's own
+Which provider is in use is decided when lake starts, from its environment (`PaymentProviders`,
+lake#628): the billing capabilities and the notice route ask for the current one, and a key
+changed, rotated or removed takes effect at the next restart. `record_invoice_payment` goes by the invoice's own
 provider: an invoice issued by the manual provider stays recordable after Stripe is set up, and a
 Stripe invoice never is (`conflict`).
 
 `billing_account` answers `provider: {name, title, records_payments_by_hand, online_payment,
 reason}`; `reason` says why card payment is not available while the manual provider is in use.
-`viewer.billing_payment` (`{provider, title, online_payment, reason, checked_at}`, null where billing
-is off) and `server_info` (`billing`, `payment_provider`, `online_payment`) report the same, from
-the last time lake read the keys.
+`viewer.billing_payment` (`{provider, title, online_payment, reason}`, null where billing is off)
+and `server_info` (`billing`, `payment_provider`, `online_payment`) report the same. None of them
+ever carries a key.
 
 ## Stripe
 
@@ -163,44 +163,30 @@ over 1 MiB, and `503` (Stripe retries) when the keys or the store cannot be read
 
 ## Where the keys live
 
-**Lake's own secret store holds the Stripe keys, not a Kubernetes Secret** (decision 57). Secrets
-live in a workspace Zetta's sealed secret mount ([secrets.md](secrets.md)) and become a Kubernetes
-Secret only when a deployment, app or service has to mount one; lake reads its own keys from the
-store.
+**The Stripe keys are lake's own platform credentials, environment variables of the hosting
+platform** (lake#628, decision 57). Lake has two levels of secrets: Orama's own (Stripe, lake's OpenAI and Clerk
+keys, anything lake uses as a service), which are environment variables of the platform lake runs
+on, and users' workspace secrets, which live in lake's secret store ([secrets.md](secrets.md)). The
+Stripe keys are the first kind and never go in a user's secret store or a secret mount.
 
-- `LAKE_BILLING_SECRETS` is the **id of a secret mount**, a mount owned by the operator's account
-  in the instance's operator workspace. It is the only configuration in the environment; no key is
-  ever in `spec.env`, a Secret or a log.
-- In that mount, the secret **`stripe`** holds `{"secret_key": "sk_...", "webhook_secret":
-  "whsec_..."}` (a restricted `rk_...` key works if it may write customers, invoices and invoice
-  items).
-- Lake reads it with `read_secret` as the operator at use, keeps it in memory for 60 seconds, and
-  reads it again after that, or at once when a notice's signature fails. Putting a new version
-  rotates the keys within a minute, and the webhook secret at the first notice. Each read is in the
-  mount's workspace audit.
-- **Fallback.** Billing on with `LAKE_BILLING_SECRETS` unset, a mount that does not exist, no
-  `stripe` secret, a missing field or a key of the wrong shape: the manual provider, with the reason
-  on the Billing page (the operator sees the reason; an account sees "Card payment is not set up"),
-  in `billing_account`, `viewer.billing_payment` and `server_info`. If the mount's workspace does
-  not answer, lake keeps the keys it read last; with none, the call answers `store_unavailable`
-  rather than issuing a manual invoice by mistake.
+| Variable | Holds |
+|---|---|
+| `LAKE_STRIPE_SECRET_KEY` | The secret key, `sk_test_...` or `sk_live_...`, or a restricted `rk_...` key that may write customers, invoices and invoice items |
+| `LAKE_STRIPE_WEBHOOK_SECRET` | The webhook endpoint's signing secret, `whsec_...` |
+
+- **Where they are set.** On Orama's own deployments, as Railway variables of the lake service; on
+  the dev cluster, in the Lake CR's `spec.env` with a `valueFrom.secretKeyRef` to a Kubernetes
+  Secret in the `lake` namespace, never a literal value ([aks.md](../deployment/aks.md#stripe)).
+- **Read once, at start**, and never logged: not at start, not in a request log, not in an error.
+  Stripe's refusal of a key says which variable to check, never its value.
+- **Rotation is a restart.** Set the new value and roll lake; the new process uses it. Roll the
+  webhook secret in Stripe ("Roll secret" keeps the old one valid for a while), set the new
+  `whsec_`, and roll lake within that window.
+- **Fallback.** Billing on with either variable unset or of the wrong shape (`sk_`/`rk_`,
+  `whsec_`): the manual provider, with the reason, which names the variable and never a value, on
+  the Billing page (the operator sees the reason; an account sees "Card payment is not set up"), in
+  `billing_account`, `viewer.billing_payment` and `server_info`.
 - **Billing off** (an enterprise install): no provider, no route, nothing read.
-
-Setting it up (the operator, with the operator's bearer):
-
-```http
-POST /v1/create_secret_mount
-{"customer_id": "<operator account id>", "workspace_id": "<operator workspace id>", "name": "billing"}
-```
-
-```http
-POST /v1/put_secret
-{"mount_id": "<mount id>", "name": "stripe", "value": {"secret_key": "sk_test_...", "webhook_secret": "whsec_..."}}
-```
-
-Then set `LAKE_BILLING_SECRETS=<mount id>` in the Lake CR's `spec.env`
-([aks.md](../deployment/aks.md#stripe)). The Secrets pages do the same: Administration → Secrets
-(`/secret-mounts`), the mount, **New secret**, name `stripe`, with the two fields.
 
 ## Prices and bills
 
@@ -411,9 +397,10 @@ POST /v1/record_invoice_payment
   write with its own idempotency key; a retry after a failed step that bills once; Stripe's total
   equal to lake's to the cent; a void in lake voiding in Stripe; webhooks applying paid, failed and
   void once per event id, refusing bad and stale signatures, acknowledging foreign and unknown
-  events, with the central audit; the keys read from a secret mount, cached, rotated (a new webhook
-  secret accepted at once) and removed, falling back to manual with a reason in `billing_account`,
-  `viewer` and `server_info`; and the route answering only where the lake bills.
+  events, with the central audit; the keys from the environment: unset, half set and malformed
+  falling back to manual with a reason that names the variable in `billing_account`, `viewer` and
+  `server_info`, never a value, and rotation by restart (lake#628); and the route answering only
+  where the lake bills.
 - `PostgresBilling.PlansSubscriptionsAndInvoicesFollowTheContract` and
   `PostgresBilling.PaymentProviderCustomersAndNoticesFollowTheContract` (`tests/test_postgres.cpp`):
   the migrations' tables and guards (`0073`, `0074`), and the store's contract on PostgreSQL.

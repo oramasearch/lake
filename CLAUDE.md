@@ -169,10 +169,11 @@ makes an account a Stripe Customer at its first invoice (`billing_accounts`) and
 finalized Stripe Invoice with an item per lake line in cents; lake's invoice keeps the amounts, the
 hosted URL (`payment_url`) and Stripe's status. `POST /billing/stripe/webhook` checks
 `Stripe-Signature` (HMAC-SHA256, 300 s window) and applies `invoice.paid`, `invoice.payment_failed`
-and `invoice.voided` once per event id (`billing_payment_events`), audited centrally. The keys live
-in lake's secret store, never a Kubernetes Secret: the secret `stripe` in the mount
-`LAKE_BILLING_SECRETS` names, read at use and cached 60 s; without them, the manual provider, said on
-the Billing page and in `viewer`/`server_info`. Not deployed; the operator must vendor the schema
+and `invoice.voided` once per event id (`billing_payment_events`), audited centrally. The keys are
+lake's own platform credentials, environment variables of the hosting platform (lake#628):
+`LAKE_STRIPE_SECRET_KEY` and `LAKE_STRIPE_WEBHOOK_SECRET`, read at start and never logged (Railway for
+Orama's deployments; `spec.env` with a `secretKeyRef` on the dev cluster), never a user's secret
+store; without them, the manual provider, said on the Billing page and in `viewer`/`server_info`. Not deployed; the operator must vendor the schema
 and select `payment_provider_guard`. See `docs/api/billing.md#stripe`.
 Dynamic-secret leases follow (lake#362, migration `0058`): each lease is a sealed record in its
 mount's workspace, and PostgreSQL keeps only `secret_lease_routes` (lease → mount, workspace, and
