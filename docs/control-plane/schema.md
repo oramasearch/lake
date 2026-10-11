@@ -921,6 +921,30 @@ Nothing is dropped; idempotent (the check is dropped and added again on every ru
 `metered_jobs_guard`. The operator vendors the schema, selects that guard and reports cron runs in
 its own pull request before a lake with this change is rolled.
 
+## Methodology runs migration
+
+`0078_methodology_runs` (lake#655) runs a workspace's own methodology, Python code in one of its
+repositories, as untrusted code ([`../api/methodologies.md#runs`](../api/methodologies.md#runs)):
+
+- `methodology_runs` (lake writes it and `NOTIFY`s `lake_services`): customer, workspace (routed by
+  `enforce_workspace_routing`), `methodology_id` (`W-<8 hex>`, the entry in the workspace Zetta's
+  registry), `mode` (`validate` or `train`), `build_id` (the methodology's image build), `image`
+  (the built image's pull reference, empty until known), `runtime_image` (the pristine
+  `oramasearch/methodology-runtime` image), `cpu_millis`, `memory_bytes`, `gpus`, `gpu_class`,
+  `timeout_seconds`, `network` (false unless the person granted it), `slug` (`mr-<12 hex>`),
+  `desired` (`present` or `absent`), `generation`, `stop_reason`;
+- `methodology_run_status`, written only by the operator: `phase` (`Building`, `Staging`, `Running`,
+  `Collecting`, `Succeeded`, `Failed`, `Stopped`), `message`, `exit_code`, `credential_sha256` (the
+  run's `lmr.` credential, never the credential), `observed_generation`, `started_at` and
+  `finished_at` of the sandbox pod;
+- `workload_resources.object_kind` adds `methodology_run` to every kind `0077_metered_jobs` allows.
+
+Nothing about the run's content is kept here: its parameters, data, metrics, log and artifact live in
+the workspace Zetta. Nothing is dropped; idempotent; guard `methodology_runs_guard`. The operator
+vendors the schema, selects that guard and runs the pods in its own pull request
+([orama-operator#291](https://github.com/oramasearch/orama-operator/issues/291)) before a lake with this
+change is rolled.
+
 ## Repository workspaces migration
 
 `0051_repository_workspaces` adds `repositories.workspace_id` (references `workspaces`, index

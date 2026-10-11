@@ -375,6 +375,13 @@ TEST(Docs, EveryCapabilityHasADeliberateGroup) {
     }
     EXPECT_TRUE(group("Transcripts").contains("transcribe"));
     EXPECT_TRUE(group("Solutions").contains("duplicate_solution"));
+    for (const char* name : {"create_methodology",
+                             "validate_methodology",
+                             "run_methodology",
+                             "duplicate_methodology",
+                             "methodology_run_output"}) {
+        EXPECT_TRUE(group("Methodologies").contains(name)) << name;
+    }
     EXPECT_TRUE(group("Search").contains("search"));
 }
 

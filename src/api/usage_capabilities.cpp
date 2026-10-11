@@ -525,12 +525,13 @@ const std::vector<std::pair<std::string_view, std::string_view>>& engine_storage
     return kinds;
 }
 
-// A workload charged once for how long it ran (lake#658): an image build, a job-mode agent launch
-// or an agent cron run that has finished. It ran from its request (a cron run: its start) to its
+// A workload charged once for how long it ran (lake#658): an image build, a job-mode agent launch,
+// an agent cron run or a workspace methodology run (lake#655) that has finished. It ran from its request (a cron run: its start) to its
 // final status, so time queued is included for builds and launches, as for build time.
 struct FinishedJob {
-    std::string row_kind;   // its workload_resources kind: build, agent_launch or agent_cron_run
-    std::string usage_kind; // its kind in the usage series: build or agent
+    std::string row_kind;   // its workload_resources kind: build, agent_launch, agent_cron_run or
+                            // methodology_run
+    std::string usage_kind; // its kind in the usage series: build, agent or methodology
     std::string id, workspace_id, started, ended;
 };
 
@@ -587,6 +588,25 @@ FinishedJobs finished_jobs(control::Store& store,
         }
     } else {
         out.problems.push_back("Agent cron runs: " + runs.error().message);
+    }
+    // A workspace methodology's run (lake#655) ran from its sandbox pod's start to its finish, as
+    // the operator reports them; the stage and collect pods around it are not charged.
+    for (const std::string& workspace_id : workspaces) {
+        const auto methodology_runs = store.list_methodology_runs(customer_id, workspace_id, "", 1000);
+        if (!methodology_runs) {
+            out.problems.push_back("Methodology runs: " + methodology_runs.error().message);
+            continue;
+        }
+        for (const control::MethodologyRun& run : *methodology_runs) {
+            if (!run.started_at.empty() && !run.finished_at.empty()) {
+                out.jobs.push_back({"methodology_run",
+                                    "methodology",
+                                    run.id,
+                                    run.workspace_id,
+                                    run.started_at,
+                                    run.finished_at});
+            }
+        }
     }
     return out;
 }

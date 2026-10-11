@@ -396,6 +396,9 @@ struct ApiContext {
     // Ship Apps configuration supplied by the Lake operator (docs/control-plane/web-apps.md).
     std::string apps_wildcard;
     std::string apps_runtime_image;
+    // The methodology-runtime image a workspace methodology's image is built from and whose
+    // stage and collect pods move its data (LAKE_METHODOLOGY_RUNTIME_IMAGE, lake#655).
+    std::string methodology_runtime_image;
     std::string apps_reserved_names;
     std::size_t apps_per_customer = 0;
     std::size_t app_replicas_per_customer = 0;

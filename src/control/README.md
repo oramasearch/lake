@@ -118,6 +118,12 @@ space, edited and deleted at the revision read, with the paging and excerpt help
 `solutions.cpp` is a workspace's own AI solutions (lake#597): one record per solution in
 `lake_solutions`, found by the space, edited and deleted at the revision read, with the rules a
 solution keeps and the copy of one of Orama's catalogue entries; it was never a PostgreSQL table.
+`methodologies.cpp` is a workspace methodology's pure rules (lake#655): the manifest it reads and
+the findings Validate answers without running anything (manifest, entrypoint, lock file), drafts from
+the Python templates in `methodology_templates.cpp`, the copy of one of Orama's, the image's
+Dockerfile, the validation sample and the metrics a result may carry. The stores keep the content-free
+`methodology_runs` dispatch rows and the operator's `methodology_run_status` (migration `0078`), and
+resolve a run's `lmr.` credential by its digest.
 `mcp_connections.cpp` is a workspace's MCP connections (decision 60, lake#652): one record per
 connection in `lake_mcp_connections`, found by the space, unique by name and prefix, changed and
 deleted at the revision read (`change_mcp_connection` rereads on a conflict), with the prefix rule

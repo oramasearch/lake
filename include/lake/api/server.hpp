@@ -125,6 +125,9 @@ struct ServerOptions {
     std::string apps_wildcard;
     // Runtime base image for source-backed Ship App builds (LAKE_APPS_RUNTIME_IMAGE).
     std::string apps_runtime_image;
+    // The oramasearch/methodology-runtime image for workspace methodologies
+    // (LAKE_METHODOLOGY_RUNTIME_IMAGE, lake#655, docs/api/methodologies.md).
+    std::string methodology_runtime_image;
     std::string apps_reserved_names;
     std::size_t apps_per_customer = 0;
     std::size_t app_replicas_per_customer = 0;

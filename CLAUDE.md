@@ -128,6 +128,20 @@ only agents with something to train, with performance, versions, promote and rol
 training schedule and Launch experiment. The pages call the named engine capabilities. Not
 deployed. See `docs/api/train-agents.md`.
 
+A workspace's own methodologies from Python code follow (lake#655, migration `0078_methodology_runs`):
+the code is a manifest, an entrypoint with fit, predict and score, and a hashed lock file in a
+workspace repository; the engine registers it as `W-<8 hex>` beside Orama's (zetta#1261), whose edits
+and deletes answer `forbidden`. Validate checks the code without running it, then builds its image by
+the build path (`LAKE_METHODOLOGY_RUNTIME_IMAGE`) and runs it on a sample. Each run is a
+`methodology_runs` dispatch row the Orama operator runs as stage, run and collect pods
+(orama-operator#291): the code holds no credential and has no network unless granted; the run's
+`lmr.` credential reaches only `methodology_run_input` and `methodology_run_output` (and a pull of its
+image); its record is sealed `lake_methodology_runs` in the workspace Zetta; a training run's model
+is registered by the engine; a pipeline's `runner_required` run is dispatched to it; finished runs are
+metered as `methodology_run`. Not deployed; the operator must vendor the schema and select
+`methodology_runs_guard`, and `oramasearch/methodology-runtime` must be published. See
+`docs/api/methodologies.md`.
+
 Every future deployment image receives OCI revision and creation labels. The binary reports the
 same embedded revision through `GET /v1/server_info`; details are in
 [`docs/build/container-image.md`](docs/build/container-image.md).
