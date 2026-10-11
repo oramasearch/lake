@@ -162,7 +162,7 @@ workspaces.
 
 **Not Measured Yet** names, in plain sentences, what a reading could not include:
 
-- CPU, RAM, GPU and GPU memory of a workload the lake operator has not reported the resources of,
+- CPU, RAM, GPU and GPU memory of a workload the Lake operator has not reported the resources of,
   named (such as "service orders"): it is not counted;
 - agents' scheduled runs (cron): their resources are not reported yet;
 - model tokens an agent has not reported (agents do not report them yet);
