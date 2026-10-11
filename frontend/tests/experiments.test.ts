@@ -5,7 +5,19 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { canCompare, chosenRuns, ema, heldOutScores, metricData, nextCursor, parameterDiff, type RunDetail } from "../src/pages/experiments/transforms.ts";
+import {
+  artifactChart,
+  artifactSource,
+  artifactTitle,
+  canCompare,
+  chosenRuns,
+  ema,
+  heldOutScores,
+  metricData,
+  nextCursor,
+  parameterDiff,
+  type RunDetail,
+} from "../src/pages/experiments/transforms.ts";
 
 const points = [
   { step: 1, value: 4, time: "2026-09-28T00:00:00Z" },
@@ -93,4 +105,30 @@ test("Compare Runs compares only two to eight chosen runs (lake#576)", () => {
   assert.equal(canCompare(chosenRuns("a,a")), false, "the same run twice is one run");
   assert.equal(canCompare(chosenRuns("a,b")), true);
   assert.equal(canCompare(chosenRuns("a,b,c,d,e,f,g,h,i")), false);
+});
+
+// zetta#1247 (lake#615): a GBDT classifier logs its held-out confusion matrix, ROC curve and
+// calibration; the run page names each chart and its axes, and draws the line to read it against.
+test("the held-out charts are named and drawn on their own axes", () => {
+  assert.equal(artifactTitle("confusion_matrix"), "Confusion Matrix");
+  assert.equal(artifactTitle("roc_curve"), "ROC Curve");
+  assert.equal(artifactTitle("calibration"), "Calibration");
+  assert.equal(artifactTitle("lift_chart"), "lift chart");
+  assert.equal(artifactSource("held_out"), "held-out rows");
+  assert.equal(artifactSource("validation"), "validation");
+
+  const roc = artifactChart("roc_curve", { x: [0, 0.25, 1], y: [0, 0.75, 1], thresholds: [1, 0.6, 0.1] });
+  assert.deepEqual(roc.data, [[0, 0.25, 1], [0, 0.75, 1], [0, 0.25, 1]], "the curve and the chance diagonal");
+  assert.deepEqual(roc.labels, ["True positive rate", "Chance"]);
+  assert.equal(roc.settings.xLabel, "False positive rate");
+
+  const calibration = artifactChart("calibration", { predicted: [0.12, 0.81], observed: [0.1, 0.9], counts: [40, 60] });
+  assert.deepEqual(calibration.data, [[0.12, 0.81], [0.1, 0.9], [0.12, 0.81]]);
+  assert.equal(calibration.settings.xLabel, "Mean predicted probability");
+  assert.deepEqual(calibration.labels, ["Observed rate", "Perfectly calibrated"]);
+
+  const importance = artifactChart("feature_importance", { features: ["tenure", "usage"], values: [0.4, 0.6] });
+  assert.deepEqual(importance.settings.xValues, ["tenure", "usage"]);
+  assert.equal(artifactChart("pr_curve", { x: [0, 1], y: [1, 0.5] }).settings.xLabel, "Recall");
+  assert.deepEqual(artifactChart("roc_curve", { x: [0, "bad", 1], y: [0, 1] }).data[0], [0, null, 1], "a value that is not a number is a gap");
 });

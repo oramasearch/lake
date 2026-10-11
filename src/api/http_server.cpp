@@ -41,6 +41,7 @@
 #include <print>
 #include <ranges>
 #include <set>
+#include <shared_mutex>
 #include <span>
 #include <string>
 #include <string_view>
@@ -133,6 +134,74 @@
 
 namespace lake::api {
 namespace {
+
+// Closes a workspace store's search index to its own process's writes (lake#606). When lake
+// drains, it removes the index's manifest so the next owner rebuilds it; a rebuild whose writes
+// were still in flight must not put a manifest back afterwards, or the next process loads an index
+// that lacks the writes the drain dropped. Replacing puts (the manifest, the artifact members) and
+// removes hold the gate shared across their request, and the drain's invalidation and every store
+// close take it exclusively, so each such write lands before the close or is refused after it.
+// Write-once puts (segments and runs under new names) only check it: one landing after the close
+// is an object no manifest names, never a manifest.
+struct IndexWriteGate {
+    std::shared_mutex mutex;
+    bool closed = false;
+
+    void close() {
+        std::unique_lock lock(mutex);
+        closed = true;
+    }
+};
+
+search::Error closed_index_error() {
+    return {"store_unavailable",
+            "this workspace's store was closed here, so lake writes no more of its search index; "
+            "the next owner rebuilds it"};
+}
+
+class GatedIndexObjects final : public search::IndexObjects {
+public:
+    GatedIndexObjects(std::shared_ptr<search::IndexObjects> inner,
+                      std::shared_ptr<IndexWriteGate> gate)
+        : inner_(std::move(inner)), gate_(std::move(gate)) {}
+
+    search::Result<std::optional<std::string>> get(const std::string& name) override {
+        return inner_->get(name);
+    }
+    search::Result<void> put(const std::string& name, std::string bytes, bool once) override {
+        if (once) {
+            {
+                std::shared_lock lock(gate_->mutex);
+                if (gate_->closed) {
+                    return std::unexpected(closed_index_error());
+                }
+            }
+            return inner_->put(name, std::move(bytes), once);
+        }
+        std::shared_lock lock(gate_->mutex);
+        if (gate_->closed) {
+            return std::unexpected(closed_index_error());
+        }
+        return inner_->put(name, std::move(bytes), once);
+    }
+    search::Result<void> remove(const std::string& name) override {
+        std::shared_lock lock(gate_->mutex);
+        if (gate_->closed) {
+            return std::unexpected(closed_index_error());
+        }
+        return inner_->remove(name);
+    }
+    search::Result<std::vector<std::string>> list() override {
+        return inner_->list();
+    }
+    search::Result<void> sync() override {
+        return inner_->sync();
+    }
+
+private:
+    std::shared_ptr<search::IndexObjects> inner_;
+    std::shared_ptr<IndexWriteGate> gate_;
+};
 
 // The workspace a /w/<workspace>/... path names: a UUID, or empty for any other path.
 std::string workspace_path_id(std::string_view path) {
@@ -3780,6 +3849,9 @@ private:
         // Set when Zetta refused a search index write as fenced: the lease is another holder's.
         // A failed search write never fails the store otherwise.
         std::shared_ptr<std::atomic<bool>> search_fenced = std::make_shared<std::atomic<bool>>(false);
+        // Closed when this process stops writing the store's search index: at the drain's
+        // invalidation and when the store closes (lake#606).
+        std::shared_ptr<IndexWriteGate> index_gate = std::make_shared<IndexWriteGate>();
 
         // A store whose lease was lost, or one a write failed on, is closed and opened again.
         bool usable() const {
@@ -4998,8 +5070,10 @@ private:
             return std::unexpected(cipher.error());
         }
         std::shared_ptr<std::atomic<bool>> fenced = store.search_fenced;
-        return search::make_sealed_index_objects(store.client, *cipher, store.owner->fence(),
-                                                 [fenced] { fenced->store(true); });
+        return std::make_shared<GatedIndexObjects>(
+            search::make_sealed_index_objects(
+                store.client, *cipher, store.owner->fence(), [fenced] { fenced->store(true); }),
+            store.index_gate);
     }
 
     // Takes the lane of the store that serves the repository and opens it there. A switch of the
@@ -5065,6 +5139,7 @@ private:
         }
         evicted.clear();
         if (store) {
+            store->index_gate->close();
             static_cast<void>(liquid::runtime::block_on(store->store->close()));
         }
     }
@@ -6052,6 +6127,7 @@ public:
             store = std::move(found->second);
             workspace_stores_.erase(found);
         }
+        store->index_gate->close();
         evicted.clear();
         const auto closed = liquid::runtime::block_on(store->store->close());
         if (!closed) {
@@ -6572,6 +6648,7 @@ private:
     // caller holds the lane. True when the manifest is gone.
     bool invalidate_search_index_locked(const std::string& workspace_id) {
         std::shared_ptr<control::ZettaObjectClient> client;
+        std::shared_ptr<IndexWriteGate> gate;
         std::uint64_t fence = 0;
         {
             std::lock_guard maps(mutex_);
@@ -6580,8 +6657,11 @@ private:
                 return false;
             }
             client = found->second->client;
+            gate = found->second->index_gate;
             fence = found->second->owner->fence();
         }
+        // No index write of this process lands after the manifest is removed (lake#606).
+        gate->close();
         const auto removed = liquid::runtime::block_on(
             client->remove(std::string(search::workspace_index_manifest), fence, true));
         return removed || removed.error().code == liquid::errc::not_found;

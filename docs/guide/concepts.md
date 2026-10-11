@@ -31,8 +31,8 @@ MCP tools take.
 | Term | What it is |
 |---|---|
 | **Account** | Who owns workspaces, repositories, keys and apps: you, or an organization. Its id is the `customer_id` of every call. When you sign up, lake makes one for you; an organization has its own. |
-| **Workspace** | An isolated environment with an Orama Zetta cluster of its own, where datasets, projects, runs, models, transcripts and Ask Orama conversations live. An account can have many workspaces, for example one per environment (`dev`, `staging`, `prod`). Its id is the `workspace_id` every Design, Train and Ship call names; lake never picks one for you. See [Workspaces](/docs/workspaces). |
-| **Workspace Zetta** | The Zetta cluster that is a workspace's data plane. Everything that belongs to a workspace is kept in it, sealed with the workspace's own key, apart from every other customer's. |
+| **Workspace** | An isolated environment with an engine of its own, where datasets, projects, runs, models, transcripts and Ask Orama conversations live. An account can have many workspaces, for example one per environment (`dev`, `staging`, `prod`). Its id is the `workspace_id` every Design, Train and Ship call names; lake never picks one for you. See [Workspaces](/docs/workspaces). |
+| **Workspace engine** | The engine a workspace runs on, which holds its data. Everything that belongs to a workspace is kept in it, sealed with the workspace's own key, apart from every other customer's. |
 | **Workspace picker** | The pill in the top bar that names the current workspace. Choosing another keeps the page you are on. |
 | **Environment** | A workspace's label, such as `dev`, `staging` or `prod` (any lowercase DNS label). |
 | **Organization** | A group of people with its own workspaces, repositories and apps. Members join by invitation or through single sign-on. See [Organizations, Members and Teams](/docs/organizations). |
@@ -76,7 +76,7 @@ MCP tools take.
 | **Model** | A learned function that turns inputs into a prediction, a score or a ranking. A model can be one step inside a pipeline, and one pipeline can hold several models (a segmentation feeding a churn classifier, for example). A model also stands on its own: you can upload one as a model repository (weights, card and history) without any pipeline. Each run that trains a model adds a **version** of it. **Train → Models** lists the models a workspace trains, with their versions and held-out scores; **Ship → Models** serves them: a **published** version can be called from outside lake with `predict`. See [Models and Search Indexes](/docs/ship). |
 | **Search index** | A full-text index over a dataset's text columns. A published index answers outside searches with `search_index`. See [Models and Search Indexes](/docs/ship). |
 | **Experiment and trial** | An AI model training experiment, as an experiment tracker records it: one experiment tries many settings for one objective, within budgets, and keeps the best model; each attempt is a trial with its own run and curves, ranked and compared live. See [Experiments](/docs/experiments). |
-| **Stream and topic** | A topic is a named sequence of messages in a workspace Zetta (agent events, app events, build logs, your own). Streams browses and publishes to them. See [Streams](/docs/streams). |
+| **Stream and topic** | A topic is a named sequence of messages in a workspace (agent events, app events, build logs, your own). Streams browses and publishes to them. See [Streams](/docs/streams). |
 | **Agent** | An AI helper that works for you. It reads what it is allowed to read and proposes changes for you to confirm. See [Agents](/docs/agents). |
 | **Agent Library** | The agents Orama provides: Ask Orama, the Project Agent, ApplicationAgent, ExperimentsAgent, Auto-Suggest and AgentCreator. **Design → Agent Library** lists them and whether each runs on your lake. |
 | **Agent Factory** | Building a new agent in a conversation with AgentCreator. |
@@ -92,7 +92,7 @@ MCP tools take.
 | **Package and registry** | The images, npm and Python packages lake serves. **Ship → Packages** lists them with their install commands. See [Packages, Builds and the Registry](/docs/registry). |
 | **Environment** | Where a repository's deployments run, with its domains and logs. See [Deployments and Environments](/docs/deployments). |
 | **Deployment** | One version of a repository running in an environment. |
-| **Service** | A database, stream or engine lake runs for you: Postgres, Zetta, Kafka, ClickHouse, TiDB, Cassandra, Valkey. See [Services and Storage](/docs/services). |
+| **Service** | A database, stream or engine lake runs for you: Postgres, Zetta, Kafka, ClickHouse, TiDB, Cassandra, Valkey. Zetta is Orama's data and AI engine, the one every workspace runs on. See [Services and Storage](/docs/services). |
 | **Storage** | A volume lake provisions for a workspace's services. |
 
 ### Credentials, Audit and Usage

@@ -50,6 +50,10 @@ answers the existing grant with `existing: true` instead of `conflict`.
 After lake rotates its identity, a repeated share's digest differs; such a program leaves
 `attestation_digest` out.
 
+`create_grant`, `create_membership` and `accept_invitation` follow the same rule since lake#602,
+through the same code (`src/api/lake_attestation.cpp`); see
+[policy.md](policy.md#the-grants-attestation-lake602).
+
 `drive_effective_access` calls the policy engine's `effective_access` function and returns each
 principal, role, allowed actions, source object, and `inherited` flag. The sharing page renders
 that result directly, so its answers match `authorize` rather than duplicating role logic.

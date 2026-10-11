@@ -12,6 +12,7 @@ import { entityCrumb, useTrail } from "@/lib/trail";
 import { Banner, Button, Card, Chip, CopyBlock, Empty, ErrorBlock, KeyValue, Meter, Query, Skeleton, Split, StateTabs, Status } from "@/lib/ui";
 import { WorkspaceFrame, cellText, qs, text, useAsync, useWorkspace, useWq, useWsPath, wa } from "../train/workspace";
 import { CopyMono, useOrigin } from "./parts";
+import { hitFields } from "./search";
 
 const SUB = "Search it here, publish it, and call it from your own code with a key that can only search.";
 
@@ -195,7 +196,7 @@ function TrySearch({ id, fields }: { id: string; fields: string[] }) {
       <div className="mt-3">
         {!asked ? (
           <Empty compact icon={Search} title="Ask the index something">
-            Results appear here, ranked, with each document's score.
+            Results appear here, ranked, with each matched row's fields and its score.
           </Empty>
         ) : search.isLoading ? (
           <Skeleton />
@@ -208,11 +209,9 @@ function TrySearch({ id, fields }: { id: string; fields: string[] }) {
         ) : (
           <ol className="m-0 list-none divide-y divide-hairline rounded-[6px] border border-hairline p-0" aria-label="Search hits">
             {hits.map((hit, i) => (
-              <li key={`${text(hit, "id")}-${i}`} className="grid grid-cols-[2rem_minmax(0,1fr)_minmax(6rem,10rem)] items-center gap-3 px-3 py-2">
+              <li key={`${text(hit, "id")}-${i}`} className="grid grid-cols-[2rem_minmax(0,1fr)_minmax(6rem,10rem)] items-start gap-3 px-3 py-2">
                 <span className="font-mono text-[12px] text-ink-3 tabular-nums">{i + 1}</span>
-                <code className="truncate" title={text(hit, "id")}>
-                  {text(hit, "id")}
-                </code>
+                <HitFields hit={hit} fields={fields} />
                 <Meter value={Number(hit.score ?? 0) || 0} max={top || 1} label={cellText(hit.score ?? 0)} />
               </li>
             ))}
@@ -220,6 +219,29 @@ function TrySearch({ id, fields }: { id: string; fields: string[] }) {
         )}
       </div>
     </Card>
+  );
+}
+
+/** What a hit matched: the row's fields (zetta#1243), else, from an engine that sends none, the
+ * workspace's row id. */
+function HitFields({ hit, fields }: { hit: Row; fields: string[] }) {
+  const pairs = hitFields(hit, fields);
+  if (!pairs.length) {
+    return (
+      <code className="truncate" title={text(hit, "id")}>
+        {text(hit, "id")}
+      </code>
+    );
+  }
+  return (
+    <dl className="m-0 grid min-w-0 grid-cols-[minmax(0,auto)_minmax(0,1fr)] gap-x-3 gap-y-0.5 text-[13px]">
+      {pairs.map(([name, value]) => (
+        <div key={name} className="contents">
+          <dt className="truncate font-mono text-[12px] text-ink-3">{name}</dt>
+          <dd className="m-0 break-words text-ink">{value}</dd>
+        </div>
+      ))}
+    </dl>
   );
 }
 
@@ -277,8 +299,8 @@ function CallIt({ id, published }: { id: string; published: boolean }) {
   const workspace = workspaceId || "<workspace id>";
   const url = `${origin}/v1/search_index?customer_id=${encodeURIComponent(customerId)}&workspace_id=${encodeURIComponent(workspace)}&index_id=${encodeURIComponent(id)}&query=`;
   const curl = `curl -s -H "Authorization: Bearer $LAKE_SEARCH_KEY" \\\n  "${url}renewal%20risk&top_k=10"`;
-  const js = `// JavaScript\nconst res = await fetch("${url}" + encodeURIComponent("renewal risk"), {\n  headers: { Authorization: \`Bearer \${process.env.LAKE_SEARCH_KEY}\` },\n});\nconst { value } = await res.json(); // value.hits: [{ id, score }]`;
-  const py = `# Python\nimport os, requests\nr = requests.get("${origin}/v1/search_index", params={"customer_id": "${customerId}", "workspace_id": "${workspace}", "index_id": "${id}", "query": "renewal risk"},\n    headers={"Authorization": f"Bearer {os.environ['LAKE_SEARCH_KEY']}"})\nhits = r.json()["value"]["hits"]`;
+  const js = `// JavaScript\nconst res = await fetch("${url}" + encodeURIComponent("renewal risk"), {\n  headers: { Authorization: \`Bearer \${process.env.LAKE_SEARCH_KEY}\` },\n});\nconst { value } = await res.json(); // value.hits: [{ id, score, fields }]`;
+  const py = `# Python\nimport os, requests\nr = requests.get("${origin}/v1/search_index", params={"customer_id": "${customerId}", "workspace_id": "${workspace}", "index_id": "${id}", "query": "renewal risk"},\n    headers={"Authorization": f"Bearer {os.environ['LAKE_SEARCH_KEY']}"})\nhits = r.json()["value"]["hits"]  # each {"id", "score", "fields": the row's values}`;
   return (
     <Card label="Outside calls" title="Call It from Your Code">
       <p className="mt-0 text-[13px] text-ink-2">Call lake with the search key. The search runs in your own workspace; lake checks the key and records every query.</p>

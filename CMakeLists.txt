@@ -281,6 +281,7 @@ add_library(lake-core STATIC
   src/api/audit_logs.cpp
   src/api/drive.cpp
   src/api/drive_capabilities.cpp
+  src/api/lake_attestation.cpp
   src/api/model_capabilities.cpp
   src/api/transparency_capabilities.cpp
   src/api/timestamp_capabilities.cpp

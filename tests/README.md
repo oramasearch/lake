@@ -642,7 +642,13 @@ once, not a copy per append: lake#547);
 `durable_requests` counts the requests that asked for an fsync (lake#535).
 `fail_after` and `fail_randomly` lose requests before they are applied; `lose_next_answers` and
 `lose_answers_randomly` apply them and then lose the answer. `applied` and `most_writes_in_flight`
-show the order and concurrency of what was applied. Set `LAKE_TEST_ZETTA_BINARY` to a `zetta` built from Zetta dev
+show the order and concurrency of what was applied. `requests_seen` lists every request one endpoint received
+(method and path), and `store_requests_to` counts them without the owner loop's `:usage` reads,
+which run at start and every ten seconds whoever is calling: a test that a caller never reaches a
+workspace counts only those (lake#607, `WorkspaceStoreSearch.ASearchNeverOpensAWorkspaceItsCallerCannotRead`
+once counted a quota read that landed in its window under load). `hold(endpoint, fragment)` keeps every
+matching request waiting until `let_go`, and `held` counts those waiting, so a test can say "while
+this request is in flight" without a sleep (lake#603, lake#606). Set `LAKE_TEST_ZETTA_BINARY` to a `zetta` built from Zetta dev
 to run `WorkspaceStoreZetta.*` against it; `latency_proxy.hpp` (`LatencyProxy`) puts a loopback
 round trip in front of it, `LAKE_TEST_ZETTA_RTT_MS` (default 10) for
 `WorkspaceStoreZetta.AOneFileCommitsRequestsAreCountedAndTimed`, and holds each request that asks
@@ -663,5 +669,6 @@ drops the next answers from Zetta and closes their connections, for
 `WorkspaceStoreHandoff.AFreshProcessCreatesOneLocalIdentityForItsConcurrentFirstOpens`
 (`test_workspace_store.cpp`) points `LIQUID_HOME` at a fresh directory, starts lake with the
 pre-open on, runs 32 first uses of liquid's local identity at once, then reads and commits through
-the operator token and reads the `repositories_preopened` lines from stderr. It guards the
+the operator token, waits for the `repositories_preopened` line of each workspace on stderr before
+it stops the server (the pre-open runs beside the requests, lake#614), and checks them. It guards the
 start-time creation of the identity ([`../docs/deployment/store-volume.md`](../docs/deployment/store-volume.md#liquids-local-identity)).

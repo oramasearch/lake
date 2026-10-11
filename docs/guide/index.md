@@ -10,8 +10,8 @@ you automate it.
 
 - **An account.** Open lake and choose **Sign in** in the top bar (or **Create account** where your
   lake allows sign-up). [Your Account and Sign-In](/docs/account) covers every way in.
-- **A workspace.** Everything you design, train and ship lives in a workspace: an isolated Orama
-  Zetta cluster of its own. Your account can have many workspaces, one per environment for example.
+- **A workspace.** Everything you design, train and ship lives in a workspace: an isolated
+  environment with an engine of its own. Your account can have many workspaces, one per environment for example.
 - **A key, for scripts and agents.** The site needs no key. Scripts, `curl` and AI agents use a lake
   API key made on **Developer → API** or **Developer → MCP** ([Tokens and Keys](/docs/tokens)).
 
@@ -41,7 +41,7 @@ Orama** and your account menu. On a phone the rail is a drawer behind the menu b
 ## 1. Start Your Workspace
 
 1. Open **Design → Projects**. If you have no workspace yet, the page shows **Start Your Workspace**.
-2. Press **Start your workspace**. lake asks for a Zetta cluster of your own; the page shows
+2. Press **Start your workspace**. lake asks for an engine of your own; the page shows
    *Preparing Your Workspace* and checks again every 15 seconds until it is ready.
 3. To add another workspace later, open **Ship → Workspaces** and press **New workspace**.
 
@@ -101,7 +101,7 @@ A name already in use answers `conflict`. More: [AI Projects and Pipelines](/doc
 
 1. On the project, press **Build pipeline**.
 2. Under **What should it predict or answer?** write the goal, for example *Predict the churned
-   column of accounts*. Under **From data** choose `accounts`. Leave **Methodology** to let Zetta
+   column of accounts*. Under **From data** choose `accounts`. Leave **Methodology** to let lake
    choose, or pick one the workspace runs.
 3. Press **Build pipeline**. The pipeline opens, drawn as steps joined by arrows.
 4. Press **Approve**. A pipeline must be approved before it runs, and again after any change.
@@ -174,7 +174,7 @@ From an AI agent it is the MCP tool `predict`. **Unpublish** stops every outside
 | You see | What it means and what to do |
 |---|---|
 | *Start Your Workspace* on every Design, Train and Ship page | The workspace was never started. Press **Start your workspace**. |
-| *Preparing Your Workspace* | The workspace Zetta is being provisioned. The page checks again every 15 seconds. |
+| *Preparing Your Workspace* | The workspace is being provisioned. The page checks again every 15 seconds. |
 | *Your Workspace Could Not Be Prepared* | The operator could not provision it; the banner gives the reason. **Cancel workspace** withdraws the request. |
 | `workspace_not_ready` | A call reached a workspace that is not ready yet. Poll `workspace_status`. |
 | `workspace_id is required` | Every Design, Train and Ship call names its workspace. |

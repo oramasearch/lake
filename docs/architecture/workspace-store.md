@@ -493,6 +493,15 @@ signal arrives, before anything else winds down):
    dropped here (a rebuild queued or running, repositories pending) is not lost: before such a
    workspace's store is released its `search/manifest.json` is removed under the lease, and the
    next process rebuilds the index ([search.md](../api/search.md#where-the-index-lives-lake381-decision-54-s8)).
+   A rebuild stops only between repositories, so its index writes (written without a lane) can
+   still be in flight. Each open store has an `IndexWriteGate` (lake#606): the invalidation and
+   every close of the store close it, a replacing put (the manifest, the artifact members) or a
+   remove holds it shared across its request, and a write-once put (a segment or run under a new
+   name) checks it. So a manifest put either lands before the removal or is refused after it
+   (`store_unavailable`, "this workspace's store was closed here"). Before lake#606 a rebuild whose
+   writes were in flight put the manifest back after the drain removed it; with a successor holding
+   the lease its newer fence refused them, but without one the next process loaded an index that
+   lacked the commits the drain had dropped.
 5. Each open workspace store is closed as soon as its lane is idle (no admitted request, no image
    pull), eight stores at a time (`release_workspace_stores`, sweeping again until none is left, so
    a store an open already in progress inserts later is released too): the owner settles what the
@@ -1023,7 +1032,8 @@ a real lake server. `WorkspaceStoreZetta.*` run against a real Zetta binary when
 | `WorkspaceStoreHandoff.TheDrainIsAnnouncedOnlyOnceAnOpenInProgressHasFinished` | lake#536: with an open in progress at the drain, the announcement waits for it (written at once without the count) |
 | `WorkspaceStoreHandoff.AnUnreadyWorkspaceDoesNotHoldUpTheOthersRepositories` | lake#536: with one workspace's Zetta not ready, another's repositories are opened within 3 s of the root; lake#535: nothing their open wrote is left unsynced |
 | `WorkspaceStoreHandoff.AStaleDrainAnnouncementIsIgnored` | lake#536: an earlier owner's announcement and a copy of the record with another token are ignored; the successor takes no free lease, and removes the marker once it owns the root |
-| `WorkspaceStoreHandoff.IndexWorkTheDrainDropsIsRebuiltByTheSuccessor` | lake#536: a rebuild and a pending commit dropped by the drain: the manifest is removed, and the successor's rebuilt index holds every commit |
+| `WorkspaceStoreHandoff.IndexWorkTheDrainDropsIsRebuiltByTheSuccessor` | lake#536: a rebuild and a pending commit dropped by the drain: the manifest is removed, and the successor's rebuilt index holds every commit. The rebuild's segment writes are held in the fake (`hold`, `let_go`) until the successor holds the lease, so it is still building at the drain under any load (lake#606) |
+| `WorkspaceStoreHandoff.AnIndexWriteInFlightAtTheDrainNeverPutsTheManifestBack` | lake#606: the same drain with no successor: the held rebuild writes go on after the drain, the manifest stays removed, and the next process's index holds every commit (it failed before `IndexWriteGate`) |
 | `WorkspaceStoreBackend.ACommitAsksForOneDurableRequestAndKeepsItsJournalRemoval` | lake#535: liquid one-file commits that each checkpoint send no fsync until lake's sync, which sends one `:barrier`; an idle sync sends nothing; after a crash `LIQUID_JOURNAL` stays removed and the reopened head is the last commit |
 | `WorkspaceStoreBackend.ANewViewsFirstSyncMakesWhatItServesDurable` | lake#535: a write a predecessor sent but never made durable is served by the next view, whose first sync sends `:barrier` (and only the first); a crash after it keeps the write |
 | `WorkspaceStoreOwner.AZettaWithoutPrefixDurabilityIsRefused` | lake#543: a fake Zetta without zetta#1237 (no `object_log_prefix_durability` in its lease answer), and one reporting `0`, are refused `unsupported` naming the reason and zetta#1237; the lease is given back and nothing is written; once it reports `1`, the store opens |

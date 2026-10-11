@@ -1,5 +1,8 @@
+#include <algorithm>
 #include <cstdlib>
 #include <iostream>
+#include <string>
+#include <vector>
 
 #include <gtest/gtest.h>
 
@@ -296,6 +299,26 @@ TEST_F(Experiments, CompareRunsAnswersItsGetFormWithRepeatedKeysOrACommaList) {
     ASSERT_NE(runs, parameters.end());
     EXPECT_EQ(runs->at("style"), "form");
     EXPECT_EQ(runs->at("explode"), true);
+}
+
+// zetta#1247 (lake#615): a GBDT classifier run with a held-out split logs a confusion matrix, an
+// ROC curve and calibration; get_run_metrics says so and passes them through for the run page.
+TEST_F(Experiments, RunMetricsPromiseAndCarryTheHeldOutCharts) {
+    const auto capability = registry.find("get_run_metrics");
+    ASSERT_NE(capability, nullptr);
+    for (const std::string promised :
+         {"GBDT classifier", "confusion matrix", "ROC curve", "calibration", "held_out"}) {
+        EXPECT_NE(capability->description.find(promised), std::string::npos) << promised;
+    }
+    const auto read = call("get_run_metrics", {{"run", "run-a"}});
+    ASSERT_TRUE(read.ok) << read.error.message;
+    std::vector<std::string> types;
+    for (const auto& artifact : read.value.at("artifacts")) {
+        types.push_back(artifact.at("type"));
+    }
+    for (const std::string chart : {"confusion_matrix", "roc_curve", "calibration"}) {
+        EXPECT_NE(std::ranges::find(types, chart), types.end()) << chart;
+    }
 }
 
 // lake#561: lake says experiment and `experiment_id`; the engine's study names stay on the engine

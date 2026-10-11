@@ -1061,8 +1061,30 @@ TEST(Workspaces, SearchIndexAnswersOnlyForAPublishedIndex) {
     EXPECT_EQ(w.caller->calls.back().second["target"], "i-1");
     EXPECT_EQ(w.caller->calls.back().second["field"], "body");
     EXPECT_EQ(w.caller->calls.back().second["top_k"], 3);
+    EXPECT_FALSE(w.caller->calls.back().second.contains("fields"))
+        << "no `fields`: the engine's default, every field the index holds";
     EXPECT_EQ(registry.find("search_index")->kind, lake::api::CapabilityKind::Read)
         << "GET /v1/search_index for outside callers";
+
+    // zetta#1243 (lake#596, lake#615): each hit carries the matched row's fields, and `fields`
+    // picks which; [] asks for ids and scores only.
+    w.caller->answers["search"] = {
+        {"hits",
+         json::array({{{"id", "doc-7"},
+                       {"score", 2.5},
+                       {"fields", {{"title", "Renewal risk"}, {"plan", "enterprise"}}}}})}};
+    const auto with_fields = search({{"fields", json::array({"title", "plan"})}});
+    ASSERT_TRUE(with_fields.ok) << with_fields.error.message;
+    EXPECT_EQ(w.caller->calls.back().second["fields"], json::array({"title", "plan"}));
+    EXPECT_EQ(with_fields.value["hits"][0]["fields"]["title"], "Renewal risk");
+    const auto ids_only = search({{"fields", json::array()}});
+    ASSERT_TRUE(ids_only.ok) << ids_only.error.message;
+    EXPECT_EQ(w.caller->calls.back().second["fields"], json::array());
+    const std::string described = registry.find("search_index")->description;
+    EXPECT_NE(described.find("{id, score, fields}"), std::string::npos) << described;
+    EXPECT_EQ(described.find("lake#596"), std::string::npos) << "the hit carries fields now";
+    const json output = registry.find("search_index")->output_schema;
+    EXPECT_TRUE(output["properties"]["hits"]["items"]["properties"].contains("fields"));
 }
 
 TEST(Workspaces, PredictAnswersOnlyThroughAPublishedModel) {
@@ -2041,6 +2063,78 @@ TEST(AgentRuns, ABuiltPipelineSaysWhichTemplateItStartedFrom) {
     const auto older = r.call("compile_pipeline", {{"project", "retention"}, {"intent", "Churn"}});
     ASSERT_TRUE(older.ok) << older.error.message;
     EXPECT_FALSE(older.value.contains("template"));
+}
+
+// zetta#1246 (lake#615): compile_pipeline passes the chosen dataset's source and table and the
+// label and entity columns to the compiler as hints, so the steps are named from the data. A
+// connect step the engine already pointed is left as the engine named it; an older engine's step
+// is still pointed and renamed by lake.
+TEST(AgentRuns, ABuiltPipelineIsFittedToTheChosenDataset) {
+    AgentRuns r;
+    const auto sent = [&](const std::string& capability) {
+        for (auto call = r.w.caller->calls.rbegin(); call != r.w.caller->calls.rend(); ++call) {
+            if (call->first == capability) {
+                return call->second;
+            }
+        }
+        return json(nullptr);
+    };
+    r.w.caller->answers["capture_intent"] = {{"input_id", "in-1"}};
+    r.w.caller->answers["compile_intent"] = {{"name", "Predict downgrades"},
+                                             {"template", "the M-1 churn template"}};
+    const auto graph_with = [](json attributes) {
+        return json{{"graph_id", "g-1"},
+                    {"name", "Predict downgrades"},
+                    {"project", "retention"},
+                    {"approval", "proposed"},
+                    {"nodes",
+                     json::array({{{"id", "load_customers"},
+                                   {"kind", "connect"},
+                                   {"name", "Load subscriptions"},
+                                   {"attributes", std::move(attributes)}},
+                                  {{"id", "train"}, {"kind", "model"}, {"name", "Train"}}})},
+                    {"edges", json::array()}};
+    };
+    r.w.caller->answers["get_graph"] =
+        graph_with({{"source", "billing"}, {"table", "subscriptions"}});
+    r.w.caller->answers["save_graph"] = {{"graph_id", "g-1"}, {"name", "Predict downgrades"}};
+    const json input{{"project", "retention"},
+                     {"intent", "Predict which subscriptions downgrade"},
+                     {"dataset", "billing.subscriptions"},
+                     {"label_column", "downgraded"},
+                     {"entity_column", "account_id"}};
+    const auto built = r.call("compile_pipeline", input);
+    ASSERT_TRUE(built.ok) << built.error.message;
+    EXPECT_EQ(built.value["graph"], "Predict downgrades");
+    EXPECT_EQ(sent("compile_intent")["hints"],
+              json({{"source", "billing"},
+                    {"table", "subscriptions"},
+                    {"label_column", "downgraded"},
+                    {"entity_column", "account_id"}}));
+    EXPECT_TRUE(std::ranges::none_of(r.w.caller->calls, [](const auto& call) {
+        return call.first == "save_graph";
+    })) << "the engine already reads the table and named the step from it";
+
+    // An engine that ignores the hints: lake points and names the connect step itself.
+    r.w.caller->answers["get_graph"] = graph_with(json::object());
+    const auto older = r.call("compile_pipeline", input);
+    ASSERT_TRUE(older.ok) << older.error.message;
+    const json saved = sent("save_graph");
+    ASSERT_TRUE(saved.is_object());
+    EXPECT_EQ(saved["nodes"][0]["attributes"]["table"], "subscriptions");
+    EXPECT_EQ(saved["nodes"][0]["name"], "Load billing.subscriptions");
+
+    // Without a dataset or columns nothing is hinted, so the template keeps its own names.
+    const auto bare = r.call("compile_pipeline", {{"project", "retention"}, {"intent", "Churn"}});
+    ASSERT_TRUE(bare.ok) << bare.error.message;
+    EXPECT_FALSE(sent("compile_intent").contains("hints"));
+    // A dataset with no columns named: the source and table alone.
+    const auto table_only =
+        r.call("compile_pipeline",
+               {{"project", "retention"}, {"intent", "Churn"}, {"dataset", "subscriptions"}});
+    ASSERT_TRUE(table_only.ok) << table_only.error.message;
+    EXPECT_EQ(sent("compile_intent")["hints"],
+              json({{"source", "datasets"}, {"table", "subscriptions"}}));
 }
 
 TEST(AgentRuns, ScheduleTimeZonesAreIanaNames) {

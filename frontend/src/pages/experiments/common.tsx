@@ -11,7 +11,7 @@ import { LiveSwitch, pause, qs, useWorkspaceLink } from "@/pages/apps/shared";
 import { useConfirm } from "@/pages/streams/common";
 import "@/styles/experiments.css";
 import { Chart, ChartContext, newRegistry, viewAction } from "./Chart";
-import { cell, ema, heldOutScores, metricData, nextCursor, parameterDiff, type RunDetail } from "./transforms";
+import { artifactChart, artifactSource, artifactTitle, cell, ema, heldOutScores, metricData, nextCursor, parameterDiff, type RunDetail } from "./transforms";
 import { stopsPolling } from "@/lib/errors";
 
 export type Mode = "list" | "experiment" | "run" | "compare";
@@ -437,12 +437,7 @@ function Artifacts({ details }: { details: RunDetail[] }) {
 
 function ArtifactView({ chartKey, run, name, type, data }: { chartKey: string; run: string; name: string; type: string; data: Data }) {
   const list = (key: string) => (Array.isArray(data[key]) ? data[key] : []) as unknown[];
-  const numbers = (key: string) => list(key) as (number | null)[];
-  const chart = useMemo(() => {
-    if (type === "feature_importance") return { data: [numbers("values").map((_, i) => i), numbers("values")], labels: ["Importance"], settings: { xValues: list("features").map(String) } };
-    if (type === "calibration") return { data: [numbers("predicted"), numbers("observed"), numbers("predicted")], labels: ["Observed", "Ideal"], settings: {} };
-    return { data: [numbers("x"), numbers("y")], labels: [type === "roc_curve" ? "True positive rate" : "Precision"], settings: {} };
-  }, [data, type]);
+  const chart = useMemo(() => artifactChart(type, data), [data, type]);
   let body: ReactNode;
   if (type === "confusion_matrix") {
     const labels = list("labels");
@@ -457,9 +452,10 @@ function ArtifactView({ chartKey, run, name, type, data }: { chartKey: string; r
     if (type === "feature_importance") {
       table = <Table headers={["Feature", "Importance"]} rows={list("features").map((feature, i) => [feature, list("values")[i]])} />;
     } else if (type === "calibration") {
-      table = <Table headers={["Predicted", "Observed", "Count"]} rows={list("predicted").map((value, i) => [value, list("observed")[i], list("counts")[i]])} />;
+      table = <Table headers={["Mean predicted", "Observed rate", "Rows"]} rows={list("predicted").map((value, i) => [value, list("observed")[i], list("counts")[i]])} />;
     } else {
-      table = <Table headers={["X", "Y", "Threshold"]} rows={list("x").map((value, i) => [value, list("y")[i], list("thresholds")[i]])} />;
+      const headers = type === "roc_curve" ? ["False positive rate", "True positive rate", "Threshold"] : type === "pr_curve" ? ["Recall", "Precision", "Threshold"] : ["X", "Y", "Threshold"];
+      table = <Table headers={headers} rows={list("x").map((value, i) => [value, list("y")[i], list("thresholds")[i]])} />;
     }
     body = (
       <>
@@ -471,7 +467,10 @@ function ArtifactView({ chartKey, run, name, type, data }: { chartKey: string; r
   return (
     <section className="experiment-artifact">
       <h3 className="m-0 text-[13.5px] font-semibold text-ink">
-        {name} <span className="font-mono text-[12px] font-normal text-ink-3">· {run}</span>
+        {artifactTitle(type)}{" "}
+        <span className="font-mono text-[12px] font-normal text-ink-3">
+          · {artifactSource(name)} · {run}
+        </span>
       </h3>
       {body}
     </section>

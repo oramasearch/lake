@@ -672,6 +672,18 @@ TEST_F(PlatformFixture, WithoutThePlatformMirrorEveryCallSaysDeploymentsAreNotSe
     }
 }
 
+// `server_info` says whether Deployments are set up, so the web app asks once instead of every
+// repository (lake#605).
+TEST_F(PlatformFixture, ServerInfoSaysWhetherDeploymentsAreSetUp) {
+    ApiResult with = call_async("server_info", json::object());
+    ASSERT_TRUE(with.ok) << with.error.message;
+    EXPECT_EQ(with.value.at("deployments"), true);
+    context.platform = nullptr;
+    ApiResult without = call_async("server_info", json::object());
+    ASSERT_TRUE(without.ok) << without.error.message;
+    EXPECT_EQ(without.value.at("deployments"), false);
+}
+
 TEST_F(PlatformFixture, DiscoveryExposesPlatformSurface) {
     ASSERT_TRUE(sync());
     const json openapi = lake::api::openapi_document(registry, "test");

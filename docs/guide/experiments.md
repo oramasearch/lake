@@ -7,7 +7,7 @@ and promote the best trial's model.
 
 Open **Train → Experiments**. You can describe a goal to **ExperimentsAgent** and review the
 experiment it proposes, or fill in an experiment yourself with **Start experiment**. Every
-experiment and trial lives in your workspace's Zetta.
+experiment and trial lives in your workspace.
 
 Every call below names `customer_id`, the id of the account that owns your workspaces (yours, or
 your organization's), and `workspace_id`, the workspace in the page address
@@ -22,7 +22,7 @@ reads also answer `GET`) and an MCP tool of the same name and input.
 | **Trial** | One training run of the experiment with one set of parameters, with its own run and curves. Its state is `running`, `pruned`, `failed` or `complete`. |
 | **Run** | One training run's record: its metric curves, parameters and artifacts, named by `run_id`. Each trial has one. |
 | **Objective** | The metric the experiment optimizes and its direction (maximize or minimize). |
-| **Search ranges** | The parameters to try and their ranges. With *from defaults*, Zetta fills the methodology's own. |
+| **Search ranges** | The parameters to try and their ranges. With *from defaults*, lake fills in the methodology's own. |
 | **Budgets** | The most trials, how many run in parallel, the wall time and the cost cap. |
 | **Sampler and pruner** | How the next parameters are chosen, and how weak trials are stopped early. |
 | **Tracked run** | A run with recorded metrics outside any experiment; it can be charted and compared too. |
@@ -40,7 +40,7 @@ Objectives use the run report's held-out metric names:
 | `held_out_rmse` | minimize |
 | `held_out_mae` | minimize |
 
-Zetta still accepts older spellings such as `validation.auc` and stores the canonical name, so an
+The workspace still accepts older spellings such as `validation.auc` and stores the canonical name, so an
 experiment shows under its `held_out_*` name. The validation split is `validation`; a `test` split is
 refused.
 
@@ -135,7 +135,7 @@ own confirmation.
   `{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "name": "Retention Tuning", "project": "retention", "pipeline": "training", "dataset": "accounts", "methodology": "M-1", "objective": {"metric": "held_out_auc", "direction": "maximize", "validation_split": "validation"}, "from_defaults": true, "budgets": {"max_trials": 10, "max_wall_time_ms": 60000, "max_parallel_trials": 1, "cost_cap": 5}, "confirm": true}`
 - MCP: `start_experiment`.
 
-`name`, `methodology` and `confirm: true` are required. With `from_defaults: true`, Zetta fills the
+`name`, `methodology` and `confirm: true` are required. With `from_defaults: true`, lake fills in the
 methodology's parameter ranges and any missing objective (`held_out_auc`, maximize, the `validation`
 split) and budgets (10 trials, 2 in parallel, 10 minutes, no cost cap), field by field. Without it,
 a missing `objective` or `budgets` is refused at `/objective` or `/budgets` before anything reaches
@@ -182,7 +182,8 @@ it; a failure shows *Reconnecting* and keeps trying.
 
 A trial or tracked run opens its own page: every metric grouped by its prefix, its parameters and
 its artifacts (confusion matrices, ROC and PR curves, calibration, feature importance, sample
-predictions). On the list, tick tracked runs and choose **Compare selected runs**; on an
+predictions). A GBDT classifier trained with a held-out split shows its **Confusion Matrix**,
+**ROC Curve** and **Calibration** on the held-out rows; a regressor shows none. On the list, tick tracked runs and choose **Compare selected runs**; on an
 experiment, select trials and **Compare selected runs**. Two to eight runs share charts, with their parameter differences
 marked.
 
@@ -243,11 +244,11 @@ checks again. A scoped key must name each tool it calls. Starting, stopping and 
 |---|---|
 | *ExperimentsAgent is not registered on this lake yet.* | Start an experiment yourself, or ask whoever runs this lake to deploy ExperimentsAgent. |
 | `invalid_input` at `/objective` or `/budgets` | Fill them in, or send `from_defaults: true`. |
-| `invalid_input` naming a field | Zetta's own path to the field at fault; correct it and start again. |
+| `invalid_input` naming a field | The path to the field at fault; correct it and start again. |
 | `conflict` on the confirmed `agent_turn` | The proposal changed since you reviewed it; read the task again and confirm the new one. |
 | `unauthorized` on `promote_trial` | Promotion needs `admin` on the account. |
 | *No Training Curves Yet* | The trials have recorded no metrics yet; turn on **Live updates**. |
-| `workspace_not_ready` | The workspace Zetta is starting ([Workspaces](/docs/workspaces)). |
+| `workspace_not_ready` | The workspace is starting ([Workspaces](/docs/workspaces)). |
 
 ## Related Pages
 

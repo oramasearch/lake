@@ -8,7 +8,11 @@ import {
   a1Queue,
   actionCounts,
   certificateGroups,
+  checkTone,
   datasetChoices,
+  datasetColumns,
+  gateCounts,
+  notApplicableLine,
   decisionsRef,
   defaultModelName,
   experimentAllocations,
@@ -262,4 +266,40 @@ test("a project's state comes from its pipelines: one approved makes it approved
   assert.deepEqual(projectState([]), { state: "no pipelines", pipelines: 0, approved: 0 });
   assert.deepEqual(projectState([{ approval: "proposed" }]), { state: "proposed", pipelines: 1, approved: 0 });
   assert.deepEqual(projectState([{ approval: "proposed" }, { approval: "approved" }]), { state: "approved", pipelines: 2, approved: 1 });
+});
+
+// zetta#1240 (lake#615): the gate lists the checks that applied and counts the ones that did not.
+test("gateCounts takes the engine's counts and counts the listed checks for an older engine", () => {
+  assert.deepEqual(gateCounts({ verdict: "pass", applied: 1, not_applicable: 107, checks: [{ name: "label_leakage", status: "pass" }] }), { applied: 1, notApplicable: 107 });
+  assert.deepEqual(
+    gateCounts({ checks: [{ status: "pass" }, { status: "not_applicable" }, { status: "fail" }] }),
+    { applied: 2, notApplicable: 1 },
+    "an audit answer or an older engine: counted from the list",
+  );
+  assert.deepEqual(gateCounts(undefined), { applied: 0, notApplicable: 0 });
+  assert.deepEqual(gateCounts({ applied: "1", not_applicable: null, checks: [] }), { applied: 0, notApplicable: 0 }, "only numbers count");
+});
+
+test("a check that did not apply is neutral, never a pass or a failure", () => {
+  assert.equal(checkTone("not_applicable"), "neutral");
+  assert.equal(checkTone("pass"), "success");
+  assert.equal(checkTone("warn"), "warning");
+  assert.equal(checkTone("fail"), "danger");
+  assert.equal(notApplicableLine(0), "");
+  assert.equal(notApplicableLine(1), "1 check did not apply");
+  assert.equal(notApplicableLine(107), "107 checks did not apply");
+});
+
+// zetta#1246 (lake#615): Build a Pipeline offers the chosen dataset's columns as its label and entity.
+test("datasetColumns reads the chosen dataset's columns by its path", () => {
+  const datasets = [
+    { database: "billing", name: "subscriptions", columns: ["account_id", "plan", "downgraded", 7] },
+    { name: "accounts", columns: ["id"] },
+    { database: "churn_results", name: "at_risk_1", kind: "result", columns: ["risk"] },
+  ];
+  assert.deepEqual(datasetColumns(datasets, "billing.subscriptions"), ["account_id", "plan", "downgraded"]);
+  assert.deepEqual(datasetColumns(datasets, "datasets.accounts"), ["id"], "a bare name is in `datasets`");
+  assert.deepEqual(datasetColumns(datasets, ""), []);
+  assert.deepEqual(datasetColumns(datasets, "billing.missing"), []);
+  assert.deepEqual(datasetColumns(null, "billing.subscriptions"), []);
 });

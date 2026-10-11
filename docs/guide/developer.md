@@ -130,7 +130,7 @@ give a base URL ending in `/w/<workspace id>` works in that workspace without re
 
 ## Inside a Workspace's Engine
 
-Each workspace has its own Orama Zetta. Two capabilities reach the engine's own operations, each
+Each workspace has its own engine. Two capabilities reach the engine's own operations, each
 through an allow-list, with the same permission checks and audit as every other call:
 
 - `workspace_query` runs one allowed engine **read**: projects, pipelines (`get_graph`), datasets,
@@ -295,7 +295,7 @@ says why.
 - **A `502` or `504` HTML page**: it came from the edge, not from lake, which never answers either
   (an engine refusal is `422 engine_error` with lake's message). lake was unreachable or the call ran
   past the edge's 100-second limit; retry, and split a very long recording.
-- **`workspace_not_ready`**: the workspace Zetta is starting. See
+- **`workspace_not_ready`**: the workspace is starting. See
   [Workspaces](/docs/workspaces).
 - More answers: [FAQ and Troubleshooting](/docs/faq).
 

@@ -15,7 +15,7 @@ or your organization's), and, where a service or store is created, `workspace_id
 | Term | What it is |
 |---|---|
 | **Service** | One managed database, stream or engine of a kind from the catalog, created in a workspace. |
-| **Your workspace's Zetta** | Every workspace has its own Zetta, the engine behind Design, Train and Ship. It is listed on Services marked as the workspace, and is created and deleted with the workspace, not here. |
+| **Zetta** | Orama's data and AI engine. Every workspace runs on one of its own, the engine behind Design, Train and Ship; it is listed on Services marked as the workspace, and is created and deleted with the workspace, not here. You can also start a Zetta service of your own. |
 | **Kind** | `zetta`, `postgres`, `kafka`, `clickhouse`, `tidb`, `cassandra`, `valkey`, `sqlite`, `duckdb` or `polars`. |
 | **Connection** | What a client needs to reach a Ready service: a Postgres URI, Kafka's bootstrap and SASL settings, and so on. Shown on request, once, and never put in a page address or a list. |
 | **Store** | A volume (a cluster disk) for your services, created in a workspace. |
@@ -69,7 +69,7 @@ from the page.
 
 - MCP: `service_connection`.
 
-A Zetta service's admin token is never shown. Lake reaches your workspace's Zetta for you through
+A Zetta service's admin token is never shown. Lake reaches your workspace's engine for you through
 `workspace_query`, `workspace_act` and `workspace_sql`.
 
 Addresses are inside the cluster only: a service is reachable from your other services, your apps
@@ -95,7 +95,7 @@ and your workspace, not from the internet.
 ### Bind a Service to an App
 
 An app reaches a service through a binding: on the app's **Services** tab, **Attach service**, or
-**Create and attach** for a new one ([Apps](/docs/apps#bindings-the-workspace-zetta-and-services)).
+**Create and attach** for a new one ([Apps](/docs/apps#bindings-workspace-data-and-services)).
 
 ### Delete a Service
 
@@ -114,14 +114,14 @@ until the operator has removed it.
 
 - MCP: `delete_service`. A `confirm` that is not the exact name deletes nothing.
 
-Your workspace's own Zetta is not deleted here: deleting the workspace deletes it
+Your workspace's own engine is not deleted here: deleting the workspace deletes it
 ([Workspaces](/docs/workspaces)).
 
 ## Storage
 
 **Data → Datasets** ends with the **Storage** card, *Buckets, Filesystems and Volumes*: storage for
 your services, private to the workspace. It lists each store's name, type, provider, size, status
-with the operator's message, and its actions. It works whether or not the workspace Zetta is ready.
+with the operator's message, and its actions. It works whether or not the workspace is ready.
 
 Today one kind is offered: a **volume on the cluster disk**. Buckets and shared filesystems are
 listed in the form and disabled, each with the reason; they cannot be created.
@@ -183,7 +183,7 @@ deletes the data in it, which cannot be recovered.
 - There are no backups yet for any kind. A SQLite service has one instance and no replication, so
   its volume is its only copy; it is reached over HTTP with a bearer token, not as a SQLite file.
 - Valkey is a preview: its operator is not ready for production use.
-- Design, Train and Ship use the workspace's own Zetta only.
+- Design, Train and Ship use the workspace's own engine only.
 - Only volumes on the cluster disk can be created as storage.
 
 ## Permissions
@@ -214,6 +214,6 @@ deletes the data in it, which cannot be recovered.
 
 - [Datasets and Loading Data](/docs/load-data): connections and pulling tables.
 - [Apps](/docs/apps): bind a service to an app.
-- [Workspaces](/docs/workspaces): your workspace's own Zetta.
+- [Workspaces](/docs/workspaces): your workspace and its engine.
 - [Usage and Metering](/docs/usage): what your services use.
 - [Grants and Effective Access](/docs/access): who may create and delete.

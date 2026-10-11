@@ -133,7 +133,9 @@ lacks a scope or a grant is still 403 `unauthorized`.
   *"principal_taap_id already holds this role here: the item is already shared with that person in
   that role"* at `/principal_taap_id` (for `create_grant`; `share_drive_folder` reaches neither:
   lake makes its digest, and sharing again what is already shared answers the existing grant with
-  `existing: true`, lake#585). The in-memory store names the same constraints in its
+  `existing: true`, lake#585; `create_grant`, `create_membership` and `accept_invitation` make
+their digest too since lake#602, and refuse a supplied one that is not lake's at
+`/attestation_digest`). The in-memory store names the same constraints in its
   messages. Only a diagnostic for a constraint not in the table still answers the generic *"the
   request contains invalid data"*; add the constraint to the table when an input can reach it.
 - **Secrets** name the secret and the field: *"no secret named nope"* at `/name`, *"secret database

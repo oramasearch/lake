@@ -15,7 +15,7 @@ reads also answer `GET`) and an MCP tool of the same name and input.
 |---|---|
 | **Topic** | A named, ordered log of messages kept for a while by its retention settings. |
 | **Message** | One JSON event with a sequence number, a sender, a publication time, a size and a revision. |
-| **Workspace Zetta** | The topics of this workspace: `agent-events`, `app-events.<app id>`, `build-events.<build id>`, training events, and the topics you create. Named `workspace` in calls. |
+| **Workspace** | The topics of this workspace: `agent-events`, `app-events.<app id>`, `build-events.<build id>`, training events, and the topics you create. Named `workspace` in calls. |
 | **Lake Bus** | The dispatch topics that hand tasks to lake's agents (`agent-tasks.<agent>`). Named `bus` in calls. You see only your own tasks there. |
 | **Subscription** | A consumer of a topic, with its position and lag. Browsing never moves it. |
 | **System topic** | A topic lake or the engine owns. It is marked *system · browse-only* and can only be read. |
@@ -26,7 +26,7 @@ Sequence numbers are the topic's own, so gaps are normal.
 ## See the Topics
 
 **Train → Streams** opens with figures (Topics, Held messages, Subscribers) and a card of topics per
-Zetta, *Workspace Zetta* and *Lake Bus*, each with its subscribers, held messages and next sequence.
+place they live, *Workspace* and *Lake Bus*, each with its subscribers, held messages and next sequence.
 Agent topics are labelled (*Agent events*, *Agent tasks · <agent>*). Filter by **Name prefix** and
 page size, and page with **Previous** and **Next**.
 
@@ -39,7 +39,7 @@ page size, and page with **Previous** and **Next**.
 
 1. On **Train → Streams** choose **New topic**.
 2. Name it and, optionally, give its settings as JSON: retention (`retention_ms`, `max_events`),
-   time to live, limits and delivery defaults. New topics live on this workspace's Zetta.
+   time to live, limits and delivery defaults. New topics live in this workspace.
 3. Choose **Create topic**. You are recorded as its creator.
 
 - REST: `POST /v1/create_stream` with
@@ -164,8 +164,8 @@ ask you to confirm any write.
 | `conflict` on an edit | The message changed since you saw it; refresh and edit again. |
 | `conflict` on a purge | The count changed; preview again. |
 | `invalid_input` at `/workspace_id` | The workspace is not one of the account's live workspaces. |
-| `workspace_not_ready` | The workspace Zetta is starting ([Workspaces](/docs/workspaces)). |
-| A Zetta's card shows an error | That Zetta could not be read; the other card still lists its topics. |
+| `workspace_not_ready` | The workspace is starting ([Workspaces](/docs/workspaces)). |
+| A card shows an error | That place could not be read; the other card still lists its topics. |
 
 ## Related Pages
 

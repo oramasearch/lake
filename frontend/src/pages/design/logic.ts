@@ -137,6 +137,34 @@ export function verdictTone(verdict: string): "success" | "warning" | "danger" {
   return verdict === "pass" ? "success" : verdict === "warn" ? "warning" : "danger";
 }
 
+/** A gate check's tone: a check that did not apply is neither a pass nor a failure (zetta#1240). */
+export function checkTone(status: string): "neutral" | "success" | "warning" | "danger" {
+  return status === "not_applicable" ? "neutral" : verdictTone(status);
+}
+
+/** How many of a gate's checks applied and how many did not (zetta#1240). The engine counts both
+ * (`applied`, `not_applicable`) and lists only the applied checks unless asked for an audit; an
+ * older engine sends neither count, so the listed checks are counted. */
+export function gateCounts(gate: J | null | undefined): { applied: number; notApplicable: number } {
+  const checks: J[] = Array.isArray(gate?.checks) ? gate!.checks : [];
+  const listedNa = checks.filter((c) => c?.status === "not_applicable").length;
+  const count = (key: string, fallback: number) => (typeof gate?.[key] === "number" && Number.isFinite(gate[key]) ? (gate[key] as number) : fallback);
+  return { applied: count("applied", checks.length - listedNa), notApplicable: count("not_applicable", listedNa) };
+}
+
+/** "1 check did not apply", "107 checks did not apply"; "" for none. */
+export function notApplicableLine(count: number): string {
+  if (count <= 0) return "";
+  return `${count} ${count === 1 ? "check" : "checks"} did not apply`;
+}
+
+/** A dataset's columns from list_datasets, by the "<database>.<name>" path datasetChoices gives. */
+export function datasetColumns(datasets: unknown, path: string): string[] {
+  if (!Array.isArray(datasets) || !path) return [];
+  const found = datasets.find((d) => d && typeof d === "object" && `${text(d, "database") || "datasets"}.${text(d, "name")}` === path);
+  return Array.isArray(found?.columns) ? found.columns.filter((c: unknown): c is string => typeof c === "string") : [];
+}
+
 /** An id written anywhere in a text ("M-3", "M-3 Segmentation"), else "". */
 export function idToken(value: string, prefix: "M" | "S"): string {
   for (let at = 0; at + 2 < value.length; ++at) {

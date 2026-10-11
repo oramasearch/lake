@@ -10,8 +10,7 @@ record on the phone, and the transcript is in the workspace a moment later.
 - **Transcript.** A title and its text, with where it came from (`source`: `recording`, `upload`
   or `text`), how long the audio was when the speech-to-text model reports it, the language you
   gave, when it was said, who added it and when.
-- **Where it lives.** Each transcript is a sealed record in the workspace Zetta of the workspace
-  it was added to. Other workspaces never see it, and deleting the workspace deletes its
+- **Where it lives.** Each transcript is a sealed record in the workspace it was added to. Other workspaces never see it, and deleting the workspace deletes its
   transcripts.
 - **Speech-to-text.** Lake turns audio into text with OpenAI's transcription model, using lake's
   own key. **The audio is never kept**: lake reads it into memory for the one call, sends it to
@@ -194,7 +193,7 @@ recordings transcribe well within it. Split a long recording, or upload its text
 | `invalid_input` at `/title`, `/language`, `/recorded_at` or `/cursor` | That field is empty, too long or malformed. |
 | `not_found` at `/id` | No such transcript in this workspace. |
 | `unauthorized` (403) | You lack `write` on the account, or your key's scope does not carry the capability. |
-| `workspace_not_ready` | The workspace Zetta is not ready yet. |
+| `workspace_not_ready` | The workspace is not ready yet. |
 | The microphone does nothing | The browser needs permission, a secure (https) page and a tap. Check the site's microphone setting. |
 | 504 on a long recording | See the limit above: split the recording. |
 

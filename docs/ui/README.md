@@ -158,7 +158,7 @@ Workspaces)
 | `/ship/indexes`, `/ship/index` | `ship/IndexesPage.tsx`, `IndexPage.tsx` | search indexes, one index, search it | `search_index`, `create_token`; engine `list_indexes`, `create_index`, `get_index`, `expose_index`, `unexpose_index` |
 | `/ship/packages` | `apps/PackagesPage.tsx` | the instance registry, the space's images and builds | `list_packages`, `list_image_repositories`, `list_builds`, `receive_build_events` |
 | `/ship/apps`, `/ship/app` | `apps/AppsPage.tsx`, `AppPage.tsx` | apps, ApplicationAgent, one app ([apps.md](apps.md)) | see apps.md |
-| `/deployments` | `apps/DeploymentsPage.tsx` | every environment across readable repositories | `list_repositories`, `list_environments` |
+| `/deployments` | `apps/DeploymentsPage.tsx` | every environment across readable repositories | `server_info` (whether Deployments are set up, lake#605), `list_repositories`, `list_environments` |
 | `/services` | `ship/ServicesPage.tsx` | the space's databases, streams and engines | `list_services`, `list_service_kinds`, `create_service`, `delete_service`, `service_connection` |
 | `/workspaces` | `workspaces/WorkspacesPage.tsx` | a customer's workspaces with phase and storage, New workspace and deletion in dialogs ([workspace-selection.md](workspace-selection.md#the-workspaces-page)) | `list_workspaces`, `create_workspace`, `delete_workspace` |
 | `/ask`, `/w/<id>/ask` | `ask/AskRedirect.tsx` | the old Ask Orama page's address: opens the home (`/`) with its query, less `customer_id`; `/w/<id>/ask` first makes `<id>` the current workspace ([../api/ask-orama.md](../api/ask-orama.md)) | none; the home calls `send_ask_message`, `settle_ask_turn`, `confirm_ask_proposal`, `get_ask_conversation`, `get_agent_task`, `list_agent_library` |

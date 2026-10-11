@@ -13,8 +13,8 @@ security review about lake.
   cannot.
 - **Everything is recorded.** Every call, including refusals, is a signed, hash-linked audit event
   you can read and verify.
-- **Your data stays in your workspace.** What you put in a workspace lives in that workspace's own
-  Orama Zetta, sealed with the workspace's key.
+- **Your data stays in your workspace.** What you put in a workspace lives in that workspace
+  itself, sealed with the workspace's key.
 - **Agents act as you, and ask first.** An agent's turn holds a short-lived key that can read but not
   change; every change it wants is a proposal you confirm.
 
@@ -146,13 +146,13 @@ Who has access to one object, with the source of each grant, is
 
 - **Workspace data stays in the workspace.** Datasets, runs, models, transcripts, Ask Orama
   conversations, repository descriptions, issues and reviews, app settings, secrets and the
-  workspace's own audit are records in that workspace's Zetta, never in lake's central database.
+  workspace's own audit are records in that workspace, never in lake's central database.
 - **Sealed.** lake seals each record with the workspace's key (AES-256-GCM) and finds it by a keyed
   hash of its name, so the workspace's storage holds only ciphertext. A record copied to another
   workspace or another place does not open.
 - **Central data is about access only**: accounts and their workspaces, memberships and grants,
   sign-in and sessions, and the routing that says which workspace holds what.
-- **Deleting a workspace deletes its data.** Its Zetta and every record in it, its repositories, apps,
+- **Deleting a workspace deletes its data.** Every record in it, its repositories, apps,
   builds and images go with it; the confirmation lists them first. See
   [Workspaces](/docs/workspaces).
 - **Recordings are never kept.** Audio sent for speech-to-text is held in memory for the one call,
@@ -197,7 +197,7 @@ changed event breaks the chain.
 
 - **Two kinds of log.** Sign-in, sessions, keys, organizations, memberships, grants and workspaces
   themselves go to the central log. Events about a workspace's data go to that workspace's own log,
-  in its Zetta, so they are deleted with it. Refused calls stay in the central log.
+  kept in the workspace, so they are deleted with it. Refused calls stay in the central log.
 - **Your own events.** **Organization → Activity** shows what you did, newest first, with filters,
   **Include reads**, and the log each event came from. The operator's **Administration → Audit**
   shows everyone's.

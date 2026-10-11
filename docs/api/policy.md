@@ -40,7 +40,7 @@ ancestor or linked device is revoked or expires. The complete derivation and mig
 | `get_object` | `read` on `id` | one object |
 | `create_object` | `admin` on `parent_id` | child object |
 | `list_grants` | `admin` on `object_id` | direct grants |
-| `create_grant` | `admin` on `object_id` | attestation-backed grant |
+| `create_grant` | `admin` on `object_id` | grant, with the attestation lake signed for it |
 | `effective_access` | `share` on `object_id` | direct and inherited access |
 | `entity_effective_access` | `share` on the resolved repository, organization, or team | its policy object and direct and inherited access |
 
@@ -49,6 +49,39 @@ team pages link to `/repository/access?id=…`, `/organization/access?id=…`, a
 `/team/access?id=…` through `entity_effective_access`. Effective access returns the
 principal, role, allowed actions, source object, and whether the grant is inherited. This is the
 sharing view required by the product design.
+
+## The grant's attestation (lake#602)
+
+`create_grant` takes `principal_taap_id`, `object_id` and `role`. Lake writes the grant's evidence
+itself, as `share_drive_folder` does ([sharing.md](sharing.md#the-grants-attestation-lake585)): the
+statement
+
+`{type: "lake.grant/1", object_id, principal_taap_id, role, granted_by, issuer}`
+
+signed with lake's TAAP identity (purpose `grant`), and keeps `sha256:<hex>` of the JSON of
+`{statement, signer, signature}` as the grant's `attestation_digest`. The answer is the grant plus
+`attestation: {statement, signer, signature, digest}`, and the registry audit event carries the same
+`attestation`, so anyone holding the audit can recompute the digest and check the signature against
+lake's identity document. The statement has no time and Ed25519 signatures are deterministic, so
+`attestation_digest` stays an optional input for programs that repeat a call: it is accepted only
+when it equals lake's digest for the same object, principal, role and granter, and anything else is
+`invalid_input` at `/attestation_digest` with nothing written. Before lake#602 the caller supplied
+the digest and lake stored whatever it was sent; the Grants and Members pages showed that string as
+"attestation evidence" although it proved nothing.
+
+`create_membership` and the administrator's `accept_invitation` follow the same rule with the
+statement `lake.org_membership/1` (purpose `org-membership`); see
+[organizations.md](organizations.md#attestation-evidence). The shared code is
+`src/api/lake_attestation.cpp` (`sign_lake_attestation`, `check_supplied_digest`).
+`Organizations.GrantsAndMembershipsKeepTheDigestOfAStatementLakeSigned` (`tests/test_api.cpp`)
+covers all three: a made-up digest is refused and writes nothing, lake's digest recomputes from the
+answer, and a digest for another role is refused. Verify on a running lake with
+`POST /v1/create_grant` without `attestation_digest`: the answer's `attestation.digest` equals the
+grant's `attestation_digest`.
+
+Grants lake writes for itself with an evidence reference rather than a caller's digest
+(`sign_up_password/…`, `invitation/<id>` for `join_organization`, `create_organization_space/…`,
+`scim:…`) are unchanged; they never took the digest from the caller.
 
 ## Roles by object type
 

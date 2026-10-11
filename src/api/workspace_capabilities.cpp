@@ -1614,18 +1614,34 @@ void register_search_capabilities(Registry& registry) {
         .title = "Search a published index",
         .description = "Search one published search index in the customer's workspace. `query` is "
                        "the text, `field` optionally limits it to one indexed field, `top_k` caps "
-                       "the hits (default 10). Answers `hits` as {id, score}, best first: `id` is "
-                       "the workspace's internal id of the matched row, not a column of the table, "
-                       "and the hit carries no row fields yet (lake#596, which waits on the "
-                       "workspace engine). An index that is not published is refused; publish it "
-                       "with workspace_act expose_index.",
+                       "the hits (default 10), and `fields` picks which of the index's fields each "
+                       "hit carries (default all of them; [] for ids and scores only; a field the "
+                       "index does not hold is refused). Answers `hits` as {id, score, fields}, "
+                       "best first: `fields` holds the matched row's values, which is what a "
+                       "caller shows; `id` is the workspace's internal id of the row, not a column "
+                       "of the table. An index that is not published is refused; publish it with "
+                       "workspace_act expose_index.",
         .input_schema = customer_input_schema(
             {{"index_id", {{"type", "string"}}},
              {"query", {{"type", "string"}}},
              {"field", {{"type", "string"}}},
+             {"fields",
+              {{"type", "array"},
+               {"items", {{"type", "string"}, {"minLength", 1}}},
+               {"maxItems", 100}}},
              {"top_k", {{"type", "integer"}, {"minimum", 1}, {"maximum", 100}}}},
             json::array({"index_id", "query"})),
-        .output_schema = {{"type", "object"}},
+        .output_schema = {{"type", "object"},
+                          {"properties",
+                           {{"hits",
+                             {{"type", "array"},
+                              {"items",
+                               {{"type", "object"},
+                                {"properties",
+                                 {{"id", {{"type", "string"}}},
+                                  {"score", {{"type", "number"}}},
+                                  {"fields", {{"type", "object"}}}}},
+                                {"required", json::array({"id", "score"})}}}}}}}},
         .kind = CapabilityKind::Read,
         .object = "customer",
         .action = "read",
@@ -1655,6 +1671,11 @@ void register_search_capabilities(Registry& registry) {
                         {"top_k", input.value("top_k", 10)}};
             if (const std::string field = input.value("field", std::string()); !field.empty()) {
                 search["field"] = field;
+            }
+            // Which of the index's fields each hit carries (zetta#1243); the engine's default is
+            // all of them, and it refuses a field the index does not hold.
+            if (const auto fields = input.find("fields"); fields != input.end()) {
+                search["fields"] = *fields;
             }
             auto found =
                 co_await call_workspace(context, customer, "search", true, std::move(search));
@@ -3182,11 +3203,24 @@ liquid::runtime::task<ApiResult> point_pipeline(ApiContext& context,
         const std::string kind = node.value("kind", std::string());
         if (kind == "connect" && !dataset.empty()) {
             if (!pointed) {
-                edits.push_back({{"op", "set_attribute"}, {"step", id}, {"name", "source"},
-                                 {"value", source}});
-                edits.push_back({{"op", "set_attribute"}, {"step", id}, {"name", "table"},
-                                 {"value", table}});
-                edits.push_back({{"op", "rename_step"}, {"step", id}, {"name", "Load " + dataset}});
+                // An engine given the dataset's hints (zetta#1246) already reads it and names the
+                // step from the table; only an older engine's step is pointed and renamed here.
+                const json attributes = node.value("attributes", json::object());
+                const bool reads = attributes.is_object() &&
+                                   attributes.value("source", json()) == json(source) &&
+                                   attributes.value("table", json()) == json(table);
+                if (!reads) {
+                    edits.push_back({{"op", "set_attribute"},
+                                     {"step", id},
+                                     {"name", "source"},
+                                     {"value", source}});
+                    edits.push_back({{"op", "set_attribute"},
+                                     {"step", id},
+                                     {"name", "table"},
+                                     {"value", table}});
+                    edits.push_back(
+                        {{"op", "rename_step"}, {"step", id}, {"name", "Load " + dataset}});
+                }
                 pointed = true;
             } else {
                 edits.push_back({{"op", "remove_step"}, {"step", id}});
@@ -3214,13 +3248,43 @@ liquid::runtime::task<ApiResult> point_pipeline(ApiContext& context,
     co_return ApiResult::success({{"graph", graph}});
 }
 
+// What the engine's compiler fits the template to (zetta#1246): the dataset's `source` and
+// `table`, and the label and entity columns when they are known (`label_column`, else the model's
+// `target`). Empty when nothing is known, so the template keeps its own names.
+static json pipeline_hints(const std::string& dataset, const json& model, const json& columns) {
+    json hints = json::object();
+    if (!dataset.empty()) {
+        const std::size_t dot = dataset.find('.');
+        hints["source"] =
+            dot == std::string::npos ? std::string("datasets") : dataset.substr(0, dot);
+        hints["table"] = dot == std::string::npos ? dataset : dataset.substr(dot + 1);
+    }
+    const auto text_of = [](const json& object, const char* key) {
+        const auto found = object.is_object() ? object.find(key) : object.end();
+        return found != object.end() && found->is_string() ? found->get<std::string>()
+                                                           : std::string();
+    };
+    std::string label = text_of(columns, "label_column");
+    if (label.empty()) {
+        label = text_of(model, "target");
+    }
+    if (!label.empty()) {
+        hints["label_column"] = label;
+    }
+    if (const std::string entity = text_of(columns, "entity_column"); !entity.empty()) {
+        hints["entity_column"] = entity;
+    }
+    return hints;
+}
+
 liquid::runtime::task<ApiResult> compile_pipeline(ApiContext& context,
                                                   std::string customer_id,
                                                   std::string project,
                                                   std::string intent,
                                                   std::string dataset,
                                                   json model,
-                                                  std::string methodology) {
+                                                  std::string methodology,
+                                                  json columns) {
     const auto act = [&](std::string capability, json input) {
         return call_capability(context,
                                "workspace_act",
@@ -3239,6 +3303,11 @@ liquid::runtime::task<ApiResult> compile_pipeline(ApiContext& context,
         // with not_supported, naming the issue, rather than compiling a skeleton.
         if (!methodology.empty()) {
             input["methodology"] = methodology;
+        }
+        // The chosen dataset's hints, so the steps are named from the data (zetta#1246). An
+        // older engine ignores them and point_pipeline names the connect step below.
+        if (json hints = pipeline_hints(dataset, model, columns); !hints.empty()) {
+            input["hints"] = std::move(hints);
         }
         result = called(co_await act("compile_intent", std::move(input)));
     }
@@ -3289,6 +3358,8 @@ liquid::runtime::task<ApiResult> settle_build(ApiContext& context, control::Agen
     if (const std::string algo = design_text_field(design, "model_kind"); !algo.empty()) {
         model["algo"] = algo;
     }
+    // The design's entity column, a hint to the compiler with the label (zetta#1246).
+    const json design_columns{{"entity_column", design_text_field(design, "entity_column")}};
     // The methodology the design names, else the one of the Opportunity the build came from
     // (lake#289). An engine with the registry (zetta#1061) builds that methodology's own
     // pipeline; one it cannot run yet is refused here, never replaced by a skeleton.
@@ -3325,13 +3396,15 @@ liquid::runtime::task<ApiResult> settle_build(ApiContext& context, control::Agen
     // The Project Agent's compile check graphs are never the project's pipeline (lake#438).
     const json graphs = without_project_agent_checks(read.value.value("graphs", json::array()));
     if (graphs.empty()) {
-        co_return called(co_await compile_pipeline(context,
-                                                   task.customer_id,
-                                                   project,
-                                                   design_text(design_text_field(task.body, "message"), design),
-                                                   dataset,
-                                                   model,
-                                                   methodology));
+        co_return called(
+            co_await compile_pipeline(context,
+                                      task.customer_id,
+                                      project,
+                                      design_text(design_text_field(task.body, "message"), design),
+                                      dataset,
+                                      model,
+                                      methodology,
+                                      design_columns));
     }
     // The project's own pipeline (Zetta compiles one from its intent when it is created):
     // the first one not yet approved. Applied once: a connect step that already reads the
@@ -3346,13 +3419,15 @@ liquid::runtime::task<ApiResult> settle_build(ApiContext& context, control::Agen
     // A pipeline of another methodology's shape (the churn skeleton a segmentation project got
     // before zetta#1061) is not repointed: the design's methodology gets its own pipeline.
     if (!methodology.empty() && design_text_field(*open, "methodology") != methodology) {
-        co_return called(co_await compile_pipeline(context,
-                                                   task.customer_id,
-                                                   project,
-                                                   design_text(design_text_field(task.body, "message"), design),
-                                                   dataset,
-                                                   model,
-                                                   methodology));
+        co_return called(
+            co_await compile_pipeline(context,
+                                      task.customer_id,
+                                      project,
+                                      design_text(design_text_field(task.body, "message"), design),
+                                      dataset,
+                                      model,
+                                      methodology,
+                                      design_columns));
     }
     const ApiResult current = called(co_await call_capability(
         context,
@@ -4726,11 +4801,16 @@ void register_conversation_capabilities(Registry& registry) {
             "The project page's Build a Pipeline: capture `intent` as the project's intent, "
             "compile it (with `methodology`, that methodology's own pipeline), and, with "
             "`dataset` (\"<database>.<table>\"), point the new pipeline's first connect step at "
-            "it. Answers the new pipeline's name as `graph` (from the intent's words) and, from "
-            "an engine that says so, the `template` its steps started from.",
+            "it. The dataset's source and table, and the optional `label_column` (what it "
+            "predicts) and `entity_column` (what each row is about), are passed to the compiler "
+            "as hints, so the steps are named from the data (\"Load subscriptions\", \"Train "
+            "downgraded model\"). Answers the new pipeline's name as `graph` (from the intent's "
+            "words) and, from an engine that says so, the `template` its steps started from.",
         .input_schema = customer_input_schema({{"project", {{"type", "string"}, {"minLength", 1}}},
                                                {"intent", {{"type", "string"}, {"minLength", 1}}},
                                                {"dataset", {{"type", "string"}}},
+                                               {"label_column", {{"type", "string"}}},
+                                               {"entity_column", {{"type", "string"}}},
                                                {"methodology", {{"type", "string"}}}},
                                               json::array({"project", "intent"})),
         .output_schema = {{"type", "object"},
@@ -4747,13 +4827,16 @@ void register_conversation_capabilities(Registry& registry) {
             if (!context.workspaces || !context.store) {
                 co_return unavailable();
             }
-            co_return called(co_await compile_pipeline(context,
-                                                       input.at("customer_id"),
-                                                       input.at("project"),
-                                                       input.at("intent"),
-                                                       input.value("dataset", std::string()),
-                                                       nullptr,
-                                                       input.value("methodology", std::string())));
+            co_return called(co_await compile_pipeline(
+                context,
+                input.at("customer_id"),
+                input.at("project"),
+                input.at("intent"),
+                input.value("dataset", std::string()),
+                nullptr,
+                input.value("methodology", std::string()),
+                {{"label_column", input.value("label_column", std::string())},
+                 {"entity_column", input.value("entity_column", std::string())}}));
         }});
     registry.add(Capability{
         .name = "render_pipeline",

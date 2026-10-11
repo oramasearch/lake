@@ -419,7 +419,9 @@ const std::vector<Flow>& flows() {
          {{"workspace_query", "`capability: \"list_indexes\"` to find the index id"},
           {"workspace_act",
            "`capability: \"expose_index\"` to publish it (`unexpose_index` to stop)"},
-          {"search_index", "`index_id`, `query`; optional `field`, `top_k`"}}},
+          {"search_index",
+           "`index_id`, `query`; optional `field`, `top_k`, `fields` (which row fields each "
+           "hit carries)"}}},
     };
     return all;
 }

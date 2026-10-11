@@ -12,7 +12,7 @@ your own workspaces into an organization.
 | Term | What it is |
 |---|---|
 | **Organization** | A named group of people with its own workspaces, repositories and apps. Its own account has an id, the `customer_id` that every call about its workspaces names. |
-| **Membership** | One person (or workload) in an organization or one of its teams, with a role. Every membership keeps the digest of the signed `org_membership/1` attestation behind it and the identity of the administrator who granted it. |
+| **Membership** | One person (or workload) in an organization or one of its teams, with a role. Every membership keeps the digest of the attestation lake signed for it (`lake.org_membership/1`) and the identity of the administrator who granted it. |
 | **Role** | `owner`, `admin` or `member`. See [Roles](#roles). |
 | **Team** | A named group inside an organization. A membership can be in the organization itself or in one team. |
 | **Invitation** | An offer of a membership, addressed to an email address or to a handle, with a role and an expiry. It becomes a membership only when the person joins. |

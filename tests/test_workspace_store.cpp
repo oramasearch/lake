@@ -1694,7 +1694,9 @@ TEST(WorkspaceStoreSearch, ASearchNeverOpensAWorkspaceItsCallerCannotRead) {
     ASSERT_TRUE(owner_token) << owner_token.error().message;
     const auto [grantee, grantee_token] = token_for("taap:1:ed25519:search-grantee", "grantee@example.test");
     ASSERT_TRUE(rig.store->create_grant({grantee.taap_id, space->id, "read", "sha512-256:grantee", "admin", "grant"}));
-    const std::uint64_t gamma_requests = rig.zetta->requests_to(endpoint_gamma);
+    // The owner loop's quota reads of gamma's usage are not the callers' and are left out (lake#607):
+    // they run at start and every ten seconds, so under load one can land in the window below.
+    const std::uint64_t gamma_requests = rig.zetta->store_requests_to(endpoint_gamma);
     const std::uint64_t gamma_fence = rig.zetta->lease(endpoint_gamma).fence;
 
     for (const std::string& bearer : {owner_token->secret, grantee_token}) {
@@ -1724,11 +1726,17 @@ TEST(WorkspaceStoreSearch, ASearchNeverOpensAWorkspaceItsCallerCannotRead) {
         EXPECT_EQ(repository_status, 400U) << repository.dump();
     }
     // Not one request reached gamma's Zetta.
-    EXPECT_EQ(rig.zetta->requests_to(endpoint_gamma), gamma_requests);
+    EXPECT_EQ(rig.zetta->store_requests_to(endpoint_gamma), gamma_requests) << [&] {
+        std::string seen;
+        for (const std::string& line : rig.zetta->requests_seen(endpoint_gamma)) {
+            seen += "\n  " + line;
+        }
+        return seen;
+    }();
     EXPECT_EQ(rig.zetta->lease(endpoint_gamma).fence, gamma_fence);
     // The operator still reaches it.
     EXPECT_EQ(searched(rig, "gamma&workspace_id=" + rig.gamma)["value"]["items"].size(), 1U);
-    EXPECT_GT(rig.zetta->requests_to(endpoint_gamma), gamma_requests);
+    EXPECT_GT(rig.zetta->store_requests_to(endpoint_gamma), gamma_requests);
 }
 
 TEST(WorkspaceStoreSearch, AWipedOrTamperedWorkspaceIndexIsRebuiltNotServedEmpty) {
@@ -4485,18 +4493,32 @@ TEST(WorkspaceStoreHandoff, IndexWorkTheDrainDropsIsRebuiltByTheSuccessor) {
     }
     ASSERT_NO_FATAL_FAILURE(rig.restart());
     rig.tree(repositories.front());
-    rig.zetta->hang(endpoint_a, 150ms, "/lake_store/");
-    const auto requests = rig.zetta->requests_to(endpoint_a);
+    // The rebuild's index writes are held in the network, so it is still building when the drain
+    // begins, however fast it read the repositories (lake#606: a 150 ms delay on every store
+    // request once stood for "still rebuilding", and under load the commit below waited for the
+    // lane behind the rebuild's reads, so the rebuild finished first and the drain had no index
+    // work to drop). Its writes take no lane, so the commit and the drain's release are not held
+    // up.
+    rig.zetta->hold(endpoint_a, "/lake_store/search/segments/");
     ASSERT_EQ(rig.call("GET", "/v1/search?query=" + std::string(alpha_term) + "&workspace_id=" + rig.alpha).first, 200U);
-    ASSERT_TRUE(eventually([&] { return rig.zetta->requests_to(endpoint_a) > requests + 3; }));
+    if (!eventually([&] { return rig.zetta->held() > 0; }, 30s)) {
+        rig.zetta->let_go();
+        FAIL() << "the rebuild never reached its index writes";
+    }
     // A commit while the index is being rebuilt is pending until the rebuild is done.
     ASSERT_EQ(rig.commit(repositories.back(), "later.txt", "second laterterm").first, 200U);
+    const auto unsettled = rig.options.search->unsettled_workspaces();
+    EXPECT_NE(std::ranges::find(unsettled, rig.alpha), unsettled.end())
+        << "the rebuild is still under way";
 
     auto successor = start_successor(rig);
+    const std::uint64_t fence = rig.zetta->lease(endpoint_a).fence;
     rig.server->begin_drain();
     EXPECT_TRUE(eventually([&] { return !search_objects(*rig.zetta, endpoint_a).contains("search/manifest.json"); }))
         << "the index left behind is removed for the successor to rebuild";
-    rig.zetta->hang(endpoint_a, 0ms);
+    // The held writes go on once the successor holds the lease, and are refused as fenced.
+    EXPECT_TRUE(eventually([&] { return rig.zetta->lease(endpoint_a).fence > fence; }, 30s));
+    rig.zetta->let_go();
     rig.server->stop();
     rig.server = std::move(successor);
     ASSERT_TRUE(eventually([&] { return rig.server->store_root_open(); }));
@@ -4506,6 +4528,76 @@ TEST(WorkspaceStoreHandoff, IndexWorkTheDrainDropsIsRebuiltByTheSuccessor) {
                    repositories.size();
     })) << "the successor's index holds every commit";
     EXPECT_TRUE(search_objects(*rig.zetta, endpoint_a).contains("search/manifest.json"));
+}
+
+// lake#606: a rebuild whose index writes are still in flight when lake drains never puts the
+// manifest back after the drain removed it. Without a successor no newer fence refuses them, so
+// before the fix the rebuild's manifest landed after the drain, and the next process loaded an
+// index without the commit made during the rebuild (it never found "laterterm").
+TEST(WorkspaceStoreHandoff, AnIndexWriteInFlightAtTheDrainNeverPutsTheManifestBack) {
+    MoveRig rig;
+    ASSERT_NO_FATAL_FAILURE(rig.SetUp());
+    const std::string endpoint_a = "http://" + rig.alpha + ".test";
+    ASSERT_EQ(rig.move(rig.alpha, "switch").first, 200U);
+    std::vector<lake::control::Repository> repositories;
+    for (int index = 0; index < 6; ++index) {
+        const auto created = rig.create(rig.alpha, "indexed-" + std::to_string(index));
+        ASSERT_TRUE(created);
+        ASSERT_EQ(rig.commit(*created, "README.md", "first " + std::string(alpha_term)).first,
+                  200U);
+        repositories.push_back(*created);
+    }
+    // The index is damaged; a new process rebuilds it slowly on the next search.
+    for (const auto& [key, bytes] : search_objects(*rig.zetta, endpoint_a)) {
+        if (key.starts_with("search/runs/")) {
+            auto damaged = bytes;
+            damaged[damaged.size() - 5] = static_cast<char>(damaged[damaged.size() - 5] ^ 0x01);
+            rig.zetta->set_object(endpoint_a, key, damaged);
+        }
+    }
+    ASSERT_NO_FATAL_FAILURE(rig.restart());
+    rig.tree(repositories.front());
+    // The rebuild's index writes are held in the network, so it is still building when the drain
+    // begins, however fast it read the repositories (lake#606: a 150 ms delay on every store
+    // request once stood for "still rebuilding", and under load the commit below waited for the
+    // lane behind the rebuild's reads, so the rebuild finished first and the drain had no index
+    // work to drop). Its writes take no lane, so the commit and the drain's release are not held
+    // up.
+    rig.zetta->hold(endpoint_a, "/lake_store/search/segments/");
+    ASSERT_EQ(rig.call("GET",
+                       "/v1/search?query=" + std::string(alpha_term) + "&workspace_id=" + rig.alpha)
+                  .first,
+              200U);
+    if (!eventually([&] { return rig.zetta->held() > 0; }, 30s)) {
+        rig.zetta->let_go();
+        FAIL() << "the rebuild never reached its index writes";
+    }
+    // A commit while the index is being rebuilt is pending until the rebuild is done.
+    ASSERT_EQ(rig.commit(repositories.back(), "later.txt", "second laterterm").first, 200U);
+    const auto unsettled = rig.options.search->unsettled_workspaces();
+    EXPECT_NE(std::ranges::find(unsettled, rig.alpha), unsettled.end())
+        << "the rebuild is still under way";
+
+    rig.server->begin_drain();
+    EXPECT_TRUE(eventually([&] {
+        return !search_objects(*rig.zetta, endpoint_a).contains("search/manifest.json");
+    })) << "the index left behind is removed for the next owner to rebuild";
+    // Nobody takes the lease; the held writes go on and the rebuild finishes what it can.
+    rig.zetta->let_go();
+    rig.server->stop();
+    EXPECT_FALSE(search_objects(*rig.zetta, endpoint_a).contains("search/manifest.json"))
+        << "a write in flight at the drain put the manifest back";
+
+    // The next process rebuilds the index with every commit.
+    rig.options.search = std::make_shared<lake::search::Service>(rig.root);
+    ASSERT_NO_FATAL_FAILURE(rig.start());
+    EXPECT_TRUE(eventually([&] {
+        return searched(rig, "laterterm&workspace_id=" + rig.alpha)["value"]["items"].size() ==
+                   1U &&
+               searched(rig,
+                        std::string(alpha_term) + "&workspace_id=" + rig.alpha)["value"]["items"]
+                       .size() == repositories.size();
+    })) << "the next process's index holds every commit";
 }
 
 // lake#535: liquid's one-file commits on the workspace store ask Zetta for one fsync each, lake's
@@ -5083,6 +5175,12 @@ public:
     ~StderrLines() {
         finish();
     }
+    // What the process has written so far, while capturing goes on.
+    std::string text() {
+        std::fflush(stderr);
+        std::lock_guard lock(mutex_);
+        return text_;
+    }
     std::string finish() {
         if (original_ >= 0) {
             std::fflush(stderr);
@@ -5161,17 +5259,32 @@ TEST(WorkspaceStoreHandoff, AFreshProcessCreatesOneLocalIdentityForItsConcurrent
         const auto [commit_status, committed] =
             rig.commit(rig.repo_b, "round-" + std::to_string(round) + ".txt", "later");
         EXPECT_EQ(commit_status, 200U) << committed.dump();
+
+        // The pre-open opens the repositories in the background and logs each workspace once it
+        // has; nothing orders that before the read, the commit or a stop. A stop that comes first
+        // drains it, and it logs nothing or 0 (lake#614). So wait for both events, then stop.
+        const auto preopened_of = [](const std::string& text) {
+            std::map<std::string, int> preopened;
+            std::istringstream lines(text);
+            for (std::string line; std::getline(lines, line);) {
+                const json entry = json::parse(line, nullptr, false);
+                if (entry.is_object() && entry.value("state", "") == "repositories_preopened") {
+                    preopened[entry.value("workspace_id", "")] = entry.value("repositories", -1);
+                }
+            }
+            return preopened;
+        };
+        EXPECT_TRUE(eventually(
+            [&] {
+                const auto preopened = preopened_of(stderr_lines.text());
+                return preopened.contains(rig.alpha) && preopened.contains(rig.beta);
+            },
+            30s))
+            << "the pre-open did not log both workspaces' repositories";
         rig.server->stop();
         rig.server.reset();
 
-        std::map<std::string, int> preopened;
-        std::istringstream lines(stderr_lines.finish());
-        for (std::string line; std::getline(lines, line);) {
-            const json entry = json::parse(line, nullptr, false);
-            if (entry.is_object() && entry.value("state", "") == "repositories_preopened") {
-                preopened[entry.value("workspace_id", "")] = entry.value("repositories", -1);
-            }
-        }
+        auto preopened = preopened_of(stderr_lines.finish());
         EXPECT_EQ(preopened[rig.alpha], 1) << "alpha's repository was not pre-opened";
         EXPECT_EQ(preopened[rig.beta], 1) << "beta's repository was not pre-opened";
     }

@@ -378,7 +378,9 @@ std::string experiment_description(const std::string& name) {
         {"get_run_metrics",
          "Read one run's metric curves, parameters and summary to judge how it trained; the "
          "summary holds its held-out scores (held_out_auc and the like) once training recorded "
-         "them. `artifacts` lists the evaluation charts a trainer logged, often none."},
+         "them. `artifacts` lists the evaluation charts a trainer logged: a GBDT classifier run "
+         "with a held-out split logs a confusion matrix, an ROC curve and calibration, each "
+         "named held_out; a regressor, or a run without a held-out split, logs none."},
         {"compare_runs",
          "Compare two to eight runs metric by metric on aligned steps, held-out scores "
          "included; leave `names` out to compare every metric they share."},

@@ -18,12 +18,12 @@ to another workspace.
 | **Image app** (*From an image*) | Runs a container image you name. |
 | **Address** | `https://<name>.<the lake's app domain>` unless a host is given. On lake.oramadev.net an app named `reports` is `reports.oramadev.net`. |
 | **Access** | **Lake Sign-In** (the default): only members of the app's workspace reach it, after signing in to lake. **Public**: anyone with the address, which needs an explicit confirmation. |
-| **Bindings** | Read-only access to the workspace Zetta, and connections to services of your account. |
+| **Bindings** | Read-only access to the workspace's data, and connections to services of your account. |
 | **Generation** | Every change to an app's desired state increases its generation; the operator reports the generation it has applied. |
 
 ## Ship → Apps
 
-The page opens with figures (**Apps**, **Ready**, **Failed**, **With Zetta**), then **Search apps…**
+The page opens with figures (**Apps**, **Ready**, **Failed**, **With Workspace Data**), then **Search apps…**
 and filter chips by phase over a card per app: its name, phase, address, revision or image, its
 bindings and when it last changed. **Open** on a card opens the app.
 
@@ -250,12 +250,12 @@ The app receives the person in the `X-Orama-User` header and never sees their la
 own cookie lasts 12 hours, and lake checks on every request that the person still belongs to the
 workspace, so removing someone from the workspace takes effect at once.
 
-### Bindings: the Workspace Zetta and Services
+### Bindings: Workspace Data and Services
 
 **Services** tab:
 
-- **Workspace Zetta**: **Attach Zetta** gives the app read-only access to the workspace's data;
-  **Detach Zetta** takes it away at once.
+- **Workspace data**: **Attach workspace data** gives the app read-only access to the workspace's
+  data; **Detach workspace data** takes it away at once.
 - **Services**: choose a **Service** and press **Attach service**; **Detach** removes one.
 - **Create and Attach**: fill **Name**, **Kind** (for example `postgres`) and **Size** in GiB and
   press **Create and attach** to create a new service and bind it in one step.
@@ -314,7 +314,7 @@ In **Delete App**, type the app's name under **App name** and press **Delete app
 - A host must be one label below the lake's app domain.
 - Replicas are 1 to 100 per app. A lake's operator may cap the number of apps and the replicas per
   account; past the cap the call is refused.
-- An app reads the workspace Zetta only, never writes it, and only when Zetta is attached.
+- An app reads the workspace's data only, never writes it, and only when workspace data is attached.
 - App events are kept for 24 hours, up to 5,000 per app.
 - **Logs** shows the last 200 lines; `app_logs` answers at most 1,000 per call.
 

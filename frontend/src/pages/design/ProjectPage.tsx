@@ -19,6 +19,7 @@ import { qs, useScope, useScopedRead, useWq, useWsPath, wa, wq } from "./api";
 import {
   PROJECT_STATE_TONE,
   datasetChoices,
+  datasetColumns,
   projectState,
   runIsActive,
   runsOf,
@@ -337,9 +338,14 @@ function BuildPipeline({ project, datasets, methodologies, onClose }: { project:
   const toast = useToast();
   const [intent, setIntent] = useState("");
   const [dataset, setDataset] = useState("");
+  const [label, setLabel] = useState("");
+  const [entity, setEntity] = useState("");
   const [methodology, setMethodology] = useState("");
   const { busy, error, run } = useSubmit();
   const choices = datasetChoices(datasets.data?.datasets);
+  // The chosen dataset's columns: what it predicts and what each row is about, so lake's compiler
+  // names the steps from the data (zetta#1246).
+  const columns = datasetColumns(datasets.data?.datasets, dataset);
   // The methodologies the engine runs (lake#289); absent on an older engine.
   const runnable: J[] = (Array.isArray(methodologies?.methodologies) ? methodologies!.methodologies : []).filter((m: J) => m?.runnable === true);
   const submit = () =>
@@ -350,12 +356,15 @@ function BuildPipeline({ project, datasets, methodologies, onClose }: { project:
         project,
         intent,
         ...(dataset ? { dataset } : {}),
+        ...(dataset && label ? { label_column: label } : {}),
+        ...(dataset && entity ? { entity_column: entity } : {}),
         ...(methodology ? { methodology } : {}),
       });
       const graph = text(answer, "graph");
       // zetta#1238: the steps' names are the template's until edited; say which one.
       const template = text(answer, "template");
-      const from = template ? ` from ${template}; rename its steps to fit your data` : "";
+      // With a dataset the engine names the steps from it (zetta#1246); without, they are the template's.
+      const from = template ? (dataset ? ` from ${template}, its steps named from ${dataset}` : ` from ${template}; rename its steps to fit your data`) : "";
       setIntent("");
       if (dataset && graph) {
         // Pointed at a dataset: open the pipeline at its Run form, the dataset chosen.
@@ -386,7 +395,15 @@ function BuildPipeline({ project, datasets, methodologies, onClose }: { project:
           <textarea name="intent" rows={4} placeholder="Predict which accounts will churn in the next 90 days, with the reasons" value={intent} onChange={(e) => setIntent(e.target.value)} />
         </Field>
         <Field label="From data" help="Choose a dataset and the pipeline reads it, and its runs train on it." error={datasets.isError ? `The datasets could not be listed: ${(datasets.error as Error).message}` : undefined}>
-          <select name="dataset" value={dataset} onChange={(e) => setDataset(e.target.value)}>
+          <select
+            name="dataset"
+            value={dataset}
+            onChange={(e) => {
+              setDataset(e.target.value);
+              setLabel("");
+              setEntity("");
+            }}
+          >
             <option value="">Let the builder describe its sources</option>
             {choices.map((d) => (
               <option key={d.path} value={d.path}>
@@ -395,6 +412,26 @@ function BuildPipeline({ project, datasets, methodologies, onClose }: { project:
             ))}
           </select>
         </Field>
+        {columns.length > 0 && (
+          <>
+            <Field label="Predicts" help="The column it learns to predict. lake names the steps from it and from the dataset.">
+              <select name="label_column" value={label} onChange={(e) => setLabel(e.target.value)}>
+                <option value="">Not chosen yet</option>
+                {columns.map((c) => (
+                  <option key={c}>{c}</option>
+                ))}
+              </select>
+            </Field>
+            <Field label="Each row is about" help="The column that identifies what each row describes, such as an account.">
+              <select name="entity_column" value={entity} onChange={(e) => setEntity(e.target.value)}>
+                <option value="">Not chosen yet</option>
+                {columns.map((c) => (
+                  <option key={c}>{c}</option>
+                ))}
+              </select>
+            </Field>
+          </>
+        )}
         {runnable.length > 0 && (
           <Field label="Methodology" help="Only the methodologies this workspace's engine runs are listed.">
             <select name="methodology" value={methodology} onChange={(e) => setMethodology(e.target.value)}>

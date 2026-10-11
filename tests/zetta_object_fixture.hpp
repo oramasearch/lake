@@ -4,6 +4,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <deque>
 #include <format>
 #include <functional>
 #include <map>
@@ -222,6 +223,21 @@ public:
         std::lock_guard lock(mutex_);
         return by_endpoint_[endpoint];
     }
+    // The requests sent to one workspace Zetta other than reads of its bucket's usage (`:usage`).
+    // The owner loop reads every switched workspace's usage for the quota at start and every ten
+    // seconds (refresh_workspace_usage), whoever is calling; that read opens no store, takes no
+    // lease and carries no content, so a test of what a caller reaches counts the rest (lake#607).
+    std::uint64_t store_requests_to(const std::string& endpoint) {
+        std::lock_guard lock(mutex_);
+        return by_endpoint_[endpoint] - usage_by_endpoint_[endpoint];
+    }
+    // The last requests sent to one workspace Zetta (at most `seen_limit`), as
+    // "METHOD /path?query", in arrival order: what a failing test prints.
+    std::vector<std::string> requests_seen(const std::string& endpoint) {
+        std::lock_guard lock(mutex_);
+        const auto& seen = seen_by_endpoint_[endpoint];
+        return {seen.begin(), seen.end()};
+    }
     // Acquires of `endpoint`'s leases waiting now for a holder to let go.
     int acquiring(const std::string& endpoint) {
         std::lock_guard lock(mutex_);
@@ -310,6 +326,22 @@ public:
         std::lock_guard lock(mutex_);
         hangs_[endpoint] = {delay, std::move(fragment)};
     }
+    // Every request to `endpoint` whose URL contains `fragment` (empty: every one) waits until
+    // `let_go`, as one stuck in the network would; `held` counts those waiting. Unlike `hang`, the
+    // test decides when they go on, so "while this request is stuck" needs no timing guess.
+    void hold(const std::string& endpoint, std::string fragment = {}) {
+        std::lock_guard lock(mutex_);
+        holds_[endpoint] = std::move(fragment);
+    }
+    void let_go() {
+        std::lock_guard lock(mutex_);
+        holds_.clear();
+        held_changed_.notify_all();
+    }
+    int held() {
+        std::lock_guard lock(mutex_);
+        return held_;
+    }
     // The bucket is gone (a recreated workspace Zetta): every request to it answers 404.
     void drop_bucket(const std::string& endpoint, const std::string& bucket = "lake_store") {
         std::lock_guard lock(mutex_);
@@ -344,6 +376,21 @@ public:
                     (hung.second.empty() || request.url.find(hung.second) != std::string::npos)) {
                     delay = hung.first;
                 }
+            }
+        }
+        {
+            std::unique_lock lock(mutex_);
+            const auto holding = [&] {
+                return std::ranges::any_of(holds_, [&](const auto& item) {
+                    return request.url.starts_with(item.first) &&
+                           (item.second.empty() ||
+                            request.url.find(item.second) != std::string::npos);
+                });
+            };
+            if (holding()) {
+                ++held_;
+                held_changed_.wait(lock, [&] { return !holding(); });
+                --held_;
             }
         }
         const bool write = request.method == "PUT" || request.method == "PATCH" ||
@@ -504,6 +551,14 @@ private:
         for (const auto& [endpoint, node] : nodes_) {
             if (request.url.starts_with(endpoint + "/")) {
                 ++by_endpoint_[endpoint];
+                if (request.url.ends_with(":usage")) {
+                    ++usage_by_endpoint_[endpoint];
+                }
+                auto& seen = seen_by_endpoint_[endpoint];
+                seen.push_back(request.method + " " + request.url.substr(endpoint.size()));
+                if (seen.size() > seen_limit) {
+                    seen.pop_front();
+                }
             }
         }
         if (keep_bodies_) {
@@ -769,12 +824,19 @@ private:
     }
 
     std::mutex mutex_;
+    std::condition_variable held_changed_;
+    std::map<std::string, std::string> holds_;
+    int held_ = 0;
     std::condition_variable changed_;
     std::map<std::string, Node> nodes_;
     std::uint64_t requests_ = 0;
     std::uint64_t incarnations_ = 0;
     std::uint64_t incarnation_refusals_ = 0;
     std::map<std::string, std::uint64_t> by_endpoint_;
+    // Bounded, so a test that sends many requests (a large pull) keeps no growing log.
+    static constexpr std::size_t seen_limit = 512;
+    std::map<std::string, std::deque<std::string>> seen_by_endpoint_;
+    std::map<std::string, std::uint64_t> usage_by_endpoint_;
     std::map<std::string, std::uint64_t> by_method_;
     std::map<std::string, int> acquiring_;
     std::vector<std::string> bodies_;

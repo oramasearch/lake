@@ -137,6 +137,16 @@ environments (`items`), and with `GET /healthz`, which reports `platform: ready`
 `PlatformFixture.WithoutThePlatformMirrorEveryCallSaysDeploymentsAreNotSetUp`
 (`tests/test_platform.cpp`) covers the answer.
 
+`server_info` says it too, without authentication: `deployments` is `true` when the platform
+service is configured and `false` otherwise (lake#605). Ship → Deployments reads it first, so on a
+lake without the mirror its one call is `server_info`: it neither lists repositories nor asks any of
+them for environments. A lake from before lake#605 does not send the field; the page then asks the
+first repository alone and the others only once it answered something other than `not_supported`
+(`frontend/src/pages/apps/deployments.ts`, `frontend/tests/deployments.test.ts`).
+`PlatformFixture.ServerInfoSaysWhetherDeploymentsAreSetUp` covers the flag. Verify with
+`curl -s <lake>/v1/server_info`, and in the browser's network panel: Ship → Deployments on a lake
+without the mirror sends `server_info` and nothing else.
+
 ## Loki-compatible logs
 
 `environment_logs` takes the current deployment namespace and sends:

@@ -3,11 +3,11 @@
  * tabs kept in the address, and the workspace breadcrumb. */
 import { type ReactNode, useCallback, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
-import { Card, DataTable, Status, cx } from "@/lib/ui";
+import { Button, Card, DataTable, Status, cx } from "@/lib/ui";
 import { relative } from "@/lib/format";
 import { useTrail, entityCrumb, type Crumb } from "@/lib/trail";
 import { useWsPath, qs } from "./api";
-import { LAYOUT, layoutGraph, runIsActive, runStatusTone, runsBadge, text, verdictTone, whenUtc, type Graph, type J } from "./logic";
+import { LAYOUT, checkTone, gateCounts, layoutGraph, notApplicableLine, runIsActive, runStatusTone, runsBadge, text, verdictTone, whenUtc, type Graph, type J } from "./logic";
 
 /** A titled card (the kit's Card) that keeps an anchor `id` and a `role`, so `#run` and
  * `#proposal` still land on it. */
@@ -150,15 +150,31 @@ export function RunsPanel({ runs, title = "Runs" }: { runs: J[]; title?: ReactNo
   );
 }
 
-/** Gate checks, from gate or from deploy's gate (gate_panel). */
-export function GatePanel({ gate, heading }: { gate: J; heading: string }) {
+/** Gate checks, from gate or from deploy's gate (gate_panel). The engine lists only the checks that
+ * applied and counts the rest (zetta#1240); `onAudit` asks it again for every check, the ones that
+ * did not apply included. */
+export function GatePanel({ gate, heading, onAudit, auditing }: { gate: J; heading: string; onAudit?: () => void; auditing?: boolean }) {
   const verdict = text(gate, "verdict");
   const blocked = gate?.block_deploy === true;
   const checks: J[] = Array.isArray(gate?.checks) ? gate.checks : [];
+  const { notApplicable } = gateCounts(gate);
+  const listed = checks.some((c) => text(c, "status") === "not_applicable");
   return (
     <Panel title={heading} tone={blocked ? "exception" : "active"} role="status" actions={<Status value={verdict || (blocked ? "fail" : "pass")} tone={verdictTone(verdict || (blocked ? "fail" : "pass"))} />}>
       <p className={cx("mt-0 text-[13px]", blocked ? "text-bad" : "text-ink-2")}>{blocked ? "It cannot run or deploy until the failing checks pass." : "It may run and deploy."}</p>
       {checks.length > 0 && <CheckTable checks={checks} />}
+      {notApplicable > 0 && (
+        <p className="mb-0 mt-2 flex flex-wrap items-center gap-2 text-[12.5px] text-ink-3" data-testid="gate-not-applicable">
+          <span>
+            {notApplicableLine(notApplicable)} to this pipeline{listed ? "; they are listed above as did not apply." : ", so they are left out."}
+          </span>
+          {onAudit && !listed && (
+            <Button variant="ghost" loading={auditing} onClick={onAudit}>
+              List them for an audit
+            </Button>
+          )}
+        </p>
+      )}
     </Panel>
   );
 }
@@ -175,7 +191,8 @@ export function CheckTable({ checks, runTone }: { checks: J[]; runTone?: boolean
           label: "Status",
           render: (check) => {
             const status = text(check, "status");
-            return runTone ? <RunBadge status={status} /> : <Status value={status} tone={verdictTone(status)} />;
+            if (runTone) return <RunBadge status={status} />;
+            return status === "not_applicable" ? <Status value="did not apply" tone={checkTone(status)} /> : <Status value={status} tone={checkTone(status)} />;
           },
         },
         { key: "reason", label: "Why", render: (check) => <span className="text-ink-2">{text(check, "reason")}</span> },

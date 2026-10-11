@@ -384,8 +384,7 @@ TEST(PostgresCapabilities, OrganizationAndPolicyRoundTrip) {
                                        {"principal_type", "user"},
                                        {"principal_id", first_user.value.at("id")},
                                        {"principal_taap_id", first_user.value.at("taap_id")},
-                                       {"role", "owner"},
-                                       {"attestation_digest", "sha512-256:owner-" + suffix}});
+                                       {"role", "owner"}});
     ASSERT_TRUE(membership.ok) << membership.error.message;
     ASSERT_TRUE(call("list_memberships", {{"organization_id", organization.value.at("id")}}).ok);
 
@@ -405,8 +404,7 @@ TEST(PostgresCapabilities, OrganizationAndPolicyRoundTrip) {
                                     {{"invitation_id", invitation.value.at("id")},
                                      {"principal_type", "user"},
                                      {"principal_id", second_user.value.at("id")},
-                                     {"principal_taap_id", second_user.value.at("taap_id")},
-                                     {"attestation_digest", "sha512-256:accepted-" + suffix}});
+                                     {"principal_taap_id", second_user.value.at("taap_id")}});
     ASSERT_TRUE(accepted.ok) << accepted.error.message;
 
     const auto repository_object =
@@ -424,8 +422,7 @@ TEST(PostgresCapabilities, OrganizationAndPolicyRoundTrip) {
     const ApiResult grant = call("create_grant",
                                  {{"principal_taap_id", "taap:1:ed25519:reader-" + suffix},
                                   {"object_id", repository_object->id},
-                                  {"role", "read"},
-                                  {"attestation_digest", "sha512-256:grant-" + suffix}});
+                                  {"role", "read"}});
     ASSERT_TRUE(grant.ok) << grant.error.message;
     ASSERT_TRUE(call("list_grants", {{"object_id", repository_object->id}}).ok);
     const ApiResult access = call("effective_access", {{"object_id", path.value.at("id")}});
