@@ -1,10 +1,10 @@
 # Activity and Audit
 
-Every call to lake, from the web app, REST or MCP, is recorded as a **signed audit event**: who
+Every call to Lake, from the web app, REST or MCP, is recorded as a **signed audit event**: who
 acted, on what, with which capability, and whether it succeeded, was denied or failed. Refused calls
 are recorded too. Events are hash-linked, so a removed or altered event is detected.
 
-**Organization → Activity** shows your own events. The lake operator's **Administration → Audit**
+**Organization → Activity** shows your own events. The Lake operator's **Administration → Audit**
 shows everyone's.
 
 ## Concepts
@@ -15,7 +15,7 @@ shows everyone's.
 | **Outcome** | `success`, `denied` (no permission) or `failure` (an error). |
 | **Central log** | Lake's own log, for sign-in, sessions, tokens, users, organizations, memberships, grants, workspaces themselves, SSO and SCIM, and other control-plane events. |
 | **Workspace audit** | Each workspace's own log, kept in the workspace itself, for events about that workspace's data: datasets and SQL, repositories and pushes, apps, builds, secrets, streams, agents, experiments, Ask Orama and Design. |
-| **Chain** | Each log is a hash chain: every event carries the digest of the one before it and lake's signature. |
+| **Chain** | Each log is a hash chain: every event carries the digest of the one before it and Lake's signature. |
 | **Transparency log** | An append-only public log of signed statements (such as agent session delegations and dynamic-secret lease events), with signed checkpoints anyone can check. |
 
 A call refused before it ran (no credential, invalid input, no permission) is always recorded in the
@@ -52,7 +52,7 @@ the organization's events from the central log, with outcome chips.
 
 ## Audit Log for the Operator
 
-The lake operator sees **Administration → Audit**: every event on the lake, with an extra
+The Lake operator sees **Administration → Audit**: every event on the Lake, with an extra
 **Principal** filter and a **Transparency log** card showing the log's mode and witness quorum.
 
 - REST: `GET /v1/audit?limit=100&outcome=denied`.
@@ -86,7 +86,7 @@ it:
 
 A value below 400 days or below the current setting is refused, and the refusal is itself recorded.
 A workspace's audit is kept as long as the workspace exists and is deleted with it. When a workspace
-is deleted, lake records one central event per repository, app, build and image it destroyed, so
+is deleted, Lake records one central event per repository, app, build and image it destroyed, so
 that history survives.
 
 ## The Transparency Log and Monitor
@@ -108,7 +108,7 @@ attestations that name that identity. Modified tiles are refused.
 | Call | Who |
 |---|---|
 | `my_audit` | Any signed-in person, for their own events |
-| `audit`, `verify_audit`, `export_audit` | The lake operator |
+| `audit`, `verify_audit`, `export_audit` | The Lake operator |
 | `set_audit_retention` | `admin` on the account |
 | `transparency_identity_scan` | Anyone |
 
@@ -127,7 +127,7 @@ recorded. A workspace call records its capability and identifiers, not its data.
 | `unauthorized` on `audit` | Only the operator reads the whole log; use `my_audit` for your own. |
 | `invalid_input` on `set_audit_retention` | The value is below 400 days. |
 | `conflict` on `set_audit_retention` | The value is below the current setting; retention can never be reduced. |
-| `invalid_chain`, `invalid_signature` or `invalid_digest` | The log was changed. Keep the export and contact the lake operator. |
+| `invalid_chain`, `invalid_signature` or `invalid_digest` | The log was changed. Keep the export and contact the Lake operator. |
 
 ## Related Pages
 

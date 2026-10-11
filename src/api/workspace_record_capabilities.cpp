@@ -209,7 +209,7 @@ liquid::runtime::task<ApiResult> copy_oci_tags(ApiContext& context, const std::s
     if (content == nullptr || !content->legacy_image_tags || !content->read_blob ||
         !content->blob_size) {
         co_return ApiResult::failure("store_unavailable",
-                                     "this lake has no registry storage to copy images from");
+                                     "this Lake has no registry storage to copy images from");
     }
     const std::vector<LegacyImageTag> rows = content->legacy_image_tags(after, limit);
     json unresolved = json::array();
@@ -577,7 +577,7 @@ liquid::runtime::task<ApiResult> copy_oci_blobs(ApiContext& context, const std::
     if (content == nullptr || !content->blob_file || !content->instance_digests ||
         context.sync_store == nullptr) {
         co_return ApiResult::failure("store_unavailable",
-                                     "this lake has no registry storage to copy image blobs from");
+                                     "this Lake has no registry storage to copy image blobs from");
     }
     auto customers = context.store->list_customers(1'000'000);
     if (!customers) {
@@ -859,7 +859,7 @@ void register_workspace_record_capabilities(Registry& registry) {
             }
             if (!context.workspaces) {
                 co_return ApiResult::failure("store_unavailable",
-                                             "workspaces are not configured on this lake");
+                                             "workspaces are not configured on this Lake");
             }
             const std::string mode = input.at("mode");
             context.audit_kind = "workspace_records.copy";

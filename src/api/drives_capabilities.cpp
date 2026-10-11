@@ -435,7 +435,7 @@ Files file_store(ApiContext& context,
     if (!context.object_transport || !context.workspaces) {
         return {std::nullopt,
                 ApiResult::failure("not_supported",
-                                   "this lake keeps no workspace files: it has no workspace Zetta "
+                                   "this Lake keeps no workspace files: it has no workspace Zetta "
                                    "object transport")};
     }
     const auto endpoint = context.workspaces->endpoint(customer_id, workspace_id);
@@ -1834,7 +1834,7 @@ struct RepositoryPaths {
 liquid::runtime::task<RepositoryPaths> repository_paths(ApiContext& context,
                                                         const std::string& repository_id) {
     if (!context.sync_store) {
-        co_return RepositoryPaths{{}, "this lake has no repository store"};
+        co_return RepositoryPaths{{}, "this Lake has no repository store"};
     }
     const auto repository = context.store->get_repository(repository_id);
     if (!repository) {
@@ -2119,7 +2119,7 @@ void register_drives_capabilities(Registry& registry) {
          "List a Drive Folder",
          "The folders, files and shortcuts in one folder of a workspace-files or virtual drive: "
          "`folder_id`, or a slash `path` from the top; neither is the top. Each shortcut carries "
-         "`status`: ok, broken (with a reason) or unknown when lake cannot check its kind. "
+         "`status`: ok, broken (with a reason) or unknown when Lake cannot check its kind. "
          "`uploads` lists the folder's unfinished uploads with `age_seconds`: each holds its name "
          "until it is finished, deleted (delete_drive_entry) or expires 24 hours after it began.",
          workspace_input({{"drive_id", string_schema()},
@@ -2228,7 +2228,7 @@ void register_drives_capabilities(Registry& registry) {
     action(
         "finish_drive_upload",
         "Finish an upload",
-        "Finish an upload once every byte is sent: lake reads the file back for its SHA-256 "
+        "Finish an upload once every byte is sent: Lake reads the file back for its SHA-256 "
         "(refusing it when `sha256` is sent and differs) and lists it. With on_conflict "
         "replace, the file it replaces is deleted now.",
         workspace_input(

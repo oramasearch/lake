@@ -166,7 +166,7 @@ export function NewTranscript({ onClose, onCreated }: { onClose: () => void; onC
         <div className="grid gap-3">
           {!speech && noSpeech}
           <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-            <Choice icon={Mic} title="Record" sub="Use the microphone; lake transcribes it." disabled={!speech || !recorder.canRecord} onClick={() => go("record")} />
+            <Choice icon={Mic} title="Record" sub="Use the microphone; Lake transcribes it." disabled={!speech || !recorder.canRecord} onClick={() => go("record")} />
             <Choice icon={FileAudio} title="Upload audio" sub="A voice memo or recorded call." disabled={!speech} onClick={() => go("audio")} />
             <Choice icon={FileText} title="Upload text" sub=".txt, .md, .vtt or .srt" onClick={() => go("textfile")} />
             <Choice icon={ClipboardPaste} title="Paste" sub="Type, paste or dictate it." onClick={() => go("paste")} />

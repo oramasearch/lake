@@ -30,7 +30,7 @@ function Guard({ screen, children }: { screen: Screen; children: React.ReactNode
   if (who !== "visitor" && !billingVisible(screen, session.viewer)) {
     return (
       <Page title="Not Available">
-        <Empty action={<Button to="/usage">Usage</Button>}>This lake does not bill. Usage is tracked as usual.</Empty>
+        <Empty action={<Button to="/usage">Usage</Button>}>This Lake does not bill. Usage is tracked as usual.</Empty>
       </Page>
     );
   }
@@ -41,7 +41,7 @@ function Guard({ screen, children }: { screen: Screen; children: React.ReactNode
     return (
       <Page title="Not Available">
         <Empty action={<Button to="/">Home</Button>}>
-          {who === "operator" ? "This page belongs to an account; the operator credential has no account." : "This page is for the lake operator."}
+          {who === "operator" ? "This page belongs to an account; the operator credential has no account." : "This page is for the Lake operator."}
         </Empty>
       </Page>
     );

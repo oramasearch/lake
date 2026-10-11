@@ -83,7 +83,7 @@ function Editor({ current, next }: { current: PriceList | null; next: PriceList 
     >
       {!current && (
         <p className="m-0 mb-3 text-[13px] text-ink-2">
-          Nothing is published on this lake yet. The rows start from Orama Cloud's list rates; publish them to start billing.
+          Nothing is published on this Lake yet. The rows start from Orama Cloud's list rates; publish them to start billing.
         </p>
       )}
       <Form id="price-list" onSubmit={submit} error={error}>

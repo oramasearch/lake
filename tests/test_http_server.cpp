@@ -1386,7 +1386,7 @@ TEST_P(HttpResponseIsolation, AgentsReachAWorkspacesZettaThroughLakeInZettasShap
     EXPECT_EQ(response_header(wrong_method, "allow"), "GET");
     const std::string refused = connection->request("POST", base + "add_nodes", "{}", cookie);
     EXPECT_TRUE(refused.starts_with("HTTP/1.1 404")) << refused.substr(0, 300);
-    EXPECT_NE(refused.find("not available through lake"), std::string::npos);
+    EXPECT_NE(refused.find("not available through Lake"), std::string::npos);
     const std::string anonymous = connection->request("GET", base + "list_datasets");
     EXPECT_FALSE(anonymous.starts_with("HTTP/1.1 200")) << anonymous.substr(0, 300);
     const std::string other = connection->request(

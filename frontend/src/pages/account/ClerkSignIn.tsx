@@ -105,7 +105,7 @@ export function ClerkSignIn({ mode }: { mode: "sign-in" | "sign-up" }) {
     const key = viewer.clerk.publishable_key;
     const host = viewer.clerk.frontend_api;
     if (!node || !key || !host) {
-      setStatus("Sign-in could not load: Clerk is not configured on this lake.");
+      setStatus("Sign-in could not load: Clerk is not configured on this Lake.");
       return;
     }
     let cancelled = false;
@@ -169,7 +169,7 @@ export function ClerkSignIn({ mode }: { mode: "sign-in" | "sign-up" }) {
   return (
     <AuthFrame title={signUp ? "create account" : "sign in"}>
       <Page
-        eyebrow="lake by Orama"
+        eyebrow="Lake by Orama"
         title={signUp ? "Create Your Account" : "Sign In"}
         sub={
           signUp

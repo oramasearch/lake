@@ -1,8 +1,8 @@
 # Apps
 
-**Ship → Apps** runs your own web applications on lake: a dashboard over a dataset, an internal
-tool, a small API. An app runs from a lake repository or from a container image, gets its own
-address, and by default asks people to sign in to lake before they reach it. You can build one
+**Ship → Apps** runs your own web applications on Lake: a dashboard over a dataset, an internal
+tool, a small API. An app runs from a Lake repository or from a container image, gets its own
+address, and by default asks people to sign in to Lake before they reach it. You can build one
 yourself, or describe it to ApplicationAgent, review exactly what it proposes, and confirm.
 
 Every call on this page names `customer_id`, the id of the account that owns your workspaces (yours,
@@ -13,11 +13,11 @@ to another workspace.
 
 | Term | What it is |
 |---|---|
-| **App** | Desired state that lake records and the Orama operator runs: a name, a mode, a source or image, a framework and a port, plus replicas, access, bindings and environment. |
-| **Runtime app** (*From a repository*) | Runs a revision of a lake repository on lake's app runtime. The source is `{repository, revision, path, entrypoint}`; with no entrypoint the runtime reads the app's `app.toml`. |
+| **App** | Desired state that Lake records and the Orama operator runs: a name, a mode, a source or image, a framework and a port, plus replicas, access, bindings and environment. |
+| **Runtime app** (*From a repository*) | Runs a revision of a Lake repository on Lake's app runtime. The source is `{repository, revision, path, entrypoint}`; with no entrypoint the runtime reads the app's `app.toml`. |
 | **Image app** (*From an image*) | Runs a container image you name. |
 | **Address** | `https://<name>.<the lake's app domain>` unless a host is given. On lake.oramadev.net an app named `reports` is `reports.oramadev.net`. |
-| **Access** | **Lake Sign-In** (the default): only members of the app's workspace reach it, after signing in to lake. **Public**: anyone with the address, which needs an explicit confirmation. |
+| **Access** | **Lake Sign-In** (the default): only members of the app's workspace reach it, after signing in to Lake. **Public**: anyone with the address, which needs an explicit confirmation. |
 | **Bindings** | Read-only access to the workspace's data, and connections to services of your account. |
 | **Generation** | Every change to an app's desired state increases its generation; the operator reports the generation it has applied. |
 
@@ -66,7 +66,7 @@ bindings and when it last changed. **Open** on a card opens the app.
 {"customer_id": "<customer id>", "workspace_id": "<workspace id>", "name": "status-board", "mode": "image", "image": "<image>", "framework": "container", "port": 8080, "auth": "none", "confirm_public": true}
 ```
 
-An image you built in lake is named on [Packages, Builds and the Registry](/docs/registry).
+An image you built in Lake is named on [Packages, Builds and the Registry](/docs/registry).
 
 ## Build an App with ApplicationAgent
 
@@ -119,8 +119,8 @@ confirmation.*). You can also choose ApplicationAgent in **Ask Orama → Talk to
 hand an app request to it; the review and confirmation happen the same way before anything is
 written.
 
-If ApplicationAgent is not running on your lake, the drawer says *ApplicationAgent is not registered
-on this lake yet.* and cannot start.
+If ApplicationAgent is not running on your Lake, the drawer says *ApplicationAgent is not registered
+on this Lake yet.* and cannot start.
 
 ## Operate an App
 
@@ -249,9 +249,9 @@ The audit records the key and whether it is secret, never the value.
 
 - MCP: `set_app_auth`. Without `confirm_public` it is `invalid_input` at `/confirm_public`.
 
-With **Lake Sign-In**, a visitor who is not signed in is sent to lake's sign-in and back to the app.
-The app receives the person in the `X-Orama-User` header and never sees their lake session. The app's
-own cookie lasts 12 hours, and lake checks on every request that the person still belongs to the
+With **Lake Sign-In**, a visitor who is not signed in is sent to Lake's sign-in and back to the app.
+The app receives the person in the `X-Orama-User` header and never sees their Lake session. The app's
+own cookie lasts 12 hours, and Lake checks on every request that the person still belongs to the
 workspace, so removing someone from the workspace takes effect at once.
 
 ### Bindings: Workspace Data and Services
@@ -285,7 +285,7 @@ workspace, so removing someone from the workspace takes effect at once.
 - MCP: `set_app_zetta_binding`, `bind_service_to_app`, `unbind_service_from_app`,
   `create_service_and_bind_to_app`.
 
-Connections reach the app as mounted Secrets; lake never puts a token into the app's code or
+Connections reach the app as mounted Secrets; Lake never puts a token into the app's code or
 environment.
 
 ### Delete an App
@@ -313,10 +313,10 @@ In **Delete App**, type the app's name under **App name** and press **Delete app
 - Names are DNS labels. These are reserved and refused (`<name> is reserved` at `/name`): `lake`,
   `www`, `api`, `app`, `apps`, `admin`, `mcp`, `docs`, `status`, `mail`, `smtp`, `auth`, `login`,
   `sso`, `id`, `cdn`, `static`, `assets`, `grafana`, `prometheus`, `argocd`, `registry`, `git`,
-  `dev`, `staging`, `prod`, `test`, and every name starting with `lake-` or `orama`. A lake's operator
+  `dev`, `staging`, `prod`, `test`, and every name starting with `lake-` or `orama`. A Lake's operator
   may reserve more.
-- A host must be one label below the lake's app domain.
-- Replicas are 1 to 100 per app. A lake's operator may cap the number of apps and the replicas per
+- A host must be one label below the Lake's app domain.
+- Replicas are 1 to 100 per app. A Lake's operator may cap the number of apps and the replicas per
   account; past the cap the call is refused.
 - An app reads the workspace's data only, never writes it, and only when workspace data is attached.
 - App events are kept for 24 hours, up to 5,000 per app.
@@ -343,7 +343,7 @@ In **Delete App**, type the app's name under **App name** and press **Delete app
 | *That task has no ApplicationAgent proposal to confirm.* | The turn asked a question or failed, or is not an app turn. | Reply, or start a new turn. |
 | *The ApplicationAgent proposal changed before confirmation.* | What you confirmed is not what the turn proposed. | Review the proposal shown now and confirm that. |
 | The phase stays *Failed* | The operator could not run it; **Rollout** shows its message. | Read **Logs** and **Events**, fix the source or image, and **Deploy** again. |
-| *Logs are not available on this lake yet.* | This lake has no log source configured. | Use **Events**, or ask the lake's operator. |
+| *Logs are not available on this Lake yet.* | This Lake has no log source configured. | Use **Events**, or ask the Lake's operator. |
 
 ## Related Pages
 

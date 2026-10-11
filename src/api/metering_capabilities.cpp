@@ -673,7 +673,7 @@ void register_metering_capabilities(Registry& registry) {
                 "in the hourly table or the estimated charge.");
             if (!context.metering_recorder) {
                 not_measured.push_back(
-                    "Repository transfer: this lake has no workspaces to record it in.");
+                    "Repository transfer: this Lake has no workspaces to record it in.");
             }
             if (without_workspace > 0) {
                 not_measured.push_back(std::format(
@@ -703,7 +703,7 @@ void register_metering_capabilities(Registry& registry) {
                 }
             } else {
                 not_measured.push_back(
-                    "Container images: this lake has no workspaces to hold them.");
+                    "Container images: this Lake has no workspaces to hold them.");
             }
             json image_builds{{"seconds", 0}, {"count", 0}};
             if (const auto builds = context.store->list_builds(customer_id)) {
@@ -728,7 +728,7 @@ void register_metering_capabilities(Registry& registry) {
                 run_count += workspace.value("runs", std::uint64_t{0});
             }
             if (!context.workspaces) {
-                not_measured.push_back("Workspace data and runs: this lake has no workspaces.");
+                not_measured.push_back("Workspace data and runs: this Lake has no workspaces.");
             }
             if (!workspaces.empty()) {
                 not_measured.push_back(

@@ -22,7 +22,7 @@ reads also answer `GET`) and an MCP tool of the same name and input.
 | **Trial** | One training run of the experiment with one set of parameters, with its own run and curves. Its state is `running`, `pruned`, `failed` or `complete`. |
 | **Run** | One training run's record: its metric curves, parameters and artifacts, named by `run_id`. Each trial has one. |
 | **Objective** | The metric the experiment optimizes and its direction (maximize or minimize). |
-| **Search ranges** | The parameters to try and their ranges. With *from defaults*, lake fills in the methodology's own. |
+| **Search ranges** | The parameters to try and their ranges. With *from defaults*, Lake fills in the methodology's own. |
 | **Budgets** | The most trials, how many run in parallel, the wall time and the cost cap. |
 | **Sampler and pruner** | How the next parameters are chosen, and how weak trials are stopped early. |
 | **Tracked run** | A run with recorded metrics outside any experiment; it can be charted and compared too. |
@@ -80,8 +80,8 @@ ExperimentsAgent turns a goal into a complete experiment you review before anyth
 The first turn can only read: it has no way to create or start an experiment. Only the confirmed
 turn may start one, and only the experiment you confirmed.
 
-ExperimentsAgent must be running on this lake. If it is not, the box stays visible and says
-*ExperimentsAgent is not registered on this lake yet.*
+ExperimentsAgent must be running on this Lake. If it is not, the box stays visible and says
+*ExperimentsAgent is not registered on this Lake yet.*
 
 ### The Same Steps Through REST and MCP
 
@@ -107,7 +107,7 @@ naming the turn that proposed it as `proposal_task_id` and the digest from `get_
   `{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "agent": "agent-experiments", "kind": "experiment", "message": "Confirm and start the reviewed experiment proposal.", "proposal_task_id": "<task id>", "proposal_sha256": "<proposal_sha256 from get_agent_task>", "context": {"confirmed_proposal": {"kind": "proposal", "confirm": true, "study": {"name": "Retention Tuning", "project": "retention", "pipeline": "training", "dataset": "accounts", "methodology": "M-1", "objective": {"metric": "held_out_auc", "direction": "maximize", "validation_split": "validation"}, "budgets": {"max_trials": 4, "max_parallel_trials": 1, "max_wall_time_ms": 60000, "cost_cap": 5}}, "explanations": {"objective": "Use held-out AUC."}}}}`
 - MCP: `agent_turn`, with the same input.
 
-lake checks the confirmation itself. It refuses, and nothing starts, when:
+Lake checks the confirmation itself. It refuses, and nothing starts, when:
 
 - `proposal_task_id` is not a finished ExperimentsAgent proposal of this workspace that you may
   follow: *That task has no ExperimentsAgent proposal to confirm.* (`invalid_input`);
@@ -135,7 +135,7 @@ own confirmation.
   `{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "name": "Retention Tuning", "project": "retention", "pipeline": "training", "dataset": "accounts", "methodology": "M-1", "objective": {"metric": "held_out_auc", "direction": "maximize", "validation_split": "validation"}, "from_defaults": true, "budgets": {"max_trials": 10, "max_wall_time_ms": 60000, "max_parallel_trials": 1, "cost_cap": 5}, "confirm": true}`
 - MCP: `start_experiment`.
 
-`name`, `methodology` and `confirm: true` are required. With `from_defaults: true`, lake fills in the
+`name`, `methodology` and `confirm: true` are required. With `from_defaults: true`, Lake fills in the
 methodology's parameter ranges and any missing objective (`held_out_auc`, maximize, the `validation`
 split) and budgets (10 trials, 2 in parallel, 10 minutes, no cost cap), field by field. Without it,
 a missing `objective` or `budgets` is refused at `/objective` or `/budgets` before anything reaches
@@ -197,7 +197,7 @@ none.
   (MCP: `get_run_metrics`; `names`, `from_step` and `max_points` are optional).
 - Compare: `POST /v1/compare_runs` with
   `{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "runs": ["<run id>", "<other run id>"]}`
-  (MCP: `compare_runs`; `names` is optional, and without it lake compares every metric the runs
+  (MCP: `compare_runs`; `names` is optional, and without it Lake compares every metric the runs
   share).
 
 ## Stop and Promote
@@ -242,7 +242,7 @@ checks again. A scoped key must name each tool it calls. Starting, stopping and 
 
 | What you see | What to do |
 |---|---|
-| *ExperimentsAgent is not registered on this lake yet.* | Start an experiment yourself, or ask whoever runs this lake to deploy ExperimentsAgent. |
+| *ExperimentsAgent is not registered on this Lake yet.* | Start an experiment yourself, or ask whoever runs this Lake to deploy ExperimentsAgent. |
 | `invalid_input` at `/objective` or `/budgets` | Fill them in, or send `from_defaults: true`. |
 | `invalid_input` naming a field | The path to the field at fault; correct it and start again. |
 | `conflict` on the confirmed `agent_turn` | The proposal changed since you reviewed it; read the task again and confirm the new one. |

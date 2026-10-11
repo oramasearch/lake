@@ -353,7 +353,7 @@ function NewWorkspace({ customerId, onDone, onClose }: { customerId: string; onD
   return (
     <Modal
       title="New Workspace"
-      subtitle="lake prepares it for you; preparing it takes a minute or two."
+      subtitle="Lake prepares it for you; preparing it takes a minute or two."
       onClose={onClose}
       width={480}
       footer={

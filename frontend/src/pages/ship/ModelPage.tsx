@@ -284,7 +284,7 @@ function Access({ group }: { group: ModelGroup }) {
         }
       >
         <p className="muted mt-0 text-[12.5px]">
-          A call needs a lake key of someone with read on this workspace. A key scoped to <code>predict</code> can call any published model that person can read, and nothing else. These are your keys; each person makes their own.
+          A call needs a Lake key of someone with read on this workspace. A key scoped to <code>predict</code> can call any published model that person can read, and nothing else. These are your keys; each person makes their own.
         </p>
         {secret && (
           <div className="mb-3">
@@ -326,7 +326,7 @@ function Access({ group }: { group: ModelGroup }) {
       </Card>
       <Card label="Allowed origins">
         <p className="m-0 text-[13px]">
-          A call carrying a key is answered from any origin. A browser signed in to lake is refused when the page calling is not lake's own. Lake keeps no per-model list of origins.
+          A call carrying a key is answered from any origin. A browser signed in to Lake is refused when the page calling is not Lake's own. Lake keeps no per-model list of origins.
         </p>
       </Card>
       {creating && (
@@ -459,8 +459,8 @@ function Monitoring({ version }: { version: Row }) {
           <StatRow>
             <Stat label="Calls" value={t.calls} icon={Activity} sub={`of this version, last ${RANGES.find((r) => r.id === range)!.label}`} />
             <Stat label="Errors" value={t.errors} icon={AlertTriangle} tone={t.errors ? "bad" : undefined} sub={t.calls ? `${errorRate(t)} · ${t.clientErrors} refused, ${t.serverErrors} failed` : "no calls"} />
-            <Stat label="Mean latency" value={t.meanMs === null ? "—" : `${t.meanMs.toFixed(0)} ms`} icon={Gauge} sub="inside lake, per call" />
-            <Stat label="Workspace predict requests" value={cellText(requests.total ?? 0)} sub="every model, as lake counted them" />
+            <Stat label="Mean latency" value={t.meanMs === null ? "—" : `${t.meanMs.toFixed(0)} ms`} icon={Gauge} sub="inside Lake, per call" />
+            <Stat label="Workspace predict requests" value={cellText(requests.total ?? 0)} sub="every model, as Lake counted them" />
           </StatRow>
           <Card label="Calls and errors">
             {t.calls ? <Chart chartKey={`calls-${id}-${range}`} data={callsData} labels={callLabels} settings={{ title: "Calls and errors", xLabel: "Time", time: true }} /> : <p className="muted m-0 text-[13px]">No calls in this range.</p>}

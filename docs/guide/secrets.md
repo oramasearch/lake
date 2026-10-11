@@ -2,7 +2,7 @@
 
 Lake keeps your secrets (passwords, API keys, connection strings) and encryption keys, for your
 own account or for an organization. Secrets are versioned JSON values you manage in the web app, through the REST API or over MCP.
-Encryption keys never leave lake: you send data to lake and get back ciphertext, a signature or an
+Encryption keys never leave Lake: you send data to Lake and get back ciphertext, a signature or an
 HMAC.
 
 The web app lists **metadata**: which mounts exist, which secrets a mount holds, a secret's version
@@ -88,7 +88,7 @@ curl -s "https://lake.oramadev.net/v1/read_secret?mount_id=<mount id>&name=datab
   -H "Authorization: Bearer $LAKE_KEY"
 ```
 
-`<mount id>` is the `id` the first call answers. Replace `lake.oramadev.net` with your lake's
+`<mount id>` is the `id` the first call answers. Replace `lake.oramadev.net` with your Lake's
 address.
 
 ## Write a Secret
@@ -116,7 +116,7 @@ The first write is version 1; each later write adds the next version. Two option
 
 - `custom_metadata`, an object kept with the secret (non-empty metadata replaces what was there;
   leaving it out keeps it).
-- `check_and_set`, the version you expect to be current. If another write got there first, lake
+- `check_and_set`, the version you expect to be current. If another write got there first, Lake
   answers `conflict` and writes nothing; `0` makes no check.
 
 ## Read a Secret
@@ -222,7 +222,7 @@ answers whether it is valid and which key version signed it.
 new current version. Encrypt always uses the current version; old ciphertext still decrypts, and
 `POST /v1/rewrap` with
 `{"mount_id": "<mount id>", "name": "customer-data", "ciphertext": "<the ciphertext>"}` moves it to
-the current version without the plaintext leaving lake.
+the current version without the plaintext leaving Lake.
 
 `POST /v1/derive_encryption_key` with
 `{"mount_id": "<mount id>", "parent_name": "customer-data", "name": "customer-data-eu", "context": "ZXU"}`
@@ -241,7 +241,7 @@ A lease generates a fresh username and password for a role, valid for 1 to 3,600
 - MCP: the tools of the same names.
 
 Renewal never shortens a lease, and a revoked or expired lease cannot be renewed (`conflict`).
-Revocation erases the stored value at once; an expired lease is erased by lake shortly after it
+Revocation erases the stored value at once; an expired lease is erased by Lake shortly after it
 ends.
 
 ## Rotate the Account Key
@@ -269,7 +269,7 @@ owns until you grant them access on it.
 
 Every call is one signed audit event naming the caller, mount, workspace, secret name and version,
 or key and version. Values, plaintext, ciphertext, signatures and MACs are never in the audit. Lease
-lifecycle events are also appended to lake's transparency log ([Activity and Audit](/docs/activity)).
+lifecycle events are also appended to Lake's transparency log ([Activity and Audit](/docs/activity)).
 
 ## Troubleshooting
 

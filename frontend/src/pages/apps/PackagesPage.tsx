@@ -36,7 +36,7 @@ function installCommand(template: string, origin: string, item: Package): string
   return template.replaceAll("{host}", host).replaceAll("{origin}", origin).replaceAll("{name}", item.name).replaceAll("{version}", latest);
 }
 
-const SUB = "Container images, npm packages and Python distributions published to this lake. Private images are visible only to their workspace.";
+const SUB = "Container images, npm packages and Python distributions published to this Lake. Private images are visible only to their workspace.";
 
 export default function PackagesPage() {
   const { space, workspaceId, viewer } = useSession();
@@ -57,7 +57,7 @@ export default function PackagesPage() {
   if (!catalog.data?.available) {
     return shell(
       <Empty icon={PackageIcon} title="No Registry Storage">
-        This lake has no registry storage configured.
+        This Lake has no registry storage configured.
       </Empty>,
     );
   }

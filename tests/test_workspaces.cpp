@@ -1837,10 +1837,10 @@ TEST(Workspaces, TheAgentLibraryListsEverySpecializedAgentAndWhatRuns) {
     EXPECT_EQ(agents[2].at("status"), "Available");
     EXPECT_EQ(agents[3].at("name"), "ExperimentsAgent");
     EXPECT_EQ(agents[3].at("status"), "Available");
-    EXPECT_EQ(agents[4].at("status"), "Not running on this lake");
+    EXPECT_EQ(agents[4].at("status"), "Not running on this Lake");
     // Every library agent takes a conversation (lake#263), but the generators are Orama's own
     // tooling (lake#451): listed here, never offered in Ask Orama's Talk to.
-    EXPECT_EQ(agents[6].at("status"), "Not running on this lake");
+    EXPECT_EQ(agents[6].at("status"), "Not running on this Lake");
     EXPECT_EQ(agents[6].at("runs_as"), "service");
     for (const auto& agent : agents) {
         EXPECT_TRUE(agent.at("chat").get<bool>()) << agent.at("key");

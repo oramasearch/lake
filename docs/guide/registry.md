@@ -5,8 +5,8 @@ come from the same place as your repositories. **Ship → Packages** shows what 
 images, npm packages and Python distributions, each with its versions and the command that
 installs it, and the image builds of the current workspace.
 
-Builds turn a lake repository into a container image without any machine of your own: lake records
-the build, the Orama operator runs it inside the cluster, and the image lands in lake's registry,
+Builds turn a Lake repository into a container image without any machine of your own: Lake records
+the build, the Orama operator runs it inside the cluster, and the image lands in Lake's registry,
 ready for an app.
 
 Calls on this page name `customer_id`, the id of the account that owns your workspaces (yours, or
@@ -16,12 +16,12 @@ your organization's), and usually `workspace_id`, the workspace the build or ima
 
 | Term | What it is |
 |---|---|
-| **Container image** | An OCI image in lake's registry. Your images are named `<handle>/<name>`, where `<handle>` is your account's handle, and belong to one workspace. |
+| **Container image** | An OCI image in Lake's registry. Your images are named `<handle>/<name>`, where `<handle>` is your account's handle, and belong to one workspace. |
 | **Image repository** | One image name, `<handle>/<name>`, with its tags. Lake routes each to one workspace, which holds its manifests and tags; the name never moves. |
-| **npm package**, **Python distribution** | Packages published to the lake instance. They are public reads: anyone can install them. |
+| **npm package**, **Python distribution** | Packages published to the Lake instance. They are public reads: anyone can install them. |
 | **Build** | One in-cluster image build: a repository, a revision, a Dockerfile and a target `name:tag`. Its phases are queued, fetching, building, pushing and done, or it fails or is cancelled. |
 | **App build** | A build of a Ship app's own image from the app runtime, with the app's dependencies installed ([Apps](/docs/apps#build-the-apps-image)). |
-| **Pull key** | A lake API token with the scope `registry_pull`, which can pull your private images and nothing else. |
+| **Pull key** | A Lake API token with the scope `registry_pull`, which can pull your private images and nothing else. |
 
 ## Ship → Packages
 
@@ -64,9 +64,9 @@ The answer is the new `build_id`; the call returns at once and the build runs on
 
 ### Where the Image Goes
 
-You give only `name:tag`. Inside the cluster lake pushes it under your account's handle. Once the
+You give only `name:tag`. Inside the cluster Lake pushes it under your account's handle. Once the
 build succeeds, `get_build` and `list_builds` answer its `image` as an immutable reference through
-the lake's public host:
+the Lake's public host:
 
 ```
 <lake host>/<handle>/<name>@sha256:<digest>
@@ -97,7 +97,7 @@ to 5,000 events. Cancelling sets the build's desired state to cancelled; the ope
 
 ## Build an App's Image
 
-An app's own image is built with `build_app` rather than `build_image`: it starts from lake's app
+An app's own image is built with `build_app` rather than `build_image`: it starts from Lake's app
 runtime image, installs the app's dependencies, and runs as an unprivileged user. Use it from the
 app page's **Builds** tab, or REST `POST /v1/build_app`:
 
@@ -106,7 +106,7 @@ app page's **Builds** tab, or REST `POST /v1/build_app`:
 ```
 
 Once an app runs a built image, the next `build_app` needs `source` (`repository`, `revision`,
-optional `path`), since that deploy no longer carries the repository. On a lake whose operator has
+optional `path`), since that deploy no longer carries the repository. On a Lake whose operator has
 not configured the app runtime image, `build_app` answers `store_unavailable` naming
 `LAKE_APPS_RUNTIME_IMAGE`.
 
@@ -134,7 +134,7 @@ credential the operator holds for that app alone; you never handle it.
 
 ## Install npm and Python Packages
 
-The **Install** command on each card points at this lake:
+The **Install** command on each card points at this Lake:
 
 ```
 npm install <package> --registry https://<lake host>
@@ -142,7 +142,7 @@ pip install <project> --index-url https://<lake host>/simple/
 ```
 
 These are public reads. Publishing npm and Python packages, and images under a one-part name, needs
-the lake operator's administrator credential.
+the Lake operator's administrator credential.
 
 ## Name an Image Repository Ahead of a Push
 
@@ -164,7 +164,7 @@ name in a workspace before anything is pushed, REST `POST /v1/create_image_repos
 
 ## Limits
 
-- One image layer may be up to 4 GiB by default (the lake's `LAKE_MAX_REGISTRY_BLOB_BYTES`).
+- One image layer may be up to 4 GiB by default (the Lake's `LAKE_MAX_REGISTRY_BLOB_BYTES`).
 - A push counts against your account's storage limit; past it the registry answers `507 DENIED`
   and existing images stay readable ([Usage and Metering](/docs/usage)).
 - A build pushes and reads only image repositories of its own workspace; it cannot use another
@@ -179,14 +179,14 @@ name in a workspace before anything is pushed, REST `POST /v1/create_image_repos
 | See packages, builds and logs | `read` on the account that owns the workspace |
 | Build an image, build an app, cancel a build, name an image repository | `write` on the account |
 | Pull a private image | a key with `registry_pull`, held by someone who may read the account |
-| Publish npm or Python packages | the lake operator's administrator credential |
+| Publish npm or Python packages | the Lake operator's administrator credential |
 
 ## Troubleshooting
 
 | You see | What it means | What to do |
 |---|---|---|
 | `invalid_input` at `/workspace_id` | The workspace is missing, unknown, or not one of the account's. | Use the repository's own workspace. |
-| A build stays queued | The operator has not picked it up. | Read its **Live log** and messages; ask the lake's operator if nothing arrives. |
+| A build stays queued | The operator has not picked it up. | Read its **Live log** and messages; ask the Lake's operator if nothing arrives. |
 | A build fails at fetching | The revision or path does not exist in the repository. | Check the revision and `context`. |
 | `403 DENIED` from the registry | The credential is valid but not for this image: another account's image, or another workspace's image for a build. | Pull with a key of an account that may read the image. |
 | `404 NAME_UNKNOWN` on a push | The image name is not routed to any workspace. | Push from a build, or call `create_image_repository` first. |

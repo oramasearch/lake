@@ -314,7 +314,7 @@ json customer_input_schema(json properties, json required, bool workspace = true
 }
 
 ApiResult unavailable() {
-    return ApiResult::failure("store_unavailable", "workspaces are not configured on this lake");
+    return ApiResult::failure("store_unavailable", "workspaces are not configured on this Lake");
 }
 
 json control_input_schema(json properties, json required) {
@@ -649,10 +649,10 @@ void register_workspace_call(Registry& registry, bool read) {
                  : "Change something in a workspace's engine (the Zetta named by `workspace_id`): "
                    "create projects and datasets, approve and run pipelines, publish models and "
                    "indexes, by naming one allowed action `capability` and its `input`. "
-                   "expose_model and expose_index answer `call`, the lake capability that serves "
+                   "expose_model and expose_index answer `call`, the Lake capability that serves "
                    "what was published. A Python agent's create_agent or update_agent definition "
                    "is {source: zetta, instructions, entrypoint, files: [{path, contents}]} or "
-                   "{source: lake, repository_id, revision, entrypoint}; lake refuses any other "
+                   "{source: lake, repository_id, revision, entrypoint}; Lake refuses any other "
                    "field.",
         .input_schema = customer_input_schema(
             {{"capability", {{"type", "string"}}}, {"input", {{"type", "object"}}}},
@@ -1118,10 +1118,10 @@ void register_service_capabilities(Registry& registry) {
         .title = "Service connection",
         .description = "The connection details of a Ready service, including its password: "
                        "what the operator delivered for its kind. Audited. A Zetta service's "
-                       "admin token is never returned: lake calls it on the customer's behalf "
+                       "admin token is never returned: Lake calls it on the customer's behalf "
                        "through workspace_query and workspace_act.",
         .input_schema = control_input_schema({{"service_id", {{"type", "string"}}}},
-                                              json::array({"service_id"})),
+                                             json::array({"service_id"})),
         .output_schema = {{"type", "object"}},
         .kind = CapabilityKind::Action,
         .object = "customer",
@@ -1141,7 +1141,7 @@ void register_service_capabilities(Registry& registry) {
             if (found->kind == "zetta") {
                 co_return ApiResult::failure("invalid_input",
                                              "a Zetta service's admin token is never handed out; "
-                                             "lake calls it for you",
+                                             "Lake calls it for you",
                                              "/service_id");
             }
             const auto connection = context.workspaces->connection(*found);
@@ -1150,7 +1150,7 @@ void register_service_capabilities(Registry& registry) {
                     "workspace_not_ready",
                     found->phase == "Ready"
                         ? "the service is ready and its connection is still being delivered to "
-                          "lake; try again in a minute"
+                          "Lake; try again in a minute"
                         : "the service is not ready yet");
             }
             // Everything the operator delivered for this kind (docs/control-plane/services.md,
@@ -1221,7 +1221,7 @@ void register_store_capabilities(Registry& registry) {
         .title = "List store providers",
         .description = "Every type × provider pair a store can be (object, filesystem, "
                        "network_filesystem, volume on cluster, r2, s3, b2, azure, gcs, lake, "
-                       "zetta, nfs), whether this lake offers it, and why not when it does not.",
+                       "zetta, nfs), whether this Lake offers it, and why not when it does not.",
         .input_schema = control_input_schema(json::object(), json::array()),
         .output_schema = {{"type", "object"}},
         .kind = CapabilityKind::Read,
@@ -1401,7 +1401,7 @@ void register_store_capabilities(Registry& registry) {
                     "workspace_not_ready",
                     found->desired == "present" && found->phase == "Ready"
                         ? "the store is ready and its connection is still being delivered to "
-                          "lake; try again in a minute"
+                          "Lake; try again in a minute"
                         : "the store is not ready");
             }
             co_return ApiResult::success(*connection);
@@ -3665,7 +3665,7 @@ void register_agent_flow_capabilities(Registry& registry) {
                 !context.agent_caller ||
                 !context.workspaces->config().agent_endpoints.contains("agent-project")) {
                 co_return ApiResult::failure("store_unavailable",
-                                             "the Project Agent is not running on this lake");
+                                             "the Project Agent is not running on this Lake");
             }
             if (context.acting_user_id.empty()) {
                 co_return ApiResult::failure("unauthorized",
@@ -3724,7 +3724,7 @@ void register_agent_flow_capabilities(Registry& registry) {
         .description =
             "Confirm one finished solution:<project> Project Agent task. Optional edits are a "
             "JSON merge patch over result.foundation. This is the only step that calls the "
-            "engine's create_solution (not lake's create_solution, which writes a workspace's "
+            "engine's create_solution (not Lake's create_solution, which writes a workspace's "
             "own solution).",
         .input_schema = {{"type", "object"},
                          {"properties",
@@ -3762,8 +3762,9 @@ void register_agent_flow_capabilities(Registry& registry) {
         .description =
             "Create the agent an AgentCreator proposal describes (agent_turn with agent-creator "
             "answers `proposal`): a native agent, or a Python agent whose code goes into a new "
-            "private lake repository (storage lake) or into the workspace (storage zetta). A "
-            "Python agent with a trigger is scheduled, and its first check run starts. Refused when "
+            "private Lake repository (storage lake) or into the workspace (storage zetta). A "
+            "Python agent with a trigger is scheduled, and its first check run starts. Refused "
+            "when "
             "the proposal lists defects.",
         .input_schema = customer_input_schema(
             {{"proposal", {{"type", "object"}}}, {"defects", {{"type", "array"}}}},
@@ -4668,7 +4669,7 @@ void register_conversation_capabilities(Registry& registry) {
         .description =
             "Say something in one of your conversations with Ask Orama (`kind` ask, the "
             "default; `agent` picks another chat agent) or the Agent Factory (`kind` factory, "
-            "AgentCreator): lake stores your message in the workspace's conversation, then asks "
+            "AgentCreator): Lake stores your message in the workspace's conversation, then asks "
             "the agent. A library agent answers in the background: follow `task_id` with "
             "get_agent_task, then call settle_ask_turn {conversation_id, task_id, kind} once it "
             "finished, because the answer is saved in the conversation only by that call (the "
@@ -4722,7 +4723,7 @@ void register_conversation_capabilities(Registry& registry) {
         .title = "Confirm an Ask Orama proposal",
         .description =
             "Run proposal `index` of the Ask Orama message `message_id` in your conversation, as "
-            "you: only a proposal lake stored there can be run. The outcome is stored in the "
+            "you: only a proposal Lake stored there can be run. The outcome is stored in the "
             "conversation (`message_id` is that outcome message) and answered with `ok`; a "
             "capability that refused is `ok: false` with its `error`.",
         .input_schema =
@@ -4845,7 +4846,7 @@ void register_conversation_capabilities(Registry& registry) {
             "A pipeline graph as inline SVG, drawn as the pipeline page draws it: one column per "
             "stage, data-flow arrows solid and control arrows dashed, the steps the latest run "
             "of this pipeline ran coloured by its outcome, `step` outlined. Every step links to "
-            "the pipeline page with that step selected. The markup is escaped by lake.",
+            "the pipeline page with that step selected. The markup is escaped by Lake.",
         .input_schema = customer_input_schema({{"project", {{"type", "string"}}},
                                                {"graph", {{"type", "string"}}},
                                                {"step", {{"type", "string"}}}},
@@ -5350,7 +5351,7 @@ void register_agent_run_capabilities(Registry& registry) {
                 if (endpoint == config.agent_endpoints.end() || context.agent_caller == nullptr) {
                     co_return ApiResult::failure("store_unavailable",
                                                  std::string(library->name) + " is not running on "
-                                                                              "this lake");
+                                                                              "this Lake");
                 }
                 std::vector<std::string> scopes{"workspace_query", "workspace_openapi"};
                 std::string task_kind = input.value("kind", std::string("api"));
@@ -5568,7 +5569,7 @@ void register_agent_run_capabilities(Registry& registry) {
                 }
                 if (context.agent_bus == nullptr) {
                     co_return ApiResult::failure("store_unavailable",
-                                                 "the agent bus is not configured on this lake");
+                                                 "the agent bus is not configured on this Lake");
                 }
                 const auto ready = control::settled(co_await context.workspaces->state(
                     customer_id, input.at("workspace_id")));
@@ -5967,9 +5968,9 @@ json workspace_openapi(const json& document, std::string_view base) {
     filtered["servers"] = json::array({{{"url", std::string(base)}}});
     json info = filtered.value("info", json::object());
     info["description"] =
-        "A lake workspace's Zetta, reduced to the capabilities lake allows. Reads are GET "
+        "A Lake workspace's Zetta, reduced to the capabilities Lake allows. Reads are GET "
         "/v1/<name> with the input in the query string; actions are POST /v1/<name> with a JSON "
-        "body. Authenticate with a lake token or agent key; every call is authorized on the "
+        "body. Authenticate with a Lake token or agent key; every call is authorized on the "
         "customer and audited.";
     filtered["info"] = std::move(info);
     return filtered;
@@ -6020,7 +6021,7 @@ void register_agent_bus_capabilities(Registry& registry) {
         .name = "receive_agent_tasks",
         .title = "Receive agent tasks",
         .description =
-            "A library agent's inbox (topic agent-tasks.<agent> on lake's Zetta pub/sub): the "
+            "A library agent's inbox (topic agent-tasks.<agent> on Lake's Zetta pub/sub): the "
             "tasks published for it from `from_sequence` on, oldest first, without those "
             "already claimed. Long-polls up to `wait_ms`. Pass the returned `next_sequence` to "
             "continue. Only that agent may call it, with its own bus credential.",
@@ -6046,7 +6047,7 @@ void register_agent_bus_capabilities(Registry& registry) {
             }
             if (context.agent_bus == nullptr || context.store == nullptr) {
                 co_return ApiResult::failure("store_unavailable",
-                                             "the agent bus is not configured on this lake");
+                                             "the agent bus is not configured on this Lake");
             }
             const std::string agent = input.at("agent");
             if (!std::ranges::contains(context.agent_bus->agents(), agent)) {
@@ -6086,7 +6087,7 @@ void register_agent_bus_capabilities(Registry& registry) {
         .description =
             "A library agent takes one task it received: exactly one claim succeeds (another is "
             "a conflict). Answers the task's body with the task's own credential in it, handed "
-            "over this once; lake keeps only its SHA-256. Only that agent may call it, with "
+            "over this once; Lake keeps only its SHA-256. Only that agent may call it, with "
             "its own bus credential.",
         .input_schema = {{"type", "object"},
                          {"required", json::array({"task_id", "agent"})},
@@ -6212,7 +6213,7 @@ void register_agent_bus_capabilities(Registry& registry) {
             }
             if (context.agent_bus == nullptr || context.store == nullptr) {
                 co_return ApiResult::failure("store_unavailable",
-                                             "the agent bus is not configured on this lake");
+                                             "the agent bus is not configured on this Lake");
             }
             const std::string task_id = input.at("task_id");
             auto task = context.store->get_agent_task(task_id);
@@ -6275,14 +6276,15 @@ void register_agent_bus_capabilities(Registry& registry) {
         .name = "receive_agent_events",
         .title = "Follow an agent turn live",
         .description =
-            "What the agent of one background turn has published (topic agent-events on lake's "
+            "What the agent of one background turn has published (topic agent-events on Lake's "
             "Zetta pub/sub): progress messages and its result, from `from_sequence` on, "
             "long-polling up to `wait_ms`. Always answers the task as it stands (as "
             "get_agent_task); pass `next_sequence` to continue.",
-        .input_schema = customer_input_schema({{"task_id", {{"type", "string"}}},
-                                               {"from_sequence", {{"type", "integer"}, {"minimum", 1}}},
-                                               {"wait_ms", bus_wait_schema()}},
-                                              json::array({"task_id"})),
+        .input_schema =
+            customer_input_schema({{"task_id", {{"type", "string"}}},
+                                   {"from_sequence", {{"type", "integer"}, {"minimum", 1}}},
+                                   {"wait_ms", bus_wait_schema()}},
+                                  json::array({"task_id"})),
         .output_schema = {{"type", "object"}},
         .kind = CapabilityKind::Read,
         .long_poll = true,
@@ -6306,7 +6308,7 @@ void register_agent_bus_capabilities(Registry& registry) {
             }
             if (context.agent_bus == nullptr) {
                 co_return ApiResult::failure("store_unavailable",
-                                             "the agent bus is not configured on this lake");
+                                             "the agent bus is not configured on this Lake");
             }
             // Never before the task's own first event (lake#275): the topic only grows.
             std::uint64_t next = std::max(input.value("from_sequence", std::uint64_t{1}),
@@ -6554,7 +6556,7 @@ void register_workspace_capabilities(Registry& registry) {
         .name = "workspace_status",
         .title = "Workspace status",
         .description = "Whether the workspace named by `workspace_id` was requested, its "
-                       "operator phase, and whether lake can call it.",
+                       "operator phase, and whether Lake can call it.",
         .input_schema = customer_input_schema(json::object(), json::array()),
         .output_schema = {{"type", "object"}},
         .kind = CapabilityKind::Read,
@@ -6610,7 +6612,7 @@ void register_workspace_capabilities(Registry& registry) {
         .name = "workspace_openapi",
         .title = "A workspace's OpenAPI",
         .description =
-            "The customer's Zetta OpenAPI document reduced to what lake allows, served under "
+            "The customer's Zetta OpenAPI document reduced to what Lake allows, served under "
             "/workspaces/<customer_id>/zetta/v1/. Agents derive their Zetta tools from it.",
         .input_schema = customer_input_schema(json::object(), json::array()),
         .output_schema = {{"type", "object"}},
@@ -6643,7 +6645,7 @@ void register_workspace_capabilities(Registry& registry) {
         .description =
             "Every specialized agent Orama ships for you to use (Ask Orama, the Project Agent, "
             "ApplicationAgent, Auto-Suggest, AgentCreator, ...): what each does, where you meet "
-            "it, and whether this lake runs it. Orama's internal tooling (the corpus and "
+            "it, and whether this Lake runs it. Orama's internal tooling (the corpus and "
             "evaluation generators) is listed only with `include_internal: true`.",
         .input_schema = {{"type", "object"},
                          {"properties",

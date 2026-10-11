@@ -2047,7 +2047,7 @@ std::vector<std::string> Service::tracked_workspaces() const {
 
 Result<void> Service::rebuild_workspace(const std::string& customer, const std::string& workspace) {
     if (impl_->stopping.load()) {
-        return std::unexpected(Error{"store_unavailable", "lake is stopping"});
+        return std::unexpected(Error{"store_unavailable", "Lake is stopping"});
     }
     {
         std::lock_guard lock(impl_->mutex);
@@ -2162,7 +2162,7 @@ Result<void> Service::rebuild_workspace(const std::string& customer, const std::
         // workspace waits at most one repository's read.
         for (const std::string& repository : *repositories) {
             if (impl_->stopping.load()) {
-                return failed(Error{"store_unavailable", "lake is stopping"});
+                return failed(Error{"store_unavailable", "Lake is stopping"});
             }
             {
                 std::lock_guard held(state->mutex);

@@ -206,7 +206,7 @@ app_host(const json& input, const std::string& name, const ApiContext& context) 
     if (!valid_domain(host) || host == wildcard || !host.ends_with("." + wildcard) ||
         host.substr(0, host.size() - wildcard.size() - 1).contains('.')) {
         return std::unexpected(ApiResult::failure(
-            "invalid_input", "host must be below the lake apps wildcard " + wildcard, "/host"));
+            "invalid_input", "host must be below the Lake apps wildcard " + wildcard, "/host"));
     }
     return host;
 }
@@ -255,7 +255,7 @@ std::optional<ApiResult> validate_plain_env(const json& env) {
 // projection the operator writes from the secret when the app is deployed.
 std::expected<std::string, ApiResult> lake_secret_reference(const json& value,
                                                             const std::string& path) {
-    const std::string usage = "a secret is {mount_id, name, field} of a lake secret mount, or "
+    const std::string usage = "a secret is {mount_id, name, field} of a Lake secret mount, or "
                               "lake-secret://<mount id>/<name>#<field>";
     if (value.is_object()) {
         const auto text = [&](const char* key) {
@@ -329,7 +329,7 @@ liquid::runtime::task<std::optional<ApiResult>> check_secret_references(
         const auto reference = parse_lake_secret_ref(stored.get<std::string>());
         const std::string path = "/env/" + key + "/secret";
         if (!reference) {
-            co_return ApiResult::failure("invalid_input", "not a lake secret reference", path);
+            co_return ApiResult::failure("invalid_input", "not a Lake secret reference", path);
         }
         ApiContext inner = context;
         inner.audit_details = json::object();
@@ -444,7 +444,7 @@ liquid::runtime::task<ApiResult> publish_event(ApiContext& context,
                                                json details = json::object()) {
     if (context.workspaces == nullptr) {
         co_return ApiResult::failure("store_unavailable",
-                                     "the app event bus is not configured on this lake");
+                                     "the app event bus is not configured on this Lake");
     }
     const std::string topic = app_events_topic(app.id);
     WorkspaceApiBus bus(context, app.customer_id, app.workspace_id);
@@ -1017,7 +1017,7 @@ void register_web_app_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "set_app_auth",
         .title = "Set app authentication",
-        .description = "Require lake sign-in or make an app public after explicit confirmation.",
+        .description = "Require Lake sign-in or make an app public after explicit confirmation.",
         .input_schema = app_input_schema(
             {{"auth", {{"type", "string"}, {"enum", json::array({"lake", "none"})}}},
              {"confirm_public", {{"type", "boolean"}}}},

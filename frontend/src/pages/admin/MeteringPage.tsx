@@ -116,10 +116,10 @@ function Usage({ usage, onSetLimit }: { usage: Row; onSetLimit: () => void }) {
                     <Receipt size={16} className="text-ink-3" aria-hidden />
                     {usageMoney(usage.cost_micros, currency)}
                   </div>
-                  <p className="mb-0 text-[12.5px] text-ink-3">Repository transfer and repository build time at this lake's prices. Storage, images, image builds and workspaces are not priced.</p>
+                  <p className="mb-0 text-[12.5px] text-ink-3">Repository transfer and repository build time at this Lake's prices. Storage, images, image builds and workspaces are not priced.</p>
                 </>
               ) : (
-                <p className="m-0 text-[13px] text-ink-2">This lake has no prices set, so there is no charge to show.</p>
+                <p className="m-0 text-[13px] text-ink-2">This Lake has no prices set, so there is no charge to show.</p>
               )}
             </Card>
           </>

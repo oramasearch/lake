@@ -1,38 +1,38 @@
 # Getting Started
 
-lake is where you **design, train and ship AI**. You build an **AI solution** in an **AI project**,
-whose pipeline is the workflow from your data to a result; lake keeps the data it learns from and
+Lake is where you **design, train and ship AI**. You build an **AI solution** in an **AI project**,
+whose pipeline is the workflow from your data to a result; Lake keeps the data it learns from and
 runs what you ship ([Concepts and Glossary](/docs/concepts)). This page takes you from your first sign-in to a model you can call from your own code.
 Each step says where to click, then gives the same step as a REST call and an MCP tool, for when
 you automate it.
 
 ## What You Need
 
-- **An account.** Open lake and choose **Sign in** in the top bar (or **Create account** where your
-  lake allows sign-up). [Your Account and Sign-In](/docs/account) covers every way in.
+- **An account.** Open Lake and choose **Sign in** in the top bar (or **Create account** where your
+  Lake allows sign-up). [Your Account and Sign-In](/docs/account) covers every way in.
 - **A workspace.** Everything you design, train and ship lives in a workspace: an isolated
   environment with an engine of its own. Your account can have many workspaces, one per environment for example.
-- **A key, for scripts and agents.** The site needs no key. Scripts, `curl` and AI agents use a lake
+- **A key, for scripts and agents.** The site needs no key. Scripts, `curl` and AI agents use a Lake
   API key made on **Developer → API** or **Developer → MCP** ([Tokens and Keys](/docs/tokens)).
 
 ## Find Your Way Around
 
-Signing in, or opening lake while signed in, lands you on **Ask Orama**, full page, in your current
-workspace. Ask it anything about your lake in plain words; while the conversation is empty it
+Signing in, or opening Lake while signed in, lands you on **Ask Orama**, full page, in your current
+workspace. Ask it anything about your Lake in plain words; while the conversation is empty it
 suggests questions about your own datasets, projects and runs. It is the same conversation the
 **Ask Orama** button opens beside any other page ([Ask Orama](/docs/ask-orama)).
 
-The rail on the left groups lake's pages:
+The rail on the left groups Lake's pages:
 
 | Group | Pages | What they are for |
 |---|---|---|
-| **Home** | Ask Orama, Dashboard | Ask about anything in your lake; the whole platform at a glance |
+| **Home** | Ask Orama, Dashboard | Ask about anything in your Lake; the whole platform at a glance |
 | **Data** | Repositories, Shared with Me, Search, Datasets, Transcripts | Where your data lives and is found |
 | **Design** | Projects, Opportunities, Solutions, Methodologies, Agent Library | Deciding what AI to build, and designing its workflow |
 | **Train** | Agents, Runs, Experiments, Models, Streams | Training models and agents, and watching them work |
 | **Ship** | Models, Search Indexes, Packages, Apps, Deployments, Services, Workspaces | Putting what you built to work |
 | **Organization** | Organizations, Secrets, Usage, Activity | People, credentials, usage and history |
-| **Developer** | API, MCP, Docs | Calling lake from code and from AI agents |
+| **Developer** | API, MCP, Docs | Calling Lake from code and from AI agents |
 
 The top bar holds the workspace picker, **Go to…** (press ⌘K or `/`), the theme switch, **Ask
 Orama** and your account menu. On a phone the rail is a drawer behind the menu button
@@ -41,7 +41,7 @@ Orama** and your account menu. On a phone the rail is a drawer behind the menu b
 ## 1. Start Your Workspace
 
 1. Open **Design → Projects**. If you have no workspace yet, the page shows **Start Your Workspace**.
-2. Press **Start your workspace**. lake asks for an engine of your own; the page shows
+2. Press **Start your workspace**. Lake asks for an engine of your own; the page shows
    *Preparing Your Workspace* and checks again every 15 seconds until it is ready.
 3. To add another workspace later, open **Ship → Workspaces** and press **New workspace**.
 
@@ -57,7 +57,7 @@ yours; `list_workspaces` lists both.
   true.
 - MCP: `create_workspace`, then `workspace_status`, with the same inputs.
 
-A call without `workspace_id` is refused with `workspace_id is required`: lake never guesses which
+A call without `workspace_id` is refused with `workspace_id is required`: Lake never guesses which
 workspace you mean. Details: [Workspaces](/docs/workspaces).
 
 ## 2. Load Your Data
@@ -101,7 +101,7 @@ A name already in use answers `conflict`. More: [AI Projects and Pipelines](/doc
 
 1. On the project, press **Build pipeline**.
 2. Under **What should it predict or answer?** write the goal, for example *Predict the churned
-   column of accounts*. Under **From data** choose `accounts`. Leave **Methodology** to let lake
+   column of accounts*. Under **From data** choose `accounts`. Leave **Methodology** to let Lake
    choose, or pick one the workspace runs.
 3. Press **Build pipeline**. The pipeline opens, drawn as steps joined by arrows.
 4. Press **Approve**. A pipeline must be approved before it runs, and again after any change.
@@ -142,7 +142,7 @@ rows most at risk and what the run cannot tell you ([Train a Model](/docs/train)
 1. Open **Ship → Models** and press **Publish v1** on your model (the button names the version it
    publishes). **Train → Models** is where you compare its versions and retrain it.
 2. Press **Call** on it. The drawer shows the call with your account, workspace and model filled in.
-3. Call it from your own code with a lake key in `LAKE_KEY`:
+3. Call it from your own code with a Lake key in `LAKE_KEY`:
 
 ```
 curl -s https://lake.oramadev.net/v1/predict \
@@ -157,7 +157,7 @@ From an AI agent it is the MCP tool `predict`. **Unpublish** stops every outside
 
 | To | Read |
 |---|---|
-| Keep code and files in lake | [Repositories](/docs/repositories), [Sharing and Shared with Me](/docs/sharing) |
+| Keep code and files in Lake | [Repositories](/docs/repositories), [Sharing and Shared with Me](/docs/sharing) |
 | Find anything | [Search](/docs/search) |
 | Turn recordings into searchable text | [Transcripts and Speech-to-Text](/docs/transcripts) |
 | Start from a ready-made business solution | [AI Solutions, Methodologies and Opportunities](/docs/solutions) |

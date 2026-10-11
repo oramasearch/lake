@@ -1,8 +1,8 @@
 # Models and Search Indexes
 
-Ship is where what you trained and indexed leaves lake. This page covers the two things your own
+Ship is where what you trained and indexed leaves Lake. This page covers the two things your own
 code calls: **published models**, which score your records, and **published search indexes**,
-which answer full-text searches. Both run in your workspace; lake checks the key, the
+which answer full-text searches. Both run in your workspace; Lake checks the key, the
 workspace and that the model or index is published, and records every call.
 
 Every call on this page names two ids. `customer_id` is the id of the account that owns your
@@ -14,12 +14,12 @@ address `/w/<workspace id>/…`. [Getting Started](/docs) says where to find bot
 | Term | What it is |
 |---|---|
 | **Model** | A learned function that makes a prediction. Each training of it is a **version** with its own model id. **Train → Models** is about training it: its versions, held-out scores and what it learned from ([Train a Model](/docs/train)). **Ship → Models** is about serving it: calling it, who may, where its answers go and how it is doing. A pipeline can train several models. A model uploaded on its own lives as a model repository, with no pipeline ([Repositories](/docs/repositories)). |
-| **Predict key** | A lake API token whose only scope is `predict`: it can call published models and do nothing else. |
-| **Published** | A model or index that answers calls from outside lake. Anything not published can still be used inside lake, but `predict` and `search_index` refuse it. |
+| **Predict key** | A Lake API token whose only scope is `predict`: it can call published models and do nothing else. |
+| **Published** | A model or index that answers calls from outside Lake. Anything not published can still be used inside Lake, but `predict` and `search_index` refuse it. |
 | **Promoted** | The model an experiment chose as its best trial ([Experiments](/docs/experiments)). It is marked **promoted** on Train → Models and Ship → Models. Promoting a version to Ship from **Train → Models** publishes it. |
 | **Search index** | A full-text (BM25F) index over one dataset's columns. |
-| **Search key** | A lake API token whose only scope is `search_index`: it can search published indexes and do nothing else. |
-| **Lake key** | Any lake API token, made on Developer → API or Developer → MCP ([Tokens and Keys](/docs/tokens)). |
+| **Search key** | A Lake API token whose only scope is `search_index`: it can search published indexes and do nothing else. |
+| **Lake key** | Any Lake API token, made on Developer → API or Developer → MCP ([Tokens and Keys](/docs/tokens)). |
 
 ## Ship → Models
 
@@ -47,7 +47,7 @@ opens its serving page; **training** under it opens Train → Models.
 
 - MCP: `workspace_act` with the same input.
 
-The answer's `call` names the lake capability that now serves the model (`predict`), with its method,
+The answer's `call` names the Lake capability that now serves the model (`predict`), with its method,
 path and input filled in.
 
 ### Call a Published Model
@@ -110,10 +110,10 @@ the same model on Train → Models.
   call to paste, and **Try It**: edit the rows (prefilled with one row keyed by the model's
   features) and press **Predict** to see the rows ranked by risk and the whole answer. Try It calls
   `predict` as you, so the version must be published.
-- **Access**: who may call it. A call needs a lake key of someone with `read` on the workspace; the
+- **Access**: who may call it. A call needs a Lake key of someone with `read` on the workspace; the
   list shows your keys scoped to `predict` (or to everything). **New predict key** makes a token
   whose only scope is `predict` and shows its secret once. A call carrying a key is answered from
-  any origin; a browser signed in to lake is refused when the calling page is not lake's own. Lake
+  any origin; a browser signed in to Lake is refused when the calling page is not Lake's own. Lake
   keeps no per-model list of origins.
 - **Destinations**: where its answers go. Each answer goes back to the caller only; no app, topic
   or webhook receives a model's answers yet. An app calls a model as any code does.
@@ -187,7 +187,7 @@ be shared. Searching here works whether or not the index is published.
 
 On the index page, the **Publishing** card says whether the index answers outside calls. Press
 **Publish**. To stop, press **Unpublish** and confirm: every outside call stops at once, and
-searching in lake keeps working.
+searching in Lake keeps working.
 
 - REST: `POST /v1/workspace_act`:
 
@@ -245,11 +245,11 @@ For an index over `account_id` and `plan`, each hit's `fields` holds that row's 
 
 - Only a **published** model or index answers `predict` or `search_index`. Publishing is per model
   and per index.
-- A model or index is reached only through lake (`/v1/predict`, `/v1/search_index` or the MCP tools
+- A model or index is reached only through Lake (`/v1/predict`, `/v1/search_index` or the MCP tools
   of the same names), never at your workspace's own address.
 - `search_index` answers at most 100 hits per call.
 - A model's calls are counted by the minute and kept 30 days; `model_traffic` reads at most 31 days
-  and 10,000 steps at once. Counts can lag by up to ten seconds, and a lake that stops abruptly can
+  and 10,000 steps at once. Counts can lag by up to ten seconds, and a Lake that stops abruptly can
   lose its last ten seconds of counts.
 - Workspace reads time out after 15 seconds and actions after 60.
 - A key lasts as long as the sign-in that made it, at most 30 days, unless your account allows keys
@@ -282,4 +282,4 @@ For an index over `account_id` and `plan`, each hit's `fields` holds that row's 
 - [Datasets and Loading Data](/docs/load-data): the datasets an index covers.
 - [Apps](/docs/apps): ship a whole data app instead of an endpoint.
 - [Tokens and Keys](/docs/tokens): make and revoke keys.
-- [REST API and OpenAPI](/docs/developer) and [MCP Setup](/docs/mcp): calling lake from code and agents.
+- [REST API and OpenAPI](/docs/developer) and [MCP Setup](/docs/mcp): calling Lake from code and agents.

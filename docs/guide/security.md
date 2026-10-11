@@ -1,8 +1,8 @@
 # Security Model
 
-How lake decides who you are, what you may do, where your data is kept and how you can check what
+How Lake decides who you are, what you may do, where your data is kept and how you can check what
 happened. Read this before you hand a key to a script or an agent, share a folder, or answer a
-security review about lake.
+security review about Lake.
 
 ## The Short Version
 
@@ -22,23 +22,23 @@ security review about lake.
 
 | Term | What it is |
 |---|---|
-| **Session** | What signing in creates: a random secret lake stores only as a digest. The browser holds it in the `lake_session` cookie. |
+| **Session** | What signing in creates: a random secret Lake stores only as a digest. The browser holds it in the `lake_session` cookie. |
 | **Key** (API token) | A named session for programs and agents, sent as `Authorization: Bearer <key>`, limited to the capabilities it names. |
 | **Device** | A browser or passkey that signed in. Revoking a device ends its sessions and its passkey. |
 | **TAAP identity** | Your cryptographic identity. Grants, audit events and attestations name it. |
 | **Policy object** | Anything that can be granted on: an organization, a team, a repository or a path in it, an environment, a secret mount. Objects form a tree, and grants are inherited down it unless an object cuts inheritance. |
 | **Role** | What a grant allows: `read`, `write`, `review`, `deploy`, `share` or `admin`, depending on the object. |
 | **Audit log** | The signed record of every call: the central log for sign-in, identity and access changes, and each workspace's own log for its data. |
-| **Transparency log** | lake's public, append-only Merkle log of signed attestations, with signed checkpoints anyone can check. |
+| **Transparency log** | Lake's public, append-only Merkle log of signed attestations, with signed checkpoints anyone can check. |
 
 ## Signing In
 
 You sign in with a password (and a TOTP code when MFA is on), a passkey, an OAuth provider, your
-organization's single sign-on, or, on lake instances that use it, Clerk. Each ends in the same kind
+organization's single sign-on, or, on Lake instances that use it, Clerk. Each ends in the same kind
 of session.
 
 - The session secret is set as an `HttpOnly` cookie, `SameSite=Lax`, and `Secure` whenever the
-  request came over HTTPS. Page scripts never see it, and lake never puts it in a URL.
+  request came over HTTPS. Page scripts never see it, and Lake never puts it in a URL.
 - Passwords and identity documents travel only in request bodies, never in an address.
 - When a session ends or is revoked, the page says *Your session has ended* and offers **Sign in
   again**, which brings you back to the same page.
@@ -58,8 +58,8 @@ From then on, password sign-in asks for a code. Without MFA, an action that requ
 ### Register a Passkey
 
 Open the account menu → **Passkeys** and press **Register passkey**. A registered passkey appears as
-a device on **Sessions**, where you can revoke it. lake signs a binding between the passkey and
-your TAAP identity, so the binding can be checked later. (Passkeys are not offered on lake instances
+a device on **Sessions**, where you can revoke it. Lake signs a binding between the passkey and
+your TAAP identity, so the binding can be checked later. (Passkeys are not offered on Lake instances
 that sign in through Clerk.)
 
 ### Review and Revoke Sessions
@@ -105,20 +105,20 @@ workspaces. For example, `POST /v1/create_token` for a seven-day read-only key:
 {"name": "warehouse reader", "scopes": ["list_repositories", "get_repository", "workspace_sql"], "expires_in_seconds": 604800}
 ```
 
-The secret is shown once; lake keeps only its hash.
+The secret is shown once; Lake keeps only its hash.
 
 ## Cross-Site Requests
 
-Ship apps are served on addresses next to lake's own, so a page of an app is *same-site* with lake
-and a browser would send lake's cookie along with its requests. lake therefore refuses any unsafe
+Ship apps are served on addresses next to Lake's own, so a page of an app is *same-site* with Lake
+and a browser would send Lake's cookie along with its requests. Lake therefore refuses any unsafe
 request (`POST`, `PUT`, `PATCH`, `DELETE`) authenticated only by the `lake_session` cookie when:
 
 - `Sec-Fetch-Site` is present and is not `same-origin`;
-- `Origin` is present and is not lake's own origin (including `Origin: null`); or
+- `Origin` is present and is not Lake's own origin (including `Origin: null`); or
 - it is a `POST` to `/v1/<capability>` or `/mcp` whose `Content-Type` is not `application/json`.
 
 The refusal is `403 unauthorized`: *Cross-site requests cannot use the browser session.* Calls with
-`Authorization: Bearer` are not affected, from any origin. A script, an app or a tool that calls lake
+`Authorization: Bearer` are not affected, from any origin. A script, an app or a tool that calls Lake
 sends a key, never a copied cookie.
 
 ## Permissions
@@ -146,8 +146,8 @@ Who has access to one object, with the source of each grant, is
 
 - **Workspace data stays in the workspace.** Datasets, runs, models, transcripts, Ask Orama
   conversations, repository descriptions, issues and reviews, app settings, secrets and the
-  workspace's own audit are records in that workspace, never in lake's central database.
-- **Sealed.** lake seals each record with the workspace's key (AES-256-GCM) and finds it by a keyed
+  workspace's own audit are records in that workspace, never in Lake's central database.
+- **Sealed.** Lake seals each record with the workspace's key (AES-256-GCM) and finds it by a keyed
   hash of its name, so the workspace's storage holds only ciphertext. A record copied to another
   workspace or another place does not open.
 - **Central data is about access only**: accounts and their workspaces, memberships and grants,
@@ -167,7 +167,7 @@ Who has access to one object, with the source of each grant, is
 - **Ask Orama works as you.** Each turn gets a key that exists for that turn only, derived from your
   own credential, carrying every read capability and no action. It is revoked when the turn ends.
 - **Changes are proposals.** When an agent wants to change something, it shows a proposal; only
-  **Confirm** runs it, as you, through the ordinary permission check and audit. Only a proposal lake
+  **Confirm** runs it, as you, through the ordinary permission check and audit. Only a proposal Lake
   stored in your own conversation can be confirmed.
 - **Builders show the exact result first.** ApplicationAgent and ExperimentsAgent show the complete
   app or experiment before anything is written, and only a second turn carrying the exact proposal you
@@ -182,7 +182,7 @@ See [Ask Orama](/docs/ask-orama) and [Agents](/docs/agents).
 - A repository is private unless it is made public. A signed-out visitor sees only public
   repositories; any other address sends them to sign in without saying whether it exists.
 - A share link opens one folder, read-only or with the role it was made with, until its required
-  expiry. lake keeps only a digest of the link's token. Every open, preview and download checks the
+  expiry. Lake keeps only a digest of the link's token. Every open, preview and download checks the
   link's scope, role, expiry and revocation again, and a guessed parent or sibling folder is
   refused. Revoking a link stops its next use; a copy someone already downloaded cannot be recalled.
 
@@ -192,7 +192,7 @@ See [Sharing and Shared with Me](/docs/sharing).
 
 Every capability call is recorded: who (the TAAP identity, and the agent if one acted for them),
 what, on which object, the outcome (including denials and invalid input) and when. Events are
-signed with lake's identity, and each names the digest of the event before it, so a removed or
+signed with Lake's identity, and each names the digest of the event before it, so a removed or
 changed event breaks the chain.
 
 - **Two kinds of log.** Sign-in, sessions, keys, organizations, memberships, grants and workspaces
@@ -214,7 +214,7 @@ whole workspace rolled back by whoever runs its storage.
 
 ## Transparency
 
-lake appends signed attestations (for example agent delegations and secret lease lifecycles) to an
+Lake appends signed attestations (for example agent delegations and secret lease lifecycles) to an
 append-only Merkle log, and publishes signed checkpoints that bind its size and root. Checkpoints
 can require witness cosignatures before they become current. Anyone can check, without a key:
 
@@ -224,7 +224,7 @@ can require witness cosignatures before they become current. Anyone can check, w
   than returning partial results. The **Transparency Monitor** page (`/transparency`) runs it: enter
   an identity and press **Scan**.
 - `GET /v1/transparency_proof_bundle?leaf_index=0`: a self-contained bundle (checkpoint, tiles and an
-  inclusion proof) that liquid's verifier checks offline, with no further call to lake.
+  inclusion proof) that liquid's verifier checks offline, with no further call to Lake.
 
 Two different checkpoints for the same log size are evidence of a split view, and liquid's verifier
 refuses the second.

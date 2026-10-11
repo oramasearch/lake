@@ -385,7 +385,7 @@ function HeldOut({ details }: { details: RunDetail[] }) {
           <p className="muted mb-0 mt-2 text-[12.5px]">Measured on rows the model never trained on. Higher is better, except for losses and errors.</p>
         </>
       ) : (
-        <p className="muted m-0 text-[13px]">No held-out score was recorded. The run held no rows out, or it ran before lake recorded held-out scores; its run report may still have one.</p>
+        <p className="muted m-0 text-[13px]">No held-out score was recorded. The run held no rows out, or it ran before Lake recorded held-out scores; its run report may still have one.</p>
       )}
     </Card>
   );

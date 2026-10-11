@@ -41,7 +41,7 @@ function Conflicts({ id }: { id: string }) {
   const r = repository.data!;
   const rows = itemsOf(conflicts.data);
   return (
-    <ForgePage title="Conflicts" repository={r} tab="conflicts" sub="Concurrent values lake preserved instead of choosing one. Compare them, then keep one.">
+    <ForgePage title="Conflicts" repository={r} tab="conflicts" sub="Concurrent values Lake preserved instead of choosing one. Compare them, then keep one.">
       {rows.length === 0 ? (
         <Empty icon={CircleCheck} title="No conflicts">
           No unresolved conflict values.

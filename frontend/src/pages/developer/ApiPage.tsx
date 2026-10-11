@@ -48,7 +48,7 @@ export default function ApiPage() {
     <Page
       eyebrow="Developer"
       title="API"
-      sub={`Call lake from a program as ${who}. Every page on this site, Ask Orama and the MCP server use this same API: one registry, REST under /v1, OpenAPI and MCP.`}
+      sub={`Call Lake from a program as ${who}. Every page on this site, Ask Orama and the MCP server use this same API: one registry, REST under /v1, OpenAPI and MCP.`}
       actions={
         <>
           <DownloadButton path="/v1/openapi.json" filename="lake-openapi.json" transform={prettyJson}>
@@ -163,7 +163,7 @@ function QuickStart({ keyValue }: { keyValue: string | null }) {
         <CodeBlock
           title="in a workspace: /w/<id>/v1"
           code={`curl -s "${base}/w/${workspace}/v1/workspace_status?customer_id=${customer}&workspace_id=${workspace}" \\\n  -H "Authorization: Bearer ${key}"`}
-          note="Under /w/<workspace id>, lake fills workspace_id from the address and refuses a different one; the pages call it this way."
+          note="Under /w/<workspace id>, Lake fills workspace_id from the address and refuses a different one; the pages call it this way."
         />
         <CodeBlock title="the whole contract" code={`curl -s ${base}/v1/openapi.json > lake-openapi.json`} note="OpenAPI 3.1. Load it into Postman, Insomnia or any OpenAPI tool." />
       </div>
@@ -183,7 +183,7 @@ function QuickStart({ keyValue }: { keyValue: string | null }) {
         </Card>
         <Card title="Workspaces">
           <p className="m-0 text-[12.5px] leading-relaxed text-ink-2">
-            Every Design, Train and Ship call names your space (<code>customer_id</code>) and workspace (<code>workspace_id</code>); lake never guesses. A
+            Every Design, Train and Ship call names your space (<code>customer_id</code>) and workspace (<code>workspace_id</code>); Lake never guesses. A
             workspace's own capabilities are reached through <code>workspace_query</code> and <code>workspace_act</code>.
           </p>
         </Card>

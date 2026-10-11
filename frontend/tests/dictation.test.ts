@@ -27,5 +27,5 @@ test("not_supported means the lake has no speech-to-text, and nothing else does"
   assert.equal(isNotSupported(new Error("network")), false);
   assert.equal(isNotSupported(null), false);
   assert.ok(MICROPHONE_GONE.startsWith(NOT_CONFIGURED));
-  assert.equal(NOT_CONFIGURED, "Speech-to-text is not configured on this lake.");
+  assert.equal(NOT_CONFIGURED, "Speech-to-text is not configured on this Lake.");
 });

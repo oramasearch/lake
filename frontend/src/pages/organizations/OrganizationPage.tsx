@@ -608,7 +608,7 @@ function ApplicationsTab({ organizationId }: { organizationId: string }) {
           <KeyValue
             rows={[
               ["Pool", application.pool_id ? <Mono short={20}>{application.pool_id}</Mono> : null],
-              ["Domain", application.custom_sign_in_domain || "lake domain"],
+              ["Domain", application.custom_sign_in_domain || "Lake domain"],
             ]}
           />
         </Card>

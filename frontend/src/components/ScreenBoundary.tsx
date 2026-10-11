@@ -15,7 +15,7 @@ class Boundary extends Component<{ children: ReactNode; resetKey: string }, Stat
   }
 
   componentDidCatch(error: Error) {
-    console.error("lake screen error:", error);
+    console.error("Lake screen error:", error);
   }
 
   componentDidUpdate(prev: { resetKey: string }) {
@@ -27,7 +27,7 @@ class Boundary extends Component<{ children: ReactNode; resetKey: string }, Stat
     return (
       <div className="page-container">
         <Notice tone="danger" title="This page hit an error">
-          The rest of lake still works: choose another page, or reload this one. The details are in the browser console.
+          The rest of Lake still works: choose another page, or reload this one. The details are in the browser console.
           <div className="mt-2">
             <Button onClick={() => window.location.reload()}>Reload</Button>
           </div>

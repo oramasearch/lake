@@ -50,7 +50,7 @@ The same upload through the API is `upload_dataset` inside `workspace_act`:
 
 ## Load a File from a Drive
 
-A CSV or JSONL file kept in a drive loads without leaving lake.
+A CSV or JSONL file kept in a drive loads without leaving Lake.
 
 1. Open **Data → Drives**, open the drive and go to the file's folder.
 2. In the file's menu (**⋯**) choose **Load as dataset**.
@@ -123,7 +123,7 @@ they came from and when they were saved.
 
 When the workspace runs a Postgres service (**Ship → Services**), the Connections card offers it
 under **Connect One of Your Services**. Press **Connect** beside a Ready service, or **Refresh** for
-one already connected. The workspace reaches it inside the cluster with the credential lake already
+one already connected. The workspace reaches it inside the cluster with the credential Lake already
 holds; you type no password, and none is shown. Other service kinds are not connectable yet and say
 so.
 
@@ -145,7 +145,7 @@ Add `"name"` to choose the connection's name; it defaults to the service's name.
 3. Press **Save connection**.
 
 Use a read-only account: only a single `SELECT` ever runs against it. The password is sent to the
-workspace once, which stores it and never returns it; lake keeps no copy. Through the API this is
+workspace once, which stores it and never returns it; Lake keeps no copy. Through the API this is
 `create_connection` inside `workspace_act`; `list_connections` inside `workspace_query` lists
 connections without their credentials.
 
@@ -258,7 +258,7 @@ to this workspace. It shows whether or not the workspace is ready.
 4. Press **Create storage**. The card checks again every 3 seconds while a store is changing; it reads *Waiting
    for the operator*, then *Connecting*, then Ready.
 5. Once Ready, **Show connection** shows what a service mounts to use it. It is shown once and
-   not stored by lake.
+   not stored by Lake.
 
 `POST /v1/create_store`
 
@@ -296,9 +296,9 @@ members hold `read` unless they were granted more ([Grants and Effective Access]
 | `invalid_input` naming a line | The CSV is malformed at that line; fix the header, the quoting or the field count. |
 | `invalid_input` at `/input/table_name` | The name is not a valid SQL name; use letters, digits and underscores. |
 | `invalid_input` at `/statement` | The query does not start with `SELECT` or `WITH` (the message quotes how it starts), or holds several statements. |
-| *This workspace requires an approval before it reaches an outside database* | The workspace enforces consent for outside sources, which lake cannot give (`consent_required`). |
+| *This workspace requires an approval before it reaches an outside database* | The workspace enforces consent for outside sources, which Lake cannot give (`consent_required`). |
 | `workspace_not_ready` | The workspace is starting. Wait until **Ship → Workspaces** shows it Ready, or press **Start** on the page. |
-| *Connecting* on a store for a long time | The operator has made it but its connection has not reached lake yet. |
+| *Connecting* on a store for a long time | The operator has made it but its connection has not reached Lake yet. |
 | `unauthorized` | You have `read` but not `write` on the account; ask an owner or admin. |
 
 ## Related Pages

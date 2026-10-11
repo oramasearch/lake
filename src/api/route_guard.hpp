@@ -85,7 +85,7 @@ inline boost::http::route_task answer_route_failure(boost::http::route_params& r
                                                     RouteFailure failure) {
     namespace http = boost::http;
     const std::string message =
-        "lake could not answer this request. Request id: " + failure.request_id;
+        "Lake could not answer this request. Request id: " + failure.request_id;
     const bool html = route_failure_wants_html(route);
     const std::string body =
         html ? web_ui_error("500", message)

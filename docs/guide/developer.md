@@ -1,6 +1,6 @@
 # REST API and OpenAPI
 
-Everything you can do in lake's web app is also a REST call and an MCP tool. One capability
+Everything you can do in Lake's web app is also a REST call and an MCP tool. One capability
 registry defines each operation once: its name, its input and output schemas, who may call it and
 what it records in the audit log. REST under `/v1`, the OpenAPI document and the MCP server are
 three renderings of that registry, so they accept the same input, check the same permissions and
@@ -27,7 +27,7 @@ Failure:
 - `code` is always one of the codes in [Error Codes](#error-codes), and the HTTP status follows it.
 - `path` is a JSON pointer to the input field at fault whenever your input is at fault, and empty
   otherwise. Show it next to the field.
-- `duration_ms` is how long lake took.
+- `duration_ms` is how long Lake took.
 
 ## Concepts
 
@@ -36,16 +36,16 @@ Failure:
 | **Capability** | One operation, such as `list_repositories` or `create_workspace`. Its name is the REST path, the MCP tool name and the OpenAPI `operationId`. |
 | **Read** | A capability that changes nothing. Call it with `GET`, its input in the query string. |
 | **Action** | A capability that changes something (or, like `predict`, takes a body). Call it with `POST` and a JSON body. |
-| **Key** | A lake API token: `Authorization: Bearer <key>`. It acts as you, limited to the capabilities it names. |
+| **Key** | A Lake API token: `Authorization: Bearer <key>`. It acts as you, limited to the capabilities it names. |
 | **`customer_id`** | The id of the account that owns your workspaces (yours, or your organization's). |
-| **`workspace_id`** | The workspace a call is about. Design, Train, Ship, Transcripts and Ask Orama calls require it; lake never picks one for you. |
+| **`workspace_id`** | The workspace a call is about. Design, Train, Ship, Transcripts and Ask Orama calls require it; Lake never picks one for you. |
 
 ## Make Your First Call
 
 1. Open **Developer → API**. The strip at the top shows the base URL (`<origin>/v1`) with **Copy**.
 2. On the **Keys** tab, choose what the key may do (**Every operation**, **Read-only** or **Named
    capabilities**) and a lifetime, then press **Create an API key**. The key is shown once, under
-   *Your New Key: Copy It Now*; lake keeps only its hash. Store it, then press **I've stored it**.
+   *Your New Key: Copy It Now*; Lake keeps only its hash. Store it, then press **I've stored it**.
 3. Open the **Quick start** tab. Its blocks are filled in with your origin and, until you leave the
    page, your new key: who you are, a list read, an action, a call inside a workspace, and the
    same from JavaScript.
@@ -56,14 +56,14 @@ curl -s https://lake.oramadev.net/v1/viewer -H "Authorization: Bearer $LAKE_KEY"
 ```
 
 `viewer` needs no key; with one it names you and the workspaces you can open. Replace
-`lake.oramadev.net` with your lake's address wherever it appears on this page.
+`lake.oramadev.net` with your Lake's address wherever it appears on this page.
 
 ### Send a User-Agent
 
 Every call must carry a `User-Agent` header that names your program. `curl`, Python `requests`,
 Node's `fetch` and browsers send one already. Python's built-in `urllib` sends
 `Python-urllib/3.x`, which the network edge in front of lake.oramadev.net refuses before the call
-reaches lake: the answer is `403` with the plain-text body `error code: 1010`, not lake's JSON
+reaches Lake: the answer is `403` with the plain-text body `error code: 1010`, not Lake's JSON
 envelope. Name your script instead:
 
 ```
@@ -220,7 +220,7 @@ Each capability's page in [Docs](/docs) and its OpenAPI operation name the input
 | `unauthenticated` | 401 | No credential was accepted. See [When a Key Is Refused](#when-a-key-is-refused). |
 | `unauthorized` | 403 | The credential is valid but does not grant this call on this object. |
 | `mfa_required` | 403 | Finish multi-factor verification first. |
-| `consent_required` | 403 | The workspace requires an approval lake cannot give. |
+| `consent_required` | 403 | The workspace requires an approval Lake cannot give. |
 | `not_found` | 404 | The object does not exist, or you cannot see it. |
 | `unknown_capability` | 404 | No capability has this name. |
 | `method_not_allowed` | 405 | Reads are `GET`, actions `POST`. |
@@ -233,7 +233,7 @@ Each capability's page in [Docs](/docs) and its OpenAPI operation name the input
 | `size_invalid` | 413 | The request body or a value in it is over its limit. |
 | `rate_limited` | 429 | Too many long requests are waiting; retry after `Retry-After`. |
 | `store_error`, `corrupt`, `io`, `crypto_error` | 500 | The server failed; the message says what. |
-| `not_supported` | 501 | This lake or its workspace engine cannot do this yet. |
+| `not_supported` | 501 | This Lake or its workspace engine cannot do this yet. |
 | `engine_error` | 422 | The workspace engine or an outside service refused the call (a SQL typo, unreadable audio); the message is its own. |
 | `store_unavailable`, `busy` | 503 | A dependency is unreachable or busy; retry. |
 | `workspace_not_ready` | 503 | The workspace exists but is not ready. |
@@ -243,7 +243,7 @@ Any other failure is answered as `store_error`, so you never meet an undocumente
 
 ## When a Key Is Refused
 
-A call that needs a credential and gets none lake accepts answers `401 unauthenticated` with a
+A call that needs a credential and gets none Lake accepts answers `401 unauthenticated` with a
 `WWW-Authenticate: Bearer` challenge, a `reason` and a `help` link to **Developer → MCP**:
 
 - `missing`: no `Authorization` header and no session cookie.
@@ -264,20 +264,20 @@ instead. Lake tells `expired` apart only once the secret itself matches, so a gu
 
 ## Server and Agent Documents
 
-- `GET /v1/server_info` answers lake's name, version and source revision, with no key.
-- `/llms.txt` describes lake in one page for an AI agent: what it is, how to connect, every tool by
+- `GET /v1/server_info` answers Lake's name, version and source revision, with no key.
+- `/llms.txt` describes Lake in one page for an AI agent: what it is, how to connect, every tool by
   group and the rules an agent keeps. `/llms-full.txt` adds each tool's description and input
   schema. Both are public and generated from the same registry, so they list exactly the tools the
   server has.
-- The lake skill (`/skills/lake/SKILL.md`) teaches an agent the same; [MCP Setup](/docs/mcp#teach-your-agent)
+- The Lake skill (`/skills/lake/SKILL.md`) teaches an agent the same; [MCP Setup](/docs/mcp#teach-your-agent)
   installs it.
 
 ## Calling From a Browser on Another Site
 
 Bearer calls work from any origin. Lake's browser session cookie does not: a `POST` that only the
-`lake_session` cookie authenticates must come from lake's own origin and be `application/json`, or
+`lake_session` cookie authenticates must come from Lake's own origin and be `application/json`, or
 it is refused with `unauthorized` (*Cross-site requests cannot use the browser session.*). A script
-or app outside lake therefore always sends a key. [Security Model](/docs/security#cross-site-requests)
+or app outside Lake therefore always sends a key. [Security Model](/docs/security#cross-site-requests)
 says why.
 
 ## Troubleshooting
@@ -292,8 +292,8 @@ says why.
 - **`403` with the body `error code: 1010`**, not JSON: the edge refused your program's
   `User-Agent` (Python's `urllib` default). Send your own; see
   [Send a User-Agent](#send-a-user-agent).
-- **A `502` or `504` HTML page**: it came from the edge, not from lake, which never answers either
-  (an engine refusal is `422 engine_error` with lake's message). lake was unreachable or the call ran
+- **A `502` or `504` HTML page**: it came from the edge, not from Lake, which never answers either
+  (an engine refusal is `422 engine_error` with Lake's message). Lake was unreachable or the call ran
   past the edge's 100-second limit; retry, and split a very long recording.
 - **`workspace_not_ready`**: the workspace is starting. See
   [Workspaces](/docs/workspaces).

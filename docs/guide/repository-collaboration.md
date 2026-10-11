@@ -50,7 +50,7 @@ To open a review, comment and approve:
   `GET /v1/list_review_comments?repository_id=<repository id>` (MCP `list_reviews`,
   `list_review_comments`).
 
-From a checkout, `liquid review` does the same against lake: `list`, `show`, `open`, `comment`,
+From a checkout, `liquid review` does the same against Lake: `list`, `show`, `open`, `comment`,
 `approve`, `close` and `watch`, with `--lake <repository URL>` ([The liquid CLI](/docs/cli)).
 
 An approved review matters to branch protection: a rule that requires review accepts a push only
@@ -132,7 +132,7 @@ From a checkout, `liquid conflicts` lists them and `liquid conflict resolve <pat
 The **Artifacts** tab (titled **Build Results**) lists the build actions recorded in the
 repository, with figures for cache hits, failures and divergent outputs. Filter by action, output
 path or content digest. Open a result to see its outputs, timing, cache and divergence state, the
-attestations lake verified, the trace it belongs to, and **Search inside** for text and source
+attestations Lake verified, the trace it belongs to, and **Search inside** for text and source
 members of its outputs.
 
 - List: `GET /v1/list_artifacts?id=<repository id>&limit=100` (MCP `list_artifacts`). Filters:
@@ -141,7 +141,7 @@ members of its outputs.
   `get_artifact`).
 
 Build results are written by liquid's build (`liquid wrap`, `liquid build`) and pushed with the
-repository; lake verifies their attestations when it reads them. A change's **Checks and
+repository; Lake verifies their attestations when it reads them. A change's **Checks and
 attestations** card shows the same results for that change.
 
 ## Publish a Release

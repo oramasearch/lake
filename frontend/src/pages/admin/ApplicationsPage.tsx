@@ -95,7 +95,7 @@ export default function ApplicationsPage() {
           <FilterChips
             options={[
               { id: "custom" as const, label: "Custom domain", count: custom },
-              { id: "lake" as const, label: "lake domain", count: listed.length - custom },
+              { id: "lake" as const, label: "Lake domain", count: listed.length - custom },
             ]}
             value={domain}
             onChange={setDomain}
@@ -118,7 +118,7 @@ export default function ApplicationsPage() {
     <Page
       eyebrow="Administration"
       title="Applications"
-      sub="Hosted sign-in and user pools for the products you build on lake."
+      sub="Hosted sign-in and user pools for the products you build on Lake."
       actions={
         <Button variant="primary" onClick={() => setRegistering(true)}>
           <Plus size={14} aria-hidden /> Register application
@@ -165,7 +165,7 @@ function ApplicationCard({ application, workspaceLabel, countUsers }: { applicat
             ) : null,
           ],
           ["Pool", <Mono short={18}>{application.pool_id}</Mono>],
-          ["Domain", application.custom_sign_in_domain || "lake domain"],
+          ["Domain", application.custom_sign_in_domain || "Lake domain"],
         ]}
       />
     </Card>

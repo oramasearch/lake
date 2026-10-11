@@ -90,7 +90,7 @@ export default function McpPage() {
       title="MCP"
       sub={
         <>
-          Connect Claude Code, Codex, Cursor, Claude Desktop or any MCP client to lake. The agent at the other end acts as you, with your permissions, and can do
+          Connect Claude Code, Codex, Cursor, Claude Desktop or any MCP client to Lake. The agent at the other end acts as you, with your permissions, and can do
           nothing your key does not allow. Every call is checked and audited as your own.
         </>
       }
@@ -155,13 +155,13 @@ export default function McpPage() {
           <p id="mcp-upgrades" className="m-0 flex gap-2 text-[12.5px] leading-relaxed text-ink-3">
             <Info size={13} className="mt-[3px] shrink-0" aria-hidden />
             <span>
-              <b className="font-semibold text-ink-2">After lake upgrades</b>, reconnect or restart your client. Lake tells a connected client when its tools change (
+              <b className="font-semibold text-ink-2">After Lake upgrades</b>, reconnect or restart your client. Lake tells a connected client when its tools change (
               <code>notifications/tools/list_changed</code>), but a client connected before an upgrade, or one that ignores the notice, keeps the tools it first listed.
             </span>
           </p>
         </Step>
 
-        <Step n={3} title="Teach Your Agent" aside="The skill tells an agent what lake is, which tool to use for what, the worked flows and the rules it must keep.">
+        <Step n={3} title="Teach Your Agent" aside="The skill tells an agent what Lake is, which tool to use for what, the worked flows and the rules it must keep.">
           <TeachAgent key={client} origin={origin} client={client} />
         </Step>
 
@@ -169,14 +169,14 @@ export default function McpPage() {
           n={4}
           id="tools"
           title="What the Tools Do"
-          aside="One tool per capability, in lake's product groups: the same list tools/list serves. A read-only key sees every tool and is refused the writes."
+          aside="One tool per capability, in Lake's product groups: the same list tools/list serves. A read-only key sees every tool and is refused the writes."
         >
           <Query q={setup} what="the MCP tools" lines={8}>
             {(value) => <Tools setup={value} />}
           </Query>
         </Step>
 
-        <Step n={5} title="Worked Flows" aside="The tools an agent calls, in order, for the jobs people ask of lake most.">
+        <Step n={5} title="Worked Flows" aside="The tools an agent calls, in order, for the jobs people ask of Lake most.">
           <Query q={setup} what="the worked flows" lines={4}>
             {(value) => <Flows setup={value} />}
           </Query>
@@ -290,7 +290,7 @@ function TeachAgent({ origin, client }: { origin: string; client: ClientId }) {
     <Card>
       <div className="flex flex-wrap items-center gap-2">
         <DownloadButton path="/skills/lake/SKILL.md" filename="SKILL.md">
-          Download the lake skill
+          Download the Lake skill
         </DownloadButton>
         <DownloadButton path="/llms-full.txt" filename="lake-llms-full.txt">
           llms-full.txt
@@ -302,11 +302,11 @@ function TeachAgent({ origin, client }: { origin: string; client: ClientId }) {
       </div>
       <ul className="mt-3 mb-4 space-y-1 pl-5 text-[12.5px] text-ink-2">
         <li>
-          <b className="text-ink">The lake skill</b>: a <code>SKILL.md</code> with the setup, the tools for each job, the flows and the rules. It is public, so the
-          commands below fetch it straight from lake.
+          <b className="text-ink">The Lake skill</b>: a <code>SKILL.md</code> with the setup, the tools for each job, the flows and the rules. It is public, so the
+          commands below fetch it straight from Lake.
         </li>
         <li>
-          <b className="text-ink">llms.txt</b>: lake in one page for any agent; <b className="text-ink">llms-full.txt</b> adds every tool with its input schema.
+          <b className="text-ink">llms.txt</b>: Lake in one page for any agent; <b className="text-ink">llms-full.txt</b> adds every tool with its input schema.
         </li>
         <li>
           <b className="text-ink">OpenAPI</b>: the same tools as REST, <code>GET /v1/&lt;tool&gt;</code> for a read and <code>POST /v1/&lt;tool&gt;</code> for an action.

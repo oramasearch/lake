@@ -259,7 +259,7 @@ export function AskMessages({
     <section className="panel ask-conversation" aria-live="polite">
       {error ? <ErrorBlock error={error} what="this conversation" /> : null}
       {loading && <Skeleton lines={2} />}
-      {!loading && !list.length && <p>Ask anything about your lake: your repositories, projects, data, runs, models, services or agents.</p>}
+      {!loading && !list.length && <p>Ask anything about your Lake: your repositories, projects, data, runs, models, services or agents.</p>}
       {list.map((message) => {
         const person = message.role === "user";
         const payload = message.payload && typeof message.payload === "object" ? message.payload : null;

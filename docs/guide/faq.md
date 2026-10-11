@@ -1,16 +1,16 @@
 # FAQ and Troubleshooting
 
-Answers to the questions people ask most, and what to do about the messages lake shows. Each answer
+Answers to the questions people ask most, and what to do about the messages Lake shows. Each answer
 links the page with the details. An error from the API always carries a `code` and, when your input
 is at fault, a `path` to the field; [REST API and OpenAPI](/docs/developer#error-codes) lists every
 code.
 
 ## Workspaces
 
-### Why does lake say `workspace_id is required`?
+### Why does Lake say `workspace_id is required`?
 
 A workspace is where your data, projects, runs and models live, and the account that owns your
-workspaces can have several. lake never guesses which one you mean, so every Design, Train, Ship,
+workspaces can have several. Lake never guesses which one you mean, so every Design, Train, Ship,
 Transcripts and Ask Orama call names one.
 
 - In the web app, the workspace is in the address: `/w/<workspace id>/…`. The picker in the top bar
@@ -30,7 +30,7 @@ never started. A Design, Train or Ship page shows which:
 - **Preparing Your Workspace**: wait; the page checks again every 15 seconds.
 - **Start Your Workspace**: press **Start your workspace**.
 - **Your Workspace Could Not Be Prepared**: the operator's message says why; contact whoever runs
-  your lake.
+  your Lake.
 
 From the API, poll `GET /v1/workspace_status?customer_id=<customer id>&workspace_id=<workspace id>`
 until `ready` is true. Details: [Workspaces](/docs/workspaces).
@@ -68,7 +68,7 @@ Details: [Workspaces](/docs/workspaces).
 
 What you put in a workspace (datasets, runs, models, transcripts, Ask Orama conversations,
 repository descriptions, issues and reviews, secrets, the workspace's own audit) is kept in that
-workspace itself, sealed with the workspace's key. lake's central database keeps only
+workspace itself, sealed with the workspace's key. Lake's central database keeps only
 accounts, memberships, grants, sign-in and the routing that says which workspace holds what.
 Recordings sent for speech-to-text are never kept. Details: [Security Model](/docs/security#where-your-data-lives).
 
@@ -93,9 +93,9 @@ Details: [REST API and OpenAPI](/docs/developer#when-a-key-is-refused), [Tokens 
 
 ### What is the difference between `unauthorized` and `not_found`?
 
-`unauthorized` (403) means lake knows who you are, but you, or the key you used, may not make this
+`unauthorized` (403) means Lake knows who you are, but you, or the key you used, may not make this
 call on this object: ask an administrator for a grant, or use a key that names the capability.
-`not_found` (404) means the object does not exist, or you cannot see it; lake does not tell the two
+`not_found` (404) means the object does not exist, or you cannot see it; Lake does not tell the two
 apart, so it never reveals what exists to someone who may not see it. Details:
 [Grants and Effective Access](/docs/access).
 
@@ -107,7 +107,7 @@ ask its owner to share it. Details: [Repositories](/docs/repositories).
 
 ### My script works with the browser's cookie and fails from another site. Why?
 
-A `POST` that only lake's session cookie authenticates must come from lake's own origin and be
+A `POST` that only Lake's session cookie authenticates must come from Lake's own origin and be
 `application/json`; otherwise it answers `unauthorized` with *Cross-site requests cannot use the
 browser session.* This stops a page on another site from acting as you. Scripts and apps send a key
 (`Authorization: Bearer <key>`), which works from anywhere. Details:
@@ -145,15 +145,15 @@ way: choose another name. Details: [Datasets and Loading Data](/docs/load-data).
 
 ### Why are Record and Upload audio turned off?
 
-This lake has no speech-to-text configured: the page says *Speech-to-text is not configured on this
-lake.*, and the API answers `not_supported`. Uploading a text, `.vtt` or `.srt` file and pasting
-still work. Ask whoever runs your lake to configure speech-to-text. Details:
+This Lake has no speech-to-text configured: the page says *Speech-to-text is not configured on this
+Lake.*, and the API answers `not_supported`. Uploading a text, `.vtt` or `.srt` file and pasting
+still work. Ask whoever runs your Lake to configure speech-to-text. Details:
 [Transcripts and Speech-to-Text](/docs/transcripts).
 
 ### A long recording failed with a 504. What happened?
 
-lake waits while the audio is transcribed, but the proxies in front of lake close a response after
-about 60 to 100 seconds. A recording that takes longer to transcribe answers 504 even though lake
+Lake waits while the audio is transcribed, but the proxies in front of Lake close a response after
+about 60 to 100 seconds. A recording that takes longer to transcribe answers 504 even though Lake
 finishes the call. Short recordings fit well within it; split a long one, or upload a transcript the
 recorder already made (`.vtt`, `.srt` or text). Audio is limited to 25 MiB. Details:
 [Transcripts and Speech-to-Text](/docs/transcripts).
@@ -187,13 +187,13 @@ yet says *Trains nothing yet*. Details: [Train a Model](/docs/train).
 ### Why is an agent unavailable?
 
 The Agent Library (**Design → Agent Library**) says, for each agent Orama provides, whether it is
-**Available** here. An agent that is not deployed on your lake is shown as such, and the pages that
+**Available** here. An agent that is not deployed on your Lake is shown as such, and the pages that
 use it (for example **Run an Experiment** on Train → Experiments) explain that it is unavailable and
 disable sending. Details: [Agents](/docs/agents).
 
 ### Why was my confirmation refused?
 
-lake runs only the exact proposal you reviewed:
+Lake runs only the exact proposal you reviewed:
 
 - Ask Orama confirms only a proposal it stored in your own conversation; anything else answers
   *That proposal is not in this conversation.*
@@ -227,19 +227,19 @@ until it is ready. Details: [Workspaces](/docs/workspaces).
 
 ## Getting Help
 
-### Where can an agent learn lake?
+### Where can an agent learn Lake?
 
-`/llms.txt` describes lake in one page, `/llms-full.txt` adds every tool with its input schema, and
-the lake skill (`/skills/lake/SKILL.md`) teaches an agent the flows and rules. All three are public.
+`/llms.txt` describes Lake in one page, `/llms-full.txt` adds every tool with its input schema, and
+the Lake skill (`/skills/lake/SKILL.md`) teaches an agent the flows and rules. All three are public.
 Details: [MCP Setup](/docs/mcp#teach-your-agent).
 
 ### Where else can I look?
 
 - **Search** in the Data section searches these Docs alongside your repositories, datasets and
   transcripts.
-- **Ask Orama**, at the top of every page, answers questions from what you can read in lake.
+- **Ask Orama**, at the top of every page, answers questions from what you can read in Lake.
 - **Organization → Activity** shows what you did and what was refused, with the reason.
-- `GET /v1/server_info` names the lake version and revision to quote when you report a problem.
+- `GET /v1/server_info` names the Lake version and revision to quote when you report a problem.
 
 ## Related Pages
 

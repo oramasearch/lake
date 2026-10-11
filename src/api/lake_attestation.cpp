@@ -45,7 +45,7 @@ std::expected<LakeAttestation, ApiError> sign_lake_attestation(ApiContext& conte
     if (!identity) {
         return std::unexpected(ApiError{
             identity.error().code.empty() ? "store_unavailable" : identity.error().code,
-            "lake cannot sign " + std::string(what) + "'s attestation: " + identity.error().message,
+            "Lake cannot sign " + std::string(what) + "'s attestation: " + identity.error().message,
             {}});
     }
     LakeAttestation out;
@@ -62,7 +62,7 @@ std::expected<LakeAttestation, ApiError> sign_lake_attestation(ApiContext& conte
     if (!signature) {
         return std::unexpected(
             ApiError{signature.error().code.empty() ? "store_unavailable" : signature.error().code,
-                     "lake could not sign " + std::string(what) +
+                     "Lake could not sign " + std::string(what) +
                          "'s attestation: " + signature.error().message,
                      {}});
     }
@@ -82,9 +82,9 @@ std::expected<void, ApiError> check_supplied_digest(const json& input,
     }
     return std::unexpected(ApiError{
         "invalid_input",
-        "lake makes and signs " + std::string(what) +
+        "Lake makes and signs " + std::string(what) +
             "'s attestation itself: leave attestation_digest out. A digest is accepted only when "
-            "it is the one lake answered for this same change.",
+            "it is the one Lake answered for this same change.",
         "/attestation_digest"});
 }
 

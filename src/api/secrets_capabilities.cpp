@@ -674,7 +674,7 @@ void register_encryption_key_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "create_encryption_key",
         .title = "Create encryption key",
-        .description = "Create a named versioned key whose material remains inside lake.",
+        .description = "Create a named versioned key whose material remains inside Lake.",
         .input_schema = mount_input({{"name", {{"type", "string"}}}}, json::array({"name"})),
         .output_schema = object_schema(),
         .kind = CapabilityKind::Action,
@@ -682,8 +682,8 @@ void register_encryption_key_capabilities(Registry& registry) {
         .action = "write",
         .resolve_object = mount_object("encryption"),
         .resolves_operator_audit_target = true,
-        .async_handler = on_mount([](const json& input, ApiContext& context,
-                                     MountSecrets& mount) -> liquid::runtime::task<ApiResult> {
+        .async_handler = on_mount([](const json& input, ApiContext& context, MountSecrets& mount)
+                                      -> liquid::runtime::task<ApiResult> {
             auto created = control::settled(co_await mount.create_key(input.at("name")));
             if (created) {
                 context.audit_details["version"] = created->current_version;
@@ -809,7 +809,7 @@ void register_encryption_value_capabilities(Registry& registry) {
                      });
     add_value_action("decrypt",
                      "Decrypt",
-                     "Decrypt lake ciphertext with the version embedded in its envelope.",
+                     "Decrypt Lake ciphertext with the version embedded in its envelope.",
                      "ciphertext",
                      [](MountSecrets& mount, std::string name, std::string value) {
                          return mount.decrypt(std::move(name), std::move(value));

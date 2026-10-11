@@ -267,7 +267,7 @@ liquid::runtime::task<Heard> transcribe_audio(ApiContext& context,
                                               std::string name_path) {
     if (!context.transcriber) {
         co_return refused_audio(
-            ApiResult::failure("not_supported", "Speech-to-text is not configured on this lake."));
+            ApiResult::failure("not_supported", "Speech-to-text is not configured on this Lake."));
     }
     // A text file is refused here, not sent to be called corrupt (lake#594).
     if (std::string reason = not_audio_reason(name); !reason.empty()) {
@@ -545,9 +545,9 @@ void register_transcript_capabilities(Registry& registry) {
         .name = "transcribe",
         .title = "Transcribe audio",
         .description =
-            "Turn a recording into text with speech-to-text (OpenAI, through lake's own key). "
+            "Turn a recording into text with speech-to-text (OpenAI, through Lake's own key). "
             "Nothing is stored and the audio is not kept: create_transcript saves a transcript. "
-            "not_supported when this lake has no speech-to-text configured.",
+            "not_supported when this Lake has no speech-to-text configured.",
         .input_schema = {{"type", "object"},
                          {"properties",
                           {{"name",

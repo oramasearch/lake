@@ -122,10 +122,12 @@ json counts_json(const std::vector<control::WorkspaceDeletionItem>& repositories
 // What goes with the workspace Zetta whatever lake does: every record lake keeps there (the
 // sealed lake_* collections) and the workspace's own audit chain.
 json zetta_json() {
-    return {{"records", "every lake record in the workspace's Zetta (the sealed lake_* collections), "
-                        "with its datasets, topics and stores"},
-            {"audit", "the workspace's own audit chain; the central log keeps one event per "
-                      "destroyed repository, app, build and image"}};
+    return {{"records",
+             "every Lake record in the workspace's Zetta (the sealed lake_* collections), "
+             "with its datasets, topics and stores"},
+            {"audit",
+             "the workspace's own audit chain; the central log keeps one event per "
+             "destroyed repository, app, build and image"}};
 }
 
 // Records one central event of a deletion unless it is already recorded (a resumed deletion).
@@ -358,7 +360,7 @@ std::expected<void, std::string> finish_workspace_deletion(const ApiContext& con
         } else if (!context.workspace_content && image.state != "routed") {
             // The registry lives in this lake's store root; only a lake that has it removes the
             // tags. The deletion stays pending until one does.
-            return std::unexpected("this lake has no registry storage to remove image " +
+            return std::unexpected("this Lake has no registry storage to remove image " +
                                    image.name + " from");
         }
         const auto recorded = record_once(context, deletion, "workspace.deletion.image",
