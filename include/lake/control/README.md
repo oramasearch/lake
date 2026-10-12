@@ -75,7 +75,8 @@ first mutable collection (Design → Opportunities, lake#376): derived keys, con
 writes; the retired `opportunities` table is dropped by migration `0070` with its legacy reads.
 `transcripts.hpp` (lake#561) is the transcripts codec: one record per transcript in its
 workspace, found by the space, never in PostgreSQL (`docs/api/transcripts.md`).
-`mcp_connections.hpp` (lake#652) is the MCP connection codec: the connection, the person's decision
+`mcp_connections.hpp` (lake#652) is the MCP connection codec (a stdio server's `app_id` and `stdio`,
+lake#659): the connection, the person's decision
 for each tool, the auto-approve grants and the streams, with its credential only named
 (`lake-secret://`), and the OAuth state codec (`docs/api/mcp-connections.md`). See
 `docs/architecture/workspace-records.md`. `drive_share_links.hpp` is the drive share link codec
@@ -231,6 +232,13 @@ operator reports a workload is scheduled with; `Store::workload_resources` lists
 `InvoiceLine::class_name` carry a GPU class rate and the class a line bills; `AgentLaunch::status_updated_at`
 is when the operator last wrote a launch's status (a finished job's end). See
 [metering](../../../docs/api/metering.md#resources).
+
+`store.hpp`'s `McpConnectionDispatch` (lake#684, lake#685, migration `0079_mcp_connection_dispatch`)
+is where a workspace's MCP connection needs Lake outside a request: whether it streams and the digest
+of the tools it re-exports. `put_mcp_connection_dispatch` writes or removes it,
+`mcp_stream_dispatch` lists the streaming rows for the stream worker and `mcp_exported_dispatch` a
+workspace's re-exporting rows for its MCP endpoint. See
+[mcp-connections.md](../../../docs/api/mcp-connections.md).
 
 `methodologies.hpp` (lake#655) is a workspace methodology's manifest, the findings Validate answers
 without running anything, drafts and copies of Orama's, the image's Dockerfile and the validation

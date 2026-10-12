@@ -428,6 +428,14 @@ public addresses and tool bounds, then the client over the server's own transpor
 `mcp_test_server.hpp`, a local MCP server (Streamable HTTP and HTTP+SSE, an OAuth authorization
 server, and hostile modes: slow, huge, garbage, another id first, a sampling request, endless
 events, an unknown version).
+`McpStdioConnectionsRunAsAWorkspaceApp` (lake#659) checks a stdio connection's secret, App, address
+and lifecycle; `McpClient.AWorkspaceAppIsReachedOnlyAtAClusterServiceName` the address rule, and
+`McpClient.DrivesAStdioServerThroughTheRunner` runs Lake's client through a running
+`lake-mcp-runner` when `LAKE_MCP_RUNNER_URL` and `LAKE_MCP_RUNNER_TOKEN` are set.
+`McpConnectionDispatchNamesExportsAndStreamingWorkspacesOnly` (lake#684, lake#685) checks the
+dispatch rows, the workspace endpoint's digest and that the stream worker calls only streaming
+workspaces; `HttpServer.WorkspaceMcpSessionsLearnThatExportedToolsChanged` drives the notice over
+`/w/<workspace>/mcp`.
 `test_workspace_records.cpp`'s `McpConnections*` cases run the MCP connection capabilities against
 that server with both stores: the sealed record and its secret, the read-or-change rule for people,
 Ask Orama and a user-built agent, auto-approve, the audit, the usage series, re-export through the

@@ -5893,6 +5893,103 @@ public:
         return {};
     }
 
+    Result<void> put_mcp_connection_dispatch(const McpConnectionDispatch& row) override {
+        if (!agent_task_uuid(row.customer_id) || !agent_task_uuid(row.workspace_id) ||
+            row.connection_id.empty()) {
+            return std::unexpected(
+                StoreError{"invalid_input", "not an MCP connection dispatch row"});
+        }
+        auto written = with_tx<bool>([&](pqxx::work& tx) -> Result<bool> {
+            if (!row.streams && row.exported_digest.empty()) {
+                tx.exec_params("DELETE FROM mcp_connection_dispatch WHERE workspace_id = $1::uuid "
+                               "AND connection_id = $2",
+                               row.workspace_id,
+                               row.connection_id);
+                return true;
+            }
+            const pqxx::result kept = tx.exec_params(
+                "INSERT INTO mcp_connection_dispatch (customer_id, workspace_id, connection_id, "
+                "streams, exported_digest) SELECT w.customer_id, w.id, $3, $4, $5 FROM workspaces "
+                "w WHERE w.id = $2::uuid AND w.customer_id = $1::uuid ON CONFLICT (workspace_id, "
+                "connection_id) DO UPDATE SET streams = EXCLUDED.streams, exported_digest = "
+                "EXCLUDED.exported_digest, updated_at = now() RETURNING 1",
+                row.customer_id,
+                row.workspace_id,
+                row.connection_id,
+                row.streams,
+                row.exported_digest);
+            if (kept.empty()) {
+                return std::unexpected(StoreError{"not_found", "workspace not found"});
+            }
+            return true;
+        });
+        if (!written) {
+            return std::unexpected(written.error());
+        }
+        return {};
+    }
+
+    Result<void> remove_mcp_connection_dispatch(const std::string& workspace_id,
+                                                const std::string& connection_id) override {
+        if (!agent_task_uuid(workspace_id)) {
+            return {};
+        }
+        auto removed = with_tx<bool>([&](pqxx::work& tx) -> Result<bool> {
+            tx.exec_params("DELETE FROM mcp_connection_dispatch WHERE workspace_id = $1::uuid AND "
+                           "connection_id = $2",
+                           workspace_id,
+                           connection_id);
+            return true;
+        });
+        if (!removed) {
+            return std::unexpected(removed.error());
+        }
+        return {};
+    }
+
+    static std::vector<McpConnectionDispatch> dispatch_rows(const pqxx::result& rows) {
+        std::vector<McpConnectionDispatch> out;
+        for (const auto& row : rows) {
+            out.push_back({row[0].as<std::string>(),
+                           row[1].as<std::string>(),
+                           row[2].as<std::string>(),
+                           row[3].as<bool>(),
+                           row[4].as<std::string>(),
+                           row[5].as<std::string>()});
+        }
+        return out;
+    }
+
+    Result<std::vector<McpConnectionDispatch>> mcp_stream_dispatch(int limit) override {
+        return with_tx<std::vector<McpConnectionDispatch>>(
+            [&](pqxx::work& tx) -> Result<std::vector<McpConnectionDispatch>> {
+                return dispatch_rows(tx.exec_params(
+                    "SELECT customer_id::text, workspace_id::text, connection_id, streams, "
+                    "exported_digest, " +
+                        utc_column("updated_at") +
+                        " FROM mcp_connection_dispatch WHERE streams ORDER BY workspace_id, "
+                        "connection_id LIMIT $1",
+                    std::max(limit, 0)));
+            });
+    }
+
+    Result<std::vector<McpConnectionDispatch>>
+    mcp_exported_dispatch(const std::string& workspace_id) override {
+        if (!agent_task_uuid(workspace_id)) {
+            return std::vector<McpConnectionDispatch>{};
+        }
+        return with_tx<std::vector<McpConnectionDispatch>>(
+            [&](pqxx::work& tx) -> Result<std::vector<McpConnectionDispatch>> {
+                return dispatch_rows(tx.exec_params(
+                    "SELECT customer_id::text, workspace_id::text, connection_id, streams, "
+                    "exported_digest, " +
+                        utc_column("updated_at") +
+                        " FROM mcp_connection_dispatch WHERE workspace_id = $1::uuid AND "
+                        "exported_digest <> '' ORDER BY connection_id",
+                    workspace_id));
+            });
+    }
+
     static std::string invoice_columns() {
         return "id::text, number, customer_id::text, period, plan_id, plan_name, currency, "
                "total_micros, state, provider, provider_reference, instructions, note, " +

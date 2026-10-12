@@ -18,7 +18,10 @@ injected dependency on `ApiContext` and `ServerOptions` (lake#561, `docs/api/tra
 `McpClient` speaks Streamable HTTP and HTTP+SSE over an injected `McpHttp` (the server's transport,
 `make_mcp_http`, or a test's), with `McpLimits` bounding every exchange; `SseParser`,
 `parse_mcp_url`, `resolve_mcp_url` and `mcp_public_address` are the pure parts. `ApiContext` and
-`ServerOptions` carry the transport (`mcp_http`) and `mcp_allow_private_addresses`.
+`ServerOptions` carry the transport (`mcp_http`), `mcp_allow_private_addresses` and
+`mcp_runner_image` (`LAKE_MCP_RUNNER_IMAGE`, lake#659). A client or request marked
+`cluster_service` reaches a workspace App's `<service>.<namespace>.svc.cluster.local` over http and
+its private address, and nothing else private (`mcp_cluster_service_host`).
 `mcp_connections.hpp` registers a workspace's MCP connection capabilities and answers what Lake's
 own MCP endpoint re-exports (`exported_mcp_tools`, `call_exported_mcp_tool`). `registry.hpp`'s
 `acting_agent` names the agent whose credential made a call.
@@ -124,7 +127,9 @@ The registry owns the response envelope and its success/error schemas, and
 `audience_input_schema` owns the input schema each audience is shown. REST/OpenAPI
 (`openapi_document`) and MCP (`mcp_tools`) render both from there, so their schemas are
 byte-identical; `mcp.hpp` also carries the tool-list digest and session identifier behind
-`tools.listChanged` (lake#441, [`docs/api/mcp.md`](../../../docs/api/mcp.md)). REST and MCP use that
+`tools.listChanged` (lake#441, [`docs/api/mcp.md`](../../../docs/api/mcp.md)), a workspace
+endpoint's digest over what its connections re-export (`mcp_workspace_tool_list_digest`) and what
+each session last listed (`McpSessionLists`, lake#684). REST and MCP use that
 shared contract, and input validation recursively checks object fields and array items with JSON
 pointer errors. See [`docs/api/README.md`](../../../docs/api/README.md) for the envelope decision
 and HTTP conformance proof.

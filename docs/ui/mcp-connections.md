@@ -7,14 +7,20 @@ after Transcripts, and call only `/v1` capabilities.
 ## The list (`/w/<workspace>/mcp-connections`)
 
 - Figures: connections (and how many need attention), tools allowed across them, calls this month.
-- One card per connection: its name, status (Connected, Needs sign-in, Failing, New), the server's
-  host, tools allowed of offered, how it authenticates, whether it is exposed through Lake's MCP,
+- One card per connection: its name, status (Connected, Needs sign-in, Failing, New, Starting), the server's
+  host (or, for a server run here, its package), tools allowed of offered, how it authenticates, whether it is exposed through Lake's MCP,
   whether it has an agent, calls this month and the last refresh; a failing connection says why.
 - **New connection** (a `Modal sheet`, full screen on a phone): the server URL, a name (the prefix
   its tools get, `<prefix>__<tool>`, is shown as it is typed), the transport, and authentication:
   none, a bearer token held in a secret of this workspace (mount, secret, field; the token is never
   typed here), or OAuth. **Test** connects without keeping anything (`test_mcp_connection`); **Add
   connection** keeps it and discovers its tools (`create_mcp_connection`), then opens its page.
+  **Where the server runs** comes first: **At a URL** (the fields above) or **Here, from a package
+  (stdio)** (lake#659): the runtime (npm package through `npx`, or Python package through `uvx`),
+  the package with its version, the command when it is not named after the package, the arguments
+  one per line, the secret mount, and the environment, each variable a plain value or a field of a
+  secret in that mount (names starting with `MCP_`, `APP_` or `LAKE_` are refused as they are
+  typed). There is no Test for a package: it runs only once its App does.
 
 ## A connection (`/w/<workspace>/mcp-connection?id=<id>`)
 
@@ -44,6 +50,13 @@ after Transcripts, and call only `/v1` capabilities.
   (a person, an agent, auto-approved or not, Lake's MCP) and the outcome. Arguments and results are
   never recorded.
 - **Also Offered**: the server's resources and prompts.
+- **Runs in This Workspace**, for a server Lake runs here (lake#659): the header shows its command
+  line instead of a URL, and a **Starting** banner shows until the App is ready and its tools are
+  discovered (the page asks `refresh_mcp_connection` once when `get_app` says ready). The section
+  shows the App's state (`get_app`), the package, runtime, command line and environment names (a
+  secret variable is marked, never shown), a link to the App's own page, **Start**, **Stop** and
+  **Restart** (`start_app`, `stop_app`, `restart_app`) and the last 200 log lines (`app_logs`):
+  what the package installer and the server print. Delete says the App goes with the connection.
 
 ## Signing in
 
@@ -58,4 +71,5 @@ connection, or says why the sign-in did not finish.
 `frontend/tests/mcp.test.ts` covers the form a schema makes, the arguments its values make, the
 prefix, the callback's state and the switch's words. `frontend/checks/mcp-connections.mjs` takes
 screenshots of the list, New connection, a connection and Try it at 1440 and 390 wide against
-mocked answers and reports sideways scrolling and page errors (none on 2026-10-11).
+mocked answers and reports sideways scrolling and page errors (none on 2026-10-11), and a stdio
+connection's page with its App section.

@@ -26,8 +26,8 @@ one translation unit that names HTTP types), or a test's.
 - `transport: auto` (the default) tries Streamable HTTP and falls back to HTTP+SSE when the server
   refuses the `POST` of `initialize` with `400`, `404` or `405`.
 
-A server that only speaks stdio is not supported yet: it will run as a workspace App container that
-Lake reaches over HTTP ([lake#659](https://github.com/oramasearch/lake/issues/659)).
+A server that only speaks **stdio** runs as an App of the workspace, which Lake reaches over
+Streamable HTTP inside the cluster ([below](#servers-that-speak-only-stdio), lake#659).
 
 **What Lake asks.** `initialize` (Lake declares no client capabilities: no sampling, roots or
 elicitation), `notifications/initialized`, then `tools/list`, `resources/list` and `prompts/list`
@@ -70,7 +70,9 @@ loopback.
   It holds the name, the URL and transport, the authentication kind, what the server offered at
   the last refresh, the person's decision for each tool, the re-export switch, the auto-approve
   grants, and the connection's agent and streams. Another workspace of the account never sees it.
-  Nothing of it is in PostgreSQL, and there is no migration.
+  Nothing of it is in PostgreSQL. Lake's store keeps only its **dispatch row** (migration
+  `0079_mcp_connection_dispatch`, lake#684, lake#685): the account, workspace and connection ids,
+  whether it streams, and the digest of the tools it re-exports. That is dispatch, never content.
 - **The credential** is a workspace secret (decision 58) in a secret mount of the same workspace:
   a bearer token, or the OAuth refresh token Lake writes there when a person signs in. The record
   holds only its reference, `lake-secret://<mount>/<name>#<field>`. Lake reads it server-side for
@@ -87,7 +89,7 @@ actions `write`. Each is audited in the workspace's own log ([audit](audit.md#wh
 
 | Capability | Kind | Input | What it does |
 |---|---|---|---|
-| `create_mcp_connection` | action | `name`, `url`, `transport?` (`auto`, `streamable_http`, `sse`), `auth?` | Adds a connection and discovers the server at once (an OAuth connection waits for a person to sign in). No tool is allowed yet. A name used in the workspace, or one whose prefix is, is `conflict` |
+| `create_mcp_connection` | action | `name`, then `url`, `transport?` (`auto`, `streamable_http`, `sse`), `auth?`; or `stdio` ([stdio servers](#servers-that-speak-only-stdio)) | Adds a connection and discovers the server at once (an OAuth connection waits for a person to sign in; a stdio server is `starting` until its App is ready). No tool is allowed yet. A name used in the workspace, or one whose prefix is, is `conflict` |
 | `list_mcp_connections` | read | — | `{connections}`, by name, each with `status`, `refreshed_at`, `tool_count`, `allowed_count`, `exported` and `calls_this_month` |
 | `get_mcp_connection` | read | `id` | The connection with its `tools`, `resources`, `prompts`, `skipped` and `streams` |
 | `update_mcp_connection` | action | `id`, then any of `name`, `url`, `transport`, `auth`, `tools`, `exported`, `agent_id`, `input_topic`, `output_topic`, `notifications_topic`, `subscribe_resources` | Changes it; a new URL, transport or authentication discovers again |
@@ -223,9 +225,21 @@ result (`content`, `structuredContent`, `isError`). A refusal is `isError: true`
 
 **What turning it on means:** a re-exported tool runs with Lake's credential to that server for
 **anyone who may call Lake's tools in this workspace**. Lake's policy, the caller's permission on
-the workspace, is the only gate. The connection's page says so beside the switch. The tool list's
-session digest (`Mcp-Session-Id`) covers Lake's own tools only, so a client is not told when a
-connection is exported; it sees the tools on its next `tools/list`.
+the workspace, is the only gate. The connection's page says so beside the switch.
+
+**An open session is told** (lake#684). Whenever Lake writes a connection, it keeps its dispatch
+row in lake's store (migration `0079_mcp_connection_dispatch`): the SHA-256 of the `tools/list`
+entries it re-exports, empty when it re-exports none. The workspace endpoint names its tool list by
+`mcp_workspace_tool_list_digest`: Lake's own digest when no connection re-exports, else the
+SHA-256 of Lake's digest and each re-exporting connection's id and digest. `initialize` answers an
+`Mcp-Session-Id` carrying that digest, so exporting a connection, allowing or disallowing one of
+its tools, a refresh that changes its tools, renaming it, or no longer exporting it changes the
+list, and the session's next request (with `Accept: text/event-stream`) receives
+`notifications/tools/list_changed` ahead of its answer, as after an upgrade ([mcp.md](mcp.md)).
+Each Lake process remembers what a session last received from `tools/list` (`McpSessionLists`,
+at most 10,000 sessions), so a session is told until it lists the tools again, not on every later
+request; a session another replica listed is told once more there. The row holds ids and a
+digest only: the connection and its tools stay in the workspace Zetta.
 
 ## A connection's agent and streams
 
@@ -258,9 +272,91 @@ The streams act with the authority of **the person who last set the agent or a s
 workspace decides whether a job starts. The store root's owner runs them, and only it
 (`McpStreamWorker`, on the server's maintenance thread, every `mcp_stream_interval`, 15 s), so two
 replicas never mirror a notification twice; each pass reads at most 64 connections and 20 input
-events each. Metrics: `lake_mcp_stream_passes_total`, `lake_mcp_notifications_mirrored_total`,
+events each.
+
+**Only the workspaces that stream are called** (lake#685). The connection's dispatch row says it
+`streams` when it has a notifications topic, an agent with an input topic, or finished jobs'
+results still to publish; Lake writes it with every connection it writes, on any replica. Each pass
+reads the streaming rows from lake's store and lists the connections of those workspaces only, one
+workspace Zetta call each: a workspace with no streaming connection is never called. A row whose
+connection is gone, or no longer streams, is put right by the pass that finds it, and a deleted
+workspace's rows go with it. A connection whose streams were set before this change has no row
+until it is next saved. Metrics: `lake_mcp_stream_passes_total`, `lake_mcp_notifications_mirrored_total`,
 `lake_mcp_stream_turns_total`, `lake_mcp_stream_problems_total`. Mirrored notifications count as
 the workspace's `calls` (`kind: mcp_connection`).
+
+## Servers that speak only stdio
+
+Decision 60 took remote servers first; lake#659 adds the servers that only speak stdio, an npm or
+Python package such as most reference servers. Lake runs one as an **App of the workspace**
+([Ship Apps](web-apps.md)) whose image is Lake's own runner, `oramasearch/lake-mcp-runner` (a
+private repository and a private image of its own; we write our own, standard library Go, no MCP
+SDK). The runner starts the package as its child, initializes it once, and serves it over
+Streamable HTTP at `/mcp`; Lake's client reaches it as any other server.
+
+`create_mcp_connection {name, stdio}`, with `stdio`:
+
+| Field | What |
+|---|---|
+| `runtime` | `node`: an npm package, run with `npx --yes`; `python`: a Python package, run with `uvx` |
+| `package` | the package, with its version (`@modelcontextprotocol/server-everything@2026.8.31`, `mcp-server-fetch==2025.4.7`): letters, digits and `@/._~=<>!+-`, at most 214 bytes, not starting with `-` |
+| `command?` | the package's command when it is not named after the package (`npx --package <package> <command>`, `uvx --from <package> <command>`) |
+| `args?` | at most 32 strings, after the command |
+| `env?` | at most 50 variables, each a string or `{secret: {mount_id, name, field}}`; a name is letters, digits and `_`, and `MCP_`, `APP_` and `LAKE_` are Lake's |
+| `mount_id` | the secret mount Lake keeps the runner's secret in |
+
+What Lake does, as the person who adds it (so their permission on the mount, the workspace and its
+Apps decides, and each step is audited as theirs):
+
+1. Writes a new secret `mcp-<prefix>-runner` in the mount (`put_secret`): `token`, 32 random bytes
+   the runner requires as a bearer on every request, and `command`, the command line as a JSON
+   array (a secret field, because a package name with its version reads as a high-entropy value to
+   the App's scan of plain variables).
+2. Creates the App (`create_app`): `mode: image`, the image `LAKE_MCP_RUNNER_IMAGE`, `framework:
+   mcp`, port `8080` (the port the workspace's network policy admits Lake to, as for an agent), the
+   name `mcp-<prefix>-<4 hex>`, and the environment: `MCP_RUNNER_TOKEN` and `MCP_STDIO_COMMAND` from
+   that secret, and the person's variables, plain or from secrets, which the operator projects from
+   the workspace's secret store as for any App (decision 58, lake#625).
+3. Keeps the connection: its URL is the App's Service in the cluster,
+   `http://app-<the first 12 hex digits of the App's id>.<the workspace's namespace>.svc.cluster.local/mcp`,
+   its transport `streamable_http`, its authentication the runner's token, and `app_id` and `stdio`
+   (runtime, package, command, args, the names of its variables, plain and secret, the mount and
+   the App's name). Its status is `starting`.
+
+**Reaching it.** Only a connection whose URL is its own App's Service (`mcp_stdio_app_address`)
+marks its requests `cluster_service`: the transport then takes plain `http` to that
+`<service>.<namespace>.svc.cluster.local` name and its private address, and nothing else private,
+so a stdio connection cannot be pointed at Lake's Postgres or a workspace Zetta. `update_mcp_connection`
+refuses `url`, `transport` and `auth` on a stdio connection; its name, tools, re-export, agent and
+streams change as for any connection.
+
+**Lifecycle.** `refresh_mcp_connection` (and any call) first reads the App from lake's store: until
+it is ready the connection stays `starting` and says why (`its App is Pending: …`, `its App is
+stopped: start it to use this server`), without calling it; once ready, discovery runs as for any
+server. `get_mcp_connection` answers the App's state as `app: {phase, ready, desired, message}`.
+The connection's page starts, stops and restarts the App (`start_app`, `stop_app`, `restart_app`)
+and shows its logs (`app_logs`): what the package installer and the server print.
+`delete_mcp_connection` deletes the App first (`delete_app`, as the person); when it cannot, the
+connection stays. The secret stays in its mount.
+
+**Metering.** The App is metered like any App ([metering](metering.md#resources), lake#658): the
+Orama operator reports the CPU and RAM its pod is scheduled with, and Lake counts its `cpu`, `ram`
+and `instances` as an `app`. Its traffic is Lake's exchanges with it, each counted as the
+connection's `calls` and `transfer` (`mcp_out`, `mcp_in`); what the server itself sends to the
+internet is App traffic, which the operator does not report yet, as for every App.
+
+**What it needs.** The workspace needs HTTPS egress to the internet (the Lake's
+`spec.workspaces.overrides[<workspace>].internetEgress`) for `npx` or `uvx` to install the package
+at start and for the server to reach what it serves; without it the App's logs show the install
+failing. The App has a read-only root and a 1 GiB `/tmp`, where the image keeps every cache. A Lake
+without `LAKE_MCP_RUNNER_IMAGE` answers `not_supported`.
+
+**The runner** (`oramasearch/lake-mcp-runner`, its `docs/api.md`): one child, initialized once,
+whose answer every HTTP session's `initialize` is given; each forwarded request under an id of the
+runner's own, so sessions never collide; the child's notifications on the `GET` event stream; a
+request from the child (sampling, roots, elicitation) refused, since Lake declares no client
+capabilities; a request with an `Origin` refused; the child's stderr as the App's logs. It exits
+when the child exits, and the App restarts it.
 
 ## Verify
 
@@ -283,4 +379,23 @@ challenge, a state taken once and by its own person, only the refresh token kept
 token renewed with a rotated refresh token. `...McpConnectionStreamsMirrorNotificationsAndDriveTheAgent`:
 notifications mirrored to their topic after a subscription, one job per input event as the person,
 and its result published once on the output topic.
+`...McpConnectionDispatchNamesExportsAndStreamingWorkspacesOnly`: no row for a connection that
+neither streams nor re-exports, the endpoint digest changing on export and on an allow-list change
+(and not on a refresh that changes nothing), a session that listed not told again, the worker
+calling no workspace at all with no streaming connection and only the streaming workspace with
+one, and the rows gone when the stream or the connection is. `HttpServer.WorkspaceMcpSessionsLearnThatExportedToolsChanged`
+drives `/w/<workspace>/mcp`: the notice after an export until the session lists, again after a
+change of what is exported, and a new session on Lake's own list once nothing is.
+`Mcp.WorkspaceDigestFollowsExportedToolsAndListedSessionsAreNotToldAgain` checks the digest and the
+bounded memory of listed sessions.
+`...McpStdioConnectionsRunAsAWorkspaceApp` (lake#659): no runner image is `not_supported`; a bad
+runtime, package, command or variable name and `url` beside `stdio` are refused before anything
+starts; the runner's secret (token and command) in the person's mount, never answered; the App with
+the runner's image, `framework: mcp`, port 8080 and its secret variables; the URL of the App's own
+Service, and no other Service accepted; `url`, `transport` and `auth` refused on update; a refresh
+before the App is ready says so; deletion deletes the App and keeps the secret.
+`McpClient.AWorkspaceAppIsReachedOnlyAtAClusterServiceName` checks the cluster Service rule, and
+`McpClient.DrivesAStdioServerThroughTheRunner` (run when `LAKE_MCP_RUNNER_URL` and
+`LAKE_MCP_RUNNER_TOKEN` name a running runner) drives the MCP reference server through it with
+Lake's own client: discovery, `echo`, a resource read, and a wrong token refused.
 `SchemaConformance.EveryToolAndRequiredOutputUsesHttpContract` calls each capability over MCP.
