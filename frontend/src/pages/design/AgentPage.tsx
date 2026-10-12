@@ -2,11 +2,11 @@
  * `get_agent`) shows its definition, where it is used and every revision of it
  * (`list_agent_revisions`), with Edit (a new revision), Restore, Duplicate and Delete. One of
  * Orama's (`?key=`, from the Agent Library, or an engine record of kind `orama`) is read-only and
- * offers Duplicate to edit. Running it (once, scheduled or launched) and training it are on
- * Train → Agent, linked from here. */
+ * offers Duplicate to edit. Where it is used lists the workspace streams that start it (lake#677).
+ * Running it (once, scheduled or launched) and training it are on Train → Agent, linked from here. */
 import { useState, type ReactNode } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
-import { Bot, Copy, GraduationCap, History, MessageSquare, Pencil, Play, Trash2, Workflow } from "lucide-react";
+import { Bot, Copy, GraduationCap, History, MessageSquare, Pencil, Play, Radio, Trash2, Workflow } from "lucide-react";
 import { ApiError, act, useRead, type Row } from "@/lib/api";
 import { ConfirmButton } from "@/lib/overlay";
 import { useToast } from "@/lib/toast";
@@ -239,7 +239,7 @@ function HeaderActions({ agent, own, onEdit }: { agent: Row; own: boolean; onEdi
         title="Delete This Agent?"
         confirmLabel="Delete agent"
         typed={text(agent, "name")}
-        confirm={<>The agent {text(agent, "name")} is deleted from this workspace, and its schedules with it. Its revisions are kept.</>}
+        confirm={<>The agent {text(agent, "name")} is deleted from this workspace, and its schedules and the streams that start it with it. Its revisions are kept.</>}
         onConfirm={async () => {
           await deleteAgent(scope, id);
           toast(`Deleted ${text(agent, "name")}`);
@@ -329,12 +329,13 @@ function AgentDesign({ agent, own }: { agent: Row; own: boolean }) {
   );
 }
 
-/** Where an agent is used: the pipelines it calls as tools, Lake's schedules for it, its runs, and
- * Ask Orama. */
+/** Where an agent is used: the pipelines it calls as tools, Lake's schedules for it, the workspace
+ * streams that start it, its runs, and Ask Orama. */
 function WhereUsed({ agent }: { agent: Row }) {
   const ws = useWsPath();
   const id = text(agent, "id");
   const schedules = useScopedRead<{ schedules?: Row[] }>("list_agent_schedules", { agent_id: id });
+  const streams = useScopedRead<{ streams?: Row[] }>("list_agent_streams", { agent_id: id });
   const launches = useScopedRead<{ launches?: Row[] }>("list_agent_launches", { agent_id: id, limit: 20 });
   const pipelines = pipelinesOf(agent);
   const scheduleCount = schedules.data?.schedules?.length ?? 0;
@@ -365,6 +366,26 @@ function WhereUsed({ agent }: { agent: Row }) {
             <span className="muted">Could not be read.</span>
           ) : (
             <Link to={ws(`/train/agent?${qs({ id, tab: "schedules" })}`)}>{scheduleCount === 1 ? "1 schedule" : `${scheduleCount} schedules`}</Link>
+          )}
+        </li>
+        <li className="py-2">
+          <div className="label m-0">Streams that start it</div>
+          {streams.isError ? (
+            <span className="muted">Could not be read.</span>
+          ) : streams.data?.streams?.length ? (
+            <span className="flex flex-col gap-1">
+              {streams.data.streams.map((s) => (
+                <span key={text(s, "id")} className="inline-flex flex-wrap items-center gap-1">
+                  <Radio size={13} className="text-ink-3" aria-hidden />
+                  <Link to={ws(`/train/stream?${qs({ zetta: "workspace", topic: text(s, "stream") })}`)}>{text(s, "stream")}</Link>
+                  <span className="muted">
+                    each new message starts a run{text(s, "set_by_name") ? `, as ${text(s, "set_by_name")}` : ""}
+                  </span>
+                </span>
+              ))}
+            </span>
+          ) : (
+            <span className="muted">{streams.isLoading ? "Reading…" : "None. Choose streams in Edit."}</span>
           )}
         </li>
         <li className="py-2">

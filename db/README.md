@@ -30,6 +30,14 @@ protected-app browser handoff. Only SHA-256 code hashes are stored; exchange is 
 expired or spent rows are swept. Its guard is `app_forward_auth_guard`. See
 `docs/api/web-apps.md` and `docs/control-plane/web-apps.md`.
 
+Migration `0079_mcp_connection_dispatch` adds `mcp_connection_dispatch`: one row per MCP
+connection that streams or re-exports tools, with the account, workspace and connection ids,
+`streams` and the SHA-256 of the re-exported tool entries. Lake writes it with every connection; the
+stream worker reads only the streaming workspaces (lake#685) and a workspace MCP session is told when
+the digests change (lake#684). Dispatch only, never content; the operator reads nothing of it but
+must vendor this schema. Its guard is `mcp_connection_dispatch_guard`. See
+[mcp-connections.md](../docs/api/mcp-connections.md).
+
 Verify changes with the full PostgreSQL-backed static and shared CTest suites. Keep the identity
 contract in `docs/api/identity.md` updated with changes to token derivation.
 

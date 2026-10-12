@@ -174,7 +174,10 @@ constexpr std::array group_rules{
               "browse_stream. Stream writes require the person's confirmation; deletes require "
               "admin on the account. System streams are browse-only. browse_stream never "
               "consumes messages; use wait_ms for bounded live reads over REST or MCP.",
-              [](std::string_view n) { return n.find("stream") != std::string_view::npos; }},
+              [](std::string_view n) {
+                  return n.find("stream") != std::string_view::npos &&
+                         !n.ends_with("_agent_streams");
+              }},
     GroupRule{"Agents",
               "The Agent Library of specialized agents Orama ships, Ask Orama, and the agents you "
               "design in Design > Agents: create, change and delete them (create_agent, "
@@ -183,15 +186,18 @@ constexpr std::array group_rules{
               "set_training_schedule), talk to any of them with agent_turn or "
               "chat_with_agent, run Python agents with launch_agent and give them cron schedules "
               "with schedule_agent (each its own Kubernetes CronJob, at most once every five "
-              "minutes). A Python agent's definition is {source: zetta, instructions, entrypoint, "
-              "files: [{path, contents}]}; Lake refuses any other field. Runs and schedules belong "
-              "to the workspace they were started in.",
+              "minutes), or start them from workspace streams with set_agent_streams (one job per "
+              "new message, the message as its input; list_agent_streams). A Python agent's "
+              "definition is {source: zetta, instructions, entrypoint, files: [{path, contents}]}; "
+              "Lake refuses any other field. Runs, schedules and streams belong to the workspace "
+              "they were set in.",
               [](std::string_view n) {
                   return n == "list_agent_library" || n == "list_agent_revisions" ||
                          n == "launch_agent" ||
                          n == "list_agent_launches" || n == "stop_agent_launch" ||
                          n == "schedule_agent" || n == "list_agent_schedules" ||
-                         n == "unschedule_agent" || n == "agent_turn" ||
+                         n == "unschedule_agent" || n == "set_agent_streams" ||
+                         n == "list_agent_streams" || n == "agent_turn" ||
                          n == "create_agent_from_proposal" ||
                          n == "create_projects_from_opportunities" || n == "start_solution" ||
                          n == "confirm_solution" || n == "get_ask_conversation" ||
@@ -653,8 +659,8 @@ const std::vector<Flow>& flows() {
            "`drive_id`, `id` (a CSV or JSONL file of a workspace-files drive), `table_name`: "
            "loads it into a dataset of the workspace"},
           {"load_drive_model",
-           "`drive_id`, `id` (a model file), `name` (or `version_of`): brings it into the "
-           "workspace as a standalone model"}}},
+           "`drive_id`, `id` (a model file of any drive kind, or a virtual drive's shortcut to "
+           "one), `name` (or `version_of`): brings it into the workspace as a standalone model"}}},
         {"Search everything",
          "Search what you can open, place by place, as the Lake Console's search does.",
          {{"search", "`query`: repository code, ranked (`history: true` searches past changes)"},

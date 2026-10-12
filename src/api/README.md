@@ -97,7 +97,8 @@ answered predictions, `search_index` an index's answered searches, `create_trans
 model reports none; tokens are never billed), and the file, drive, Hub and image paths their bytes as
 `transfer` (`record_workspace_transfer`, `stream_blob`'s `metered_workspace`; lake#658);
 `ApiServer::drain` flushes it every `usage_flush_interval` and, as the store root's owner, schedules
-`usage_capabilities.cpp`'s `sample_usage` (stored bytes, the engine's `storage_usage` by kind,
+`usage_capabilities.cpp`'s `sample_usage` (stored bytes, the engine's `storage_usage` by kind, which
+`usage_over_time` answers as the unbilled `engine_storage` (decision 61, lake#663),
 instance and volume time, CPU, RAM, GPU and GPU memory from the operator's `workload_resources`
 (lake#643), each finished build, job and cron run once, each closed hour of an app's ingress
 traffic from the operator's `app_transfer` once as `transfer` (lake#661), new build results) every
@@ -115,7 +116,11 @@ to the run's workspace usage and refused past the monthly `model_tokens` limit. 
 holds the gateway's pure parts (the request as forwarded, the usage of every answer shape, the
 provider's refusals, `openai_model_provider`), and `http_server.cpp` serves the OpenAI-compatible
 `POST /openai/v1/<endpoint>` over `model_completion` and builds the provider over its outbound client
-when `LAKE_OPENAI_API_KEY` is set (`docs/api/model-gateway.md`). `metering_capabilities.cpp`'s
+when `LAKE_OPENAI_API_KEY` is set (`docs/api/model-gateway.md`). A streamed call is relayed as it
+arrives (lake#665): the outbound client's `on_body` hands the provider's body on piece by piece, the
+route sets `ApiContext::model_stream` to queue each piece, and its relay writes them to the caller in
+chunked transfer while `model_completion` reads the usage from the events as they pass
+(`ModelStreamUsage`). `metering_capabilities.cpp`'s
 `queue_repository_builds` is the build-record queueing the sample shares with `metering_usage`. See
 [metering](../../docs/api/metering.md#usage-over-time).
 
@@ -198,20 +203,32 @@ calls, notifications, the event-stream reader and every bound on a hostile serve
 reading once the answer is in, a byte limit, a deadline on resolution, connection, handshake and
 exchange, and no address that is not public unless `LAKE_MCP_ALLOW_PRIVATE_ADDRESSES=1`. See
 `docs/api/mcp-connections.md#the-client`.
-`mcp_connection_capabilities.cpp` registers the MCP connection capabilities (lake#652): records
+`mcp_connection_capabilities.cpp` registers the MCP connection capabilities (lake#652); a `stdio`
+connection (lake#659) writes the runner's secret and creates its App as the person, then reaches it
+only at that App's cluster Service (`mcp_stdio_app_address`). It records
 through `control::mcp_connections`, the credential read from the workspace's secret store as Lake
 (`as_lake`, never answered), discovery merged into the person's tool decisions, who may call a
 change (a person, or an agent with a person's per-tool grant and its `mcp:<prefix>` skill),
 metering through the `UsageRecorder` (`calls`, `transfer`), the audit read back for a connection's
 calls, and the re-export `mcp.cpp` calls for `/w/<workspace>/mcp`. `mcp_connection_streams.cpp` is
-`McpStreamWorker`, run by the store root's owner on the maintenance thread: notifications mirrored to
+`McpStreamWorker`, run by the store root's owner on the maintenance thread over only the workspaces
+whose dispatch row streams (lake#685; every connection write keeps the row and the digest of what
+it re-exports, which `http_server.cpp` folds into a workspace endpoint's tool-list digest, lake#684):
+notifications mirrored to
 a connection's topic, one agent job per input event as the person who set the streams, and each
 finished job's result on the output topic; `mcp_connection_internal.hpp` lends it the connection's
-bearer, never a capability.
+bearer, never a capability. `agent_stream_triggers.cpp` (lake#677) registers `set_agent_streams` and
+`list_agent_streams` and is `AgentStreamWorker`, run on the same owner-only pass: one job of an agent
+per new message on a workspace stream it names, as the person who set it, and the trigger's removal
+after `delete_agent` (`remove_agent_stream_triggers`, called by `workspace_capabilities.cpp`). Both
+workers start their jobs through `start_stream_runs` and act through `stream_person`
+(`agent_stream_runs.hpp`).
 `deletion_capabilities.cpp` registers what deletes a workspace's data (lake#645):
 `delete_dataset`, `delete_model`, `delete_run` and `delete_index`, named capabilities over the
 workspace engine's own deletes that answer `not_supported` from an older engine, and
-`delete_ask_conversation`, which removes one person's message records from the workspace Zetta.
+`delete_ask_conversation`, which removes one person's message records from the workspace Zetta and
+the agent tasks the conversation started (their `lake_agent_tasks` records, then their dispatch
+rows through `Store::delete_agent_tasks`, lake#673).
 `delete_organization`, `revoke_invitation` and `revoke_grant` sit beside their siblings in
 `capabilities.cpp`, and `delete_secret_mount` in `secrets_capabilities.cpp` over
 `MountSecrets::remove_all` (`secret_records_api.cpp`). Each takes `dry_run`. See

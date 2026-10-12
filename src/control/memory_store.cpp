@@ -934,6 +934,17 @@ Result<void> InMemoryStore::set_workspace_status(const std::string& id, std::str
     return {};
 }
 
+Result<void> InMemoryStore::set_workspace_namespace(const std::string& id,
+                                                    std::string namespace_name) {
+    std::lock_guard lock(mutex_);
+    const auto row = std::ranges::find(workspaces_, id, &Workspace::id);
+    if (row == workspaces_.end()) {
+        return std::unexpected(StoreError{"not_found", "no workspace " + id});
+    }
+    row->namespace_name = std::move(namespace_name);
+    return {};
+}
+
 Result<std::vector<ManagedService>> InMemoryStore::list_services(const std::string& customer_id) {
     std::lock_guard lock(mutex_);
     std::vector<ManagedService> services;
@@ -2056,6 +2067,49 @@ Result<AgentTask> InMemoryStore::latest_agent_conversation_task(
     return std::unexpected(StoreError{"not_found", "no earlier turn in this conversation"});
 }
 
+Result<std::vector<AgentTask>>
+InMemoryStore::list_conversation_agent_tasks(const std::string& customer_id,
+                                             const std::string& workspace_id,
+                                             const std::string& conversation_id,
+                                             const std::string& requested_by_user_id) {
+    std::lock_guard lock(mutex_);
+    std::vector<AgentTask> found;
+    std::set<std::string> ids;
+    for (const AgentTask& task : agent_tasks_) {
+        if (!conversation_id.empty() && task.customer_id == customer_id &&
+            task.workspace_id == workspace_id && task.conversation_id == conversation_id &&
+            task.requested_by_user_id == requested_by_user_id &&
+            (task.kind == "ask" || task.kind == "factory")) {
+            found.push_back(task);
+            ids.insert(task.id);
+        }
+    }
+    // The tasks those turns asked for, at any depth (a task is created after its asking one).
+    for (const AgentTask& task : agent_tasks_) {
+        if (task.customer_id == customer_id && task.workspace_id == workspace_id &&
+            ids.contains(task.parent_task_id) && !ids.contains(task.id)) {
+            found.push_back(task);
+            ids.insert(task.id);
+        }
+    }
+    return found;
+}
+
+Result<std::size_t> InMemoryStore::delete_agent_tasks(const std::string& customer_id,
+                                                      const std::vector<std::string>& ids) {
+    std::lock_guard lock(mutex_);
+    const std::set<std::string> wanted(ids.begin(), ids.end());
+    const auto removed = std::erase_if(agent_tasks_, [&](const AgentTask& task) {
+        return task.customer_id == customer_id && wanted.contains(task.id);
+    });
+    for (const std::string& id : wanted) {
+        if (std::ranges::find(agent_tasks_, id, &AgentTask::id) == agent_tasks_.end()) {
+            agent_task_clocks_.erase(id);
+        }
+    }
+    return static_cast<std::size_t>(removed);
+}
+
 Result<AgentTask> InMemoryStore::claim_agent_task(const std::string& id,
                                                   const std::string& agent,
                                                   const std::string& credential_sha256,
@@ -2415,6 +2469,57 @@ Result<void> InMemoryStore::put_workload_resources(const WorkloadResources& row)
     stored.observed_at = now_iso8601();
     workload_resources_[{row.object_kind, row.object_id}] = std::move(stored);
     return {};
+}
+
+Result<void> InMemoryStore::put_mcp_connection_dispatch(const McpConnectionDispatch& row) {
+    if (row.customer_id.empty() || row.workspace_id.empty() || row.connection_id.empty()) {
+        return std::unexpected(StoreError{"invalid_input", "not an MCP connection dispatch row"});
+    }
+    std::lock_guard lock(mutex_);
+    if (std::ranges::none_of(workspaces_, [&](const Workspace& workspace) {
+            return workspace.id == row.workspace_id && workspace.customer_id == row.customer_id;
+        })) {
+        return std::unexpected(StoreError{"not_found", "workspace not found"});
+    }
+    const std::pair key{row.workspace_id, row.connection_id};
+    if (!row.streams && row.exported_digest.empty()) {
+        mcp_connection_dispatch_.erase(key);
+        return {};
+    }
+    McpConnectionDispatch stored = row;
+    stored.updated_at = now_iso8601();
+    mcp_connection_dispatch_[key] = std::move(stored);
+    return {};
+}
+
+Result<void> InMemoryStore::remove_mcp_connection_dispatch(const std::string& workspace_id,
+                                                           const std::string& connection_id) {
+    std::lock_guard lock(mutex_);
+    mcp_connection_dispatch_.erase({workspace_id, connection_id});
+    return {};
+}
+
+Result<std::vector<McpConnectionDispatch>> InMemoryStore::mcp_stream_dispatch(int limit) {
+    std::lock_guard lock(mutex_);
+    std::vector<McpConnectionDispatch> rows;
+    for (const auto& [key, row] : mcp_connection_dispatch_) {
+        if (row.streams && static_cast<int>(rows.size()) < limit) {
+            rows.push_back(row);
+        }
+    }
+    return rows;
+}
+
+Result<std::vector<McpConnectionDispatch>>
+InMemoryStore::mcp_exported_dispatch(const std::string& workspace_id) {
+    std::lock_guard lock(mutex_);
+    std::vector<McpConnectionDispatch> rows;
+    for (const auto& [key, row] : mcp_connection_dispatch_) {
+        if (key.first == workspace_id && !row.exported_digest.empty()) {
+            rows.push_back(row);
+        }
+    }
+    return rows;
 }
 
 Result<Invoice> InMemoryStore::create_invoice(const Invoice& invoice) {

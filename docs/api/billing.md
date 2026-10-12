@@ -237,6 +237,16 @@ and the Usage page marks their tiles *Detail, not billed*. Compute is priced as 
 memory. A list published before lake#643 keeps its rates for them, so a month billed at it still
 bills them, and every invoice keeps its lines as issued.
 
+**A workspace engine's disk is billed once, as its volume** (decision 61, lake#663). The engine's
+volume is billed as `volumes` by its requested size. What the engine holds on that volume (its
+datasets, models, indexes, run artifacts, topics, files and own buckets, from Zetta's
+`storage_usage`) is the dimension `engine_storage`: measured, charted, `billed: false`, and marked
+*Detail, billed as the engine's volume* on the Usage page. `set_price_list` refuses a rate for it.
+`storage` is billed only for what Lake holds outside an engine volume: repositories, container
+images, transcripts and drive files. Before this change those engine bytes were billed as `storage`
+as well as the volume. From now on, a month's `storage` line counts only what Lake holds outside
+the engine's volume, whatever list prices it.
+
 The bill for a month (`YYYY-MM`, a UTC calendar month) is one `usage` line per rate on the list, in
 list order, with `dimension`, `class` (empty but for a class rate), `quantity` (the month's use),
 `billable` (what is charged; `included` is always 0), the rate (`unit_micros`, `per`) and
@@ -306,8 +316,9 @@ research tables with each reference's source URL and date.
 **Metis is not on this list.** Metis is enterprise software priced by Orama's sales team; a
 customer talks to sales. Nothing here prices it.
 
-**Status:** not yet published on lake.oramadev.net (billing is not deployed there). `set_price_list`
+**Status:** published on lake.oramadev.net on 2026-10-11, effective October 2026. `set_price_list`
 needs the operator or the instance administrator; the payload is [below](#publish-the-price-list).
+Why the prices are what they are, and how they are governed: [`../billing/pricing-strategy.md`](../billing/pricing-strategy.md).
 
 ### Rates
 
@@ -323,14 +334,14 @@ needs the operator or the instance administrator; the payload is [below](#publis
 | `gpu` (`h100`) | $0.07875 / GPU-minute ($4.725 / hour) | 78750 | 60 | GPU-only $3.95 / hour, less 80 GiB at $0.01 = $3.15 | 1.5× |
 | `gpu` (other classes) | $0.03875 / GPU-minute | 38750 | 60 | a GPU of a class without its own rate, or of no known class, is billed as an A100 | — |
 | `vram` | $0.00025 / GiB-minute ($0.015 / GiB-hour) | 250 | 61440 MiB-seconds | no provider prices GPU memory apart: it is bundled into each GPU class, at an implied $0.024–0.14 / GiB-hour. Its share here is $0.01 / GiB-hour, below the lowest implied figure, so that each class's compute share above stays positive | 1.5× |
-| `storage` | $0.04 / GiB-month | 40000 | 1073741824 bytes | hyperscaler object storage $0.023 / GB-month (the others $0.015–0.020) | 1.7× |
+| `storage` | $0.04 / GiB-month | 40000 | 1073741824 bytes | hyperscaler object storage $0.023 / GB-month (the others $0.015–0.020). What Lake holds outside a workspace engine's volume: repositories, container images, transcripts and drive files. What an engine holds on its own volume is `engine_storage`, shown and never billed: the volume is billed, as `volumes` (decision 61, lake#663) | 1.7× |
 | `transfer` | $0.05 / GiB | 50000 | 1073741824 bytes | hyperscaler internet egress $0.087–0.12 / GB, ingress free | in and out are one dimension: ~1.1× a half-in, half-out blend, about half of egress alone |
 | `speech` | $0.0072 / minute | 7200 | 60 seconds | the model provider's speech-to-text rate, $0.006 / minute | provider + 20%. Speech is billed here only: a transcription model's tokens are never also billed as `model_tokens` (lake#658); the minutes are the model's figure, else measured from the recording ([transcripts.md](transcripts.md#how-long-a-recording-is)) |
 | `calls` | $2.00 / million | 2000000 | 1000000 calls | managed HTTP API gateway $1.00 / million (REST APIs $3.50) | 2× |
 | `predictions` | $0.01 / 1,000 | 10000 | 1000 calls | serverless CPU inference, about $4.55 / million requests at 2 GB | 2.2× |
 | `searches` | $0.01 / 1,000 | 10000 | 1000 calls | the same serverless request reference: a search of a published index is one request served by the workspace engine, whose CPU, RAM and volume are billed apart. Hosted search services charge about $0.50 / 1,000 searches, the index's compute included (lake#658) | 2.2× |
 | `model_tokens` | $9.00 / million | 9000000 | 1000000 tokens | the model provider's per-token rate for lake's agents' default model: $5.00 / million input, $30.00 output; $7.27 / million at 10 input to 1 output | provider + 20%, rounded up |
-| `volumes` | $0.20 / GiB-month | 200000 | 2628000 GiB-seconds (730 hours) | block volume $0.08 / GB-month | 2.5× |
+| `volumes` | $0.20 / GiB-month | 200000 | 2628000 GiB-seconds (730 hours) | block volume $0.08 / GB-month. Every provisioned volume by its requested size while it runs: a workspace engine's, a managed service's and a store's. An engine's disk is billed this way only, never again for the bytes on it (decision 61, lake#663) | 2.5× |
 
 A GPU-hour, its memory included, is therefore 1.5× its GPU-only reference: an L4 $1.008 ($0.648 +
 24 GiB × $0.015), an A10G $1.65, an H100 $5.925; an A100 is $2.925 with 40 GiB (1.39×) and $3.525
@@ -364,8 +375,8 @@ Two rates rest on an assumption:
 
 A workspace's engine runs all month: at the operator's default (64 MiB, and 0.1 vCPU, the
 workspace namespace's default request) that is about $6.70 of CPU and $0.47 of RAM a month; at 1
-vCPU and 2 GiB, $66.96 and $15.18. There is no free allowance: usage limits warn and do not refuse
-([metering.md](metering.md#limits)).
+vCPU and 2 GiB, $66.96 and $15.18. There is no free allowance. The monthly `model_tokens` limit is enforced at the model gateway; the
+other usage limits warn and do not refuse ([metering.md](metering.md#limits)).
 
 ### Worked bills
 

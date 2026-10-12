@@ -2781,7 +2781,8 @@ TEST(PostgresAgentLaunches, LaunchesCredentialsSchedulesAndConversationsFollowTh
 
 TEST(PostgresSessions, AnExpiredCredentialIsToldApartFromAnUnknownOne) {
     // lake#450: a caller holding the real secret of an expired token learns it expired; any other
-    // secret is simply not active.
+    // secret is simply not active. The token's expiry is moved into the past explicitly rather
+    // than waited out, so the test does not depend on how fast a loaded host runs (lake#679).
     const char* uri = lake::test::postgres_uri();
     if (uri == nullptr || std::string(uri).empty()) {
         GTEST_SKIP() << "LAKE_TEST_DB_URI is not set";
@@ -2794,10 +2795,18 @@ TEST(PostgresSessions, AnExpiredCredentialIsToldApartFromAnUnknownOne) {
         {"taap:1:ed25519:exp-" + suffix, "exp-" + suffix + "@example.com", "Expiring"});
     ASSERT_TRUE(user) << user.error().message;
     const auto token =
-        store->create_token({user->id, "lake", "short", "test", {"list_customers"}, 1, false});
+        store->create_token({user->id, "lake", "short", "test", {"list_customers"}, 3600, false});
     ASSERT_TRUE(token) << token.error().message;
     ASSERT_TRUE(store->context_for(token->secret)) << "live before it expires";
-    std::this_thread::sleep_for(std::chrono::milliseconds(2100));
+    {
+        pqxx::connection connection(uri);
+        pqxx::work tx(connection);
+        const pqxx::result moved = tx.exec_params(
+            "UPDATE sessions SET expires_at = now() - interval '1 second' WHERE id = $1::uuid",
+            token->session.id);
+        ASSERT_EQ(moved.affected_rows(), 1);
+        tx.commit();
+    }
     const auto expired = store->context_for(token->secret);
     ASSERT_FALSE(expired);
     EXPECT_EQ(expired.error().code, "expired");

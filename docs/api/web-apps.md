@@ -83,6 +83,14 @@ read scope. Detaching it clears the operator token hash immediately; service det
 that service from the normalized binding list. Deploy and rollback events retain their exact
 source or image input so the UI can offer history-bound rollback.
 
+## Apps Lake starts for MCP servers
+
+A stdio MCP connection (lake#659, [mcp-connections.md](mcp-connections.md#servers-that-speak-only-stdio))
+creates an ordinary App, as the person: `mode: image` with `LAKE_MCP_RUNNER_IMAGE`, `framework:
+mcp`, port `8080`, named `mcp-<prefix>-<4 hex>`, with `MCP_RUNNER_TOKEN` and `MCP_STDIO_COMMAND`
+from a secret Lake wrote in the person's mount. It is listed, metered, logged, stopped and started
+like any App; deleting its connection deletes it.
+
 ## Lake-protected app authentication
 
 An app with `auth = lake` uses nginx forward authentication without exposing Lake's browser
