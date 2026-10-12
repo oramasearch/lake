@@ -9,6 +9,7 @@
 #include "lake/api/mcp_connections.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <chrono>
 #include <map>
@@ -845,6 +846,16 @@ liquid::runtime::task<Outcome<McpConnection>> connection_of(control::WorkspaceRe
     co_return std::move(**found);
 }
 
+// Keeps the connection's dispatch row (lake#684, lake#685) in step with what was just written. A
+// failure does not undo the write; the audit event names it.
+void dispatch(ApiContext& context,
+              const std::string& workspace_id,
+              const McpConnection& connection) {
+    if (auto problem = record_mcp_connection_dispatch(context, workspace_id, connection)) {
+        context.audit_details["dispatch_error"] = *problem;
+    }
+}
+
 // Runs discovery and keeps what it learned (or why it failed) on the record.
 liquid::runtime::task<Outcome<McpConnection>>
 refresh(ApiContext& context, control::WorkspaceRecords& records, McpConnection connection) {
@@ -896,6 +907,7 @@ refresh(ApiContext& context, control::WorkspaceRecords& records, McpConnection c
     if (!changed) {
         co_return Outcome<McpConnection>(std::unexpected(failed(changed.error())));
     }
+    dispatch(context, workspace_id, *changed);
     co_return std::move(*changed);
 }
 
@@ -1194,6 +1206,7 @@ liquid::runtime::task<ApiResult> update_connection(const json& input, ApiContext
     if (!changed) {
         co_return failed(changed.error());
     }
+    dispatch(context, workspace_id, *changed);
     if (input.contains("exported")) {
         context.audit_details["exported"] = changed->exported;
     }
@@ -1222,6 +1235,13 @@ liquid::runtime::task<ApiResult> delete_connection(const json& input, ApiContext
         co_await control::remove_mcp_connection(*records, input.at("customer_id"), id));
     if (!removed) {
         co_return failed(removed.error());
+    }
+    if (context.store != nullptr) {
+        if (auto forgotten = context.store->remove_mcp_connection_dispatch(
+                input.at("workspace_id").get<std::string>(), id);
+            !forgotten) {
+            context.audit_details["dispatch_error"] = forgotten.error().message;
+        }
     }
     forget_token(id);
     co_return ApiResult::success({{"deleted", true}});
@@ -2104,6 +2124,7 @@ liquid::runtime::task<ApiResult> create_agent(const json& input, ApiContext& con
     if (!changed) {
         co_return failed(changed.error());
     }
+    dispatch(context, workspace_id, *changed);
     context.audit_details["agent_id"] = agent_id;
     co_return ApiResult::success(
         {{"agent_id", agent_id}, {"name", name}, {"connection", connection_json(*changed, false)}});
@@ -2156,6 +2177,86 @@ bool is_mcp_exported_tool_name(std::string_view name) {
     return name.find("__") != std::string_view::npos;
 }
 
+namespace {
+
+// One tools/list entry of a re-exported tool, from its row in list_mcp_connection_tools.
+std::optional<json> exported_entry(const json& row) {
+    const std::string name = text(row, "exported_name");
+    if (name.size() > 128) {
+        return std::nullopt;
+    }
+    const bool change = row.value("change", true);
+    return json{
+        {"name", name},
+        {"title", text(row, "title").empty() ? text(row, "name") : text(row, "title")},
+        {"description",
+         "[" + text(row, "connection_name") + ", through Lake] " + text(row, "description")},
+        {"inputSchema", row.value("input_schema", json::object())},
+        {"annotations",
+         {{"readOnlyHint", !change},
+          {"destructiveHint", row.value("destructive_hint", json(false)) == json(true)},
+          {"openWorldHint", true}}}};
+}
+
+std::string sha256_hex(const std::string& value) {
+    std::array<unsigned char, EVP_MAX_MD_SIZE> digest{};
+    unsigned int size = 0;
+    if (EVP_Digest(value.data(), value.size(), digest.data(), &size, EVP_sha256(), nullptr) != 1) {
+        return {};
+    }
+    static constexpr char digits[] = "0123456789abcdef";
+    std::string out;
+    for (unsigned int index = 0; index < size; ++index) {
+        out.push_back(digits[digest[index] >> 4]);
+        out.push_back(digits[digest[index] & 0x0f]);
+    }
+    return out;
+}
+
+} // namespace
+
+bool mcp_connection_streams(const McpConnection& connection) {
+    return !connection.notifications_topic.empty() ||
+           (!connection.agent_id.empty() && !connection.input_topic.empty()) ||
+           !connection.pending_launches.empty();
+}
+
+json mcp_exported_entries(const McpConnection& connection) {
+    json entries = json::array();
+    if (!connection.exported) {
+        return entries;
+    }
+    for (const json& row : tool_rows(connection, true)) {
+        if (auto entry = exported_entry(row)) {
+            entries.push_back(std::move(*entry));
+        }
+    }
+    return entries;
+}
+
+std::string mcp_exported_digest(const McpConnection& connection) {
+    const json entries = mcp_exported_entries(connection);
+    return entries.empty() ? std::string() : sha256_hex(entries.dump());
+}
+
+std::optional<std::string> record_mcp_connection_dispatch(const ApiContext& context,
+                                                          const std::string& workspace_id,
+                                                          const McpConnection& connection) {
+    if (context.store == nullptr) {
+        return std::nullopt;
+    }
+    auto written = context.store->put_mcp_connection_dispatch(
+        {.customer_id = connection.customer_id,
+         .workspace_id = workspace_id,
+         .connection_id = connection.id,
+         .streams = mcp_connection_streams(connection),
+         .exported_digest = mcp_exported_digest(connection)});
+    if (!written) {
+        return written.error().message;
+    }
+    return std::nullopt;
+}
+
 liquid::runtime::task<json>
 exported_mcp_tools(const Registry& registry, ApiContext& context, std::string workspace_id) {
     json tools = json::array();
@@ -2180,21 +2281,9 @@ exported_mcp_tools(const Registry& registry, ApiContext& context, std::string wo
         if (!row.value("exported", false)) {
             continue;
         }
-        const std::string name = text(row, "exported_name");
-        if (name.size() > 128) {
-            continue;
+        if (auto entry = exported_entry(row)) {
+            tools.push_back(std::move(*entry));
         }
-        const bool change = row.value("change", true);
-        tools.push_back(
-            {{"name", name},
-             {"title", text(row, "title").empty() ? text(row, "name") : text(row, "title")},
-             {"description",
-              "[" + text(row, "connection_name") + ", through Lake] " + text(row, "description")},
-             {"inputSchema", row.value("input_schema", json::object())},
-             {"annotations",
-              {{"readOnlyHint", !change},
-               {"destructiveHint", row.value("destructive_hint", json(false)) == json(true)},
-               {"openWorldHint", true}}}});
     }
     co_return tools;
 }

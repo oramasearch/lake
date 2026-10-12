@@ -1105,3 +1105,19 @@ that still holds content in `workspace_assignments` under `object_table = 'agent
 does not hold the copy back). The operator reads neither table. Nothing is dropped. Idempotent;
 guard `agent_task_workspaces_guard`. Mechanism and cutover:
 [`../architecture/workspace-records.md`](../architecture/workspace-records.md#cutover-runbook-agent-tasks-dev-cluster).
+
+## MCP connection dispatch migration
+
+`0079_mcp_connection_dispatch` (lake#684, lake#685) records where a workspace's MCP connections need
+Lake outside a request ([`../api/mcp-connections.md`](../api/mcp-connections.md)):
+
+- `mcp_connection_dispatch` (lake writes it with every connection it writes): `customer_id`,
+  `workspace_id` (both cascading on delete), `connection_id` (the connection record's id in the
+  workspace Zetta), `streams` (it has a notifications topic, an agent with an input topic, or results
+  still to publish), `exported_digest` (the hex SHA-256 of the `tools/list` entries it re-exports
+  through Lake's MCP, or empty), `updated_at`. A connection with neither has no row. The partial index
+  `mcp_connection_dispatch_streams_idx` serves the stream worker's read.
+
+The connection itself, its tools and its settings stay in the workspace Zetta. Nothing is dropped;
+idempotent; guard `mcp_connection_dispatch_guard`. The operator reads nothing of it; it vendors the
+schema and selects that guard before a lake with this change is rolled.

@@ -203,7 +203,9 @@ through `control::mcp_connections`, the credential read from the workspace's sec
 change (a person, or an agent with a person's per-tool grant and its `mcp:<prefix>` skill),
 metering through the `UsageRecorder` (`calls`, `transfer`), the audit read back for a connection's
 calls, and the re-export `mcp.cpp` calls for `/w/<workspace>/mcp`. `mcp_connection_streams.cpp` is
-`McpStreamWorker`, run by the store root's owner on the maintenance thread: notifications mirrored to
+`McpStreamWorker`, run by the store root's owner on the maintenance thread (every connection write
+keeps its dispatch row and the digest of what it re-exports, which `http_server.cpp` folds into a
+workspace endpoint's tool-list digest, lake#684): notifications mirrored to
 a connection's topic, one agent job per input event as the person who set the streams, and each
 finished job's result on the output topic; `mcp_connection_internal.hpp` lends it the connection's
 bearer, never a capability.

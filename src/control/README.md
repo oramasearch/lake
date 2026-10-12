@@ -258,3 +258,7 @@ open and silent. It never sends a request twice; `ZettaObjectClient` keeps the r
 Both stores keep `workload_resources` rows (lake#643): PostgreSQL in the operator-written table, the
 memory store in a map keyed by kind and id; prices and invoice lines carry their `class`, and the
 memory store's `age_build` moves a build's request time back for tests.
+
+Both stores keep MCP connection dispatch rows (lake#684, lake#685, migration `0079`), keyed by
+workspace and connection: a row that neither streams nor re-exports is removed rather than kept,
+and PostgreSQL writes one only for a workspace of the row's account.

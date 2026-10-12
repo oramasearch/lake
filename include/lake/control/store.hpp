@@ -385,6 +385,20 @@ struct WorkloadResources {
     std::uint64_t vram_bytes = 0;
     std::string observed_at;
 };
+// Where a workspace's MCP connections need Lake outside a request (migration 0079, lake#684,
+// lake#685, docs/api/mcp-connections.md): a connection whose streams the stream worker drives,
+// and the digest of the tools it re-exports through Lake's MCP. Ids and a digest only: the
+// connection itself is a record in its workspace Zetta. A row with neither is not kept.
+struct McpConnectionDispatch {
+    std::string customer_id;
+    std::string workspace_id;
+    std::string connection_id;
+    bool streams = false;
+    // The SHA-256 (hex) of the tools/list entries the connection re-exports; empty when it
+    // re-exports none.
+    std::string exported_digest;
+    std::string updated_at;
+};
 struct Workspace {
     std::string id, customer_id, name, environment;
     std::string desired = "running";
@@ -1590,6 +1604,16 @@ public:
     // demos (it replaces the row of the kind and id).
     virtual Result<std::vector<WorkloadResources>> workload_resources() = 0;
     virtual Result<void> put_workload_resources(const WorkloadResources& row) = 0;
+    // MCP connection dispatch (migration 0079, lake#684, lake#685). put replaces the connection's
+    // row, or removes it when it neither streams nor re-exports; remove removes it.
+    // mcp_stream_dispatch lists the rows that stream, by workspace, at most `limit`;
+    // mcp_exported_dispatch the rows of one workspace that re-export tools.
+    virtual Result<void> put_mcp_connection_dispatch(const McpConnectionDispatch& row) = 0;
+    virtual Result<void> remove_mcp_connection_dispatch(const std::string& workspace_id,
+                                                        const std::string& connection_id) = 0;
+    virtual Result<std::vector<McpConnectionDispatch>> mcp_stream_dispatch(int limit) = 0;
+    virtual Result<std::vector<McpConnectionDispatch>>
+    mcp_exported_dispatch(const std::string& workspace_id) = 0;
     virtual Result<BillingPlan> put_billing_plan(const BillingPlan& plan) = 0;
     virtual Result<Invoice> create_invoice(const Invoice& invoice) = 0;
     virtual Result<std::vector<Invoice>> list_invoices(const std::string& customer_id) = 0;

@@ -297,6 +297,12 @@ public:
     Result<std::vector<BillingPlan>> billing_plans() override;
     Result<std::vector<WorkloadResources>> workload_resources() override;
     Result<void> put_workload_resources(const WorkloadResources& row) override;
+    Result<void> put_mcp_connection_dispatch(const McpConnectionDispatch& row) override;
+    Result<void> remove_mcp_connection_dispatch(const std::string& workspace_id,
+                                                const std::string& connection_id) override;
+    Result<std::vector<McpConnectionDispatch>> mcp_stream_dispatch(int limit) override;
+    Result<std::vector<McpConnectionDispatch>>
+    mcp_exported_dispatch(const std::string& workspace_id) override;
     Result<BillingPlan> put_billing_plan(const BillingPlan& plan) override;
     Result<Invoice> create_invoice(const Invoice& invoice) override;
     Result<std::vector<Invoice>> list_invoices(const std::string& customer_id) override;
@@ -495,6 +501,8 @@ private:
     std::map<std::pair<std::string, std::string>, UsageLimit> usage_limits_;
     std::map<std::string, BillingPlan> billing_plans_;
     std::map<std::pair<std::string, std::string>, WorkloadResources> workload_resources_;
+    // By (workspace, connection).
+    std::map<std::pair<std::string, std::string>, McpConnectionDispatch> mcp_connection_dispatch_;
     std::vector<Invoice> invoices_;
     std::map<std::pair<std::string, std::string>, std::string> billing_provider_customers_;
     std::set<std::pair<std::string, std::string>> payment_events_;

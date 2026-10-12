@@ -658,6 +658,26 @@ public:
     control::Result<void> put_workload_resources(const control::WorkloadResources& row) override {
         return call("put_workload_resources", [&] { return store_->put_workload_resources(row); });
     }
+    control::Result<void>
+    put_mcp_connection_dispatch(const control::McpConnectionDispatch& row) override {
+        return call("put_mcp_connection_dispatch",
+                    [&] { return store_->put_mcp_connection_dispatch(row); });
+    }
+    control::Result<void> remove_mcp_connection_dispatch(const std::string& workspace_id,
+                                                         const std::string& connection_id) override {
+        return call("remove_mcp_connection_dispatch", [&] {
+            return store_->remove_mcp_connection_dispatch(workspace_id, connection_id);
+        });
+    }
+    control::Result<std::vector<control::McpConnectionDispatch>>
+    mcp_stream_dispatch(int limit) override {
+        return call("mcp_stream_dispatch", [&] { return store_->mcp_stream_dispatch(limit); });
+    }
+    control::Result<std::vector<control::McpConnectionDispatch>>
+    mcp_exported_dispatch(const std::string& workspace_id) override {
+        return call("mcp_exported_dispatch",
+                    [&] { return store_->mcp_exported_dispatch(workspace_id); });
+    }
     control::Result<control::BillingPlan>
     put_billing_plan(const control::BillingPlan& plan) override {
         return call("put_billing_plan", [&] { return store_->put_billing_plan(plan); });

@@ -232,6 +232,13 @@ operator reports a workload is scheduled with; `Store::workload_resources` lists
 is when the operator last wrote a launch's status (a finished job's end). See
 [metering](../../../docs/api/metering.md#resources).
 
+`store.hpp`'s `McpConnectionDispatch` (lake#684, lake#685, migration `0079_mcp_connection_dispatch`)
+is where a workspace's MCP connection needs Lake outside a request: whether it streams and the digest
+of the tools it re-exports. `put_mcp_connection_dispatch` writes or removes it,
+`mcp_stream_dispatch` lists the streaming rows for the stream worker and `mcp_exported_dispatch` a
+workspace's re-exporting rows for its MCP endpoint. See
+[mcp-connections.md](../../../docs/api/mcp-connections.md).
+
 `methodologies.hpp` (lake#655) is a workspace methodology's manifest, the findings Validate answers
 without running anything, drafts and copies of Orama's, the image's Dockerfile and the validation
 sample. `store.hpp`'s `MethodologyRun`, `NewMethodologyRun` and `MethodologyRunStatus` are the

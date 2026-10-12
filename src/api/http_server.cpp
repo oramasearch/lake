@@ -7544,6 +7544,8 @@ struct ApiServer::Impl {
     std::string agent_openapi_body;
     // The registry is fixed for the life of the process, so its MCP tool list is too (lake#441).
     std::string mcp_tool_digest;
+    // What each MCP session last listed (lake#684).
+    McpSessionLists mcp_session_lists;
     mutable OutboundHttpClient outbound_http;
     // How invoices are paid where billing is on (docs/api/billing.md#payment-providers).
     std::shared_ptr<PaymentProviders> payments;
@@ -13425,6 +13427,24 @@ struct ApiServer::Impl {
         co_return http::route_done;
     }
 
+    // The tool-list digest of /mcp (Lake's own) or of /w/<workspace>/mcp (lake#684): Lake's own
+    // and the digests the workspace's re-exporting connections recorded. nullopt when the store
+    // cannot answer, so a session is never told on a guess.
+    std::optional<std::string> mcp_endpoint_digest(const std::string& workspace_id) {
+        if (workspace_id.empty() || !options.store) {
+            return mcp_tool_digest;
+        }
+        const auto rows = options.store->mcp_exported_dispatch(workspace_id);
+        if (!rows) {
+            return std::nullopt;
+        }
+        std::vector<McpExportedDigest> exported;
+        for (const control::McpConnectionDispatch& row : *rows) {
+            exported.push_back({row.connection_id, row.exported_digest});
+        }
+        return mcp_workspace_tool_list_digest(mcp_tool_digest, std::move(exported));
+    }
+
     // POST /mcp — JSON-RPC 2.0 over HTTP. Notifications get 202 and no body. initialize answers an
     // Mcp-Session-Id naming this build's tool list; a later request from a session that began on
     // another list (lake was upgraded since) is told notifications/tools/list_changed ahead of its
@@ -13470,11 +13490,20 @@ struct ApiServer::Impl {
                 const std::string method = request.is_object() ? request.value("method", "") : "";
                 const std::string presented(route.req.value_or("Mcp-Session-Id", ""));
                 const std::string accept(route.req.value_or(http::field::accept, ""));
+                // A workspace's endpoint also lists the tools its connections re-export, so its
+                // list changes when one is exported or what it exports changes (lake#684).
+                std::optional<std::string> current;
+                if (method == "initialize" || !presented.empty()) {
+                    current = mcp_endpoint_digest(ctx.path_workspace_id);
+                }
                 if (method == "initialize") {
-                    session_id = mcp_session_id(mcp_tool_digest);
-                } else if (method != "tools/list" &&
-                           mcp_session_tool_list_changed(presented, mcp_tool_digest) &&
-                           accept.find("text/event-stream") != std::string::npos) {
+                    session_id = mcp_session_id(current.value_or(mcp_tool_digest));
+                } else if (method == "tools/list") {
+                    if (current) {
+                        mcp_session_lists.listed(presented, *current);
+                    }
+                } else if (current && accept.find("text/event-stream") != std::string::npos &&
+                           mcp_session_lists.changed(presented, *current)) {
                     // tools/list is itself the fresh list, so it never carries the notice:
                     // a client that refetches on the notice is not told again.
                     content_type = "text/event-stream";

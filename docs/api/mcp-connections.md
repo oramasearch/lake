@@ -70,7 +70,9 @@ loopback.
   It holds the name, the URL and transport, the authentication kind, what the server offered at
   the last refresh, the person's decision for each tool, the re-export switch, the auto-approve
   grants, and the connection's agent and streams. Another workspace of the account never sees it.
-  Nothing of it is in PostgreSQL, and there is no migration.
+  Nothing of it is in PostgreSQL. Lake's store keeps only its **dispatch row** (migration
+  `0079_mcp_connection_dispatch`, lake#684, lake#685): the account, workspace and connection ids,
+  whether it streams, and the digest of the tools it re-exports. That is dispatch, never content.
 - **The credential** is a workspace secret (decision 58) in a secret mount of the same workspace:
   a bearer token, or the OAuth refresh token Lake writes there when a person signs in. The record
   holds only its reference, `lake-secret://<mount>/<name>#<field>`. Lake reads it server-side for
@@ -223,9 +225,21 @@ result (`content`, `structuredContent`, `isError`). A refusal is `isError: true`
 
 **What turning it on means:** a re-exported tool runs with Lake's credential to that server for
 **anyone who may call Lake's tools in this workspace**. Lake's policy, the caller's permission on
-the workspace, is the only gate. The connection's page says so beside the switch. The tool list's
-session digest (`Mcp-Session-Id`) covers Lake's own tools only, so a client is not told when a
-connection is exported; it sees the tools on its next `tools/list`.
+the workspace, is the only gate. The connection's page says so beside the switch.
+
+**An open session is told** (lake#684). Whenever Lake writes a connection, it keeps its dispatch
+row in lake's store (migration `0079_mcp_connection_dispatch`): the SHA-256 of the `tools/list`
+entries it re-exports, empty when it re-exports none. The workspace endpoint names its tool list by
+`mcp_workspace_tool_list_digest`: Lake's own digest when no connection re-exports, else the
+SHA-256 of Lake's digest and each re-exporting connection's id and digest. `initialize` answers an
+`Mcp-Session-Id` carrying that digest, so exporting a connection, allowing or disallowing one of
+its tools, a refresh that changes its tools, renaming it, or no longer exporting it changes the
+list, and the session's next request (with `Accept: text/event-stream`) receives
+`notifications/tools/list_changed` ahead of its answer, as after an upgrade ([mcp.md](mcp.md)).
+Each Lake process remembers what a session last received from `tools/list` (`McpSessionLists`,
+at most 10,000 sessions), so a session is told until it lists the tools again, not on every later
+request; a session another replica listed is told once more there. The row holds ids and a
+digest only: the connection and its tools stay in the workspace Zetta.
 
 ## A connection's agent and streams
 
@@ -283,4 +297,9 @@ challenge, a state taken once and by its own person, only the refresh token kept
 token renewed with a rotated refresh token. `...McpConnectionStreamsMirrorNotificationsAndDriveTheAgent`:
 notifications mirrored to their topic after a subscription, one job per input event as the person,
 and its result published once on the output topic.
+`HttpServer.WorkspaceMcpSessionsLearnThatExportedToolsChanged`
+drives `/w/<workspace>/mcp`: the notice after an export until the session lists, again after a
+change of what is exported, and a new session on Lake's own list once nothing is.
+`Mcp.WorkspaceDigestFollowsExportedToolsAndListedSessionsAreNotToldAgain` checks the digest and the
+bounded memory of listed sessions.
 `SchemaConformance.EveryToolAndRequiredOutputUsesHttpContract` calls each capability over MCP.

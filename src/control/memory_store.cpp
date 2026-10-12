@@ -2389,6 +2389,57 @@ Result<void> InMemoryStore::put_workload_resources(const WorkloadResources& row)
     return {};
 }
 
+Result<void> InMemoryStore::put_mcp_connection_dispatch(const McpConnectionDispatch& row) {
+    if (row.customer_id.empty() || row.workspace_id.empty() || row.connection_id.empty()) {
+        return std::unexpected(StoreError{"invalid_input", "not an MCP connection dispatch row"});
+    }
+    std::lock_guard lock(mutex_);
+    if (std::ranges::none_of(workspaces_, [&](const Workspace& workspace) {
+            return workspace.id == row.workspace_id && workspace.customer_id == row.customer_id;
+        })) {
+        return std::unexpected(StoreError{"not_found", "workspace not found"});
+    }
+    const std::pair key{row.workspace_id, row.connection_id};
+    if (!row.streams && row.exported_digest.empty()) {
+        mcp_connection_dispatch_.erase(key);
+        return {};
+    }
+    McpConnectionDispatch stored = row;
+    stored.updated_at = now_iso8601();
+    mcp_connection_dispatch_[key] = std::move(stored);
+    return {};
+}
+
+Result<void> InMemoryStore::remove_mcp_connection_dispatch(const std::string& workspace_id,
+                                                           const std::string& connection_id) {
+    std::lock_guard lock(mutex_);
+    mcp_connection_dispatch_.erase({workspace_id, connection_id});
+    return {};
+}
+
+Result<std::vector<McpConnectionDispatch>> InMemoryStore::mcp_stream_dispatch(int limit) {
+    std::lock_guard lock(mutex_);
+    std::vector<McpConnectionDispatch> rows;
+    for (const auto& [key, row] : mcp_connection_dispatch_) {
+        if (row.streams && static_cast<int>(rows.size()) < limit) {
+            rows.push_back(row);
+        }
+    }
+    return rows;
+}
+
+Result<std::vector<McpConnectionDispatch>>
+InMemoryStore::mcp_exported_dispatch(const std::string& workspace_id) {
+    std::lock_guard lock(mutex_);
+    std::vector<McpConnectionDispatch> rows;
+    for (const auto& [key, row] : mcp_connection_dispatch_) {
+        if (key.first == workspace_id && !row.exported_digest.empty()) {
+            rows.push_back(row);
+        }
+    }
+    return rows;
+}
+
 Result<Invoice> InMemoryStore::create_invoice(const Invoice& invoice) {
     if (invoice.customer_id.empty() || invoice.period.size() != 7 || invoice.plan_id.empty() ||
         !valid_currency(invoice.currency) || invoice.provider.empty()) {
