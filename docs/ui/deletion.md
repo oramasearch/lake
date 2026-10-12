@@ -35,12 +35,12 @@ names the confirmation text; it is pure and tested by `frontend/tests/deletion.t
 | Model | Ship → Model, header, **Delete** (one version) | the model's name | the trained model, whether it was published, the run it keeps |
 | Run | Train → Run, header, **Delete**, enabled once the run has finished | the first 8 characters of its id | the run and its report, the models it keeps |
 | Search index | Ship → Search Index, header, **Delete** | the indexed table (its id's first 8 characters without one) | the index, whether it was published, the dataset it keeps |
-| Ask Orama conversation | Ask Orama home, beside New conversation, **Delete** | `delete` | how many messages, how it starts; a new conversation starts after it |
+| Ask Orama conversation | Ask Orama home, beside New conversation, **Delete** | `delete` | how many messages, how it starts, how many agent tasks it started go with it; a new conversation starts after it |
 
 ## How to check it
 
 `frontend/checks/deletion.mjs` drives the built pages with Playwright against `npx vite` and mocked
 answers, at 1440 and 390 px wide: an organization that still owns a workspace (blocked, the
-workspace linked), one that owns none (the typed handle enables the button), a secret mount and a
-dataset. It reports whether a page scrolls sideways, the dialog's lines and the button's state
+workspace linked), one that owns none (the typed handle enables the button), a secret mount, a
+dataset, and an Ask Orama conversation with the two agent tasks it started (lake#673). It reports whether a page scrolls sideways, the dialog's lines and the button's state
 before and after typing, and writes screenshots to `OUT`.

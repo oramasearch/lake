@@ -807,6 +807,21 @@ public:
                 customer_id, conversation_id, agent, kind, workspace_id);
         });
     }
+    control::Result<std::vector<control::AgentTask>>
+    list_conversation_agent_tasks(const std::string& customer_id,
+                                  const std::string& workspace_id,
+                                  const std::string& conversation_id,
+                                  const std::string& requested_by_user_id) override {
+        return call("list_conversation_agent_tasks", [&] {
+            return store_->list_conversation_agent_tasks(
+                customer_id, workspace_id, conversation_id, requested_by_user_id);
+        });
+    }
+    control::Result<std::size_t> delete_agent_tasks(const std::string& customer_id,
+                                                    const std::vector<std::string>& ids) override {
+        return call("delete_agent_tasks",
+                    [&] { return store_->delete_agent_tasks(customer_id, ids); });
+    }
     control::Result<control::AgentTask> claim_agent_task(const std::string& id,
                                                          const std::string& agent,
                                                          const std::string& sha256,

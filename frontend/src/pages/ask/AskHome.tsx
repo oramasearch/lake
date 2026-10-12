@@ -121,7 +121,7 @@ function HomeConversation({ workspaceId, customerId }: { workspaceId: string; cu
                         input={{ customer_id: customerId, workspace_id: workspaceId, conversation_id: state.conversation }}
                         title="Delete This Conversation"
                         confirmLabel="Delete conversation"
-                        intro="Its messages are removed from this workspace. It cannot be undone."
+                        intro="Its messages, and the agent tasks it started, are removed from this workspace. It cannot be undone."
                         typed={() => DELETE_WORD}
                         lines={conversationLines}
                         done="Conversation deleted"
