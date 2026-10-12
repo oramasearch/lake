@@ -525,6 +525,17 @@ const std::vector<std::pair<std::string_view, std::string_view>>& engine_storage
     return kinds;
 }
 
+// Whether a `lake_storage` kind is held on a workspace engine's own volume: billed as the
+// volume, so shown as engine_storage and never as storage (decision 61, lake#663).
+bool engine_held(std::string_view kind) {
+    for (const auto& [engine, name] : engine_storage_kinds()) {
+        if (name == kind) {
+            return true;
+        }
+    }
+    return false;
+}
+
 // A workload charged once for how long it ran (lake#658): an image build, a job-mode agent launch,
 // an agent cron run or a workspace methodology run (lake#655) that has finished. It ran from its request (a cron run: its start) to its
 // final status, so time queued is included for builds and launches, as for build time.
@@ -824,7 +835,7 @@ liquid::runtime::task<UsageReading> read_usage(ApiContext& context, const UsageQ
         } else {
             pending.push_back(complete_read(nothing()));
         }
-        if (wants("storage")) {
+        if (wants("storage") || wants("engine_storage")) {
             json input = window;
             input["metric"] = std::string(UsageRecorder::storage_metric);
             input["group_by"] = json::array({"kind"});
@@ -892,8 +903,13 @@ liquid::runtime::task<UsageReading> read_usage(ApiContext& context, const UsageQ
                                 labels[name] = value.get<std::string>();
                             }
                         }
-                        const std::string dimension =
+                        std::string dimension =
                             fixed_dimension.empty() ? labels["dimension"] : fixed_dimension;
+                        // What the engine holds on its own volume is engine_storage, never
+                        // billed storage (decision 61, lake#663).
+                        if (dimension == "storage" && engine_held(labels["kind"])) {
+                            dimension = "engine_storage";
+                        }
                         if (!wants(dimension)) {
                             continue;
                         }
@@ -1124,13 +1140,13 @@ liquid::runtime::task<UsageReading> read_usage(ApiContext& context, const UsageQ
     }
     // Model tokens are counted by the model gateway as each call is answered (lake#248).
     // Speech is measured for every transcript and dictation (lake#613, lake#658).
-    if (wants("storage")) {
+    if (wants("engine_storage")) {
         // A workspace sampled in the window whose engine reported no models (its Zetta has no
         // storage_usage yet): its models, indexes, run artifacts, topics, files and buckets are
-        // not in its storage (lake#658).
+        // not in what its engine holds (lake#658).
         std::set<std::string> sampled, reported;
         for (const auto& [key, series] : accumulator.series()) {
-            if (series.dimension != "storage") {
+            if (series.dimension != "engine_storage") {
                 continue;
             }
             sampled.insert(series.workspace_id);
@@ -1149,7 +1165,7 @@ liquid::runtime::task<UsageReading> read_usage(ApiContext& context, const UsageQ
                 "Model files, indexes, run artifacts, topics, files and buckets inside workspace " +
                 unreported +
                 ": its engine does not report their size yet (it needs a Zetta with "
-                "storage_usage), so only its datasets are counted (lake#658).");
+                "storage_usage), so only its datasets are shown (lake#658).");
         }
     }
     if (wants("transfer")) {
@@ -2090,7 +2106,8 @@ void register_usage_capabilities(Registry& registry) {
             "tokens also by agent, launch and model; instances and volumes by service, store or "
             "app; CPU, RAM, GPU, GPU memory, predictions and searches by object). `billed` says "
             "whether the price list bills the dimension; build, run and instance time are detail "
-            "and never billed. Read from each workspace's own Zetta. `from` is rounded down and "
+            "and never billed, and so is engine_storage, what a workspace engine holds on its "
+            "own volume, which is billed as the volume (`volumes`). Read from each workspace's own Zetta. `from` is rounded down and "
             "`to` up to whole periods; an hour granularity covers at most 100 days.",
         .input_schema = {{"type", "object"},
                          {"properties",
