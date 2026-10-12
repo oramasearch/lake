@@ -19,6 +19,7 @@
 #include <pqxx/pqxx>
 
 #include "api/forge_records_api.hpp"
+#include "api/mcp_connection_internal.hpp"
 #include "api/secret_records_api.hpp"
 #include "api/workspace_bus.hpp"
 #include "api/workspace_records_api.hpp"
@@ -330,6 +331,9 @@ struct TwoSpaces {
     // Repositories and image builds, for workspace methodologies (lake#655); unset: none.
     lake::api::SyncStore* sync_store = nullptr;
     std::string methodology_runtime_image;
+    // The runner image of stdio MCP connections (lake#659); empty: none.
+    std::string mcp_runner_image;
+    std::string apps_wildcard;
     std::string internal_url;
     std::string public_host;
     // MCP connections' transport (lake#652); null: none. Tests reach a local test server.
@@ -379,6 +383,17 @@ struct TwoSpaces {
     }
 
     void ready(const std::string& workspace_id) {
+        // The namespace the operator reports the workspace runs in.
+        if (database_uri.empty()) {
+            EXPECT_TRUE(static_cast<lake::control::InMemoryStore&>(*store).set_workspace_namespace(
+                workspace_id, "dev-ws-" + workspace_id));
+        } else {
+            pqxx::connection connection(database_uri);
+            pqxx::work tx(connection);
+            tx.exec_params("UPDATE workspaces SET namespace = $2 WHERE id = $1::uuid",
+                           workspace_id, "dev-ws-" + workspace_id);
+            tx.commit();
+        }
         const auto workspace = store->get_workspace(workspace_id);
         const auto zetta_service = store->get_service(workspace->zetta_service_id);
         status(zetta_service->id, "Ready", "http://" + workspace_id + ".test");
@@ -401,6 +416,8 @@ struct TwoSpaces {
         context.transcriber = transcriber;
         context.sync_store = sync_store;
         context.methodology_runtime_image = methodology_runtime_image;
+        context.mcp_runner_image = mcp_runner_image;
+        context.apps_wildcard = apps_wildcard;
         context.internal_url = internal_url;
         context.public_host = public_host;
         context.mcp_http = mcp_http;
@@ -4187,6 +4204,173 @@ TEST_P(WorkspaceRecordStores, McpConnectionDispatchNamesExportsAndStreamingWorks
     ASSERT_TRUE(t.call(first, "delete_mcp_connection", in(home, {{"id", id}})).ok);
     EXPECT_TRUE(t.store->mcp_stream_dispatch(100)->empty());
     EXPECT_TRUE(exported_digests(home).empty());
+}
+
+// lake#659: a server that speaks only stdio runs as an App of its workspace. Lake writes the
+// runner's token as a new secret in the person's mount, creates the App with the runner's image,
+// the package's command line and its environment, and reaches it at the App's cluster Service with
+// that token; nobody changes that address. Until the App is ready the connection is `starting`;
+// deleting it deletes the App.
+TEST_P(WorkspaceRecordStores, McpStdioConnectionsRunAsAWorkspaceApp) {
+    auto store = make_store();
+    if (!store) {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
+    }
+    TwoSpaces t(store, database_uri_);
+    t.mcp_http = lake::api::make_mcp_http(true);
+    t.apps_wildcard = "apps.lake.test";
+    const auto& first = t.spaces[0];
+    const std::string home = first.workspaces[0];
+    const auto in = [&](json input) {
+        input["customer_id"] = first.customer_id;
+        input["workspace_id"] = home;
+        return input;
+    };
+    const auto mount = t.call(first, "create_secret_mount", in({{"name", "mcp-servers"}}));
+    ASSERT_TRUE(mount.ok) << mount.error.message;
+    const std::string mount_id = mount.value["id"];
+    ASSERT_TRUE(t.call(first,
+                       "put_secret",
+                       {{"mount_id", mount_id}, {"name", "github"}, {"value", {{"token", "ghp-x"}}}})
+                    .ok);
+    const json stdio{{"runtime", "node"},
+                     {"package", "@modelcontextprotocol/server-everything@2026.8.31"},
+                     {"args", json::array({"stdio"})},
+                     {"mount_id", mount_id},
+                     {"env",
+                      {{"LOG_LEVEL", "info"},
+                       {"GITHUB_TOKEN",
+                        {{"secret",
+                          {{"mount_id", mount_id}, {"name", "github"}, {"field", "token"}}}}}}}};
+
+    // A Lake with no runner image runs no stdio server.
+    EXPECT_EQ(t.call(first, "create_mcp_connection", in({{"name", "Everything"}, {"stdio", stdio}}))
+                  .error.code,
+              "not_supported");
+    t.mcp_runner_image = "oramasearch/lake-mcp-runner:0.1.0";
+
+    // Refusals before anything starts.
+    const auto refused = [&](json changed, const std::string& path) {
+        json input = stdio;
+        input.update(changed);
+        const auto answer =
+            t.call(first, "create_mcp_connection", in({{"name", "Everything"}, {"stdio", input}}));
+        EXPECT_FALSE(answer.ok) << path;
+        EXPECT_EQ(answer.error.path, path) << answer.error.message;
+    };
+    refused({{"runtime", "ruby"}}, "/stdio/runtime");
+    refused({{"package", "--eval=1"}}, "/stdio/package");
+    refused({{"package", "left pad"}}, "/stdio/package");
+    refused({{"command", "-x"}}, "/stdio/command");
+    refused({{"env", {{"MCP_RUNNER_TOKEN", "mine"}}}}, "/stdio/env/MCP_RUNNER_TOKEN");
+    refused({{"env", {{"1BAD", "x"}}}}, "/stdio/env/1BAD");
+    EXPECT_EQ(t.call(first,
+                     "create_mcp_connection",
+                     in({{"name", "Everything"}, {"stdio", stdio}, {"url", "https://x.example"}}))
+                  .error.path,
+              "/url");
+    const auto apps = [&] {
+        const auto listed = t.store->list_web_apps(first.customer_id);
+        EXPECT_TRUE(listed);
+        std::vector<lake::control::WebApp> live;
+        for (const auto& app : listed ? *listed : std::vector<lake::control::WebApp>{}) {
+            if (app.desired != "deleted") {
+                live.push_back(app);
+            }
+        }
+        return live;
+    };
+    EXPECT_TRUE(apps().empty()) << "nothing started for a refused connection";
+
+    // Added: the App, its token in the mount, and the connection that reaches it.
+    const auto created =
+        t.call(first, "create_mcp_connection", in({{"name", "Everything"}, {"stdio", stdio}}));
+    ASSERT_TRUE(created.ok) << created.error.message << " at " << created.error.path;
+    const std::string id = created.value["id"];
+    EXPECT_EQ(created.value["kind"], "stdio");
+    EXPECT_EQ(created.value["status"], "starting");
+    const std::string app_id = created.value["app_id"];
+    std::string hex = app_id;
+    std::erase(hex, '-');
+    EXPECT_EQ(created.value["url"],
+              "http://app-" + hex.substr(0, 12) + ".dev-ws-" + home + ".svc.cluster.local/mcp");
+    EXPECT_EQ(created.value["auth"]["kind"], "bearer");
+    EXPECT_EQ(created.value["auth"]["secret"],
+              json({{"mount_id", mount_id}, {"name", "mcp-everything-runner"}, {"field", "token"}}));
+    EXPECT_EQ(created.value["stdio"]["env_keys"], json::array({"LOG_LEVEL"}));
+    EXPECT_EQ(created.value["stdio"]["secret_env_keys"], json::array({"GITHUB_TOKEN"}));
+    const auto running = apps();
+    ASSERT_EQ(running.size(), 1U);
+    const auto& app = running[0];
+    EXPECT_EQ(app.id, app_id);
+    EXPECT_EQ(app.workspace_id, home);
+    EXPECT_EQ(app.mode, "image");
+    EXPECT_EQ(app.image, "oramasearch/lake-mcp-runner:0.1.0");
+    EXPECT_EQ(app.framework, "mcp");
+    EXPECT_EQ(app.port, 8080) << "the port the workspace admits Lake to";
+    EXPECT_TRUE(app.name.starts_with("mcp-everything-")) << app.name;
+    EXPECT_EQ(created.value["stdio"]["app_name"], app.name);
+    EXPECT_EQ(app.secret_env_refs.at("MCP_STDIO_COMMAND"),
+              "lake-secret://" + mount_id + "/mcp-everything-runner#command");
+    EXPECT_EQ(app.env.at("LOG_LEVEL"), "info");
+    EXPECT_EQ(app.secret_env_refs.at("MCP_RUNNER_TOKEN"),
+              "lake-secret://" + mount_id + "/mcp-everything-runner#token");
+    EXPECT_EQ(app.secret_env_refs.at("GITHUB_TOKEN"), "lake-secret://" + mount_id + "/github#token");
+    const auto token = t.call(first,
+                              "read_secret",
+                              {{"mount_id", mount_id}, {"name", "mcp-everything-runner"}});
+    ASSERT_TRUE(token.ok) << token.error.message;
+    const std::string runner_token = token.value["value"]["token"];
+    EXPECT_GE(runner_token.size(), 32U);
+    EXPECT_EQ(json::parse(token.value["value"]["command"].get<std::string>()),
+              json::array({"npx",
+                           "--yes",
+                           "@modelcontextprotocol/server-everything@2026.8.31",
+                           "stdio"}));
+    const auto got = t.call(first, "get_mcp_connection", in({{"id", id}}));
+    ASSERT_TRUE(got.ok);
+    EXPECT_EQ(got.value.dump().find(runner_token), std::string::npos) << "never answered";
+    EXPECT_EQ(got.value["app"]["phase"], "Pending");
+    EXPECT_EQ(got.value["app"]["ready"], false);
+    {
+        auto context = t.context(first);
+        auto records = lake::api::workspace_records(context, first.customer_id, home);
+        ASSERT_TRUE(records);
+        const auto kept = run(lake::control::get_mcp_connection(*records, first.customer_id, id));
+        ASSERT_TRUE(kept && *kept);
+        EXPECT_TRUE(lake::api::mcp_stdio_app_address(**kept));
+        auto moved = **kept;
+        moved.url = "http://lake-prod-postgres.lake.svc.cluster.local/mcp";
+        EXPECT_FALSE(lake::api::mcp_stdio_app_address(moved)) << "only the App's own Service";
+    }
+
+    // Its address and token are the App's: a person cannot point it elsewhere.
+    for (const auto& [field, value] :
+         std::vector<std::pair<std::string, json>>{{"url", "https://mcp.example.com/mcp"},
+                                                   {"transport", "sse"},
+                                                   {"auth", {{"kind", "none"}}}}) {
+        const auto changed = t.call(first, "update_mcp_connection", in({{"id", id}, {field, value}}));
+        EXPECT_FALSE(changed.ok) << field;
+        EXPECT_EQ(changed.error.path, "/" + field);
+    }
+    EXPECT_TRUE(t.call(first, "update_mcp_connection", in({{"id", id}, {"name", "Everything 2"}})).ok);
+
+    // A refresh before the App is ready says so and calls nothing.
+    const auto early = t.call(first, "refresh_mcp_connection", in({{"id", id}}));
+    ASSERT_TRUE(early.ok) << early.error.message;
+    EXPECT_EQ(early.value["status"], "starting");
+    EXPECT_NE(early.value["last_error"].get<std::string>().find("its App is Pending"),
+              std::string::npos)
+        << early.value["last_error"];
+
+    // Deleted: the App goes with it, and the secret stays in its mount.
+    ASSERT_TRUE(t.call(first, "delete_mcp_connection", in({{"id", id}})).ok);
+    EXPECT_TRUE(apps().empty()) << "the App is being deleted";
+    EXPECT_TRUE(t.call(first,
+                       "read_secret",
+                       {{"mount_id", mount_id}, {"name", "mcp-everything-runner"}})
+                    .ok);
+    EXPECT_EQ(t.call(first, "get_mcp_connection", in({{"id", id}})).error.code, "not_found");
 }
 
 INSTANTIATE_TEST_SUITE_P(Stores, WorkspaceRecordStores, testing::Values(false, true),

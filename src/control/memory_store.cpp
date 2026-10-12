@@ -934,6 +934,17 @@ Result<void> InMemoryStore::set_workspace_status(const std::string& id, std::str
     return {};
 }
 
+Result<void> InMemoryStore::set_workspace_namespace(const std::string& id,
+                                                    std::string namespace_name) {
+    std::lock_guard lock(mutex_);
+    const auto row = std::ranges::find(workspaces_, id, &Workspace::id);
+    if (row == workspaces_.end()) {
+        return std::unexpected(StoreError{"not_found", "no workspace " + id});
+    }
+    row->namespace_name = std::move(namespace_name);
+    return {};
+}
+
 Result<std::vector<ManagedService>> InMemoryStore::list_services(const std::string& customer_id) {
     std::lock_guard lock(mutex_);
     std::vector<ManagedService> services;

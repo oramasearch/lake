@@ -629,6 +629,7 @@ McpClientOptions options_for(const ApiContext& context,
     options.transport = connection.transport;
     options.credential = credential;
     options.allow_private_addresses = context.mcp_allow_private_addresses;
+    options.cluster_service = mcp_stdio_app_address(connection);
     options.client_version = std::string(lake::version_string());
     return options;
 }
@@ -791,7 +792,10 @@ json connection_json(const McpConnection& connection, bool with_tools) {
                                                   : json(connection.notifications_topic)},
           {"subscribe_resources", connection.subscribe_resources}}},
         {"created_at", connection.created_at},
-        {"created_by", connection.created_by}};
+        {"created_by", connection.created_by},
+        {"kind", connection.app_id.empty() ? "remote" : "stdio"},
+        {"app_id", connection.app_id.empty() ? json(nullptr) : json(connection.app_id)},
+        {"stdio", connection.app_id.empty() ? json(nullptr) : connection.stdio}};
     if (with_tools) {
         out["tools"] = tools;
         out["resources"] = connection.discovery.value("resources", json::array());
@@ -856,10 +860,40 @@ void dispatch(ApiContext& context,
     }
 }
 
-// Runs discovery and keeps what it learned (or why it failed) on the record.
+json stdio_app_state(const ApiContext& context, const std::string& app_id);
+
+// Runs discovery and keeps what it learned (or why it failed) on the record. A stdio server's App
+// that is not ready yet leaves the connection `starting` and says why, without calling it.
 liquid::runtime::task<Outcome<McpConnection>>
 refresh(ApiContext& context, control::WorkspaceRecords& records, McpConnection connection) {
     const std::string workspace_id = records.workspace_id();
+    if (!connection.app_id.empty()) {
+        const json app = stdio_app_state(context, connection.app_id);
+        const bool ready = app.is_object() && app.value("ready", false);
+        if (!ready) {
+            const std::string why =
+                !app.is_object()
+                    ? "its App is gone: delete this connection and add the server again"
+                : app.value("desired", "") == "stopped"
+                    ? "its App is stopped: start it to use this server"
+                    : "its App is " + app.value("phase", std::string("starting")) +
+                          (app.value("message", "").empty() ? std::string()
+                                                            : ": " + app.value("message", ""));
+            auto changed = control::settled(co_await control::change_mcp_connection(
+                records,
+                connection.customer_id,
+                connection.id,
+                [&](McpConnection& next) -> std::optional<control::ZettaControlError> {
+                    next.status = app.is_object() ? "starting" : "failing";
+                    next.last_error = why;
+                    return std::nullopt;
+                }));
+            if (!changed) {
+                co_return Outcome<McpConnection>(std::unexpected(failed(changed.error())));
+            }
+            co_return std::move(*changed);
+        }
+    }
     Credential credential = settled_credential(co_await credential_for(context, connection));
     std::optional<McpDiscovery> discovery;
     std::string status;
@@ -911,6 +945,285 @@ refresh(ApiContext& context, control::WorkspaceRecords& records, McpConnection c
     co_return std::move(*changed);
 }
 
+// ---- Servers that speak only stdio (lake#659) ---------------------------------------------------
+
+// The port the runner listens on: the one the workspace's network policy admits Lake to, as it
+// does an agent's (orama-operator `agentPort`).
+constexpr int stdio_app_port = 8080;
+
+std::string app_hex12(const std::string& app_id) {
+    std::string hex;
+    for (const char c : app_id) {
+        if (c != '-') {
+            hex.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+        }
+    }
+    return hex.size() < 12 ? std::string() : hex.substr(0, 12);
+}
+
+// The App's Service inside the cluster, as the Orama operator names a synchronized App's objects:
+// `app-<the first 12 hex digits of its id>` in the workspace's namespace, port 80.
+std::string stdio_app_url(const std::string& app_id, const std::string& namespace_name) {
+    const std::string hex = app_hex12(app_id);
+    if (hex.empty() || namespace_name.empty()) {
+        return {};
+    }
+    return "http://app-" + hex + "." + namespace_name + ".svc.cluster.local/mcp";
+}
+
+bool reserved_env_name(const std::string& name) {
+    std::string upper;
+    for (const char c : name.substr(0, 5)) {
+        upper.push_back(static_cast<char>(std::toupper(static_cast<unsigned char>(c))));
+    }
+    return upper.starts_with("MCP_") || upper.starts_with("APP_") || upper.starts_with("LAKE_");
+}
+
+bool env_name(const std::string& name) {
+    return !name.empty() && name.size() <= 128 &&
+           (std::isalpha(static_cast<unsigned char>(name.front())) != 0 || name.front() == '_') &&
+           std::ranges::all_of(name,
+                               [](unsigned char c) { return std::isalnum(c) != 0 || c == '_'; });
+}
+
+// What a stdio connection runs: the checked input, the command line the runner starts, and the
+// App's environment beyond the runner's own.
+struct StdioPlan {
+    std::string runtime;
+    std::string package;
+    std::string command;
+    std::vector<std::string> args;
+    std::string mount_id;
+    json env = json::object();
+    std::vector<std::string> env_keys;
+    std::vector<std::string> secret_env_keys;
+    json argv = json::array();
+};
+
+std::expected<StdioPlan, ApiResult> stdio_plan(const json& stdio) {
+    const auto refuse = [](const std::string& message, const std::string& path) {
+        return std::unexpected(ApiResult::failure("invalid_input", message, "/stdio" + path));
+    };
+    if (!stdio.is_object()) {
+        return refuse("stdio is an object: runtime, package, command, args, env and mount_id", "");
+    }
+    StdioPlan plan;
+    plan.runtime = stdio.value("runtime", "");
+    if (plan.runtime != "node" && plan.runtime != "python") {
+        return refuse("runtime is node (an npm package, run with npx) or python (run with uvx)",
+                      "/runtime");
+    }
+    plan.package = trimmed(stdio.value("package", ""));
+    if (plan.package.empty() || plan.package.size() > 214 || plan.package.front() == '-' ||
+        !std::ranges::all_of(plan.package, [](unsigned char c) {
+            return std::isalnum(c) != 0 ||
+                   std::string_view("@/._~=<>!+-").find(static_cast<char>(c)) !=
+                       std::string_view::npos;
+        })) {
+        return refuse(
+            "package is a package name, with its version: letters, digits and @/._~=<>!+-",
+            "/package");
+    }
+    plan.command = trimmed(stdio.value("command", ""));
+    if (!plan.command.empty() && (plan.command.size() > 64 || plan.command.front() == '-' ||
+                                  !std::ranges::all_of(plan.command, [](unsigned char c) {
+                                      return std::isalnum(c) != 0 || c == '.' || c == '_' ||
+                                             c == '-';
+                                  }))) {
+        return refuse("command is the name of one of the package's commands", "/command");
+    }
+    const json args = stdio.value("args", json::array());
+    if (!args.is_array() || args.size() > 32) {
+        return refuse("args is at most 32 strings", "/args");
+    }
+    for (const json& arg : args) {
+        if (!arg.is_string() || arg.get<std::string>().size() > 1024 ||
+            arg.get<std::string>().find('\0') != std::string::npos) {
+            return refuse("each argument is a string of at most 1024 bytes", "/args");
+        }
+        plan.args.push_back(arg.get<std::string>());
+    }
+    plan.mount_id = stdio.value("mount_id", "");
+    if (plan.mount_id.empty()) {
+        return refuse("mount_id names the secret mount Lake keeps the runner's token in",
+                      "/mount_id");
+    }
+    const json env = stdio.value("env", json::object());
+    if (!env.is_object() || env.size() > 50) {
+        return refuse("env is an object of at most 50 variables", "/env");
+    }
+    for (const auto& [name, value] : env.items()) {
+        if (!env_name(name)) {
+            return refuse("a variable's name is letters, digits and _, not starting with a digit",
+                          "/env/" + name);
+        }
+        if (reserved_env_name(name)) {
+            return refuse("names starting with MCP_, APP_ or LAKE_ are Lake's", "/env/" + name);
+        }
+        if (value.is_string()) {
+            plan.env_keys.push_back(name);
+        } else if (value.is_object() && value.contains("secret")) {
+            plan.secret_env_keys.push_back(name);
+        } else {
+            return refuse("a variable is a string, or {secret: {mount_id, name, field}}",
+                          "/env/" + name);
+        }
+        plan.env[name] = value;
+    }
+    const std::string runner = plan.runtime == "python" ? "uvx" : "npx";
+    plan.argv.push_back(runner);
+    if (plan.runtime == "node") {
+        plan.argv.push_back("--yes");
+    }
+    if (plan.command.empty()) {
+        plan.argv.push_back(plan.package);
+    } else {
+        plan.argv.push_back(plan.runtime == "python" ? "--from" : "--package");
+        plan.argv.push_back(plan.package);
+        plan.argv.push_back(plan.command);
+    }
+    for (const std::string& arg : plan.args) {
+        plan.argv.push_back(arg);
+    }
+    return plan;
+}
+
+// The App's name: `mcp-<prefix>-<4 hex>`, a DNS label of at most 31 characters.
+std::string stdio_app_name(const std::string& prefix) {
+    std::string name = "mcp-";
+    for (const char c : prefix.substr(0, 20)) {
+        name.push_back(c == '_' ? '-' : c);
+    }
+    while (name.ends_with('-')) {
+        name.pop_back();
+    }
+    std::string hex = random_uuid();
+    std::erase(hex, '-');
+    return name + "-" + hex.substr(0, 4);
+}
+
+// Starts a stdio connection's App, as the person: the runner's token as a new secret in their
+// mount, then the App with the runner's image, the package's command line and its environment.
+// Answers the App's id and name.
+struct StdioApp {
+    std::string id;
+    std::string name;
+    std::string secret_name;
+    std::string url;
+};
+liquid::runtime::task<Outcome<StdioApp>> start_stdio_app(ApiContext& context,
+                                                         const json& input,
+                                                         const std::string& prefix,
+                                                         const StdioPlan& plan) {
+    using Answer = Outcome<StdioApp>;
+    const std::string customer_id = input.at("customer_id");
+    const std::string workspace_id = input.at("workspace_id");
+    if (context.mcp_runner_image.empty()) {
+        co_return Answer(std::unexpected(ApiResult::failure(
+            "not_supported",
+            "this Lake runs no stdio MCP servers (LAKE_MCP_RUNNER_IMAGE is not set)",
+            "/stdio")));
+    }
+    if (context.store == nullptr) {
+        co_return Answer(std::unexpected(
+            ApiResult::failure("store_unavailable", "no store to start the App in")));
+    }
+    const auto workspace = context.store->get_workspace(workspace_id);
+    if (!workspace || workspace->customer_id != customer_id) {
+        co_return Answer(std::unexpected(
+            ApiResult::failure("invalid_input", "no such workspace", "/workspace_id")));
+    }
+    if (workspace->namespace_name.empty()) {
+        co_return Answer(std::unexpected(
+            ApiResult::failure("workspace_not_ready",
+                               "the workspace has no namespace yet: try again once it is ready")));
+    }
+    StdioApp app;
+    app.secret_name = "mcp-" + prefix + "-runner";
+    std::ranges::replace(app.secret_name, '_', '-');
+    const std::string token = random_token(32);
+    if (token.empty()) {
+        co_return Answer(std::unexpected(
+            ApiResult::failure("store_error", "could not draw the runner's token")));
+    }
+    // The command line rides in the same secret: a package name with its version reads as a
+    // high-entropy value to the App's scan of plain variables, and the operator projects a secret's
+    // fields as variables all the same.
+    const ApiResult put =
+        called(co_await call(context,
+                             "put_secret",
+                             {{"mount_id", plan.mount_id},
+                              {"name", app.secret_name},
+                              {"value", {{"token", token}, {"command", plan.argv.dump()}}}}));
+    if (!put.ok) {
+        ApiResult refused = put;
+        if (refused.error.path.empty() || refused.error.path == "/mount_id") {
+            refused.error.path = "/stdio/mount_id";
+        }
+        co_return Answer(std::unexpected(refused));
+    }
+    json env = plan.env;
+    const auto field = [&](const char* name) {
+        return json{
+            {"secret", {{"mount_id", plan.mount_id}, {"name", app.secret_name}, {"field", name}}}};
+    };
+    env["MCP_STDIO_COMMAND"] = field("command");
+    env["MCP_RUNNER_TOKEN"] = field("token");
+    app.name = stdio_app_name(prefix);
+    const ApiResult created = called(co_await call(context,
+                                                   "create_app",
+                                                   {{"customer_id", customer_id},
+                                                    {"workspace_id", workspace_id},
+                                                    {"name", app.name},
+                                                    {"mode", "image"},
+                                                    {"image", context.mcp_runner_image},
+                                                    {"framework", "mcp"},
+                                                    {"port", stdio_app_port},
+                                                    {"env", env}}));
+    if (!created.ok) {
+        ApiResult refused = created;
+        if (refused.error.path.starts_with("/env/")) {
+            refused.error.path = "/stdio" + refused.error.path;
+        }
+        co_return Answer(std::unexpected(refused));
+    }
+    app.id = created.value.value("id", std::string());
+    app.url = stdio_app_url(app.id, workspace->namespace_name);
+    if (app.url.empty()) {
+        co_return Answer(std::unexpected(ApiResult::failure(
+            "store_error", "the App was created without an id Lake can address")));
+    }
+    co_return app;
+}
+
+// The App's state, from lake's store: {phase, ready, desired, message}, or null when it is gone.
+json stdio_app_state(const ApiContext& context, const std::string& app_id) {
+    if (context.store == nullptr) {
+        return nullptr;
+    }
+    const auto app = context.store->get_web_app(app_id);
+    if (!app || app->desired == "deleted") {
+        return nullptr;
+    }
+    return {{"phase", app->phase},
+            {"ready", app->ready},
+            {"desired", app->desired},
+            {"message", app->message}};
+}
+
+liquid::runtime::task<void> delete_stdio_app(ApiContext& context,
+                                             const json& input,
+                                             const std::string& app_id,
+                                             const std::string& name) {
+    static_cast<void>(co_await call(context,
+                                    "delete_app",
+                                    {{"customer_id", input.at("customer_id")},
+                                     {"workspace_id", input.at("workspace_id")},
+                                     {"app_id", app_id},
+                                     {"confirm", name}}));
+    co_return {};
+}
+
 // ---- create, list, get, update, delete, refresh, test ------------------------------------------
 
 struct AuthChoice {
@@ -956,7 +1269,89 @@ std::optional<ApiResult> url_problem(const ApiContext& context, const std::strin
     return std::nullopt;
 }
 
+liquid::runtime::task<ApiResult> create_stdio_connection(const json& input, ApiContext& context) {
+    McpConnection connection;
+    connection.customer_id = input.at("customer_id");
+    connection.name = trimmed(input.at("name"));
+    connection.prefix = control::mcp_connection_prefix(connection.name);
+    connection.created_by = acting_person(context);
+    if (connection.name.empty() || connection.name.size() > 100) {
+        co_return ApiResult::failure(
+            "invalid_input", "a connection needs a name of at most 100 bytes", "/name");
+    }
+    if (connection.prefix.empty()) {
+        co_return ApiResult::failure(
+            "invalid_input", "a connection's name needs a letter", "/name");
+    }
+    for (const char* other : {"url", "transport", "auth"}) {
+        if (input.contains(other)) {
+            co_return ApiResult::failure(
+                "invalid_input",
+                "a stdio server runs as a workspace App, which Lake reaches itself: no url, "
+                "transport or auth",
+                std::string("/") + other);
+        }
+    }
+    auto plan = stdio_plan(input.at("stdio"));
+    if (!plan) {
+        co_return plan.error();
+    }
+    auto records = settle(co_await records_of(context, input));
+    if (!records) {
+        co_return records.error();
+    }
+    // The name is checked before an App starts, so a conflict leaves nothing behind.
+    auto existing =
+        control::settled(co_await control::list_mcp_connections(*records, connection.customer_id));
+    if (!existing) {
+        co_return failed(existing.error());
+    }
+    for (const McpConnection& other : *existing) {
+        if (other.name == connection.name || other.prefix == connection.prefix) {
+            co_return ApiResult::failure(
+                "conflict", "the workspace already has a connection named " + other.name, "/name");
+        }
+    }
+    auto app = settle(co_await start_stdio_app(context, input, connection.prefix, *plan));
+    if (!app) {
+        co_return app.error();
+    }
+    connection.url = app->url;
+    connection.transport = "streamable_http";
+    connection.auth_kind = "bearer";
+    connection.secret_ref = lake_secret_ref({plan->mount_id, app->secret_name, "token"});
+    connection.app_id = app->id;
+    connection.stdio = {{"runtime", plan->runtime},
+                        {"package", plan->package},
+                        {"command", plan->command.empty() ? json(nullptr) : json(plan->command)},
+                        {"args", plan->args},
+                        {"env_keys", plan->env_keys},
+                        {"secret_env_keys", plan->secret_env_keys},
+                        {"mount_id", plan->mount_id},
+                        {"app_name", app->name}};
+    connection.status = "starting";
+    auto stored = control::settled(co_await control::record_mcp_connection(*records, connection));
+    if (!stored) {
+        static_cast<void>(co_await delete_stdio_app(context, input, app->id, app->name));
+        co_return failed(stored.error());
+    }
+    dispatch(context, records->workspace_id(), *stored);
+    context.audit_details["connection_id"] = stored->id;
+    context.audit_details["stdio"] = {{"runtime", plan->runtime}, {"package", plan->package}};
+    context.audit_details["app_id"] = app->id;
+    context.audit_object = "mcp_connection/" + stored->id;
+    json answer = connection_json(*stored, true);
+    co_return ApiResult::success(std::move(answer));
+}
+
 liquid::runtime::task<ApiResult> create_connection(const json& input, ApiContext& context) {
+    if (input.contains("stdio")) {
+        co_return co_await create_stdio_connection(input, context);
+    }
+    if (!input.contains("url")) {
+        co_return ApiResult::failure(
+            "invalid_input", "a connection names its server's url, or a stdio package", "/url");
+    }
     McpConnection connection;
     connection.customer_id = input.at("customer_id");
     connection.name = trimmed(input.at("name"));
@@ -1080,7 +1475,11 @@ liquid::runtime::task<ApiResult> get_connection(const json& input, ApiContext& c
     if (!connection) {
         co_return connection.error();
     }
-    co_return ApiResult::success(connection_json(*connection, true));
+    json answer = connection_json(*connection, true);
+    if (!connection->app_id.empty()) {
+        answer["app"] = stdio_app_state(context, connection->app_id);
+    }
+    co_return ApiResult::success(std::move(answer));
 }
 
 liquid::runtime::task<ApiResult> update_connection(const json& input, ApiContext& context) {
@@ -1129,6 +1528,16 @@ liquid::runtime::task<ApiResult> update_connection(const json& input, ApiContext
         customer_id,
         id,
         [&](McpConnection& next) -> std::optional<control::ZettaControlError> {
+            if (!next.app_id.empty()) {
+                for (const char* fixed : {"url", "transport", "auth"}) {
+                    if (input.contains(fixed)) {
+                        return control::ZettaControlError{
+                            "invalid_input",
+                            "a stdio server's address and token are its App's, which Lake made",
+                            std::string("/") + fixed};
+                    }
+                }
+            }
             if (input.contains("name")) {
                 const std::string name = trimmed(input.at("name"));
                 if (name.empty() || name.size() > 100) {
@@ -1231,6 +1640,26 @@ liquid::runtime::task<ApiResult> delete_connection(const json& input, ApiContext
     const std::string id = input.at("id");
     context.audit_object = "mcp_connection/" + id;
     context.audit_details["connection_id"] = id;
+    // A stdio server's App goes first, as the person: when it cannot be deleted, the connection
+    // stays, so nothing is left running that no page shows.
+    if (auto found = control::settled(
+            co_await control::get_mcp_connection(*records, input.at("customer_id"), id));
+        found && *found && !(*found)->app_id.empty()) {
+        const std::string app_id = (*found)->app_id;
+        if (!stdio_app_state(context, app_id).is_null()) {
+            const ApiResult deleted = called(
+                co_await call(context,
+                              "delete_app",
+                              {{"customer_id", input.at("customer_id")},
+                               {"workspace_id", input.at("workspace_id")},
+                               {"app_id", app_id},
+                               {"confirm", (*found)->stdio.value("app_name", std::string())}}));
+            if (!deleted.ok && deleted.error.code != "not_found") {
+                co_return deleted;
+            }
+        }
+        context.audit_details["app_id"] = app_id;
+    }
     auto removed = control::settled(
         co_await control::remove_mcp_connection(*records, input.at("customer_id"), id));
     if (!removed) {
@@ -2136,6 +2565,18 @@ json connection_schema() {
     return open_object();
 }
 
+json stdio_schema() {
+    return {{"type", "object"},
+            {"properties",
+             {{"runtime", {{"type", "string"}, {"enum", json::array({"node", "python"})}}},
+              {"package", string_schema()},
+              {"command", string_schema()},
+              {"args", {{"type", "array"}, {"items", string_schema()}}},
+              {"env", {{"type", "object"}}},
+              {"mount_id", string_schema()}}},
+            {"required", json::array({"runtime", "package", "mount_id"})}};
+}
+
 void add(Registry& registry,
          std::string name,
          std::string title,
@@ -2214,6 +2655,16 @@ std::string sha256_hex(const std::string& value) {
 }
 
 } // namespace
+
+bool mcp_stdio_app_address(const McpConnection& connection) {
+    if (connection.app_id.empty()) {
+        return false;
+    }
+    const auto parsed = parse_mcp_url(connection.url, false, true);
+    const std::string hex = app_hex12(connection.app_id);
+    return parsed && !hex.empty() && parsed->scheme == "http" &&
+           mcp_cluster_service_host(parsed->host) && parsed->host.starts_with("app-" + hex + ".");
+}
 
 bool mcp_connection_streams(const McpConnection& connection) {
     return !connection.notifications_topic.empty() ||
@@ -2353,16 +2804,22 @@ void register_mcp_connection_capabilities(Registry& registry) {
     add(registry,
         "create_mcp_connection",
         "Add an MCP Connection",
-        "Connect the workspace to a remote MCP server (Streamable HTTP, or the older HTTP+SSE): "
-        "Lake becomes its client. `auth` is none, a bearer token held in a workspace secret "
-        "(`secret: {mount_id, name, field}`), or OAuth (a person then signs in with "
+        "Connect the workspace to a remote MCP server (`url`: Streamable HTTP, or the older "
+        "HTTP+SSE): Lake becomes its client. `auth` is none, a bearer token held in a workspace "
+        "secret (`secret: {mount_id, name, field}`), or OAuth (a person then signs in with "
         "begin_mcp_connection_sign_in). Lake discovers the server's tools at once; none is allowed "
-        "until a person allows it. The credential is never on the connection and never answered.",
+        "until a person allows it. The credential is never on the connection and never answered. "
+        "Or `stdio`: a server that speaks only stdio, an npm (`runtime: node`) or Python "
+        "(`runtime: python`) `package` with its version, which Lake runs as an App of the "
+        "workspace (status `starting` until the App is ready; refresh then discovers it), with "
+        "`args` and `env` (each a string or `{secret: {mount_id, name, field}}`); `mount_id` is "
+        "where Lake keeps the runner's token.",
         workspace_input({{"name", string_schema()},
                          {"url", string_schema()},
                          {"transport", transport},
-                         {"auth", auth_schema()}},
-                        json::array({"name", "url"})),
+                         {"auth", auth_schema()},
+                         {"stdio", stdio_schema()}},
+                        json::array({"name"})),
         connection_schema(),
         CapabilityKind::Action,
         "write",

@@ -259,6 +259,9 @@ Both stores keep `workload_resources` rows (lake#643): PostgreSQL in the operato
 memory store in a map keyed by kind and id; prices and invoice lines carry their `class`, and the
 memory store's `age_build` moves a build's request time back for tests.
 
+The memory store's `set_workspace_namespace` writes the namespace the operator reports for a
+workspace, for tests (lake#659).
+
 Both stores keep MCP connection dispatch rows (lake#684, lake#685, migration `0079`), keyed by
 workspace and connection: a row that neither streams nor re-exports is removed rather than kept,
 and PostgreSQL writes one only for a workspace of the row's account.

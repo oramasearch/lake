@@ -2,7 +2,7 @@
  * `npm test` covers them without a browser. A connection's tools come with the server's own JSON
  * Schemas; "Try it" turns one into a form and the form's values back into `arguments`. */
 
-export type McpStatus = "new" | "connected" | "needs_sign_in" | "failing";
+export type McpStatus = "new" | "starting" | "connected" | "needs_sign_in" | "failing";
 
 export type McpTool = {
   connection_id: string;
@@ -41,6 +41,24 @@ export type McpConnection = {
   prompts?: { name: string; description?: string }[];
   skipped?: string[];
   created_at?: string;
+  /** `stdio`: a server Lake runs as a workspace App (lake#659); `remote`: one at a URL. */
+  kind?: "remote" | "stdio";
+  app_id?: string | null;
+  stdio?: McpStdio | null;
+  /** The App's state, for a stdio connection. */
+  app?: { phase?: string; ready?: boolean; desired?: string; message?: string } | null;
+};
+
+/** What a stdio connection runs (lake#659): the package, how, and the names of its variables. */
+export type McpStdio = {
+  runtime: "node" | "python";
+  package: string;
+  command?: string | null;
+  args?: string[];
+  env_keys?: string[];
+  secret_env_keys?: string[];
+  mount_id?: string;
+  app_name?: string;
 };
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -48,6 +66,7 @@ export type JsonSchema = Record<string, any>;
 
 const STATUS_LABELS: Record<string, string> = {
   connected: "Connected",
+  starting: "Starting",
   needs_sign_in: "Needs sign-in",
   failing: "Failing",
   new: "New",
@@ -63,6 +82,33 @@ export function statusTone(status: string | null | undefined): "ok" | "warn" | "
   if (status === "needs_sign_in") return "warn";
   if (status === "failing") return "bad";
   return "neutral";
+}
+
+export function runtimeLabel(runtime: string | null | undefined): string {
+  return runtime === "python" ? "Python package" : "npm package";
+}
+
+/** The command line a stdio connection's App runs, as people read it. */
+export function stdioCommandLine(stdio: McpStdio): string {
+  const runner = stdio.runtime === "python" ? "uvx" : "npx";
+  const head = stdio.command ? (stdio.runtime === "python" ? [runner, "--from", stdio.package, stdio.command] : [runner, "--package", stdio.package, stdio.command]) : [runner, stdio.package];
+  return [...head, ...(stdio.args ?? [])].join(" ");
+}
+
+/** The arguments typed one per line; blank lines dropped. */
+export function argsOf(text: string): string[] {
+  return text
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+}
+
+/** Why an environment variable's name cannot be used, or null. Lake keeps MCP_, APP_ and LAKE_ for
+ * itself and the App. */
+export function envNameProblem(name: string): string | null {
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) return "Letters, digits and _, not starting with a digit";
+  if (/^(MCP_|APP_|LAKE_)/i.test(name)) return "MCP_, APP_ and LAKE_ are Lake's";
+  return null;
 }
 
 export function authLabel(kind: string | null | undefined): string {

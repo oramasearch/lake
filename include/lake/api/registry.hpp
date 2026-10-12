@@ -399,6 +399,9 @@ struct ApiContext {
     // The methodology-runtime image a workspace methodology's image is built from and whose
     // stage and collect pods move its data (LAKE_METHODOLOGY_RUNTIME_IMAGE, lake#655).
     std::string methodology_runtime_image;
+    // The oramasearch/lake-mcp-runner image a stdio MCP connection's App runs
+    // (LAKE_MCP_RUNNER_IMAGE, lake#659); empty: this Lake runs no stdio servers.
+    std::string mcp_runner_image;
     std::string apps_reserved_names;
     std::size_t apps_per_customer = 0;
     std::size_t app_replicas_per_customer = 0;

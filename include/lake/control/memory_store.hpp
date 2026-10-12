@@ -139,6 +139,9 @@ public:
     // The operator's workspace observation (phase, observed generation). Tests call this
     // directly; the production operator updates the same columns in Postgres.
     Result<void> set_workspace_status(const std::string& id, std::string phase);
+    // The namespace the operator reports a workspace runs in (`workspaces.namespace`); tests call
+    // this directly.
+    Result<void> set_workspace_namespace(const std::string& id, std::string namespace_name);
     // What the operator writes about a workspace's volumes and a target's snapshots (migration
     // 0069); tests call these directly.
     Result<void> set_workspace_storage_status(const std::string& id, std::int32_t observed_gi,

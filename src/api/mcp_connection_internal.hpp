@@ -20,6 +20,11 @@ namespace lake::api {
 liquid::runtime::task<std::optional<std::string>>
 mcp_connection_bearer(const ApiContext& context, const control::McpConnection& connection);
 
+// Whether the connection is a stdio server's App (lake#659) at the cluster Service address Lake
+// made for it, `http://app-<12 hex of the App's id>.<namespace>.svc.cluster.local/mcp`: only then
+// may its client reach that private address.
+bool mcp_stdio_app_address(const control::McpConnection& connection);
+
 // Whether the stream worker has something to do for the connection: notifications to mirror, an
 // agent with an input stream, or finished jobs' results still to publish (lake#685).
 bool mcp_connection_streams(const control::McpConnection& connection);

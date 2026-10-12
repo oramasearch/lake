@@ -7272,11 +7272,16 @@ private:
     }
 
     boost::capy::task<> perform(std::shared_ptr<McpExchangeState> state) {
-        auto target = parse_mcp_url(state->request.url, state->allow_private);
+        auto target = parse_mcp_url(
+            state->request.url, state->allow_private, state->request.cluster_service);
         if (!target) {
             finish(state, target.error());
             co_return;
         }
+        // A workspace App Lake runs for a stdio server (lake#659) is reached at the cluster Service
+        // name Lake made, whose address is private; nothing else private is.
+        const bool cluster_service =
+            state->request.cluster_service && mcp_cluster_service_host(target->host);
         boost::corosio::resolver resolver(io_context_);
         auto [resolve_error, results] = co_await boost::capy::timeout(
             resolver.resolve(target->host, target->port), state->request.timeout);
@@ -7299,7 +7304,7 @@ private:
                 const auto raw = endpoint.v6_address().to_bytes();
                 bytes.assign(raw.begin(), raw.end());
             }
-            if (!state->allow_private && !mcp_public_address(bytes)) {
+            if (!state->allow_private && !cluster_service && !mcp_public_address(bytes)) {
                 refused_address = true;
                 continue;
             }
@@ -8915,6 +8920,7 @@ struct ApiServer::Impl {
         ctx.apps_wildcard = options.apps_wildcard;
         ctx.apps_runtime_image = options.apps_runtime_image;
         ctx.methodology_runtime_image = options.methodology_runtime_image;
+        ctx.mcp_runner_image = options.mcp_runner_image;
         // Build registry targets use the in-cluster authority (LAKE_INTERNAL_URL).
         ctx.internal_url = options.internal_url;
         ctx.apps_reserved_names = options.apps_reserved_names;

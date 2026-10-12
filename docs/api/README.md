@@ -42,7 +42,10 @@ fifteen capabilities (`create_mcp_connection`, `list_mcp_connections`, `get_mcp_
 `list_mcp_connection_tools`, `read_mcp_tool`, `call_mcp_tool`, `set_mcp_tool_auto_approve`,
 `list_mcp_connection_calls`, `begin_mcp_connection_sign_in`, `complete_mcp_connection_sign_in`,
 `create_mcp_connection_agent`), the read-or-change rule, who may call what, OAuth sign-in, the
-opt-in re-export through `/w/<workspace>/mcp`, and a connection's agent and streams.
+opt-in re-export through `/w/<workspace>/mcp` (whose sessions are told when what it re-exports
+changes, lake#684), a connection's agent and streams (the stream worker calls only workspaces that
+stream, lake#685), and servers that speak only stdio, run as an App of the workspace by Lake's own
+runner `oramasearch/lake-mcp-runner` (lake#659).
 lake#597: [solutions.md](solutions.md) documents a workspace's own AI solutions, kept in the workspace
 Zetta beside Orama's read-only catalogue (`list_solutions`, `get_solution`, `create_solution`,
 `update_solution`, `delete_solution`, `duplicate_solution`; `forbidden` for Orama's).

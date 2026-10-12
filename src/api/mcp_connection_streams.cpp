@@ -148,6 +148,7 @@ McpStreamPass McpStreamWorker::pass(ApiContext& context) {
                     options.url = connection.url;
                     options.transport = connection.transport;
                     options.allow_private_addresses = context.mcp_allow_private_addresses;
+                    options.cluster_service = mcp_stdio_app_address(connection);
                     options.client_version = std::string(lake::version_string());
                     // The bearer is read as Lake, from the connection's secret, as a call reads
                     // it.

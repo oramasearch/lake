@@ -197,7 +197,9 @@ calls, notifications, the event-stream reader and every bound on a hostile serve
 reading once the answer is in, a byte limit, a deadline on resolution, connection, handshake and
 exchange, and no address that is not public unless `LAKE_MCP_ALLOW_PRIVATE_ADDRESSES=1`. See
 `docs/api/mcp-connections.md#the-client`.
-`mcp_connection_capabilities.cpp` registers the MCP connection capabilities (lake#652): records
+`mcp_connection_capabilities.cpp` registers the MCP connection capabilities (lake#652); a `stdio`
+connection (lake#659) writes the runner's secret and creates its App as the person, then reaches it
+only at that App's cluster Service (`mcp_stdio_app_address`). It records
 through `control::mcp_connections`, the credential read from the workspace's secret store as Lake
 (`as_lake`, never answered), discovery merged into the person's tool decisions, who may call a
 change (a person, or an agent with a person's per-tool grant and its `mcp:<prefix>` skill),

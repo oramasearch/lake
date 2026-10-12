@@ -75,7 +75,8 @@ first mutable collection (Design → Opportunities, lake#376): derived keys, con
 writes; the retired `opportunities` table is dropped by migration `0070` with its legacy reads.
 `transcripts.hpp` (lake#561) is the transcripts codec: one record per transcript in its
 workspace, found by the space, never in PostgreSQL (`docs/api/transcripts.md`).
-`mcp_connections.hpp` (lake#652) is the MCP connection codec: the connection, the person's decision
+`mcp_connections.hpp` (lake#652) is the MCP connection codec (a stdio server's `app_id` and `stdio`,
+lake#659): the connection, the person's decision
 for each tool, the auto-approve grants and the streams, with its credential only named
 (`lake-secret://`), and the OAuth state codec (`docs/api/mcp-connections.md`). See
 `docs/architecture/workspace-records.md`. `drive_share_links.hpp` is the drive share link codec
