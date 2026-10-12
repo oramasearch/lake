@@ -141,6 +141,10 @@ is registered by the engine; a pipeline's `runner_required` run is dispatched to
 metered as `methodology_run`. Not deployed; the operator must vendor the schema and select
 `methodology_runs_guard`, and `oramasearch/methodology-runtime` must be published. See
 `docs/api/methodologies.md`.
+New Methodology's first draft is written by Ask Orama (lake#688, no migration): an `agent_turn` of
+kind `methodology_draft` to agent-ask-orama, whose answer `draft_methodology {task_id}` offers only
+when the manifest, entrypoint and lock checks pass, otherwise Lake's template with the reason. Needs
+agent-ask-orama with that turn kind. Not deployed. See `docs/api/methodologies.md#drafts`.
 
 Every future deployment image receives OCI revision and creation labels. The binary reports the
 same embedded revision through `GET /v1/server_info`; details are in

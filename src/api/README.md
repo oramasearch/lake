@@ -228,7 +228,10 @@ as `methodology_runs` rows the Orama operator runs; each run's record is sealed
 `lake_methodology_runs` in the workspace Zetta. `methodology_run_input` and `methodology_run_output`
 answer only a run's `lmr.` credential, which `Registry::call` checks
 (`authorize_methodology_run_token`) in place of policy. `workspace_capabilities.cpp` dispatches an
-engine `run` that answers `runner_required` to `run_methodology`. See `docs/api/methodologies.md`.
+engine `run` that answers `runner_required` to `run_methodology`. `draft_methodology {task_id}`
+(lake#688) reads the draft Ask Orama wrote in an `agent_turn` of kind `methodology_draft` (set up
+in `workspace_capabilities.cpp`) and offers it only when `check_code` passes, otherwise Lake's
+template with the reason. See `docs/api/methodologies.md`.
 
 Repository terminal instructions receive a validated explicit `ServerOptions::external_origin` or
 the HTTPS fallback derived from trusted `public_host`. Request and proxy headers cannot select

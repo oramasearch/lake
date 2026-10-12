@@ -5580,6 +5580,18 @@ void register_agent_run_capabilities(Registry& registry) {
                         }
                     }
                     scopes.push_back("workspace_query");
+                    // New Methodology's Ask Orama (lake#688): a first draft of a workspace
+                    // methodology's files from the person's description (the message), with the
+                    // name and target kind they chose. Nothing is written; draft_methodology
+                    // {task_id} checks the files before the drawer offers them.
+                    if (task_kind == "methodology_draft") {
+                        body["kind"] = task_kind;
+                        body["context"] = input.value("context", json::object());
+                        if (!body["context"].is_object()) {
+                            co_return ApiResult::failure(
+                                "invalid_input", "context is an object", "/context");
+                        }
+                    }
                 } else if (agent == "agent-application") {
                     task_kind = "app";
                     scopes = {"workspace_query",

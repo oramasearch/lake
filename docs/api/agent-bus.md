@@ -93,6 +93,12 @@ later task with the person's reviewed proposal. Task credentials also derive the
 Lake capability and Zetta-shaped proxy calls, including clients that use the unprefixed
 `/workspaces/<customer>/zetta/v1/...` route.
 
+Ask Orama's turns have kind `api`, except New Methodology's draft (lake#688): kind
+`methodology_draft`, with the person's description as the message and `context: {name?,
+target_kind?}`. Its credential is Ask Orama's usual one (every read, no action); the answer's
+`result` is the draft's files, which `draft_methodology {task_id}` checks before anything is offered
+([methodologies.md](methodologies.md#drafts)).
+
 ExperimentsAgent has the independent topic and credential `agent-tasks.agent-experiments` /
 `agent-experiments`. Its task kinds are `experiment`, `experiment_status` and
 `experiment_explain`. The bus still carries only the task id. Experiment definitions, trials and

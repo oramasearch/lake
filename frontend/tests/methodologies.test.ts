@@ -2,13 +2,14 @@
  * Design → Methodologies with a workspace's own methodologies from Python code beside Orama's
  * (lake#655, src/pages/design/methodologies.ts): who an entry is from, the toolbar's filter, a
  * workspace methodology's validation state, Validate's findings, a run's tone, and the parameters
- * Train sends.
+ * Train sends; and who wrote a New Methodology draft (lake#688).
  */
 import assert from "node:assert/strict";
 import {test} from "node:test";
 
 import {
     declaredParameters,
+    draftAuthor,
     failedFindings,
     filterMethodologies,
     heldOutMetrics,
@@ -140,4 +141,27 @@ test("files are read manifest, entrypoint, lock, then the rest", () => {
         orderedFiles(files).map((f) => f.path),
         [ "methodology.json", "methodology.py", "requirements.lock", "notes.md" ],
     );
+});
+
+test("a draft says whether Ask Orama wrote it, or why Lake's template is offered", () => {
+    assert.deepEqual(draftAuthor({drafted_by : "orama"}, true),
+                     {badge : "Written by Ask Orama", tone : "ai", note : "", failing : []});
+    const refused = draftAuthor({
+        drafted_by : "template",
+        orama : {
+            offered : false,
+            reason : "Ask Orama's draft did not pass the checks Validate runs first.",
+            findings : [
+                {check : "packages", ok : false, message : "numpy==2.1.3 needs --hash"},
+                {check : "manifest", ok : true, message : "reads"}
+            ]
+        }
+    },
+                                true);
+    assert.equal(refused.badge, "Lake's template");
+    assert.equal(refused.tone, "warning");
+    assert.match(refused.note, /did not pass/);
+    assert.deepEqual(refused.failing.map((f) => f.check), [ "packages" ]);
+    assert.match(draftAuthor({drafted_by : "template"}, false).note, /not running on this Lake/);
+    assert.equal(draftAuthor({drafted_by : "template"}, true).note, "");
 });

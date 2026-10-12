@@ -1,7 +1,8 @@
 # Methodologies: Orama's and Your Own, in Python
 
 **Status: implemented 2026-10-11 in the source tree (lake#655, migration `0078_methodology_runs`);
-not deployed.** It needs Zetta with zetta#1261 (zetta PR #1265), the Orama operator with
+not deployed. Drafts written by Ask Orama (lake#688, no migration) need agent-ask-orama with its
+`methodology_draft` turn; not deployed.** It needs Zetta with zetta#1261 (zetta PR #1265), the Orama operator with
 orama-operator#291 (operator PR #292) and a published `oramasearch/methodology-runtime` image
 (methodology-runtime PR #2). A workspace has two kinds of methodology:
 
@@ -79,7 +80,7 @@ carries `workspace_act` the actions (`granted_by_scope`), so agents use them thr
 |---|---|---|---|
 | `list_methodologies` | read | (the engine's, lake#650) | every methodology, each marked `source` (`orama` or `workspace`) and `editable`; the workspace's own after Orama's |
 | `get_methodology` | read | `id`, `include_source?` | `{methodology}`; with `include_source`, a workspace methodology's `source {files, findings, repository_id, revision, path}` |
-| `draft_methodology` | read (also POST) | `description`, `name?`, `target_kind?` | `{draft: {name, template, reason, manifest, files}}`; nothing is saved |
+| `draft_methodology` | read (also POST) | `description`, `name?`, `target_kind?`, `task_id?` | `{draft: {name, drafted_by, template?, reason, manifest, files, findings?, orama?}}`; nothing is saved |
 | `create_methodology` | action | `name`, then `files` (`{path, contents}`), or `description` (and `target_kind?`) to start from a draft, or `repository_id` (`path?`, `revision?`) of code already in the workspace; `network?` | `{methodology, findings, ready_to_validate}` |
 | `update_methodology` | action | `id`, then any of `files` (`{path, contents}` or `{path, delete: true}`), `message`, `name`, `description`, `revision`, `network` | `{methodology, findings, ready_to_validate}` |
 | `delete_methodology` | action | `id` | `{deleted: true, repository_id}` |
@@ -111,12 +112,48 @@ validated. `findings` says, without running anything, what Validate will refuse.
 
 ### Drafts
 
-`draft_methodology` answers a first version from a description, from four templates that use the
-standard library only (so the lock file is empty): a yes-or-no outcome (logistic regression), one
-of several categories (multinomial logistic regression), an amount (linear regression), or groups
-with no target (k-means). The description picks the template (it names groups or segments, an
-amount, several categories, or otherwise a yes-or-no outcome), or `target_kind` does. Drafts are
-Lake's templates; a draft written by Ask Orama from the description is lake#688.
+A first version comes from **Ask Orama**, written for the description itself (lake#688), or from
+Lake's own templates. Nothing is saved either way: the person reads the files, and Create commits
+them.
+
+**Ask Orama's draft** goes through the agent path every page uses, Lake's agent bus:
+
+1. `agent_turn` with `agent: "agent-ask-orama"`, `kind: "methodology_draft"`, the description as
+   `message` and `context: {name?, target_kind?}`. It answers `{task_id, status}` at once. The turn
+   carries Ask Orama's usual key (every read, no action), so it writes nothing; its model tokens are
+   counted in the workspace like any turn's.
+2. Ask Orama answers `methodology.json`, `methodology.py` and `requirements.lock` (agent-ask-orama
+   `docs/methodologies/`): the standard library when it can, otherwise each package pinned
+   `name==version` with `--hash=sha256:` for every wheel the Python package index has for that
+   version, which it looks up rather than writes. It checks them itself and gets one more round to
+   fix what fails.
+3. `get_agent_task` follows the turn; once it has finished, `draft_methodology` with the same
+   `description` and the turn's `task_id` reads its answer and runs **the checks Validate runs
+   first** (the manifest reads, the entrypoint defines `fit`, `predict` and `score`, every lock line
+   is pinned and hashed; file paths inside the folder, at most 64 files of 1 MiB). A draft that
+   passes is offered: `drafted_by: "orama"`, its `task_id`, the agent's `reason` and the passing
+   `findings`.
+
+```json
+{"draft": {"name": "Late payers", "drafted_by": "orama", "task_id": "<task id>",
+  "reason": "A logistic regression fits a yes-or-no outcome.", "manifest": {"interface": 1, "…": "…"},
+  "files": [{"path": "methodology.json", "contents": "…"}, {"path": "methodology.py", "contents": "…"},
+            {"path": "requirements.lock", "contents": ""}],
+  "findings": [{"check": "manifest", "ok": true, "…": "…"}]}}
+```
+
+A draft that fails the checks, or a turn that failed or answered no draft, is never offered: the
+answer is Lake's template (below) with `orama: {task_id, offered: false, reason, findings}`, the
+checks that failed among `findings`. A turn still working is `conflict` ("Ask Orama is still writing
+the draft"); a task that is not an Ask Orama `methodology_draft` turn is `invalid_input` at
+`/task_id`.
+
+**Lake's templates** (`drafted_by: "template"`, and `draft_methodology` without `task_id`) use the
+standard library only, so the lock file is empty: a yes-or-no outcome (logistic regression), one of
+several categories (multinomial logistic regression), an amount (linear regression), or groups with
+no target (k-means). The description picks the template (it names groups or segments, an amount,
+several categories, or otherwise a yes-or-no outcome), or `target_kind` does. The New Methodology
+drawer offers one when Ask Orama is not running on the Lake (`list_agent_library`), and says so.
 
 ### Orama's stay read-only
 
@@ -283,10 +320,18 @@ back.
 ## How to verify
 
 ```sh
-ctest --test-dir build -R 'Methodologies|MethodologiesAreTheWorkspacesOwn|SchemaConformance|Docs'
+ctest --test-dir build -R 'Methodologies|MethodologiesAreTheWorkspacesOwn|AskOramaDraftsAMethodology|SchemaConformance|Docs'
 (cd frontend && npm test)
 ```
 
+The New Methodology drawer's Ask Orama in a browser at 1440 and 390 px (while it writes, its draft,
+a draft Lake refused, and a Lake without Ask Orama), against `npx vite --port 5174` with every `/v1`
+call mocked: `PLAYWRIGHT_FROM=<a package.json with playwright> node frontend/checks/methodology-draft.mjs`.
+
+`AgentRuns.AskOramaDraftsAMethodologyThatLakeChecksBeforeOffering` covers Ask Orama's
+`methodology_draft` turn and `draft_methodology {task_id}`: a passing draft offered as Ask Orama's, an
+unhashed pin and a missing `score` refused with the findings and the template, a path outside the
+folder, a failed turn, another agent's task, and the template without a task.
 `Methodologies.*` cover the manifest, lock and entrypoint checks, drafts and copies of Orama's, the
 Dockerfile, the sample and every template run through the interface with python3.
 `WorkspaceRecordStores.MethodologiesAreTheWorkspacesOwnAndOramasStayReadOnly` (memory and

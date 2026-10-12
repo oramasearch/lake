@@ -295,6 +295,10 @@ fake operator Ready status.
 the `agent_turn` OpenAPI/MCP schemas, continues one conversation across those transports, then
 replies to a question, edits and confirms the proposal, and refuses a stale digest or a proposal
 changed beyond its experiment.
+`AgentRuns.AskOramaDraftsAMethodologyThatLakeChecksBeforeOffering` covers lake#688: Ask Orama's
+`methodology_draft` turn carries its kind and context and no write, and `draft_methodology {task_id}`
+offers a draft only when Lake's manifest, entrypoint and lock checks pass, falling back to the
+template with the findings, a path outside the folder, a failed turn, or another agent's task.
 `AgentRuns.ExperimentsAgentGrantsEachTurnOnlyItsExperimentOperations` verifies the
 three kinds, independent topic/credential, workspace URL and confirmation-limited experiment actions.
 `AgentRuns.AProjectAgentProposalIsCheckedThenAppliedApprovedAndRun` covers lake#438: a pipeline

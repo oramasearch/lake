@@ -52,7 +52,9 @@ constexpr std::array group_rules{
     GroupRule{"Methodologies",
               "A workspace's own methodologies, written in Python in one of its repositories, "
               "beside Orama's (list_methodologies marks each `source` orama or workspace, and "
-              "`editable`). draft_methodology drafts the files from a description; "
+              "`editable`). draft_methodology drafts the files from a description (with `task_id`, "
+              "the draft Ask Orama wrote in a methodology_draft agent_turn, offered only when it "
+              "passes the manifest, entrypoint and lock checks); "
               "create_methodology commits them and registers it; update_methodology commits "
               "changes; validate_methodology checks the manifest, fit, predict and score and the "
               "lock file, then runs it on a sample in its sandbox; run_methodology trains it on a "

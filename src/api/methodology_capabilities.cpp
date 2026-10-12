@@ -859,23 +859,139 @@ checked_entry_code(ApiContext& context,
 
 // --- Capabilities --------------------------------------------------------------------------------
 
-liquid::runtime::task<ApiResult> draft_methodology(const json& input, ApiContext&) {
-    const std::string description = input.at("description");
-    if (description.find_first_not_of(" \t\r\n") == std::string::npos) {
-        co_return refused("invalid_input", "say what the methodology should do", "/description");
-    }
+// Lake's own template draft, as draft_methodology answers it.
+json template_draft(const json& input, const std::string& description) {
     const control::MethodologyDraft draft = control::draft_methodology(
         description, input.value("name", std::string()), input.value("target_kind", std::string()));
     json files = json::array();
     for (const control::MethodologyFile& file : draft.files) {
         files.push_back({{"path", file.path}, {"contents", file.contents}});
     }
+    return {{"name", draft.manifest.name},
+            {"drafted_by", "template"},
+            {"template", draft.template_name},
+            {"reason", draft.reason},
+            {"manifest", control::manifest_json(draft.manifest)},
+            {"files", std::move(files)}};
+}
+
+// The files of Ask Orama's draft as a folder, or why they cannot be one: each a {path, contents}
+// inside the folder, at most as many and as large as a methodology's source files.
+std::expected<std::map<std::string, std::string>, std::string> draft_files(const json& files) {
+    if (!files.is_array() || files.empty()) {
+        return std::unexpected("the draft has no files");
+    }
+    if (files.size() > max_source_files) {
+        return std::unexpected("the draft has more than " + std::to_string(max_source_files) +
+                               " files");
+    }
+    std::map<std::string, std::string> folder;
+    for (const json& file : files) {
+        if (!file.is_object() || !file.value("path", json()).is_string() ||
+            !file.value("contents", json()).is_string()) {
+            return std::unexpected("each file of the draft is {path, contents}");
+        }
+        const std::string path = file.at("path");
+        if (!control::methodology_path("", path)) {
+            return std::unexpected("the draft's file " + path +
+                                   " is not a path inside the methodology's folder");
+        }
+        if (file.at("contents").get_ref<const std::string&>().size() > max_source_file_bytes) {
+            return std::unexpected("the draft's file " + path + " is larger than 1 MiB");
+        }
+        if (!folder.emplace(path, file.at("contents").get<std::string>()).second) {
+            return std::unexpected("the draft names " + path + " twice");
+        }
+    }
+    return folder;
+}
+
+// draft_methodology {task_id} (lake#688): the draft Ask Orama wrote in that methodology_draft
+// turn, offered only when Lake's own checks pass (the manifest reads, the entrypoint defines fit,
+// predict and score, every lock line is pinned and hashed). Otherwise Lake's template, with
+// `orama` saying why Ask Orama's draft was not offered. A turn still working is `conflict`.
+liquid::runtime::task<ApiResult> orama_draft(const json& input,
+                                             ApiContext& context,
+                                             const std::string& description) {
+    const std::string task_id = input.at("task_id");
+    const ApiResult got = finished(co_await call_capability(context,
+                                                            "get_agent_task",
+                                                            {{"customer_id", input.at("customer_id")},
+                                                             {"workspace_id", input.at("workspace_id")},
+                                                             {"task_id", task_id}}));
+    if (!got.ok) {
+        co_return got;
+    }
+    const json& task = got.value;
+    if (task.value("agent", std::string()) != "agent-ask-orama" ||
+        task.value("kind", std::string()) != "methodology_draft") {
+        co_return refused("invalid_input",
+                          "that task is not an Ask Orama methodology draft (agent_turn with "
+                          "agent-ask-orama and kind methodology_draft)",
+                          "/task_id");
+    }
+    const std::string status = task.value("status", std::string());
+    if (status == "pending" || status == "running" || status.empty()) {
+        co_return refused("conflict", "Ask Orama is still writing the draft", "/task_id");
+    }
+    const auto fallback = [&](std::string reason, json findings) {
+        json draft = template_draft(input, description);
+        draft["orama"] = {{"task_id", task_id},
+                          {"offered", false},
+                          {"reason", std::move(reason)},
+                          {"findings", std::move(findings)}};
+        return ApiResult::success({{"draft", std::move(draft)}});
+    };
+    const json answer = task.value("answer", json::object());
+    const json result = answer.is_object() ? answer.value("result", json()) : json();
+    if (status != "succeeded" || !result.is_object() ||
+        result.value("kind", std::string()) != "methodology_draft") {
+        std::string why = task.value("message", std::string());
+        if (why.empty() && answer.is_object() && answer.value("error", json()).is_string()) {
+            why = answer.at("error");
+        }
+        co_return fallback(
+            "Ask Orama did not write a draft" + (why.empty() ? std::string() : ": " + why) + ".",
+            json::array());
+    }
+    auto folder = draft_files(result.value("files", json()));
+    if (!folder) {
+        co_return fallback("Ask Orama's draft could not be read: " + folder.error() + ".",
+                           json::array());
+    }
+    Checked checked = check_code(*folder);
+    if (!checked.manifest || !control::all_ok(checked.findings)) {
+        co_return fallback("Ask Orama's draft did not pass the checks Validate runs first, so this "
+                           "is Lake's template instead.",
+                           findings_json(checked.findings));
+    }
+    json files = json::array();
+    for (const json& file : result.at("files")) {
+        files.push_back({{"path", file.at("path")}, {"contents", file.at("contents")}});
+    }
+    std::string reason = result.value("reason", std::string());
+    if (reason.empty()) {
+        reason = "Ask Orama wrote this first version for your description.";
+    }
     co_return ApiResult::success({{"draft",
-                                   {{"name", draft.manifest.name},
-                                    {"template", draft.template_name},
-                                    {"reason", draft.reason},
-                                    {"manifest", control::manifest_json(draft.manifest)},
-                                    {"files", std::move(files)}}}});
+                                   {{"name", checked.manifest->name},
+                                    {"drafted_by", "orama"},
+                                    {"task_id", task_id},
+                                    {"reason", std::move(reason)},
+                                    {"manifest", control::manifest_json(*checked.manifest)},
+                                    {"files", std::move(files)},
+                                    {"findings", findings_json(checked.findings)}}}});
+}
+
+liquid::runtime::task<ApiResult> draft_methodology(const json& input, ApiContext& context) {
+    const std::string description = input.at("description");
+    if (description.find_first_not_of(" \t\r\n") == std::string::npos) {
+        co_return refused("invalid_input", "say what the methodology should do", "/description");
+    }
+    if (input.contains("task_id")) {
+        co_return co_await orama_draft(input, context, description);
+    }
+    co_return ApiResult::success({{"draft", template_draft(input, description)}});
 }
 
 // Registers a workspace entry for the code at `revision`, with `extra` (duplicated_from, network).
@@ -1981,13 +2097,19 @@ void register_methodology_capabilities(Registry& registry) {
         "draft_methodology",
         "Draft a methodology",
         "A first version of a methodology's files from a description of what it should do: "
-        "methodology.json, methodology.py with fit, predict and score, and an empty lock file. "
-        "The template follows the problem the description names (groups with no target, an "
-        "amount, one of several categories, otherwise a yes-or-no outcome), or `target_kind`. "
-        "Nothing is saved: pass the files to create_methodology.",
+        "methodology.json, methodology.py with fit, predict and score, and a lock file. With "
+        "`task_id`, the draft Ask Orama wrote in that turn (agent_turn with agent-ask-orama, "
+        "kind methodology_draft, the description as its message), offered only when it passes "
+        "the manifest, entrypoint and lock checks Validate runs first (`drafted_by: orama`); "
+        "otherwise, or without `task_id`, Lake's template (`drafted_by: template`) for the "
+        "problem the description names (groups with no target, an amount, one of several "
+        "categories, otherwise a yes-or-no outcome) or `target_kind`, with `orama` saying why "
+        "Ask Orama's draft was not offered. Nothing is saved: pass the files to "
+        "create_methodology.",
         workspace_input(
             {{"description", text()},
              {"name", text()},
+             {"task_id", text()},
              {"target_kind",
               {{"type", "string"}, {"enum", {"binary", "multiclass", "regression", "none"}}}}},
             json::array({"description"})),

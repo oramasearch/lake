@@ -198,3 +198,42 @@ export function orderedFiles(files: unknown, entrypoint = "methodology.py"): J[]
     return [...list ].sort((a, b) => rank(a.path) - rank(b.path) ||
                                      String(a.path).localeCompare(String(b.path)));
 }
+
+/** One check of a methodology's code, as draft_methodology and Validate answer it. */
+export type MethodologyFinding = {check: string; ok: boolean; message: string; file?: string};
+
+/** draft_methodology's draft (lake#688): Ask Orama's, checked by Lake, or Lake's template. */
+export type MethodologyDraft = {
+    name?: string;
+    drafted_by?: "orama"|"template";
+    template?: string;
+    reason?: string;
+    task_id?: string;
+    files?: {path: string; contents: string}[];
+    findings?: MethodologyFinding[];
+    /** Why Ask Orama's draft was not offered, when it was asked for and this is the template. */
+    orama?: {task_id?: string; offered?: boolean; reason?: string; findings?: MethodologyFinding[]};
+};
+
+/** Who wrote a draft, in the drawer's words: the badge, a note before the reason, and the checks
+ * Ask Orama's draft failed when Lake offers its template instead. */
+export function draftAuthor(draft: MethodologyDraft, askOramaRunning: boolean): {
+    badge: string; tone : "ai" | "neutral" | "warning"; note : string; failing : MethodologyFinding[]
+} {
+    if (draft.drafted_by === "orama")
+        return {badge : "Written by Ask Orama", tone : "ai", note : "", failing : []};
+    const failing = (draft.orama?.findings ?? []).filter((finding) => !finding.ok);
+    if (draft.orama)
+        return {
+            badge : "Lake's template",
+            tone : "warning",
+            note : draft.orama.reason ?? "Ask Orama's draft was not offered.",
+            failing
+        };
+    return {
+        badge : "Lake's template",
+        tone : "neutral",
+        note : askOramaRunning ? "" : "Ask Orama is not running on this Lake, so this is Lake's template.",
+        failing : []
+    };
+}
