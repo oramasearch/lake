@@ -510,6 +510,10 @@ the provider's refusals without echoing Lake's key, `model_completion` counting 
 launch's tokens in the run's workspace with the prompt kept out of the audit, every other caller
 refused before the provider, the monthly `model_tokens` limit refusing with `usage_limit_reached`,
 and the OpenAI-compatible `/openai/v1/*` route over a real server, all against a fake provider.
+Streaming (lake#665): a stream's usage read piece by piece however the pieces cut its events, a
+relayed stream counted from its last event and one without usage audited `usage_reported: false`,
+and the route over a real server and its outbound client against a loopback provider that holds its
+last event until the caller has read the first.
 
 Billing (lake#564): `test_billing.cpp` covers prices and bill lines, choosing a plan now or next
 month, a month's bill from two workspaces' usage, invoices frozen, voided, reissued and paid, an

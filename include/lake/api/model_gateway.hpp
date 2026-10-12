@@ -51,17 +51,36 @@ struct ModelUsage {
 };
 ModelUsage model_usage(std::string_view body, bool stream);
 
+// The usage of an event stream read as it arrives (lake#665): feed it each piece of the body in
+// order, however the pieces cut the events, and `usage()` is what model_usage would say of the
+// whole stream so far. A last line without its line end is read by `finish()`.
+class ModelStreamUsage {
+public:
+    void feed(std::string_view piece);
+    void finish();
+    const ModelUsage& usage() const {
+        return usage_;
+    }
+
+private:
+    void line(std::string_view text);
+    std::string partial_;
+    ModelUsage usage_;
+};
+
 // The provider's refusal as a documented error: its own message for a request it refused
 // (engine_error), rate_limited when it is busy, and store_unavailable when it is down or refuses
 // Lake's own key (whose message may echo part of the key, so it is never passed on).
 ApiError model_provider_failure(int status, std::string_view body, std::string_view transport);
 
-// One HTTPS POST: url, body, headers, timeout.
+// One HTTPS POST: url, body, headers, timeout, and where a 2xx answer's body goes as it arrives
+// (empty: kept whole in the response).
 using ModelPost =
     std::function<ModelProviderResponse(const std::string& url,
                                         std::string body,
                                         std::vector<std::pair<std::string, std::string>> headers,
-                                        std::chrono::seconds timeout)>;
+                                        std::chrono::seconds timeout,
+                                        ModelBodySink on_body)>;
 // A ModelProvider that calls `base_url` (empty: OpenAI's) with `api_key` through `post`.
 ModelProvider openai_model_provider(std::string api_key, std::string base_url, ModelPost post);
 
