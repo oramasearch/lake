@@ -131,6 +131,9 @@ and the OAuth sign-in states in `lake_mcp_oauth_states`, taken once by a delete 
 `agent_revisions.cpp` is an agent's definition revisions (lake#653): one append-only record per
 `create_agent` or `update_agent` in `lake_agent_revisions`, found by the account and the agent's id,
 and `agent_definition_of`, the fields of an engine agent a person designs.
+`agent_stream_triggers.cpp` is an agent's stream triggers (lake#677): one record per agent and
+workspace stream in `lake_agent_stream_triggers`, found by the account, with the person its runs act
+as and the last message sequence that started one, moved forward by a conditional write.
 `stream_owners.cpp` is the second
 (lake#379): one `if_absent` record per topic, keyed by the topic's blind index; the stores hold no
 topic creator (the retired table is dropped by `0070`). `drive_share_links.cpp` is the drive share

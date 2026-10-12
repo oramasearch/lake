@@ -24,6 +24,7 @@
 #include "api/workspace_records_api.hpp"
 #include "audit_test_support.hpp"
 #include "control/secrets_crypto.hpp"
+#include "lake/api/agent_stream_triggers.hpp"
 #include "lake/api/audit_recorder.hpp"
 #include "lake/api/audit_routing.hpp"
 #include "lake/api/capabilities.hpp"
@@ -4034,6 +4035,166 @@ TEST_P(WorkspaceRecordStores, McpConnectionStreamsMirrorNotificationsAndDriveThe
     EXPECT_NE(topics["inbox-out"].events[0].dump().find("task_id"), std::string::npos);
     EXPECT_NE(topics["inbox-out"].events[0].dump().find("triaged"), std::string::npos);
     EXPECT_EQ(worker.pass(owner).results, 0U) << "published once";
+}
+
+// lake#677: an agent started by a workspace stream. The streams are sealed records in the
+// workspace; each message that arrives after one is set starts one job of the agent with the
+// message as its input, as the person who set it; deleting the agent removes them, and a trigger
+// whose agent is gone is removed by the worker.
+TEST_P(WorkspaceRecordStores, AStreamStartsItsAgentOncePerMessageAsThePersonWhoSetIt) {
+    auto store = make_store();
+    if (!store) {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
+    }
+    TwoSpaces t(store, database_uri_);
+    const auto& first = t.spaces[0];
+    const auto& second = t.spaces[1];
+    const std::string home = first.workspaces[0];
+    const auto in = [&](json input) {
+        input["customer_id"] = first.customer_id;
+        input["workspace_id"] = home;
+        return input;
+    };
+    json agent{{"id", "agent-7"},
+               {"name", "Order Watcher"},
+               {"runtime", "python"},
+               {"skills", json::array()},
+               {"definition", {{"source", "zetta"}, {"instructions", "x"}, {"files", json::array()}}}};
+    bool agent_deleted = false;
+    t.zetta->responder = [&](const std::string& capability,
+                             const json&) -> std::optional<lake::control::ZettaControlResult<json>> {
+        if (capability == "get_agent") {
+            if (agent_deleted) {
+                return lake::control::ZettaControlResult<json>(std::unexpected(
+                    lake::control::ZettaControlError{"not_found", "no such agent"}));
+            }
+            return agent;
+        }
+        if (capability == "delete_agent") {
+            agent_deleted = true;
+            return json{{"deleted", true}};
+        }
+        return std::nullopt;
+    };
+    // A message already on the stream when it is set starts nothing.
+    {
+        auto context = t.context(first);
+        lake::api::WorkspaceApiBus bus(context, first.customer_id, home);
+        ASSERT_TRUE(liquid::runtime::block_on(bus.create_topic("orders")));
+        ASSERT_TRUE(liquid::runtime::block_on(bus.publish("orders", {{"order", "O-0"}}, "o-0")));
+    }
+
+    // Refusals: a system stream, a stream the workspace does not have, a native agent.
+    const auto system = t.call(first,
+                               "set_agent_streams",
+                               in({{"agent_id", "agent-7"}, {"streams", {"agent-events"}}}));
+    ASSERT_FALSE(system.ok);
+    EXPECT_EQ(system.error.code, "invalid_input");
+    EXPECT_EQ(system.error.path, "/streams/0");
+    const auto missing = t.call(first,
+                                "set_agent_streams",
+                                in({{"agent_id", "agent-7"}, {"streams", {"orders", "nowhere"}}}));
+    ASSERT_FALSE(missing.ok);
+    EXPECT_EQ(missing.error.code, "not_found");
+    EXPECT_EQ(missing.error.path, "/streams/1");
+    agent["runtime"] = "native";
+    const auto native = t.call(
+        first, "set_agent_streams", in({{"agent_id", "agent-7"}, {"streams", {"orders"}}}));
+    ASSERT_FALSE(native.ok);
+    EXPECT_EQ(native.error.code, "invalid_input");
+    agent["runtime"] = "python";
+    const auto none =
+        t.call(first, "list_agent_streams", in({{"agent_id", "agent-7"}}));
+    ASSERT_TRUE(none.ok) << none.error.message;
+    EXPECT_TRUE(none.value["streams"].empty()) << "a refused call stores nothing";
+
+    const auto set = t.call(
+        first, "set_agent_streams", in({{"agent_id", "agent-7"}, {"streams", {"topic:orders"}}}));
+    ASSERT_TRUE(set.ok) << set.error.message;
+    ASSERT_EQ(set.value["streams"].size(), 1U);
+    EXPECT_EQ(set.value["streams"][0]["stream"], "orders");
+    EXPECT_EQ(set.value["streams"][0]["cursor"], 1) << "it starts after the message already there";
+    EXPECT_EQ(set.value["streams"][0]["set_by"], first.principal.user_id);
+    const std::string trigger_id = set.value["streams"][0]["id"];
+    // Setting the same set again keeps the trigger (and whose it is).
+    const auto again = t.call(
+        first, "set_agent_streams", in({{"agent_id", "agent-7"}, {"streams", {"orders"}}}));
+    ASSERT_TRUE(again.ok) << again.error.message;
+    EXPECT_EQ(again.value["streams"][0]["id"], trigger_id);
+    // Sealed in the workspace: the stream's name is not on the record at rest.
+    bool stored = false;
+    for (auto& [url, tables] : t.zetta->records) {
+        if (const auto found = tables.collections.find("lake_agent_stream_triggers");
+            found != tables.collections.end()) {
+            for (const auto& [key, row] : found->second.records) {
+                stored = true;
+                EXPECT_EQ(row.dump().find("orders"), std::string::npos);
+            }
+        }
+    }
+    EXPECT_TRUE(stored) << "the trigger is a record in the workspace Zetta";
+    // Another account's person cannot read them.
+    auto foreign = in({{"agent_id", "agent-7"}});
+    EXPECT_FALSE(t.call(second, "list_agent_streams", foreign).ok);
+
+    // Two new messages: two jobs, each with its message, as the person who set the stream.
+    {
+        auto context = t.context(first);
+        lake::api::WorkspaceApiBus bus(context, first.customer_id, home);
+        ASSERT_TRUE(liquid::runtime::block_on(bus.publish("orders", {{"order", "O-1"}}, "o-1")));
+        ASSERT_TRUE(liquid::runtime::block_on(bus.publish("orders", {{"order", "O-2"}}, "o-2")));
+    }
+    lake::api::AgentStreamWorker worker;
+    lake::api::ApiContext owner;
+    owner.store = t.store.get();
+    owner.workspaces = t.service.get();
+    owner.instance_kek = std::string(kek);
+    owner.registry = &t.registry;
+    const auto done = worker.pass(owner);
+    for (const auto& problem : done.problems) {
+        ADD_FAILURE() << problem;
+    }
+    EXPECT_EQ(done.runs, 2U);
+    EXPECT_EQ(worker.pass(owner).runs, 0U) << "a message starts one run only";
+    const auto launches = t.store->list_agent_launches(first.customer_id, "agent-7", 10, home);
+    ASSERT_TRUE(launches);
+    ASSERT_EQ(launches->size(), 2U);
+    std::set<std::string> orders;
+    for (const auto& launch : *launches) {
+        EXPECT_EQ(launch.created_by_user_id, first.principal.user_id);
+        EXPECT_EQ(launch.mode, "job");
+        EXPECT_EQ(launch.trigger, "stream");
+        EXPECT_EQ(launch.input["stream"], "orders");
+        EXPECT_EQ(launch.input["trigger_id"], trigger_id);
+        orders.insert(launch.input["message"]["order"].get<std::string>());
+    }
+    EXPECT_EQ(orders, (std::set<std::string>{"O-1", "O-2"}));
+    const auto listed = t.call(first, "list_agent_streams", in({{"agent_id", "agent-7"}}));
+    ASSERT_TRUE(listed.ok) << listed.error.message;
+    EXPECT_EQ(listed.value["streams"][0]["cursor"], 3) << "its place on the stream is kept";
+
+    // Deleting the agent removes its streams.
+    const auto deleted = t.call(first, "delete_agent", in({{"id", "agent-7"}}));
+    ASSERT_TRUE(deleted.ok) << deleted.error.message;
+    EXPECT_EQ(deleted.value["streams_removed"], 1);
+    EXPECT_TRUE(t.call(first, "list_agent_streams", in(json::object())).value["streams"].empty());
+
+    // A trigger whose agent was deleted elsewhere is removed at its next message.
+    agent_deleted = false;
+    ASSERT_TRUE(t.call(first,
+                       "set_agent_streams",
+                       in({{"agent_id", "agent-7"}, {"streams", {"orders"}}}))
+                    .ok);
+    agent_deleted = true;
+    {
+        auto context = t.context(first);
+        lake::api::WorkspaceApiBus bus(context, first.customer_id, home);
+        ASSERT_TRUE(liquid::runtime::block_on(bus.publish("orders", {{"order", "O-3"}}, "o-3")));
+    }
+    const auto orphaned = worker.pass(owner);
+    EXPECT_EQ(orphaned.runs, 0U);
+    EXPECT_EQ(orphaned.removed, 1U);
+    EXPECT_TRUE(t.call(first, "list_agent_streams", in(json::object())).value["streams"].empty());
 }
 
 INSTANTIATE_TEST_SUITE_P(Stores, WorkspaceRecordStores, testing::Values(false, true),

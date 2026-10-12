@@ -433,6 +433,10 @@ that server with both stores: the sealed record and its secret, the read-or-chan
 Ask Orama and a user-built agent, auto-approve, the audit, the usage series, re-export through the
 workspace's MCP endpoint, OAuth sign-in with registration, PKCE and refresh rotation, and the
 stream worker's mirrored notifications, agent jobs and published results.
+`AStreamStartsItsAgentOncePerMessageAsThePersonWhoSetIt` (lake#677) runs `set_agent_streams` and
+`AgentStreamWorker` with both stores: the refusals, the sealed trigger, one job per new message as
+the person who set it with the message as its input, and removal by `delete_agent` and by the worker
+when the agent is gone.
 
 `test_workspace_records.cpp` covers workspace records (lake#370,
 [workspace-records.md](../docs/architecture/workspace-records.md)): sealed records and blind

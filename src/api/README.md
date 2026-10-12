@@ -206,7 +206,12 @@ calls, and the re-export `mcp.cpp` calls for `/w/<workspace>/mcp`. `mcp_connecti
 `McpStreamWorker`, run by the store root's owner on the maintenance thread: notifications mirrored to
 a connection's topic, one agent job per input event as the person who set the streams, and each
 finished job's result on the output topic; `mcp_connection_internal.hpp` lends it the connection's
-bearer, never a capability.
+bearer, never a capability. `agent_stream_triggers.cpp` (lake#677) registers `set_agent_streams` and
+`list_agent_streams` and is `AgentStreamWorker`, run on the same owner-only pass: one job of an agent
+per new message on a workspace stream it names, as the person who set it, and the trigger's removal
+after `delete_agent` (`remove_agent_stream_triggers`, called by `workspace_capabilities.cpp`). Both
+workers start their jobs through `start_stream_runs` and act through `stream_person`
+(`agent_stream_runs.hpp`).
 `deletion_capabilities.cpp` registers what deletes a workspace's data (lake#645):
 `delete_dataset`, `delete_model`, `delete_run` and `delete_index`, named capabilities over the
 workspace engine's own deletes that answer `not_supported` from an older engine, and

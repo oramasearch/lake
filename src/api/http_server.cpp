@@ -10,6 +10,7 @@
 #include "lake/api/audit_recorder.hpp"
 #include "lake/api/billing.hpp"
 #include "lake/api/mcp_client.hpp"
+#include "lake/api/agent_stream_triggers.hpp"
 #include "lake/api/mcp_connections.hpp"
 #include "lake/api/metering_recorder.hpp"
 #include "lake/api/request_recorder.hpp"
@@ -7464,6 +7465,7 @@ struct ApiServer::Impl {
     std::chrono::steady_clock::time_point next_usage_sample{};
     // The MCP connections' streams (lake#652), on the maintenance thread of the store root's owner.
     McpStreamWorker mcp_streams;
+    AgentStreamWorker agent_streams;
     std::chrono::steady_clock::time_point next_mcp_stream_pass{};
     std::chrono::steady_clock::time_point last_usage_sample{};
     UsageRecorder::Totals reported_usage;
@@ -12799,6 +12801,18 @@ struct ApiServer::Impl {
         if (!done.problems.empty()) {
             metrics.increment_counter(
                 "lake_mcp_stream_problems_total", {}, static_cast<double>(done.problems.size()));
+        }
+        // Agents started by a workspace stream (lake#677), on the same owner-only pass.
+        const AgentStreamPass started = agent_streams.pass(context);
+        metrics.increment_counter("lake_agent_stream_passes_total");
+        if (started.runs > 0) {
+            metrics.increment_counter(
+                "lake_agent_stream_runs_total", {}, static_cast<double>(started.runs));
+        }
+        if (!started.problems.empty()) {
+            metrics.increment_counter("lake_agent_stream_problems_total",
+                                      {},
+                                      static_cast<double>(started.problems.size()));
         }
     }
 

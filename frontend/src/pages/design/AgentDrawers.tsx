@@ -1,15 +1,16 @@
 /** The drawers that design an agent (lake#653): New agent (blank, or duplicated from one of
- * Orama's) and Edit, both over the shared definition form. */
+ * Orama's) and Edit, both over the shared definition form, which also names the workspace streams
+ * that start it (lake#677). */
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import type { Row } from "@/lib/api";
 import { Drawer } from "@/lib/overlay";
 import { useSession } from "@/lib/session";
 import { useToast } from "@/lib/toast";
-import { Button } from "@/lib/ui";
+import { Button, Skeleton } from "@/lib/ui";
 import { agentForm, text, type AgentForm } from "@/lib/agents";
 import { AgentFields } from "@/pages/train/agents";
-import { qs, useScope, useWsPath } from "./api";
+import { qs, useScope, useScopedRead, useWsPath } from "./api";
 import { useSubmit } from "./parts";
 import { createAgent, updateAgent } from "./agentActions";
 
@@ -26,6 +27,7 @@ export function NewAgent({ initial, onClose, title = "New Agent" }: { initial: A
     run(async () => {
       const made = await createAgent(scope, form, viewer.config?.frontier_model);
       if (made.scheduleError) toast(`The agent was created, but its schedule was not: ${made.scheduleError}`, "bad");
+      if (made.streamsError) toast(`The agent was created, but its streams were not set: ${made.streamsError}`, "bad");
       onClose();
       navigate(ws(`/design/agent?${qs({ id: made.id })}`));
     });
@@ -50,17 +52,33 @@ export function NewAgent({ initial, onClose, title = "New Agent" }: { initial: A
 }
 
 
-/** Edit one of the workspace's own agents: saving writes a new revision of its definition. */
+/** Edit one of the workspace's own agents: saving writes a new revision of its definition, and sets
+ * the streams that start it when they changed. The form opens once those streams are read. */
 export function EditAgent({ agent, onClose }: { agent: Row; onClose: () => void }) {
+  const streams = useScopedRead<{ streams?: Row[] }>("list_agent_streams", { agent_id: text(agent, "id") }, { retry: false });
+  if (streams.isLoading) {
+    return (
+      <Drawer title="Edit Agent" subtitle={text(agent, "name")} onClose={onClose} width={600}>
+        <Skeleton />
+      </Drawer>
+    );
+  }
+  // An unread list leaves the streams as they are: the form starts empty and sends nothing for them.
+  const before = (streams.data?.streams ?? []).map((s) => text(s, "stream")).filter(Boolean);
+  return <EditAgentForm agent={agent} before={before} onClose={onClose} />;
+}
+
+function EditAgentForm({ agent, before, onClose }: { agent: Row; before: string[]; onClose: () => void }) {
   const scope = useScope();
   const toast = useToast();
   const { viewer } = useSession();
-  const [form, setForm] = useState<AgentForm>(() => agentForm(agent));
+  const [form, setForm] = useState<AgentForm>(() => ({ ...agentForm(agent), streams: before }));
   const { busy, error, run } = useSubmit();
   const submit = () =>
     run(async () => {
-      await updateAgent(scope, agent, form, viewer.config?.frontier_model);
-      toast("Agent saved as a new revision");
+      const saved = await updateAgent(scope, agent, form, viewer.config?.frontier_model, before);
+      if (saved.streamsError) toast(`Saved as a new revision, but its streams were not set: ${saved.streamsError}`, "bad");
+      else toast("Agent saved as a new revision");
       onClose();
     });
   return (

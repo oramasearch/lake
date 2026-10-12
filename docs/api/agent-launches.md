@@ -1,7 +1,7 @@
 # Running and talking to agents
 
-**Status: implemented 2026-09-27 (lake#231, epic lake#228); cron schedules as CronJobs 2026-09-27; workspace-scoped launches, start timeout and definition checks 2026-10-02 (lake#442).** How lake runs user-created Python
-agents on `agent-runtime`, fires their schedules, and delivers one conversation turn to any agent,
+**Status: implemented 2026-09-27 (lake#231, epic lake#228); cron schedules as CronJobs 2026-09-27; workspace-scoped launches, start timeout and definition checks 2026-10-02 (lake#442); stream triggers 2026-10-11 (lake#677, not deployed).** How lake runs user-created Python
+agents on `agent-runtime`, fires their schedules, starts them from workspace streams, and delivers one conversation turn to any agent,
 from the Agent Library's specialized agents to the ones people build.
 
 ## Launches
@@ -118,6 +118,68 @@ Agent Factory) adds its first schedule; deleting the agent removes all of them.
 The per-agent `agent_schedules` table of 0030 and lake's in-process scheduler are retired: the
 table is no longer read, and is left for a deliberate drop.
 
+## Stream triggers
+
+**An agent can be started by a workspace stream, not only a schedule (lake#677).** A Python agent's
+stream triggers name topics of its workspace Zetta (`list_streams`, Train → Streams); each message
+published to one after the trigger is set starts one `job` launch of the agent, with the message as
+its `input`:
+
+```json
+{"trigger_id": "<trigger id>", "stream": "orders", "sequence": 42, "message": {"order": "O-42"}}
+```
+
+`message` is the message's JSON payload (null when it was not JSON); `sequence` is its place on the
+stream. The launch's `trigger` is `stream` (an MCP connection agent's runs say `stream` too).
+
+| What | Where | Why there |
+|---|---|---|
+| The trigger: agent, stream, who set it, the last sequence that started a run | a sealed `lake_agent_stream_triggers` record in the agent's workspace Zetta, found by its account | workspace data stays in the workspace Zetta; nothing of it is in Postgres, so **no migration** |
+| Each run it starts | `agent_launches`, as every launch | dispatch: the Orama operator runs it |
+
+- **Who it acts as.** Each run is a `launch_agent` called as **the person who set the trigger**
+  (`set_by`), so its launch credential acts as them, limited to the launch scopes of the agent's
+  skills, as a schedule's runs act as whoever set the schedule. Their permission decides: if they can
+  no longer write in the account, the run is refused and the message is passed over. A trigger needs
+  a person, so the operator credential cannot set one.
+- **Each message starts one run.** A new trigger starts at the stream's `next_sequence` at the
+  moment it is set, so the messages already there start nothing. The worker reads after the
+  trigger's `cursor`, starts one launch per message, and moves the cursor past every message it read
+  whether or not its launch started, with a conditional write in the workspace.
+- **Who reads the streams.** The store root's owner, and only it, on the maintenance pass that runs
+  the MCP connection streams (`mcp_stream_interval`, 15 s), so two replicas never start one message
+  twice. A pass reads at most 256 triggers and 20 messages per trigger; a busier stream catches up
+  on the next passes. Both workers start their runs through one function (`start_stream_runs`,
+  `src/api/agent_stream_runs.hpp`), the machinery of an MCP connection agent's input stream
+  ([mcp-connections](mcp-connections.md#a-connections-agent-and-streams)). Metrics:
+  `lake_agent_stream_passes_total`, `lake_agent_stream_runs_total`,
+  `lake_agent_stream_problems_total`.
+- **Removed with its agent.** `delete_agent` (named or through `workspace_act`) removes the agent's
+  triggers once the engine has deleted it and answers `streams_removed`; if that fails it answers
+  `streams_error` beside the deleted agent, and the worker removes a trigger whose launch finds no
+  agent (`not_found`) at its next message.
+- **What cannot start an agent.** Only Python agents (as for schedules). System streams (`agent-*`,
+  `app-events.*`, `build-events.*`, `run-metrics.*`, `study-events.*`, `inbox:*`) are refused, so
+  an agent's own events never start it. At most 20 streams per agent. A stream that is deleted stops
+  starting runs; the worker reports it as a problem until the trigger is removed.
+
+`set_agent_streams {agent_id, streams}` sets the whole set: a stream already set keeps its trigger
+(its cursor and who set it), a new one is checked (`get_topic`) and added, one left out is removed;
+`[]` removes them all. Everything is checked before anything is written: an unknown agent is
+`not_found` at `/agent_id`, a native agent `invalid_input`, a system stream `invalid_input` and a
+stream the workspace does not have `not_found`, each at `/streams/<n>`. It answers the agent's
+triggers as `list_agent_streams` does: `{id, agent_id, agent_name, stream, zetta: "workspace",
+cursor, set_by, set_by_name, created_at}`. Audit kind `agent.streams`, in the workspace.
+
+```sh
+curl -X POST "$LAKE/v1/set_agent_streams" -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "agent_id": "<agent id>", "streams": ["orders"]}'
+```
+
+Design → Agents' New agent and Edit offer the workspace's streams for a frontier-model agent, and
+the agent's Design page lists them under Where It Is Used ([train-agents](train-agents.md)).
+
 ## Background turns (lake#269)
 
 **No lake page or capability waits on a library agent inside an HTTP request.** `agent_turn` to
@@ -178,9 +240,12 @@ service.
 | `schedule_agent` | action | `write` | `{agent_id, cron \| trigger, time_zone?, input?}`; adds one schedule; Python agents only; an unknown IANA zone is `invalid_input` at `/time_zone` |
 | `list_agent_schedules` | read | `read` | `{agent_id?}`, oldest first, with its phase, a message in lake's words (lake#586) and last firing |
 | `unschedule_agent` | action | `write` | `{schedule_id}`; the operator deletes its CronJob |
+| `set_agent_streams` | action | `write` | `{agent_id, streams}`; the whole set of workspace streams whose new messages each start a job, as the caller; Python agents only ([stream triggers](#stream-triggers)) |
+| `list_agent_streams` | read | `read` | `{agent_id?}`, the workspace's stream triggers (or one agent's), oldest first |
 | `agent_turn` | action | `write` | `{agent, message, conversation_id?, context?, page?, kind?}`; Lake creates the conversation ID when omitted and uses it to attach the preceding same-kind turn; ExperimentsAgent accepts `experiment`, `experiment_status`, or `experiment_explain` |
 
-Audit kinds: `agent.launch`, `agent.stop`, `agent.schedule`, `agent.unschedule`, `agent.turn`.
+Audit kinds: `agent.launch`, `agent.stop`, `agent.schedule`, `agent.unschedule`, `agent.streams`,
+`agent.turn`.
 
 ## Model Tokens (lake#564, lake#248)
 
@@ -205,8 +270,8 @@ outside Lake.
 ## Train → Agent: runs and schedules
 
 Running an agent stays on its Train page (`/train/agent?id=&tab=runs`), linked from its Design page
-(lake#653). The page lists its runs (started, how, mode, status, result, *Stop*; a scheduled run has no
-*Stop*, its schedule does), refreshes every five seconds while one is starting, and for a Python
+(lake#653). The page lists its runs (started, how — `manual`, `schedule` or `stream` —, mode, status,
+result, *Stop*; a scheduled run has no *Stop*, its schedule does), refreshes every five seconds while one is starting, and for a Python
 agent offers **Run now** with an input and a **Schedules** panel: every schedule with its words,
 cron, zone, what it asks, the operator's status and last firing, a *Remove* button, and a form that
 takes plain words or a cron expression. *Talk to this
@@ -225,6 +290,10 @@ ctest --test-dir build -R 'AgentRuns|PostgresAgentLaunches'
 `…AgentTurnReachesLibraryNativeAndPythonAgents`, `…LaunchesAndSchedulesBelongToTheirWorkspace`,
 `…AWaitingLaunchSaysWhyAndTimesOutWithAReason`, `…CreateAgentRefusesDefinitionFieldsZettaWouldDrop`,
 and `PostgresAgentLaunches.LaunchesCredentialsSchedulesAndConversationsFollowTheContract`.
+Stream triggers: `ctest --test-dir build -R AStreamStartsItsAgent`
+(`WorkspaceRecordStores.AStreamStartsItsAgentOncePerMessageAsThePersonWhoSetIt`, memory and
+Postgres: the refusals, sealed at rest, one run per new message as the person with the message as
+its input, the cursor kept, removal by `delete_agent` and by the worker when the agent is gone).
 
 ## Creating a Python agent
 
@@ -239,6 +308,7 @@ list, with `invalid_input` and the field's path (for example `/input/definition/
 
 ## Known limits
 
-- Event triggers ("when a new dataset lands") are stored on the agent but not fired yet.
+- Event triggers other than a stream ("when a new dataset lands") are stored on the agent but not
+  fired yet; publish such events to a stream and start the agent from it.
 - A Python agent's first message starts its service; the person sends it again once it is Ready.
 - OpenAI usage is not yet metered per agent.

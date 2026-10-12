@@ -20,7 +20,9 @@ injected dependency on `ApiContext` and `ServerOptions` (lake#561, `docs/api/tra
 `parse_mcp_url`, `resolve_mcp_url` and `mcp_public_address` are the pure parts. `ApiContext` and
 `ServerOptions` carry the transport (`mcp_http`) and `mcp_allow_private_addresses`.
 `mcp_connections.hpp` registers a workspace's MCP connection capabilities and answers what Lake's
-own MCP endpoint re-exports (`exported_mcp_tools`, `call_exported_mcp_tool`). `registry.hpp`'s
+own MCP endpoint re-exports (`exported_mcp_tools`, `call_exported_mcp_tool`).
+`agent_stream_triggers.hpp` (lake#677) registers the capabilities that start an agent from a
+workspace stream, removes an agent's triggers, and declares `AgentStreamWorker`. `registry.hpp`'s
 `acting_agent` names the agent whose credential made a call.
 `model_gateway.hpp` declares the model gateway's pure helpers (`prepare_model_request`,
 `model_usage`, `model_provider_failure`) and `openai_model_provider`. `registry.hpp` declares the

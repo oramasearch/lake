@@ -127,6 +127,13 @@ Factory; every `create_agent` and `update_agent` the engine accepts is kept as a
 only agents with something to train, with performance, versions, promote and roll back, the
 training schedule and Launch experiment. The pages call the named engine capabilities. Not
 deployed. See `docs/api/train-agents.md`.
+An agent can be started by a workspace stream (lake#677, no migration): `set_agent_streams` names
+the workspace streams whose new messages each start a job of a Python agent with the message as its
+input, as the person who set them; each trigger is a sealed `lake_agent_stream_triggers` record in
+the workspace Zetta, read by the store root's owner (`AgentStreamWorker`, beside the MCP connection
+streams, through the same `start_stream_runs`), and removed with its agent by `delete_agent`. Design
+→ Agents' New agent and Edit offer the streams; the agent's Design page lists them. Not deployed. See
+`docs/api/agent-launches.md#stream-triggers`.
 
 A workspace's own methodologies from Python code follow (lake#655, migration `0078_methodology_runs`):
 the code is a manifest, an entrypoint with fit, predict and score, and a hashed lock file in a
