@@ -120,7 +120,8 @@ labels, before writing `Deleted`. Only the Orama operator's own resources are ev
 
 ## What lake does
 
-- Capabilities `list_services`, `create_service`, `delete_service` and `service_connection`
+- Capabilities `list_services`, `create_service`, `set_service_stores`, `delete_service` and
+  `service_connection`
   (every kind but Zetta, whose admin token lake never hands out)
   ([`../api/services.md`](../api/services.md)), authorized on the customer. lake caps each
   customer at `LAKE_SERVICES_PER_CUSTOMER` live services when it is set; the default, `0`, is no
@@ -131,6 +132,12 @@ labels, before writing `Deleted`. Only the Orama operator's own resources are ev
   every withdrawal (`desired = 'absent'`), so it is delivered on commit. The operator `LISTEN`s and
   reconciles the Lake at once instead of on its next poll (lake#197); the poll remains the
   fallback, so a missed notification only delays.
+- **Storage a service mounts** (lake#666): `create_service` and `set_service_stores` write the
+  service's rows of `store_mounts` (migration `0080_store_mounts`) in the transaction that bumps
+  its `generation` and `NOTIFY`s `lake_services`; `withdraw_service` removes them. Only the kinds
+  whose pod template the operator writes itself (`sqlite`, `duckdb`, `polars`,
+  `control::store_mounting_service_kinds`) may mount; lake refuses the others. The operator adds
+  each to the StatefulSet's pod template ([storage.md](storage.md#mounts)).
 - Design, Train and Ship call the customer's default Zetta service at its `endpoint` with the token
   from `$LAKE_SERVICE_DIR/<slug>.json`, read per call and never stored.
 

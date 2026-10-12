@@ -83,6 +83,8 @@ int usage() {
                  "(default https://api.openai.com/v1)");
     std::println("  LAKE_MCP_ALLOW_PRIVATE_ADDRESSES=1 lets MCP connections reach loopback and "
                  "private addresses (local development only)");
+    std::println("  LAKE_STORE_ALLOW_PRIVATE_ADDRESSES=1 lets a store's bucket endpoint be a "
+                 "loopback or private address (local development only)");
     std::println(
         "  LAKE_BILLING=on turns billing on (Orama Cloud); unset or off, as on an enterprise "
         "install, billing is absent. LAKE_BILLING_INSTRUCTIONS tells accounts how to pay");
@@ -109,6 +111,8 @@ int usage() {
     std::println("  LAKE_APPS_RUNTIME_IMAGE is the base image for source-backed Ship App builds");
     std::println("  LAKE_METHODOLOGY_RUNTIME_IMAGE is the oramasearch/methodology-runtime image "
                  "workspace methodologies are built from and run with");
+    std::println("  LAKE_MCP_RUNNER_IMAGE is the oramasearch/lake-mcp-runner image a stdio MCP "
+                 "connection's App runs");
     std::println(
         "  LAKE_APPS_RESERVED_NAMES adds comma-separated names that Ship apps cannot use");
     std::println("  LAKE_APPS_PER_CUSTOMER caps live apps per account (default 0: no limit)");
@@ -169,6 +173,7 @@ int main(int argc, char** argv) {
     // MCP connections reach only public addresses unless this is set, for local development
     // against an MCP server on the same machine (docs/api/mcp-connections.md#the-client).
     opts.mcp_allow_private_addresses = env_or("LAKE_MCP_ALLOW_PRIVATE_ADDRESSES", "") == "1";
+    opts.store_allow_private_addresses = env_or("LAKE_STORE_ALLOW_PRIVATE_ADDRESSES", "") == "1";
     // Billing (docs/api/billing.md): on only where LAKE_BILLING=on, as on Orama Cloud; an
     // enterprise install leaves it unset and has no billing capability or page.
     opts.billing = lake::api::billing_enabled(env_or("LAKE_BILLING", ""));
@@ -215,6 +220,7 @@ int main(int argc, char** argv) {
     opts.apps_wildcard = env_or("LAKE_APPS_WILDCARD", "");
     opts.apps_runtime_image = env_or("LAKE_APPS_RUNTIME_IMAGE", "");
     opts.methodology_runtime_image = env_or("LAKE_METHODOLOGY_RUNTIME_IMAGE", "");
+    opts.mcp_runner_image = env_or("LAKE_MCP_RUNNER_IMAGE", "");
     opts.apps_reserved_names = env_or("LAKE_APPS_RESERVED_NAMES", "");
     opts.apps_per_customer = env_u64("LAKE_APPS_PER_CUSTOMER");
     opts.app_replicas_per_customer = env_u64("LAKE_APP_REPLICAS_PER_CUSTOMER");

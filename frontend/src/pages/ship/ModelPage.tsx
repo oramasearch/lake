@@ -1,6 +1,8 @@
 /** Ship → Model (`/ship/model?id=`, lake#599): serving one model version.
  * - Inference: publish or unpublish, the endpoint, the call to paste, and a try-it panel that
- *   calls `predict` with a row.
+ *   calls `predict` with a row. A model a workspace methodology trained (`python:W-…`) is served
+ *   by its own code (lake#690): publishing starts its server, whose state the side card follows
+ *   (`get_methodology_deployment`), and `predict` answers one prediction per row.
  * - Access: the keys that may call it (tokens scoped to `predict`, and a new one), and origins.
  * - Destinations: where its answers go.
  * - Monitoring: its calls, errors and latency from the workspace's own series (`model_traffic`),
@@ -20,7 +22,7 @@ import { Banner, Button, Card, Chip, CopyBlock, DataTable, Empty, ErrorBlock, Fi
 import { NO_WORKSPACE } from "@/pages/account/signIn";
 import { Chart } from "../experiments/Chart";
 import { WorkspaceFrame, cellText, qs, text, useSpaceRead, useWorkspace, useWsPath, wa } from "../train/workspace";
-import { errorRate, featuresOf, filledSteps, groupOf, parseRows, predictCurl, predictKeys, sampleRow, trafficOf, versionNumber, type ModelGroup } from "../train/models";
+import { errorRate, featuresOf, filledSteps, groupOf, methodologyOf, parseRows, predictCurl, predictionRows, predictKeys, sampleRow, serverState, trafficOf, versionNumber, type ModelGroup } from "../train/models";
 import { SourceText, VersionChip, useModelGroups, useModelLinks } from "../train/modelParts";
 import { CopyMono, useOrigin } from "./parts";
 import { UsageThisMonth } from "../usage/UsageThisMonth";
@@ -140,6 +142,9 @@ function Side({ group, version }: { group: ModelGroup; version: Row }) {
   const id = text(version, "id");
   const n = versionNumber(group, id);
   const on = version.exposed === true;
+  const methodology = methodologyOf(version);
+  const server = useServer(id, methodology !== "");
+  const wsPath = useWsPath();
   const publish = async () => {
     setBusy(true);
     setError(null);
@@ -175,6 +180,15 @@ function Side({ group, version }: { group: ModelGroup; version: Row }) {
             </Button>
           )}
           <FormError error={error} />
+          {methodology && (
+            <div className="space-y-1" data-testid="methodology-server">
+              <p className="m-0 text-[12.5px]">
+                Served by its own code, the methodology <Link to={wsPath(`/design/methodology?${qs({ id: methodology })}`)}>{methodology}</Link>, in its sandbox.{" "}
+                <Status value={server.state.label} tone={server.state.tone} />
+              </p>
+              {server.message && <p className="muted m-0 text-[12.5px]">{server.message}</p>}
+            </div>
+          )}
           {group.versions[0] !== version && (
             <p className="muted m-0 text-[12.5px]">
               v{versionNumber(group, text(group.latest, "id"))} is newer. <Link to={links.train(text(group.latest, "id"))}>Compare and promote it</Link> in Train.
@@ -227,6 +241,10 @@ function Inference({ version }: { version: Row }) {
     }
   };
   const ranked = Array.isArray(answer?.ranked) ? (answer!.ranked as Row[]) : [];
+  const predictions = predictionRows(answer);
+  const methodology = methodologyOf(version);
+  const server = useServer(id, methodology !== "");
+  const callable = on && (!methodology || server.state.ready);
   return (
     <div className="space-y-4">
       <Card label="Endpoint">
@@ -242,16 +260,44 @@ function Inference({ version }: { version: Row }) {
             <Notice tone="warning">This version is not published, so <code>predict</code> refuses it. Publish it to call it.</Notice>
           </div>
         )}
+        {on && methodology && !server.state.ready && (
+          <div className="mt-3">
+            <Notice tone={server.state.tone === "danger" ? "danger" : "info"}>
+              {server.message || `Its server is ${server.state.label}.`} <code>predict</code> answers once it is serving.
+            </Notice>
+          </div>
+        )}
       </Card>
       <CopyBlock label="Call it from your code" value={predictCurl(origin, customerId, workspaceId, version)} />
-      <Card label="Try it" title="Score a Row" actions={<Button variant="primary" loading={busy} disabled={!on} onClick={() => void run()}><Play size={14} aria-hidden /> Predict</Button>}>
+      <Card label="Try it" title="Score a Row" actions={<Button variant="primary" loading={busy} disabled={!callable} onClick={() => void run()}><Play size={14} aria-hidden /> Predict</Button>}>
         <Field label="Rows, as JSON" help="One object or a list of them, keyed by the model's features; `entity` is each row's own key.">
           <textarea className="font-mono text-[12.5px]" rows={8} value={rows} onChange={(e) => setRows(e.target.value)} spellCheck={false} />
         </Field>
         <FormError error={error} />
         {answer && (
           <div className="mt-3">
-            {ranked.length ? (
+            {predictions.length ? (
+              <div className="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th scope="col">Row</th>
+                      <th scope="col">Entity</th>
+                      <th scope="col" className="text-right">Prediction</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {predictions.map((entry, i) => (
+                      <tr key={i}>
+                        <td className="font-mono">{cellText(entry.row)}</td>
+                        <td className="font-mono">{cellText(entry.entity)}</td>
+                        <td className="text-right font-mono">{typeof entry.prediction === "number" ? entry.prediction.toFixed(3) : cellText(entry.prediction)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : ranked.length ? (
               <div className="table-wrap">
                 <table>
                   <thead>
@@ -284,6 +330,19 @@ function Inference({ version }: { version: Row }) {
       </Card>
     </div>
   );
+}
+
+/* ------------------------------------------------------------------ its own server (lake#690) */
+
+/** A methodology model's server: refreshed while it is on its way, still once it is settled. */
+function useServer(modelId: string, enabled: boolean) {
+  const q = useSpaceRead<{ deployment?: Row | null }>(
+    enabled ? "get_methodology_deployment" : null,
+    { model_id: modelId },
+    { refetchInterval: (query) => (serverState((query.state.data as { deployment?: Row | null } | undefined)?.deployment).settled ? false : 4000) },
+  );
+  const deployment = q.data?.deployment ?? null;
+  return { state: serverState(deployment), message: deployment ? text(deployment, "message") : "" };
 }
 
 /* ------------------------------------------------------------------ ingress */

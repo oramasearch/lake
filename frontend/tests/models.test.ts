@@ -17,14 +17,17 @@ import {
   holdoutOf,
   isBrought,
   measuredFigures,
+  methodologyOf,
   modelSteps,
   nameProblem,
   needsTarget,
   parseRows,
   predictCurl,
   predictKeys,
+  predictionRows,
   sampleRow,
   scoreSeries,
+  serverState,
   trafficOf,
   trainingOf,
   versionNumber,
@@ -230,4 +233,23 @@ test("a new model's name and held-out share are checked before they are sent", (
   assert.deepEqual(holdoutOf("20%"), { value: 0.2 });
   assert.ok("error" in holdoutOf("1.5"));
   assert.ok("error" in holdoutOf("abc"));
+});
+
+test("a workspace methodology's model is served by its own code (lake#690)", () => {
+  assert.equal(methodologyOf({ id: "m", kind: "python:W-0123abcd" }), "W-0123abcd");
+  assert.equal(methodologyOf({ id: "m", kind: "python:M-1" }), "");
+  assert.equal(methodologyOf({ id: "m", kind: "gbdt" }), "");
+  assert.equal(methodologyOf(undefined), "");
+
+  assert.deepEqual(serverState(null), { label: "not served", tone: "neutral", settled: true, ready: false });
+  assert.equal(serverState({ phase: "Ready" }).ready, true);
+  assert.equal(serverState({ phase: "Staging" }).settled, false, "refreshed while on its way");
+  assert.equal(serverState({ phase: "Queued" }).tone, "warning");
+  assert.equal(serverState({ phase: "Failed" }).tone, "danger");
+  assert.equal(serverState({ phase: "Stopped" }).label, "not served");
+  assert.equal(serverState({}).label, "pending");
+
+  const answer = { runner: "methodology", predictions: [{ row: 0, entity: "c-1", prediction: 0.25 }, { row: 1, prediction: "yes" }] };
+  assert.equal(predictionRows(answer).length, 2);
+  assert.deepEqual(predictionRows({ ranked: [] }), [], "an engine model answers ranked rows instead");
 });

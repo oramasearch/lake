@@ -6,8 +6,8 @@
   "scripts": {
     "dev": "vite",
     "tokens": "node ../tools/ui/build-tokens.mjs",
-    "build": "tsc -b && npm test && vite build && node scripts/check-effects.mjs && node scripts/check-list-errors.mjs",
-    "test": "TZ=America/Vancouver node --experimental-strip-types --no-warnings --test tests/*.test.ts",
+    "build": "tsc -b && npm test && vite build && node --import ./scripts/watch-copied-reads.mjs scripts/check-effects.mjs && node --import ./scripts/watch-copied-reads.mjs scripts/check-list-errors.mjs",
+    "test": "TZ=America/Vancouver node --experimental-strip-types --no-warnings --import ./scripts/watch-copied-reads.mjs --test tests/*.test.ts",
     "typecheck": "tsc -b --noEmit",
     "preview": "vite preview"
   },

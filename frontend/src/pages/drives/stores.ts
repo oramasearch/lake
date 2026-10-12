@@ -63,3 +63,153 @@ export function storeFigures(stores: StoreRow[]): StoreFigures {
 export function driveForStore<T extends { store_id?: string | null }>(drives: T[], storeId: string): T | undefined {
   return drives.find((d) => d.store_id === storeId);
 }
+
+/** What New storage asks for beside the name (lake#664): a volume's size, your own bucket's
+ * location and the workspace secret that opens it, a liquid repository for a `lake` store, or
+ * nothing for a store Lake keeps in the workspace Zetta. */
+export function storeNeeds(type: string, provider: string): "size" | "bucket" | "repository" | "none" {
+  if (type === "volume") return "size";
+  if (type === "object" && ["r2", "s3", "b2", "gcs", "azure"].includes(provider)) return "bucket";
+  if (provider === "lake") return "repository";
+  return "none";
+}
+
+/** The endpoint a bucket form suggests, and whether it must be given (R2's account, Azure's
+ * account; B2 without a region). */
+export function endpointHint(provider: string): { placeholder: string; required: boolean; help: string } {
+  switch (provider) {
+    case "r2":
+      return { placeholder: "https://<account id>.r2.cloudflarestorage.com", required: true, help: "Your account's S3 API endpoint." };
+    case "azure":
+      return { placeholder: "https://<account>.blob.core.windows.net", required: true, help: "Your storage account's Blob endpoint." };
+    case "b2":
+      return { placeholder: "https://s3.<region>.backblazeb2.com", required: false, help: "Or leave it empty and give the region." };
+    case "gcs":
+      return { placeholder: "https://storage.googleapis.com", required: false, help: "Empty: Google Cloud Storage's XML API." };
+    default:
+      return { placeholder: "https://s3.<region>.amazonaws.com", required: false, help: "Empty: AWS S3 in the region below." };
+  }
+}
+
+/** The fields the workspace secret must hold for a bucket of this provider. */
+export function credentialFields(provider: string): string {
+  return provider === "azure" ? "account_key, or sas_token" : "access_key_id and secret_access_key";
+}
+
+/** What deleting a store does to what is in it: a volume's and a workspace Zetta store's data
+ * go with it; your own bucket and a `lake` store's repository stay. */
+export function deleteWarning(store: StoreRow): { tone: "warn" | "quiet"; text: string } {
+  const type = str(store, "type");
+  const provider = str(store, "provider");
+  if (storeNeeds(type, provider) === "bucket") {
+    return { tone: "quiet", text: "Lake forgets this bucket. The bucket and what is in it stay in your account. A drive that opens it stops working; delete that drive too." };
+  }
+  if (provider === "lake") {
+    return { tone: "quiet", text: "Lake forgets this storage. Its repository stays, with its history. A drive that opens it stops working; delete that drive too." };
+  }
+  return { tone: "warn", text: "Deleting storage deletes the data in it, which cannot be recovered. A drive that opens it stops working; delete that drive too." };
+}
+
+/** The size column: a volume's GiB asked for; nothing to ask for otherwise. */
+export function storeSizeText(store: StoreRow): string {
+  return str(store, "type") === "volume" ? `${str(store, "size_gi")} GiB` : "—";
+}
+
+/** Your own bucket's name and folder, shown under the storage's name. */
+export function storeWhere(store: StoreRow): string {
+  const location = (store.location ?? null) as StoreRow | null;
+  if (location && str(location, "bucket")) {
+    const prefix = str(location, "prefix");
+    return `${str(location, "bucket")}${prefix ? "/" + prefix : ""}`;
+  }
+  return "";
+}
+
+/* ------------------------------------------------------------------ mounts (lake#666) */
+
+/** One service or app that mounts a store: `list_stores`' `mounted_by`. */
+export type MountedBy = { kind: string; id: string; name: string; mount_path: string; read_only: boolean };
+
+/** What a service or an app asks to mount: the `stores` input of create_service,
+ * set_service_stores, create_app and set_app_stores. */
+export type MountRequest = { store_id: string; mount_path?: string; read_only?: boolean };
+
+export function mountedBy(store: StoreRow): MountedBy[] {
+  const value = store.mounted_by;
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter((m): m is Record<string, unknown> => !!m && typeof m === "object")
+    .map((m) => ({ kind: str(m, "kind"), id: str(m, "id"), name: str(m, "name"), mount_path: str(m, "mount_path"), read_only: m.read_only === true }));
+}
+
+function query(values: Record<string, string>): string {
+  return Object.entries(values)
+    .filter(([, v]) => v !== "")
+    .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`)
+    .join("&");
+}
+
+/** Where a mount's workload opens: an app's page in the store's workspace; a service on Ship →
+ * Services (the account's services, one page), searched for its name. */
+export function workloadHref(mount: MountedBy, customerId: string, workspaceId: string): string {
+  if (mount.kind === "app") return `/w/${encodeURIComponent(workspaceId)}/ship/app?${query({ customer_id: customerId, app_id: mount.id })}`;
+  return `/services?${query({ customer_id: customerId, q: mount.name })}`;
+}
+
+/** Where a workload's storage opens: Data → Drives → Storage of its workspace. */
+export function storageHref(workspaceId: string): string {
+  return `/w/${encodeURIComponent(workspaceId)}/drives?tab=storage`;
+}
+
+/** Bytes in words: "512 B", "3.0 MiB", "1.5 GiB". */
+export function bytesWords(bytes: number): string {
+  const units = ["B", "KiB", "MiB", "GiB", "TiB"];
+  let value = bytes;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  return unit === 0 ? `${value} B` : `${value.toFixed(1)} ${units[unit]}`;
+}
+
+/** A store's used space beside the size asked for: "3.0 MiB used" (with the share of a volume's
+ * size), or why there is no figure yet. The operator measures a volume once a pod mounts it. */
+export function usedWords(store: StoreRow): string {
+  const used = store.used_bytes;
+  if (typeof used !== "number") return str(store, "type") === "volume" && mountedBy(store).length === 0 ? "measured once mounted" : "not measured yet";
+  const size = Number(store.size_gi) || 0;
+  const share = str(store, "type") === "volume" && size > 0 ? Math.round((used / (size * 1024 ** 3)) * 100) : null;
+  return share === null ? `${bytesWords(used)} used` : `${bytesWords(used)} used (${share}%)`;
+}
+
+/** Whether a workload may mount a store, and why not: a store being deleted, one Lake keeps
+ * (zetta, lake), a kind not mountable yet, or a volume another workload mounts (a volume is
+ * mounted by one service or app). `owner` is the workload asking (kind and id; no id yet while
+ * it is being created). */
+export function mountProblem(store: StoreRow, owner: { kind: string; id?: string }): string {
+  if (str(store, "desired") === "absent") return "being deleted";
+  const provider = str(store, "provider");
+  if (provider === "zetta" || provider === "lake") return "kept by Lake; open it as a drive";
+  const type = str(store, "type");
+  if (type !== "volume" && !(type === "object" && ["r2", "s3", "b2", "gcs", "azure"].includes(provider))) return "cannot be mounted yet";
+  if (type === "volume") {
+    const other = mountedBy(store).find((m) => !(m.kind === owner.kind && m.id === owner.id));
+    if (other) return `mounted by the ${other.kind} ${other.name}`;
+  }
+  return "";
+}
+
+/** The path a volume is offered at before the person changes it. */
+export function defaultMountPath(name: string): string {
+  return `/mnt/${name}`;
+}
+
+/** The `stores` input for a choice: a bucket takes no path. */
+export function mountInput(choice: MountRequest[], stores: StoreRow[]): MountRequest[] {
+  return choice.map((m) => {
+    const store = stores.find((s) => str(s, "id") === m.store_id);
+    const volume = str(store, "type") === "volume";
+    return { store_id: m.store_id, ...(volume ? { mount_path: m.mount_path ?? "" } : {}), ...(m.read_only ? { read_only: true } : {}) };
+  });
+}

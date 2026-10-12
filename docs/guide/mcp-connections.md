@@ -22,8 +22,9 @@ counts it in the workspace's usage.
   agents treat it as data: if an answer asks for something to be done, it is shown to you, never
   done.
 
-Lake reaches servers on the public internet over `https`. A server that runs only on your own
-computer (stdio) is not supported yet.
+Lake reaches servers on the public internet over `https`. A server that only runs as a program
+(stdio), an npm or Python package, Lake runs for you as an App of the workspace: see
+[A Server That Runs Here](#a-server-that-runs-here).
 
 ## Add a Connection
 
@@ -37,6 +38,26 @@ computer (stdio) is not supported yet.
    - **Sign in (OAuth)**: you sign in from the connection's page after adding it.
 4. **Test** connects and lists the tools without keeping anything. **Add connection** keeps it and
    asks the server what it offers.
+
+## A Server That Runs Here
+
+Many MCP servers are packages you would normally run on your own computer. Lake can run one for the
+workspace:
+
+1. Put any credential the server needs in a secret mount of this workspace first.
+2. **New connection → Here, from a package (stdio)**. Choose **npm package** or **Python package**,
+   type the package with its version (for example
+   `@modelcontextprotocol/server-everything@2026.8.31`), the **command** if it is not named after
+   the package, the **arguments** one per line, the **secret mount**, and the **environment**: each
+   variable a value, or a field of a secret in the mount.
+3. **Add connection.** Lake keeps a token for the server in the mount, starts an App of this
+   workspace that installs and runs the package, and connects to it inside the cluster. The page
+   says **Starting** until the App is ready, then lists the server's tools.
+
+**Runs in This Workspace** on the connection's page shows the App's state, **Start**, **Stop** and
+**Restart**, and its logs, where an install that failed says why. The App is metered like any App.
+The workspace needs internet access for the package to install. Deleting the connection deletes
+its App.
 
 ## Decide Its Tools
 
@@ -101,6 +122,8 @@ recorded. Each call counts in **Organization → Usage** as API and MCP calls of
   agent.
 - **The connection says Failing.** Lake could not reach the server or it answered something that is
   not MCP; the page says why. **Refresh** asks again.
+- **A server that runs here stays Starting.** Its App is not ready yet: the logs on its page show
+  the package installing, or why it could not.
 
 Through the API and MCP: `create_mcp_connection`, `list_mcp_connections`, `get_mcp_connection`,
 `update_mcp_connection`, `refresh_mcp_connection`, `test_mcp_connection`,

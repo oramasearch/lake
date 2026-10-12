@@ -3215,6 +3215,83 @@ TEST(HttpServer, McpSessionsLearnThatTheToolListChanged) {
     }
 }
 
+// lake#684: a workspace's endpoint also lists the tools its connections re-export, so a session
+// that began there is told when one is exported or what it exports changes, and is not told again
+// once it has listed the new tools.
+TEST(HttpServer, WorkspaceMcpSessionsLearnThatExportedToolsChanged) {
+    auto store = std::make_shared<lake::control::InMemoryStore>();
+    const auto user = store->create_user({"taap:mcp-exports", "", "Exports"});
+    ASSERT_TRUE(user);
+    const auto customer = store->create_customer({"individual", user->id, "", "mcp-exports"});
+    ASSERT_TRUE(customer);
+    lake::test::StreamWorkspace workspace(store, customer->id);
+    lake::api::ServerOptions options;
+    options.port = 0;
+    options.worker_coroutines = 1;
+    options.store = store;
+    options.workspaces = workspace.service;
+    options.admin_token = "mcp-exports-operator";
+    options.instance_kek = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+    lake::api::ApiServer server(options);
+    ASSERT_TRUE(server.start()) << server.reason();
+    HttpConnection connection(server.port());
+    const std::string path = "/w/" + workspace.id + "/mcp";
+    const auto post = [&](const std::string& body, const std::string& session) {
+        std::vector<std::pair<std::string, std::string>> headers = {
+            {"Accept", "application/json, text/event-stream"}};
+        if (!session.empty()) {
+            headers.emplace_back("Mcp-Session-Id", session);
+        }
+        return connection.request("POST", path, body, {}, "HTTP/1.1", "mcp-exports-operator",
+                                  "application/json", headers);
+    };
+    const auto told = [](const std::string& response) {
+        return response_header(response, "content-type") == "text/event-stream" &&
+               response.find("notifications/tools/list_changed") != std::string::npos;
+    };
+    const std::string initialize =
+        R"({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"1"}}})";
+    const std::string call =
+        R"({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"server_info","arguments":{}}})";
+    const std::string list = R"({"jsonrpc":"2.0","id":3,"method":"tools/list"})";
+    const auto export_digest = [&](const std::string& digest) {
+        EXPECT_TRUE(store->put_mcp_connection_dispatch({.customer_id = customer->id,
+                                                        .workspace_id = workspace.id,
+                                                        .connection_id = "connection-1",
+                                                        .exported_digest = digest}));
+    };
+
+    const std::string initialized = post(initialize, "");
+    ASSERT_TRUE(initialized.starts_with("HTTP/1.1 200")) << initialized.substr(0, 300);
+    const std::string session = response_header(initialized, "mcp-session-id");
+    ASSERT_EQ(session.size(), 64U + 1U + 32U) << session;
+    EXPECT_FALSE(told(post(call, session))) << "nothing changed";
+
+    // A connection is exported: the next request is told, ahead of its answer, until it lists.
+    export_digest(std::string(64, 'a'));
+    const std::string after_export = post(call, session);
+    ASSERT_TRUE(after_export.starts_with("HTTP/1.1 200")) << after_export.substr(0, 300);
+    EXPECT_TRUE(told(after_export)) << after_export.substr(0, 400);
+    EXPECT_TRUE(told(post(call, session))) << "told until it lists again";
+
+    // It lists: no more notices, until an allow-list change changes what is exported.
+    const std::string listed = post(list, session);
+    ASSERT_TRUE(listed.starts_with("HTTP/1.1 200")) << listed.substr(0, 300);
+    EXPECT_FALSE(told(listed)) << "tools/list is the fresh list itself";
+    EXPECT_FALSE(told(post(call, session)));
+    export_digest(std::string(64, 'b'));
+    EXPECT_TRUE(told(post(call, session))) << "an allow-list change";
+    ASSERT_TRUE(post(list, session).starts_with("HTTP/1.1 200"));
+    EXPECT_FALSE(told(post(call, session)));
+
+    // Not exported any more: told again, and a new session begins on Lake's own list.
+    ASSERT_TRUE(store->remove_mcp_connection_dispatch(workspace.id, "connection-1"));
+    EXPECT_TRUE(told(post(call, session)));
+    const std::string fresh = response_header(post(initialize, ""), "mcp-session-id");
+    EXPECT_EQ(fresh.substr(0, 64), session.substr(0, 64)) << "Lake's own digest, as at first";
+    EXPECT_FALSE(told(post(call, fresh)));
+}
+
 // With Clerk, the web app mounts Clerk's sign-in (docs/api/clerk.md); lake keeps the exchange and
 // sends sign-out through Clerk's page so its session ends too.
 TEST(HttpServer, ClerkExchangeRefusesAForgedTokenAndSignOutEndsClerkToo) {

@@ -240,10 +240,13 @@ add_library(lake-core STATIC
   src/control/transcripts.cpp
   src/control/mcp_connections.cpp
   src/control/agent_revisions.cpp
+  src/control/agent_stream_triggers.cpp
   src/control/project_decisions.cpp
   src/control/drives.cpp
   src/control/drive_files.cpp
   src/control/store_contents.cpp
+  src/control/store_buckets.cpp
+  src/control/store_kept.cpp
   src/control/stream_owners.cpp
   src/control/drive_share_links.cpp
   src/control/forge_records.cpp
@@ -273,11 +276,13 @@ add_library(lake-core STATIC
   src/api/transcript_capabilities.cpp
   src/api/deletion_capabilities.cpp
   src/api/drives_capabilities.cpp
+  src/api/store_repository.cpp
   src/api/model_gateway.cpp
   src/api/transcription.cpp
   src/api/mcp_client.cpp
   src/api/mcp_connection_capabilities.cpp
   src/api/mcp_connection_streams.cpp
+  src/api/agent_stream_triggers.cpp
   src/api/audio_duration.cpp
   src/api/workspace_store_capabilities.cpp
   src/api/datasets.cpp
@@ -318,6 +323,7 @@ add_library(lake-core STATIC
   src/api/agent_capabilities.cpp
   src/api/platform_capabilities.cpp
   src/api/web_app_capabilities.cpp
+  src/api/store_mounts.cpp
   src/api/build_capabilities.cpp
   src/api/image_capabilities.cpp
   src/api/volume_capabilities.cpp

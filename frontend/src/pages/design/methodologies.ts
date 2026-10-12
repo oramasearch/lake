@@ -110,8 +110,19 @@ export function runPhaseTone(run: J): "ok"|"bad"|"warn"|"neutral" {
 
 /** Whether a run is still under way, so its page refreshes. */
 export function runIsLive(run: J): boolean {
-    return [ "Pending", "Building", "Staging", "Running", "Collecting" ].includes(
+    return [ "Pending", "Building", "Queued", "Staging", "Running", "Collecting" ].includes(
         String(run?.phase ?? ""));
+}
+
+/**
+ * Why a queued run waits, in the operator's words (orama-operator#293): its workspace is at the
+ * Lake's cap of concurrent methodology runs, or no node of its GPU class exists yet. Empty for a
+ * run that is not queued.
+ */
+export function runQueuedReason(run: J): string {
+    if (String(run?.phase ?? "") !== "Queued")
+        return "";
+    return String(run?.message ?? "") || "Queued: waiting for a place among this workspace's runs.";
 }
 
 /** A run's held-out metrics, the ones to quote first: "held_out_auc 0.84". */
@@ -197,4 +208,43 @@ export function orderedFiles(files: unknown, entrypoint = "methodology.py"): J[]
                                                                    : 3);
     return [...list ].sort((a, b) => rank(a.path) - rank(b.path) ||
                                      String(a.path).localeCompare(String(b.path)));
+}
+
+/** One check of a methodology's code, as draft_methodology and Validate answer it. */
+export type MethodologyFinding = {check: string; ok: boolean; message: string; file?: string};
+
+/** draft_methodology's draft (lake#688): Ask Orama's, checked by Lake, or Lake's template. */
+export type MethodologyDraft = {
+    name?: string;
+    drafted_by?: "orama"|"template";
+    template?: string;
+    reason?: string;
+    task_id?: string;
+    files?: {path: string; contents: string}[];
+    findings?: MethodologyFinding[];
+    /** Why Ask Orama's draft was not offered, when it was asked for and this is the template. */
+    orama?: {task_id?: string; offered?: boolean; reason?: string; findings?: MethodologyFinding[]};
+};
+
+/** Who wrote a draft, in the drawer's words: the badge, a note before the reason, and the checks
+ * Ask Orama's draft failed when Lake offers its template instead. */
+export function draftAuthor(draft: MethodologyDraft, askOramaRunning: boolean): {
+    badge: string; tone : "ai" | "neutral" | "warning"; note : string; failing : MethodologyFinding[]
+} {
+    if (draft.drafted_by === "orama")
+        return {badge : "Written by Ask Orama", tone : "ai", note : "", failing : []};
+    const failing = (draft.orama?.findings ?? []).filter((finding) => !finding.ok);
+    if (draft.orama)
+        return {
+            badge : "Lake's template",
+            tone : "warning",
+            note : draft.orama.reason ?? "Ask Orama's draft was not offered.",
+            failing
+        };
+    return {
+        badge : "Lake's template",
+        tone : "neutral",
+        note : askOramaRunning ? "" : "Ask Orama is not running on this Lake, so this is Lake's template.",
+        failing : []
+    };
 }

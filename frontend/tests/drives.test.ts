@@ -6,8 +6,9 @@ import assert from "node:assert/strict";
 import { ancestors, chunkBySize, chunkRanges, cleanPath, datasetFormat, datasetName, driveSlug, expandTo, isWithin, joinPath, nameOf, parentOf, planMoves, planUpload, rangeSelect, sortEntries, validName } from "../src/pages/drives/paths.ts";
 import { cleanTarget, nameAfterTarget, selectsOnFocus, storageLabel, targetHref, targetProblem } from "../src/pages/drives/targets.ts";
 import { folderKey, matchLink, matchWhere, parentKey, type DriveMatch } from "../src/pages/drives/search.ts";
-import { browsable, driveForStore, phaseTone, storeFigures, storeKindWords, storePhase } from "../src/pages/drives/stores.ts";
+import { browsable, bytesWords, credentialFields, defaultMountPath, deleteWarning, driveForStore, endpointHint, mountedBy, mountInput, mountProblem, phaseTone, storageHref, storeFigures, storeKindWords, storeNeeds, storePhase, storeSizeText, storeWhere, usedWords, workloadHref } from "../src/pages/drives/stores.ts";
 import { STORAGE } from "../src/pages/drives/targets.ts";
+import { bringable, choosable, matchDrive, matchItem, pickedLabel, pickerRows, searchRows, type PickerItem } from "../src/pages/drives/picker.ts";
 import { movedFromDatasets } from "../src/pages/connections/connections.ts";
 import { readFileSync } from "node:fs";
 
@@ -233,4 +234,115 @@ test("Datasets keeps datasets only: no storage and no connections on its page (l
   for (const gone of ["list_stores", "create_store", "delete_store", "store_connection", "list_store_providers", "connect_service", "delete_connection", "list_source_tables"]) {
     assert.ok(!page.includes(`"${gone}"`), `Datasets no longer calls ${gone}`);
   }
+});
+
+test("the drive picker: every drive kind, folders, search, and what Bring one can choose (lake#682)", () => {
+  const drive = (storage: "files" | "repository" | "virtual" | "store", id: string) => ({ id, name: id.toUpperCase(), storage, repository_id: storage === "repository" ? "r-1" : null, store_id: storage === "store" ? "s-1" : null });
+  const match = (m: Partial<DriveMatch>): DriveMatch => ({ drive: drive("files", "f"), kind: "file", id: null, parent_id: null, name: "", path: "", folder: "", ...m });
+  const item = (m: Partial<PickerItem>): PickerItem => ({ key: "k", kind: "file", name: "n", path: "n", size: 0, ...m });
+
+  // Search matches become items of their drive, keyed as the drive's storage addresses them.
+  assert.equal(matchItem(match({ drive: drive("repository", "r"), id: null, path: "models/churn.json", name: "churn.json" })).key, "models/churn.json");
+  assert.equal(matchItem(match({ drive: drive("store", "s"), id: "deep/a/b/model.json", path: "deep/a/b/model.json" })).key, "deep/a/b/model.json");
+  assert.equal(matchItem(match({ id: "e-7", path: "x/model.json" })).key, "e-7");
+  assert.equal(matchItem(match({ kind: "drive", id: null, path: "" })).kind, "folder", "a drive match opens like a folder");
+  const opened = matchDrive(match({ drive: drive("virtual", "v") }));
+  assert.equal(opened.storage, "virtual");
+  assert.equal(opened.id, "v");
+
+  // What Bring one accepts: a file of any kind of drive, or a shortcut that opens a file.
+  assert.ok(bringable(item({ kind: "file" })));
+  assert.ok(bringable(item({ kind: "shortcut", target: { kind: "drive_entry", drive_id: "f", entry_id: "e" }, status: "ok" })));
+  assert.ok(bringable(item({ kind: "shortcut", target: { kind: "repository_path", repository_id: "r", path: "m.json" } })));
+  assert.ok(!bringable(item({ kind: "shortcut", target: { kind: "drive_entry", drive_id: "f", entry_id: "e" }, status: "broken" })), "a broken shortcut");
+  assert.ok(!bringable(item({ kind: "shortcut", target: { kind: "url", url: "https://x.test" } })), "a web address is not a file");
+  assert.ok(!bringable(item({ kind: "folder" })));
+
+  // Folders are always listed to be opened; only accepted items are listed to be chosen.
+  const rows = [item({ key: "a", kind: "folder" }), item({ key: "b", kind: "file" }), item({ key: "c", kind: "shortcut", target: { kind: "url", url: "https://x.test" } })];
+  assert.deepEqual(pickerRows(rows, { kind: "item", accept: bringable }).map((r) => r.key), ["a", "b"]);
+  assert.deepEqual(pickerRows(rows, { kind: "item" }).map((r) => r.key), ["a", "b", "c"], "a shortcut's target may be any item");
+  assert.deepEqual(pickerRows(rows, { kind: "folder" }).map((r) => r.key), ["a"], "Move picks folders");
+  assert.ok(!choosable(item({ kind: "folder" }), { kind: "item", accept: bringable }));
+  assert.ok(choosable(item({ kind: "folder" }), { kind: "folder" }));
+  const found = [match({ kind: "drive" }), match({ kind: "folder", id: "f1" }), match({ kind: "file", id: "e1" }), match({ kind: "shortcut", id: "s1", target: { kind: "project", name: "p" } })];
+  assert.deepEqual(searchRows(found, { kind: "item", accept: bringable }).map((m) => m.kind), ["drive", "folder", "file"]);
+  assert.equal(pickedLabel({ name: "Models" }, item({ path: "2026/q3/churn.json" })), "Models / 2026/q3/churn.json");
+
+  // Bring one → A drive uses this picker over every drive, not the newest files of one kind.
+  const bring = readFileSync(new URL("../src/pages/train/NewModel.tsx", import.meta.url), "utf8");
+  assert.match(bring, /<FolderPicker[\s\S]*drives=\{driveList\}[\s\S]*accept=\{bringable\}/);
+  assert.match(bring, /"list_drives"/);
+  assert.doesNotMatch(bring, /recent_drive_entries/);
+});
+
+test("New storage asks each provider for what it needs, and deleting says what stays (lake#664)", () => {
+  assert.equal(storeNeeds("volume", "cluster"), "size");
+  for (const provider of ["r2", "s3", "b2", "gcs", "azure"]) assert.equal(storeNeeds("object", provider), "bucket", provider);
+  assert.equal(storeNeeds("object", "lake"), "repository");
+  assert.equal(storeNeeds("filesystem", "lake"), "repository");
+  assert.equal(storeNeeds("filesystem", "zetta"), "none");
+  assert.equal(endpointHint("r2").required, true);
+  assert.equal(endpointHint("azure").required, true);
+  assert.equal(endpointHint("s3").required, false);
+  assert.match(credentialFields("azure"), /account_key/);
+  assert.match(credentialFields("s3"), /access_key_id/);
+  assert.equal(deleteWarning({ type: "object", provider: "r2" }).tone, "quiet");
+  assert.match(deleteWarning({ type: "object", provider: "r2" }).text, /stay in your account/);
+  assert.match(deleteWarning({ type: "filesystem", provider: "lake" }).text, /repository stays/);
+  assert.equal(deleteWarning({ type: "volume", provider: "cluster" }).tone, "warn");
+  assert.equal(deleteWarning({ type: "object", provider: "zetta" }).tone, "warn");
+  assert.equal(storeSizeText({ type: "volume", size_gi: 10 }), "10 GiB");
+  assert.equal(storeSizeText({ type: "object", size_gi: 0 }), "—");
+  assert.equal(storeWhere({ provider: "r2", location: { bucket: "media", prefix: "team" } }), "media/team");
+  assert.equal(storeWhere({ provider: "zetta", location: null }), "");
+  assert.equal(storeWhere({ provider: "cluster" }), "");
+});
+
+test("who mounts a store, and its used space (lake#666)", () => {
+  const volume = {
+    id: "v",
+    type: "volume",
+    provider: "cluster",
+    name: "uploads",
+    size_gi: 10,
+    desired: "present",
+    used_bytes: 3 * 1024 * 1024,
+    mounted_by: [{ kind: "service", id: "s1", name: "db", mount_path: "/data", read_only: false }],
+  };
+  assert.deepEqual(mountedBy(volume), [{ kind: "service", id: "s1", name: "db", mount_path: "/data", read_only: false }]);
+  assert.deepEqual(mountedBy({}), []);
+  assert.equal(usedWords(volume), "3.0 MiB used (0%)");
+  assert.equal(usedWords({ type: "volume", size_gi: 1, used_bytes: 512 * 1024 * 1024 }), "512.0 MiB used (50%)");
+  assert.equal(usedWords({ type: "volume", used_bytes: null }), "measured once mounted");
+  assert.equal(usedWords({ ...volume, used_bytes: null }), "not measured yet");
+  assert.equal(usedWords({ type: "object", provider: "s3", used_bytes: 100 }), "100 B used");
+  assert.equal(bytesWords(1536), "1.5 KiB");
+  // A service opens Ship → Services searched for it; an app its page in the store's workspace.
+  assert.equal(workloadHref(mountedBy(volume)[0], "c1", "w1"), "/services?customer_id=c1&q=db");
+  assert.equal(workloadHref({ kind: "app", id: "a1", name: "site", mount_path: "", read_only: false }, "c1", "w 1"), "/w/w%201/ship/app?customer_id=c1&app_id=a1");
+  assert.equal(storageHref("w1"), "/w/w1/drives?tab=storage");
+});
+
+test("what a service or an app may mount (lake#666)", () => {
+  const volume = { id: "v", type: "volume", provider: "cluster", name: "uploads", mounted_by: [{ kind: "service", id: "s1", name: "db" }] };
+  assert.equal(mountProblem(volume, { kind: "app", id: "a1" }), "mounted by the service db", "a volume is mounted by one workload");
+  assert.equal(mountProblem(volume, { kind: "service", id: "s1" }), "", "its own mount");
+  assert.equal(mountProblem({ type: "volume", provider: "cluster" }, { kind: "service" }), "");
+  assert.equal(mountProblem({ type: "object", provider: "s3", mounted_by: [{ kind: "app", id: "x" }] }, { kind: "app", id: "y" }), "", "a bucket by any number");
+  assert.equal(mountProblem({ type: "object", provider: "zetta" }, { kind: "app" }), "kept by Lake; open it as a drive");
+  assert.equal(mountProblem({ type: "network_filesystem", provider: "nfs" }, { kind: "app" }), "cannot be mounted yet");
+  assert.equal(mountProblem({ type: "volume", provider: "cluster", desired: "absent" }, { kind: "app" }), "being deleted");
+  assert.equal(defaultMountPath("uploads"), "/mnt/uploads");
+  // A bucket takes no path; read_only only when chosen.
+  assert.deepEqual(
+    mountInput(
+      [
+        { store_id: "v", mount_path: "/data" },
+        { store_id: "b", mount_path: "/ignored", read_only: true },
+      ],
+      [volume, { id: "b", type: "object", provider: "s3" }],
+    ),
+    [{ store_id: "v", mount_path: "/data" }, { store_id: "b", read_only: true }],
+  );
 });

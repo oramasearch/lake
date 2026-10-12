@@ -361,10 +361,13 @@ TEST(Billing, AMonthsBillIsWorkedOutFromTheUsageOfEveryWorkspace) {
     rig.recorder.add(rig.lab, "calls", 1500, {{"kind", "mcp"}}, day2);
     rig.recorder.add(rig.home, "model_tokens", 1'500'000, {{"kind", "input"}}, day2);
     // Storage: 2 GiB the first day and 4 GiB the second, across the workspaces: 3 GiB on average.
-    rig.recorder.sample(rig.home, "workspace_data", gib, day1);
-    rig.recorder.sample(rig.lab, "workspace_data", gib, day1);
-    rig.recorder.sample(rig.home, "workspace_data", 3 * gib, day2);
-    rig.recorder.sample(rig.lab, "workspace_data", gib, day2);
+    rig.recorder.sample(rig.home, "drive_files", gib, day1);
+    rig.recorder.sample(rig.lab, "repositories", gib, day1);
+    rig.recorder.sample(rig.home, "drive_files", 3 * gib, day2);
+    rig.recorder.sample(rig.lab, "repositories", gib, day2);
+    // What an engine holds on its own volume is not billed as storage (decision 61, lake#663).
+    rig.recorder.sample(rig.home, "workspace_data", 10 * gib, day1);
+    rig.recorder.sample(rig.lab, "models", 10 * gib, day2);
     rig.flush();
 
     const std::string period = month_name(first_of(last));

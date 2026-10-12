@@ -19,6 +19,7 @@
 #include "lake/control/builds.hpp"
 #include "lake/control/offline_recovery.hpp"
 #include "lake/control/secrets.hpp"
+#include "lake/control/store_mounts.hpp"
 #include "lake/control/web_apps.hpp"
 
 // The control-plane store: users and organizations (identity), customers (the
@@ -385,6 +386,32 @@ struct WorkloadResources {
     std::uint64_t vram_bytes = 0;
     std::string observed_at;
 };
+// Where a workspace's MCP connections need Lake outside a request (migration 0079, lake#684,
+// lake#685, docs/api/mcp-connections.md): a connection whose streams the stream worker drives,
+// and the digest of the tools it re-exports through Lake's MCP. Ids and a digest only: the
+// connection itself is a record in its workspace Zetta. A row with neither is not kept.
+struct McpConnectionDispatch {
+    std::string customer_id;
+    std::string workspace_id;
+    std::string connection_id;
+    bool streams = false;
+    // The SHA-256 (hex) of the tools/list entries the connection re-exports; empty when it
+    // re-exports none.
+    std::string exported_digest;
+    std::string updated_at;
+};
+// An app's traffic through the ingress in one UTC hour (migration 0081, lake#661,
+// docs/api/metering.md#app-traffic), written only by the Orama operator from the ingress
+// controller's byte counters: `in_bytes` clients sent to the app, `out_bytes` it sent back. The
+// operator adds each poll's increase to its hour's row; lake charges a closed hour once.
+struct AppTransfer {
+    std::string app_id;
+    std::string workspace_id;
+    std::string hour; // "YYYY-MM-DDTHH:00:00Z"
+    std::uint64_t in_bytes = 0;
+    std::uint64_t out_bytes = 0;
+    std::string observed_at;
+};
 struct Workspace {
     std::string id, customer_id, name, environment;
     std::string desired = "running";
@@ -660,6 +687,10 @@ struct NewManagedService {
     int instances = 1, storage_gi = 10;
     std::size_t max_per_customer = 0; // live services per customer; 0 (the default) means no limit
     std::string workspace_id;
+    // The stores the service mounts (migration 0080, lake#666), written in the transaction that
+    // creates it. The caller has checked them (api/store_mounts.hpp); the store refuses a volume
+    // another workload mounts.
+    std::vector<StoreMountRequest> stores;
 };
 // A customer's store (docs/control-plane/storage.md, lake#196): a bucket, filesystem, network
 // filesystem or volume. Two axes: the type (what a client gets) and the provider (what runs it).
@@ -677,6 +708,19 @@ struct ManagedStore {
     // The workspace the store belongs to (migration 0044, lake#465); the operator places it in
     // that workspace's namespace, and lake lists a workspace's own stores only.
     std::string workspace_id;
+    // Where the store's contents are (lake#664, in `stores.spec`): for the customer's own bucket
+    // (r2, s3, b2, gcs, azure) its name, endpoint and the folder in it the store covers, and the
+    // workspace secret that opens it (decision 58: the workspace's credential, never Orama's);
+    // for a `lake` store the liquid repository that keeps it. Empty otherwise.
+    std::string bucket, endpoint_url, prefix;
+    std::string credential_mount_id, credential_name;
+    std::string repository_id;
+    // The bytes in use and when the operator measured them (migration 0080, lake#666): empty until
+    // it has mounted and measured the store.
+    std::optional<std::int64_t> used_bytes;
+    std::string used_bytes_at;
+    // The services and apps that mount it (store_mounts), filled by list_stores and get_store.
+    std::vector<StoreMount> mounted_by;
 };
 // A launch credential is `lal.<launch id>.<secret>`, a schedule's `las.<schedule id>.<secret>`:
 // the Orama operator generates it for the pod and writes its SHA-256 into the status row it owns
@@ -785,8 +829,9 @@ struct MethodologyRunStatus {
     std::string started_at, finished_at;
 };
 // A methodology run's credential (`lmr.<run id>.<secret>`, lake#655) is live while the run is
-// present and not finished; it acts as no person, and may call only methodology_run_input and
-// methodology_run_output for its own run (the registry checks the run).
+// present and not finished; it acts as no person, and may call only methodology_run_input,
+// methodology_run_artifact (lake#690) and methodology_run_output for its own run (the registry
+// checks the run).
 inline constexpr std::string_view methodology_run_credential_prefix = "lmr.";
 inline bool methodology_run_credential_live(const MethodologyRun& run) {
     return run.desired == "present" && !run.credential_sha256.empty() && run.phase != "Succeeded" &&
@@ -799,7 +844,7 @@ inline Principal methodology_run_principal(const MethodologyRun& run, std::strin
                      "",
                      "lake",
                      "methodology_run",
-                     {"methodology_run_input", "methodology_run_output"},
+                     {"methodology_run_input", "methodology_run_artifact", "methodology_run_output"},
                      std::nullopt,
                      run.id,
                      run.customer_id,
@@ -807,6 +852,70 @@ inline Principal methodology_run_principal(const MethodologyRun& run, std::strin
                      "",
                      std::move(digest)};
 }
+// A workspace methodology's model served from Ship → Models (lake#690, migration 0083): lake writes
+// the desired deployment when the model is published, the Orama operator stages the model's
+// artifact with the deployment's credential and runs the methodology's image in `serve` mode as a
+// Deployment behind a Service, and writes the status with the Service's in-cluster endpoint. The
+// stage Job authenticates with `lmd.<deployment id>.<secret>`; lake keeps only its SHA-256. Ids,
+// images, resources and phases only: the model and every prediction stay in the workspace Zetta.
+struct MethodologyDeployment {
+    std::string id, customer_id, workspace_id, methodology_id, model_id, run_id, build_id, image,
+        runtime_image, slug, desired;
+    std::int64_t cpu_millis = 0, memory_bytes = 0;
+    int gpus = 0;
+    std::string gpu_class;
+    bool network = false;
+    std::int64_t generation = 1;
+    std::string stop_reason;
+    std::string created_by_user_id, created_by_taap_id, created_at, updated_at;
+    // Written by the operator; empty until it reports.
+    std::string phase, message, credential_sha256, endpoint;
+    std::int64_t observed_generation = 0;
+    std::string ready_at, stopped_at, status_updated_at;
+};
+struct NewMethodologyDeployment {
+    std::string customer_id, workspace_id, methodology_id, model_id, run_id, build_id, image,
+        runtime_image;
+    std::int64_t cpu_millis = 0, memory_bytes = 0;
+    int gpus = 0;
+    std::string gpu_class;
+    bool network = false;
+    std::string created_by_user_id, created_by_taap_id;
+};
+// What the operator reports about a deployment (methodology_deployment_status). Tests and the
+// operator contract write it; lake never does in production.
+struct MethodologyDeploymentStatus {
+    std::string phase, message, credential_sha256, endpoint;
+    std::int64_t observed_generation = 0;
+    std::string ready_at, stopped_at;
+};
+// A deployment's credential (`lmd.<deployment id>.<secret>`, lake#690) is live while the deployment
+// is present: the stage Job reads the model through methodology_deployment_input, and kubelet pulls
+// the methodology's image with it whenever a serve pod (re)starts. It acts as no person.
+inline constexpr std::string_view methodology_deployment_credential_prefix = "lmd.";
+inline bool methodology_deployment_credential_live(const MethodologyDeployment& deployment) {
+    return deployment.desired == "present" && !deployment.credential_sha256.empty() &&
+           deployment.phase != "Stopped";
+}
+inline Principal methodology_deployment_principal(const MethodologyDeployment& deployment,
+                                                  std::string digest) {
+    return Principal{"",
+                     "methodology_deployment:" + deployment.id,
+                     "methodology_deployment:" + deployment.id,
+                     "",
+                     "lake",
+                     "methodology_deployment",
+                     {"methodology_deployment_input"},
+                     std::nullopt,
+                     deployment.id,
+                     deployment.customer_id,
+                     "",
+                     "",
+                     std::move(digest)};
+}
+// Whether `endpoint` is a serve Service the operator could have written: only
+// `http://md-<12 hex>.<namespace>.svc.cluster.local[:port]`, so a predict is never sent elsewhere.
+bool methodology_deployment_endpoint_valid(std::string_view endpoint);
 // One cron schedule of a Python agent (docs/api/agent-launches.md): an agent may have several.
 // lake writes the desired schedule (agent_cron_schedules, migration 0031); the Orama operator makes
 // each present one a Kubernetes CronJob and writes agent_cron_schedule_status, and one
@@ -900,11 +1009,37 @@ struct AskMessage {
 };
 struct NewManagedStore {
     std::string customer_id, type, provider, name, created_by_taap_id;
-    int size_gi = 10;
+    int size_gi = 10; // a volume's; 0 for every other type, which has no size to ask for
     std::string region;
     bool is_public = false;
     std::string workspace_id; // required by the routing trigger (migration 0044)
+    // As ManagedStore's (lake#664).
+    std::string bucket, endpoint_url, prefix;
+    std::string credential_mount_id, credential_name;
+    std::string repository_id;
 };
+// `stores.spec` for a new store (docs/control-plane/storage.md): a volume's {size_gi, region,
+// public}; a bucket's {public, bucket, endpoint, region, prefix, credential: {mount_id, name}}; a
+// `lake` store's {public, repository_id}; otherwise {public}. Content-free: a secret is named,
+// never copied.
+inline nlohmann::json store_spec(const NewManagedStore& in) {
+    nlohmann::json spec{{"public", in.is_public}};
+    if (in.type == "volume") {
+        spec["size_gi"] = in.size_gi;
+        spec["region"] = in.region;
+    }
+    if (!in.bucket.empty()) {
+        spec["bucket"] = in.bucket;
+        spec["endpoint"] = in.endpoint_url;
+        spec["region"] = in.region;
+        spec["prefix"] = in.prefix;
+        spec["credential"] = {{"mount_id", in.credential_mount_id}, {"name", in.credential_name}};
+    }
+    if (!in.repository_id.empty()) {
+        spec["repository_id"] = in.repository_id;
+    }
+    return spec;
+}
 // One valid type × provider pair and whether this lake offers it. Order: what is available first,
 // then by type. The schema's store_type_check and store_provider_check list the same keys.
 struct StoreProvider {
@@ -912,28 +1047,35 @@ struct StoreProvider {
     bool available = false;
     std::string_view unavailable_reason; // empty when available
 };
-inline constexpr std::string_view store_phase_two_reason =
-    "needs an Orama account or your own credentials (lake#196 phase 2)";
 inline constexpr StoreProvider store_providers[] = {
     {"volume", "cluster", "Volume — cluster disk", true, ""},
-    {"object",
-     "r2",
-     "Bucket — Cloudflare R2",
-     false,
-     "needs R2 enabled on Orama's Cloudflare account and a token that can issue bucket keys"},
-    {"object", "s3", "Bucket — AWS S3", false, store_phase_two_reason},
-    {"object", "b2", "Bucket — Backblaze B2", false, store_phase_two_reason},
-    {"object", "azure", "Bucket — Azure Blob", false, store_phase_two_reason},
-    {"object", "gcs", "Bucket — Google Cloud Storage", false, store_phase_two_reason},
-    {"object", "lake", "Bucket — liquid repository", false, "phase 3"},
-    {"object", "zetta", "Bucket — Zetta large objects", false, "phase 3"},
-    {"filesystem", "lake", "Filesystem — Drive", false, "phase 3"},
-    {"filesystem", "zetta", "Filesystem — Zetta", false, "phase 3"},
+    // The customer's own bucket, opened with a secret in the workspace's secret store (lake#664).
+    {"object", "r2", "Bucket — your Cloudflare R2 bucket", true, ""},
+    {"object", "s3", "Bucket — your AWS S3 bucket", true, ""},
+    {"object", "b2", "Bucket — your Backblaze B2 bucket", true, ""},
+    {"object", "gcs", "Bucket — your Google Cloud Storage bucket", true, ""},
+    {"object", "azure", "Bucket — your Azure Blob container", true, ""},
+    // Kept by Lake in the workspace (lake#664).
+    {"object", "zetta", "Bucket — kept by Lake in the workspace", true, ""},
+    {"object", "lake", "Bucket — a liquid repository", true, ""},
+    {"filesystem", "zetta", "Filesystem — kept by Lake in the workspace", true, ""},
+    {"filesystem", "lake", "Filesystem — Drive (a liquid repository)", true, ""},
     {"network_filesystem", "nfs", "Network filesystem — NFS in the cluster", false, "phase 4"},
     {"network_filesystem", "azure", "Network filesystem — Azure Files", false, "phase 4"},
     {"network_filesystem", "s3", "Network filesystem — EFS", false, "phase 4"},
     {"network_filesystem", "gcs", "Network filesystem — Filestore", false, "phase 4"},
 };
+// The customer's own bucket at a cloud provider, reached over the provider's protocol with the
+// workspace's credential (lake#664).
+inline bool store_external_bucket(std::string_view type, std::string_view provider) {
+    return type == "object" && (provider == "r2" || provider == "s3" || provider == "b2" ||
+                                provider == "gcs" || provider == "azure");
+}
+// A store whose contents Lake keeps itself in the workspace (lake#664): the workspace Zetta or a
+// liquid repository.
+inline bool store_kept_by_lake(std::string_view type, std::string_view provider) {
+    return (type == "object" || type == "filesystem") && (provider == "zetta" || provider == "lake");
+}
 inline const StoreProvider* find_store_provider(std::string_view type, std::string_view provider) {
     for (const StoreProvider& entry : store_providers) {
         if (entry.type == type && entry.provider == provider) {
@@ -1441,8 +1583,18 @@ public:
     // Creates a service. A default one that already exists is returned unchanged; a live name is a
     // conflict; a customer at max_per_customer live services is refused with quota_exceeded.
     virtual Result<ManagedService> create_service(const NewManagedService&) = 0;
-    // Marks a service absent so the operator deletes it. Refuses one already absent.
+    // Marks a service absent so the operator deletes it, and removes its store mounts. Refuses one
+    // already absent.
     virtual Result<ManagedService> withdraw_service(const std::string& id) = 0;
+    // Replaces the stores a live service mounts (lake#666): bumps its generation and NOTIFYs
+    // lake_services in the same transaction. A store must be a present store of the service's
+    // workspace; a volume another workload mounts is a conflict naming it.
+    virtual Result<ManagedService> set_service_stores(const std::string& service_id,
+                                                      const std::vector<StoreMountRequest>&) = 0;
+    // Every store mount of the customer's stores, with the store's and the workload's names
+    // (lake#666); an empty workspace_id lists every workspace's.
+    virtual Result<std::vector<StoreMount>>
+    list_store_mounts(const std::string& customer_id, const std::string& workspace_id = {}) = 0;
     // Ship apps (docs/control-plane/web-apps.md). The apps row carries desired state from lake and
     // status written by the operator. Acknowledged deletions are removed by the owner loop.
     virtual Result<std::vector<WebApp>> list_web_apps(const std::string& customer_id) = 0;
@@ -1479,7 +1631,8 @@ public:
     virtual Result<ManagedStore> get_store(const std::string& id) = 0;
     // Creates a store; a live name is a conflict. The provider table is the caller's to check.
     virtual Result<ManagedStore> create_store(const NewManagedStore&) = 0;
-    // Marks a store absent so the operator deletes it and its data. Refuses one already absent.
+    // Marks a store absent so the operator deletes it and its data. Refuses one already absent,
+    // and one a service or an app mounts (conflict, naming them: lake#666).
     virtual Result<ManagedStore> withdraw_store(const std::string& id) = 0;
     // Agent launches (lake#231). Writing one NOTIFYs lake_services, as services and stores do.
     virtual Result<AgentLaunch> create_agent_launch(const NewAgentLaunch&) = 0;
@@ -1514,6 +1667,26 @@ public:
     // The operator's report, for tests and the operator contract; lake never calls it otherwise.
     virtual Result<void> put_methodology_run_status(const std::string& id,
                                                     const MethodologyRunStatus& status) = 0;
+    // Methodology deployments (lake#690). Creating or withdrawing one NOTIFYs lake_services.
+    // Creating refuses a second present deployment of the same model in a workspace (`conflict`).
+    virtual Result<MethodologyDeployment>
+    create_methodology_deployment(const NewMethodologyDeployment&) = 0;
+    virtual Result<MethodologyDeployment> get_methodology_deployment(const std::string& id) = 0;
+    // Newest first; an empty model_id lists every model's deployments in the workspace, absent
+    // ones included.
+    virtual Result<std::vector<MethodologyDeployment>>
+    list_methodology_deployments(const std::string& customer_id,
+                                 const std::string& workspace_id,
+                                 const std::string& model_id,
+                                 int limit) = 0;
+    // Marks a deployment absent so the operator removes its pods, recording `reason`. Refuses one
+    // already absent.
+    virtual Result<MethodologyDeployment>
+    withdraw_methodology_deployment(const std::string& id, const std::string& reason) = 0;
+    // The operator's report, for tests and the operator contract; lake never calls it otherwise.
+    virtual Result<void>
+    put_methodology_deployment_status(const std::string& id,
+                                      const MethodologyDeploymentStatus& status) = 0;
     // Cron schedules: any number per agent. Creating or withdrawing one NOTIFYs lake_services.
     virtual Result<AgentCronSchedule> create_agent_cron_schedule(const NewAgentCronSchedule&) = 0;
     virtual Result<AgentCronSchedule> get_agent_cron_schedule(const std::string& id) = 0;
@@ -1545,6 +1718,18 @@ public:
                                                              const std::string& agent,
                                                              const std::string& kind,
                                                              const std::string& workspace_id) = 0;
+    // The tasks one person's conversation started in a workspace (kind ask or factory, any
+    // agent), and every task those asked for in turn (parent_task_id, lake#451), oldest first:
+    // what deleting the conversation removes (lake#673). Empty for an id that is not a UUID.
+    virtual Result<std::vector<AgentTask>>
+    list_conversation_agent_tasks(const std::string& customer_id,
+                                  const std::string& workspace_id,
+                                  const std::string& conversation_id,
+                                  const std::string& requested_by_user_id) = 0;
+    // Removes these tasks' dispatch rows (their status goes with them) when they belong to
+    // `customer_id`; answers how many went. Ids of another space, or already gone, are skipped.
+    virtual Result<std::size_t> delete_agent_tasks(const std::string& customer_id,
+                                                   const std::vector<std::string>& ids) = 0;
     // The task's agent claims it: Running, with the SHA-256 of the credential lake just handed
     // it and where on agent-events its events will start. Exactly one claim per attempt succeeds;
     // another is a conflict, as is a claim by a different agent.
@@ -1590,6 +1775,22 @@ public:
     // demos (it replaces the row of the kind and id).
     virtual Result<std::vector<WorkloadResources>> workload_resources() = 0;
     virtual Result<void> put_workload_resources(const WorkloadResources& row) = 0;
+    // MCP connection dispatch (migration 0079, lake#684, lake#685). put replaces the connection's
+    // row, or removes it when it neither streams nor re-exports; remove removes it.
+    // mcp_stream_dispatch lists the rows that stream, by workspace, at most `limit`;
+    // mcp_exported_dispatch the rows of one workspace that re-export tools.
+    virtual Result<void> put_mcp_connection_dispatch(const McpConnectionDispatch& row) = 0;
+    virtual Result<void> remove_mcp_connection_dispatch(const std::string& workspace_id,
+                                                        const std::string& connection_id) = 0;
+    virtual Result<std::vector<McpConnectionDispatch>> mcp_stream_dispatch(int limit) = 0;
+    virtual Result<std::vector<McpConnectionDispatch>>
+    mcp_exported_dispatch(const std::string& workspace_id) = 0;
+    // Each app's traffic through the ingress by hour (migration 0081, lake#661), the rows of
+    // `since_hour` and later, oldest hour first. The Orama operator writes them;
+    // add_app_transfer is the same write (it adds to the row of the app and hour), for tests and
+    // local demos.
+    virtual Result<std::vector<AppTransfer>> app_transfer(const std::string& since_hour) = 0;
+    virtual Result<void> add_app_transfer(const AppTransfer& row) = 0;
     virtual Result<BillingPlan> put_billing_plan(const BillingPlan& plan) = 0;
     virtual Result<Invoice> create_invoice(const Invoice& invoice) = 0;
     virtual Result<std::vector<Invoice>> list_invoices(const std::string& customer_id) = 0;

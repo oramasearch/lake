@@ -129,14 +129,19 @@ with a chip naming the transcript and its text attached to your next message
 ([Transcripts and Speech-to-Text](/docs/transcripts)). The chip's close button asks without that
 context. After one message, later messages are about the page as usual.
 
+On **Design → Methodologies**, New methodology's **Ask Orama** has Ask Orama write the first
+version of a methodology for your description. Lake checks the files before you see them and
+nothing is saved until you press Create ([Your own methodologies](/docs/solutions#create-one)).
+
 ## Delete a Conversation
 
 On the Ask Orama home, press **Delete** beside **New conversation**, type `delete` and press
 **Delete conversation**. Every message of it is removed from the workspace and a new conversation
-starts. Only you can delete your conversations. The agent tasks it started stay in Agent Tasks.
+starts. The agent tasks it started go with it, with what they asked and answered, and so do the
+tasks those agents asked for in turn. Only you can delete your conversations.
 
 - REST: `POST /v1/delete_ask_conversation` with `customer_id`, `workspace_id` and
-  `conversation_id`; add `"dry_run": true` to see how many messages would go.
+  `conversation_id`; add `"dry_run": true` to see how many messages, and which agent tasks, would go.
 - MCP: `delete_ask_conversation`.
 
 ## Permissions
