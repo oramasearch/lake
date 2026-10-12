@@ -178,7 +178,8 @@ first, the base model on an update, and an unrecorded revision that does not fai
 `AgentRuns.CreateAgentRefusesDefinitionFieldsZettaWouldDrop`. `frontend/tests/agents.test.ts`
 covers the read-only rule for Orama's agents, the By Orama / Yours filter, Duplicate of each kind,
 New agent's and Edit's input, the skills vendored from agent-runtime, revision changes, the filter to
-trainable agents, promote and roll back, and the streams the form offers and sends (lake#677).
+trainable agents, promote and roll back, and the streams the form offers and sends (lake#677). `frontend/checks/agent-streams.mjs` screenshots the Design page's streams, Edit and New agent at
+1440 and 390 px against mocked reads.
 
 ## Change it
 
