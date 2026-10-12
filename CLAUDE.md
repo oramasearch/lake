@@ -10,13 +10,15 @@ document rules, confidentiality, and the decisions not to drift past. Read both.
 
 Status: 2026-10-12. The current release is **v0.1.0**, the first tagged release
 ([`docs/releases/v0.1.0.md`](docs/releases/v0.1.0.md) lists everything in it). `Lake/prod` on the
-dev AKS cluster (there is no production environment yet) serves `oramasearch/lake:20261011u`,
-source `dd1574fd`, the commit v0.1.0 was cut from; its OpenAPI lists 554 paths and the operator's
-schema is applied through `0083_methodology_deployments`.
+dev AKS cluster (there is no production environment yet) serves `oramasearch/lake:20261012a`, which
+is also `oramasearch/lake:v0.1.0`, built from the tag (`2e6f6d7`) against liquid `v0.1.0`
+(`f669726`). `GET /v1/server_info` reports version `0.1.0`; the OpenAPI lists 554 paths and the
+operator's schema is applied through `0083_methodology_deployments`. Its bus and workspace Zettas
+run `oramasearch/zetta:main-4015ef76` (zetta `v0.2.0`).
 
 The newest dated record, [`docs/deployment/dev-2026-10-01.md`](docs/deployment/dev-2026-10-01.md),
 and [`docs/design/status.md`](docs/design/status.md) still describe the 2026-10-01 deployment
-(`oramasearch/lake:20261001d`, `36679e1`); they have not been brought up to `dd1574fd`. Until they
+(`oramasearch/lake:20261001d`, `36679e1`); they have not been brought up to the release. Until they
 are, the record is authoritative only for what was exercised on that date.
 `status.md` distinguishes implemented, exercised locally, deployed, and exercised-in-deployment
 behavior; do not infer an end-to-end deployment exercise from a route's presence in OpenAPI.
@@ -860,8 +862,25 @@ are in [`docs/releases/`](docs/releases/README.md); read its `README.md` first. 
    then publish the GitHub release from the page:
    `gh release create vX.Y.Z --repo oramasearch/lake --verify-tag --title "Release vX.Y.Z" --notes-file <page without its first heading, relative links made absolute at the tag>`.
 
-A release does not deploy anything. Building and rolling an image stays the separate step under
-**Container image**.
+7. **Build the image from the tag and roll `Lake/prod`.** Confirm the schema did not change since
+   the deployed image (`git diff <deployed revision> vX.Y.Z -- db/` is empty); if it did, the
+   operator is re-vendored and rolled first. Move `wt/lake/deploy-next` to the tag and run
+   `build/scripts/build-lake.sh <YYYYMMDD><letter>`, which rolls only on a successful build. The
+   image is built against the liquid commit liquid-bridge pins, so move that pin to liquid's
+   release first when one was cut. The commands are in liquid-bridge's `liquid-dev` skill.
+8. **Check the live service**: `GET /v1/server_info` reports the release's `version` and the tag's
+   `revision`, `/readyz` answers 200, and a browser's request for `/` (`Accept: text/html`) answers
+   200. A bare `curl` of `/` answers 404 by design.
+9. **Tag the image `vX.Y.Z` in Docker Hub**, naming the digest that is deployed, without
+   rebuilding: `retag-image.py lake <YYYYMMDD><letter> vX.Y.Z` (in the `liquid-dev` skill). Both
+   tags must print the digest the running pod reports, and an anonymous request for the
+   repository must still answer 404.
+10. **Move the pins and record the roll**: liquid-bridge's pin of `modules/lake` to the tag, the
+    umbrella's pointer to liquid-bridge, and the deployment paragraph in liquid-bridge's
+    `docs/action-plan.md`. Update **Status** above and the README's deployment line.
+
+A release is finished when the Git tag, the GitHub release and the image tag all exist and the
+cluster runs that image. `v0.1.0` is `oramasearch/lake:20261012a`, also tagged `v0.1.0`.
 
 ## Open decisions
 
