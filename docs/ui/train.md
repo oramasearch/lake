@@ -34,11 +34,21 @@ lake#654. A model made on its own, not as a project pipeline's step (`docs/api/m
   methodology's `label` input is not required) and Held-out share (0.2 by default, `20%` taken).
   The name, dataset, methodology, target and share are checked before anything is sent
   (`nameProblem`, `needsTarget`, `holdoutOf` in `models.ts`). `train_model`, then the new run's page.
-- **Bring one**: This computer (a `.json` file, `register_model` with its text), A drive (the files
-  of the workspace's drives, newest first from `recent_drive_entries`; `load_drive_model`) or A model
-  repository (repository, path, revision; `resolve_model_file`, then `register_model`), a Name and an
-  optional held-out AUC measured where it was trained. A banner says what can be brought: the
-  engine's own tree weights format. Then the model's page.
+- **Bring one**: This computer (`.onnx`, `.json`, `.ubj` or `.txt`; `register_model` with the
+  file as `weights_base64`), A drive (the files of the workspace's drives, newest first from
+  `recent_drive_entries`; `load_drive_model`) or A model repository (repository, path, revision;
+  `resolve_model_file`, then `register_model` with its `content_base64`), a Name, Columns (optional,
+  comma-separated, sent as `feature_names`; its help asks for them when the file is `.onnx`, which
+  names none; a column named twice is refused before sending, `featureNamesProblem`) and an
+  optional held-out AUC measured where it was trained. A banner says what can be brought (ONNX,
+  XGBoost, LightGBM or Lake's own weights) and what is refused (lake#681). Then the model's page.
+
+Train → Model, for every model, has a **Weights** card under Facts (lake#681): **Download** calls
+`export_model` for the selected version with `format: "zetta"` and saves the answer as its
+`file_name` (`weightsFile` in `models.ts` decodes it); **As ONNX** does the same with
+`format: "onnx"`, shown when the version is a tree model whose objective is `binary_logistic` or
+`squared_error` (or, with no objective recorded, a classifier or regressor; `exportsAsOnnx`). A
+refusal shows in the card.
 
 Train → Model for a standalone model:
 

@@ -216,7 +216,7 @@ using nlohmann::json;
 // The Zetta capabilities lake's pages may call on a customer's workspace (docs/api/workspaces.md).
 // Reads need `read` on the customer, actions `write`. Anything else is refused, so a lake caller
 // can never reach Zetta's administrative surface (sql, users, cloud provisioning) through lake.
-constexpr std::array<std::string_view, 47> workspace_reads = {"server_info",
+constexpr std::array<std::string_view, 48> workspace_reads = {"server_info",
                                                               "get_run_metrics",
                                                               "compare_runs",
                                                               "get_study",
@@ -263,6 +263,10 @@ constexpr std::array<std::string_view, 47> workspace_reads = {"server_info",
                                                               // same checks as create_study,
                                                               // storing nothing.
                                                               "validate_study",
+                                                              // A model version's weights as a
+                                                              // file, as kept or as ONNX
+                                                              // (lake#681).
+                                                              "export_model",
                                                               "analyze_dataset",
                                                               "plan_features",
                                                               // The solutions catalogue

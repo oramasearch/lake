@@ -1391,8 +1391,9 @@ TEST(DrivesHttp, ARepositoryDriveWriteIsSearchedDownloadedAndLoaded) {
               "/format")
         << "only CSV and JSONL load";
 
-    // Bring a model file (lake#654): its text goes to the engine's register_model, with where it
-    // came from; the engine's refusal of the file points at the file.
+    // Bring a model file (lake#654): its bytes go to the engine's register_model in base64 (so an
+    // ONNX file arrives intact, lake#681), with where it came from and the format options; the
+    // engine's refusal of the file points at the file.
     const std::string weights = R"({"objective":"binary_logistic","trees":[]})";
     const json kept = lake.call(
         "upload_drive_files",
@@ -1408,14 +1409,19 @@ TEST(DrivesHttp, ARepositoryDriveWriteIsSearchedDownloadedAndLoaded) {
                                    {{"drive_id", drive["value"]["id"]},
                                     {"id", "models/churn.json"},
                                     {"name", "partner churn"},
-                                    {"metrics", {{"held_out_auc", 0.8}}}});
+                                    {"metrics", {{"held_out_auc", 0.8}}},
+                                    {"format", "zetta"},
+                                    {"feature_names", {"tickets", "tenure"}}});
     ASSERT_TRUE(brought.value("ok", false)) << brought.dump();
     EXPECT_EQ(brought["value"]["model_id"], "m-9");
     EXPECT_EQ(brought["value"]["source"]["name"], "churn.json");
     const auto registered = std::ranges::find_if(
         lake.spaces.zetta->calls, [](const auto& call) { return call.first == "register_model"; });
     ASSERT_NE(registered, lake.spaces.zetta->calls.end());
-    EXPECT_EQ(registered->second["weights"], weights);
+    EXPECT_EQ(registered->second["weights_base64"], base64(weights));
+    EXPECT_FALSE(registered->second.contains("weights"));
+    EXPECT_EQ(registered->second["format"], "zetta");
+    EXPECT_EQ(registered->second["feature_names"], json({"tickets", "tenure"}));
     EXPECT_EQ(registered->second["name"], "partner churn");
     EXPECT_EQ(registered->second["metrics"]["held_out_auc"], 0.8);
     EXPECT_EQ(registered->second["source"], "drive Docs: churn.json");
@@ -1430,7 +1436,7 @@ TEST(DrivesHttp, ARepositoryDriveWriteIsSearchedDownloadedAndLoaded) {
             return std::nullopt;
         }
         return std::unexpected(lake::control::ZettaControlError{
-            "not_supported", "/weights: the engine reads gradient-boosted tree models", "/weights"});
+            "not_supported", "/weights_base64: this is a Python pickle", "/weights_base64"});
     };
     const json refused = lake.call("load_drive_model",
                                    {{"drive_id", drive["value"]["id"]},

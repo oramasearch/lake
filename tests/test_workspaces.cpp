@@ -4505,6 +4505,19 @@ TEST(EngineCapabilities, StandaloneModelsAreNamedAndAnOlderEngineSaysSo) {
     }
     EXPECT_TRUE(registry.find("train_model")->input_schema["properties"].contains("methodology"));
     EXPECT_TRUE(registry.find("register_model")->input_schema["properties"].contains("weights"));
+    // lake#681: any file goes as weights_base64, in any format the engine converts.
+    EXPECT_TRUE(
+        registry.find("register_model")->input_schema["properties"].contains("weights_base64"));
+    EXPECT_TRUE(
+        registry.find("register_model")->input_schema["properties"].contains("feature_names"));
+    // Downloading a model's weights is a named read, audited as export_model.
+    const auto exported = registry.find("export_model");
+    ASSERT_TRUE(exported);
+    EXPECT_EQ(exported->action, "read");
+    EXPECT_EQ(lake::api::agent_docs::group_of("export_model"), "Models");
+    EXPECT_TRUE(lake::api::workspace_read_allowed("export_model"));
+    EXPECT_TRUE(exported->input_schema["properties"].contains("model_id"));
+    EXPECT_EQ(exported->input_schema["properties"]["format"]["enum"], json({"zetta", "onnx"}));
 
     w.caller->answers["train_model"] = {
         {"run_id", "r-1"}, {"name", "churn"}, {"project_id", "p-1"}, {"standalone", true}};
@@ -4519,6 +4532,22 @@ TEST(EngineCapabilities, StandaloneModelsAreNamedAndAnOlderEngineSaysSo) {
     EXPECT_FALSE(w.caller->read);
     EXPECT_EQ(w.caller->input["target"], "churned");
     EXPECT_EQ(w.caller->input["dataset_path"], "datasets.accounts");
+
+    w.caller->answers["export_model"] = {{"model_id", "m-1"},
+                                         {"name", "churn"},
+                                         {"format", "onnx"},
+                                         {"file_name", "churn-m-1.onnx"},
+                                         {"media_type", "application/onnx"},
+                                         {"encoding", "base64"},
+                                         {"content", "AAEC"},
+                                         {"bytes", 3}};
+    const auto downloaded = call("export_model", {{"model_id", "m-1"}, {"format", "onnx"}});
+    ASSERT_TRUE(downloaded.ok) << downloaded.error.message;
+    EXPECT_EQ(w.caller->capability, "export_model");
+    EXPECT_TRUE(w.caller->read);
+    EXPECT_EQ(w.caller->input["model_id"], "m-1");
+    EXPECT_EQ(w.caller->input["format"], "onnx");
+    EXPECT_EQ(downloaded.value["file_name"], "churn-m-1.onnx");
 
     const auto moved =
         call("move_model_to_project", {{"model_id", "m-1"}, {"project_name", "Retention"}});

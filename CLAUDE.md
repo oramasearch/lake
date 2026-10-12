@@ -109,6 +109,13 @@ version's `delete_model`), and Ship serves it as any model. The engine keeps an 
 it that it never lists. An engine that lacks an allow-listed capability is answered `not_supported`.
 Needs the zetta standalone-models change in the workspace image. Not deployed. See
 `docs/api/models.md#a-standalone-model-lake654` and `docs/ui/train.md#a-standalone-model`.
+Bring one takes common model formats and any version's weights download (lake#681, no migration):
+`register_model` and `load_drive_model` take ONNX tree ensembles (scikit-learn, XGBoost, LightGBM),
+XGBoost JSON/UBJSON and LightGBM text models as `weights_base64`, which the engine converts exactly
+into its own trees (`feature_names` names an ONNX model's columns); pickles, neural networks and
+random-forest classifiers are refused. `export_model` (a named engine read, audited) downloads a
+version's weights as kept or as ONNX; Train → Model has a Weights card. Needs the zetta model-import
+change in the workspace image. Not deployed. See `docs/api/models.md#bring-a-model-in-a-common-format-and-download-its-weights-lake681`.
 
 The workspace engine's capabilities are named capabilities (lake#650, no migration): every name in
 `workspace_reads` and `workspace_actions` is served by `/v1/<name>`, its own OpenAPI operation and

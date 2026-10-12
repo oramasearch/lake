@@ -33,7 +33,7 @@ registered once and therefore appear in `/v1/openapi.json` and `POST /mcp` autom
 | `get_model`, repository `get_dataset` | `id`, `revision` | Repository identity, immutable `sha`, visibility, card, files, storage totals, and provenance |
 | workspace `get_dataset` | `customer_id`, `workspace_id`, `id` as `<database>/<dataset>` (no `revision`) | Workspace dataset schema; an ApplicationAgent task credential supplies the customer implicitly |
 | workspace `get_model` | `customer_id`, `workspace_id`, `id` as the model id Ship → Models shows (no `revision`) | The workspace's trained model: measures, feature columns, published state. The same record `workspace_query` `get_model` answers, so the name means one thing on both surfaces (lake#450, [naming.md](naming.md)); an unknown id is `not_found` at `/id` |
-| `resolve_model_file`, `resolve_dataset_file` | `id`, `revision`, `path` | Exact bytes plus blob, size, and immutable revision metadata |
+| `resolve_model_file`, `resolve_dataset_file` | `id`, `revision`, `path` | Exact bytes plus blob, size, and immutable revision metadata; `contents` as text and `content_base64`, the exact bytes of any file (binary included, lake#681) |
 | `prepare_repository_upload` | `id`, `files[{path,size}]` | `regular` for files through 5 MiB, otherwise `lfs` |
 | `stage_repository_file` | `id`, SHA-256 `oid`, `size`, binary body or base64 `content` | Unique stored bytes after digest and size verification |
 | `commit_repository_files` | `id`, `revision?`, `message?`, `operations[]` | New immutable `commitOid`; operations are `file`, `lfsFile`, `deletedFile`, or `deletedFolder` |
@@ -76,8 +76,9 @@ account like `workspace_act`, and is audited in the workspace's own chain.
 |---|---|---|
 | `train_model` | `name`, `methodology` (an id from `list_methodologies`), `dataset_path` (`<database>/<name>` or `<database>.<name>`), `target` (required when the methodology's `label` input is), `entity_column?`, `holdout_fraction?` | Trains it: answers the `run_id`; the model appears in `list_models` when the run finishes |
 | `retrain_model` | `model_id` (any version), and optionally a new `dataset_path`, `target`, `entity_column` or `holdout_fraction` | A new version. A standalone model keeps the new settings for its next retrain; a project's model uses them for this run only |
-| `register_model` | `weights` (the file's contents), `name` or `version_of`, `kind?`, `metrics?` (the figures measured where it was trained), `source?` | Brings a model trained elsewhere so `score`, `explain`, `expose_model` and `predict` take it like a trained one |
-| `load_drive_model` (Lake's) | `drive_id`, `id` (the file), `name` or `version_of`, `kind?`, `metrics?` | Reads the file as the caller (`read_drive_file` or `download_drive_file`) and sends it to `register_model`, as `load_drive_dataset` loads a table. At most 16 MiB |
+| `register_model` | `weights_base64` (the file, any format below) or `weights` (a text file), `name` or `version_of`, `format?`, `feature_names?`, `kind?`, `metrics?` (the figures measured where it was trained), `source?` | Brings a model trained elsewhere so `score`, `explain`, `expose_model` and `predict` take it like a trained one; answers `format`, what the file was read as |
+| `load_drive_model` (Lake's) | `drive_id`, `id` (the file), `name` or `version_of`, `format?`, `feature_names?`, `kind?`, `metrics?` | Reads the file as the caller (`read_drive_file` or `download_drive_file`) and sends its bytes as `weights_base64` to `register_model`, as `load_drive_dataset` loads a table. At most 16 MiB |
+| `export_model` (a read) | `model_id` (any version), `format?` (`zetta`, the default, or `onnx`) | The version's weights as a file: `file_name`, `media_type`, `encoding` (`utf-8` or `base64`), `content`, `bytes` (lake#681) |
 | `move_model_to_project` | `model_id`, `project_name?` (default the model's name) | Makes it a project in Design → Projects, with its pipeline and every version |
 
 - **Why the engine keeps a project for it.** Every methodology trains through a project and a
@@ -85,16 +86,58 @@ account like `workspace_act`, and is audited in the workspace's own chain.
   internal project of its own, which `list_projects` never lists. Lake never shows it: `list_models`
   marks each version `standalone: true`, and the pages say "trained on its own" or "brought from a
   file" where a project's model names its pipeline and project.
-- **What can be brought.** The engine scores, serves and explains what it reads natively: a
-  gradient-boosted tree model in its own JSON weights format (`objective`, `base_score`,
-  `feature_names`, `trees`), the format every model trained in Lake is kept in. Any other file is
-  `not_supported` and nothing is kept. A model repository's file is read with
-  `resolve_model_file` and sent as `weights`.
+- **What can be brought.** A tree model in a common format, converted exactly into the engine's
+  own trees (below, lake#681), or the engine's own JSON weights format, the format every model
+  trained in Lake is kept in. Any other file is `not_supported`, saying why, and nothing is kept. A
+  model repository's file is read with `resolve_model_file` and its `content_base64` sent as
+  `weights_base64`.
 - **Delete.** `delete_model` deletes one version. Deleting a standalone model's last version also
   removes its internal project (`removed.standalone_project: 1`); its runs are kept.
 - **An older engine.** A workspace whose engine predates these capabilities answers each with
   `not_supported` ("this workspace's engine does not have train_model yet; it needs a newer
   Zetta"), and nothing changes. This holds for every allow-listed engine capability.
+
+## Bring a model in a common format, and download its weights (lake#681)
+
+A customer's models come from scikit-learn, XGBoost and LightGBM. The workspace engine reads each
+format with its own reader, and no third-party runtime. It converts the model into its own
+gradient-boosted trees, so the model is scored, served, explained and compared exactly like a
+trained one. The engine's page is zetta `docs/ml/model-import.md`.
+
+| Format | `format` | Made with |
+|---|---|---|
+| ONNX `TreeEnsembleRegressor` / `TreeEnsembleClassifier` | `onnx` | scikit-learn through skl2onnx (gradient boosting, histogram gradient boosting, decision tree and random forest regressors); XGBoost and LightGBM through onnxmltools |
+| XGBoost model, JSON or UBJSON | `xgboost_json`, `xgboost_ubjson` | `Booster.save_model("model.json")` or `("model.ubj")` |
+| LightGBM text model | `lightgbm` | `Booster.save_model("model.txt")` |
+| The engine's own JSON weights | `zetta` | a model trained in Lake, or downloaded from one |
+
+- **Sending the file.** Send it as `weights_base64`. `format` is read from the file when omitted.
+- **Column names.** ONNX names no columns, so give `feature_names`: the columns the model reads, in
+  its order. Without them they are `f0`, `f1`, …. For the other formats, `feature_names` renames
+  the columns the file names.
+- **Exact.** Each row goes through the same leaves as in the library that made the model. Splits
+  that compare 32-bit floats are converted to the exact double bound, and missing values go the
+  way the source sends them. Only float rounding in the sum differs, under 1e-5 in the engine's
+  tests against each library's own predictions.
+- **Refused, saying why:**
+  - a pickle or joblib file, which is never unpickled;
+  - a neural network, or preprocessing inside the ONNX graph;
+  - a multiclass model;
+  - a random-forest or decision-tree classifier (averaged probabilities, not a logistic link);
+  - categorical splits, and exponential objectives.
+
+  The random-forest classifier is [lake#697](https://github.com/oramasearch/lake/issues/697).
+
+**Download.** `export_model` is a named engine read: `read` on the account, recorded as
+`export_model` in the workspace's audit. It answers a model version's weights as a file:
+
+- **`zetta`** (the default) works for any model. It answers the weights exactly as kept, as text.
+- **`onnx`** works for a gradient-boosted tree classifier or regressor. It answers an ONNX file in
+  base64 that onnxruntime scores as the engine does. Its input is one double tensor `input`
+  [N, features], and the column names are in the model's metadata.
+
+Train → Model's **Weights** card downloads the selected version both ways
+([../ui/train.md](../ui/train.md#a-standalone-model)).
 
 ## Deleting from a workspace
 

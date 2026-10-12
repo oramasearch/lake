@@ -7,6 +7,11 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   broughtFrom,
+  exportsAsOnnx,
+  featureNamesProblem,
+  isOnnxPath,
+  parseFeatureNames,
+  weightsFile,
   compareVersions,
   errorRate,
   featuresOf,
@@ -230,4 +235,27 @@ test("a new model's name and held-out share are checked before they are sent", (
   assert.deepEqual(holdoutOf("20%"), { value: 0.2 });
   assert.ok("error" in holdoutOf("1.5"));
   assert.ok("error" in holdoutOf("abc"));
+});
+
+test("bring one: an ONNX file's columns are typed in order, each once (lake#681)", () => {
+  assert.deepEqual(parseFeatureNames(" tenure, spend ,, tickets "), ["tenure", "spend", "tickets"]);
+  assert.deepEqual(parseFeatureNames(""), []);
+  assert.equal(featureNamesProblem(["a", "b"]), null);
+  assert.match(featureNamesProblem(["a", "b", "a"])!, /a is named twice/);
+  assert.equal(isOnnxPath("models/churn.ONNX"), true);
+  assert.equal(isOnnxPath("model.json"), false);
+});
+
+test("download weights: export_model's answer becomes the file to save (lake#681)", () => {
+  const onnx = weightsFile({ file_name: "churn-1.onnx", media_type: "application/onnx", encoding: "base64", content: "AAEC/w==" });
+  assert.equal(onnx.name, "churn-1.onnx");
+  assert.equal(onnx.type, "application/onnx");
+  assert.deepEqual([...onnx.bytes], [0, 1, 2, 255]);
+  const kept = weightsFile({ file_name: "churn-1.json", media_type: "application/json", encoding: "utf-8", content: "{\"trees\":[]}" });
+  assert.equal(new TextDecoder().decode(kept.bytes), '{"trees":[]}');
+  assert.equal(weightsFile({}).name, "model");
+  assert.equal(exportsAsOnnx({ feature_schema: { objective: "binary_logistic" } }), true);
+  assert.equal(exportsAsOnnx({ feature_schema: { objective: "lambdamart" } }), false);
+  assert.equal(exportsAsOnnx({ kind: "classifier" }), true);
+  assert.equal(exportsAsOnnx({ kind: "anomaly" }), false);
 });

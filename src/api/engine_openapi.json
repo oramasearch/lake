@@ -1737,6 +1737,37 @@
       "method": "get",
       "summary": "Explain one row's score"
     },
+    "export_model": {
+      "description": "Read one model version's weights as a file to keep or use elsewhere: as the engine keeps them (format zetta, any model), or a gradient-boosted tree model as ONNX (format onnx), which onnxruntime and other ONNX runtimes score. Changes nothing. Requires api:query.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "format": {
+            "description": "`zetta` (default): the weights exactly as the engine keeps them, for any model. `onnx`: a gradient-boosted tree model as an ONNX TreeEnsembleClassifier or TreeEnsembleRegressor that onnxruntime scores as the engine does",
+            "enum": [
+              "zetta",
+              "onnx"
+            ],
+            "type": "string"
+          },
+          "intent": {
+            "description": "reserved: say what you are trying to do; recorded on the call's trace, stripped before schema validation",
+            "type": "string"
+          },
+          "model_id": {
+            "description": "the model version's id (or a name one model has)",
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "model_id"
+        ],
+        "type": "object"
+      },
+      "method": "get",
+      "summary": "Download a model's weights"
+    },
     "expose_index": {
       "description": "Publish an index's HTTP search endpoint (/v1/indexes/{name}/search — the distributed scatter-gather path underneath) on every node; endpoint access then requires the data:search capability. Idempotent; undo with unexpose_index. Requires orchestration:expose_index.",
       "input_schema": {
@@ -2904,6 +2935,26 @@
       "input_schema": {
         "additionalProperties": false,
         "properties": {
+          "feature_names": {
+            "description": "the columns the model reads, in its own order: name an ONNX model's columns (ONNX names none, so they are f0, f1, … otherwise), or rename another file's",
+            "items": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "minItems": 1,
+            "type": "array"
+          },
+          "format": {
+            "description": "the file's format (default: read from the file). Every format is converted into the engine's tree model, so it is scored, served and explained like a trained one; a model it cannot convert exactly (a neural network, a multiclass or random-forest classifier, categorical splits, a pickle) is refused and nothing is kept",
+            "enum": [
+              "zetta",
+              "onnx",
+              "xgboost_json",
+              "xgboost_ubjson",
+              "lightgbm"
+            ],
+            "type": "string"
+          },
           "intent": {
             "description": "reserved: say what you are trying to do; recorded on the call's trace, stripped before schema validation",
             "type": "string"
@@ -2936,14 +2987,16 @@
             "type": "string"
           },
           "weights": {
-            "description": "the model file's contents: a gradient-boosted tree model in the engine's own JSON weights format (objective, base_score, feature_names, trees), the format every model trained here is kept in. The engine scores, serves and explains only what it can read; any other format is refused",
+            "description": "the model file's contents, for a text file: XGBoost's JSON model, LightGBM's text model, or the engine's own JSON weights (objective, base_score, feature_names, trees). Give this or `weights_base64`",
             "minLength": 2,
+            "type": "string"
+          },
+          "weights_base64": {
+            "description": "the model file's contents in base64, for any file and required for a binary one: ONNX (a TreeEnsembleRegressor or TreeEnsembleClassifier, as scikit-learn, XGBoost and LightGBM export) or XGBoost's UBJSON model. Give this or `weights`",
+            "minLength": 4,
             "type": "string"
           }
         },
-        "required": [
-          "weights"
-        ],
         "type": "object"
       },
       "method": "post",

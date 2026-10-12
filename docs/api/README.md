@@ -27,7 +27,9 @@ rates mid-month is billed, and when to revisit it.
 lake#654: [models.md](models.md#a-standalone-model-lake654) documents a standalone model, made on its
 own rather than by a project's pipeline: `train_model`, `retrain_model`, `register_model` and
 `move_model_to_project` (the workspace engine's, [engine-capabilities.md](engine-capabilities.md)),
-and Lake's `load_drive_model`, which brings a drive's model file.
+and Lake's `load_drive_model`, which brings a drive's model file. lake#681: a brought file may be
+ONNX, XGBoost or LightGBM, converted exactly, and `export_model` downloads any version's weights
+([models.md](models.md#bring-a-model-in-a-common-format-and-download-its-weights-lake681)).
 lake#645: [deletion.md](deletion.md) documents deleting and revoking what could only be created
 before, each with `dry_run: true` first and a typed confirmation in Lake Console:
 `delete_organization`, `revoke_invitation`, `revoke_grant`, `delete_secret_mount`, `delete_dataset`,
@@ -288,8 +290,9 @@ and `Experiments.CompareRunsAnswersItsGetFormWithRepeatedKeysOrACommaList`
 | `model_traffic` | read | `customer_id`, `workspace_id`, `model_id?`, `from_ms?`, `to_ms?`, `step_ms?` | each model's `predict` calls, errors and mean latency, step by step, from the workspace's own series; the workspace's `predict` requests; drift not measured yet (lake#599) | [workspaces.md](workspaces.md) |
 | `get_model`, `get_dataset`, `resolve_model_file`, `resolve_dataset_file` | read | repository id and revision, or, without `revision`, a workspace model or dataset id with `customer_id` and `workspace_id`; file path where required | compatible model/dataset metadata, the workspace's trained model or dataset schema, storage/provenance, or exact file | [models.md](models.md) |
 | `delete_dataset`, `delete_model`, `delete_run`, `delete_index` | action | `customer_id`, `workspace_id`, `id`, `dry_run?` | the engine's account of what went (`removed`, `kept`); `501 not_supported` from an older engine | [models.md](models.md#deleting-from-a-workspace) |
-| `train_model`, `retrain_model`, `register_model`, `move_model_to_project` | action | `customer_id`, `workspace_id` and the engine's fields: a name, methodology, dataset and target; a model id and new settings; a model file's text; a model id and project name | a training run's `run_id`, a brought model's `model_id`, or the project; `501 not_supported` from an older engine | [models.md](models.md#a-standalone-model-lake654) |
-| `load_drive_model` | action | `customer_id`, `workspace_id`, `drive_id`, `id`, `name` or `version_of`, `kind?`, `metrics?` | `register_model`'s answer with the file's `source` | [drives.md](drives.md#a-drive-file-as-a-model-lake654) |
+| `train_model`, `retrain_model`, `register_model`, `move_model_to_project` | action | `customer_id`, `workspace_id` and the engine's fields: a name, methodology, dataset and target; a model id and new settings; a model file in base64 (ONNX, XGBoost, LightGBM or the engine's own) with `feature_names?`; a model id and project name | a training run's `run_id`, a brought model's `model_id`, or the project; `501 not_supported` from an older engine | [models.md](models.md#a-standalone-model-lake654) |
+| `export_model` | read | `customer_id`, `workspace_id`, `model_id`, `format?` (`zetta` or `onnx`) | the weights as a file: `file_name`, `media_type`, `encoding`, `content`, `bytes` | [models.md](models.md#bring-a-model-in-a-common-format-and-download-its-weights-lake681) |
+| `load_drive_model` | action | `customer_id`, `workspace_id`, `drive_id`, `id`, `name` or `version_of`, `format?`, `feature_names?`, `kind?`, `metrics?` | `register_model`'s answer with the file's `source` | [drives.md](drives.md#a-drive-file-as-a-model-lake654) |
 | `prepare_repository_upload`, `stage_repository_file`, `commit_repository_files` | action | repository id plus upload plan, verified staged bytes, or file operations | upload modes, unique stored bytes, or immutable committed revision | [models.md](models.md) |
 | `attach_model_provenance`, `verify_model_provenance` | action | model and dataset revisions plus canonical liquid attestations, or model revision | attached or re-verified dataset-to-model training chain | [models.md](models.md) |
 | `create_repository` | action | `customer_id`, `workspace_id`, `name`, `description?`, `visibility?` | repository, with its `workspace_id` | [repositories.md](repositories.md) |

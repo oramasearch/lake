@@ -8,7 +8,9 @@
 //   PLAYWRIGHT_FROM=/path/to/a/project/with/playwright/package.json OUT=/tmp/shots node checks/standalone-models.mjs
 //
 // It prints a JSON report per shot: whether the page scrolls sideways, the dialog's title, the
-// text a reader checks for, page errors, and what Train one sent to `train_model`.
+// text a reader checks for, page errors, and what Train one sent to `train_model`. lake#681 adds
+// Bring one from this computer with an ONNX file and its columns (what `register_model` was
+// sent), and the Weights card's downloads (the file `export_model`'s answer saved as).
 import { createRequire } from "node:module";
 import { mkdirSync } from "node:fs";
 const require = createRequire(process.env.PLAYWRIGHT_FROM ?? import.meta.url);
@@ -96,6 +98,9 @@ const graph = {
 };
 
 const sent = [];
+const registered = [];
+const exported = [];
+const downloads = [];
 
 function engine(capability, input) {
   if (capability === "list_models") return { models };
@@ -133,6 +138,17 @@ function answer(name, body, url) {
     sent.push(body);
     return { run_id: "run-new", name: body?.name, project_id: "p-new", pipeline: body?.name, standalone: true };
   }
+  if (name === "register_model") {
+    registered.push({ name: body?.name, feature_names: body?.feature_names, weights_base64: typeof body?.weights_base64 === "string" ? body.weights_base64.slice(0, 12) : null, weights: body?.weights ?? null, source: body?.source });
+    return { model_id: "b-1", name: body?.name, kind: "classifier", project_id: "p-brought", features: body?.feature_names ?? [], standalone: true, format: "onnx" };
+  }
+  if (name === "export_model") {
+    const format = url.searchParams.get("format") ?? "zetta";
+    exported.push({ model_id: url.searchParams.get("model_id"), format });
+    return format === "onnx"
+      ? { model_id: "m-2", name: "churn", format, file_name: "churn-m-2.onnx", media_type: "application/onnx", encoding: "base64", content: "CAgSBXpldHRh", bytes: 9 }
+      : { model_id: "m-2", name: "churn", format, file_name: "churn-m-2.json", media_type: "application/json", encoding: "utf-8", content: '{"objective":"binary_logistic","trees":[]}', bytes: 42 };
+  }
   if (name === "recent_drive_entries") return { items: [{ drive: { id: "d-1", name: "Models" }, entry: { id: "e-1", kind: "file", name: "partner-churn.json", path: "partner-churn.json" } }] };
   if (name === "list_repositories") return { items: [{ id: "r-1", name: "churn-models", workspace_id: "me-0" }] };
   if (name === "model_traffic") return { models: [] };
@@ -147,7 +163,9 @@ const SHOTS = [
   { tag: "models", path: "/w/me-0/train/models", expect: ["New model", "trained on its own", "brought from a file", "Standalone"] },
   { tag: "new-choice", path: "/w/me-0/train/models", click: ["New model"], expect: ["Train one", "Bring one"] },
   { tag: "train-one", path: "/w/me-0/train/models", click: ["New model", "Train one"], fill: true, expect: ["Column to predict", "Held-out share"] },
-  { tag: "bring-one", path: "/w/me-0/train/models", click: ["New model", "Bring one", "A drive"], expect: ["What can be brought", "partner-churn.json"] },
+  { tag: "bring-one", path: "/w/me-0/train/models", click: ["New model", "Bring one", "A drive"], expect: ["What can be brought", "partner-churn.json", "ONNX", "Columns"] },
+  { tag: "bring-onnx", path: "/w/me-0/train/models", click: ["New model", "Bring one"], upload: true, expect: ["An ONNX file names no columns", "LightGBM"] },
+  { tag: "weights", path: "/w/me-0/train/model?id=m-2", download: ["Download", "As ONNX"], expect: ["v2 of churn as a file", "Download", "As ONNX"] },
   { tag: "model", path: "/w/me-0/train/model?id=m-2", expect: ["No project or pipeline to look after", "datasets.accounts", "churned", "20% of rows", "Retrain", "New version", "Move into a project", "Delete"] },
   { tag: "new-version", path: "/w/me-0/train/model?id=m-2", click: ["New version"], expect: ["New Version of churn", "Train new version"] },
   { tag: "move", path: "/w/me-0/train/model?id=m-2", click: ["Move into a project"], expect: ["Project name"] },
@@ -188,6 +206,13 @@ for (const shot of SHOTS.filter((s) => !ONLY || s.tag === ONLY)) {
       }
       await page.waitForTimeout(400);
     }
+    if (shot.upload) {
+      const dialog = page.locator('[role="dialog"]');
+      await dialog.locator("input").first().fill("lightgbm churn");
+      await dialog.locator('input[type="file"]').setInputFiles({ name: "churn.onnx", mimeType: "application/octet-stream", buffer: Buffer.from([8, 8, 18, 5, 122, 101, 116, 116, 97]) });
+      await dialog.getByPlaceholder("tenure_months, monthly_spend, support_tickets").fill("tenure_months, monthly_spend, support_tickets, failed_payments");
+      await page.waitForTimeout(200);
+    }
     if (shot.fill) {
       const dialog = page.locator('[role="dialog"]');
       await dialog.locator("input").first().fill("churn v2");
@@ -199,6 +224,17 @@ for (const shot of SHOTS.filter((s) => !ONLY || s.tag === ONLY)) {
     }
     const text = await page.locator("body").innerText();
     await page.screenshot({ path: `${OUT}/${shot.tag}-${width}.png` });
+    if (shot.upload && width === 1440) {
+      await page.locator('[role="dialog"]').getByRole("button", { name: "Bring model" }).click();
+      await page.waitForTimeout(600);
+    }
+    if (shot.download && width === 1440) {
+      for (const label of shot.download) {
+        const [download] = await Promise.all([page.waitForEvent("download", { timeout: 5000 }), page.getByRole("button", { name: label, exact: true }).click()]);
+        downloads.push({ button: label, file: download.suggestedFilename() });
+        await page.waitForTimeout(300);
+      }
+    }
     if (shot.fill && width === 1440) {
       await page.locator('[role="dialog"]').getByRole("button", { name: "Train", exact: true }).click();
       await page.waitForTimeout(500);
@@ -216,4 +252,4 @@ for (const shot of SHOTS.filter((s) => !ONLY || s.tag === ONLY)) {
   }
 }
 await browser.close();
-console.log(JSON.stringify({ report, train_model: sent }, null, 2));
+console.log(JSON.stringify({ report, train_model: sent, register_model: registered, export_model: exported, downloads }, null, 2));

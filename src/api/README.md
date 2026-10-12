@@ -159,7 +159,8 @@ call `workspace_query` or `workspace_act` call them. See
 capabilities (`train_model`, `retrain_model`, `register_model`, `move_model_to_project`, lake#654)
 are named this way; `workspace_call` answers an engine that does not know an allow-listed name
 `not_supported`, saying it needs a newer Zetta. `drives_capabilities.cpp`'s `load_drive_model`
-reads a drive's model file as the caller and sends it to `register_model`
+reads a drive's model file as the caller and sends its bytes as `weights_base64` to `register_model`
+(any format the engine converts, lake#681); `export_model` is a named engine read like `score`
 ([`models.md`](../../docs/api/models.md#a-standalone-model-lake654)).
 [`engine-capabilities.md`](../../docs/api/engine-capabilities.md).
 After the engine accepts a `create_agent` or `update_agent`, `workspace_call` keeps the definition

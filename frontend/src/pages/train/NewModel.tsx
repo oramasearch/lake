@@ -6,7 +6,9 @@
  *   the model appears with its versions when it finishes.
  * - Bring one: a model file uploaded from this computer, from a drive (`load_drive_model`) or from
  *   a model repository (`resolve_model_file`, then `register_model`), kept so it is scored, served
- *   and compared like a trained one.
+ *   and compared like a trained one. The file goes in base64: ONNX, XGBoost, LightGBM or the
+ *   engine's own weights, which the engine converts (lake#681); `feature_names` names an ONNX
+ *   model's columns.
  *
  * The same forms add a version: `RetrainDialog` trains a standalone model again on new settings
  * (`retrain_model`), and `BringDialog` with `versionOf` adds a brought model's next file. An engine
@@ -19,8 +21,9 @@ import { Modal } from "@/lib/overlay";
 import { useToast } from "@/lib/toast";
 import { Banner, Button, Field, FormError, fieldError } from "@/lib/ui";
 import { datasetChoices, datasetColumns } from "../design/logic";
+import { bytesToBase64 } from "../repositories/forge";
 import { qs, text, useWorkspace, useWq, useWsPath } from "./workspace";
-import { holdoutOf, nameProblem, needsTarget, type ModelGroup, type Training } from "./models";
+import { featureNamesProblem, holdoutOf, isOnnxPath, nameProblem, needsTarget, parseFeatureNames, type ModelGroup, type Training } from "./models";
 
 type Mode = "choose" | "train" | "bring";
 
@@ -296,6 +299,7 @@ export function BringDialog({ groups, versionOf, onClose, onBack }: { groups: Mo
   const [repositoryPath, setRepositoryPath] = useState("model.json");
   const [revision, setRevision] = useState("main");
   const [auc, setAuc] = useState("");
+  const [columns, setColumns] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
   const recent = useRead<{ items?: Row[] }>(from === "drive" && scope.customerId && scope.workspaceId ? "recent_drive_entries" : null, { customer_id: scope.customerId, workspace_id: scope.workspaceId, limit: 100 });
@@ -307,7 +311,10 @@ export function BringDialog({ groups, versionOf, onClose, onBack }: { groups: Mo
   const score = auc.trim() ? Number(auc) : null;
   const scoreProblem = score !== null && (!Number.isFinite(score) || score < 0 || score > 1) ? "An AUC is between 0 and 1." : null;
   const sourceProblem = from === "upload" ? (!file ? "Choose the file." : null) : from === "drive" ? (!driveFile ? "Choose the file." : null) : !repository || !repositoryPath.trim() ? "Choose the repository and the file's path." : null;
-  const problem = named ?? sourceProblem ?? scoreProblem;
+  const featureNames = parseFeatureNames(columns);
+  const chosenPath = from === "upload" ? file?.name ?? "" : from === "repository" ? repositoryPath : driveFile;
+  const columnsProblem = featureNamesProblem(featureNames);
+  const problem = named ?? sourceProblem ?? scoreProblem ?? columnsProblem;
 
   const submit = async () => {
     if (problem) return;
@@ -319,17 +326,18 @@ export function BringDialog({ groups, versionOf, onClose, onBack }: { groups: Mo
         workspace_id: scope.workspaceId,
         ...(versionOf ? { version_of: text(versionOf.latest, "id") } : { name: name.trim() }),
         ...(score !== null ? { metrics: { held_out_auc: score } } : {}),
+        ...(featureNames.length ? { feature_names: featureNames } : {}),
       };
       let answer: Row;
       if (from === "drive") {
         const [driveId, id] = driveFile.split("\u0000");
         answer = await act<Row>("load_drive_model", { ...common, drive_id: driveId, id });
       } else if (from === "upload") {
-        answer = await act<Row>("register_model", { ...common, weights: await file!.text(), source: `uploaded ${file!.name}` });
+        answer = await act<Row>("register_model", { ...common, weights_base64: bytesToBase64(new Uint8Array(await file!.arrayBuffer())), source: `uploaded ${file!.name}` });
       } else {
         const resolved = await read<Row>("resolve_model_file", { id: repository, revision: revision.trim() || "main", path: repositoryPath.trim() }, { workspace: null });
         const repositoryName = text(here.find((r) => text(r, "id") === repository), "name") || repository;
-        answer = await act<Row>("register_model", { ...common, weights: text(resolved, "contents"), source: `model repository ${repositoryName}@${text(resolved, "revision") || revision}: ${repositoryPath.trim()}` });
+        answer = await act<Row>("register_model", { ...common, weights_base64: text(resolved, "content_base64"), source: `model repository ${repositoryName}@${text(resolved, "revision") || revision}: ${repositoryPath.trim()}` });
       }
       toast(versionOf ? `Added a version of ${versionOf.name}` : `Brought ${name.trim()}`);
       onClose();
@@ -378,7 +386,7 @@ export function BringDialog({ groups, versionOf, onClose, onBack }: { groups: Mo
           {tab("repository", "A model repository", FolderGit2)}
         </div>
         <Banner tone="quiet" title="What can be brought">
-          A gradient-boosted tree model in the engine&apos;s own JSON weights format, the format every model trained in Lake is kept in. Another format is refused and nothing is kept.
+          A tree model as ONNX (from scikit-learn, XGBoost or LightGBM), XGBoost&apos;s JSON or UBJSON model, LightGBM&apos;s text model, or Lake&apos;s own weights. It is converted exactly and scored like a trained one. A neural network, a pickle or a random-forest classifier is refused and nothing is kept.
         </Banner>
         {!versionOf && (
           <Field label="Name" required error={fieldError(error, "name") ?? (name && named ? named : undefined)}>
@@ -386,8 +394,8 @@ export function BringDialog({ groups, versionOf, onClose, onBack }: { groups: Mo
           </Field>
         )}
         {from === "upload" && (
-          <Field label="Model file" required error={fieldError(error, "weights")}>
-            <input type="file" accept=".json,application/json" onChange={(e) => setFile(e.target.files?.[0] ?? null)} disabled={busy} />
+          <Field label="Model file" required error={fieldError(error, "weights_base64") ?? fieldError(error, "weights")}>
+            <input type="file" accept=".onnx,.json,.ubj,.txt,application/json,text/plain" onChange={(e) => setFile(e.target.files?.[0] ?? null)} disabled={busy} />
           </Field>
         )}
         {from === "drive" && (
@@ -428,10 +436,17 @@ export function BringDialog({ groups, versionOf, onClose, onBack }: { groups: Mo
             </div>
           </>
         )}
+        <Field
+          label="Columns"
+          error={columnsProblem ?? fieldError(error, "feature_names")}
+          help={isOnnxPath(chosenPath) ? "An ONNX file names no columns: list the ones it reads, in its order, separated by commas. Without them they are f0, f1, …" : "Optional: the columns it reads, in its order, separated by commas, to rename the ones the file names."}
+        >
+          <input value={columns} onChange={(e) => setColumns(e.target.value)} placeholder="tenure_months, monthly_spend, support_tickets" disabled={busy} />
+        </Field>
         <Field label="Held-out AUC" error={scoreProblem ?? fieldError(error, "metrics")} help="Optional: the score it got on rows it did not train on, where it was trained, so it compares with this workspace's models.">
           <input value={auc} onChange={(e) => setAuc(e.target.value)} inputMode="decimal" placeholder="0.81" disabled={busy} />
         </Field>
-        {problem && !named && !scoreProblem && <p className="muted m-0 text-[12.5px]">{problem}</p>}
+        {problem && !named && !scoreProblem && !columnsProblem && <p className="muted m-0 text-[12.5px]">{problem}</p>}
         <FormError error={error} />
       </form>
     </Modal>

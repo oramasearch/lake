@@ -2386,8 +2386,9 @@ liquid::runtime::task<ApiResult> load_drive_dataset(const json& input, ApiContex
 // Brings a model file of a drive into the workspace as a standalone model, as load_drive_dataset
 // brings a table: the bytes are read as the caller (read_drive_file or download_drive_file, so
 // the drive's authorization and audit apply), then the workspace engine's register_model keeps
-// them through workspace_act. The engine reads its own gradient-boosted tree weights format and
-// refuses any other. At most 16 MiB.
+// them through workspace_act. The file goes as `weights_base64`, so a binary model (ONNX, XGBoost's
+// UBJSON) arrives intact; the engine reads ONNX tree ensembles, XGBoost and LightGBM models and its
+// own weights format, and refuses any other (lake#681). At most 16 MiB.
 liquid::runtime::task<ApiResult> load_drive_model(const json& input, ApiContext& context) {
     Opened opened = awaited(co_await open_drive(input, context, false));
     if (opened.failure) {
@@ -2450,9 +2451,9 @@ liquid::runtime::task<ApiResult> load_drive_model(const json& input, ApiContext&
     if (!bytes) {
         co_return ApiResult::failure("corrupt", "the file's bytes did not decode", "/id");
     }
-    json model{{"weights", bytes_text(*bytes)},
+    json model{{"weights_base64", read.value.at("content_base64")},
                {"source", "drive " + opened.drive.name + ": " + name}};
-    for (const char* key : {"name", "version_of", "kind", "metrics"}) {
+    for (const char* key : {"name", "version_of", "kind", "metrics", "format", "feature_names"}) {
         if (input.contains(key)) {
             model[key] = input.at(key);
         }
@@ -2469,7 +2470,7 @@ liquid::runtime::task<ApiResult> load_drive_model(const json& input, ApiContext&
         if (path.starts_with("/input/")) {
             path = path.substr(6);
         }
-        if (path == "/weights" || path == "/source") {
+        if (path == "/weights" || path == "/weights_base64" || path == "/source") {
             path = "/id";
         }
         co_return ApiResult::failure(brought.error.code, brought.error.message, path);
@@ -3023,15 +3024,26 @@ void register_drives_capabilities(Registry& registry) {
            "served and compared like a trained one (the engine's register_model). `id` is the "
            "file: its entry id in a workspace-files drive, its path in a repository drive (on "
            "main). `name` names a new model; `version_of` (a brought model's id) adds the file as "
-           "its next version. The engine reads gradient-boosted tree weights in its own JSON "
-           "format and refuses any other. At most 16 MiB.",
+           "its next version. The engine reads tree models as ONNX (TreeEnsembleRegressor or "
+           "TreeEnsembleClassifier, from scikit-learn, XGBoost or LightGBM), XGBoost's JSON or "
+           "UBJSON model, LightGBM's text model and its own JSON weights, converted exactly; "
+           "anything else is refused. `format` skips detection; `feature_names` names the "
+           "columns, in order (ONNX names none). At most 16 MiB.",
            workspace_input({{"drive_id", string_schema()},
                             {"id", string_schema()},
                             {"name", string_schema()},
                             {"version_of", string_schema()},
                             {"kind", {{"type", "string"}, {"enum", {"classifier", "regressor"}}}},
                             {"metrics",
-                             {{"type", "object"}, {"additionalProperties", {{"type", "number"}}}}}},
+                             {{"type", "object"}, {"additionalProperties", {{"type", "number"}}}}},
+                            {"format",
+                             {{"type", "string"},
+                              {"enum",
+                               {"zetta", "onnx", "xgboost_json", "xgboost_ubjson", "lightgbm"}}}},
+                            {"feature_names",
+                             {{"type", "array"},
+                              {"items", string_schema()},
+                              {"minItems", 1}}}},
                            json::array({"drive_id", "id"})),
            {{"type", "object"}},
            load_drive_model);

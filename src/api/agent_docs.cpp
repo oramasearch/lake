@@ -565,9 +565,13 @@ const std::vector<Flow>& flows() {
            "`model_id`, optionally a new `dataset_path`, `target` or `holdout_fraction`: a new "
            "version"},
           {"register_model",
-           "`name`, `weights` (a model file's contents, the engine's tree format), `metrics`: "
-           "bring one; load_drive_model brings one from a drive"},
+           "`name`, `weights_base64` (a model file: ONNX tree ensemble, XGBoost JSON or UBJSON, "
+           "LightGBM text, or the engine's own), `feature_names` for ONNX, `metrics`: bring one; "
+           "load_drive_model brings one from a drive"},
           {"move_model_to_project", "`model_id`, `project_name`: a pipeline can grow around it"},
+          {"export_model",
+           "`model_id`, `format: \"zetta\"` (as kept) or `\"onnx\"`: the weights as a file to use "
+           "elsewhere"},
           {"delete_model", "`id` of each version; the last takes the model with it"}}},
         {"Stand up a Postgres service and connect it",
          "A service is a database, stream or engine Lake runs for your account.",
@@ -653,8 +657,9 @@ const std::vector<Flow>& flows() {
            "`drive_id`, `id` (a CSV or JSONL file of a workspace-files drive), `table_name`: "
            "loads it into a dataset of the workspace"},
           {"load_drive_model",
-           "`drive_id`, `id` (a model file), `name` (or `version_of`): brings it into the "
-           "workspace as a standalone model"}}},
+           "`drive_id`, `id` (a model file: ONNX, XGBoost, LightGBM or the engine's own), `name` "
+           "(or `version_of`), `feature_names` for ONNX: brings it into the workspace as a "
+           "standalone model"}}},
         {"Search everything",
          "Search what you can open, place by place, as the Lake Console's search does.",
          {{"search", "`query`: repository code, ranked (`history: true` searches past changes)"},
