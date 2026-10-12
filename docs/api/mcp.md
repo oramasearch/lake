@@ -45,6 +45,11 @@ so the divergence was a client holding a list across a deploy.
   refetches on the notice is not told again by that refetch. A client that accepts only
   `application/json` receives its plain response. During a rolling upgrade, replicas on the old
   and new builds can each send the notice; it stops once one build serves every request.
+- A workspace's endpoint, `/w/<workspace>/mcp`, also lists the tools the workspace's connections
+  re-export, so its digest also covers them (lake#684, [mcp-connections.md](mcp-connections.md#lakes-mcp-re-exports-a-connection-opt-in)):
+  exporting a connection or changing what it exports tells the session as an upgrade does. Each
+  process remembers what a session last received from `tools/list`, so the notice stops once the
+  session has listed the new tools rather than repeating on every request.
 - A client that connected to a lake older than this change has no session identifier, so lake
   cannot tell what it holds. It must reconnect once; `/developer/mcp`, `llms.txt` and the lake
   skill tell people to reconnect after upgrades.

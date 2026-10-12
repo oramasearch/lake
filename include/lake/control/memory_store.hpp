@@ -139,6 +139,9 @@ public:
     // The operator's workspace observation (phase, observed generation). Tests call this
     // directly; the production operator updates the same columns in Postgres.
     Result<void> set_workspace_status(const std::string& id, std::string phase);
+    // The namespace the operator reports a workspace runs in (`workspaces.namespace`); tests call
+    // this directly.
+    Result<void> set_workspace_namespace(const std::string& id, std::string namespace_name);
     // What the operator writes about a workspace's volumes and a target's snapshots (migration
     // 0069); tests call these directly.
     Result<void> set_workspace_storage_status(const std::string& id, std::int32_t observed_gi,
@@ -276,6 +279,13 @@ public:
                                                      const std::string& agent,
                                                      const std::string& kind,
                                                      const std::string& workspace_id) override;
+    Result<std::vector<AgentTask>>
+    list_conversation_agent_tasks(const std::string& customer_id,
+                                  const std::string& workspace_id,
+                                  const std::string& conversation_id,
+                                  const std::string& requested_by_user_id) override;
+    Result<std::size_t> delete_agent_tasks(const std::string& customer_id,
+                                           const std::vector<std::string>& ids) override;
     Result<AgentTask> claim_agent_task(const std::string& id,
                                        const std::string& agent,
                                        const std::string& credential_sha256,
@@ -304,6 +314,14 @@ public:
     Result<std::vector<BillingPlan>> billing_plans() override;
     Result<std::vector<WorkloadResources>> workload_resources() override;
     Result<void> put_workload_resources(const WorkloadResources& row) override;
+    Result<void> put_mcp_connection_dispatch(const McpConnectionDispatch& row) override;
+    Result<void> remove_mcp_connection_dispatch(const std::string& workspace_id,
+                                                const std::string& connection_id) override;
+    Result<std::vector<McpConnectionDispatch>> mcp_stream_dispatch(int limit) override;
+    Result<std::vector<McpConnectionDispatch>>
+    mcp_exported_dispatch(const std::string& workspace_id) override;
+    Result<std::vector<AppTransfer>> app_transfer(const std::string& since_hour) override;
+    Result<void> add_app_transfer(const AppTransfer& row) override;
     Result<BillingPlan> put_billing_plan(const BillingPlan& plan) override;
     Result<Invoice> create_invoice(const Invoice& invoice) override;
     Result<std::vector<Invoice>> list_invoices(const std::string& customer_id) override;
@@ -502,6 +520,9 @@ private:
     std::map<std::pair<std::string, std::string>, UsageLimit> usage_limits_;
     std::map<std::string, BillingPlan> billing_plans_;
     std::map<std::pair<std::string, std::string>, WorkloadResources> workload_resources_;
+    // By (workspace, connection).
+    std::map<std::pair<std::string, std::string>, McpConnectionDispatch> mcp_connection_dispatch_;
+    std::map<std::pair<std::string, std::string>, AppTransfer> app_transfer_; // (hour, app)
     std::vector<Invoice> invoices_;
     std::map<std::pair<std::string, std::string>, std::string> billing_provider_customers_;
     std::set<std::pair<std::string, std::string>> payment_events_;

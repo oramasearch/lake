@@ -4,6 +4,7 @@
 // capability takes `dry_run: true`, which changes nothing and answers what would go. Each test
 // runs over the in-memory store and, when LAKE_TEST_DB_URI is set, PostgreSQL.
 
+#include <algorithm>
 #include <memory>
 #include <string>
 #include <vector>
@@ -11,11 +12,13 @@
 #include <gtest/gtest.h>
 #include <nlohmann/json.hpp>
 
+#include "api/agent_task_records_api.hpp"
 #include "api/workspace_records_api.hpp"
 #include "lake/api/audit_routing.hpp"
 #include "lake/api/capabilities.hpp"
 #include "lake/api/registry.hpp"
 #include "lake/audit/audit.hpp"
+#include "lake/control/agent_task_records.hpp"
 #include "lake/control/ask_messages.hpp"
 #include "lake/control/memory_store.hpp"
 #include "lake/control/postgres_store.hpp"
@@ -475,6 +478,104 @@ TEST_P(Deletions, AnAskConversationIsRemovedFromItsWorkspaceForItsPersonOnly) {
     theirs["conversation_id"] = kept;
     EXPECT_EQ(lake.call(stranger, "delete_ask_conversation", theirs).error.code, "unauthorized");
     EXPECT_EQ(lake.workspaces.records(workspace).rows("ask_messages").size(), 1U);
+}
+
+// lake#673: the agent tasks a conversation started go with it: each task's record (its request
+// repeats the person's message) from the workspace Zetta and its dispatch row from the control
+// store, with the task its turn asked for. Other conversations' tasks, and a task whose record is
+// already gone, still answer get_agent_task.
+TEST_P(Deletions, AnAskConversationTakesTheAgentTasksItStartedWithIt) {
+    LAKE_STORE_OR_SKIP(store);
+    Lake lake(store, database_uri_);
+    const auto owner = lake.person("owner");
+    const std::string workspace = lake.workspaces.create(owner.customer_id, "home");
+    const std::string conversation = lake::control::new_uuid_v4();
+    const std::string kept = lake::control::new_uuid_v4();
+    auto context = lake.context(owner);
+    {
+        auto records = lake::api::workspace_records(context, owner.customer_id, workspace);
+        ASSERT_TRUE(records) << records.error().message;
+        lake::control::AskMessages messages(*records);
+        for (const auto& [id, text] : std::vector<std::pair<std::string, std::string>>{
+                 {conversation, "which customers churn?"}, {kept, "other"}}) {
+            ASSERT_TRUE(run(messages.append(
+                {"", id, owner.customer_id, owner.principal.user_id, "user", text, nullptr, ""})));
+        }
+    }
+    auto task = [&](const std::string& conversation_id, const std::string& kind,
+                    const std::string& agent, const std::string& parent) {
+        lake::control::AgentTask asked{.id = lake::control::new_uuid_v4(),
+                                       .customer_id = owner.customer_id,
+                                       .agent = agent,
+                                       .kind = kind,
+                                       .conversation_id = conversation_id,
+                                       .workspace_id = workspace,
+                                       .parent_task_id = parent,
+                                       .body = {{"message", "which customers churn?"}},
+                                       .scopes = {"workspace_query"},
+                                       .requested_by_user_id = owner.principal.user_id,
+                                       .requested_by_taap_id = owner.principal.taap_id};
+        EXPECT_TRUE(run(lake::api::write_agent_task_request(context, asked)));
+        const auto created = store->create_agent_task(asked);
+        EXPECT_TRUE(created) << created.error().message;
+        return asked.id;
+    };
+    const std::string turn = task(conversation, "ask", "agent-ask-orama", "");
+    const std::string delegated = task("", "api", "agent-autosuggest", turn);
+    const std::string second = task(conversation, "ask", "agent-ask-orama", "");
+    const std::string other = task(kept, "ask", "agent-ask-orama", "");
+    const std::string build = task(conversation, "build:churn", "agent-project", "");
+    ASSERT_EQ(lake.workspaces.records(workspace).rows("agent_tasks").size(), 5U);
+
+    const json in{{"customer_id", owner.customer_id},
+                  {"workspace_id", workspace},
+                  {"conversation_id", conversation}};
+    json dry = in;
+    dry["dry_run"] = true;
+    const auto plan = lake.call(owner, "delete_ask_conversation", dry);
+    ASSERT_TRUE(plan.ok) << plan.error.message;
+    std::vector<std::string> listed;
+    for (const json& item : plan.value["agent_tasks"]) {
+        listed.push_back(item["task_id"]);
+        EXPECT_EQ(item["status"], "pending");
+    }
+    std::ranges::sort(listed);
+    std::vector<std::string> expected{turn, delegated, second};
+    std::ranges::sort(expected);
+    EXPECT_EQ(listed, expected) << plan.value.dump();
+    EXPECT_EQ(lake.workspaces.records(workspace).rows("agent_tasks").size(), 5U)
+        << "a dry run removes nothing";
+    EXPECT_TRUE(store->get_agent_task(turn));
+
+    const auto deleted = lake.call(owner, "delete_ask_conversation", in);
+    ASSERT_TRUE(deleted.ok) << deleted.error.message;
+    EXPECT_EQ(deleted.value["agent_tasks"].size(), 3U);
+    EXPECT_EQ(lake.workspaces.records(workspace).rows("agent_tasks").size(), 2U)
+        << "only the other conversation's turn and the project build keep their records";
+    for (const std::string& id : expected) {
+        EXPECT_EQ(store->get_agent_task(id).error().code, "not_found") << id;
+        EXPECT_EQ(lake.call(owner, "get_agent_task",
+                            {{"customer_id", owner.customer_id},
+                             {"workspace_id", workspace},
+                             {"task_id", id}})
+                      .error.code,
+                  "not_found");
+    }
+    EXPECT_TRUE(store->get_agent_task(build)) << "a task of another kind is not the conversation's";
+    EXPECT_EQ(lake.call(owner, "delete_ask_conversation", in).error.code, "not_found");
+
+    // A task whose record is gone still answers in Agent Tasks, with nothing to show.
+    {
+        auto records = lake::api::workspace_records(context, owner.customer_id, workspace);
+        ASSERT_TRUE(records);
+        ASSERT_TRUE(run(records->remove(lake::control::AgentTaskContentCodec::collection, other)));
+    }
+    const auto followed = lake.call(owner, "get_agent_task",
+                                    {{"customer_id", owner.customer_id},
+                                     {"workspace_id", workspace},
+                                     {"task_id", other}});
+    ASSERT_TRUE(followed.ok) << followed.error.message;
+    EXPECT_EQ(followed.value["status"], "pending");
 }
 
 TEST_P(Deletions, EngineEntitiesAreDeletedThroughTheirNamedCapabilities) {

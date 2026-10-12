@@ -182,6 +182,11 @@ test("build, run and instance time read as detail that is not billed (lake#658)"
   assert.equal(billingNote({ billed: false }), "Detail, not billed");
   assert.equal(billingNote({ billed: true }), null);
   assert.equal(billingNote({}), null, "a reading from before lake#658 says nothing");
+  assert.equal(
+    billingNote({ billed: false, dimension: "engine_storage" }),
+    "Detail, billed as the engine's volume",
+    "what an engine holds is paid for by its volume (lake#663)",
+  );
   assert.equal(breakdownName({ key: "models", total: 0, points: [] }), "Models");
   assert.equal(breakdownName({ key: "indexes", total: 0, points: [] }), "Indexes");
   assert.equal(breakdownName({ key: "dictation", total: 0, points: [] }), "Dictation");

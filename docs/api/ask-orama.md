@@ -109,10 +109,24 @@ For example, the web app's `send_ask_message` (`POST /w/<workspace_id>/v1/send_a
 `delete_ask_conversation {customer_id, workspace_id, conversation_id, dry_run?}` (lake#645)
 deletes one of the caller's conversations in that workspace: every message record is removed from
 the workspace Zetta by key. Only the person who had it can, because a conversation is found by its
-id and its person; another person's id finds nothing (`not_found` at `/conversation_id`). The
-answer is `{conversation_id, messages, first_message, dry_run, deleted}`; `dry_run: true` removes
-nothing. The agent tasks the conversation started stay in Agent Tasks, the account's task history.
-The event goes to the workspace's audit chain. Lake Console offers it beside New conversation
+id and its person; another person's id finds nothing (`not_found` at `/conversation_id`).
+
+The agent tasks the conversation started go with it (lake#673): the person's turns in it (kind
+`ask` or `factory`, any agent) and every task those turns' agents asked for in turn
+(`parent_task_id`, lake#451), such as Auto-Suggest working for Ask Orama. Each task's record in
+`lake_agent_tasks` (its request, which repeats the person's message, and the agent's answer) is
+removed from the workspace Zetta, then its content-free dispatch row (`agent_tasks`, with its
+`agent_task_status`) from PostgreSQL, so `get_agent_task` answers `not_found` for it afterwards.
+The records go first, so a deletion that fails part way is finished by calling it again, and are
+removed once more after the rows, for an event an agent recorded in between. An agent still working
+on a removed task is refused its next event (`not_found`). Tasks of other kinds that name the
+conversation (a project's `build:<project>`) are not the conversation's and stay. A task whose
+record is missing still answers `get_agent_task`, with an empty request and no answer.
+
+The answer is `{conversation_id, messages, first_message, agent_tasks: [{task_id, agent, kind,
+status, created_at}], dry_run, deleted}`; `dry_run: true` removes nothing and lists the tasks that
+would go. A conversation whose messages are gone but whose tasks are left (a deletion that stopped
+part way) is still found. The event goes to the workspace's audit chain, with the counts. Lake Console offers it beside New conversation
 ([../ui/deletion.md](../ui/deletion.md)).
 
 ## Routes

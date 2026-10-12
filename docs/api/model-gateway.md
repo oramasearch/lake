@@ -62,9 +62,23 @@ gateway is a protocol route named for its protocol.
 
 `stream: true` is accepted. For a chat completion Lake adds `stream_options.include_usage: true`, so
 the provider reports the stream's usage in its last event (the Responses API always does, in
-`response.completed`). The answer is `text/event-stream` with the provider's events, unchanged. Lake
-sends the stream once the provider has finished it, not event by event; incremental delivery is
-[lake#665](https://github.com/oramasearch/lake/issues/665). None of the agents stream today.
+`response.completed`). The answer is `text/event-stream` with the provider's events, unchanged, and
+Lake relays them as they arrive (lake#665): the outbound client hands the provider's body on piece by
+piece, and the route writes each piece to the caller in chunked transfer, so an agent that shows
+tokens as they come gets them as the provider sends them, not all at once at the end.
+
+- Lake reads the usage from the events as they pass and counts it from the event that carries it,
+  once the stream ends. A stream that ends without one is counted as zero and audited
+  `usage_reported: false`, as an answer without `usage` is.
+- A refusal before the first event (Lake's or the provider's) is answered as any other, with its
+  status and [OpenAI's error shape](#errors). Once the first event is sent the status is 200, so a
+  failure after it (the provider drops the connection, the deadline passes) ends the stream early;
+  the call is audited with its failure and counts nothing.
+- A caller that stops reading stops the provider: its stream ends when it takes no bytes for the
+  server's stream idle timeout, or falls more than 8 MiB behind the provider.
+
+`POST /v1/model_completion` and the MCP tool answer the whole stream at once, as `events`, after the
+provider has finished it. None of the agents stream today.
 
 ### Errors
 
@@ -104,7 +118,7 @@ The routes are a rendering of one registry capability, as `/workspaces/<customer
 | `recorded` | boolean | the tokens were added to the workspace's usage |
 | `streamed` | boolean | the request streamed |
 | `response` | object | the provider's answer, when not streamed |
-| `events` | string | the provider's whole event stream, when streamed |
+| `events` | string | the provider's whole event stream, when streamed (REST and MCP; the `/openai/v1/*` route relays the stream itself, [Streaming](#streaming)) |
 
 It requires no grant (`requires_auth` false, like `record_model_usage`): the handler authorizes it by
 the credential's kind and finds the run from it.

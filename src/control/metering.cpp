@@ -104,6 +104,27 @@ std::string job_key(const MeteredJob& job) {
     return job.kind + ":" + job.object_id;
 }
 
+std::optional<MeteredAppHour> app_hour_of(const StoredRecord& record,
+                                          const std::string& customer_id) {
+    if (record.schema_version != 1 || !record.body.is_object() ||
+        record.body.value("customer_id", std::string()) != customer_id) {
+        return std::nullopt;
+    }
+    MeteredAppHour hour{customer_id,
+                        record.body.value("app_id", std::string()),
+                        record.body.value("hour", std::string()),
+                        unsigned_field(record.body, "in_bytes"),
+                        unsigned_field(record.body, "out_bytes")};
+    if (hour.app_id.empty() || !metering_hour_us(hour.hour)) {
+        return std::nullopt;
+    }
+    return hour;
+}
+
+std::string app_hour_key(const MeteredAppHour& hour) {
+    return hour.app_id + ":" + hour.hour;
+}
+
 } // namespace
 
 std::optional<std::int64_t> metering_hour_us(std::string_view hour) {
@@ -278,6 +299,56 @@ list_metered_jobs(WorkspaceRecords& records, std::string customer_id, std::int64
         }
     }
     co_return ZettaControlResult<Jobs>(std::move(jobs));
+}
+
+liquid::runtime::task<ZettaControlResult<bool>> record_metered_app_hour(WorkspaceRecords& records,
+                                                                        MeteredAppHour hour) {
+    const auto at_us = metering_hour_us(hour.hour);
+    if (hour.customer_id.empty() || hour.app_id.empty() || !at_us) {
+        co_return failure<bool>("invalid_input", "an app hour record needs its account, app and hour");
+    }
+    const auto collection = MeteredAppTransferCodec::collection;
+    const std::string key = records.index_of(collection, app_hour_key(hour));
+    if (key.empty()) {
+        co_return failure<bool>("store_error", "could not index the app hour");
+    }
+    auto written = settled(co_await records.put(collection,
+                                                key,
+                                                lookup_of(hour.customer_id),
+                                                {{"customer_id", hour.customer_id},
+                                                 {"app_id", hour.app_id},
+                                                 {"hour", hour.hour},
+                                                 {"in_bytes", hour.in_bytes},
+                                                 {"out_bytes", hour.out_bytes}},
+                                                RecordCondition{.if_absent = true},
+                                                1,
+                                                *at_us));
+    if (!written) {
+        if (written.error().code == "conflict") {
+            co_return ZettaControlResult<bool>(false); // charged before
+        }
+        co_return ZettaControlResult<bool>(std::unexpected(written.error()));
+    }
+    co_return ZettaControlResult<bool>(true);
+}
+
+liquid::runtime::task<ZettaControlResult<std::vector<MeteredAppHour>>>
+list_metered_app_hours(WorkspaceRecords& records, std::string customer_id, std::int64_t since_us) {
+    using Hours = std::vector<MeteredAppHour>;
+    const auto collection = MeteredAppTransferCodec::collection;
+    auto stored = settled(co_await records.list(collection, lookup_of(customer_id), 0, since_us));
+    if (!stored) {
+        co_return ZettaControlResult<Hours>(std::unexpected(stored.error()));
+    }
+    Hours hours;
+    for (const StoredRecord& record : *stored) {
+        auto hour = app_hour_of(record, customer_id);
+        // The key binds the hour: a record moved under another app's or hour's key does not count.
+        if (hour && record.id == records.index_of(collection, app_hour_key(*hour))) {
+            hours.push_back(std::move(*hour));
+        }
+    }
+    co_return ZettaControlResult<Hours>(std::move(hours));
 }
 
 liquid::runtime::task<ZettaControlResult<std::vector<MeteredTransfer>>>

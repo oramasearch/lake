@@ -2,6 +2,7 @@
 
 #include "lake/api/mcp_connections.hpp"
 
+#include <algorithm>
 #include <array>
 #include <stdexcept>
 
@@ -96,6 +97,56 @@ bool mcp_session_tool_list_changed(std::string_view session_id,
     return !(session_id.size() > tool_list_digest.size() &&
              session_id.starts_with(tool_list_digest) &&
              session_id[tool_list_digest.size()] == '.');
+}
+
+std::string mcp_workspace_tool_list_digest(std::string_view lake_digest,
+                                           std::vector<McpExportedDigest> exported) {
+    std::erase_if(exported, [](const McpExportedDigest& entry) { return entry.digest.empty(); });
+    if (exported.empty()) {
+        return std::string(lake_digest);
+    }
+    std::ranges::sort(exported, {}, &McpExportedDigest::connection_id);
+    std::string canonical(lake_digest);
+    for (const McpExportedDigest& entry : exported) {
+        canonical += "\n" + entry.connection_id + " " + entry.digest;
+    }
+    std::array<unsigned char, EVP_MAX_MD_SIZE> digest{};
+    unsigned int size = 0;
+    if (EVP_Digest(canonical.data(),
+                   canonical.size(),
+                   digest.data(),
+                   &size,
+                   EVP_sha256(),
+                   nullptr) != 1) {
+        throw std::runtime_error("could not hash the MCP tool list");
+    }
+    return hex(digest.data(), size);
+}
+
+void McpSessionLists::listed(const std::string& session_id, const std::string& digest) {
+    if (session_id.empty()) {
+        return;
+    }
+    std::lock_guard lock(mutex_);
+    const auto [entry, inserted] = listed_.insert_or_assign(session_id, digest);
+    if (inserted) {
+        order_.push_back(session_id);
+    }
+    while (order_.size() > capacity_) {
+        listed_.erase(order_.front());
+        order_.pop_front();
+    }
+}
+
+bool McpSessionLists::changed(const std::string& session_id, std::string_view digest) const {
+    {
+        std::lock_guard lock(mutex_);
+        const auto found = listed_.find(session_id);
+        if (found != listed_.end()) {
+            return found->second != digest;
+        }
+    }
+    return mcp_session_tool_list_changed(session_id, digest);
 }
 
 nlohmann::json mcp_tool_list_changed_notification() {

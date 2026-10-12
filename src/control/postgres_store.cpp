@@ -3349,7 +3349,10 @@ public:
         "to_char(s.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), "
         "to_char(s.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), "
         "COALESCE(st.phase, ''), COALESCE(st.message, ''), COALESCE(st.endpoint, ''), "
-        "COALESCE(st.observed_generation, 0), COALESCE(s.workspace_id::text, '')";
+        "COALESCE(st.observed_generation, 0), COALESCE(s.workspace_id::text, ''), "
+        "COALESCE(s.spec->>'bucket', ''), COALESCE(s.spec->>'endpoint', ''), "
+        "COALESCE(s.spec->>'prefix', ''), COALESCE(s.spec->'credential'->>'mount_id', ''), "
+        "COALESCE(s.spec->'credential'->>'name', ''), COALESCE(s.spec->>'repository_id', '')";
 
     static ManagedService service_from(const pqxx::row& row) {
         ManagedService service;
@@ -4721,13 +4724,17 @@ public:
 
     static constexpr const char* store_columns =
         "s.id::text, s.customer_id::text, s.type, s.provider, s.name, s.slug, "
-        "COALESCE((s.spec->>'size_gi')::int, 10), COALESCE(s.spec->>'region', ''), "
+        "COALESCE((s.spec->>'size_gi')::int, CASE WHEN s.type = 'volume' THEN 10 ELSE 0 END), "
+        "COALESCE(s.spec->>'region', ''), "
         "COALESCE((s.spec->>'public')::boolean, false), "
         "s.desired, s.generation, s.created_by_taap_id, "
         "to_char(s.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), "
         "to_char(s.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), "
         "COALESCE(st.phase, ''), COALESCE(st.message, ''), COALESCE(st.endpoint, ''), "
         "COALESCE(st.observed_generation, 0), COALESCE(s.workspace_id::text, ''), "
+        "COALESCE(s.spec->>'bucket', ''), COALESCE(s.spec->>'endpoint', ''), "
+        "COALESCE(s.spec->>'prefix', ''), COALESCE(s.spec->'credential'->>'mount_id', ''), "
+        "COALESCE(s.spec->'credential'->>'name', ''), COALESCE(s.spec->>'repository_id', ''), "
         "st.used_bytes, COALESCE(to_char(st.used_bytes_at AT TIME ZONE 'UTC', "
         "'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), '')";
 
@@ -4752,10 +4759,16 @@ public:
         store.endpoint = row[16].as<std::string>();
         store.observed_generation = row[17].as<std::int64_t>();
         store.workspace_id = row[18].as<std::string>();
-        if (!row[19].is_null()) {
-            store.used_bytes = row[19].as<std::int64_t>();
+        store.bucket = row[19].as<std::string>();
+        store.endpoint_url = row[20].as<std::string>();
+        store.prefix = row[21].as<std::string>();
+        store.credential_mount_id = row[22].as<std::string>();
+        store.credential_name = row[23].as<std::string>();
+        store.repository_id = row[24].as<std::string>();
+        if (!row[25].is_null()) {
+            store.used_bytes = row[25].as<std::int64_t>();
         }
-        store.used_bytes_at = row[20].as<std::string>();
+        store.used_bytes_at = row[26].as<std::string>();
         return store;
     }
 
@@ -4822,8 +4835,7 @@ public:
                     StoreError{"conflict", "a store named " + in.name + " already exists"});
             }
             const std::string id = new_uuid_v4();
-            const nlohmann::json spec{
-                {"size_gi", in.size_gi}, {"region", in.region}, {"public", in.is_public}};
+            const nlohmann::json spec = store_spec(in);
             // The routing trigger refuses a store without a live workspace of this space.
             tx.exec_params("INSERT INTO stores (id, customer_id, type, provider, name, slug, spec, "
                            "created_by_taap_id, workspace_id) VALUES ($1::uuid, $2::uuid, $3, $4, "
@@ -5662,6 +5674,62 @@ public:
         });
     }
 
+    Result<std::vector<AgentTask>>
+    list_conversation_agent_tasks(const std::string& customer_id,
+                                  const std::string& workspace_id,
+                                  const std::string& conversation_id,
+                                  const std::string& requested_by_user_id) override {
+        if (!agent_task_uuid(conversation_id) || !agent_task_uuid(requested_by_user_id) ||
+            !agent_task_uuid(workspace_id)) {
+            return std::vector<AgentTask>{};
+        }
+        return with_tx<std::vector<AgentTask>>([&](pqxx::work& tx) -> Result<std::vector<AgentTask>> {
+            // The conversation's turns, then every task they asked for at any depth (lake#451).
+            const pqxx::result rows = tx.exec_params(
+                std::string("WITH RECURSIVE started(id) AS ("
+                            "SELECT id FROM agent_tasks WHERE customer_id = $1::uuid "
+                            "AND workspace_id = $2::uuid AND conversation_id = $3::uuid "
+                            "AND requested_by_user_id = $4::uuid AND kind IN ('ask', 'factory') "
+                            "UNION SELECT c.id FROM agent_tasks c JOIN started s "
+                            "ON c.parent_task_id = s.id WHERE c.customer_id = $1::uuid "
+                            "AND c.workspace_id = $2::uuid) SELECT ") +
+                    task_columns +
+                    " FROM agent_tasks t LEFT JOIN agent_task_status ts ON ts.task_id = t.id "
+                    "WHERE t.id IN (SELECT id FROM started) ORDER BY t.created_at, t.id",
+                customer_id,
+                workspace_id,
+                conversation_id,
+                requested_by_user_id);
+            std::vector<AgentTask> tasks;
+            tasks.reserve(rows.size());
+            for (const pqxx::row& row : rows) {
+                tasks.push_back(task_from(row));
+            }
+            return tasks;
+        });
+    }
+
+    Result<std::size_t> delete_agent_tasks(const std::string& customer_id,
+                                           const std::vector<std::string>& ids) override {
+        std::vector<std::string> valid;
+        for (const std::string& id : ids) {
+            if (agent_task_uuid(id)) {
+                valid.push_back(id);
+            }
+        }
+        if (valid.empty() || !agent_task_uuid(customer_id)) {
+            return std::size_t{0};
+        }
+        return with_tx<std::size_t>([&](pqxx::work& tx) -> Result<std::size_t> {
+            const pqxx::result rows = tx.exec_params(
+                "DELETE FROM agent_tasks WHERE customer_id = $1::uuid AND id IN "
+                "(SELECT jsonb_array_elements_text($2::jsonb)::uuid) RETURNING id",
+                customer_id,
+                nlohmann::json(valid).dump());
+            return static_cast<std::size_t>(rows.size());
+        });
+    }
+
     Result<AgentTask> claim_agent_task(const std::string& id,
                                        const std::string& agent,
                                        const std::string& credential_sha256,
@@ -6087,6 +6155,144 @@ public:
                 row.gpus,
                 row.gpu_class,
                 row.vram_bytes);
+            return true;
+        });
+        if (!written) {
+            return std::unexpected(written.error());
+        }
+        return {};
+    }
+
+    Result<void> put_mcp_connection_dispatch(const McpConnectionDispatch& row) override {
+        if (!agent_task_uuid(row.customer_id) || !agent_task_uuid(row.workspace_id) ||
+            row.connection_id.empty()) {
+            return std::unexpected(
+                StoreError{"invalid_input", "not an MCP connection dispatch row"});
+        }
+        auto written = with_tx<bool>([&](pqxx::work& tx) -> Result<bool> {
+            if (!row.streams && row.exported_digest.empty()) {
+                tx.exec_params("DELETE FROM mcp_connection_dispatch WHERE workspace_id = $1::uuid "
+                               "AND connection_id = $2",
+                               row.workspace_id,
+                               row.connection_id);
+                return true;
+            }
+            const pqxx::result kept = tx.exec_params(
+                "INSERT INTO mcp_connection_dispatch (customer_id, workspace_id, connection_id, "
+                "streams, exported_digest) SELECT w.customer_id, w.id, $3, $4, $5 FROM workspaces "
+                "w WHERE w.id = $2::uuid AND w.customer_id = $1::uuid ON CONFLICT (workspace_id, "
+                "connection_id) DO UPDATE SET streams = EXCLUDED.streams, exported_digest = "
+                "EXCLUDED.exported_digest, updated_at = now() RETURNING 1",
+                row.customer_id,
+                row.workspace_id,
+                row.connection_id,
+                row.streams,
+                row.exported_digest);
+            if (kept.empty()) {
+                return std::unexpected(StoreError{"not_found", "workspace not found"});
+            }
+            return true;
+        });
+        if (!written) {
+            return std::unexpected(written.error());
+        }
+        return {};
+    }
+
+    Result<void> remove_mcp_connection_dispatch(const std::string& workspace_id,
+                                                const std::string& connection_id) override {
+        if (!agent_task_uuid(workspace_id)) {
+            return {};
+        }
+        auto removed = with_tx<bool>([&](pqxx::work& tx) -> Result<bool> {
+            tx.exec_params("DELETE FROM mcp_connection_dispatch WHERE workspace_id = $1::uuid AND "
+                           "connection_id = $2",
+                           workspace_id,
+                           connection_id);
+            return true;
+        });
+        if (!removed) {
+            return std::unexpected(removed.error());
+        }
+        return {};
+    }
+
+    static std::vector<McpConnectionDispatch> dispatch_rows(const pqxx::result& rows) {
+        std::vector<McpConnectionDispatch> out;
+        for (const auto& row : rows) {
+            out.push_back({row[0].as<std::string>(),
+                           row[1].as<std::string>(),
+                           row[2].as<std::string>(),
+                           row[3].as<bool>(),
+                           row[4].as<std::string>(),
+                           row[5].as<std::string>()});
+        }
+        return out;
+    }
+
+    Result<std::vector<McpConnectionDispatch>> mcp_stream_dispatch(int limit) override {
+        return with_tx<std::vector<McpConnectionDispatch>>(
+            [&](pqxx::work& tx) -> Result<std::vector<McpConnectionDispatch>> {
+                return dispatch_rows(tx.exec_params(
+                    "SELECT customer_id::text, workspace_id::text, connection_id, streams, "
+                    "exported_digest, " +
+                        utc_column("updated_at") +
+                        " FROM mcp_connection_dispatch WHERE streams ORDER BY workspace_id, "
+                        "connection_id LIMIT $1",
+                    std::max(limit, 0)));
+            });
+    }
+
+    Result<std::vector<McpConnectionDispatch>>
+    mcp_exported_dispatch(const std::string& workspace_id) override {
+        if (!agent_task_uuid(workspace_id)) {
+            return std::vector<McpConnectionDispatch>{};
+        }
+        return with_tx<std::vector<McpConnectionDispatch>>(
+            [&](pqxx::work& tx) -> Result<std::vector<McpConnectionDispatch>> {
+                return dispatch_rows(tx.exec_params(
+                    "SELECT customer_id::text, workspace_id::text, connection_id, streams, "
+                    "exported_digest, " +
+                        utc_column("updated_at") +
+                        " FROM mcp_connection_dispatch WHERE workspace_id = $1::uuid AND "
+                        "exported_digest <> '' ORDER BY connection_id",
+                    workspace_id));
+            });
+    }
+
+    Result<std::vector<AppTransfer>> app_transfer(const std::string& since_hour) override {
+        return with_tx<std::vector<AppTransfer>>(
+            [&](pqxx::work& tx) -> Result<std::vector<AppTransfer>> {
+                const pqxx::result rows = tx.exec_params(
+                    "SELECT app_id::text, workspace_id::text, " + utc_column("hour") +
+                        ", in_bytes, out_bytes, " + utc_column("observed_at") +
+                        " FROM app_transfer WHERE hour >= $1::timestamptz ORDER BY hour, app_id",
+                    since_hour);
+                std::vector<AppTransfer> out;
+                for (const auto& row : rows) {
+                    out.push_back({row[0].as<std::string>(),
+                                   row[1].as<std::string>(),
+                                   row[2].as<std::string>(),
+                                   row[3].as<std::uint64_t>(),
+                                   row[4].as<std::uint64_t>(),
+                                   row[5].as<std::string>()});
+                }
+                return out;
+            });
+    }
+
+    Result<void> add_app_transfer(const AppTransfer& row) override {
+        auto written = with_tx<bool>([&](pqxx::work& tx) -> Result<bool> {
+            tx.exec_params(
+                "INSERT INTO app_transfer (app_id, workspace_id, hour, in_bytes, out_bytes) "
+                "VALUES ($1::uuid, $2::uuid, $3::timestamptz, $4, $5) ON CONFLICT (app_id, hour) "
+                "DO UPDATE SET in_bytes = app_transfer.in_bytes + EXCLUDED.in_bytes, out_bytes = "
+                "app_transfer.out_bytes + EXCLUDED.out_bytes, observed_at = now()",
+                row.app_id,
+                row.workspace_id,
+                row.hour,
+                row.in_bytes,
+                row.out_bytes);
             return true;
         });
         if (!written) {

@@ -386,6 +386,32 @@ struct WorkloadResources {
     std::uint64_t vram_bytes = 0;
     std::string observed_at;
 };
+// Where a workspace's MCP connections need Lake outside a request (migration 0079, lake#684,
+// lake#685, docs/api/mcp-connections.md): a connection whose streams the stream worker drives,
+// and the digest of the tools it re-exports through Lake's MCP. Ids and a digest only: the
+// connection itself is a record in its workspace Zetta. A row with neither is not kept.
+struct McpConnectionDispatch {
+    std::string customer_id;
+    std::string workspace_id;
+    std::string connection_id;
+    bool streams = false;
+    // The SHA-256 (hex) of the tools/list entries the connection re-exports; empty when it
+    // re-exports none.
+    std::string exported_digest;
+    std::string updated_at;
+};
+// An app's traffic through the ingress in one UTC hour (migration 0081, lake#661,
+// docs/api/metering.md#app-traffic), written only by the Orama operator from the ingress
+// controller's byte counters: `in_bytes` clients sent to the app, `out_bytes` it sent back. The
+// operator adds each poll's increase to its hour's row; lake charges a closed hour once.
+struct AppTransfer {
+    std::string app_id;
+    std::string workspace_id;
+    std::string hour; // "YYYY-MM-DDTHH:00:00Z"
+    std::uint64_t in_bytes = 0;
+    std::uint64_t out_bytes = 0;
+    std::string observed_at;
+};
 struct Workspace {
     std::string id, customer_id, name, environment;
     std::string desired = "running";
@@ -682,6 +708,13 @@ struct ManagedStore {
     // The workspace the store belongs to (migration 0044, lake#465); the operator places it in
     // that workspace's namespace, and lake lists a workspace's own stores only.
     std::string workspace_id;
+    // Where the store's contents are (lake#664, in `stores.spec`): for the customer's own bucket
+    // (r2, s3, b2, gcs, azure) its name, endpoint and the folder in it the store covers, and the
+    // workspace secret that opens it (decision 58: the workspace's credential, never Orama's);
+    // for a `lake` store the liquid repository that keeps it. Empty otherwise.
+    std::string bucket, endpoint_url, prefix;
+    std::string credential_mount_id, credential_name;
+    std::string repository_id;
     // The bytes in use and when the operator measured them (migration 0080, lake#666): empty until
     // it has mounted and measured the store.
     std::optional<std::int64_t> used_bytes;
@@ -911,11 +944,37 @@ struct AskMessage {
 };
 struct NewManagedStore {
     std::string customer_id, type, provider, name, created_by_taap_id;
-    int size_gi = 10;
+    int size_gi = 10; // a volume's; 0 for every other type, which has no size to ask for
     std::string region;
     bool is_public = false;
     std::string workspace_id; // required by the routing trigger (migration 0044)
+    // As ManagedStore's (lake#664).
+    std::string bucket, endpoint_url, prefix;
+    std::string credential_mount_id, credential_name;
+    std::string repository_id;
 };
+// `stores.spec` for a new store (docs/control-plane/storage.md): a volume's {size_gi, region,
+// public}; a bucket's {public, bucket, endpoint, region, prefix, credential: {mount_id, name}}; a
+// `lake` store's {public, repository_id}; otherwise {public}. Content-free: a secret is named,
+// never copied.
+inline nlohmann::json store_spec(const NewManagedStore& in) {
+    nlohmann::json spec{{"public", in.is_public}};
+    if (in.type == "volume") {
+        spec["size_gi"] = in.size_gi;
+        spec["region"] = in.region;
+    }
+    if (!in.bucket.empty()) {
+        spec["bucket"] = in.bucket;
+        spec["endpoint"] = in.endpoint_url;
+        spec["region"] = in.region;
+        spec["prefix"] = in.prefix;
+        spec["credential"] = {{"mount_id", in.credential_mount_id}, {"name", in.credential_name}};
+    }
+    if (!in.repository_id.empty()) {
+        spec["repository_id"] = in.repository_id;
+    }
+    return spec;
+}
 // One valid type × provider pair and whether this lake offers it. Order: what is available first,
 // then by type. The schema's store_type_check and store_provider_check list the same keys.
 struct StoreProvider {
@@ -923,28 +982,35 @@ struct StoreProvider {
     bool available = false;
     std::string_view unavailable_reason; // empty when available
 };
-inline constexpr std::string_view store_phase_two_reason =
-    "needs an Orama account or your own credentials (lake#196 phase 2)";
 inline constexpr StoreProvider store_providers[] = {
     {"volume", "cluster", "Volume — cluster disk", true, ""},
-    {"object",
-     "r2",
-     "Bucket — Cloudflare R2",
-     false,
-     "needs R2 enabled on Orama's Cloudflare account and a token that can issue bucket keys"},
-    {"object", "s3", "Bucket — AWS S3", false, store_phase_two_reason},
-    {"object", "b2", "Bucket — Backblaze B2", false, store_phase_two_reason},
-    {"object", "azure", "Bucket — Azure Blob", false, store_phase_two_reason},
-    {"object", "gcs", "Bucket — Google Cloud Storage", false, store_phase_two_reason},
-    {"object", "lake", "Bucket — liquid repository", false, "phase 3"},
-    {"object", "zetta", "Bucket — Zetta large objects", false, "phase 3"},
-    {"filesystem", "lake", "Filesystem — Drive", false, "phase 3"},
-    {"filesystem", "zetta", "Filesystem — Zetta", false, "phase 3"},
+    // The customer's own bucket, opened with a secret in the workspace's secret store (lake#664).
+    {"object", "r2", "Bucket — your Cloudflare R2 bucket", true, ""},
+    {"object", "s3", "Bucket — your AWS S3 bucket", true, ""},
+    {"object", "b2", "Bucket — your Backblaze B2 bucket", true, ""},
+    {"object", "gcs", "Bucket — your Google Cloud Storage bucket", true, ""},
+    {"object", "azure", "Bucket — your Azure Blob container", true, ""},
+    // Kept by Lake in the workspace (lake#664).
+    {"object", "zetta", "Bucket — kept by Lake in the workspace", true, ""},
+    {"object", "lake", "Bucket — a liquid repository", true, ""},
+    {"filesystem", "zetta", "Filesystem — kept by Lake in the workspace", true, ""},
+    {"filesystem", "lake", "Filesystem — Drive (a liquid repository)", true, ""},
     {"network_filesystem", "nfs", "Network filesystem — NFS in the cluster", false, "phase 4"},
     {"network_filesystem", "azure", "Network filesystem — Azure Files", false, "phase 4"},
     {"network_filesystem", "s3", "Network filesystem — EFS", false, "phase 4"},
     {"network_filesystem", "gcs", "Network filesystem — Filestore", false, "phase 4"},
 };
+// The customer's own bucket at a cloud provider, reached over the provider's protocol with the
+// workspace's credential (lake#664).
+inline bool store_external_bucket(std::string_view type, std::string_view provider) {
+    return type == "object" && (provider == "r2" || provider == "s3" || provider == "b2" ||
+                                provider == "gcs" || provider == "azure");
+}
+// A store whose contents Lake keeps itself in the workspace (lake#664): the workspace Zetta or a
+// liquid repository.
+inline bool store_kept_by_lake(std::string_view type, std::string_view provider) {
+    return (type == "object" || type == "filesystem") && (provider == "zetta" || provider == "lake");
+}
 inline const StoreProvider* find_store_provider(std::string_view type, std::string_view provider) {
     for (const StoreProvider& entry : store_providers) {
         if (entry.type == type && entry.provider == provider) {
@@ -1567,6 +1633,18 @@ public:
                                                              const std::string& agent,
                                                              const std::string& kind,
                                                              const std::string& workspace_id) = 0;
+    // The tasks one person's conversation started in a workspace (kind ask or factory, any
+    // agent), and every task those asked for in turn (parent_task_id, lake#451), oldest first:
+    // what deleting the conversation removes (lake#673). Empty for an id that is not a UUID.
+    virtual Result<std::vector<AgentTask>>
+    list_conversation_agent_tasks(const std::string& customer_id,
+                                  const std::string& workspace_id,
+                                  const std::string& conversation_id,
+                                  const std::string& requested_by_user_id) = 0;
+    // Removes these tasks' dispatch rows (their status goes with them) when they belong to
+    // `customer_id`; answers how many went. Ids of another space, or already gone, are skipped.
+    virtual Result<std::size_t> delete_agent_tasks(const std::string& customer_id,
+                                                   const std::vector<std::string>& ids) = 0;
     // The task's agent claims it: Running, with the SHA-256 of the credential lake just handed
     // it and where on agent-events its events will start. Exactly one claim per attempt succeeds;
     // another is a conflict, as is a claim by a different agent.
@@ -1612,6 +1690,22 @@ public:
     // demos (it replaces the row of the kind and id).
     virtual Result<std::vector<WorkloadResources>> workload_resources() = 0;
     virtual Result<void> put_workload_resources(const WorkloadResources& row) = 0;
+    // MCP connection dispatch (migration 0079, lake#684, lake#685). put replaces the connection's
+    // row, or removes it when it neither streams nor re-exports; remove removes it.
+    // mcp_stream_dispatch lists the rows that stream, by workspace, at most `limit`;
+    // mcp_exported_dispatch the rows of one workspace that re-export tools.
+    virtual Result<void> put_mcp_connection_dispatch(const McpConnectionDispatch& row) = 0;
+    virtual Result<void> remove_mcp_connection_dispatch(const std::string& workspace_id,
+                                                        const std::string& connection_id) = 0;
+    virtual Result<std::vector<McpConnectionDispatch>> mcp_stream_dispatch(int limit) = 0;
+    virtual Result<std::vector<McpConnectionDispatch>>
+    mcp_exported_dispatch(const std::string& workspace_id) = 0;
+    // Each app's traffic through the ingress by hour (migration 0081, lake#661), the rows of
+    // `since_hour` and later, oldest hour first. The Orama operator writes them;
+    // add_app_transfer is the same write (it adds to the row of the app and hour), for tests and
+    // local demos.
+    virtual Result<std::vector<AppTransfer>> app_transfer(const std::string& since_hour) = 0;
+    virtual Result<void> add_app_transfer(const AppTransfer& row) = 0;
     virtual Result<BillingPlan> put_billing_plan(const BillingPlan& plan) = 0;
     virtual Result<Invoice> create_invoice(const Invoice& invoice) = 0;
     virtual Result<std::vector<Invoice>> list_invoices(const std::string& customer_id) = 0;

@@ -964,6 +964,22 @@ Content-free desired state: ids, a path and a flag. Nothing is dropped; idempote
 the workloads' pods and reports bytes in use in its own pull request before a lake with this change
 is rolled.
 
+## App transfer migration
+
+`0081_app_transfer` (lake#661) adds `app_transfer`, written only by the Orama operator: one row per
+app and UTC hour (`app_id`, `workspace_id`, `hour`, which must start on the hour, `in_bytes`,
+`out_bytes`, `observed_at`), the bytes the app received and sent through the ingress controller in
+that hour. The operator reads the controller's per-Ingress byte counters and adds each poll's
+increase to the row, and deletes rows older than eight days. Numbers only: no host, path or content.
+There is no foreign key to `apps`, so an hour stays chargeable after its app is deleted. Lake charges
+each closed hour once in the app's workspace Zetta as `transfer` and records that it did there
+(`lake_metering_app_transfer_records`, [`../api/metering.md#app-traffic`](../api/metering.md#app-traffic));
+nothing about usage is kept here.
+
+Nothing is dropped; idempotent; guard `app_transfer_guard`. Lake reads the table on every usage
+sample, so the operator vendors the schema and selects that guard before a lake with this change is
+rolled; on an older schema lake's sample names app traffic as unread and records the rest.
+
 ## Repository workspaces migration
 
 `0051_repository_workspaces` adds `repositories.workspace_id` (references `workspaces`, index
@@ -1124,3 +1140,19 @@ that still holds content in `workspace_assignments` under `object_table = 'agent
 does not hold the copy back). The operator reads neither table. Nothing is dropped. Idempotent;
 guard `agent_task_workspaces_guard`. Mechanism and cutover:
 [`../architecture/workspace-records.md`](../architecture/workspace-records.md#cutover-runbook-agent-tasks-dev-cluster).
+
+## MCP connection dispatch migration
+
+`0079_mcp_connection_dispatch` (lake#684, lake#685) records where a workspace's MCP connections need
+Lake outside a request ([`../api/mcp-connections.md`](../api/mcp-connections.md)):
+
+- `mcp_connection_dispatch` (lake writes it with every connection it writes): `customer_id`,
+  `workspace_id` (both cascading on delete), `connection_id` (the connection record's id in the
+  workspace Zetta), `streams` (it has a notifications topic, an agent with an input topic, or results
+  still to publish), `exported_digest` (the hex SHA-256 of the `tools/list` entries it re-exports
+  through Lake's MCP, or empty), `updated_at`. A connection with neither has no row. The partial index
+  `mcp_connection_dispatch_streams_idx` serves the stream worker's read.
+
+The connection itself, its tools and its settings stay in the workspace Zetta. Nothing is dropped;
+idempotent; guard `mcp_connection_dispatch_guard`. The operator reads nothing of it; it vendors the
+schema and selects that guard before a lake with this change is rolled.

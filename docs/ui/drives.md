@@ -15,7 +15,7 @@ filesystems and volumes, moved from Datasets (lake#656, [below](#storage)). The 
 | `/drives` | `DrivesPage.tsx`, `NewDrive.tsx` | tabs **Drives** and **Storage** (`?tab=storage`). Drives: four figures (drives, and three kinds), a filter and kind chips, a card per drive, **Recent Files**; **New drive** opens a drawer (a storage drive picks one of the workspace's buckets or filesystems, volumes listed disabled) | `list_drives`, `recent_drive_entries`, `create_drive`, `list_repositories`, `list_stores` |
 | `/drives?tab=storage` | `StorageTab.tsx`, `stores.ts` | the workspace's storage ([below](#storage)) | `list_stores`, `list_store_providers`, `create_store`, `delete_store`, `store_connection`, `usage_over_time` (`volumes`), `list_drives` |
 | `/storage` | `StorageRedirect.tsx` | Go to's **Storage**: sends the person to `/drives?tab=storage` | — |
-| `/drives/drive?id=&folder=[&focus=]` | `DrivePage.tsx`, `FolderPicker.tsx`, `ShortcutDialog.tsx`, `search.ts`, `MatchLink.tsx` | one drive as a file manager; `folder` is the folder's key (a path in a repository drive, an entry id otherwise); `focus` (a shortcut to an item) opens the folder that holds it and selects it | `get_drive`, then the drive's storage (below), `get_drive_entry`, `search_drives`, `rename_drive`, `delete_drive` |
+| `/drives/drive?id=&folder=[&focus=]` | `DrivePage.tsx`, `FolderPicker.tsx`, `picker.ts`, `ShortcutDialog.tsx`, `search.ts`, `MatchLink.tsx`, `useSettled.ts` | one drive as a file manager; `folder` is the folder's key (a path in a repository drive, an entry id otherwise); `focus` (a shortcut to an item) opens the folder that holds it and selects it | `get_drive`, then the drive's storage (below), `get_drive_entry`, `search_drives`, `rename_drive`, `delete_drive` |
 
 The rail's **Drives** item sits under Data after Repositories and owns `/drives/drive` and
 `/storage`. Go to (⌘K) and the top bar's search list **Storage** as its own entry.
@@ -51,7 +51,7 @@ A workspace-files upload sends each file at its relative path and lake makes the
 - **Moves.** Dragging carries the selected keys under `application/x-lake-drive-items`, so a drag
   from the desktop is never a move. A folder row and every crumb of the path take drops. **Move**
   opens `FolderPicker`, which browses the drive's folders (the folders being moved cannot be
-  opened or chosen).
+  opened or chosen) and searches the drive's folders by name ([the picker](#the-picker)).
 - **Shortcuts.** `ShortcutDialog` chooses repositories (this workspace's), transcripts and drive
   items (a drive, then an item through `FolderPicker` in item mode) from lists, and takes a
   dataset, project, agent or model by name and a web address typed. `targets.ts` checks the target
@@ -87,8 +87,9 @@ only now. It shows whether or not the workspace is ready (storage does not need 
 
 - **Figures:** Storage (how many, or how many are changing), Opens as a drive (Ready buckets and
   filesystems), Volumes (shown, not browsed) and Size (the GiB asked for, in all).
-- **The table:** each store's name with its type and provider in words (*Volume · cluster disk*),
-  its size with the bytes in use under it (`usedWords`: *2.5 GiB used (25%)*, *measured once
+- **The table:** each store's name with its type and provider in words (*Volume · cluster disk*)
+  and, for your own bucket, its name and folder, its size (a volume's GiB; *—* for anything else)
+  with the bytes in use under it (`usedWords`: *2.5 GiB used (25%)*, *measured once
   mounted* for a volume no pod mounts, *not measured yet*), **Mounted By** (lake#666: each service
   or app that mounts it, linking to the app's page or to Ship → Services searched for the service
   with `?q=`, with the path and *read-only*; *Not mounted* otherwise), **This Month** (its `volumes` time from `usage_over_time` by object, linking to
@@ -96,8 +97,18 @@ only now. It shows whether or not the workspace is ready (storage does not need 
   the operator's message, the endpoint, and the actions: **Open as a drive** (a Ready bucket or
   filesystem, opening New drive with it chosen) or **Open drive** when a drive already opens it;
   a *Shown, not browsed* chip on a volume; **Show connection** once Ready; **Delete**.
-- **New storage** and **Delete** (the name typed) are the dialogs Datasets had; the list checks
-  again every 3 seconds while a store is changing.
+- **New storage** (lake#664) asks for the type and provider, a name, and what that pair needs
+  (`storeNeeds` in `stores.ts`): a volume's size; for **your own bucket** (Cloudflare R2, AWS S3,
+  Backblaze B2, Google Cloud Storage, Azure Blob) its name, the folder in it the storage covers,
+  the endpoint (`endpointHint`: required for R2 and Azure) and region, and the workspace secret
+  that opens it, as a secret mount of this workspace and the secret's name (the secret's value is
+  never typed here; the dialog says which fields it holds, `credentialFields`); for a **liquid
+  repository** one of the workspace's repositories, or a new one named after the storage; nothing
+  for storage **Lake keeps in the workspace**. A refusal is shown under its field (`fieldError`).
+- **Delete** (the name typed) warns according to what happens to the contents (`deleteWarning`):
+  a volume and storage Lake keeps in the workspace are deleted with their data; Lake only forgets
+  your own bucket and a repository, which keep what is in them. The list checks again every 3
+  seconds while a store is changing.
 - **Words.** A *drive* is where people work with files; *storage* is a bucket, filesystem or volume
   that holds bytes. The page says storage; the API's name is *store* (`list_stores`).
 - **Delete** of a mounted store names the services and apps that mount it and stays disabled;
@@ -125,6 +136,26 @@ mocked `/v1` answers.
 Old links: `/train/data#storage` goes to `/drives?tab=storage` (`movedFromDatasets`), and
 `/drives#storage` opens the tab too.
 
+## The Picker
+
+`FolderPicker.tsx` is the one dialog that picks from drives (lake#682), with its pure rules in
+`picker.ts`. It browses through each drive's `DriveStorage`, so every kind (workspace files,
+repository, virtual, storage) is browsed the same way, folder by folder, with the path as crumbs.
+
+- **What it picks.** A folder (Move), any item (a shortcut's target in `ShortcutDialog`), or only
+  the items an `accept` rule takes (Train → Models, Bring one → A drive takes `bringable`: a file,
+  or a shortcut to a drive item or a repository path that is not broken). Folders are always listed
+  so they can be opened; what cannot be chosen is not listed (`pickerRows`).
+- **Every drive.** Given `drives`, it starts at **Drives**, every drive of the workspace with its
+  kind, and the top crumb returns there.
+- **Search.** Given the workspace (`scope`), a search box sends the settled query to
+  `search_drives`: in the open drive, or in every drive from **Drives**. A match shows its drive and
+  folder path (`matchWhere`); a drive or folder match opens it, and a match that can be chosen is
+  chosen in place (`matchItem` keys it as its drive's storage does: a path in a repository or
+  storage drive, an entry id otherwise), so a file at any depth is a search away.
+- The chosen item is named under the crumbs ("Chosen: drive / path"), and the primary button
+  returns its key, the item and its drive's storage.
+
 ## In Data → Search
 
 Search's **Drives** place (`frontend/src/pages/search/SearchPage.tsx`, on by default with the
@@ -144,5 +175,10 @@ shortcut selected (`focus`).
 plans, upload chunks, what each shortcut opens, which files load as datasets under which name,
 where each search match opens (`matchLink`, `matchWhere`, `folderKey`, `parentKey`), and the
 Storage tab (`stores.ts`: each store's state, the figures, which open as drives, a volume never),
-the storage drive kind, the old `#storage` link, and Datasets without storage or connections. `npx tsc --noEmit -p .`, `npm test` and
-`npm run build` from `frontend/`.
+the storage drive kind, the old `#storage` link, Datasets without storage or connections, the
+picker (`picker.ts`: a search match as an item of its drive, the rows each mode lists, what Bring
+one can choose, and that Bring one uses the picker over every drive), and New storage's fields and
+the delete warnings per provider (lake#664). `npx tsc --noEmit -p .`, `npm test` and `npm run build`
+from `frontend/`. `frontend/checks/storage.mjs` screenshots the Storage tab, New storage for each
+kind of provider and both delete warnings at 1440 and 390 px against mocked answers, and reports any
+sideways scroll or page error.

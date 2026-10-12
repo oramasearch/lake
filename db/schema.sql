@@ -4073,6 +4073,36 @@ INSERT INTO schema_migrations (version) VALUES ('0078_methodology_runs')
     ON CONFLICT DO NOTHING;
 
 -- ---------------------------------------------------------------------------------------------
+-- 0079_mcp_connection_dispatch (lake#684, lake#685, docs/api/mcp-connections.md): where a
+-- workspace's MCP connections need Lake outside a request. One row per connection that has an
+-- agent with an input stream, a notifications stream or results still to publish (`streams`), or
+-- that re-exports tools through Lake's MCP (`exported_digest`, the SHA-256 of the tools/list
+-- entries it adds). The stream worker reads only the workspaces with a streaming row, and a
+-- workspace MCP session is told notifications/tools/list_changed when the digests change. Ids and
+-- a digest only: the connection is a record in its workspace Zetta. Lake writes it whenever it
+-- writes a connection. Idempotent; drops nothing.
+-- ---------------------------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS mcp_connection_dispatch (
+    customer_id     uuid        NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
+    workspace_id    uuid        NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    connection_id   text        NOT NULL,
+    streams         boolean     NOT NULL DEFAULT false,
+    exported_digest text        NOT NULL DEFAULT '',
+    updated_at      timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (workspace_id, connection_id),
+    CONSTRAINT mcp_connection_dispatch_digest_format
+        CHECK (exported_digest = '' OR exported_digest ~ '^[0-9a-f]{64}$')
+);
+CREATE INDEX IF NOT EXISTS mcp_connection_dispatch_streams_idx
+    ON mcp_connection_dispatch (workspace_id) WHERE streams;
+
+CREATE TABLE IF NOT EXISTS mcp_connection_dispatch_guard (
+    applied_at timestamptz NOT NULL DEFAULT now()
+);
+INSERT INTO schema_migrations (version) VALUES ('0079_mcp_connection_dispatch')
+    ON CONFLICT DO NOTHING;
+
+-- ---------------------------------------------------------------------------------------------
 -- 0080_store_mounts (lake#666, docs/control-plane/storage.md#mounts): which services and apps
 -- mount a store, and how much of a store is used. lake writes store_mounts when a service or an
 -- app is created or edited with `stores`, bumps the workload's generation and NOTIFYs
@@ -4103,4 +4133,33 @@ CREATE TABLE IF NOT EXISTS store_mounts_guard (
     applied_at timestamptz NOT NULL DEFAULT now()
 );
 INSERT INTO schema_migrations (version) VALUES ('0080_store_mounts')
+    ON CONFLICT DO NOTHING;
+
+-- ---------------------------------------------------------------------------------------------
+-- 0081_app_transfer (lake#661, docs/api/metering.md#app-traffic): the bytes each app receives and
+-- sends through the cluster's ingress controller, which lake never sees. Written only by the
+-- Orama operator: it reads the ingress controller's per-Ingress byte counters (ingress-nginx's
+-- `nginx_ingress_controller_request_size_sum` and `_response_size_sum`), and adds each poll's
+-- increase to the row of the app and the UTC hour it observed it in. `in_bytes` is what clients
+-- sent (request line, headers and body), `out_bytes` what the app sent back (headers and body).
+-- The row carries the app's workspace so an hour can still be charged after the app is deleted.
+-- Numbers only: no hosts, paths or content. Lake charges each closed hour once as `transfer` in
+-- the app's workspace Zetta. The operator deletes rows older than eight days. Idempotent; drops
+-- nothing.
+-- ---------------------------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS app_transfer (
+    app_id       uuid        NOT NULL,
+    workspace_id uuid        NOT NULL,
+    hour         timestamptz NOT NULL CHECK (extract(epoch FROM hour) % 3600 = 0),
+    in_bytes     bigint      NOT NULL DEFAULT 0 CHECK (in_bytes >= 0),
+    out_bytes    bigint      NOT NULL DEFAULT 0 CHECK (out_bytes >= 0),
+    observed_at  timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (app_id, hour)
+);
+CREATE INDEX IF NOT EXISTS app_transfer_hour_idx ON app_transfer (hour);
+
+CREATE TABLE IF NOT EXISTS app_transfer_guard (
+    applied_at timestamptz NOT NULL DEFAULT now()
+);
+INSERT INTO schema_migrations (version) VALUES ('0081_app_transfer')
     ON CONFLICT DO NOTHING;

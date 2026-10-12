@@ -41,7 +41,7 @@ audited in the workspace's own log ([audit.md](audit.md#which-log)).
 | `read_drive_file` | read | `drive_id`, `id`, `offset?`, `length?` | `{id, name, size, content_type, sha256, offset, content_base64}` |
 | `recent_drive_entries` | read | `limit?` (1 to 100, default 20) | `{items: [{drive: {id, name}, entry}]}` |
 | `load_drive_dataset` | action | `drive_id`, `id`, `table_name`, `format?`, `if_exists?` | `upload_dataset`'s answer, with `source: {drive_id, id, name}` |
-| `load_drive_model` | action | `drive_id`, `id`, `name` or `version_of`, `kind?`, `metrics?` | `register_model`'s answer (`model_id`, …), with `source: {drive_id, id, name}` ([models.md](models.md#a-standalone-model-lake654)) |
+| `load_drive_model` | action | `drive_id`, `id`, `name` or `version_of`, `kind?`, `metrics?` | `register_model`'s answer (`model_id`, …), with `source: {drive_id, id, name}`; from any drive kind, a virtual drive's shortcut to a file followed once ([below](#a-drive-file-as-a-model-lake654), [models.md](models.md#a-standalone-model-lake654)) |
 
 | `search_drives` | read | `q` (1 to 255 bytes), `drive_id?`, `limit?` (1 to 200, default 50) | `{items: [match], truncated, skipped: [{drive, reason}]}` ([Search](#search)) |
 
@@ -177,13 +177,18 @@ API's word; the Lake Console says *storage*.
   is shown, not browsed* (its contents belong to the service that mounts it); a store not Ready is
   `workspace_not_ready`; another workspace's is `not_found`.
 - **Browsing** goes through `control::StoreContents` (`include/lake/control/store_contents.hpp`):
-  list a folder, stat, read a range, write a whole file, make a folder, move, remove. A
-  `StoreBrowser`, injected as `ServerOptions::store_browser`, opens a store's contents from its
-  record and its connection (`store_connection`'s answer). **No provider is browsable yet:** the
-  only store Lake offers is a cluster volume, and every bucket and filesystem pair waits on
-  lake#196's later phases. Without a browser for it, `create_drive` answers `not_supported` naming
-  the provider and [lake#664](https://github.com/oramasearch/lake/issues/664), which tracks a
-  `StoreContents` implementation per provider. The tests run the whole kind over an in-memory one.
+  list a folder, stat, read a range, write a whole file, make a folder, move, remove. Every bucket
+  and filesystem pair is browsable (lake#664, [storage.md](storage.md#browsing-a-store)):
+  - **your own bucket** (`object` on `r2`, `s3`, `b2`, `gcs`, `azure`) through the injected
+    `StoreBrowser` (`ServerOptions::store_browser`; the server's default is
+    `control::cloud_store_browser`, Lake's own S3 and Azure Blob clients over its public-only
+    outbound transport), opened with the fields of the workspace secret the store names, which Lake
+    reads in the workspace's secret store;
+  - **a store Lake keeps** in the workspace Zetta (`zetta`, `control::zetta_store_contents`) or in a
+    liquid repository (`lake`, `api::repository_store_contents`), opened by Lake itself.
+
+  A Lake started with no store browser (`not_supported`) cannot reach external buckets; the stores
+  it keeps itself still open.
 - **Items** are addressed by their path in the store: `id`, `folder_id`, `parent_id` and `path`
   are all paths (`Reports/2026/q3.csv`; the top is `null` or empty). Each name in a path is a valid
   drive name. An item has no `created_by` (empty), `created_at` and `modified_at` are the
@@ -245,12 +250,27 @@ dataset. The Drives page offers it as **Load as dataset** on a CSV or JSONL file
 ## A Drive File as a Model (lake#654)
 
 `load_drive_model` brings a model file of a drive into the workspace as a standalone model, the same
-way: `id` is the file, a virtual drive is refused at `/drive_id`, the bytes are read as the caller,
+way: `id` is the file, the bytes are read as the caller,
 and the text goes to the workspace engine's `register_model` through `workspace_act` with `name`
 (or `version_of`), `kind?`, `metrics?` and `source` (`drive <drive name>: <file name>`). A new model
 needs `name` (`invalid_input` at `/name` before a byte is read). The engine's refusal of the file
 (`not_supported` for a format it cannot read) comes back at `/id`. At most 16 MiB. Train → Models'
 **New model**, Bring one, A drive offers it ([models.md](models.md#a-standalone-model-lake654)).
+
+Every drive kind brings a file (lake#682):
+
+- **Workspace files:** `id` is the file's entry id; a folder, or an upload not finished, is
+  `not_found` at `/id`.
+- **Repository:** `id` is the file's path on `main`.
+- **Storage:** `id` is the file's path in the store; a folder is `not_found` at `/id`.
+- **Virtual:** `id` is a shortcut to a file, which is followed once. A shortcut to a drive item
+  brings that item as if it were named directly (the answer's `source` is the item's drive and id).
+  A shortcut to a repository path reads it at the shortcut's `ref` (`main` when it has none), with
+  `source: {repository_id, ref, path, name}` and the text `repository <name>@<ref>: <path>` sent as
+  `register_model`'s `source`. Either way `source.shortcut` is `{drive_id, id, name}` of the
+  shortcut, and the audit event carries `shortcut_drive_id` and `shortcut_id`. A folder, a shortcut
+  to anything else (a dataset, a web address, …), a shortcut to another virtual drive's item, and a
+  broken shortcut are refused at `/id` (`invalid_input`, or `not_found` for a broken one).
 
 ## Search
 
@@ -333,7 +353,7 @@ storage quota yet. The workspace Zetta's own volume is the bound.
 | `conflict` | a name taken; a folder level that is not a folder; a chunk out of order; an upload not complete; a finished upload sent more bytes; an expired upload |
 | `invalid_digest` | `finish_drive_upload`'s `sha256` differs from the bytes |
 | `size_invalid` | a chunk over 8 MiB, an inline upload or read over 16 MiB, a file over 64 GiB |
-| `not_supported` | this lake has no workspace Zetta object transport (no workspace files); a store drive's store is of a provider Lake cannot browse yet ([lake#664](https://github.com/oramasearch/lake/issues/664)) |
+| `not_supported` | this lake has no workspace Zetta object transport (no workspace files); a store drive's store is a bucket and this Lake has no store browser |
 | `workspace_not_ready` | a store drive's store is not Ready, or its connection has not reached Lake |
 | `corrupt` | a stored block does not open with this workspace's key |
 | `quota_exceeded`, `store_unavailable` | the workspace Zetta refused or did not answer |
@@ -359,8 +379,12 @@ storage quota yet. The workspace Zetta's own volume is the bound.
   upload (renamed, refused), a folder, a read, a move and a rename made in the store; search by
   name; an item deleted; the drive deleted with the store and its contents still there.
   `Drives.AVolumeIsShownNotBrowsedAndAStoreLakeCannotBrowseIsRefused`: a volume refused, a bucket
-  `not_supported` without a browser (naming lake#664), a store not Ready, a store that is not
-  there.
+  `not_supported` without a browser, a store not Ready, a store that is not there.
+  `Drives.YourOwnBucketIsNamedWithAWorkspaceSecretAndOpensAsADrive`,
+  `Drives.AStoreKeptInTheWorkspaceZettaIsDeletedWithItsBytes` and
+  `Drives.ALakeStoreNamesARepositoryOfItsWorkspace` (lake#664): each provider end to end through
+  the capabilities; `StoreProviders.*` runs one conformance suite against every provider over a
+  local fake of it (see [storage.md](storage.md#verify)).
 - `Drives.AResentChunkAnswersTheUploadAndAbandonedUploadsExpire` (lake#588): a resent chunk's
   true `received` and `complete`, unfinished uploads under `uploads`, an expired one refusing
   chunks and giving up its name, and `upload_drive_entries` taking `name`.
@@ -379,8 +403,9 @@ storage quota yet. The workspace Zetta's own volume is the bound.
   `ShortcutChecker` (`src/api/drives_capabilities.cpp`), and `frontend/src/pages/drives/targets.ts`.
 - A new storage: `known_drive_storage`, `create_drive`, and a `DriveStorage` implementation in
   `frontend/src/pages/drives/storage.ts`.
-- A provider a store drive can browse: a `control::StoreContents` implementation and a
-  `StoreBrowser` that opens it for that type and provider, set in `ServerOptions::store_browser`
-  ([lake#664](https://github.com/oramasearch/lake/issues/664)).
+- A provider a store drive can browse: a `control::StoreContents` implementation that passes the
+  conformance suite in `tests/test_store_providers.cpp` against a fake of the provider, opened in
+  `open_store` (`src/api/drives_capabilities.cpp`) for a store Lake keeps, or by
+  `cloud_store_browser` for an external bucket.
 - The block format is versioned by its labels (`v1`); a new format gets new labels and a record
   field naming it, and keeps reading `v1`.

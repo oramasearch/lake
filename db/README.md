@@ -30,6 +30,14 @@ protected-app browser handoff. Only SHA-256 code hashes are stored; exchange is 
 expired or spent rows are swept. Its guard is `app_forward_auth_guard`. See
 `docs/api/web-apps.md` and `docs/control-plane/web-apps.md`.
 
+Migration `0079_mcp_connection_dispatch` adds `mcp_connection_dispatch`: one row per MCP
+connection that streams or re-exports tools, with the account, workspace and connection ids,
+`streams` and the SHA-256 of the re-exported tool entries. Lake writes it with every connection; the
+stream worker reads only the streaming workspaces (lake#685) and a workspace MCP session is told when
+the digests change (lake#684). Dispatch only, never content; the operator reads nothing of it but
+must vendor this schema. Its guard is `mcp_connection_dispatch_guard`. See
+[mcp-connections.md](../docs/api/mcp-connections.md).
+
 Verify changes with the full PostgreSQL-backed static and shared CTest suites. Keep the identity
 contract in `docs/api/identity.md` updated with changes to token derivation.
 
@@ -357,11 +365,17 @@ workspace's own methodology (lake writes it and notifies `lake_services`), and
 `methodology_run_status` (the Orama operator writes it: phase, message, exit code, the SHA-256 of
 the run's credential, when the sandbox pod started and finished), and the `methodology_run` kind of
 `workload_resources`. Ids, images, resources and phases only: parameters, data, metrics and the
-artifact stay in the workspace Zetta. Nothing is dropped; idempotent. The latest guard is
+artifact stay in the workspace Zetta. Nothing is dropped; idempotent. The guard was
 `methodology_runs_guard`; the operator must vendor this schema, select that guard and run the
 pods (orama-operator#291) before rollout. See
 [schema.md](../docs/control-plane/schema.md#methodology-runs-migration).
 
+Migration `0081_app_transfer` (lake#661) adds `app_transfer`, the bytes each app received and sent
+through the ingress controller, one row per app and UTC hour, written only by the Orama operator
+from the controller's per-Ingress byte counters. Numbers only. Lake charges each closed hour once as
+`transfer` in the app's workspace Zetta. Nothing is dropped; idempotent. The latest guard is
+`app_transfer_guard`; the operator must vendor this schema, select that guard and report app
+traffic before rollout. See [schema.md](../docs/control-plane/schema.md#app-transfer-migration).
 Migration `0080_store_mounts` (lake#666) adds `store_mounts`, one row per store a service or an app
 mounts (lake writes it when a service or an app is created or edited with `stores`, bumps the
 workload's generation and notifies `lake_services`): `store_id`, `object_kind` (`service` or
