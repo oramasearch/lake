@@ -97,7 +97,8 @@ answered predictions, `search_index` an index's answered searches, `create_trans
 model reports none; tokens are never billed), and the file, drive, Hub and image paths their bytes as
 `transfer` (`record_workspace_transfer`, `stream_blob`'s `metered_workspace`; lake#658);
 `ApiServer::drain` flushes it every `usage_flush_interval` and, as the store root's owner, schedules
-`usage_capabilities.cpp`'s `sample_usage` (stored bytes, the engine's `storage_usage` by kind,
+`usage_capabilities.cpp`'s `sample_usage` (stored bytes, the engine's `storage_usage` by kind, which
+`usage_over_time` answers as the unbilled `engine_storage` (decision 61, lake#663),
 instance and volume time, CPU, RAM, GPU and GPU memory from the operator's `workload_resources`
 (lake#643), each finished build, job and cron run once, new build results) every
 `usage_sample_interval`. `usage_capabilities.cpp` registers `usage_over_time`, `usage_limits`,
