@@ -106,7 +106,7 @@ dry run, naming the capability, the id and what was removed).
 
 | Capability | `id` | Engine input | What goes, and what is kept |
 |---|---|---|---|
-| `delete_dataset` | `<database>/<dataset>`, as `list_datasets` returns it | `dataset`, `database` | the table, its rows and partitions, and every search index on it; a run still reading it is not detected, so delete a dataset no run reads |
+| `delete_dataset` | `<database>/<dataset>`, as `list_datasets` returns it | `dataset`, `database` | the table, its rows and partitions, and every search index on it; refused (`engine_error`, naming them) while a pending or running run or a running study reads it, its dry run too (zetta#1258) |
 | `delete_model` | the model id (`model_id` is accepted too) | `model_id` | the trained model, no longer served if it was published; the run that trained it is kept. A standalone model's last version takes its internal project with it (`removed.standalone_project`) |
 | `delete_run` | the run id (`run_id` too) | `run_id` | a finished run and its report; refused while pending or running; the models it trained are kept and named |
 | `delete_index` | the index id (`index_id` too) | `index_id` | the index, no longer served if it was published; the dataset is kept |
@@ -114,8 +114,9 @@ dry run, naming the capability, the id and what was removed).
 The answer is the engine's (`removed`, and `kept` where something stays) with `id`, `dry_run` and
 `deleted`. `dry_run: true` deletes nothing and answers what would go. An unknown id is
 `not_found` at `/id`. The engine capabilities arrive with zetta#1257; a workspace whose engine is
-older answers `501 not_supported`, saying so, and nothing is deleted. Overview:
-[deletion.md](deletion.md).
+older answers `501 not_supported`, saying so, and nothing is deleted. The refusal of a dataset a run
+or a study is still reading arrives with zetta#1258; an engine before it deletes the dataset
+without that check. Overview: [deletion.md](deletion.md).
 
 ## Training provenance
 
