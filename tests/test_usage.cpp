@@ -311,10 +311,10 @@ TEST(UsageOverTime, AddsUpTheChosenWorkspacesByHourDayAndMonth) {
     rig.recorder.add(rig.lab, "calls", 5, {{"kind", "api"}}, hour + day);
     rig.recorder.add(rig.home, "speech", 90, {{"kind", "transcript"}}, hour + day);
     // Storage readings: the latest of each period counts, and workspaces add up.
-    rig.recorder.sample(rig.home, "workspace_data", 100, hour);
-    rig.recorder.sample(rig.home, "workspace_data", 150, hour + std::chrono::hours(2));
-    rig.recorder.sample(rig.lab, "workspace_data", 1000, hour + std::chrono::hours(2));
-    rig.recorder.sample(rig.home, "workspace_data", 175, hour + day);
+    rig.recorder.sample(rig.home, "drive_files", 100, hour);
+    rig.recorder.sample(rig.home, "drive_files", 150, hour + std::chrono::hours(2));
+    rig.recorder.sample(rig.lab, "drive_files", 1000, hour + std::chrono::hours(2));
+    rig.recorder.sample(rig.home, "drive_files", 175, hour + day);
     flush(rig.recorder);
 
     const std::string from = utc(std::chrono::floor<std::chrono::days>(hour));
@@ -1032,14 +1032,56 @@ TEST(UsageSample, RecordsWhatTheEngineHoldsByKind) {
                                 {"from", utc(hour)},
                                 {"to", utc(hour + std::chrono::hours(1))},
                                 {"granularity", "hour"},
-                                {"dimensions", json::array({"storage"})}});
+                                {"dimensions", json::array({"storage", "engine_storage"})}});
     ASSERT_TRUE(read.ok) << read.error.message;
     const std::string not_measured = read.value["not_measured"].dump();
     EXPECT_NE(not_measured.find("inside workspace lab"), std::string::npos) << not_measured;
     EXPECT_EQ(not_measured.find("home"), std::string::npos) << not_measured;
+    // Decision 61 (lake#663): what an engine holds on its own volume is shown as engine_storage,
+    // never billed; the volume is billed, as `volumes`.
+    const json* engine = dimension(read.value, "engine_storage");
+    ASSERT_NE(engine, nullptr);
+    EXPECT_EQ((*engine)["total"], 5000 + 700 + 300 + 50 + 20 + 10 + 90 + 64);
+    EXPECT_FALSE((*engine)["billed"].get<bool>());
+    EXPECT_EQ((*engine)["unit"], "bytes");
     const json* storage = dimension(read.value, "storage");
     ASSERT_NE(storage, nullptr);
-    EXPECT_EQ((*storage)["total"], 5000 + 700 + 300 + 50 + 20 + 10 + 90 + 64);
+    EXPECT_EQ((*storage)["total"], 0) << "none of it is billed storage";
+    EXPECT_TRUE((*storage)["billed"].get<bool>());
+}
+
+// Decision 61 (lake#663): storage is billed for what Lake holds outside an engine's volume
+// (repositories, images, transcripts, drive files), never for what the engine holds on it.
+TEST(UsageOverTime, StorageIsWhatLakeHoldsAndTheEngineVolumeIsNotBilledTwice) {
+    UsageRig rig;
+    for (const auto& [kind, bytes] : std::vector<std::pair<std::string, std::uint64_t>>{
+             {"repositories", 1000},
+             {"images", 200},
+             {"transcripts", 30},
+             {"drive_files", 4},
+             {"workspace_data", 50000},
+             {"models", 7000},
+             {"buckets", 600}}) {
+        rig.recorder.sample(rig.home, kind, bytes, hour);
+    }
+    rig.recorder.add(rig.home, "volumes", 3600 * 5, {{"kind", "service"}}, hour);
+    flush(rig.recorder);
+    const auto read = rig.call("usage_over_time",
+                               {{"customer_id", rig.customer},
+                                {"from", utc(hour)},
+                                {"to", utc(hour + std::chrono::hours(1))},
+                                {"granularity", "hour"}});
+    ASSERT_TRUE(read.ok) << read.error.message;
+    const json* storage = dimension(read.value, "storage");
+    ASSERT_NE(storage, nullptr);
+    EXPECT_EQ((*storage)["total"], 1234);
+    const json* engine = dimension(read.value, "engine_storage");
+    ASSERT_NE(engine, nullptr);
+    EXPECT_EQ((*engine)["total"], 57600);
+    EXPECT_FALSE((*engine)["billed"].get<bool>());
+    const json* volumes = dimension(read.value, "volumes");
+    ASSERT_NE(volumes, nullptr);
+    EXPECT_TRUE((*volumes)["billed"].get<bool>()) << "the engine's disk is billed as its volume";
 }
 
 // lake#613: dictation names the workspace it is dictated in, and its audio minutes (or the tokens
@@ -1152,7 +1194,8 @@ TEST(UsageOverTime, AddsTransferOutsideSyncAndSaysWhatIsNotBilled) {
     }
     for (const json& entry : read.value["dimensions"]) {
         const std::string name = entry["dimension"];
-        const bool detail = name == "instances" || name == "build_compute" || name == "run_compute";
+        const bool detail = name == "instances" || name == "build_compute" ||
+                            name == "run_compute" || name == "engine_storage";
         EXPECT_EQ(entry["billed"].get<bool>(), !detail) << name;
     }
     EXPECT_NE(read.value["not_measured"].dump().find("lake#661"), std::string::npos)

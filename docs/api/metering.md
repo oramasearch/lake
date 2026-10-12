@@ -152,8 +152,11 @@ Each dimension has one unit. Billing's prices are set per dimension `name` and c
 (`usage_dimensions()`, `src/api/usage_recorder.cpp`; [billing.md](billing.md#prices-and-bills)).
 `build_compute`, `run_compute` and `instances` are measured and charted as **detail, never billed**
 (lake#643, lake#658): compute is billed as `cpu`, `ram`, `gpu` and `vram`, and these say how long
-builds, runs and services ran. `usage_over_time` answers each dimension's `billed`, false for these
-three, and the Usage page marks their tiles *Detail, not billed*.
+builds, runs and services ran. `engine_storage` is detail too (decision 61, lake#663): a workspace
+engine's disk is billed once, as its volume (`volumes`), so the bytes it holds on that volume are
+shown and never billed. `usage_over_time` answers each dimension's `billed`, false for these four,
+and the Usage page marks their tiles *Detail, not billed* (*Detail, billed as the engine's volume*
+for `engine_storage`).
 
 | Dimension | Unit | Kinds | Where it comes from |
 |---|---|---|---|
@@ -161,7 +164,8 @@ three, and the Usage page marks their tiles *Detail, not billed*.
 | `ram` | `mib_seconds`: a MiB of memory for a second | as `cpu` | as `cpu` |
 | `gpu` | `gpu_seconds` | as `cpu`, and `class` (`l4`, `a10g`, `a100`, `h100`, …; absent when unknown) | as `cpu` |
 | `vram` | `mib_seconds` of GPU memory | as `gpu` | as `cpu` |
-| `storage` | bytes, the latest reading of each period | `repositories`, `images`, `workspace_data`, `transcripts`, `drive_files`, and what the engine holds: `models`, `indexes`, `runs` (run artifacts and experiments), `streams` (topics), `files`, `buckets` (the workspace's own) | the owner loop's sample, below |
+| `storage` | bytes, the latest reading of each period | `repositories`, `images`, `transcripts`, `drive_files` | what Lake holds outside a workspace engine's volume, from the owner loop's sample, below; billed |
+| `engine_storage` | bytes, the latest reading of each period | `workspace_data` (datasets), `models`, `indexes`, `runs` (run artifacts and experiments), `streams` (topics), `files`, `buckets` (the workspace's own, never lake's `lake_store` and `lake_files`) | what the workspace engine holds on its own volume: Zetta's `storage_usage` (an older engine: its datasets only), from the same sample. Detail, never billed: the volume is (decision 61, lake#663). Titled Engine Storage |
 | `transfer` | bytes | `in`, `out` | the exact hourly repository transfer records (`lake_metering_usage`, above), plus every other byte lake moves for a workspace (lake#658): drive uploads and reads, tenant image pushes and pulls, repository file reads, Hub `resolve` downloads, LFS staging and commits, shared-file downloads, datasets uploaded with `upload_dataset`, and any other caller that adds `transfer` to the workspace's `lake_usage` through the usage recorder (an MCP connection's bytes, say): `usage_over_time` and the bill read every `transfer` row of the series, whatever its labels, beside the repository records |
 | `build_compute` | seconds | `repository`, `image` | the repository build records (above) and the operator's finished image builds, at the hour each finished; titled Build Time |
 | `run_compute` | seconds | `run` | the workspace's runs (`list_runs`), training and experiment trials included, at the time each last changed; titled Workspace Run Time. A run executes in its workspace's engine, so its CPU and RAM are the engine's, never counted twice |
@@ -171,7 +175,7 @@ three, and the Usage page marks their tiles *Detail, not billed*.
 | `searches` | calls | — (`object_id` is the index) | each answered `search_index` of a published index (lake#658) |
 | `model_tokens` | tokens | `input`, `output` (also `agent`, `launch_id`, `model`) | every agent model call through the [model gateway](model-gateway.md) (`/openai/v1/*`, lake#248), counted from the provider's own `usage`; what an agent reports with `record_model_usage` for a call made outside Lake (below); and the tokens a speech-to-text model reports for a transcript (`model` only); never speech-to-text, which is `speech` (lake#658) |
 | `instances` | instance-seconds | the service kind (`zetta`, `postgres`, …) or `app` (`object_id` is the service or app) | the owner loop's sample of running services and apps; detail, never billed |
-| `volumes` | GiB-seconds | `service`, `store` (`object_id`) | the owner loop's sample of running services' and stores' volumes |
+| `volumes` | GiB-seconds | `service`, `store` (`object_id`) | the owner loop's sample of running services' and stores' volumes; the workspace engine is a service, and its volume is how its disk is billed (decision 61) |
 
 ### What the sampler reads
 
@@ -191,7 +195,9 @@ never count one service twice, samples every live workspace on its maintenance t
   own buckets are left out (`lake_store` is `repositories`, `lake_files` is `drive_files`), and so
   are lake's sealed records and the engine's catalogue and system files: lake's bookkeeping is not
   billed. An engine without `storage_usage` (a Zetta before it) gives `list_datasets` `size_bytes`
-  as `workspace_data` and nothing else, and `usage_over_time` names the workspace.
+  as `workspace_data` and nothing else, and `usage_over_time` names the workspace. These kinds are
+  sampled into `lake_storage` as before, and `usage_over_time` answers them as `engine_storage`,
+  never `storage`: the engine's disk is billed as its volume (decision 61, lake#663).
 - **Transcripts and drive files.** The text of the workspace's transcripts, and the size of each
   finished file of its `files` drives. A workspace that is not ready is skipped, never sampled as
   zero.
@@ -277,7 +283,8 @@ class; `""` for a GPU of no known class).
   (orama-operator's `docs/lake/workload-resources.md`). If the table cannot be read, the reading
   says so.
 - Model files, indexes, run artifacts, topics, files and buckets of a workspace whose engine does
-  not report `storage_usage` yet (a Zetta before it): named by workspace.
+  not report `storage_usage` yet (a Zetta before it): named by workspace, when `engine_storage` is
+  asked for. They are detail only; the engine's volume is billed either way.
 - App traffic through the ingress (`transfer`): the operator does not report it yet
   ([lake#661](https://github.com/oramasearch/lake/issues/661)).
 - Usage before this change: the series start empty, and nothing is copied into them.
@@ -302,7 +309,7 @@ Every capability call routed to a workspace counts in `calls`. A capability that
 resource for a workspace names the dimensions its use adds to in `capability_meters()`
 (`src/api/usage_recorder.cpp`): the workloads it starts (CPU, RAM, GPU, GPU memory, volumes), the
 work it runs in the engine, the predictions and searches it answers, the speech it transcribes, the
-bytes it moves (`transfer`) and stores (`storage`). The workspace engine's own capabilities that Lake names (lake#650) are in the same tables: training, runs, deployed pipelines and index builds are the engine's CPU, RAM and GPU; datasets, models and indexes they keep are its storage; a member's own `score` and `search_workspace_index` run on the engine and are billed as its compute, while the served `predict` and `search_index` are priced per request. Capabilities whose names look like they consume a
+bytes it moves (`transfer`) and stores (`storage`). The workspace engine's own capabilities that Lake names (lake#650) are in the same tables: training, runs, deployed pipelines and index builds are the engine's CPU, RAM and GPU; datasets, models and indexes they keep are on its volume, billed as `volumes` by its size, with their bytes shown as `engine_storage` and not billed (decision 61, lake#663); a member's own `score` and `search_workspace_index` run on the engine and are billed as its compute, while the served `predict` and `search_index` are priced per request. Capabilities whose names look like they consume a
 resource but write only records are in `calls_only_capabilities()`, each with why.
 `tests/test_usage_contract.cpp` fails when:
 
