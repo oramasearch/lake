@@ -1613,6 +1613,16 @@ liquid::runtime::task<ApiResult> model_completion(const json& input, ApiContext&
         co_return std::move(**refusal);
     }
     ModelProviderRequest request{endpoint, prepared->dump(), stream};
+    // A stream the caller reads as it arrives (the `/openai/v1/*` route, lake#665): each piece goes
+    // on to the caller, and the usage is read from the events as they pass.
+    const bool relayed = stream && static_cast<bool>(context.model_stream);
+    auto passing = std::make_shared<ModelStreamUsage>();
+    if (relayed) {
+        request.on_body = [passing, sink = context.model_stream](std::string_view piece) {
+            passing->feed(piece);
+            return sink(piece);
+        };
+    }
     auto ran = co_await run_blocking(
         [provider = context.model_provider, request]() { return provider(request); });
     if (!ran) {
@@ -1625,7 +1635,10 @@ liquid::runtime::task<ApiResult> model_completion(const json& input, ApiContext&
             model_provider_failure(response.status, response.body, response.error);
         co_return ApiResult::failure(failure.code, failure.message);
     }
-    const ModelUsage usage = model_usage(response.body, stream);
+    if (relayed) {
+        passing->finish();
+    }
+    const ModelUsage usage = relayed ? passing->usage() : model_usage(response.body, stream);
     const std::string model = usage.model.empty() ? requested : usage.model;
     const bool recorded = usage.reported && context.usage_recorder != nullptr;
     if (recorded) {
@@ -1653,7 +1666,9 @@ liquid::runtime::task<ApiResult> model_completion(const json& input, ApiContext&
              {"usage_reported", usage.reported},
              {"recorded", recorded},
              {"streamed", stream}};
-    if (stream) {
+    if (relayed) {
+        // The caller already has the stream, piece by piece.
+    } else if (stream) {
         out["events"] = response.body;
     } else {
         json answer = json::parse(response.body, nullptr, false);
@@ -2384,7 +2399,11 @@ void register_usage_capabilities(Registry& registry) {
                             {"recorded", {{"type", "boolean"}}},
                             {"streamed", {{"type", "boolean"}}},
                             {"response", {{"type", "object"}}},
-                            {"events", {{"type", "string"}}}}},
+                            {"events",
+                             {{"type", "string"},
+                              {"description",
+                               "the provider's whole event stream, when the request streamed "
+                               "(the `/openai/v1/*` route relays it event by event instead)"}}}}},
                           {"required",
                            json::array({"workspace_id",
                                         "agent",
