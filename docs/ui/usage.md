@@ -53,8 +53,8 @@ Top to bottom:
   it.
 - **Not Measured Yet.** The reading's `not_measured` sentences, as a quiet banner. Since lake#658
   it names only what is still not measured: workloads the operator has not reported, the engine
-  storage of a workspace whose Zetta is older, app traffic (lake#661) and unreported model tokens
-  (lake#248).
+  storage of a workspace whose Zetta is older and unreported model tokens (lake#248). App traffic
+  through the ingress is measured since lake#661: each closed hour is in `transfer`.
 - **Repository Usage by Hour.** A card linking `/metering` for the account.
 - **By Workspace.** Every dimension's figure per workspace, sortable, or why a workspace was not read.
 

@@ -1155,8 +1155,70 @@ TEST(UsageOverTime, AddsTransferOutsideSyncAndSaysWhatIsNotBilled) {
         const bool detail = name == "instances" || name == "build_compute" || name == "run_compute";
         EXPECT_EQ(entry["billed"].get<bool>(), !detail) << name;
     }
-    EXPECT_NE(read.value["not_measured"].dump().find("lake#661"), std::string::npos)
-        << "app traffic is named until the operator reports it";
+    EXPECT_EQ(read.value["not_measured"].dump().find("ingress"), std::string::npos)
+        << "app traffic is measured from the operator's reports (lake#661)";
+}
+
+// lake#661: the bytes an app moves through the ingress, which the operator reports by app and
+// hour, are the app's workspace's transfer, each closed hour charged once in the hour they moved.
+TEST(UsageSample, ChargesEachClosedHourOfAppTrafficOnce) {
+    UsageRig rig;
+    auto& store = *rig.store;
+    const std::string app = lake::control::new_uuid_v4();
+    const auto now = std::chrono::system_clock::now();
+    const auto closed = std::chrono::floor<std::chrono::hours>(now) - std::chrono::hours(3);
+    const auto open = std::chrono::floor<std::chrono::hours>(now);
+    const auto hour_text = [](auto at) {
+        return std::format("{:%Y-%m-%dT%H:00:00Z}", std::chrono::floor<std::chrono::hours>(at));
+    };
+    ASSERT_TRUE(store.add_app_transfer({app, rig.home, hour_text(closed), 600, 5000}));
+    ASSERT_TRUE(store.add_app_transfer({app, rig.home, hour_text(closed), 400, 0}))
+        << "the operator adds each poll's increase to its hour";
+    ASSERT_TRUE(store.add_app_transfer({app, rig.home, hour_text(open), 7, 70}));
+    ASSERT_TRUE(store.add_app_transfer(
+        {lake::control::new_uuid_v4(), lake::control::new_uuid_v4(), hour_text(closed), 9, 9}))
+        << "a workspace of no account here";
+    EXPECT_FALSE(store.add_app_transfer({app, rig.home, "2026-10-11T10:30:00Z", 1, 1}));
+
+    auto context = rig.context();
+    ASSERT_TRUE(liquid::runtime::block_on(
+        lake::api::sample_usage(context, std::chrono::seconds(60), now)));
+    flush(rig.recorder);
+    auto& home = rig.workspaces.records(rig.home);
+    const auto total = [&home, &app](const std::string& kind) {
+        return home.metric_total(
+            "lake_usage", {{"dimension", "transfer"}, {"kind", kind}, {"object_id", app}});
+    };
+    EXPECT_EQ(total("in"), 1000) << "the open hour waits until it closes";
+    EXPECT_EQ(total("out"), 5000);
+    for (const auto& point : home.metrics.at("lake_usage").points) {
+        if (point["labels"].value("object_id", "") == app) {
+            EXPECT_EQ(point["at_ms"].get<std::int64_t>(), ms(closed)) << "in the hour it moved";
+        }
+    }
+    EXPECT_EQ(home.rows("metering_app_transfer_records").size(), 1U);
+    EXPECT_EQ(rig.workspaces.records(rig.lab).rows("metering_app_transfer_records").size(), 0U);
+
+    // Never twice; the open hour once it has closed and settled.
+    ASSERT_TRUE(liquid::runtime::block_on(lake::api::sample_usage(
+        context, std::chrono::seconds(60), open + std::chrono::minutes(66))));
+    flush(rig.recorder);
+    EXPECT_EQ(total("in"), 1007);
+    EXPECT_EQ(total("out"), 5070);
+    EXPECT_EQ(home.rows("metering_app_transfer_records").size(), 2U);
+
+    const auto read = rig.call("usage_over_time",
+                               {{"customer_id", rig.customer},
+                                {"from", utc(closed)},
+                                {"to", utc(open + std::chrono::hours(1))},
+                                {"granularity", "hour"},
+                                {"dimensions", json::array({"transfer"})}});
+    ASSERT_TRUE(read.ok) << read.error.message;
+    const json* transfer = dimension(read.value, "transfer");
+    ASSERT_NE(transfer, nullptr);
+    EXPECT_EQ((*transfer)["total"], 6077) << transfer->dump();
+    EXPECT_EQ(read.value["not_measured"].dump().find("ingress"), std::string::npos)
+        << read.value["not_measured"].dump();
 }
 
 // lake#658: a dataset uploaded through the engine's upload_dataset is the workspace's transfer in.

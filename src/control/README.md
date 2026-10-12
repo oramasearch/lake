@@ -172,8 +172,10 @@ Repositories carry the workspace they belong to (migration `0051_repository_work
 Both stores refuse `create_repository` without a live workspace of the repository's space and
 filter `list_repositories` by an optional workspace; `transfer_repository` is gone from the store
 interface because the routing trigger keeps a repository's space fixed.
-Repository usage lives in workspace Zettas (lake#348, lake#349, `metering.cpp`). Neither store
-writes or reads metering rows any more; `0070` drops the retired tables. Both stores keep an
+Repository usage lives in workspace Zettas (lake#348, lake#349, `metering.cpp`), as does the
+ledger of charged app traffic hours (`record_metered_app_hour`, lake#661). Both stores read the
+operator's `app_transfer` rows (migration `0079`, numbers only; `add_app_transfer` is the operator's
+write, for tests). Neither store writes or reads metering rows any more; `0070` drops the retired tables. Both stores keep an
 account's usage limits (`customer_usage_limits`, migration `0072`, lake#564); a limit of 0 deletes
 the row.
 Both stores keep billing records (migration `0073_billing`, lake#564): plans with their prices,

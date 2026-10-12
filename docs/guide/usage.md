@@ -21,7 +21,7 @@ Billing** turns it into a monthly bill on your plan; an enterprise install has n
 | **Detail, not billed** | Build time, run time and instance time say how long builds, runs, services and apps ran. Their compute is billed as CPU, RAM, GPU and GPU memory, so these are shown and never billed. |
 | **Workspace usage** | Each workspace keeps its own usage in the workspace itself, an hour at a time, for 400 days. Usage adds up the workspaces you choose. |
 | **Storage** | The latest reading in a period, read every fifteen minutes: repositories, container images, workspace data (your datasets), transcripts, drive files, and what your workspace's engine holds besides: models, indexes, run artifacts, streams, files and buckets. |
-| **Transfer** | The bytes you send to and receive from your workspaces: repository pushes and pulls, drive uploads and downloads, image pushes and pulls, file and model downloads. |
+| **Transfer** | The bytes you send to and receive from your workspaces: repository pushes and pulls, drive uploads and downloads, image pushes and pulls, file and model downloads, and the requests and answers of your apps (each hour once it has ended). |
 | **Instance time** | How long each service and app ran ready, times its instances or replicas. Your workspace's own engine is a service, and counts. |
 | **Volume time** | The size of each running service's and store's volumes, times how long it ran. |
 | **Model tokens** | The tokens an agent reports it spent, by agent, run and model. Speech to text is never counted here: it is billed by the minute only. |
@@ -181,7 +181,6 @@ workspaces.
 - model tokens an agent has not reported (agents do not report them yet);
 - what a workspace's engine holds besides its datasets, when that engine is older and does not
   report it;
-- app traffic through the ingress;
 - a workspace that is not running, or could not be read: never counted as zero, it is named
   instead.
 

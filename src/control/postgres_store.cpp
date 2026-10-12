@@ -5893,6 +5893,47 @@ public:
         return {};
     }
 
+    Result<std::vector<AppTransfer>> app_transfer(const std::string& since_hour) override {
+        return with_tx<std::vector<AppTransfer>>(
+            [&](pqxx::work& tx) -> Result<std::vector<AppTransfer>> {
+                const pqxx::result rows = tx.exec_params(
+                    "SELECT app_id::text, workspace_id::text, " + utc_column("hour") +
+                        ", in_bytes, out_bytes, " + utc_column("observed_at") +
+                        " FROM app_transfer WHERE hour >= $1::timestamptz ORDER BY hour, app_id",
+                    since_hour);
+                std::vector<AppTransfer> out;
+                for (const auto& row : rows) {
+                    out.push_back({row[0].as<std::string>(),
+                                   row[1].as<std::string>(),
+                                   row[2].as<std::string>(),
+                                   row[3].as<std::uint64_t>(),
+                                   row[4].as<std::uint64_t>(),
+                                   row[5].as<std::string>()});
+                }
+                return out;
+            });
+    }
+
+    Result<void> add_app_transfer(const AppTransfer& row) override {
+        auto written = with_tx<bool>([&](pqxx::work& tx) -> Result<bool> {
+            tx.exec_params(
+                "INSERT INTO app_transfer (app_id, workspace_id, hour, in_bytes, out_bytes) "
+                "VALUES ($1::uuid, $2::uuid, $3::timestamptz, $4, $5) ON CONFLICT (app_id, hour) "
+                "DO UPDATE SET in_bytes = app_transfer.in_bytes + EXCLUDED.in_bytes, out_bytes = "
+                "app_transfer.out_bytes + EXCLUDED.out_bytes, observed_at = now()",
+                row.app_id,
+                row.workspace_id,
+                row.hour,
+                row.in_bytes,
+                row.out_bytes);
+            return true;
+        });
+        if (!written) {
+            return std::unexpected(written.error());
+        }
+        return {};
+    }
+
     static std::string invoice_columns() {
         return "id::text, number, customer_id::text, period, plan_id, plan_name, currency, "
                "total_micros, state, provider, provider_reference, instructions, note, " +

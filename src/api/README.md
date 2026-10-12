@@ -99,7 +99,8 @@ model reports none; tokens are never billed), and the file, drive, Hub and image
 `ApiServer::drain` flushes it every `usage_flush_interval` and, as the store root's owner, schedules
 `usage_capabilities.cpp`'s `sample_usage` (stored bytes, the engine's `storage_usage` by kind,
 instance and volume time, CPU, RAM, GPU and GPU memory from the operator's `workload_resources`
-(lake#643), each finished build, job and cron run once, new build results) every
+(lake#643), each finished build, job and cron run once, each closed hour of an app's ingress
+traffic from the operator's `app_transfer` once as `transfer` (lake#661), new build results) every
 `usage_sample_interval`. `usage_capabilities.cpp` registers `usage_over_time`, `usage_limits`,
 `set_usage_limit` and `record_model_usage`; `metering_capabilities.cpp`'s `queue_repository_builds`
 is the build-record queueing the sample shares with `metering_usage`. See

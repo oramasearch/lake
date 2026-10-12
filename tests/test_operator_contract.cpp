@@ -301,6 +301,21 @@ ON CONFLICT (object_kind, object_id) DO UPDATE SET
 constexpr std::string_view deleteWorkloadResourcesSQL =
     R"(DELETE FROM workload_resources WHERE object_kind = $1 AND object_id = $2::uuid)";
 
+// internal/controller/lake_app_transfer_pgx.go (lake#661)
+constexpr std::string_view addAppTransferSQL =
+    R"(INSERT INTO app_transfer (app_id, workspace_id, hour, in_bytes, out_bytes)
+SELECT t.app_id::uuid, t.workspace_id::uuid, $5::timestamptz, t.in_bytes, t.out_bytes
+  FROM unnest($1::text[], $2::text[], $3::bigint[], $4::bigint[])
+       AS t(app_id, workspace_id, in_bytes, out_bytes)
+ON CONFLICT (app_id, hour) DO UPDATE SET
+    in_bytes = app_transfer.in_bytes + EXCLUDED.in_bytes,
+    out_bytes = app_transfer.out_bytes + EXCLUDED.out_bytes,
+    observed_at = now())";
+
+// internal/controller/lake_app_transfer_pgx.go
+constexpr std::string_view pruneAppTransferSQL =
+    R"(DELETE FROM app_transfer WHERE hour < $1::timestamptz)";
+
 const std::vector<OperatorStatement>& operator_statements() {
     static const std::vector<OperatorStatement> statements{
         {"lake_stores_pgx.go", "listStoresSQL", listStoresSQL, true},
@@ -329,6 +344,8 @@ const std::vector<OperatorStatement>& operator_statements() {
          upsertWorkloadResourcesSQL},
         {"lake_workload_resources_pgx.go", "deleteWorkloadResourcesSQL",
          deleteWorkloadResourcesSQL},
+        {"lake_app_transfer_pgx.go", "addAppTransferSQL", addAppTransferSQL},
+        {"lake_app_transfer_pgx.go", "pruneAppTransferSQL", pruneAppTransferSQL},
     };
     return statements;
 }

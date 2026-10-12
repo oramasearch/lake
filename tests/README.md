@@ -490,7 +490,11 @@ stop.
 Usage over time (lake#564): `test_usage.cpp` covers `UsageRecorder` (bounded, flushed, values added
 together dropped together, readings keeping their latest, deleted and refusing workspaces),
 `usage_over_time` across workspaces by hour, day and month and its refusals, limits, `record_model_usage`,
-the owner loop's `sample_usage` and the speech-to-text seconds and tokens of a transcript.
+the owner loop's `sample_usage` and the speech-to-text seconds and tokens of a transcript, and
+(lake#661) each closed hour of an app's ingress traffic charged once as `transfer`
+(`UsageSample.ChargesEachClosedHourOfAppTrafficOnce`); `test_postgres.cpp`'s
+`PostgresBilling.AppTrafficAddsUpByAppAndHour` covers `app_transfer` in both stores and
+`test_operator_contract.cpp` the operator's statements for it.
 `record_fixture.hpp`'s time series now answers a gauge's `last` reading per step.
 
 The model gateway (lake#248): `test_model_gateway.cpp` covers the request as forwarded (a stream

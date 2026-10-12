@@ -658,6 +658,13 @@ public:
     control::Result<void> put_workload_resources(const control::WorkloadResources& row) override {
         return call("put_workload_resources", [&] { return store_->put_workload_resources(row); });
     }
+    control::Result<std::vector<control::AppTransfer>>
+    app_transfer(const std::string& since_hour) override {
+        return call("app_transfer", [&] { return store_->app_transfer(since_hour); });
+    }
+    control::Result<void> add_app_transfer(const control::AppTransfer& row) override {
+        return call("add_app_transfer", [&] { return store_->add_app_transfer(row); });
+    }
     control::Result<control::BillingPlan>
     put_billing_plan(const control::BillingPlan& plan) override {
         return call("put_billing_plan", [&] { return store_->put_billing_plan(plan); });

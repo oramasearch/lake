@@ -3176,6 +3176,67 @@ TEST(PostgresBilling, WorkloadResourcesAndClassRatesFollowTheContract) {
                                                        lake::control::new_uuid_v4().substr(0, 8));
 }
 
+namespace {
+
+// lake#661 against one store: the operator adds each poll's increase to the row of the app and
+// hour, and lake reads the rows from an hour on, oldest first.
+void app_traffic_adds_up_by_app_and_hour(lake::control::Store& store) {
+    const std::string app = lake::control::new_uuid_v4();
+    const std::string other = lake::control::new_uuid_v4();
+    const std::string workspace = lake::control::new_uuid_v4();
+    ASSERT_TRUE(store.add_app_transfer({app, workspace, "2026-10-11T09:00:00Z", 100, 1000}));
+    ASSERT_TRUE(store.add_app_transfer({app, workspace, "2026-10-11T09:00:00Z", 5, 50}));
+    ASSERT_TRUE(store.add_app_transfer({app, workspace, "2026-10-11T10:00:00Z", 1, 2}));
+    ASSERT_TRUE(store.add_app_transfer({other, workspace, "2026-10-10T23:00:00Z", 7, 7}));
+    EXPECT_FALSE(store.add_app_transfer({app, workspace, "2026-10-11T09:30:00Z", 1, 1}))
+        << "an hour starts on the hour";
+    const auto rows = store.app_transfer("2026-10-11T09:00:00Z");
+    ASSERT_TRUE(rows) << rows.error().message;
+    std::vector<lake::control::AppTransfer> mine;
+    for (const auto& row : *rows) {
+        if (row.app_id == app || row.app_id == other) {
+            mine.push_back(row);
+        }
+    }
+    ASSERT_EQ(mine.size(), 2U) << "the earlier hour is not read";
+    EXPECT_EQ(mine[0].hour, "2026-10-11T09:00:00Z");
+    EXPECT_EQ(mine[0].workspace_id, workspace);
+    EXPECT_EQ(mine[0].in_bytes, 105U);
+    EXPECT_EQ(mine[0].out_bytes, 1050U);
+    EXPECT_FALSE(mine[0].observed_at.empty());
+    EXPECT_EQ(mine[1].hour, "2026-10-11T10:00:00Z");
+    EXPECT_EQ(mine[1].in_bytes, 1U);
+}
+
+} // namespace
+
+// lake#661, migration 0079_app_transfer: each app's traffic through the ingress by hour.
+TEST(PostgresBilling, AppTrafficAddsUpByAppAndHour) {
+    {
+        lake::control::InMemoryStore memory;
+        app_traffic_adds_up_by_app_and_hour(memory);
+    }
+    const char* uri = lake::test::postgres_uri();
+    if (uri == nullptr || std::string(uri).empty()) {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not set";
+    }
+    auto store = lake::control::make_postgres_store(
+        uri, "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff");
+    ASSERT_TRUE(store->ping()) << store->ping().error().message;
+    {
+        pqxx::connection connection(uri);
+        pqxx::work tx(connection);
+        for (const char* table : {"app_transfer", "app_transfer_guard"}) {
+            EXPECT_FALSE(
+                tx.exec_params("SELECT to_regclass($1)", std::string(table))[0][0].is_null())
+                << table;
+        }
+        EXPECT_FALSE(
+            tx.exec("SELECT 1 FROM schema_migrations WHERE version = '0079_app_transfer'").empty());
+    }
+    app_traffic_adds_up_by_app_and_hour(*store);
+}
+
 // lake#658, migration 0077_metered_jobs: an agent cron run's resources are a workload_resources
 // kind, and a cron run's finish time reaches lake so its duration can be charged.
 TEST(PostgresBilling, CronRunsAreAWorkloadKindAndTheirEndIsRead) {

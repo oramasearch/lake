@@ -945,6 +945,22 @@ vendors the schema, selects that guard and runs the pods in its own pull request
 ([orama-operator#291](https://github.com/oramasearch/orama-operator/issues/291)) before a lake with this
 change is rolled.
 
+## App transfer migration
+
+`0079_app_transfer` (lake#661) adds `app_transfer`, written only by the Orama operator: one row per
+app and UTC hour (`app_id`, `workspace_id`, `hour`, which must start on the hour, `in_bytes`,
+`out_bytes`, `observed_at`), the bytes the app received and sent through the ingress controller in
+that hour. The operator reads the controller's per-Ingress byte counters and adds each poll's
+increase to the row, and deletes rows older than eight days. Numbers only: no host, path or content.
+There is no foreign key to `apps`, so an hour stays chargeable after its app is deleted. Lake charges
+each closed hour once in the app's workspace Zetta as `transfer` and records that it did there
+(`lake_metering_app_transfer_records`, [`../api/metering.md#app-traffic`](../api/metering.md#app-traffic));
+nothing about usage is kept here.
+
+Nothing is dropped; idempotent; guard `app_transfer_guard`. Lake reads the table on every usage
+sample, so the operator vendors the schema and selects that guard before a lake with this change is
+rolled; on an older schema lake's sample names app traffic as unread and records the rest.
+
 ## Repository workspaces migration
 
 `0051_repository_workspaces` adds `repositories.workspace_id` (references `workspaces`, index

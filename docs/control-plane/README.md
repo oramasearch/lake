@@ -11,6 +11,8 @@ API/static tokens. See
 [web-apps.md](web-apps.md) defines the `apps` desired row, protected-app authorization-code state,
 operator status fields, notification, quotas, namespaces, Secret-reference boundary and the four
 purpose-hash credentials including exact-repository image pulls.
+[schema.md](schema.md#app-transfer-migration) documents `0079_app_transfer`, each app's ingress
+bytes by hour, written by the operator and charged once as `transfer` (lake#661).
 [builds.md](builds.md) defines the `builds` desired row, configured Ship App runtime base, operator
 status loop, cancellation, notifications and purpose-hash credential boundary.
 

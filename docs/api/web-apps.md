@@ -168,6 +168,15 @@ operator's `Deleted` acknowledgement before Lake physically removes the row. Sta
 Plain environment values are scanned; detected credentials return `secret_required`. Bindings and
 operator tokens are delivered as mounted Secrets.
 
+## Usage
+
+A running app is metered for its replicas' CPU, RAM, GPU and GPU memory (lake#643) and, since
+lake#661, for the bytes it receives and sends through the ingress: the Orama operator reads the
+ingress controller's per-Ingress byte counters and reports them by app and hour (`app_transfer`,
+migration `0079`), and Lake adds each closed hour to the app's workspace as `transfer` (`in`, `out`,
+`object_id` the app), billed at the `transfer` rate. An hour appears on the Usage page once it has
+closed ([metering](metering.md#app-traffic)).
+
 ## Secret environment
 
 A secret environment value names one field of one secret in a secret mount of the app's own

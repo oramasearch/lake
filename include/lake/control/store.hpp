@@ -385,6 +385,18 @@ struct WorkloadResources {
     std::uint64_t vram_bytes = 0;
     std::string observed_at;
 };
+// An app's traffic through the ingress in one UTC hour (migration 0079, lake#661,
+// docs/api/metering.md#app-traffic), written only by the Orama operator from the ingress
+// controller's byte counters: `in_bytes` clients sent to the app, `out_bytes` it sent back. The
+// operator adds each poll's increase to its hour's row; lake charges a closed hour once.
+struct AppTransfer {
+    std::string app_id;
+    std::string workspace_id;
+    std::string hour; // "YYYY-MM-DDTHH:00:00Z"
+    std::uint64_t in_bytes = 0;
+    std::uint64_t out_bytes = 0;
+    std::string observed_at;
+};
 struct Workspace {
     std::string id, customer_id, name, environment;
     std::string desired = "running";
@@ -1590,6 +1602,12 @@ public:
     // demos (it replaces the row of the kind and id).
     virtual Result<std::vector<WorkloadResources>> workload_resources() = 0;
     virtual Result<void> put_workload_resources(const WorkloadResources& row) = 0;
+    // Each app's traffic through the ingress by hour (migration 0079, lake#661), the rows of
+    // `since_hour` and later, oldest hour first. The Orama operator writes them;
+    // add_app_transfer is the same write (it adds to the row of the app and hour), for tests and
+    // local demos.
+    virtual Result<std::vector<AppTransfer>> app_transfer(const std::string& since_hour) = 0;
+    virtual Result<void> add_app_transfer(const AppTransfer& row) = 0;
     virtual Result<BillingPlan> put_billing_plan(const BillingPlan& plan) = 0;
     virtual Result<Invoice> create_invoice(const Invoice& invoice) = 0;
     virtual Result<std::vector<Invoice>> list_invoices(const std::string& customer_id) = 0;

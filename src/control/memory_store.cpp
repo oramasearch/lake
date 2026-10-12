@@ -2375,6 +2375,34 @@ Result<std::vector<WorkloadResources>> InMemoryStore::workload_resources() {
     return rows;
 }
 
+Result<std::vector<AppTransfer>> InMemoryStore::app_transfer(const std::string& since_hour) {
+    std::lock_guard lock(mutex_);
+    std::vector<AppTransfer> rows;
+    for (const auto& [key, row] : app_transfer_) {
+        if (row.hour >= since_hour) {
+            rows.push_back(row);
+        }
+    }
+    return rows;
+}
+
+Result<void> InMemoryStore::add_app_transfer(const AppTransfer& row) {
+    const bool hour = row.hour.size() == 20 && row.hour[10] == 'T' &&
+                      row.hour.substr(13) == ":00:00Z";
+    if (row.app_id.empty() || row.workspace_id.empty() || !hour) {
+        return std::unexpected(StoreError{"invalid_input", "not an app transfer row"});
+    }
+    std::lock_guard lock(mutex_);
+    AppTransfer& stored = app_transfer_[{row.hour, row.app_id}];
+    stored.app_id = row.app_id;
+    stored.workspace_id = row.workspace_id;
+    stored.hour = row.hour;
+    stored.in_bytes += row.in_bytes;
+    stored.out_bytes += row.out_bytes;
+    stored.observed_at = now_iso8601();
+    return {};
+}
+
 Result<void> InMemoryStore::put_workload_resources(const WorkloadResources& row) {
     static const std::set<std::string> kinds{
         "workspace", "service", "store", "app", "build", "agent_launch", "agent_cron_run",

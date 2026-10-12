@@ -709,6 +709,91 @@ liquid::runtime::task<void> charge_finished_jobs(ApiContext& context,
     co_return {};
 }
 
+// App traffic through the ingress (lake#661, docs/api/metering.md#app-traffic). The operator adds
+// what it reads from the ingress controller to the row of the app and the hour it read it in; an
+// hour is charged once it has closed and the operator's last poll of it has landed. Rows older
+// than the window are past the operator's retention.
+constexpr std::int64_t app_traffic_window_ms = 7 * day_ms;
+constexpr std::int64_t app_traffic_settle_ms = 5 * 60'000;
+
+// Charges every closed hour of app traffic in `rows` whose workspace is in `workspaces` and that
+// was not charged before: its bytes as `transfer` (`in`, `out`, `object_id` the app) in the hour
+// they moved, after recording `if_absent` in the workspace that the hour was charged
+// (lake_metering_app_transfer_records). At most once, never twice.
+liquid::runtime::task<void> charge_app_traffic(ApiContext& context,
+                                               const std::string& customer_id,
+                                               const std::vector<control::AppTransfer>& rows,
+                                               const std::set<std::string>& workspaces,
+                                               std::chrono::system_clock::time_point at,
+                                               UsageSampleReport& report) {
+    const std::int64_t now_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(at.time_since_epoch()).count();
+    const std::int64_t from_ms = floor_to(now_ms - app_traffic_window_ms, hour_ms);
+    std::map<std::string, std::vector<std::pair<const control::AppTransfer*, std::int64_t>>>
+        by_workspace;
+    for (const control::AppTransfer& row : rows) {
+        const auto hour = utc_ms(row.hour);
+        if (!workspaces.contains(row.workspace_id) || !hour || *hour < from_ms ||
+            *hour + hour_ms + app_traffic_settle_ms > now_ms ||
+            (row.in_bytes == 0 && row.out_bytes == 0)) {
+            continue;
+        }
+        by_workspace[row.workspace_id].emplace_back(&row, *hour);
+    }
+    for (auto& [workspace_id, hours] : by_workspace) {
+        auto records = workspace_records(context, customer_id, workspace_id);
+        if (!records) {
+            report.unmeasured.push_back("App traffic of workspace " + workspace_id + ": " +
+                                        records.error().message);
+            continue;
+        }
+        auto charged = control::settled(
+            co_await control::list_metered_app_hours(*records, customer_id, from_ms * 1000));
+        if (!charged) {
+            report.unmeasured.push_back("App traffic of workspace " + workspace_id + ": " +
+                                        charged.error().message);
+            continue;
+        }
+        std::set<std::string> seen;
+        for (const control::MeteredAppHour& hour : *charged) {
+            seen.insert(hour.app_id + ":" + hour.hour);
+        }
+        std::size_t written = 0;
+        for (const auto& [row, hour_start] : hours) {
+            const std::string hour = utc_text(hour_start);
+            if (seen.contains(row->app_id + ":" + hour)) {
+                continue;
+            }
+            if (written == jobs_per_sample) {
+                break;
+            }
+            ++written;
+            auto recorded = control::settled(co_await control::record_metered_app_hour(
+                *records, {customer_id, row->app_id, hour, row->in_bytes, row->out_bytes}));
+            if (!recorded) {
+                report.unmeasured.push_back("App traffic of app " + row->app_id + ": " +
+                                            recorded.error().message);
+                continue;
+            }
+            if (!*recorded) {
+                continue; // another lake charged it first
+            }
+            std::vector<UsageRecorder::Increment> bytes;
+            if (row->in_bytes > 0) {
+                bytes.push_back(
+                    {"transfer", row->in_bytes, {{"kind", "in"}, {"object_id", row->app_id}}});
+            }
+            if (row->out_bytes > 0) {
+                bytes.push_back(
+                    {"transfer", row->out_bytes, {{"kind", "out"}, {"object_id", row->app_id}}});
+            }
+            report.increments += bytes.size();
+            context.usage_recorder->add_together(workspace_id, std::move(bytes), time_of(hour_start));
+        }
+    }
+    co_return {};
+}
+
 // The running workloads of the chosen workspaces the operator has not reported the resources of,
 // by name, and the finished builds, agent jobs and cron runs of [from, to) without them: their
 // CPU, RAM, GPU and VRAM are not counted (usage_over_time's not_measured).
@@ -1152,11 +1237,8 @@ liquid::runtime::task<UsageReading> read_usage(ApiContext& context, const UsageQ
                 "storage_usage), so only its datasets are counted (lake#658).");
         }
     }
-    if (wants("transfer")) {
-        reading.not_measured.push_back(
-            "Transfer of apps through the ingress: the Orama operator does not report it yet "
-            "(lake#661).");
-    }
+    // App traffic through the ingress is charged from the operator's reports, each closed hour
+    // once (lake#661).
     co_return reading;
 }
 
@@ -1707,6 +1789,18 @@ liquid::runtime::task<UsageSampleReport> sample_usage(ApiContext& context,
     } else {
         report.unmeasured.push_back("Workload resources: " + rows.error());
     }
+    // App traffic through the ingress the Orama operator reports (lake#661), read once a sample.
+    std::optional<std::vector<control::AppTransfer>> app_traffic;
+    {
+        const std::int64_t now_ms =
+            std::chrono::duration_cast<std::chrono::milliseconds>(at.time_since_epoch()).count();
+        if (auto rows = context.store->app_transfer(
+                utc_text(floor_to(now_ms - app_traffic_window_ms, hour_ms)))) {
+            app_traffic = std::move(*rows);
+        } else {
+            report.unmeasured.push_back("App traffic: " + rows.error().message);
+        }
+    }
     const auto spend = [&](const std::string& workspace_id,
                            std::string_view dimension,
                            std::uint64_t value,
@@ -2061,6 +2155,11 @@ liquid::runtime::task<UsageSampleReport> sample_usage(ApiContext& context,
             }
             static_cast<void>(co_await charge_finished_jobs(
                 context, customer.id, jobs.jobs, *resources, at, report));
+        }
+
+        if (app_traffic) {
+            static_cast<void>(co_await charge_app_traffic(
+                context, customer.id, *app_traffic, live_ids, at, report));
         }
 
         // Repository build results finished since a little before the last sample, for their

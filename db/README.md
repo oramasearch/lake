@@ -357,7 +357,14 @@ workspace's own methodology (lake writes it and notifies `lake_services`), and
 `methodology_run_status` (the Orama operator writes it: phase, message, exit code, the SHA-256 of
 the run's credential, when the sandbox pod started and finished), and the `methodology_run` kind of
 `workload_resources`. Ids, images, resources and phases only: parameters, data, metrics and the
-artifact stay in the workspace Zetta. Nothing is dropped; idempotent. The latest guard is
+artifact stay in the workspace Zetta. Nothing is dropped; idempotent. The guard was
 `methodology_runs_guard`; the operator must vendor this schema, select that guard and run the
 pods (orama-operator#291) before rollout. See
 [schema.md](../docs/control-plane/schema.md#methodology-runs-migration).
+
+Migration `0079_app_transfer` (lake#661) adds `app_transfer`, the bytes each app received and sent
+through the ingress controller, one row per app and UTC hour, written only by the Orama operator
+from the controller's per-Ingress byte counters. Numbers only. Lake charges each closed hour once as
+`transfer` in the app's workspace Zetta. Nothing is dropped; idempotent. The latest guard is
+`app_transfer_guard`; the operator must vendor this schema, select that guard and report app
+traffic before rollout. See [schema.md](../docs/control-plane/schema.md#app-transfer-migration).
