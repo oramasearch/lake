@@ -2137,6 +2137,9 @@ liquid::runtime::task<ApiResult> get_methodology_deployment(const json& input,
 
 liquid::runtime::task<ApiResult> list_methodology_deployments(const json& input,
                                                               ApiContext& context) {
+    if (auto refusal = authorize_space_read(input, context)) {
+        co_return *refusal;
+    }
     const std::string customer_id = input.at("customer_id");
     const std::string workspace_id = input.at("workspace_id");
     const auto deployments = context.store->list_methodology_deployments(
@@ -2736,6 +2739,7 @@ void register_methodology_capabilities(Registry& registry) {
          {"required", json::array({"deployments"})}},
         true,
         list_methodology_deployments);
+    deployments.authorizes_candidates = true;
     registry.add(std::move(deployments));
     Capability deployment_input{
         .name = "methodology_deployment_input",

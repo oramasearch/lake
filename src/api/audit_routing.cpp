@@ -340,6 +340,7 @@ constexpr std::array workspace = std::to_array<std::string_view>({
     "get_experiment_analysis",
     "get_mcp_connection",
     "get_methodology",
+    "get_methodology_deployment",
     "get_methodology_run",
     "get_model",
     "get_pipeline",
@@ -383,6 +384,7 @@ constexpr std::array workspace = std::to_array<std::string_view>({
     "list_mcp_connection_calls",
     "list_mcp_connection_tools",
     "list_mcp_connections",
+    "list_methodology_deployments",
     "list_methodology_runs",
     "list_opportunities",
     "list_releases",
@@ -402,6 +404,10 @@ constexpr std::array workspace = std::to_array<std::string_view>({
     "load_drive_model",
     "map_review_anchors",
     // The operator's delivery of a secret to a Kubernetes Secret: the mount's workspace (lake#625).
+    // A served model's stage (lake#690) and a run's artifact chunks: the workspace of the
+    // deployment or run.
+    "methodology_deployment_input",
+    "methodology_run_artifact",
     "methodology_run_input",
     "methodology_run_output",
     "mint_sealed_secret",

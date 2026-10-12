@@ -263,7 +263,7 @@ function Inference({ version }: { version: Row }) {
         {on && methodology && !server.state.ready && (
           <div className="mt-3">
             <Notice tone={server.state.tone === "danger" ? "danger" : "info"}>
-              Its server is {server.state.label}{server.message ? `: ${server.message}` : "."} <code>predict</code> answers once it is serving.
+              {server.message || `Its server is ${server.state.label}.`} <code>predict</code> answers once it is serving.
             </Notice>
           </div>
         )}
