@@ -945,6 +945,25 @@ vendors the schema, selects that guard and runs the pods in its own pull request
 ([orama-operator#291](https://github.com/oramasearch/orama-operator/issues/291)) before a lake with this
 change is rolled.
 
+## Store mounts migration
+
+`0079_store_mounts` (lake#666) records which services and apps mount a store, and how much of a
+store is used ([`storage.md#mounts`](storage.md#mounts)):
+
+- `store_mounts` (lake writes it when a service or an app is created or edited with `stores`, in
+  the transaction that bumps the workload's `generation` and `NOTIFY`s `lake_services`):
+  `store_id` (cascades with the store), `object_kind` (`service` or `app`), `object_id`,
+  `mount_path` (`''`, or an absolute path matching `^/[A-Za-z0-9._/-]{1,255}$`), `read_only`,
+  `created_at`; primary key `(store_id, object_kind, object_id)`, index on
+  `(object_kind, object_id)`;
+- `store_status.used_bytes` and `used_bytes_at`, written only by the operator: the bytes in use
+  and when they were measured (null until measured).
+
+Content-free desired state: ids, a path and a flag. Nothing is dropped; idempotent; guard
+`store_mounts_guard`. The operator vendors the schema, selects that guard, mounts the stores into
+the workloads' pods and reports used space in its own pull request before a lake with this change
+is rolled.
+
 ## Repository workspaces migration
 
 `0051_repository_workspaces` adds `repositories.workspace_id` (references `workspaces`, index

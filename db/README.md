@@ -361,3 +361,15 @@ artifact stay in the workspace Zetta. Nothing is dropped; idempotent. The latest
 `methodology_runs_guard`; the operator must vendor this schema, select that guard and run the
 pods (orama-operator#291) before rollout. See
 [schema.md](../docs/control-plane/schema.md#methodology-runs-migration).
+
+Migration `0079_store_mounts` (lake#666) adds `store_mounts`, one row per store a service or an app
+mounts (lake writes it when a service or an app is created or edited with `stores`, bumps the
+workload's generation and notifies `lake_services`): `store_id`, `object_kind` (`service` or
+`app`), `object_id`, `mount_path` (a volume's absolute path in the containers; '' for a bucket,
+which is mounted as environment variables) and `read_only`. It also adds `store_status.used_bytes`
+and `used_bytes_at`, which the Orama operator writes when it can measure a store's used space.
+Ids, a path and a flag only. Nothing is dropped; idempotent. The latest guard is
+`store_mounts_guard`; the operator must vendor this schema, select that guard, mount the stores and
+report used space before rollout. See
+[storage.md](../docs/control-plane/storage.md#mounts) and
+[schema.md](../docs/control-plane/schema.md#store-mounts-migration).

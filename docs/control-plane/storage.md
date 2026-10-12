@@ -52,6 +52,49 @@ warning; the operator's join leaves such a store out until someone sets its work
 lake sends `NOTIFY lake_services, '<store id>'` in the transaction of every insert and every
 withdrawal, on the same channel as services, so the operator's listener wakes the Lake at once.
 
+## Mounts
+
+Migration `0079_store_mounts` (lake#666) records **which services and apps mount a store** and
+**how much of a store is used**.
+
+`store_mounts` — written by lake only, one row per store a workload mounts: `store_id`,
+`object_kind` (`service` or `app`), `object_id`, `mount_path`, `read_only`, `created_at`. lake
+writes the rows when a service or an app is created or edited with `stores`
+(`[{store_id, mount_path?, read_only?}]`), in the transaction that bumps the workload's
+`generation` and sends `NOTIFY lake_services`, as for its other edits. Ids, a path and a flag: no
+content.
+
+| Store | Mounted by | `mount_path` | What the operator gives the workload's containers |
+|---|---|---|---|
+| `volume` (`ReadWriteOnce`) | at most one workload; a second is refused (`conflict`, naming who mounts it) | required, absolute (`^/[A-Za-z0-9._/-]{1,255}$`) | the claim `<lake>-<slug>` mounted at `mount_path`, read-only when `read_only` |
+| bucket (`r2`, `s3`, `b2`, `gcs`, `azure`) | any number of workloads | none (`''`) | the connection as environment variables, prefix `STORE_<NAME>_` (the store name upper-cased, `-` to `_`): `_BUCKET`, `_ENDPOINT`, `_REGION`, `_PREFIX`, and the credential fields from Secret `<lake>-<slug>` (`_ACCESS_KEY_ID`, `_SECRET_ACCESS_KEY`, `_SESSION_TOKEN` / `_ACCOUNT_KEY`, `_SAS_TOKEN`, each optional) |
+| Lake-run (`zetta`, `lake`) | not mountable: lake refuses it (`invalid_input`); the workspace reads it through Lake | | |
+
+Only workloads whose pods the operator builds can mount: **apps** (`LakeApp`) and the service kinds
+whose pod template the operator writes itself, `sqlite`, `duckdb` and `polars`
+(`control::service_kind_mounts_stores`). The other kinds (`zetta`, `postgres`, `kafka`,
+`clickhouse`, `tidb`, `cassandra`, `valkey`) are run by their own operator, which owns their pods,
+and are refused (`invalid_input`, with that reason). A store must belong to the workload's
+workspace and be present.
+
+Deleting a service or an app removes its mounts in the same transaction. Deleting a store that is
+mounted is refused (`conflict`, naming the services and apps that mount it): remove it from them
+first, so a workload never loses a volume it was given without being told.
+
+**Used space.** `store_status.used_bytes` and `used_bytes_at` are written by the operator only:
+for a volume, from the kubelet's volume stats of the pod that mounts it (null until it is mounted
+and measured). The row is not rewritten on every poll unless the value moved by more than 1 MiB or
+15 minutes passed.
+
+**What lake answers.** `list_stores` answers, per store, `mounted_by: [{kind, id, name,
+mount_path, read_only}]`, `used_bytes` (null: not measured) and `used_bytes_at`. `list_services`
+and the app reads answer each workload's `stores: [{store_id, name, type, provider, mount_path,
+read_only}]`.
+
+**What the operator reads.** Its polls read the mounts with the workload, joined to the stores
+(slug, type, provider, name, desired); a copy of the statement is in
+`tests/test_operator_contract.cpp`.
+
 ## What the operator does
 
 On the services poll (and on a `lake_services` notification), for a Lake with services enabled,
