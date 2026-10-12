@@ -55,7 +55,10 @@ and gives the credential:
 - the **Lake reads** each of its skills grants, and nothing for a skill lake does not know.
 
 A skill's changes are never scopes: agent-runtime turns them into proposals a person confirms, and
-the confirmed change runs as that person. Which reads each skill grants is agent-runtime's decision
+the confirmed change runs as that person. The few engine actions a skill lets agent-runtime call
+directly (`check_pipeline`, `start_run`, `generate_dataset`, `decide`, `record_outcome`,
+agent-runtime#11) need no scope of their own: `workspace_act`, which every run has, grants each named
+engine action ([engine-capabilities.md](engine-capabilities.md)), and the engine's policy decides. Which reads each skill grants is agent-runtime's decision
 (`skills.py`, published as `skills.json`); lake vendors it with
 `tools/agents/vendor-agent-skills.py <agent-runtime>/skills.json` into
 `src/control/agent_skills.cpp` (and the labels into

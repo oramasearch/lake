@@ -144,6 +144,8 @@ json McpConnectionCodec::encode(const McpConnection& connection) {
             {"streams_set_by", connection.streams_set_by},
             {"input_cursor", connection.input_cursor},
             {"pending_launches", connection.pending_launches},
+            {"app_id", connection.app_id},
+            {"stdio", connection.stdio},
             {"status", connection.status},
             {"last_error", connection.last_error},
             {"refreshed_at", connection.refreshed_at},
@@ -199,6 +201,11 @@ std::optional<McpConnection> McpConnectionCodec::decode(const StoredRecord& reco
         if (launch.is_string()) {
             connection.pending_launches.push_back(launch.get<std::string>());
         }
+    }
+    connection.app_id = text(body, "app_id");
+    connection.stdio = body.value("stdio", json::object());
+    if (!connection.stdio.is_object()) {
+        connection.stdio = json::object();
     }
     connection.status = text(body, "status");
     connection.last_error = text(body, "last_error");

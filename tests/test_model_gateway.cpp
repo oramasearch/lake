@@ -5,7 +5,18 @@
 
 #include <gtest/gtest.h>
 
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <sys/time.h>
+#include <unistd.h>
+
+#include <algorithm>
 #include <atomic>
+#include <cctype>
+#include <chrono>
+#include <sstream>
+#include <thread>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -52,17 +63,32 @@ const std::string chat_stream =
     "{\"prompt_tokens\":40,\"completion_tokens\":2,\"total_tokens\":42}}\n\n"
     "data: [DONE]\n\n";
 
-// A provider that answers what it is told and remembers every request.
+// A provider that answers what it is told and remembers every request. A request that takes
+// its body as it arrives gets a 2xx answer in small pieces that cut across the events' lines.
 struct FakeProvider {
     std::mutex mutex;
     std::vector<ModelProviderRequest> requests;
     ModelProviderResponse answer{200, chat_answer.dump(), {}};
+    std::size_t piece_size = 13;
 
     lake::api::ModelProvider provider() {
         return [this](const ModelProviderRequest& request) {
-            std::lock_guard lock(mutex);
-            requests.push_back(request);
-            return answer;
+            ModelProviderResponse out;
+            {
+                std::lock_guard lock(mutex);
+                requests.push_back(request);
+                out = answer;
+            }
+            if (request.on_body && out.status >= 200 && out.status < 300) {
+                const std::string body = std::exchange(out.body, std::string());
+                for (std::size_t at = 0; at < body.size(); at += piece_size) {
+                    if (!request.on_body(std::string_view(body).substr(at, piece_size))) {
+                        out.error = "the response body's reader stopped";
+                        break;
+                    }
+                }
+            }
+            return out;
         };
     }
     std::size_t calls() {
@@ -263,8 +289,13 @@ TEST(ModelGateway, OpenAIProviderSendsLakesKeyToTheConfiguredBase) {
     std::string url, body;
     std::vector<std::pair<std::string, std::string>> headers;
     const auto provider = lake::api::openai_model_provider(
-        "sk-platform", "http://127.0.0.1:9/v1/", [&](const std::string& to, std::string sent,
-                                                     auto sent_headers, std::chrono::seconds) {
+        "sk-platform",
+        "http://127.0.0.1:9/v1/",
+        [&](const std::string& to,
+            std::string sent,
+            auto sent_headers,
+            std::chrono::seconds,
+            const lake::api::ModelBodySink&) {
             url = to;
             body = std::move(sent);
             headers = std::move(sent_headers);
@@ -344,6 +375,86 @@ TEST(ModelCompletion, CountsAStreamFromItsLastEventAndAnswersTheWholeStream) {
     EXPECT_EQ(rig.workspaces.records(rig.home).metric_total("lake_usage",
                                                             {{"dimension", "model_tokens"}}),
               42);
+}
+
+// lake#665: a stream read piece by piece, however the pieces cut its events, says what the
+// whole stream says.
+TEST(ModelGateway, ReadsAStreamsUsageHoweverItsPiecesFall) {
+    const auto whole = lake::api::model_usage(chat_stream, true);
+    for (const std::size_t size : {std::size_t{1}, std::size_t{7}, std::size_t{64}}) {
+        lake::api::ModelStreamUsage reader;
+        for (std::size_t at = 0; at < chat_stream.size(); at += size) {
+            reader.feed(std::string_view(chat_stream).substr(at, size));
+        }
+        reader.finish();
+        EXPECT_TRUE(reader.usage().reported) << size;
+        EXPECT_EQ(reader.usage().model, whole.model) << size;
+        EXPECT_EQ(reader.usage().input_tokens, 40U) << size;
+        EXPECT_EQ(reader.usage().output_tokens, 2U) << size;
+    }
+    // A last event without its line end is still read.
+    lake::api::ModelStreamUsage unterminated;
+    unterminated.feed("data: {\"usage\":{\"input_tokens\":5,\"output_tokens\":1}}");
+    EXPECT_FALSE(unterminated.usage().reported);
+    unterminated.finish();
+    EXPECT_TRUE(unterminated.usage().reported);
+    EXPECT_EQ(unterminated.usage().input_tokens, 5U);
+}
+
+// lake#665: the `/openai/v1/*` route hands model_completion its caller's stream; each piece goes
+// on as it arrives, and the usage is still counted from the event that carries it.
+TEST(ModelCompletion, RelaysAStreamToItsCallerAndCountsItsLastEvent) {
+    GatewayRig rig;
+    rig.fake.answer = {200, chat_stream, {}};
+    const auto task = rig.task(rig.home, "agent-project");
+    auto context = rig.task_context(task);
+    std::vector<std::string> relayed;
+    context.model_stream = [&](std::string_view piece) {
+        relayed.emplace_back(piece);
+        return true;
+    };
+    const auto answered = rig.call(chat(true), context);
+    ASSERT_TRUE(answered.ok) << answered.error.message;
+    EXPECT_GT(relayed.size(), 1U) << "the stream went on in pieces";
+    std::string joined;
+    for (const auto& piece : relayed) {
+        joined += piece;
+    }
+    EXPECT_EQ(joined, chat_stream);
+    EXPECT_FALSE(answered.value.contains("events")) << "the caller already has the stream";
+    EXPECT_EQ(answered.value["streamed"], true);
+    EXPECT_EQ(answered.value["model"], "gpt-5.5-2026-08-01");
+    EXPECT_EQ(answered.value["input_tokens"], 40);
+    EXPECT_EQ(answered.value["output_tokens"], 2);
+    EXPECT_EQ(context.audit_details["usage_reported"], true);
+    static_cast<void>(liquid::runtime::block_on(rig.recorder.flush()));
+    EXPECT_EQ(rig.workspaces.records(rig.home).metric_total("lake_usage",
+                                                            {{"dimension", "model_tokens"}}),
+              42);
+}
+
+TEST(ModelCompletion, AuditsARelayedStreamWithoutUsageAsUnreported) {
+    GatewayRig rig;
+    const std::string no_usage =
+        "data: {\"id\":\"c\",\"model\":\"gpt-5.5\",\"choices\":[{\"index\":0,\"delta\":"
+        "{\"content\":\"Hi\"}}]}\n\n"
+        "data: [DONE]\n\n";
+    rig.fake.answer = {200, no_usage, {}};
+    const auto task = rig.task(rig.home, "agent-project");
+    auto context = rig.task_context(task);
+    std::string joined;
+    context.model_stream = [&](std::string_view piece) {
+        joined.append(piece);
+        return true;
+    };
+    const auto answered = rig.call(chat(true), context);
+    ASSERT_TRUE(answered.ok) << answered.error.message;
+    EXPECT_EQ(joined, no_usage);
+    EXPECT_EQ(answered.value["usage_reported"], false);
+    EXPECT_EQ(answered.value["recorded"], false);
+    EXPECT_EQ(context.audit_details["usage_reported"], false);
+    EXPECT_EQ(context.audit_details["input_tokens"], 0);
+    EXPECT_EQ(context.audit_details["output_tokens"], 0);
 }
 
 TEST(ModelCompletion, CountsALaunchedAgentsCallsAndRefusesEveryOtherCaller) {
@@ -513,6 +624,210 @@ TEST(ModelGatewayRoute, AnswersTheOpenAIShapeForATaskCredential) {
     EXPECT_EQ(invalid["error"]["param"], "/request/model");
     EXPECT_EQ(fake.calls(), 1U);
     server.stop();
+}
+
+// A model provider on loopback that streams a chat completion in chunked transfer: it sends its
+// first event, then holds the last until `release` is set (or a deadline passes) and records
+// whether it was released before it sent the last.
+class StreamingProvider {
+public:
+    StreamingProvider() {
+        listener_ = ::socket(AF_INET, SOCK_STREAM, 0);
+        int yes = 1;
+        ::setsockopt(listener_, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
+        sockaddr_in address{};
+        address.sin_family = AF_INET;
+        address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        address.sin_port = 0;
+        ::bind(listener_, reinterpret_cast<sockaddr*>(&address), sizeof(address));
+        ::listen(listener_, 4);
+        socklen_t length = sizeof(address);
+        ::getsockname(listener_, reinterpret_cast<sockaddr*>(&address), &length);
+        port_ = ntohs(address.sin_port);
+        thread_ = std::thread([this] { serve(); });
+    }
+    ~StreamingProvider() {
+        release.store(true);
+        ::shutdown(listener_, SHUT_RDWR);
+        ::close(listener_);
+        if (thread_.joinable()) {
+            thread_.join();
+        }
+    }
+    std::string base_url() const {
+        return "http://127.0.0.1:" + std::to_string(port_) + "/v1";
+    }
+
+    std::atomic<bool> release{false};
+    std::atomic<bool> released_before_last{false};
+    std::atomic<bool> sent_last{false};
+    std::string request_head;
+
+    static constexpr std::string_view first =
+        "data: {\"id\":\"c\",\"model\":\"gpt-5.5-2026-08-01\",\"choices\":[{\"index\":0,"
+        "\"delta\":{\"content\":\"FIRST\"}}],\"usage\":null}\n\n";
+    static constexpr std::string_view last =
+        "data: {\"id\":\"c\",\"model\":\"gpt-5.5-2026-08-01\",\"choices\":[],\"usage\":"
+        "{\"prompt_tokens\":40,\"completion_tokens\":2,\"total_tokens\":42}}\n\n"
+        "data: [DONE]\n\n";
+
+private:
+    static void send_all(int fd, std::string_view bytes) {
+        while (!bytes.empty()) {
+            const auto sent = ::send(fd, bytes.data(), bytes.size(), 0);
+            if (sent <= 0) {
+                return;
+            }
+            bytes.remove_prefix(static_cast<std::size_t>(sent));
+        }
+    }
+    static std::string chunk(std::string_view data) {
+        std::ostringstream out;
+        out << std::hex << data.size() << "\r\n" << data << "\r\n";
+        return out.str();
+    }
+    void serve() {
+        const int fd = ::accept(listener_, nullptr, nullptr);
+        if (fd < 0) {
+            return;
+        }
+        std::string received;
+        char buffer[4096];
+        std::size_t head_end = std::string::npos;
+        std::size_t wanted = 0;
+        for (;;) {
+            const auto got = ::recv(fd, buffer, sizeof(buffer), 0);
+            if (got <= 0) {
+                break;
+            }
+            received.append(buffer, static_cast<std::size_t>(got));
+            if (head_end == std::string::npos) {
+                head_end = received.find("\r\n\r\n");
+                if (head_end != std::string::npos) {
+                    std::string head = received.substr(0, head_end);
+                    std::ranges::transform(head, head.begin(), [](unsigned char c) {
+                        return static_cast<char>(std::tolower(c));
+                    });
+                    const auto length = head.find("content-length:");
+                    wanted = length == std::string::npos
+                                 ? 0
+                                 : std::stoul(head.substr(length + 15));
+                }
+            }
+            if (head_end != std::string::npos && received.size() >= head_end + 4 + wanted) {
+                break;
+            }
+        }
+        request_head = received.substr(0, head_end);
+        send_all(fd,
+                 "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n"
+                 "Transfer-Encoding: chunked\r\nConnection: close\r\n\r\n");
+        send_all(fd, chunk(first));
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+        while (!release.load() && std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        released_before_last.store(release.load());
+        send_all(fd, chunk(last));
+        sent_last.store(true);
+        send_all(fd, "0\r\n\r\n");
+        ::shutdown(fd, SHUT_RDWR);
+        ::close(fd);
+    }
+
+    int listener_ = -1;
+    unsigned short port_ = 0;
+    std::thread thread_;
+};
+
+// lake#665, over the real server and its outbound client: a caller streaming through
+// `/openai/v1/chat/completions` reads the provider's first event while the provider still holds
+// its last, and the usage in the last event is counted.
+TEST(ModelGatewayRoute, RelaysEachEventAsTheProviderSendsIt) {
+    auto store = std::make_shared<lake::control::InMemoryStore>();
+    lake::test::RecordWorkspaces workspaces(store);
+    const std::string customer = space(*store, "gateway-stream");
+    const std::string home = workspaces.create(customer, "home");
+    const auto owner = store->get_customer(customer);
+    ASSERT_TRUE(owner);
+    lake::control::AgentTask row;
+    row.id = lake::control::new_uuid_v4();
+    row.customer_id = customer;
+    row.agent = "agent-ask-orama";
+    row.kind = "turn";
+    row.workspace_id = home;
+    row.scopes = {"workspace_query"};
+    row.requested_by_user_id = owner->user_id;
+    ASSERT_TRUE(store->create_agent_task(row));
+    const std::string credential =
+        std::string(lake::control::agent_task_credential_prefix) + row.id +
+        ".0123456789abcdef0123456789abcdef";
+    ASSERT_TRUE(store->claim_agent_task(
+        row.id, row.agent, lake::control::identity_crypto::sha256_hex(credential)));
+
+    StreamingProvider provider;
+    lake::api::ApiServer server({.port = 0,
+                                 .node_name = "gateway-stream-test",
+                                 .store = store,
+                                 .workspaces = workspaces.service,
+                                 .admin_token = "gateway-admin",
+                                 .instance_kek = std::string(kek),
+                                 .openai_api_key = "sk-fake-provider",
+                                 .model_provider_url = provider.base_url()});
+    ASSERT_TRUE(server.start()) << server.reason();
+
+    const int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+    ASSERT_GE(fd, 0);
+    sockaddr_in address{};
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    address.sin_port = htons(static_cast<unsigned short>(server.port()));
+    ASSERT_EQ(::connect(fd, reinterpret_cast<sockaddr*>(&address), sizeof(address)), 0);
+    timeval wait{20, 0};
+    ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &wait, sizeof(wait));
+    const std::string body = chat(true)["request"].dump();
+    const std::string sent = "POST /openai/v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+                             "Authorization: Bearer " +
+                             credential +
+                             "\r\nContent-Type: application/json\r\nAccept: text/event-stream\r\n"
+                             "Connection: close\r\nContent-Length: " +
+                             std::to_string(body.size()) + "\r\n\r\n" + body;
+    ASSERT_EQ(::send(fd, sent.data(), sent.size(), 0), static_cast<ssize_t>(sent.size()));
+
+    std::string received;
+    char buffer[4096];
+    bool saw_first_early = false;
+    for (;;) {
+        const auto got = ::recv(fd, buffer, sizeof(buffer), 0);
+        if (got <= 0) {
+            break;
+        }
+        received.append(buffer, static_cast<std::size_t>(got));
+        if (!provider.release.load() && received.find("FIRST") != std::string::npos) {
+            // The first event is here; the provider has not sent its last.
+            saw_first_early = !provider.sent_last.load();
+            provider.release.store(true);
+        }
+    }
+    ::close(fd);
+
+    EXPECT_TRUE(saw_first_early) << received;
+    EXPECT_TRUE(provider.released_before_last.load())
+        << "the caller read the first event before the provider sent its last";
+    EXPECT_NE(received.find("HTTP/1.1 200"), std::string::npos) << received;
+    std::string head = received.substr(0, received.find("\r\n\r\n"));
+    std::ranges::transform(
+        head, head.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    EXPECT_NE(head.find("transfer-encoding: chunked"), std::string::npos) << head;
+    EXPECT_NE(head.find("content-type: text/event-stream"), std::string::npos) << head;
+    EXPECT_NE(received.find("\"total_tokens\":42"), std::string::npos) << received;
+    EXPECT_NE(received.find("data: [DONE]"), std::string::npos) << received;
+    EXPECT_NE(provider.request_head.find("Bearer sk-fake-provider"), std::string::npos);
+
+    // The usage of the last event is counted: stopping the server writes what it counted.
+    server.stop();
+    EXPECT_EQ(
+        workspaces.records(home).metric_total("lake_usage", {{"dimension", "model_tokens"}}), 42);
 }
 
 } // namespace

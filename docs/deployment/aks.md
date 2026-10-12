@@ -137,60 +137,22 @@ Removing the entry turns billing off at the next roll; the billing rows stay in 
 
 ## Stripe
 
-Stripe is lake's payment provider (decision 57, lake#620,
-[`../api/billing.md#stripe`](../api/billing.md#stripe)). **Its keys are lake's own platform
-credentials, environment variables of the platform lake runs on, never a user's secret store**
-(lake#628): Railway variables on Orama's own deployments, and on this cluster `spec.env` entries
-whose values come from a Kubernetes Secret through `valueFrom.secretKeyRef`, never a literal in the
-CR. The schema must first carry `0074_payment_provider` (guard `payment_provider_guard`), and
-billing must be on (above).
+Stripe is lake's payment provider (decision 57, lake#620). Its keys are lake's own platform
+credentials: on this cluster, the Secret `lake-prod-stripe` in namespace `lake`, referenced from
+`Lake/prod`'s `spec.env` (`LAKE_STRIPE_SECRET_KEY` and `LAKE_STRIPE_WEBHOOK_SECRET` through
+`valueFrom.secretKeyRef`, never a literal in the CR). Both values are **blank** today (2026-10-11),
+so lake runs the manual provider.
 
-**On this cluster today** (2026-10-11, Steve: *"set the stripe keys (blank or xxx by default)"*):
-the Secret `lake-prod-stripe` exists in namespace `lake` with **blank** `secret_key` and
-`webhook_secret`, and `Lake/prod` already carries both `spec.env` entries pointing at it (step 3
-below is done). Blank keys leave lake on the manual provider, and `server_info` says so
-(`"payment_provider": "manual"`). To turn Stripe on, set the two values (step 2, with
-`--dry-run=client -o yaml | kubectl apply -f -`, since the Secret exists) and roll lake
-(`kubectl rollout restart deployment/lake-prod -n lake`). Then register the webhook (step 1) and
-check (step 4).
+**To set Stripe up, rotate a key or turn it off, follow the runbook:
+[stripe.md](stripe.md).** On a Lake that does not yet carry the two `spec.env` entries, add them:
 
-1. **Stripe.** In the Stripe dashboard, in test mode first: Developers → API keys, the secret key
-   (`sk_test_...`), or a restricted key with write access to Customers, Invoices and Invoice Items.
-   Developers → Webhooks → Add endpoint: `https://lake.oramadev.net/billing/stripe/webhook` (on
-   lake.live, `https://lake.live/billing/stripe/webhook`), events `invoice.paid`,
-   `invoice.payment_failed` and `invoice.voided`; its signing secret is the `whsec_...` value.
-2. **The Kubernetes Secret.** Read each value without echoing it, so it stays out of shell history
-   and every file:
-
-   ```sh
-   read -rs STRIPE_SECRET_KEY; read -rs STRIPE_WEBHOOK_SECRET
-   kubectl --context orama-production-cluster-01 -n lake create secret generic lake-prod-stripe \
-     --from-literal=secret_key="$STRIPE_SECRET_KEY" --from-literal=webhook_secret="$STRIPE_WEBHOOK_SECRET"
-   unset STRIPE_SECRET_KEY STRIPE_WEBHOOK_SECRET
-   ```
-
-3. **Point lake at it.** Only the references go into the CR:
-
-   ```sh
-   kubectl --context orama-production-cluster-01 patch lake prod --type json -p '[
-     {"op": "add", "path": "/spec/env/-", "value": {"name": "LAKE_STRIPE_SECRET_KEY",
-       "valueFrom": {"secretKeyRef": {"name": "lake-prod-stripe", "key": "secret_key"}}}},
-     {"op": "add", "path": "/spec/env/-", "value": {"name": "LAKE_STRIPE_WEBHOOK_SECRET",
-       "valueFrom": {"secretKeyRef": {"name": "lake-prod-stripe", "key": "webhook_secret"}}}}]'
-   ```
-
-4. **Check.** `GET /v1/server_info` answers `"payment_provider": "stripe"` once the rolled lake is
-   up; the Billing page's Payment figure says Stripe. Issue a test-mode invoice, open it, **Pay
-   with Stripe** with a Stripe test card (4242 4242 4242 4242), and the invoice turns paid when
-   Stripe's `invoice.paid` arrives. Stripe's dashboard shows each delivery and lake's answer.
-
-**Rotating** a key: replace the value in `lake-prod-stripe` (`kubectl create secret ... --dry-run=client
--o yaml | kubectl apply -f -`) and roll lake (`kubectl rollout restart deployment/lake-prod -n
-lake`); lake reads its environment only at start. Roll the webhook secret in Stripe ("Roll secret",
-which keeps the old one valid for a while) and roll lake within that window. **Turning it off:**
-remove the two `spec.env` entries; lake falls back to the manual provider and the Billing page says
-card payment is not set up. Invoices already issued through Stripe stay payable there, and Stripe's
-notices are answered `404` until the keys return, so Stripe retries them for three days.
+```sh
+kubectl --context orama-production-cluster-01 patch lake prod -n lake --type json -p '[
+  {"op": "add", "path": "/spec/env/-", "value": {"name": "LAKE_STRIPE_SECRET_KEY",
+    "valueFrom": {"secretKeyRef": {"name": "lake-prod-stripe", "key": "secret_key"}}}},
+  {"op": "add", "path": "/spec/env/-", "value": {"name": "LAKE_STRIPE_WEBHOOK_SECRET",
+    "valueFrom": {"secretKeyRef": {"name": "lake-prod-stripe", "key": "webhook_secret"}}}}]'
+```
 
 ## Runbook
 

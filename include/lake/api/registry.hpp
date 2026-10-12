@@ -138,14 +138,22 @@ using Transcriber =
     std::function<std::expected<Transcription, ApiError>(const TranscriptionRequest& request)>;
 
 // The model gateway's provider (lake#248, docs/api/model-gateway.md, model_gateway.hpp).
+// Receives a successful answer's body piece by piece as it arrives (lake#665); false stops the
+// exchange, as when the caller has gone.
+using ModelBodySink = std::function<bool(std::string_view piece)>;
 struct ModelProviderRequest {
     std::string endpoint; // one of model_gateway_endpoints: chat/completions, responses, embeddings
     std::string body;     // the prepared request, as JSON text
     bool stream = false;
+    // When set, a 2xx answer's body goes to it as it arrives and is not kept in the response's
+    // body; a refusal's body is still kept whole, for its message.
+    ModelBodySink on_body;
 };
 struct ModelProviderResponse {
     int status = 0;
-    std::string body;  // JSON, or the whole server-sent event stream when the request streamed
+    // JSON, or the whole server-sent event stream when the request streamed; empty when the
+    // request's on_body took a 2xx answer
+    std::string body;
     std::string error; // the transport's failure, never the request
 };
 // Sends one request to the model provider with Lake's own key. The HTTP server injects one over
@@ -355,6 +363,11 @@ struct ApiContext {
     // The model gateway's provider (model_completion, docs/api/model-gateway.md); empty when this
     // lake has no OpenAI key.
     ModelProvider model_provider;
+    // The caller's event stream (lake#665): set by the `/openai/v1/*` route, a streamed
+    // model_completion hands it each piece of the provider's event stream as it arrives, instead of
+    // answering the whole stream as `events`. Called on the outbound client's thread; false stops
+    // the stream (the caller has gone). Empty: REST and MCP, which answer `events` whole.
+    ModelBodySink model_stream;
     // The transport to workspace Zettas' object routes, for workspace files (drives with
     // `files` storage, docs/api/drives.md): the HTTP server's pooled client, or a test's fake.
     // Null: this lake keeps no workspace files.
@@ -399,6 +412,9 @@ struct ApiContext {
     // The methodology-runtime image a workspace methodology's image is built from and whose
     // stage and collect pods move its data (LAKE_METHODOLOGY_RUNTIME_IMAGE, lake#655).
     std::string methodology_runtime_image;
+    // The oramasearch/lake-mcp-runner image a stdio MCP connection's App runs
+    // (LAKE_MCP_RUNNER_IMAGE, lake#659); empty: this Lake runs no stdio servers.
+    std::string mcp_runner_image;
     std::string apps_reserved_names;
     std::size_t apps_per_customer = 0;
     std::size_t app_replicas_per_customer = 0;

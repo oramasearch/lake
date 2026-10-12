@@ -7,7 +7,9 @@ import assert from "node:assert/strict";
 import {test} from "node:test";
 
 import {
+    argsOf,
     argumentsFrom,
+    envNameProblem,
     exportWarning,
     formFields,
     hostOf,
@@ -16,6 +18,7 @@ import {
     signInState,
     statusLabel,
     statusTone,
+    stdioCommandLine,
     viaLabel,
 } from "../src/pages/mcp/logic.ts";
 
@@ -105,4 +108,23 @@ test("the re-export switch says who can then call the tools (decision 60)", () =
     assert.match(words, /Anyone who may call Lake's tools in this workspace/);
     assert.match(words, /Ticket Desk/);
     assert.match(words, /only gate/);
+});
+
+// lake#659: a server Lake runs here, as its page shows it and as the new-connection sheet reads it.
+test("a stdio server's command line, arguments and variable names", () => {
+    assert.equal(
+        stdioCommandLine({runtime: "node", package: "@modelcontextprotocol/server-everything@2026.8.31", args: ["stdio"]}),
+        "npx @modelcontextprotocol/server-everything@2026.8.31 stdio",
+    );
+    assert.equal(stdioCommandLine({runtime: "node", package: "@acme/tools@1.2.0", command: "acme-mcp"}), "npx --package @acme/tools@1.2.0 acme-mcp");
+    assert.equal(stdioCommandLine({runtime: "python", package: "mcp-server-fetch==2025.4.7"}), "uvx mcp-server-fetch==2025.4.7");
+    assert.equal(stdioCommandLine({runtime: "python", package: "acme==1.0", command: "acme-mcp", args: ["--root", "/tmp"]}), "uvx --from acme==1.0 acme-mcp --root /tmp");
+    assert.deepEqual(argsOf(" --root \n\n /data \n"), ["--root", "/data"]);
+    assert.equal(envNameProblem("GITHUB_TOKEN"), null);
+    assert.equal(envNameProblem("_private"), null);
+    assert.match(envNameProblem("1BAD") ?? "", /digit/);
+    assert.match(envNameProblem("has space") ?? "", /Letters/);
+    assert.match(envNameProblem("MCP_RUNNER_TOKEN") ?? "", /Lake's/);
+    assert.match(envNameProblem("app_port") ?? "", /Lake's/);
+    assert.equal(statusLabel("starting"), "Starting");
 });

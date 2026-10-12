@@ -4,17 +4,21 @@
  * - Train one: a dataset, the column to predict (none for a methodology that learns without one),
  *   a methodology from `list_methodologies` and a held-out share; `train_model` starts the run and
  *   the model appears with its versions when it finishes.
- * - Bring one: a model file uploaded from this computer, from a drive (`load_drive_model`) or from
- *   a model repository (`resolve_model_file`, then `register_model`), kept so it is scored, served
- *   and compared like a trained one.
+ * - Bring one: a model file uploaded from this computer, from a drive (`load_drive_model`, the file
+ *   chosen with the drive picker over every drive of any kind, lake#682) or from a model repository
+ *   (`resolve_model_file`, then `register_model`), kept so it is scored, served and compared like a
+ *   trained one.
  *
  * The same forms add a version: `RetrainDialog` trains a standalone model again on new settings
  * (`retrain_model`), and `BringDialog` with `versionOf` adds a brought model's next file. An engine
  * older than these capabilities answers `not_supported`, which the form says as it is. */
-import { type ReactNode, useMemo, useState } from "react";
+import { type ReactNode, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Brain, FileUp, FolderGit2, HardDrive, Upload } from "lucide-react";
 import { act, read, useRead, type Row } from "@/lib/api";
+import { FolderPicker } from "../drives/FolderPicker";
+import { bringable, pickedLabel } from "../drives/picker";
+import type { Drive } from "../drives/storage";
 import { Modal } from "@/lib/overlay";
 import { useToast } from "@/lib/toast";
 import { Banner, Button, Field, FormError, fieldError } from "@/lib/ui";
@@ -291,16 +295,17 @@ export function BringDialog({ groups, versionOf, onClose, onBack }: { groups: Mo
   const [from, setFrom] = useState<From>("upload");
   const [name, setName] = useState("");
   const [file, setFile] = useState<File | null>(null);
-  const [driveFile, setDriveFile] = useState("");
+  const [driveFile, setDriveFile] = useState<{ driveId: string; id: string; label: string } | null>(null);
+  const [picking, setPicking] = useState(false);
   const [repository, setRepository] = useState("");
   const [repositoryPath, setRepositoryPath] = useState("model.json");
   const [revision, setRevision] = useState("main");
   const [auc, setAuc] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
-  const recent = useRead<{ items?: Row[] }>(from === "drive" && scope.customerId && scope.workspaceId ? "recent_drive_entries" : null, { customer_id: scope.customerId, workspace_id: scope.workspaceId, limit: 100 });
+  const drives = useRead<{ drives?: Drive[] }>(from === "drive" && scope.customerId && scope.workspaceId ? "list_drives" : null, { customer_id: scope.customerId, workspace_id: scope.workspaceId });
+  const driveList = drives.data?.drives ?? [];
   const repositories = useRead<{ items?: Row[] }>(from === "repository" && scope.customerId ? "list_repositories" : null, { customer_id: scope.customerId, limit: 500 }, { workspace: null });
-  const files = useMemo(() => (recent.data?.items ?? []).filter((item) => item?.entry && text(item.entry as Row, "kind") === "file"), [recent.data]);
   const here = (repositories.data?.items ?? []).filter((r) => text(r, "workspace_id") === scope.workspaceId && !r.deleted_at);
 
   const named = versionOf ? null : nameProblem(name, groups);
@@ -322,8 +327,7 @@ export function BringDialog({ groups, versionOf, onClose, onBack }: { groups: Mo
       };
       let answer: Row;
       if (from === "drive") {
-        const [driveId, id] = driveFile.split("\u0000");
-        answer = await act<Row>("load_drive_model", { ...common, drive_id: driveId, id });
+        answer = await act<Row>("load_drive_model", { ...common, drive_id: driveFile!.driveId, id: driveFile!.id });
       } else if (from === "upload") {
         answer = await act<Row>("register_model", { ...common, weights: await file!.text(), source: `uploaded ${file!.name}` });
       } else {
@@ -348,92 +352,109 @@ export function BringDialog({ groups, versionOf, onClose, onBack }: { groups: Mo
   );
 
   return (
-    <Modal
-      sheet
-      width={600}
-      title={versionOf ? `New Version of ${versionOf.name}` : "Bring a Model"}
-      subtitle="A model trained elsewhere, kept here so it is scored, served and compared like a trained one."
-      onClose={onClose}
-      footer={
-        <>
-          <Button onClick={onBack ?? onClose} disabled={busy}>
-            {onBack ? "Back" : "Cancel"}
-          </Button>
-          <Button variant="primary" loading={busy} disabled={!!problem} onClick={() => void submit()}>
-            {versionOf ? "Add version" : "Bring model"}
-          </Button>
-        </>
-      }
-    >
-      <form
-        className="grid gap-3"
-        onSubmit={(e) => {
-          e.preventDefault();
-          void submit();
-        }}
-      >
-        <div className="flex flex-wrap gap-2" role="group" aria-label="Where the file is">
-          {tab("upload", "This computer", Upload)}
-          {tab("drive", "A drive", HardDrive)}
-          {tab("repository", "A model repository", FolderGit2)}
-        </div>
-        <Banner tone="quiet" title="What can be brought">
-          A gradient-boosted tree model in the engine&apos;s own JSON weights format, the format every model trained in Lake is kept in. Another format is refused and nothing is kept.
-        </Banner>
-        {!versionOf && (
-          <Field label="Name" required error={fieldError(error, "name") ?? (name && named ? named : undefined)}>
-            <input value={name} onChange={(e) => setName(e.target.value)} placeholder="partner churn" maxLength={120} disabled={busy} />
-          </Field>
-        )}
-        {from === "upload" && (
-          <Field label="Model file" required error={fieldError(error, "weights")}>
-            <input type="file" accept=".json,application/json" onChange={(e) => setFile(e.target.files?.[0] ?? null)} disabled={busy} />
-          </Field>
-        )}
-        {from === "drive" && (
-          <Field label="File" required error={fieldError(error, "id")} help={recent.isError ? "The drives could not be read." : files.length === 0 && !recent.isLoading ? "No file in this workspace's drives yet." : "The files of this workspace's drives, newest first."}>
-            <select value={driveFile} onChange={(e) => setDriveFile(e.target.value)} disabled={busy}>
-              <option value="">Choose a file</option>
-              {files.map((item) => {
-                const entry = item.entry as Row;
-                const drive = item.drive as Row;
-                return (
-                  <option key={`${text(drive, "id")}/${text(entry, "id")}`} value={`${text(drive, "id")}\u0000${text(entry, "id")}`}>
-                    {text(drive, "name")}: {text(entry, "path") || text(entry, "name")}
-                  </option>
-                );
-              })}
-            </select>
-          </Field>
-        )}
-        {from === "repository" && (
+    <>
+      <Modal
+        sheet
+        width={600}
+        title={versionOf ? `New Version of ${versionOf.name}` : "Bring a Model"}
+        subtitle="A model trained elsewhere, kept here so it is scored, served and compared like a trained one."
+        onClose={onClose}
+        footer={
           <>
-            <Field label="Repository" required help={repositories.isError ? "The repositories could not be read." : here.length === 0 && !repositories.isLoading ? "This workspace has no repository yet." : undefined}>
-              <select value={repository} onChange={(e) => setRepository(e.target.value)} disabled={busy}>
-                <option value="">Choose a repository</option>
-                {here.map((r) => (
-                  <option key={text(r, "id")} value={text(r, "id")}>
-                    {text(r, "name")}
-                  </option>
-                ))}
-              </select>
-            </Field>
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-[2fr_1fr]">
-              <Field label="Path" required>
-                <input value={repositoryPath} onChange={(e) => setRepositoryPath(e.target.value)} placeholder="model.json" disabled={busy} />
-              </Field>
-              <Field label="Revision">
-                <input value={revision} onChange={(e) => setRevision(e.target.value)} placeholder="main" disabled={busy} />
-              </Field>
-            </div>
+            <Button onClick={onBack ?? onClose} disabled={busy}>
+              {onBack ? "Back" : "Cancel"}
+            </Button>
+            <Button variant="primary" loading={busy} disabled={!!problem} onClick={() => void submit()}>
+              {versionOf ? "Add version" : "Bring model"}
+            </Button>
           </>
-        )}
-        <Field label="Held-out AUC" error={scoreProblem ?? fieldError(error, "metrics")} help="Optional: the score it got on rows it did not train on, where it was trained, so it compares with this workspace's models.">
-          <input value={auc} onChange={(e) => setAuc(e.target.value)} inputMode="decimal" placeholder="0.81" disabled={busy} />
-        </Field>
-        {problem && !named && !scoreProblem && <p className="muted m-0 text-[12.5px]">{problem}</p>}
-        <FormError error={error} />
-      </form>
-    </Modal>
+        }
+      >
+        <form
+          className="grid gap-3"
+          onSubmit={(e) => {
+            e.preventDefault();
+            void submit();
+          }}
+        >
+          <div className="flex flex-wrap gap-2" role="group" aria-label="Where the file is">
+            {tab("upload", "This computer", Upload)}
+            {tab("drive", "A drive", HardDrive)}
+            {tab("repository", "A model repository", FolderGit2)}
+          </div>
+          <Banner tone="quiet" title="What can be brought">
+            A gradient-boosted tree model in the engine&apos;s own JSON weights format, the format every model trained in Lake is kept in. Another format is refused and nothing is kept.
+          </Banner>
+          {!versionOf && (
+            <Field label="Name" required error={fieldError(error, "name") ?? (name && named ? named : undefined)}>
+              <input value={name} onChange={(e) => setName(e.target.value)} placeholder="partner churn" maxLength={120} disabled={busy} />
+            </Field>
+          )}
+          {from === "upload" && (
+            <Field label="Model file" required error={fieldError(error, "weights")}>
+              <input type="file" accept=".json,application/json" onChange={(e) => setFile(e.target.files?.[0] ?? null)} disabled={busy} />
+            </Field>
+          )}
+          {from === "drive" && (
+            <Field
+              label="File"
+              required
+              error={fieldError(error, "id")}
+              help={drives.isError ? "The drives could not be read." : driveList.length === 0 && !drives.isLoading ? "This workspace has no drive yet." : driveFile ? undefined : "A file of any drive, in any folder: open the drive's folders or search by name. A shortcut to a file is followed."}
+            >
+              <div className="flex min-w-0 flex-wrap items-center gap-2">
+                {driveFile && <span className="min-w-0 basis-full break-all text-[13.5px] font-semibold text-ink">{driveFile.label}</span>}
+                <Button onClick={() => setPicking(true)} disabled={busy || drives.isLoading || driveList.length === 0}>
+                  <HardDrive size={14} aria-hidden /> {driveFile ? "Choose another file" : "Choose a file"}
+                </Button>
+              </div>
+            </Field>
+          )}
+          {from === "repository" && (
+            <>
+              <Field label="Repository" required help={repositories.isError ? "The repositories could not be read." : here.length === 0 && !repositories.isLoading ? "This workspace has no repository yet." : undefined}>
+                <select value={repository} onChange={(e) => setRepository(e.target.value)} disabled={busy}>
+                  <option value="">Choose a repository</option>
+                  {here.map((r) => (
+                    <option key={text(r, "id")} value={text(r, "id")}>
+                      {text(r, "name")}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-[2fr_1fr]">
+                <Field label="Path" required>
+                  <input value={repositoryPath} onChange={(e) => setRepositoryPath(e.target.value)} placeholder="model.json" disabled={busy} />
+                </Field>
+                <Field label="Revision">
+                  <input value={revision} onChange={(e) => setRevision(e.target.value)} placeholder="main" disabled={busy} />
+                </Field>
+              </div>
+            </>
+          )}
+          <Field label="Held-out AUC" error={scoreProblem ?? fieldError(error, "metrics")} help="Optional: the score it got on rows it did not train on, where it was trained, so it compares with this workspace's models.">
+            <input value={auc} onChange={(e) => setAuc(e.target.value)} inputMode="decimal" placeholder="0.81" disabled={busy} />
+          </Field>
+          {problem && !named && !scoreProblem && <p className="muted m-0 text-[12.5px]">{problem}</p>}
+          <FormError error={error} />
+        </form>
+      </Modal>
+      {picking && (
+        <FolderPicker
+          drives={driveList}
+          scope={{ customerId: scope.customerId, workspaceId: scope.workspaceId }}
+          items
+          accept={bringable}
+          title="Choose a Model File"
+          subtitle="Open a drive and its folders, or search every drive by name, then choose the file."
+          action="Choose"
+          onClose={() => setPicking(false)}
+          onPick={(key, item, storage) => {
+            if (item) setDriveFile({ driveId: storage.drive.id, id: key, label: pickedLabel(storage.drive, item) });
+            setPicking(false);
+          }}
+        />
+      )}
+    </>
   );
 }

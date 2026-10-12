@@ -57,6 +57,9 @@ struct McpHttpRequest {
     std::string body;
     std::chrono::milliseconds timeout{30'000};
     std::size_t max_response_bytes = 4 * 1024 * 1024;
+    // The request goes to a workspace App Lake runs (lake#659): the transport then reaches a
+    // cluster Service name over http and its private address, and nothing else that is private.
+    bool cluster_service = false;
 };
 
 struct McpHttpResponse {
@@ -123,7 +126,13 @@ struct McpUrl {
 };
 // Parses an MCP server URL: https (http only to loopback, and only when `allow_loopback_http`),
 // no user information, no fragment, at most 2048 bytes. The error says why not.
-std::expected<McpUrl, std::string> parse_mcp_url(std::string_view url, bool allow_loopback_http);
+// `allow_cluster_service` also takes http to a cluster Service name (`*.svc.cluster.local`): the
+// address of a workspace App Lake runs for a stdio server (lake#659), which Lake makes itself.
+std::expected<McpUrl, std::string>
+parse_mcp_url(std::string_view url, bool allow_loopback_http, bool allow_cluster_service = false);
+
+// Whether a host is a cluster Service name, `<service>.<namespace>.svc.cluster.local`.
+bool mcp_cluster_service_host(std::string_view host);
 // `reference` (absolute, or a path) resolved against `base`; refused unless it has base's origin.
 std::expected<std::string, std::string> resolve_mcp_url(const McpUrl& base,
                                                         std::string_view reference);
@@ -232,6 +241,9 @@ struct McpClientOptions {
     McpCredential credential;
     McpLimits limits;
     bool allow_private_addresses = false;
+    // The server is a workspace App Lake runs for a stdio server (lake#659), at the cluster Service
+    // address Lake made: every request is marked so (McpHttpRequest::cluster_service).
+    bool cluster_service = false;
     std::string client_version = "lake";
 };
 
