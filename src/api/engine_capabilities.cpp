@@ -133,6 +133,8 @@ constexpr auto engine_names = std::to_array<EngineName>({
     {"retrain_model", "retrain_model", "Models"},
     {"register_model", "register_model", "Models"},
     {"move_model_to_project", "move_model_to_project", "Models"},
+    // A model version's weights as a file (lake#681).
+    {"export_model", "export_model", "Models"},
 });
 
 const EngineName* by_engine(std::string_view engine) {
@@ -158,6 +160,7 @@ constexpr auto entity_fields = std::to_array<EntityField>({
     {"get_run", "run_id"},
     {"get_run_report", "run_id"},
     {"model_health", "model_id"},
+    {"export_model", "model_id"},
     {"expose_model", "model"},
     {"unexpose_model", "model"},
     {"score", "model"},
@@ -215,7 +218,13 @@ std::string lake_note(std::string_view engine) {
     }
     if (engine == "register_model") {
         return "load_drive_model brings a file from a drive in one call; for a model repository's "
-               "file, read it with resolve_model_file and send its contents as `weights`.";
+               "file, read it with resolve_model_file and send its content_base64 as "
+               "`weights_base64`.";
+    }
+    if (engine == "export_model") {
+        return "Downloading weights is a read: `read` on the account, recorded in the workspace's "
+               "audit as export_model. `content` is the file: text when `encoding` is utf-8, "
+               "base64 when it is base64; save it as `file_name`.";
     }
     if (engine == "get_agent" || engine == "agent_training_status") {
         return "`id` is the agent's id, as list_agents answers it.";

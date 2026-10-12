@@ -154,6 +154,7 @@ The groups are the ones `llms.txt` and `llms-full.txt` list them under.
 | `retrain_model` | same | write |
 | `register_model` | same | write |
 | `move_model_to_project` | same | write |
+| `export_model` | same | read |
 
 ### Search indexes
 

@@ -256,7 +256,10 @@ Optional, per connection (Steve's design in lake#652):
   event starts a job of the agent (`launch_agent`, mode `job`) with
   `{connection_id, connection, topic, sequence, event}` as its input, the way the agent bus hands
   a task to a library agent. Each event starts one job: the connection records the last sequence
-  it started (`input_cursor`).
+  it started (`input_cursor`). The job's launch says `trigger: stream`. Any Python agent can be
+  started by a workspace stream the same way, without a connection (`set_agent_streams`,
+  [agent-launches](agent-launches.md#stream-triggers)); both workers start their jobs through one
+  function (`start_stream_runs`).
 - **Output stream** (`output_topic`): each finished job's result is published as
   `{task_id, agent, type, message, result, connection_id}`, the shape `agent-events` uses, with the
   job's launch id as `task_id`; `type` is `result` or `failed`. Other agents, apps and pipelines

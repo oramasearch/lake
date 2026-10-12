@@ -7,6 +7,11 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   broughtFrom,
+  exportsAsOnnx,
+  featureNamesProblem,
+  isOnnxPath,
+  parseFeatureNames,
+  weightsFile,
   compareVersions,
   errorRate,
   featuresOf,
@@ -17,14 +22,17 @@ import {
   holdoutOf,
   isBrought,
   measuredFigures,
+  methodologyOf,
   modelSteps,
   nameProblem,
   needsTarget,
   parseRows,
   predictCurl,
   predictKeys,
+  predictionRows,
   sampleRow,
   scoreSeries,
+  serverState,
   trafficOf,
   trainingOf,
   versionNumber,
@@ -230,4 +238,46 @@ test("a new model's name and held-out share are checked before they are sent", (
   assert.deepEqual(holdoutOf("20%"), { value: 0.2 });
   assert.ok("error" in holdoutOf("1.5"));
   assert.ok("error" in holdoutOf("abc"));
+});
+
+test("a workspace methodology's model is served by its own code (lake#690)", () => {
+  assert.equal(methodologyOf({ id: "m", kind: "python:W-0123abcd" }), "W-0123abcd");
+  assert.equal(methodologyOf({ id: "m", kind: "python:M-1" }), "");
+  assert.equal(methodologyOf({ id: "m", kind: "gbdt" }), "");
+  assert.equal(methodologyOf(undefined), "");
+
+  assert.deepEqual(serverState(null), { label: "not served", tone: "neutral", settled: true, ready: false });
+  assert.equal(serverState({ phase: "Ready" }).ready, true);
+  assert.equal(serverState({ phase: "Staging" }).settled, false, "refreshed while on its way");
+  assert.equal(serverState({ phase: "Queued" }).tone, "warning");
+  assert.equal(serverState({ phase: "Failed" }).tone, "danger");
+  assert.equal(serverState({ phase: "Stopped" }).label, "not served");
+  assert.equal(serverState({}).label, "pending");
+
+  const answer = { runner: "methodology", predictions: [{ row: 0, entity: "c-1", prediction: 0.25 }, { row: 1, prediction: "yes" }] };
+  assert.equal(predictionRows(answer).length, 2);
+  assert.deepEqual(predictionRows({ ranked: [] }), [], "an engine model answers ranked rows instead");
+});
+
+test("bring one: an ONNX file's columns are typed in order, each once (lake#681)", () => {
+  assert.deepEqual(parseFeatureNames(" tenure, spend ,, tickets "), ["tenure", "spend", "tickets"]);
+  assert.deepEqual(parseFeatureNames(""), []);
+  assert.equal(featureNamesProblem(["a", "b"]), null);
+  assert.match(featureNamesProblem(["a", "b", "a"])!, /a is named twice/);
+  assert.equal(isOnnxPath("models/churn.ONNX"), true);
+  assert.equal(isOnnxPath("model.json"), false);
+});
+
+test("download weights: export_model's answer becomes the file to save (lake#681)", () => {
+  const onnx = weightsFile({ file_name: "churn-1.onnx", media_type: "application/onnx", encoding: "base64", content: "AAEC/w==" });
+  assert.equal(onnx.name, "churn-1.onnx");
+  assert.equal(onnx.type, "application/onnx");
+  assert.deepEqual([...onnx.bytes], [0, 1, 2, 255]);
+  const kept = weightsFile({ file_name: "churn-1.json", media_type: "application/json", encoding: "utf-8", content: "{\"trees\":[]}" });
+  assert.equal(new TextDecoder().decode(kept.bytes), '{"trees":[]}');
+  assert.equal(weightsFile({}).name, "model");
+  assert.equal(exportsAsOnnx({ feature_schema: { objective: "binary_logistic" } }), true);
+  assert.equal(exportsAsOnnx({ feature_schema: { objective: "lambdamart" } }), false);
+  assert.equal(exportsAsOnnx({ kind: "classifier" }), true);
+  assert.equal(exportsAsOnnx({ kind: "anomaly" }), false);
 });

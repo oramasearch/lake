@@ -15,6 +15,7 @@
 #include "lake/control/mcp_connections.hpp"
 #include "lake/control/store.hpp"
 #include "lake/version.hpp"
+#include "agent_stream_runs.hpp"
 #include "mcp_connection_internal.hpp"
 #include "workspace_bus.hpp"
 #include "workspace_records_api.hpp"
@@ -27,27 +28,6 @@ using control::McpConnection;
 
 constexpr std::size_t max_events_per_pass = 20;
 constexpr std::size_t max_connections_per_pass = 64;
-
-// The person a connection's streams act as: who last set its agent or streams. Their permission
-// on the workspace decides, as a schedule's runs act as whoever set the schedule.
-std::optional<ApiContext> as_person(const ApiContext& base, const std::string& user_id) {
-    if (user_id.empty() || base.store == nullptr) {
-        return std::nullopt;
-    }
-    const auto user = base.store->get_user(user_id);
-    if (!user) {
-        return std::nullopt;
-    }
-    ApiContext context = base;
-    context.authorized = true;
-    context.operator_credential = false;
-    context.session_credential = false;
-    context.acting_user_id = user->id;
-    context.acting_identity = user->taap_id;
-    context.authentication_method = "mcp_connection_stream";
-    context.request_id = control::new_uuid_v4();
-    return context;
-}
 
 std::string signature(const McpConnection& connection) {
     return connection.url + "|" + connection.transport + "|" + connection.secret_ref + "|" +
@@ -134,7 +114,11 @@ McpStreamPass McpStreamWorker::pass(ApiContext& context) {
             }
             ++report.connections;
             seen.insert(connection.id);
-            const auto person = as_person(context, connection.streams_set_by);
+            // The person a connection's streams act as: who last set its agent or streams. Their
+            // permission on the workspace decides, as a schedule's runs act as whoever set the
+            // schedule.
+            const auto person =
+                stream_person(context, connection.streams_set_by, "mcp_connection_stream");
 
             // 1. Notifications, mirrored with no agent needed.
             do {
@@ -217,42 +201,25 @@ McpStreamPass McpStreamWorker::pass(ApiContext& context) {
             std::uint64_t cursor = connection.input_cursor;
             std::vector<std::string> pending = connection.pending_launches;
             if (turns && person) {
-                auto batch =
-                    liquid::runtime::block_on(bus.receive(connection.input_topic,
-                                                          cursor + 1,
-                                                          static_cast<int>(max_events_per_pass),
-                                                          std::chrono::milliseconds(0)));
-                if (batch && *batch) {
-                    for (const control::BusEvent& event : (*batch)->events) {
-                        ApiContext as = *person;
-                        auto launched = liquid::runtime::block_on(
-                            context.registry->call_async("launch_agent",
-                                                         {{"customer_id", customer_id},
-                                                          {"workspace_id", workspace->id},
-                                                          {"agent_id", connection.agent_id},
-                                                          {"mode", "job"},
-                                                          {"input",
-                                                           {{"connection_id", connection.id},
-                                                            {"connection", connection.name},
-                                                            {"topic", connection.input_topic},
-                                                            {"sequence", event.sequence},
-                                                            {"event", event.payload}}}},
-                                                         as));
-                        cursor = std::max(cursor, event.sequence);
-                        if (launched && launched->ok) {
-                            const std::string id = launched->value.value(
-                                "id", launched->value.value("launch_id", std::string()));
-                            if (!id.empty() && !connection.output_topic.empty() &&
-                                pending.size() < 200) {
-                                pending.push_back(id);
-                            }
-                            ++report.turns;
-                        } else {
-                            report.problems.push_back(
-                                connection.name + ": its agent could not start: " +
-                                (launched ? launched->error.message : launched.error().message));
-                        }
+                StreamRuns runs = start_stream_runs(
+                    context, *person, bus, customer_id, workspace->id, connection.agent_id,
+                    connection.input_topic, cursor, max_events_per_pass,
+                    [&](const control::BusEvent& event) {
+                        return json{{"connection_id", connection.id},
+                                    {"connection", connection.name},
+                                    {"topic", connection.input_topic},
+                                    {"sequence", event.sequence},
+                                    {"event", event.payload}};
+                    });
+                cursor = runs.cursor;
+                report.turns += runs.launched.size();
+                for (const std::string& id : runs.launched) {
+                    if (!connection.output_topic.empty() && pending.size() < 200) {
+                        pending.push_back(id);
                     }
+                }
+                for (const std::string& problem : runs.problems) {
+                    report.problems.push_back(connection.name + ": " + problem);
                 }
             }
 

@@ -33,10 +33,13 @@
 #include "lake/control/drive_files.hpp"
 #include "lake/control/drives.hpp"
 #include "lake/control/memory_store.hpp"
+#include "lake/control/store_buckets.hpp"
 #include "lake/control/store_contents.hpp"
+#include "lake/control/store_kept.hpp"
 #include "lake/control/zetta_workspace.hpp"
 #include "lake/search/index.hpp"
 #include "one_thread_io.hpp"
+#include "store_provider_fakes.hpp"
 #include "stream_fixture.hpp"
 #include "temporary_directory.hpp"
 #include "zetta_object_fixture.hpp"
@@ -333,8 +336,8 @@ private:
 };
 
 // A store of the space's first workspace as the operator leaves it: Ready, with its connection
-// delivered beside the services'. Written past the provider table, as the operator test does,
-// since no bucket is offered yet (lake#664).
+// delivered beside the services'. Written straight to the store, past create_store's checks of a
+// bucket's location and secret, which test_store_providers.cpp covers.
 lake::control::ManagedStore ready_store(Spaces& s,
                                         const Spaces::Space& space,
                                         std::string type,
@@ -1391,8 +1394,9 @@ TEST(DrivesHttp, ARepositoryDriveWriteIsSearchedDownloadedAndLoaded) {
               "/format")
         << "only CSV and JSONL load";
 
-    // Bring a model file (lake#654): its text goes to the engine's register_model, with where it
-    // came from; the engine's refusal of the file points at the file.
+    // Bring a model file (lake#654): its bytes go to the engine's register_model in base64 (so an
+    // ONNX file arrives intact, lake#681), with where it came from and the format options; the
+    // engine's refusal of the file points at the file.
     const std::string weights = R"({"objective":"binary_logistic","trees":[]})";
     const json kept = lake.call(
         "upload_drive_files",
@@ -1408,14 +1412,19 @@ TEST(DrivesHttp, ARepositoryDriveWriteIsSearchedDownloadedAndLoaded) {
                                    {{"drive_id", drive["value"]["id"]},
                                     {"id", "models/churn.json"},
                                     {"name", "partner churn"},
-                                    {"metrics", {{"held_out_auc", 0.8}}}});
+                                    {"metrics", {{"held_out_auc", 0.8}}},
+                                    {"format", "zetta"},
+                                    {"feature_names", {"tickets", "tenure"}}});
     ASSERT_TRUE(brought.value("ok", false)) << brought.dump();
     EXPECT_EQ(brought["value"]["model_id"], "m-9");
     EXPECT_EQ(brought["value"]["source"]["name"], "churn.json");
     const auto registered = std::ranges::find_if(
         lake.spaces.zetta->calls, [](const auto& call) { return call.first == "register_model"; });
     ASSERT_NE(registered, lake.spaces.zetta->calls.end());
-    EXPECT_EQ(registered->second["weights"], weights);
+    EXPECT_EQ(registered->second["weights_base64"], base64(weights));
+    EXPECT_FALSE(registered->second.contains("weights"));
+    EXPECT_EQ(registered->second["format"], "zetta");
+    EXPECT_EQ(registered->second["feature_names"], json({"tickets", "tenure"}));
     EXPECT_EQ(registered->second["name"], "partner churn");
     EXPECT_EQ(registered->second["metrics"]["held_out_auc"], 0.8);
     EXPECT_EQ(registered->second["source"], "drive Docs: churn.json");
@@ -1424,13 +1433,41 @@ TEST(DrivesHttp, ARepositoryDriveWriteIsSearchedDownloadedAndLoaded) {
                        ["path"],
               "/name")
         << "a new model is named";
+
+    // A virtual drive's shortcut to the repository path is followed (lake#682).
+    const json links = lake.call("create_drive", {{"name", "Links"}, {"storage", "virtual"}});
+    ASSERT_TRUE(links.value("ok", false)) << links.dump();
+    const json shortcut = lake.call("create_drive_shortcut",
+                                    {{"drive_id", links["value"]["id"]},
+                                     {"name", "Churn weights"},
+                                     {"target",
+                                      {{"kind", "repository_path"},
+                                       {"repository_id", repository_id},
+                                       {"path", "models/churn.json"}}}});
+    ASSERT_TRUE(shortcut.value("ok", false)) << shortcut.dump();
+    const json via = lake.call("load_drive_model",
+                               {{"drive_id", links["value"]["id"]},
+                                {"id", shortcut["value"]["id"]},
+                                {"name", "via shortcut"}});
+    ASSERT_TRUE(via.value("ok", false)) << via.dump();
+    EXPECT_EQ(via["value"]["source"]["repository_id"], repository_id);
+    EXPECT_EQ(via["value"]["source"]["path"], "models/churn.json");
+    EXPECT_EQ(via["value"]["source"]["shortcut"]["name"], "Churn weights");
+    const auto last = std::ranges::find_if(
+        lake.spaces.zetta->calls.rbegin(), lake.spaces.zetta->calls.rend(), [](const auto& call) {
+            return call.first == "register_model";
+        });
+    ASSERT_NE(last, lake.spaces.zetta->calls.rend());
+    EXPECT_EQ(last->second["weights_base64"], base64(weights));
+    EXPECT_EQ(last->second["source"], "repository docs-drive@main: models/churn.json")
+        << last->second.dump();
     lake.spaces.zetta->responder = [](const std::string& capability, const json&)
         -> std::optional<lake::control::ZettaControlResult<json>> {
         if (capability != "register_model") {
             return std::nullopt;
         }
         return std::unexpected(lake::control::ZettaControlError{
-            "not_supported", "/weights: the engine reads gradient-boosted tree models", "/weights"});
+            "not_supported", "/weights_base64: this is a Python pickle", "/weights_base64"});
     };
     const json refused = lake.call("load_drive_model",
                                    {{"drive_id", drive["value"]["id"]},
@@ -1500,10 +1537,12 @@ TEST(Drives, AStoreDriveBrowsesItsStoreInPlaceAndLeavesItWhenDeleted) {
     contents->files["Reports/q3.csv"] = "account,plan\n1,pro\n";
     contents->folders.insert("Reports");
     std::vector<std::string> opened;
-    s.browser = [&](const lake::control::ManagedStore& store, const json& connection)
+    s.browser = [&](const lake::control::StoreOpening& opening)
         -> lake::control::ZettaControlResult<std::shared_ptr<lake::control::StoreContents>> {
-        opened.push_back(store.id);
-        EXPECT_EQ(connection.value("bucket", ""), store.slug) << "the operator's connection";
+        opened.push_back(opening.store.id);
+        EXPECT_EQ(opening.connection.value("bucket", ""), opening.store.slug)
+            << "the operator's connection";
+        EXPECT_TRUE(opening.credential.empty()) << "the store names no secret";
         return std::shared_ptr<lake::control::StoreContents>(contents);
     };
 
@@ -1647,6 +1686,132 @@ TEST(Drives, AStoreDriveBrowsesItsStoreInPlaceAndLeavesItWhenDeleted) {
     EXPECT_FALSE(opened.empty());
 }
 
+// Bring one → A drive (lake#682): a model file is brought from every drive kind and any depth,
+// and a virtual drive's shortcut to a file is followed once.
+TEST(Drives, AModelIsBroughtFromEveryDriveKindAndAShortcutIsFollowed) {
+    Spaces s;
+    const auto& first = s.spaces[0];
+    const std::string weights = R"({"objective":"binary_logistic","trees":[]})";
+    s.zetta->answers["register_model"] = {{"model_id", "m-1"}, {"standalone", true}};
+    const auto registered = [&] {
+        std::vector<json> out;
+        for (const auto& [capability, input] : s.zetta->calls) {
+            if (capability == "register_model") {
+                out.push_back(input);
+            }
+        }
+        return out;
+    };
+
+    // A storage drive's file, three folders down, by its path.
+    const auto bucket = ready_store(s, first, "object", "r2", "models");
+    auto contents = std::make_shared<FakeBucket>();
+    contents->folders.insert("2026");
+    contents->folders.insert("2026/q3");
+    contents->folders.insert("2026/q3/churn");
+    contents->files["2026/q3/churn/model.json"] = weights;
+    s.browser = [&](const lake::control::StoreOpening&)
+        -> lake::control::ZettaControlResult<std::shared_ptr<lake::control::StoreContents>> {
+        return std::shared_ptr<lake::control::StoreContents>(contents);
+    };
+    const ApiResult store_drive = s.in(
+        first, "create_drive", {{"name", "Models"}, {"storage", "store"}, {"store_id", bucket.id}});
+    ASSERT_TRUE(store_drive.ok) << store_drive.error.message;
+    const ApiResult from_store = s.in(first,
+                                      "load_drive_model",
+                                      {{"drive_id", store_drive.value["id"]},
+                                       {"id", "2026/q3/churn/model.json"},
+                                       {"name", "churn"}});
+    ASSERT_TRUE(from_store.ok) << from_store.error.message;
+    EXPECT_EQ(from_store.value["model_id"], "m-1");
+    EXPECT_EQ(from_store.value["source"]["name"], "model.json");
+    ASSERT_EQ(registered().size(), 1U);
+    EXPECT_EQ(registered()[0]["weights_base64"], base64(weights));
+    EXPECT_EQ(registered()[0]["source"], "drive Models: model.json");
+    EXPECT_EQ(s.in(first,
+                   "load_drive_model",
+                   {{"drive_id", store_drive.value["id"]}, {"id", "2026/q3"}, {"name", "x"}})
+                  .error.code,
+              "not_found")
+        << "a folder is not a model file";
+
+    // A workspace-files drive's file in a subfolder, by its entry id.
+    const ApiResult files = s.in(first, "create_drive", {{"name", "Files"}, {"storage", "files"}});
+    ASSERT_TRUE(files.ok) << files.error.message;
+    const ApiResult uploaded =
+        s.in(first,
+             "upload_drive_entries",
+             {{"drive_id", files.value["id"]},
+              {"files", json::array({{{"path", "a/b/c/model.json"}, {"content", base64(weights)}}})}});
+    ASSERT_TRUE(uploaded.ok) << uploaded.error.message;
+    const std::string file_id = uploaded.value["items"][0]["id"];
+    const ApiResult from_files = s.in(
+        first,
+        "load_drive_model",
+        {{"drive_id", files.value["id"]}, {"id", file_id}, {"name", "deep"}});
+    ASSERT_TRUE(from_files.ok) << from_files.error.message;
+    EXPECT_EQ(from_files.value["source"]["id"], file_id);
+
+    // A virtual drive: its shortcut to the file is followed to the file's own drive; a shortcut to
+    // something that is not a file, a folder, and a broken shortcut are refused at /id.
+    const ApiResult links = s.in(first, "create_drive", {{"name", "Links"}, {"storage", "virtual"}});
+    ASSERT_TRUE(links.ok) << links.error.message;
+    const std::string virtual_id = links.value["id"];
+    const auto shortcut = [&](std::string name, json target) {
+        return s.in(first,
+                    "create_drive_shortcut",
+                    {{"drive_id", virtual_id}, {"name", std::move(name)}, {"target", std::move(target)}});
+    };
+    const ApiResult to_file = shortcut(
+        "Churn model",
+        {{"kind", "drive_entry"}, {"drive_id", files.value["id"]}, {"entry_id", file_id}});
+    ASSERT_TRUE(to_file.ok) << to_file.error.message;
+    const ApiResult followed =
+        s.in(first,
+             "load_drive_model",
+             {{"drive_id", virtual_id}, {"id", to_file.value["id"]}, {"name", "linked"}});
+    ASSERT_TRUE(followed.ok) << followed.error.message;
+    EXPECT_EQ(followed.value["source"]["drive_id"], files.value["id"]) << "the file's own drive";
+    EXPECT_EQ(followed.value["source"]["id"], file_id);
+    EXPECT_EQ(followed.value["source"]["shortcut"]["drive_id"], virtual_id);
+    EXPECT_EQ(followed.value["source"]["shortcut"]["name"], "Churn model");
+    EXPECT_EQ(registered().back()["source"], "drive Files: model.json");
+    EXPECT_EQ(registered().back()["name"], "linked");
+
+    const ApiResult to_site = shortcut("Site", {{"kind", "url"}, {"url", "https://orama.test/"}});
+    ASSERT_TRUE(to_site.ok) << to_site.error.message;
+    const ApiResult site = s.in(
+        first, "load_drive_model", {{"drive_id", virtual_id}, {"id", to_site.value["id"]}, {"name", "x"}});
+    EXPECT_EQ(site.error.code, "invalid_input");
+    EXPECT_EQ(site.error.path, "/id");
+    const ApiResult folder =
+        s.in(first, "create_drive_folder_entry", {{"drive_id", virtual_id}, {"path", "Q3"}});
+    ASSERT_TRUE(folder.ok) << folder.error.message;
+    EXPECT_EQ(s.in(first,
+                   "load_drive_model",
+                   {{"drive_id", virtual_id}, {"id", folder.value["id"]}, {"name", "x"}})
+                  .error.path,
+              "/id");
+    const ApiResult to_links = shortcut(
+        "Loop", {{"kind", "drive_entry"}, {"drive_id", virtual_id}, {"entry_id", to_file.value["id"]}});
+    ASSERT_TRUE(to_links.ok) << to_links.error.message;
+    EXPECT_EQ(s.in(first,
+                   "load_drive_model",
+                   {{"drive_id", virtual_id}, {"id", to_links.value["id"]}, {"name", "x"}})
+                  .error.code,
+              "invalid_input")
+        << "a shortcut is followed once";
+    ASSERT_TRUE(
+        s.in(first, "delete_drive_entry", {{"drive_id", files.value["id"]}, {"id", file_id}}).ok);
+    EXPECT_EQ(s.in(first,
+                   "load_drive_model",
+                   {{"drive_id", virtual_id}, {"id", to_file.value["id"]}, {"name", "x"}})
+                  .error.code,
+              "not_found")
+        << "a broken shortcut";
+    EXPECT_EQ(registered().size(), 3U) << "nothing more was kept";
+}
+
 TEST(Drives, AVolumeIsShownNotBrowsedAndAStoreLakeCannotBrowseIsRefused) {
     Spaces s;
     const auto& first = s.spaces[0];
@@ -1657,15 +1822,14 @@ TEST(Drives, AVolumeIsShownNotBrowsedAndAStoreLakeCannotBrowseIsRefused) {
         return s.in(
             first, "create_drive", {{"name", name}, {"storage", "store"}, {"store_id", store_id}});
     };
-    // No store browser, as on a Lake that browses no provider yet.
+    // No store browser, as on a Lake not configured to reach external buckets.
     const ApiResult refused = create("Archive", bucket.id);
     EXPECT_EQ(refused.error.code, "not_supported");
     EXPECT_EQ(refused.error.path, "/store_id");
-    EXPECT_NE(refused.error.message.find("Bucket — AWS S3"), std::string::npos)
+    EXPECT_NE(refused.error.message.find("Bucket — your AWS S3 bucket"), std::string::npos)
         << refused.error.message;
-    EXPECT_NE(refused.error.message.find(lake::control::store_browse_issue), std::string::npos);
 
-    s.browser = [](const lake::control::ManagedStore&, const json&)
+    s.browser = [](const lake::control::StoreOpening&)
         -> lake::control::ZettaControlResult<std::shared_ptr<lake::control::StoreContents>> {
         return std::shared_ptr<lake::control::StoreContents>(std::make_shared<FakeBucket>());
     };
@@ -1683,4 +1847,168 @@ TEST(Drives, AVolumeIsShownNotBrowsedAndAStoreLakeCannotBrowseIsRefused) {
     EXPECT_EQ(lake::control::join_store_path("", "a"), "a");
     EXPECT_EQ(lake::control::store_parent("a/b/c"), "a/b");
     EXPECT_EQ(lake::control::store_name("a/b/c"), "c");
+}
+
+// The operator's side of a store it reconciles: Ready, with its connection delivered.
+void deliver(Spaces& s, const json& store) {
+    EXPECT_TRUE(s.store->set_store_status(store["id"], "Ready", "", ""));
+    std::ofstream(s.dir / (store["slug"].get<std::string>() + ".json"))
+        << json{{"type", store["type"]}, {"provider", store["provider"]}}.dump();
+}
+
+TEST(Drives, YourOwnBucketIsNamedWithAWorkspaceSecretAndOpensAsADrive) {
+    Spaces s;
+    const auto& first = s.spaces[0];
+    lake::test::stores::FakeS3 r2;
+    s.browser = lake::control::cloud_store_browser(
+        r2.http(), [] { return lake::test::stores::at(2026, 10, 11, 12); });
+    const ApiResult mount = s.in(first, "create_secret_mount", {{"name", "buckets"}});
+    ASSERT_TRUE(mount.ok) << mount.error.message;
+    const std::string mount_id = mount.value["id"];
+    ASSERT_TRUE(s.call(first,
+                       "put_secret",
+                       {{"mount_id", mount_id},
+                        {"name", "r2-keys"},
+                        {"value",
+                         {{"access_key_id", r2.access_key_id},
+                          {"secret_access_key", r2.secret_access_key}}}})
+                    .ok);
+    ASSERT_TRUE(s.call(first,
+                       "put_secret",
+                       {{"mount_id", mount_id}, {"name", "half"}, {"value", {{"access_key_id", "x"}}}})
+                    .ok);
+    const ApiResult elsewhere = s.in(first, "create_secret_mount", {{"name", "lab-buckets"}}, 1);
+    ASSERT_TRUE(elsewhere.ok) << elsewhere.error.message;
+
+    const json good{{"type", "object"},
+                    {"provider", "r2"},
+                    {"name", "media"},
+                    {"bucket", "media"},
+                    {"endpoint", "https://account.r2.cloudflarestorage.com/"},
+                    {"credential", {{"mount_id", mount_id}, {"name", "r2-keys"}}}};
+    const auto refused_at = [&](json change, std::string remove = {}) {
+        json input = good;
+        if (change.is_object()) {
+            input.update(change);
+        }
+        if (!remove.empty()) {
+            input.erase(remove);
+        }
+        const ApiResult refused = s.in(first, "create_store", input);
+        EXPECT_FALSE(refused.ok);
+        return refused.error.path;
+    };
+    EXPECT_EQ(refused_at(json::object(), "credential"), "/credential");
+    EXPECT_EQ(refused_at({{"size_gi", 10}}), "/size_gi") << "only a volume has a size";
+    EXPECT_EQ(refused_at(json::object(), "endpoint"), "/endpoint") << "an R2 bucket needs its account";
+    EXPECT_EQ(refused_at({{"endpoint", "http://account.r2.cloudflarestorage.com"}}), "/endpoint");
+    EXPECT_EQ(refused_at({{"bucket", "Media!"}}), "/bucket");
+    EXPECT_EQ(refused_at({{"prefix", "/top"}}), "/prefix");
+    EXPECT_EQ(refused_at({{"credential", {{"mount_id", elsewhere.value["id"]}, {"name", "r2-keys"}}}}),
+              "/credential/mount_id")
+        << "the secret is this workspace's";
+    EXPECT_EQ(refused_at({{"credential", {{"mount_id", mount_id}, {"name", "half"}}}}),
+              "/credential/name");
+    EXPECT_EQ(refused_at({{"credential", {{"mount_id", mount_id}, {"name", "missing"}}}}),
+              "/credential/name");
+    EXPECT_EQ(s.in(first,
+                   "create_store",
+                   {{"type", "volume"}, {"provider", "cluster"}, {"name", "disk"}, {"bucket", "media"}})
+                  .error.path,
+              "/bucket");
+
+    const ApiResult created = s.in(first, "create_store", good);
+    ASSERT_TRUE(created.ok) << created.error.message;
+    EXPECT_EQ(created.value["size_gi"], 0);
+    EXPECT_EQ(created.value["location"]["bucket"], "media");
+    EXPECT_EQ(created.value["location"]["endpoint"], "https://account.r2.cloudflarestorage.com");
+    EXPECT_EQ(created.value["location"]["credential"],
+              json({{"mount_id", mount_id}, {"name", "r2-keys"}}));
+    EXPECT_EQ(created.value.dump().find(r2.secret_access_key), std::string::npos)
+        << "a secret is named, never copied";
+    const ApiResult early = s.in(first,
+                                 "create_drive",
+                                 {{"name", "Media"}, {"storage", "store"}, {"store_id", created.value["id"]}});
+    EXPECT_EQ(early.error.code, "workspace_not_ready") << "until the operator has it Ready";
+    deliver(s, created.value);
+
+    const ApiResult drive = s.in(first,
+                                 "create_drive",
+                                 {{"name", "Media"}, {"storage", "store"}, {"store_id", created.value["id"]}});
+    ASSERT_TRUE(drive.ok) << drive.error.message;
+    const std::string id = drive.value["id"];
+    const ApiResult uploaded = s.in(first,
+                                    "upload_drive_entries",
+                                    {{"drive_id", id},
+                                     {"files",
+                                      json::array({{{"path", "2026/q3.csv"},
+                                                    {"content", base64("account,plan\n")}}})}});
+    ASSERT_TRUE(uploaded.ok) << uploaded.error.message;
+    EXPECT_EQ(r2.objects["2026/q3.csv"].bytes, "account,plan\n") << "the bytes are in the bucket";
+    const ApiResult listed = s.in(first, "list_drive_entries", {{"drive_id", id}, {"folder_id", "2026"}});
+    ASSERT_TRUE(listed.ok) << listed.error.message;
+    ASSERT_EQ(listed.value["items"].size(), 1U);
+    EXPECT_EQ(listed.value["items"][0]["path"], "2026/q3.csv");
+    const ApiResult read = s.in(first, "read_drive_file", {{"drive_id", id}, {"id", "2026/q3.csv"}});
+    ASSERT_TRUE(read.ok) << read.error.message;
+    EXPECT_EQ(read.value["content_base64"], base64("account,plan\n"));
+    EXPECT_TRUE(r2.signed_failures.empty());
+
+    // Deleting the storage forgets the bucket; what is in it stays in the customer's account.
+    ASSERT_TRUE(s.in(first, "delete_store", {{"store_id", created.value["id"]}, {"confirm", "media"}}).ok);
+    EXPECT_TRUE(r2.objects.contains("2026/q3.csv"));
+}
+
+TEST(Drives, AStoreKeptInTheWorkspaceZettaIsDeletedWithItsBytes) {
+    Spaces s;
+    const auto& first = s.spaces[0];
+    const ApiResult created = s.in(first,
+                                   "create_store",
+                                   {{"type", "filesystem"}, {"provider", "zetta"}, {"name", "scratch"}});
+    ASSERT_TRUE(created.ok) << created.error.message;
+    EXPECT_TRUE(created.value["location"].is_null());
+    EXPECT_EQ(s.in(first,
+                   "create_store",
+                   {{"type", "object"}, {"provider", "zetta"}, {"name", "other"}, {"size_gi", 5}})
+                  .error.path,
+              "/size_gi");
+    deliver(s, created.value);
+    const ApiResult drive = s.in(first,
+                                 "create_drive",
+                                 {{"name", "Scratch"}, {"storage", "store"}, {"store_id", created.value["id"]}});
+    ASSERT_TRUE(drive.ok) << drive.error.message;
+    ASSERT_TRUE(s.in(first,
+                     "upload_drive_entries",
+                     {{"drive_id", drive.value["id"]},
+                      {"files", json::array({{{"path", "a/b.txt"}, {"content", base64("kept")}}})}})
+                    .ok);
+    const std::string bucket = lake::control::kept_store_bucket(created.value["slug"].get<std::string>());
+    EXPECT_EQ(s.objects->objects(Spaces::url(first.workspaces[0]), bucket).size(), 1U);
+    const ApiResult read =
+        s.in(first, "read_drive_file", {{"drive_id", drive.value["id"]}, {"id", "a/b.txt"}});
+    ASSERT_TRUE(read.ok) << read.error.message;
+    EXPECT_EQ(read.value["content_base64"], base64("kept"));
+
+    ASSERT_TRUE(
+        s.in(first, "delete_store", {{"store_id", created.value["id"]}, {"confirm", "scratch"}}).ok);
+    EXPECT_TRUE(s.objects->objects(Spaces::url(first.workspaces[0]), bucket).empty())
+        << "Lake deletes the bytes it keeps";
+}
+
+TEST(Drives, ALakeStoreNamesARepositoryOfItsWorkspace) {
+    Spaces s;
+    const auto& first = s.spaces[0];
+    const ApiResult refused = s.in(first,
+                                   "create_store",
+                                   {{"type", "object"},
+                                    {"provider", "lake"},
+                                    {"name", "models"},
+                                    {"repository_id", "00000000-0000-4000-8000-000000000000"}});
+    EXPECT_EQ(refused.error.code, "not_found");
+    EXPECT_EQ(refused.error.path, "/repository_id");
+    EXPECT_EQ(s.in(first,
+                   "create_store",
+                   {{"type", "object"}, {"provider", "zetta"}, {"name", "x"}, {"repository_id", "r"}})
+                  .error.path,
+              "/repository_id");
 }

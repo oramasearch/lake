@@ -261,10 +261,18 @@ held-out scores, comparisons and serving like any other. Press **New model** on 
   that learns without one, such as segmentation, takes none), and keep a held-out share (0.2 by
   default) so its score is honest. Lake trains it and opens the run; the model appears when the run
   finishes.
-- **Bring one**: a model file from **This computer**, **A drive** or **A model repository**, with
-  the held-out AUC it got where it was trained, if you know it. The file is a gradient-boosted tree
-  model in the engine's own JSON weights format, the format every model trained in Lake is kept
-  in. Any other format is refused and nothing is kept.
+- **Bring one**: a model file from **This computer**, **A drive** (open any drive and its folders,
+  or search every drive by name, and choose the file or a shortcut to it) or **A model repository**, with
+  the held-out AUC it got where it was trained, if you know it. The file can be:
+  - an ONNX tree model, exported from scikit-learn (gradient boosting, or a random forest or tree
+    regressor), XGBoost or LightGBM;
+  - an XGBoost model saved as `.json` or `.ubj`;
+  - a LightGBM `model.txt`;
+  - a model downloaded from Lake.
+
+  For an ONNX file, list its **Columns** in order, because ONNX does not name them. Lake converts
+  the model exactly, so it scores as it did where it was made. A pickle, a neural network or a
+  random-forest classifier is refused, saying why, and nothing is kept.
 
 On its training page a standalone model shows what it trains on, and has:
 
@@ -276,6 +284,13 @@ On its training page a standalone model shows what it trains on, and has:
 - **Delete**: deletes every version (type the model's name to confirm). The runs that trained it
   are kept.
 
+Every model's page, standalone or not, has a **Weights** card that downloads the version you are
+looking at:
+
+- **Download** gives the weights as Lake keeps them, a file you can bring back later.
+- **As ONNX** gives a tree model as an ONNX file that onnxruntime and other ONNX runtimes score
+  exactly as Lake does.
+
 From an agent or your code:
 
 - REST: `POST /v1/train_model`:
@@ -285,8 +300,9 @@ From an agent or your code:
 ```
 
 - `retrain_model` takes `model_id` and, to change them, `dataset_path`, `target` or
-  `holdout_fraction`. `register_model` takes `name` and the file's contents as `weights`;
-  `load_drive_model` takes a drive's file (`drive_id`, `id`) instead. `move_model_to_project` takes
+  `holdout_fraction`. `register_model` takes `name` and the file in base64 as `weights_base64`
+  (`feature_names` for an ONNX file); `load_drive_model` takes a drive's file (`drive_id`, `id`)
+  instead. `export_model` takes `model_id` and `format` (`zetta` or `onnx`) and answers the file. `move_model_to_project` takes
   `model_id` and `project_name`. `delete_model` takes each version's `id`.
 - MCP: the same names with the same input.
 - A workspace whose engine predates these answers `not_supported`, saying it needs a newer engine.

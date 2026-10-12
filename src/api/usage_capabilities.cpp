@@ -525,6 +525,17 @@ const std::vector<std::pair<std::string_view, std::string_view>>& engine_storage
     return kinds;
 }
 
+// Whether a `lake_storage` kind is held on a workspace engine's own volume: billed as the
+// volume, so shown as engine_storage and never as storage (decision 61, lake#663).
+bool engine_held(std::string_view kind) {
+    for (const auto& [engine, name] : engine_storage_kinds()) {
+        if (name == kind) {
+            return true;
+        }
+    }
+    return false;
+}
+
 // A workload charged once for how long it ran (lake#658): an image build, a job-mode agent launch,
 // an agent cron run or a workspace methodology run (lake#655) that has finished. It ran from its request (a cron run: its start) to its
 // final status, so time queued is included for builds and launches, as for build time.
@@ -709,6 +720,91 @@ liquid::runtime::task<void> charge_finished_jobs(ApiContext& context,
     co_return {};
 }
 
+// App traffic through the ingress (lake#661, docs/api/metering.md#app-traffic). The operator adds
+// what it reads from the ingress controller to the row of the app and the hour it read it in; an
+// hour is charged once it has closed and the operator's last poll of it has landed. Rows older
+// than the window are past the operator's retention.
+constexpr std::int64_t app_traffic_window_ms = 7 * day_ms;
+constexpr std::int64_t app_traffic_settle_ms = 5 * 60'000;
+
+// Charges every closed hour of app traffic in `rows` whose workspace is in `workspaces` and that
+// was not charged before: its bytes as `transfer` (`in`, `out`, `object_id` the app) in the hour
+// they moved, after recording `if_absent` in the workspace that the hour was charged
+// (lake_metering_app_transfer_records). At most once, never twice.
+liquid::runtime::task<void> charge_app_traffic(ApiContext& context,
+                                               const std::string& customer_id,
+                                               const std::vector<control::AppTransfer>& rows,
+                                               const std::set<std::string>& workspaces,
+                                               std::chrono::system_clock::time_point at,
+                                               UsageSampleReport& report) {
+    const std::int64_t now_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(at.time_since_epoch()).count();
+    const std::int64_t from_ms = floor_to(now_ms - app_traffic_window_ms, hour_ms);
+    std::map<std::string, std::vector<std::pair<const control::AppTransfer*, std::int64_t>>>
+        by_workspace;
+    for (const control::AppTransfer& row : rows) {
+        const auto hour = utc_ms(row.hour);
+        if (!workspaces.contains(row.workspace_id) || !hour || *hour < from_ms ||
+            *hour + hour_ms + app_traffic_settle_ms > now_ms ||
+            (row.in_bytes == 0 && row.out_bytes == 0)) {
+            continue;
+        }
+        by_workspace[row.workspace_id].emplace_back(&row, *hour);
+    }
+    for (auto& [workspace_id, hours] : by_workspace) {
+        auto records = workspace_records(context, customer_id, workspace_id);
+        if (!records) {
+            report.unmeasured.push_back("App traffic of workspace " + workspace_id + ": " +
+                                        records.error().message);
+            continue;
+        }
+        auto charged = control::settled(
+            co_await control::list_metered_app_hours(*records, customer_id, from_ms * 1000));
+        if (!charged) {
+            report.unmeasured.push_back("App traffic of workspace " + workspace_id + ": " +
+                                        charged.error().message);
+            continue;
+        }
+        std::set<std::string> seen;
+        for (const control::MeteredAppHour& hour : *charged) {
+            seen.insert(hour.app_id + ":" + hour.hour);
+        }
+        std::size_t written = 0;
+        for (const auto& [row, hour_start] : hours) {
+            const std::string hour = utc_text(hour_start);
+            if (seen.contains(row->app_id + ":" + hour)) {
+                continue;
+            }
+            if (written == jobs_per_sample) {
+                break;
+            }
+            ++written;
+            auto recorded = control::settled(co_await control::record_metered_app_hour(
+                *records, {customer_id, row->app_id, hour, row->in_bytes, row->out_bytes}));
+            if (!recorded) {
+                report.unmeasured.push_back("App traffic of app " + row->app_id + ": " +
+                                            recorded.error().message);
+                continue;
+            }
+            if (!*recorded) {
+                continue; // another lake charged it first
+            }
+            std::vector<UsageRecorder::Increment> bytes;
+            if (row->in_bytes > 0) {
+                bytes.push_back(
+                    {"transfer", row->in_bytes, {{"kind", "in"}, {"object_id", row->app_id}}});
+            }
+            if (row->out_bytes > 0) {
+                bytes.push_back(
+                    {"transfer", row->out_bytes, {{"kind", "out"}, {"object_id", row->app_id}}});
+            }
+            report.increments += bytes.size();
+            context.usage_recorder->add_together(workspace_id, std::move(bytes), time_of(hour_start));
+        }
+    }
+    co_return {};
+}
+
 // The running workloads of the chosen workspaces the operator has not reported the resources of,
 // by name, and the finished builds, agent jobs and cron runs of [from, to) without them: their
 // CPU, RAM, GPU and VRAM are not counted (usage_over_time's not_measured).
@@ -752,6 +848,19 @@ std::vector<std::string> unreported_workloads(control::Store& store,
                 launch.desired == "present" && !resources_of(rows, "agent_launch", launch.id)) {
                 names.push_back("agent " +
                                 (launch.agent_name.empty() ? launch.agent_id : launch.agent_name));
+            }
+        }
+    }
+    // Served methodology models (lake#690): a present deployment whose serve pods the operator
+    // has not reported.
+    for (const std::string& workspace_id : chosen) {
+        if (const auto deployments =
+                store.list_methodology_deployments(customer_id, workspace_id, "", 1000)) {
+            for (const control::MethodologyDeployment& deployment : *deployments) {
+                if (deployment.desired == "present" && deployment.phase == "Ready" &&
+                    !resources_of(rows, "methodology_deployment", deployment.id)) {
+                    names.push_back("served model " + deployment.model_id);
+                }
             }
         }
     }
@@ -824,7 +933,7 @@ liquid::runtime::task<UsageReading> read_usage(ApiContext& context, const UsageQ
         } else {
             pending.push_back(complete_read(nothing()));
         }
-        if (wants("storage")) {
+        if (wants("storage") || wants("engine_storage")) {
             json input = window;
             input["metric"] = std::string(UsageRecorder::storage_metric);
             input["group_by"] = json::array({"kind"});
@@ -892,8 +1001,13 @@ liquid::runtime::task<UsageReading> read_usage(ApiContext& context, const UsageQ
                                 labels[name] = value.get<std::string>();
                             }
                         }
-                        const std::string dimension =
+                        std::string dimension =
                             fixed_dimension.empty() ? labels["dimension"] : fixed_dimension;
+                        // What the engine holds on its own volume is engine_storage, never
+                        // billed storage (decision 61, lake#663).
+                        if (dimension == "storage" && engine_held(labels["kind"])) {
+                            dimension = "engine_storage";
+                        }
                         if (!wants(dimension)) {
                             continue;
                         }
@@ -1124,13 +1238,13 @@ liquid::runtime::task<UsageReading> read_usage(ApiContext& context, const UsageQ
     }
     // Model tokens are counted by the model gateway as each call is answered (lake#248).
     // Speech is measured for every transcript and dictation (lake#613, lake#658).
-    if (wants("storage")) {
+    if (wants("engine_storage")) {
         // A workspace sampled in the window whose engine reported no models (its Zetta has no
         // storage_usage yet): its models, indexes, run artifacts, topics, files and buckets are
-        // not in its storage (lake#658).
+        // not in what its engine holds (lake#658).
         std::set<std::string> sampled, reported;
         for (const auto& [key, series] : accumulator.series()) {
-            if (series.dimension != "storage") {
+            if (series.dimension != "engine_storage") {
                 continue;
             }
             sampled.insert(series.workspace_id);
@@ -1149,14 +1263,11 @@ liquid::runtime::task<UsageReading> read_usage(ApiContext& context, const UsageQ
                 "Model files, indexes, run artifacts, topics, files and buckets inside workspace " +
                 unreported +
                 ": its engine does not report their size yet (it needs a Zetta with "
-                "storage_usage), so only its datasets are counted (lake#658).");
+                "storage_usage), so only its datasets are shown (lake#658).");
         }
     }
-    if (wants("transfer")) {
-        reading.not_measured.push_back(
-            "Transfer of apps through the ingress: the Orama operator does not report it yet "
-            "(lake#661).");
-    }
+    // App traffic through the ingress is charged from the operator's reports, each closed hour
+    // once (lake#661).
     co_return reading;
 }
 
@@ -1613,6 +1724,16 @@ liquid::runtime::task<ApiResult> model_completion(const json& input, ApiContext&
         co_return std::move(**refusal);
     }
     ModelProviderRequest request{endpoint, prepared->dump(), stream};
+    // A stream the caller reads as it arrives (the `/openai/v1/*` route, lake#665): each piece goes
+    // on to the caller, and the usage is read from the events as they pass.
+    const bool relayed = stream && static_cast<bool>(context.model_stream);
+    auto passing = std::make_shared<ModelStreamUsage>();
+    if (relayed) {
+        request.on_body = [passing, sink = context.model_stream](std::string_view piece) {
+            passing->feed(piece);
+            return sink(piece);
+        };
+    }
     auto ran = co_await run_blocking(
         [provider = context.model_provider, request]() { return provider(request); });
     if (!ran) {
@@ -1625,7 +1746,10 @@ liquid::runtime::task<ApiResult> model_completion(const json& input, ApiContext&
             model_provider_failure(response.status, response.body, response.error);
         co_return ApiResult::failure(failure.code, failure.message);
     }
-    const ModelUsage usage = model_usage(response.body, stream);
+    if (relayed) {
+        passing->finish();
+    }
+    const ModelUsage usage = relayed ? passing->usage() : model_usage(response.body, stream);
     const std::string model = usage.model.empty() ? requested : usage.model;
     const bool recorded = usage.reported && context.usage_recorder != nullptr;
     if (recorded) {
@@ -1653,7 +1777,9 @@ liquid::runtime::task<ApiResult> model_completion(const json& input, ApiContext&
              {"usage_reported", usage.reported},
              {"recorded", recorded},
              {"streamed", stream}};
-    if (stream) {
+    if (relayed) {
+        // The caller already has the stream, piece by piece.
+    } else if (stream) {
         out["events"] = response.body;
     } else {
         json answer = json::parse(response.body, nullptr, false);
@@ -1706,6 +1832,18 @@ liquid::runtime::task<UsageSampleReport> sample_usage(ApiContext& context,
         resources = std::move(*rows);
     } else {
         report.unmeasured.push_back("Workload resources: " + rows.error());
+    }
+    // App traffic through the ingress the Orama operator reports (lake#661), read once a sample.
+    std::optional<std::vector<control::AppTransfer>> app_traffic;
+    {
+        const std::int64_t now_ms =
+            std::chrono::duration_cast<std::chrono::milliseconds>(at.time_since_epoch()).count();
+        if (auto rows = context.store->app_transfer(
+                utc_text(floor_to(now_ms - app_traffic_window_ms, hour_ms)))) {
+            app_traffic = std::move(*rows);
+        } else {
+            report.unmeasured.push_back("App traffic: " + rows.error().message);
+        }
     }
     const auto spend = [&](const std::string& workspace_id,
                            std::string_view dimension,
@@ -2053,6 +2191,28 @@ liquid::runtime::task<UsageSampleReport> sample_usage(ApiContext& context,
                 report.unmeasured.push_back("Agent launches of " + customer.id + ": " +
                                             launches.error().message);
             }
+            // Served methodology models (lake#690): a present deployment's serve pods, for as long
+            // as they run, as kind `methodology` like the runs that trained them.
+            for (const std::string& workspace_id : live_ids) {
+                const auto deployments = context.store->list_methodology_deployments(
+                    customer.id, workspace_id, "", 1000);
+                if (!deployments) {
+                    report.unmeasured.push_back("Methodology deployments of " + customer.id + ": " +
+                                                deployments.error().message);
+                    continue;
+                }
+                for (const control::MethodologyDeployment& deployment : *deployments) {
+                    if (deployment.desired != "present") {
+                        continue;
+                    }
+                    if (const auto* row = running("methodology_deployment", deployment.id)) {
+                        charge(deployment.workspace_id,
+                               *row,
+                               seconds,
+                               {{"kind", "methodology"}, {"object_id", deployment.id}});
+                    }
+                }
+            }
             // Builds, job launches and cron runs (lake#658): each finished one is charged once,
             // whenever lake first finds it finished with its resources reported.
             auto jobs = finished_jobs(*context.store, customer.id, live_ids);
@@ -2061,6 +2221,11 @@ liquid::runtime::task<UsageSampleReport> sample_usage(ApiContext& context,
             }
             static_cast<void>(co_await charge_finished_jobs(
                 context, customer.id, jobs.jobs, *resources, at, report));
+        }
+
+        if (app_traffic) {
+            static_cast<void>(co_await charge_app_traffic(
+                context, customer.id, *app_traffic, live_ids, at, report));
         }
 
         // Repository build results finished since a little before the last sample, for their
@@ -2090,7 +2255,8 @@ void register_usage_capabilities(Registry& registry) {
             "tokens also by agent, launch and model; instances and volumes by service, store or "
             "app; CPU, RAM, GPU, GPU memory, predictions and searches by object). `billed` says "
             "whether the price list bills the dimension; build, run and instance time are detail "
-            "and never billed. Read from each workspace's own Zetta. `from` is rounded down and "
+            "and never billed, and so is engine_storage, what a workspace engine holds on its "
+            "own volume, which is billed as the volume (`volumes`). Read from each workspace's own Zetta. `from` is rounded down and "
             "`to` up to whole periods; an hour granularity covers at most 100 days.",
         .input_schema = {{"type", "object"},
                          {"properties",
@@ -2384,7 +2550,11 @@ void register_usage_capabilities(Registry& registry) {
                             {"recorded", {{"type", "boolean"}}},
                             {"streamed", {{"type", "boolean"}}},
                             {"response", {{"type", "object"}}},
-                            {"events", {{"type", "string"}}}}},
+                            {"events",
+                             {{"type", "string"},
+                              {"description",
+                               "the provider's whole event stream, when the request streamed "
+                               "(the `/openai/v1/*` route relays it event by event instead)"}}}}},
                           {"required",
                            json::array({"workspace_id",
                                         "agent",

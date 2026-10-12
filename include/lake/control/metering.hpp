@@ -42,6 +42,23 @@ struct MeteredJobCodec {
     static constexpr RecordCollection collection{"metering_job_records", 1};
 };
 
+// `lake_metering_app_transfer_records` (lake#661): one record per app and closed UTC hour of its
+// traffic through the ingress, under the blind key of `<app id>:<hour>`, written `if_absent`
+// before the hour's bytes are added to the workspace's `lake_usage` as `transfer`. An hour is
+// therefore charged at most once, however often lake reads the operator's row.
+struct MeteredAppTransferCodec {
+    static constexpr RecordCollection collection{"metering_app_transfer_records", 1};
+};
+
+// One charged app hour as read back.
+struct MeteredAppHour {
+    std::string customer_id;
+    std::string app_id;
+    std::string hour; // "YYYY-MM-DDTHH:00:00Z"
+    std::uint64_t in_bytes = 0;
+    std::uint64_t out_bytes = 0;
+};
+
 // One charged job as read back.
 struct MeteredJob {
     std::string customer_id;
@@ -87,6 +104,17 @@ liquid::runtime::task<ZettaControlResult<bool>> record_metered_job(WorkspaceReco
 // The space's charged jobs in this workspace that ended at or after `since_us` (0: all).
 liquid::runtime::task<ZettaControlResult<std::vector<MeteredJob>>>
 list_metered_jobs(WorkspaceRecords& records, std::string customer_id, std::int64_t since_us = 0);
+
+// Records that an app's hour was charged: `if_absent` under the blind key of its app and hour.
+// True when written (charge it now), false when it was charged before.
+liquid::runtime::task<ZettaControlResult<bool>> record_metered_app_hour(WorkspaceRecords& records,
+                                                                        MeteredAppHour hour);
+
+// The space's charged app hours in this workspace at or after `since_us` (0: all).
+liquid::runtime::task<ZettaControlResult<std::vector<MeteredAppHour>>>
+list_metered_app_hours(WorkspaceRecords& records,
+                       std::string customer_id,
+                       std::int64_t since_us = 0);
 
 // The space's records in this workspace, oldest hour first, none before `since_us` (0: all).
 // Records that do not open here or name another space are skipped.

@@ -30,6 +30,7 @@
 #include "lake/control/agent_bus.hpp"
 #include "lake/control/agent_library.hpp"
 #include "lake/control/agent_runs.hpp"
+#include "lake/control/methodologies.hpp"
 #include "lake/control/builds.hpp"
 #include "lake/control/identity_crypto.hpp"
 #include "lake/control/memory_store.hpp"
@@ -409,11 +410,15 @@ TEST(Workspaces, StoresAreNamedPerCustomerAndOnlyAvailablePairsAreCreated) {
     Workspaces w;
     ASSERT_NE(lake::control::find_store_provider("volume", "cluster"), nullptr);
     EXPECT_TRUE(lake::control::find_store_provider("volume", "cluster")->available);
-    EXPECT_EQ(lake::control::store_providers[0].type, "volume") << "the available pair is first";
+    EXPECT_EQ(lake::control::store_providers[0].type, "volume") << "the available pairs first";
+    bool unavailable_seen = false;
     for (const lake::control::StoreProvider& entry : lake::control::store_providers) {
-        EXPECT_EQ(entry.available, entry.type == "volume" && entry.provider == "cluster")
+        // Every bucket and filesystem pair is offered (lake#664); network filesystems wait.
+        EXPECT_EQ(entry.available, entry.type != "network_filesystem")
             << entry.type << "/" << entry.provider;
         EXPECT_EQ(entry.unavailable_reason.empty(), entry.available);
+        EXPECT_FALSE(entry.available && unavailable_seen) << "available pairs come first";
+        unavailable_seen = unavailable_seen || !entry.available;
     }
 
     lake::control::NewManagedStore volume{w.customer_id, "volume", "cluster", "uploads", "taap:x"};
@@ -429,10 +434,11 @@ TEST(Workspaces, StoresAreNamedPerCustomerAndOnlyAvailablePairsAreCreated) {
     ASSERT_FALSE(duplicate);
     EXPECT_EQ(duplicate.error().code, "conflict");
 
-    const auto r2 = w.service->create_store({w.customer_id, "object", "r2", "bucket", "taap:x"});
-    ASSERT_FALSE(r2);
-    EXPECT_EQ(r2.error().code, "invalid_input");
-    EXPECT_NE(r2.error().message.find("needs R2 enabled"), std::string::npos) << r2.error().message;
+    const auto nfs =
+        w.service->create_store({w.customer_id, "network_filesystem", "nfs", "shared", "taap:x"});
+    ASSERT_FALSE(nfs);
+    EXPECT_EQ(nfs.error().code, "invalid_input");
+    EXPECT_NE(nfs.error().message.find("phase 4"), std::string::npos) << nfs.error().message;
     const auto nonsense = w.service->create_store({w.customer_id, "volume", "r2", "odd", "taap:x"});
     ASSERT_FALSE(nonsense);
     EXPECT_EQ(nonsense.error().code, "invalid_input");
@@ -843,17 +849,24 @@ TEST(Workspaces, StoreCapabilitiesRefuseUnavailablePairsAndCheckTheName) {
     ASSERT_EQ(providers.value["providers"].size(), std::size(lake::control::store_providers));
     EXPECT_EQ(providers.value["providers"][0]["type"], "volume");
     EXPECT_EQ(providers.value["providers"][0]["available"], true);
-    EXPECT_NE(providers.value.dump().find("lake#196 phase 2"), std::string::npos);
+    EXPECT_NE(providers.value.dump().find("phase 4"), std::string::npos)
+        << "network filesystems are listed, not offered";
     EXPECT_FALSE(call(*other_principal, "list_store_providers", {{"customer_id", owner}}).ok);
 
-    const auto refused =
-        call(*owner_principal,
-             "create_store",
-             {{"customer_id", owner}, {"type", "object"}, {"provider", "s3"}, {"name", "bucket"}});
+    const auto refused = call(*owner_principal,
+                              "create_store",
+                              {{"customer_id", owner},
+                               {"type", "network_filesystem"},
+                               {"provider", "nfs"},
+                               {"name", "shared"}});
     ASSERT_FALSE(refused.ok);
     EXPECT_EQ(refused.error.code, "invalid_input");
-    EXPECT_NE(refused.error.message.find("your own credentials"), std::string::npos)
-        << refused.error.message;
+    EXPECT_NE(refused.error.message.find("phase 4"), std::string::npos) << refused.error.message;
+    const auto nameless = call(
+        *owner_principal,
+        "create_store",
+        {{"customer_id", owner}, {"type", "object"}, {"provider", "s3"}, {"name", "bucket"}});
+    EXPECT_EQ(nameless.error.path, "/bucket") << "your own bucket names itself";
     EXPECT_FALSE(call(*owner_principal,
                       "create_store",
                       {{"customer_id", owner},
@@ -3538,6 +3551,154 @@ TEST(AgentRuns, ExperimentsAgentGrantsEachTurnOnlyItsExperimentOperations) {
 
 // lake#438: a Project Agent change proposal runs its compile check, is applied by the person,
 // approved and run. The turn's credential reaches compile_intent and no other workspace action.
+// lake#688: New Methodology's Ask Orama. The draft is a methodology_draft turn of Ask Orama on the
+// agent bus; draft_methodology {task_id} offers its files only when Lake's own manifest,
+// entrypoint and lock checks pass, and otherwise answers Lake's template with the reason.
+TEST(AgentRuns, AskOramaDraftsAMethodologyThatLakeChecksBeforeOffering) {
+    AgentRuns r;
+    auto& config = const_cast<lake::control::WorkspaceConfig&>(r.w.service->config());
+    config.agent_endpoints = {{"agent-ask-orama", "http://ask:8080"}};
+    config.internal_url = "http://lake.internal:4900";
+
+    const auto ask = [&]() {
+        const auto started = r.call("agent_turn",
+                                    {{"agent", "agent-ask-orama"},
+                                     {"kind", "methodology_draft"},
+                                     {"message", "Which customers will pay their invoice late"},
+                                     {"context", {{"name", "Late payers"}, {"target_kind", "binary"}}}});
+        EXPECT_TRUE(started.ok) << started.error.message;
+        return r.task(started.value["task_id"]);
+    };
+    const auto first = ask();
+    ASSERT_TRUE(first);
+    EXPECT_EQ(first->agent, "agent-ask-orama");
+    EXPECT_EQ(first->kind, "methodology_draft");
+    EXPECT_EQ(first->body["kind"], "methodology_draft");
+    EXPECT_EQ(first->body["context"]["target_kind"], "binary");
+    EXPECT_EQ(std::ranges::find(first->scopes, "create_methodology"), first->scopes.end())
+        << "Ask Orama writes nothing";
+    EXPECT_EQ(r.call("agent_turn",
+                     {{"agent", "agent-ask-orama"},
+                      {"kind", "methodology_draft"},
+                      {"message", "x"},
+                      {"context", json::array()}})
+                  .error.path,
+              "/context");
+
+    const json draft_input{{"description", "Which customers will pay their invoice late"},
+                           {"name", "Late payers"},
+                           {"task_id", first->id}};
+    const auto working = r.call("draft_methodology", draft_input);
+    EXPECT_EQ(working.error.code, "conflict") << "the turn is still working";
+
+    // A draft that passes the checks is offered as Ask Orama's.
+    const auto written = lake::control::draft_methodology("late payers", "Late payers", "binary");
+    json files = json::array();
+    for (const auto& file : written.files) {
+        files.push_back({{"path", file.path}, {"contents", file.contents}});
+    }
+    ASSERT_TRUE(r.set_task_status(first->id,
+                                  "Succeeded",
+                                  "",
+                                  "",
+                                  {{"ok", true},
+                                   {"reply", "I wrote a first version."},
+                                   {"result",
+                                    {{"kind", "methodology_draft"},
+                                     {"name", "Late payers"},
+                                     {"reason", "A logistic regression for a yes-or-no outcome."},
+                                     {"files", files}}}}));
+    const auto offered = r.call("draft_methodology", draft_input);
+    ASSERT_TRUE(offered.ok) << offered.error.message;
+    EXPECT_EQ(offered.value["draft"]["drafted_by"], "orama");
+    EXPECT_EQ(offered.value["draft"]["task_id"], first->id);
+    EXPECT_EQ(offered.value["draft"]["files"], files);
+    EXPECT_EQ(offered.value["draft"]["reason"], "A logistic regression for a yes-or-no outcome.");
+    EXPECT_FALSE(offered.value["draft"].contains("orama"));
+    for (const json& finding : offered.value["draft"]["findings"]) {
+        EXPECT_TRUE(finding["ok"].get<bool>()) << finding.dump();
+    }
+
+    // An unhashed pin and a missing score are refused: Lake's template, saying why.
+    const auto second = ask();
+    ASSERT_TRUE(second);
+    json broken = files;
+    for (json& file : broken) {
+        if (file["path"] == "requirements.lock") {
+            file["contents"] = "numpy==2.1.3\n";
+        }
+        if (file["path"] == "methodology.py") {
+            file["contents"] = "def fit(data, params):\n    return b''\n\n\ndef predict(a, d):\n"
+                               "    return []\n";
+        }
+    }
+    ASSERT_TRUE(r.set_task_status(second->id,
+                                  "Succeeded",
+                                  "",
+                                  "",
+                                  {{"ok", true},
+                                   {"result", {{"kind", "methodology_draft"}, {"files", broken}}}}));
+    json second_input = draft_input;
+    second_input["task_id"] = second->id;
+    const auto refused = r.call("draft_methodology", second_input);
+    ASSERT_TRUE(refused.ok) << refused.error.message;
+    EXPECT_EQ(refused.value["draft"]["drafted_by"], "template");
+    EXPECT_EQ(refused.value["draft"]["orama"]["offered"], false);
+    std::set<std::string> failing;
+    for (const json& finding : refused.value["draft"]["orama"]["findings"]) {
+        if (!finding["ok"].get<bool>()) {
+            failing.insert(finding["check"].get<std::string>());
+        }
+    }
+    EXPECT_TRUE(failing.contains("packages"));
+    EXPECT_TRUE(failing.contains("entrypoint.score"));
+
+    // A path outside the folder is never read as a file of the draft.
+    const auto third = ask();
+    ASSERT_TRUE(third);
+    json escaping = files;
+    escaping.push_back({{"path", "../other/methodology.py"}, {"contents", ""}});
+    ASSERT_TRUE(r.set_task_status(third->id,
+                                  "Succeeded",
+                                  "",
+                                  "",
+                                  {{"ok", true},
+                                   {"result", {{"kind", "methodology_draft"}, {"files", escaping}}}}));
+    json third_input = draft_input;
+    third_input["task_id"] = third->id;
+    const auto escaped = r.call("draft_methodology", third_input);
+    ASSERT_TRUE(escaped.ok);
+    EXPECT_EQ(escaped.value["draft"]["drafted_by"], "template");
+    EXPECT_NE(escaped.value["draft"]["orama"]["reason"].get<std::string>().find("../other"),
+              std::string::npos);
+
+    // A failed turn falls back with its message; another agent's task is not a draft.
+    const auto fourth = ask();
+    ASSERT_TRUE(fourth);
+    ASSERT_TRUE(r.set_task_status(fourth->id, "Failed", "the model gateway refused", ""));
+    json fourth_input = draft_input;
+    fourth_input["task_id"] = fourth->id;
+    const auto failed = r.call("draft_methodology", fourth_input);
+    ASSERT_TRUE(failed.ok) << failed.error.message;
+    EXPECT_EQ(failed.value["draft"]["drafted_by"], "template");
+    EXPECT_EQ(failed.value["draft"]["template"], "binary");
+
+    config.agent_endpoints["agent-project"] = "http://project:8080";
+    const auto other =
+        r.call("agent_turn", {{"agent", "agent-project"}, {"message", "Build a pipeline"}});
+    ASSERT_TRUE(other.ok);
+    json other_input = draft_input;
+    other_input["task_id"] = other.value["task_id"];
+    EXPECT_EQ(r.call("draft_methodology", other_input).error.path, "/task_id");
+
+    // Without task_id it is Lake's template, as before.
+    const auto plain = r.call("draft_methodology",
+                              {{"description", "Segment our customers into groups"}});
+    ASSERT_TRUE(plain.ok);
+    EXPECT_EQ(plain.value["draft"]["drafted_by"], "template");
+    EXPECT_EQ(plain.value["draft"]["template"], "clustering");
+}
+
 TEST(AgentRuns, AProjectAgentProposalIsCheckedThenAppliedApprovedAndRun) {
     AgentRuns r;
     auto& config = const_cast<lake::control::WorkspaceConfig&>(r.w.service->config());
@@ -4505,6 +4666,19 @@ TEST(EngineCapabilities, StandaloneModelsAreNamedAndAnOlderEngineSaysSo) {
     }
     EXPECT_TRUE(registry.find("train_model")->input_schema["properties"].contains("methodology"));
     EXPECT_TRUE(registry.find("register_model")->input_schema["properties"].contains("weights"));
+    // lake#681: any file goes as weights_base64, in any format the engine converts.
+    EXPECT_TRUE(
+        registry.find("register_model")->input_schema["properties"].contains("weights_base64"));
+    EXPECT_TRUE(
+        registry.find("register_model")->input_schema["properties"].contains("feature_names"));
+    // Downloading a model's weights is a named read, audited as export_model.
+    const auto exported = registry.find("export_model");
+    ASSERT_TRUE(exported);
+    EXPECT_EQ(exported->action, "read");
+    EXPECT_EQ(lake::api::agent_docs::group_of("export_model"), "Models");
+    EXPECT_TRUE(lake::api::workspace_read_allowed("export_model"));
+    EXPECT_TRUE(exported->input_schema["properties"].contains("model_id"));
+    EXPECT_EQ(exported->input_schema["properties"]["format"]["enum"], json({"zetta", "onnx"}));
 
     w.caller->answers["train_model"] = {
         {"run_id", "r-1"}, {"name", "churn"}, {"project_id", "p-1"}, {"standalone", true}};
@@ -4519,6 +4693,22 @@ TEST(EngineCapabilities, StandaloneModelsAreNamedAndAnOlderEngineSaysSo) {
     EXPECT_FALSE(w.caller->read);
     EXPECT_EQ(w.caller->input["target"], "churned");
     EXPECT_EQ(w.caller->input["dataset_path"], "datasets.accounts");
+
+    w.caller->answers["export_model"] = {{"model_id", "m-1"},
+                                         {"name", "churn"},
+                                         {"format", "onnx"},
+                                         {"file_name", "churn-m-1.onnx"},
+                                         {"media_type", "application/onnx"},
+                                         {"encoding", "base64"},
+                                         {"content", "AAEC"},
+                                         {"bytes", 3}};
+    const auto downloaded = call("export_model", {{"model_id", "m-1"}, {"format", "onnx"}});
+    ASSERT_TRUE(downloaded.ok) << downloaded.error.message;
+    EXPECT_EQ(w.caller->capability, "export_model");
+    EXPECT_TRUE(w.caller->read);
+    EXPECT_EQ(w.caller->input["model_id"], "m-1");
+    EXPECT_EQ(w.caller->input["format"], "onnx");
+    EXPECT_EQ(downloaded.value["file_name"], "churn-m-1.onnx");
 
     const auto moved =
         call("move_model_to_project", {{"model_id", "m-1"}, {"project_name", "Retention"}});

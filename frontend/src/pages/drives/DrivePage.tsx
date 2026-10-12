@@ -59,6 +59,7 @@ import { matchLink, matchWhere, parentKey, folderKey, type DriveMatch, type Sear
 import { MatchAnchor, matchIcon } from "./MatchLink";
 import { Highlight } from "@/components/Highlight";
 import { FolderPicker } from "./FolderPicker";
+import { useSettled } from "./useSettled";
 
 /** The type an internal drag carries, so a drop of files from the desktop is never a move. */
 const DRAG_TYPE = "application/x-lake-drive-items";
@@ -464,6 +465,7 @@ function DriveBrowser({ drive, customerId, workspaceId }: { drive: Drive; custom
       {dialog?.kind === "move" && (
         <FolderPicker
           storage={storage}
+          scope={{ customerId, workspaceId }}
           start={folder}
           title={dialog.items.length === 1 ? `Move ${dialog.items[0].name}` : `Move ${dialog.items.length} Items`}
           action="Move here"
@@ -493,15 +495,6 @@ function DriveBrowser({ drive, customerId, workspaceId }: { drive: Drive; custom
   );
 }
 
-/** The value, once it has stopped changing for `ms`. */
-function useSettled<T>(value: T, ms: number): T {
-  const [settled, setSettled] = useState(value);
-  useEffect(() => {
-    const timer = setTimeout(() => setSettled(value), ms);
-    return () => clearTimeout(timer);
-  }, [value, ms]);
-  return settled;
-}
 
 /** The whole drive searched by name (`search_drives {drive_id}`), once typing settles: every match
  * outside the folder shown, which the filter above already covers, with its path. */

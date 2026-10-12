@@ -17,8 +17,8 @@ REST and MCP expose the same registry, customer policy and signed audit records.
 
 | Capability | Input beyond `customer_id` | Effect |
 |---|---|---|
-| `list_apps`, `get_app` | `app_id` for get | desired and observed state |
-| `create_app` | name, mode, source or image, framework, port; optional replicas/host/auth/bindings/env; public also requires `confirm_public` | generation 1 and create event |
+| `list_apps`, `get_app` | `app_id` for get | desired and observed state, and `stores` (what it mounts, lake#666) |
+| `create_app` | name, mode, source or image, framework, port; optional replicas/host/auth/bindings/env/stores; public also requires `confirm_public` | generation 1 and create event |
 | `deploy_app`, `rollback_app` | `app_id` (ApplicationAgent may use `app` for deploy), source or image | new desired deployment and generation |
 | `delete_app` | `app_id`, `confirm` equal to name | `desired = deleted` |
 | `set_app_env`, `unset_app_env` | `app_id`, key; set takes `value`, `secret` (`{mount_id, name, field}`) or `secret_ref` (`lake-secret://…`) | scanned environment update; a secret is checked, never read back |
@@ -27,6 +27,7 @@ REST and MCP expose the same registry, customer policy and signed audit records.
 | `scale_app` | `app_id`, replicas | desired count within customer quota |
 | `set_app_zetta_binding` | `app_id`, attached | attach or detach read-only workspace access |
 | `bind_service_to_app` | `app_id`, service_id | bind a service from the same customer |
+| `set_app_stores` | `app_id`, `stores: [{store_id, mount_path?, read_only?}]` | replace the workspace storage the app mounts ([storage.md](storage.md#mounting-a-store)): a volume at a path (one workload per volume, else `conflict`), a bucket as `STORE_<NAME>_*` environment variables; new generation and a `stores` event |
 | `unbind_service_from_app` | `app_id`, service_id | detach an existing service binding |
 | `create_service_and_bind_to_app` | `app_id`, service kind/name and optional size | create and bind in one call |
 | `app_logs` | `app_id`, optional since/limit/direction | Loki log page |
@@ -175,6 +176,15 @@ operator's `Deleted` acknowledgement before Lake physically removes the row. Sta
 
 Plain environment values are scanned; detected credentials return `secret_required`. Bindings and
 operator tokens are delivered as mounted Secrets.
+
+## Usage
+
+A running app is metered for its replicas' CPU, RAM, GPU and GPU memory (lake#643) and, since
+lake#661, for the bytes it receives and sends through the ingress: the Orama operator reads the
+ingress controller's per-Ingress byte counters and reports them by app and hour (`app_transfer`,
+migration `0081`), and Lake adds each closed hour to the app's workspace as `transfer` (`in`, `out`,
+`object_id` the app), billed at the `transfer` rate. An hour appears on the Usage page once it has
+closed ([metering](metering.md#app-traffic)).
 
 ## Secret environment
 

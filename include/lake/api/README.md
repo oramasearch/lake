@@ -23,12 +23,16 @@ injected dependency on `ApiContext` and `ServerOptions` (lake#561, `docs/api/tra
 `cluster_service` reaches a workspace App's `<service>.<namespace>.svc.cluster.local` over http and
 its private address, and nothing else private (`mcp_cluster_service_host`).
 `mcp_connections.hpp` registers a workspace's MCP connection capabilities and answers what Lake's
-own MCP endpoint re-exports (`exported_mcp_tools`, `call_exported_mcp_tool`). `registry.hpp`'s
+own MCP endpoint re-exports (`exported_mcp_tools`, `call_exported_mcp_tool`).
+`agent_stream_triggers.hpp` (lake#677) registers the capabilities that start an agent from a
+workspace stream, removes an agent's triggers, and declares `AgentStreamWorker`. `registry.hpp`'s
 `acting_agent` names the agent whose credential made a call.
 `model_gateway.hpp` declares the model gateway's pure helpers (`prepare_model_request`,
-`model_usage`, `model_provider_failure`) and `openai_model_provider`. `registry.hpp` declares the
-`ModelProvider` injected dependency on `ApiContext`, and `server.hpp` the provider and its URL on
-`ServerOptions` (lake#248, `docs/api/model-gateway.md`).
+`model_usage`, `ModelStreamUsage` for a stream read as it arrives, `model_provider_failure`) and
+`openai_model_provider`. `registry.hpp` declares the `ModelProvider` injected dependency on
+`ApiContext`, the `ModelBodySink` a streamed answer goes to as it arrives, and the caller's
+`model_stream` (lake#665); `server.hpp` the provider and its URL on `ServerOptions` (lake#248,
+`docs/api/model-gateway.md`).
 
 `ServerOptions::external_origin` is trusted instance configuration for repository terminal
 instructions (`repository_external_origin`). It takes precedence over `https://` plus the trusted
@@ -186,3 +190,7 @@ move (`transfer_to_workspace_store`, `switch_workspace_store`, `create_repositor
 `register_deletion_capabilities` (`capabilities.hpp`, lake#645) registers `delete_dataset`,
 `delete_model`, `delete_run`, `delete_index` and `delete_ask_conversation`
 ([deletion.md](../../../docs/api/deletion.md)).
+
+`MethodologyServer` (`registry.hpp`, `ServerOptions::methodology_server`, lake#690) sends one
+prediction request to a served methodology model's Service; the HTTP server injects one over its
+outbound client (plain http to `*.svc.cluster.local` only), tests inject a fake.

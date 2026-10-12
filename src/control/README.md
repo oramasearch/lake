@@ -131,6 +131,9 @@ and the OAuth sign-in states in `lake_mcp_oauth_states`, taken once by a delete 
 `agent_revisions.cpp` is an agent's definition revisions (lake#653): one append-only record per
 `create_agent` or `update_agent` in `lake_agent_revisions`, found by the account and the agent's id,
 and `agent_definition_of`, the fields of an engine agent a person designs.
+`agent_stream_triggers.cpp` is an agent's stream triggers (lake#677): one record per agent and
+workspace stream in `lake_agent_stream_triggers`, found by the account, with the person its runs act
+as and the last message sequence that started one, moved forward by a conditional write.
 `stream_owners.cpp` is the second
 (lake#379): one `if_absent` record per topic, keyed by the topic's blind index; the stores hold no
 topic creator (the retired table is dropped by `0070`). `drive_share_links.cpp` is the drive share
@@ -172,8 +175,10 @@ Repositories carry the workspace they belong to (migration `0051_repository_work
 Both stores refuse `create_repository` without a live workspace of the repository's space and
 filter `list_repositories` by an optional workspace; `transfer_repository` is gone from the store
 interface because the routing trigger keeps a repository's space fixed.
-Repository usage lives in workspace Zettas (lake#348, lake#349, `metering.cpp`). Neither store
-writes or reads metering rows any more; `0070` drops the retired tables. Both stores keep an
+Repository usage lives in workspace Zettas (lake#348, lake#349, `metering.cpp`), as does the
+ledger of charged app traffic hours (`record_metered_app_hour`, lake#661). Both stores read the
+operator's `app_transfer` rows (migration `0081`, numbers only; `add_app_transfer` is the operator's
+write, for tests). Neither store writes or reads metering rows any more; `0070` drops the retired tables. Both stores keep an
 account's usage limits (`customer_usage_limits`, migration `0072`, lake#564); a limit of 0 deletes
 the row.
 Both stores keep billing records (migration `0073_billing`, lake#564): plans with their prices,
@@ -265,3 +270,11 @@ workspace, for tests (lake#659).
 Both stores keep MCP connection dispatch rows (lake#684, lake#685, migration `0079`), keyed by
 workspace and connection: a row that neither streams nor re-exports is removed rather than kept,
 and PostgreSQL writes one only for a workspace of the row's account.
+Store drives (lake#664, [storage.md](../../docs/api/storage.md#browsing-a-store)):
+`store_buckets.cpp` is one `BucketContents` (folders as `<path>/` prefixes and markers) over a small
+object protocol with two implementations, S3 (SigV4, `ListObjectsV2`, ranged `GET`, `PUT`, copy and
+`DELETE`) and Azure Blob (Shared Key or SAS), its own XML reader and no provider SDK;
+`store_kept.cpp` keeps a `zetta` store as sealed records and sealed objects in the workspace Zetta.
+Both stores keep served methodology models' `methodology_deployments` rows and the operator's
+`methodology_deployment_status` (lake#690, migration `0083`); `methodologies.cpp` holds
+`methodology_deployment_endpoint_valid`.

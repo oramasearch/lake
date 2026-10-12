@@ -86,7 +86,10 @@ inline json experiment_spec() {
         {"search_space", search_space()}, {"sampler", choice({"grid", "random", "tpe"})},
         {"pruner", choice({"none", "median", "asha"})}, {"budgets", budgets()},
         {"seed", integer(0, 9007199254740991)}, {"differential_privacy", flag()},
-        {"released_metrics", released}}, {"name", "project", "pipeline", "dataset",
+        {"released_metrics", released},
+        // A workspace methodology's experiment (lake#689): the target and feature columns its
+        // trials read.
+        {"target", text()}, {"features", array(identifier())}}, {"name", "project", "pipeline", "dataset",
         "methodology", "objective", "search_space", "sampler", "pruner", "budgets", "seed",
         "differential_privacy", "released_metrics"});
 }
@@ -100,16 +103,41 @@ inline json trial() {
         "cost", "intermediate", "reason", "model"});
 }
 
+// A trial's Lake run, for a workspace methodology's experiment (lake#689).
+inline json trial_run() {
+    json nullable_text = {{"type", {"string", "null"}}};
+    return object({{"trial", identifier()}, {"number", {{"type", {"integer", "null"}}}},
+                   {"run_id", nullable_text}, {"phase", text()}, {"message", text()},
+                   {"started_at", nullable_text}, {"finished_at", nullable_text}},
+                  {"trial", "number", "run_id", "phase", "message"});
+}
+
+// A trial waiting for Lake's runner: what the engine asks it to run (lake#689).
+inline json runner_work() {
+    auto run = trial_run();
+    run["type"] = {"object", "null"};
+    return object({{"experiment_id", identifier()}, {"experiment_name", text()},
+                   {"trial", identifier()}, {"number", integer()}, {"methodology", identifier()},
+                   {"params", dictionary(scalar())}, {"seed", integer(0, 9007199254740991)},
+                   {"dataset_path", text()}, {"target", text()}, {"features", array(text())},
+                   {"holdout_fraction", number()}, {"project", text()}, {"graph", text()},
+                   {"methodology_run", run}},
+                  {"experiment_id", "trial", "number", "methodology", "params"});
+}
+
 inline json experiment() {
     return object({{"id", identifier()},
                    {"spec", experiment_spec()},
-                   {"status", choice({"running", "stopped", "complete"})},
+                   {"status", choice({"running", "stopped", "complete", "failed"})},
                    {"created", text()},
                    {"updated", text()},
                    {"trials", array(trial())},
                    {"spent_cost", number()},
                    {"stop_reason", text()},
-                   {"promoted_model", text()}},
+                   {"failure_reason", text()},
+                   {"promoted_model", text()},
+                   {"runner", array(runner_work())},
+                   {"methodology_runs", array(trial_run())}},
                   {"id",
                    "spec",
                    "status",

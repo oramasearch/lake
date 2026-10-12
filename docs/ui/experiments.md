@@ -104,6 +104,25 @@ ExperimentsAgent must be deployed (the Agent Library says so). Otherwise the box
 explains that it is unavailable, and disables submission. Ask Orama and the Project Agent can
 delegate the same goal through `agent_turn`; there is no page-only experiment operation.
 
+## A Workspace Methodology's Experiment (lake#689)
+
+**Start an Experiment** lists, in **Methodology**, every methodology an experiment can search
+(`list_methodologies` entries with `studies: true`): Orama's and the workspace's own, marked
+*(yours)*. Choosing one of the workspace's own:
+
+- explains that each trial runs its Python code as a training run in its sandbox, metered as any
+  run;
+- makes **Project** and **Pipeline** optional, and asks for **Column to predict** (required when the
+  methodology has a target);
+- offers its `held_out_` metrics as **Objective metric**, with the direction a loss or an error is
+  minimized in, the `validation` split read-only and the pruner fixed at `none`;
+- lists the parameters it searches with their declared ranges; blank search parameters mean those.
+
+On the experiment's page each trial of such an experiment shows its **Lake run** under its run id:
+the phase (Pending, Building, Staging, Running, Collecting, Succeeded, Failed, Stopped) and Lake's
+message. `frontend/src/pages/experiments/workspaceMethodology.ts` holds the pure parts
+(`frontend/tests/experiment-methodologies.test.ts`).
+
 ## Experiments and Runs
 
 An experiment shows objective history and its best-so-far line, normalized parallel coordinates,

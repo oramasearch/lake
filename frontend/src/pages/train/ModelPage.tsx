@@ -5,11 +5,14 @@
  *
  * A standalone model (lake#654) shows what it trains on instead of a pipeline, and has Retrain and
  * New version (`retrain_model`, or a new file for a brought one), Move into a project
- * (`move_model_to_project`) and Delete (`delete_model` for each version). */
+ * (`move_model_to_project`) and Delete (`delete_model` for each version).
+ *
+ * Any version's weights download as a file (`export_model`, lake#681): as Lake keeps them, or a
+ * tree model as ONNX to score elsewhere. */
 import { useMemo, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
-import { ArrowUpRight, FolderInput, GitCompare, Plus, RefreshCw, Rocket, Trash2 } from "lucide-react";
-import { act, ApiError, type Row } from "@/lib/api";
+import { ArrowUpRight, Download, FolderInput, GitCompare, Plus, RefreshCw, Rocket, Trash2 } from "lucide-react";
+import { act, ApiError, read, type Row } from "@/lib/api";
 import { relative } from "@/lib/format";
 import { ConfirmButton } from "@/lib/overlay";
 import { useToast } from "@/lib/toast";
@@ -18,7 +21,7 @@ import { Banner, Button, Card, Chip, DataTable, Empty, ErrorBlock, FormError, Ke
 import { Chart } from "../experiments/Chart";
 import { WorkspaceFrame, cellText, qs, text, useWorkspace, useWq, useWsPath, wa } from "./workspace";
 import { when } from "./RunsPage";
-import { broughtFrom, compareVersions, featuresOf, groupOf, measuredFigures, modelSteps, scoreSeries, trainingOf, versionNumber, type ModelGroup } from "./models";
+import { broughtFrom, compareVersions, exportsAsOnnx, featuresOf, groupOf, measuredFigures, modelSteps, scoreSeries, trainingOf, versionNumber, weightsFile, type ModelGroup } from "./models";
 import { ScoreText, SourceText, VersionScore, useModelGroups, useModelLinks } from "./modelParts";
 import { BringDialog, RetrainDialog } from "./NewModel";
 
@@ -116,6 +119,7 @@ function ModelBody({ group, groups, id, experiment, promoted }: { group: ModelGr
               ]}
             />
           </Card>
+          <Weights selected={selected} n={n(selected)} name={group.name} />
           {group.standalone ? <Standalone group={group} /> : <PipelineSteps group={group} experiment={experiment} />}
           <Train group={group} groups={groups} selected={selected} n={n(selected)} />
         </>
@@ -200,6 +204,52 @@ function ModelBody({ group, groups, id, experiment, promoted }: { group: ModelGr
       {other && <Comparison group={group} from={other} to={selected} />}
       <Learned selected={selected} report={report} />
     </Split>
+  );
+}
+
+/** Download the selected version's weights: as Lake keeps them, or a tree model as ONNX
+ * (`export_model`, lake#681). */
+function Weights({ selected, n, name }: { selected: Row; n: number; name: string }) {
+  const scope = useWorkspace();
+  const toast = useToast();
+  const [busy, setBusy] = useState<"zetta" | "onnx" | null>(null);
+  const [error, setError] = useState<unknown>(null);
+  const download = async (format: "zetta" | "onnx") => {
+    setBusy(format);
+    setError(null);
+    try {
+      const answer = await read<Row>("export_model", { customer_id: scope.customerId, workspace_id: scope.workspaceId, model_id: text(selected, "id"), format });
+      const file = weightsFile(answer);
+      const url = URL.createObjectURL(new Blob([file.bytes as BlobPart], { type: file.type }));
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = file.name;
+      link.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      toast(`Downloaded ${file.name}`);
+    } catch (e) {
+      setError(e);
+    } finally {
+      setBusy(null);
+    }
+  };
+  return (
+    <Card label="Weights">
+      <p className="muted mt-0 mb-2 text-[12.5px]">
+        v{n} of {name} as a file, to keep or to score elsewhere.
+      </p>
+      <div className="flex flex-wrap gap-2">
+        <Button loading={busy === "zetta"} disabled={!!busy} onClick={() => void download("zetta")}>
+          <Download size={14} aria-hidden /> Download
+        </Button>
+        {exportsAsOnnx(selected) && (
+          <Button loading={busy === "onnx"} disabled={!!busy} onClick={() => void download("onnx")}>
+            <Download size={14} aria-hidden /> As ONNX
+          </Button>
+        )}
+      </div>
+      <FormError error={error} />
+    </Card>
   );
 }
 

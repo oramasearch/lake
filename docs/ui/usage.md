@@ -35,7 +35,9 @@ Top to bottom:
   in words (`formatValue`: CPU in vCPU-minutes or -hours, RAM and GPU memory in GiB-minutes or
   -hours, GPU in GPU-minutes or -hours), and its change against the last period with an arrow. A
   dimension the reading answers with `billed: false` (build, run and instance time, lake#658) says
-  *Detail, not billed* under it (`billingNote`). Pressing a tile charts it (`?dimension=`).
+  *Detail, not billed* under it (`billingNote`); Engine Storage (`engine_storage`, what a
+  workspace engine holds on its own volume, decision 61, lake#663) says *Detail, billed as the
+  engine's volume*. Pressing a tile charts it (`?dimension=`).
 - **Over Time.** A uPlot chart (`pages/usage/UsageChart.tsx`, as Train and Ship's charts) of the
   chosen dimension, stacked **By workspace** or **By kind**: the six largest bands and Other
   (`stackSeries`), in lake's colours, redrawn when the theme changes; the legend shows each band's
@@ -53,8 +55,8 @@ Top to bottom:
   it.
 - **Not Measured Yet.** The reading's `not_measured` sentences, as a quiet banner. Since lake#658
   it names only what is still not measured: workloads the operator has not reported, the engine
-  storage of a workspace whose Zetta is older, app traffic (lake#661) and unreported model tokens
-  (lake#248).
+  storage of a workspace whose Zetta is older and unreported model tokens (lake#248). App traffic
+  through the ingress is measured since lake#661: each closed hour is in `transfer`.
 - **Repository Usage by Hour.** A card linking `/metering` for the account.
 - **By Workspace.** Every dimension's figure per workspace, sortable, or why a workspace was not read.
 
@@ -99,3 +101,7 @@ usage, and the workspace selection. `npx tsc --noEmit -p .`, `npm test` and `npm
 
 A dimension the server adds appears as a figure, a chip and a column with no change here; give its
 unit a case in `formatValue` and `limitScale` if it is new, and its kinds names in `KIND_NAMES`.
+
+Browser check for lake#663: `frontend/checks/engine-storage.mjs` (against `npx vite --port 5174`,
+every `/v1` call mocked) shows Storage, Engine Storage marked *Detail, billed as the engine's
+volume* and Engine Storage by kind, at 1440 and 390 px, with no sideways scroll and no page errors.

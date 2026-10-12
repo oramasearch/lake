@@ -370,3 +370,87 @@ export function filledSteps(traffic: Traffic, fromMs: number, toMs: number, step
   for (let at = first; at < toMs && out.length < 10_000; at += stepMs) out.push(byAt.get(at) ?? { at, calls: 0, errors: 0, meanMs: null });
   return out;
 }
+
+/* ------------------------------------------------------------------ served by its own code (lake#690) */
+
+/** The workspace methodology a model's kind names (`python:W-<8 hex>`), or "" for any other
+ * model. Such a model is served by its own code: publishing it starts its server. */
+export function methodologyOf(version: Row | undefined): string {
+  const kind = version ? text(version, "kind") : "";
+  const id = kind.startsWith("python:") ? kind.slice("python:".length) : "";
+  return /^W-[0-9a-f]{8}$/.test(id) ? id : "";
+}
+
+export type ServerState = { label: string; tone: "success" | "warning" | "danger" | "neutral" | "info"; settled: boolean; ready: boolean };
+
+/** What a person is told about a served model's server, from `get_methodology_deployment`. */
+export function serverState(deployment: Row | null | undefined): ServerState {
+  if (!deployment) return { label: "not served", tone: "neutral", settled: true, ready: false };
+  const phase = text(deployment, "phase") || "Pending";
+  switch (phase) {
+    case "Ready":
+      return { label: "serving", tone: "success", settled: true, ready: true };
+    case "Failed":
+      return { label: "failed", tone: "danger", settled: true, ready: false };
+    case "Stopped":
+      return { label: "not served", tone: "neutral", settled: true, ready: false };
+    case "Queued":
+      return { label: "queued", tone: "warning", settled: false, ready: false };
+    default:
+      return { label: phase.toLowerCase(), tone: "info", settled: false, ready: false };
+  }
+}
+
+/** A served model's answer to `predict`: one prediction per row, with the row's entity. */
+export function predictionRows(answer: Row | null | undefined): Row[] {
+  return answer && Array.isArray(answer.predictions) ? (answer.predictions as Row[]) : [];
+}
+
+/* ------------------------------------------------- bring and download (lake#681) */
+
+/** "tenure, spend , tickets" typed as a model's columns, in its order. */
+export function parseFeatureNames(input: string): string[] {
+  return input
+    .split(",")
+    .map((name) => name.trim())
+    .filter(Boolean);
+}
+
+/** A column named twice is refused before the engine sees it. */
+export function featureNamesProblem(names: string[]): string | null {
+  const seen = new Set<string>();
+  for (const name of names) {
+    if (seen.has(name)) return `${name} is named twice; each column once, in the model's order.`;
+    seen.add(name);
+  }
+  return null;
+}
+
+/** Whether a file name or path is an ONNX file, which names no columns. */
+export function isOnnxPath(path: string): boolean {
+  return /\.onnx$/i.test(path.trim());
+}
+
+/** `export_model`'s answer as a file to save: its name, type and bytes. */
+export function weightsFile(answer: Record<string, unknown>): { name: string; type: string; bytes: Uint8Array } {
+  const content = typeof answer.content === "string" ? answer.content : "";
+  const name = typeof answer.file_name === "string" && answer.file_name ? answer.file_name : "model";
+  const type = typeof answer.media_type === "string" && answer.media_type ? answer.media_type : "application/octet-stream";
+  if (answer.encoding === "base64") {
+    const binary = atob(content);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    return { name, type, bytes };
+  }
+  return { name, type, bytes: new TextEncoder().encode(content) };
+}
+
+/** Whether a model can be written as ONNX: a tree model whose output is a probability or a sum.
+ * Its objective says so when the record carries one; otherwise a classifier or regressor may be
+ * one, and the engine refuses, saying why, when it is not. */
+export function exportsAsOnnx(model: Record<string, unknown>): boolean {
+  const schema = model.feature_schema;
+  const objective = schema && typeof schema === "object" ? (schema as Record<string, unknown>).objective : undefined;
+  if (objective !== undefined) return objective === "binary_logistic" || objective === "squared_error";
+  return model.kind === "classifier" || model.kind === "regressor";
+}

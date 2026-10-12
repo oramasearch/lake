@@ -10,6 +10,8 @@
 #include "lake/api/audit_recorder.hpp"
 #include "lake/api/billing.hpp"
 #include "lake/api/mcp_client.hpp"
+#include "lake/api/agent_stream_triggers.hpp"
+#include "lake/control/store_buckets.hpp"
 #include "lake/api/mcp_connections.hpp"
 #include "lake/api/metering_recorder.hpp"
 #include "lake/api/request_recorder.hpp"
@@ -66,6 +68,7 @@
 #include <boost/capy/ex/run_async.hpp>
 #include <boost/capy/io/push_to.hpp>
 #include <boost/capy/read.hpp>
+#include <boost/capy/delay.hpp>
 #include <boost/capy/timeout.hpp>
 #include <boost/corosio/io_context.hpp>
 #include <boost/corosio/openssl_stream.hpp>
@@ -6690,6 +6693,13 @@ struct OutboundRequest {
     std::chrono::seconds timeout{30};
     // The largest response body read; a model's answer or event stream can be larger (lake#248).
     std::size_t body_limit = 2 * 1024 * 1024;
+    // When set, the response body goes to it piece by piece as it arrives, with the response's
+    // status, and is not kept in OutboundResponse::body (lake#665, a model's event stream relayed
+    // as it arrives). Called on the client's io thread, so it must not block; false stops reading.
+    std::function<bool(int status, std::string_view piece)> on_body;
+    // Plain http to a cluster Service (`<name>.<namespace>.svc.cluster.local`): a served
+    // methodology's model (lake#690), whose Service only Lake's pods can reach.
+    bool cluster_http = false;
 };
 
 struct OutboundResponse {
@@ -6705,7 +6715,7 @@ struct OutboundTarget {
     std::string path;
 };
 
-bool parse_outbound_url(std::string_view url, OutboundTarget& target) {
+bool parse_outbound_url(std::string_view url, OutboundTarget& target, bool cluster_http = false) {
     if (url.starts_with("https://")) {
         url.remove_prefix(8);
         target.secure = true;
@@ -6748,7 +6758,8 @@ bool parse_outbound_url(std::string_view url, OutboundTarget& target) {
     }
     const bool loopback =
         target.host == "127.0.0.1" || target.host == "::1" || target.host == "localhost";
-    return !target.host.empty() && !target.port.empty() && (target.secure || loopback);
+    const bool cluster = cluster_http && target.host.ends_with(".svc.cluster.local");
+    return !target.host.empty() && !target.port.empty() && (target.secure || loopback || cluster);
 }
 
 std::string outbound_host_header(const OutboundTarget& target) {
@@ -6856,11 +6867,20 @@ boost::capy::io_task<std::string> exchange_outbound(Stream& stream,
             co_return {{}, "could not read outbound response body: " + read_error.message()};
         }
         std::size_t consumed = 0;
+        bool more = true;
         for (const boost::capy::const_buffer& buffer : buffers) {
-            response.body.append(static_cast<const char*>(buffer.data()), buffer.size());
+            const std::string_view piece(static_cast<const char*>(buffer.data()), buffer.size());
+            if (request.on_body) {
+                more = more && request.on_body(response.status, piece);
+            } else {
+                response.body.append(piece);
+            }
             consumed += buffer.size();
         }
         body.consume(consumed);
+        if (!more) {
+            co_return {{}, "the response body's reader stopped"};
+        }
     }
     co_return {{}, std::string()};
 }
@@ -6932,7 +6952,7 @@ private:
 
     boost::capy::task<> perform(std::shared_ptr<Pending> pending) {
         OutboundTarget target;
-        if (!parse_outbound_url(pending->request.url, target)) {
+        if (!parse_outbound_url(pending->request.url, target, pending->request.cluster_http)) {
             pending->response.error = "outbound URL must use HTTPS, except for loopback tests";
             finish(pending);
             co_return;
@@ -7469,6 +7489,7 @@ struct ApiServer::Impl {
     std::chrono::steady_clock::time_point next_usage_sample{};
     // The MCP connections' streams (lake#652), on the maintenance thread of the store root's owner.
     McpStreamWorker mcp_streams;
+    AgentStreamWorker agent_streams;
     std::chrono::steady_clock::time_point next_mcp_stream_pass{};
     std::chrono::steady_clock::time_point last_usage_sample{};
     UsageRecorder::Totals reported_usage;
@@ -7560,8 +7581,13 @@ struct ApiServer::Impl {
     // MCP connections' transport (docs/api/mcp-connections.md#the-client): the injected one, else
     // the server's own, which refuses private addresses unless the options allow them.
     std::shared_ptr<McpHttp> mcp_http;
+    // A customer's own buckets (lake#664): their transport, public addresses only, and the
+    // browser over it.
+    std::shared_ptr<McpHttp> store_transport;
+    control::StoreBrowser store_browser;
     // The model gateway's provider (docs/api/model-gateway.md): the injected one, else OpenAI's
     // API over outbound_http when LAKE_OPENAI_API_KEY is set (lake#248).
+    MethodologyServer methodology_server;
     ModelProvider model_provider;
     // The workspace Zettas' object transport (configure_workspace_stores), for workspace files;
     // null without workspaces.
@@ -8406,6 +8432,41 @@ struct ApiServer::Impl {
         }
         mcp_http = options.mcp_http ? options.mcp_http
                                     : make_mcp_http(options.mcp_allow_private_addresses);
+        store_browser = options.store_browser;
+        if (!store_browser) {
+            // Its own transport, on its own io thread, so a slow bucket never holds up an MCP
+            // server; each exchange runs on the blocking pool.
+            store_transport = make_mcp_http(options.store_allow_private_addresses);
+            store_browser = control::cloud_store_browser(
+                [transport = store_transport](control::StoreHttpRequest request)
+                    -> liquid::runtime::task<control::StoreHttpResponse> {
+                    auto ran = co_await run_blocking([transport, request = std::move(request)] {
+                        McpHttpRequest out;
+                        out.method = request.method;
+                        out.url = request.url;
+                        out.headers = request.headers;
+                        out.body = request.body;
+                        out.timeout = request.timeout;
+                        out.max_response_bytes = request.max_response_bytes;
+                        McpHttpResponse answer = transport->exchange(out, {});
+                        control::StoreHttpResponse response;
+                        response.status = answer.status;
+                        response.headers = std::move(answer.headers);
+                        response.body = std::move(answer.body);
+                        response.error = answer.timed_out ? std::string("the bucket timed out")
+                                         : answer.truncated
+                                             ? std::string("the bucket's answer was too large")
+                                             : std::move(answer.error);
+                        return response;
+                    });
+                    if (!ran) {
+                        control::StoreHttpResponse failed;
+                        failed.error = ran.error().message;
+                        co_return failed;
+                    }
+                    co_return std::move(*ran);
+                });
+        }
         model_provider = options.model_provider;
         if (!model_provider && !options.openai_api_key.empty()) {
             model_provider = openai_model_provider(
@@ -8414,11 +8475,29 @@ struct ApiServer::Impl {
                 [this](const std::string& url,
                        std::string body,
                        std::vector<std::pair<std::string, std::string>> headers,
-                       std::chrono::seconds timeout) {
+                       std::chrono::seconds timeout,
+                       ModelBodySink on_body) {
                     OutboundRequest request{
                         "POST", url, std::move(body), std::move(headers), timeout};
                     request.body_limit = 64 * 1024 * 1024;
+                    // A 2xx answer goes on as it arrives (lake#665); a refusal is kept whole,
+                    // for its message.
+                    auto refusal = std::make_shared<std::string>();
+                    if (on_body) {
+                        request.on_body = [on_body, refusal](int status, std::string_view piece) {
+                            if (status >= 200 && status < 300) {
+                                return on_body(piece);
+                            }
+                            if (refusal->size() < 64 * 1024) {
+                                refusal->append(piece);
+                            }
+                            return true;
+                        };
+                    }
                     OutboundResponse response = outbound_http.request(std::move(request));
+                    if (on_body && (response.status < 200 || response.status >= 300)) {
+                        response.body = std::move(*refusal);
+                    }
                     return ModelProviderResponse{
                         response.status, std::move(response.body), std::move(response.error)};
                 });
@@ -8959,7 +9038,7 @@ struct ApiServer::Impl {
         ctx.transcriber = transcriber;
         ctx.mcp_http = mcp_http;
         ctx.mcp_allow_private_addresses = options.mcp_allow_private_addresses;
-        ctx.store_browser = options.store_browser;
+        ctx.store_browser = store_browser;
         ctx.model_provider = model_provider;
         ctx.payments = payments;
         ctx.object_transport = object_transport;
@@ -10708,7 +10787,31 @@ struct ApiServer::Impl {
             }
             return {RegistryAccess::Allowed, customer->id, run->workspace_id, false};
         }
-        if (credential.username == "app" || credential.username == "methodology-run") {
+        if (principal->kind == "methodology_deployment") {
+            // A served methodology model's serve pods pull its image with the deployment's own
+            // credential (lake#690) whenever one (re)starts: that one image repository, read only,
+            // while the deployment is present.
+            if (write || credential.username != "methodology-deployment") {
+                return {RegistryAccess::Denied};
+            }
+            const auto deployment =
+                options.store->get_methodology_deployment(principal->workload_id);
+            const auto customer = options.store->get_customer(principal->workload_customer_id);
+            if (!deployment || !customer || deployment->customer_id != customer->id ||
+                deployment->build_id.empty()) {
+                return {RegistryAccess::Denied};
+            }
+            const auto build = options.store->get_build(deployment->build_id);
+            const std::string image =
+                build ? build_target_image(build->target, customer->name) : std::string();
+            if (!build || build->customer_id != customer->id || image.empty() ||
+                repository != customer->name + "/" + image) {
+                return {RegistryAccess::Denied};
+            }
+            return {RegistryAccess::Allowed, customer->id, deployment->workspace_id, false};
+        }
+        if (credential.username == "app" || credential.username == "methodology-run" ||
+            credential.username == "methodology-deployment") {
             return {RegistryAccess::Denied};
         }
         if (write || principal->taap_id.empty() ||
@@ -12808,6 +12911,18 @@ struct ApiServer::Impl {
             metrics.increment_counter(
                 "lake_mcp_stream_problems_total", {}, static_cast<double>(done.problems.size()));
         }
+        // Agents started by a workspace stream (lake#677), on the same owner-only pass.
+        const AgentStreamPass started = agent_streams.pass(context);
+        metrics.increment_counter("lake_agent_stream_passes_total");
+        if (started.runs > 0) {
+            metrics.increment_counter(
+                "lake_agent_stream_runs_total", {}, static_cast<double>(started.runs));
+        }
+        if (!started.problems.empty()) {
+            metrics.increment_counter("lake_agent_stream_problems_total",
+                                      {},
+                                      static_cast<double>(started.problems.size()));
+        }
     }
 
     void log_store_owner(nlohmann::json event) const {
@@ -13287,10 +13402,103 @@ struct ApiServer::Impl {
         co_return http::route_done;
     }
 
+    // A streamed model answer on its way to the caller (lake#665): the outbound client's thread
+    // offers each piece as it arrives, and the route's relay takes and writes them.
+    struct ModelStreamRelay {
+        // What a caller that reads slower than the provider writes may fall behind by.
+        static constexpr std::size_t queue_limit = 8 * 1024 * 1024;
+        std::mutex mutex;
+        std::string queued;
+        std::atomic<bool> gone{false};   // the caller stopped reading: the provider is stopped
+        std::atomic<bool> closed{false}; // the call has finished: nothing more is offered
+
+        bool offer(std::string_view piece) {
+            if (gone.load()) {
+                return false;
+            }
+            std::lock_guard lock(mutex);
+            if (queued.size() + piece.size() > queue_limit) {
+                gone.store(true);
+                return false;
+            }
+            queued.append(piece);
+            return true;
+        }
+        std::string take() {
+            std::lock_guard lock(mutex);
+            return std::exchange(queued, std::string());
+        }
+    };
+
+    static liquid::runtime::task<ApiResult>
+    call_then_close(liquid::runtime::task<ApiResult> call, std::shared_ptr<ModelStreamRelay> relay) {
+        // Closed however the call ends, so the relay never waits on a call that threw.
+        struct Close {
+            ModelStreamRelay* relay;
+            ~Close() {
+                relay->closed.store(true);
+            }
+        } close{relay.get()};
+        co_return co_await std::move(call);
+    }
+
+    // Writes each piece the provider has sent since the last look, starting the chunked response
+    // with the first; returns once the call has finished and everything offered is written. A
+    // write that fails leaves the relay `gone`, so the provider is stopped, and is answered in
+    // `failed` once the call has finished.
+    boost::capy::io_task<> relay_model_stream(boost::http::route_params& route,
+                                              std::shared_ptr<ModelStreamRelay> relay,
+                                              bool& started,
+                                              std::error_code& failed) {
+        namespace http = boost::http;
+        for (;;) {
+            // Read `closed` first: every piece is offered before the call finishes, so once it
+            // is seen, the take below is the last.
+            const bool finished = relay->closed.load();
+            const std::string pieces = relay->take();
+            if (!pieces.empty() && !relay->gone.load()) {
+                if (!started) {
+                    started = true;
+                    route.status(http::status::ok);
+                    route.res.set(http::field::content_type, "text/event-stream; charset=utf-8");
+                    route.res.set(http::field::cache_control, "no-store");
+                    route.res.set("Server-Timing", server_timing_of(route));
+                    route.res.erase(http::field::etag);
+                    route.res.erase(http::field::content_length);
+                    route.res.set_chunked(true);
+                }
+                std::size_t offset = 0;
+                while (offset < pieces.size()) {
+                    auto buffers = std::array<boost::capy::mutable_buffer, 16>{};
+                    const auto output = route.res_body.prepare(buffers);
+                    const auto copied = boost::capy::buffer_copy(
+                        output,
+                        boost::capy::const_buffer(pieces.data() + offset, pieces.size() - offset));
+                    offset += copied;
+                    // A caller that takes no bytes for the idle timeout loses its stream.
+                    auto [send_error] = co_await boost::capy::timeout(
+                        route.res_body.commit(copied), options.registry_stream_idle_timeout);
+                    if (send_error) {
+                        failed = send_error;
+                        relay->gone.store(true);
+                        break;
+                    }
+                }
+                continue;
+            }
+            if (finished) {
+                co_return {};
+            }
+            [[maybe_unused]] auto [waited] =
+                co_await boost::capy::delay(std::chrono::milliseconds(5));
+        }
+    }
+
     // POST /openai/v1/<endpoint> — the model gateway (docs/api/model-gateway.md, lake#248): the
     // OpenAI API's own request and answer around model_completion, so an agent's OpenAI SDK points
     // its base URL at `<lake>/openai/v1` with its task, launch or schedule credential as the key.
     // A failure is OpenAI's error shape, `{error: {message, type, code, param}}`, with Lake's code.
+    // A streamed answer is relayed event by event as the provider sends it (lake#665).
     boost::http::route_task serve_model_gateway(boost::http::route_params& route,
                                                 std::string endpoint) {
         namespace http = boost::http;
@@ -13326,8 +13534,52 @@ struct ApiServer::Impl {
         }
         if (body.empty()) {
             ApiContext ctx = context_for(route);
-            auto completed = co_await registry.call_async(
-                "model_completion", {{"endpoint", endpoint}, {"request", std::move(request)}}, ctx);
+            const auto stream_field = request.find("stream");
+            const bool streamed = stream_field != request.end() && stream_field->is_boolean() &&
+                                  stream_field->get<bool>();
+            const nlohmann::json input{{"endpoint", endpoint}, {"request", std::move(request)}};
+            liquid::result<ApiResult> completed;
+            if (streamed) {
+                // A stream goes to the caller event by event as the provider sends it (lake#665):
+                // the call and the relay run together, and the relay writes the head and each
+                // piece as it arrives, in chunked transfer. A call refused before its first event
+                // is answered below like any other.
+                auto relay = std::make_shared<ModelStreamRelay>();
+                ctx.model_stream = [relay](std::string_view piece) { return relay->offer(piece); };
+                bool started = false;
+                std::error_code relay_error;
+                auto [wait_error, call_done, relay_done] = co_await liquid::runtime::when_all(
+                    liquid::runtime::as_io(
+                        call_then_close(registry.call_async("model_completion", input, ctx), relay)),
+                    relay_model_stream(route, relay, started, relay_error));
+                completed = wait_error ? std::unexpected(liquid::error{liquid::errc::internal,
+                                                                      wait_error.message(),
+                                                                      "model_gateway"})
+                                       : std::move(call_done);
+                if (started) {
+                    // The head is sent: a failure now can only end the stream.
+                    if (!completed || !completed->ok) {
+                        std::cerr << nlohmann::json{
+                                         {"event", "model_stream_failed"},
+                                         {"request_id", ctx.request_id},
+                                         {"error",
+                                          completed ? completed->error.code + ": " +
+                                                          completed->error.message
+                                                    : completed.error().message}}
+                                         .dump()
+                                  << '\n';
+                    }
+                    if (relay_error) {
+                        co_return http::route_error(relay_error);
+                    }
+                    auto [end_error] = co_await route.res_body.commit_eof(0);
+                    if (end_error)
+                        co_return http::route_error(end_error);
+                    co_return http::route_done;
+                }
+            } else {
+                completed = co_await registry.call_async("model_completion", input, ctx);
+            }
             const ApiResult result =
                 completed ? std::move(*completed)
                           : ApiResult::failure("store_error", completed.error().message);

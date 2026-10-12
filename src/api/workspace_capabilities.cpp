@@ -1,3 +1,4 @@
+#include "methodology_serving.hpp"
 #include "lake/api/capabilities.hpp"
 
 #include <algorithm>
@@ -17,6 +18,7 @@
 #include <vector>
 
 #include "agent_task_records_api.hpp"
+#include "lake/api/agent_stream_triggers.hpp"
 #include "lake/api/datasets.hpp"
 #include "lake/api/oauth.hpp"
 #include "lake/api/pipeline.hpp"
@@ -33,7 +35,9 @@
 #include "lake/control/policy.hpp"
 #include "lake/control/project_decisions.hpp"
 #include "lake/control/store.hpp"
+#include "lake/control/store_buckets.hpp"
 #include "lake/control/zetta_workspace.hpp"
+#include "store_mounts.hpp"
 #include "workspace_bus.hpp"
 #include "workspace_records_api.hpp"
 
@@ -216,7 +220,7 @@ using nlohmann::json;
 // The Zetta capabilities lake's pages may call on a customer's workspace (docs/api/workspaces.md).
 // Reads need `read` on the customer, actions `write`. Anything else is refused, so a lake caller
 // can never reach Zetta's administrative surface (sql, users, cloud provisioning) through lake.
-constexpr std::array<std::string_view, 47> workspace_reads = {"server_info",
+constexpr std::array<std::string_view, 48> workspace_reads = {"server_info",
                                                               "get_run_metrics",
                                                               "compare_runs",
                                                               "get_study",
@@ -263,6 +267,10 @@ constexpr std::array<std::string_view, 47> workspace_reads = {"server_info",
                                                               // same checks as create_study,
                                                               // storing nothing.
                                                               "validate_study",
+                                                              // A model version's weights as a
+                                                              // file, as kept or as ONNX
+                                                              // (lake#681).
+                                                              "export_model",
                                                               "analyze_dataset",
                                                               "plan_features",
                                                               // The solutions catalogue
@@ -900,6 +908,9 @@ liquid::runtime::task<ApiResult> workspace_call(bool read, json input, ApiContex
         } else {
             normalize_dataset_reference(capability, arguments);
         }
+        // The agent a delete_agent removes: its stream triggers go with it (lake#677).
+        const std::string deleted_agent =
+            capability == "delete_agent" ? arguments.value("id", std::string()) : std::string();
         auto called = co_await call_workspace(context,
                                               input.at("customer_id"),
                                               capability,
@@ -974,10 +985,51 @@ liquid::runtime::task<ApiResult> workspace_call(bool read, json input, ApiContex
                 kept ? std::move(*kept)
                      : json{{"recorded", false}, {"message", kept.error().message}};
         }
+        if (!deleted_agent.empty() && value.is_object()) {
+            // The engine has deleted the agent, whatever happens here: a trigger that cannot be
+            // removed now is reported beside it, and the stream worker removes it on the next
+            // message, when its launch finds no agent.
+            auto removed = co_await remove_agent_stream_triggers(
+                context, input.at("customer_id"), input.at("workspace_id"), deleted_agent);
+            if (removed && *removed) {
+                value["streams_removed"] = **removed;
+            } else {
+                value["streams_removed"] = 0;
+                value["streams_error"] =
+                    removed ? (*removed).error().message : removed.error().message;
+            }
+        }
         if (value.is_object() &&
             (capability == "expose_model" || capability == "unexpose_model" ||
              capability == "expose_index" || capability == "unexpose_index")) {
             published_call(value, capability, input);
+        }
+        // A workspace methodology's model is served by its own code (lake#690): publishing it
+        // starts its server, unpublishing stops it.
+        if (value.is_object() && (capability == "expose_model" || capability == "unexpose_model")) {
+            const std::string model_id = value.value("model_id", std::string());
+            if (!model_id.empty()) {
+                const ApiResult served = take(co_await serve_methodology_model(
+                    context,
+                    input.at("customer_id"),
+                    input.at("workspace_id"),
+                    model_id,
+                    capability == "expose_model" && value.value("exposed", false)));
+                if (!served.ok) {
+                    // Not served after all: the engine's publish is undone, and the reason given.
+                    if (capability == "expose_model") {
+                        static_cast<void>(co_await call_workspace(context,
+                                                                  input.at("customer_id"),
+                                                                  "unexpose_model",
+                                                                  false,
+                                                                  {{"model_id", model_id}}));
+                    }
+                    co_return served;
+                }
+                if (served.value.is_object()) {
+                    value["deployment"] = served.value.value("deployment", json(nullptr));
+                }
+            }
         }
         if (capability == "list_datasets") {
             datasets::annotate_list(value);
@@ -1045,6 +1097,14 @@ bool operator_view(const ApiContext& context) {
 
 ApiResult store_failure(const control::StoreError& error) {
     return ApiResult::failure(error.code, error.message);
+}
+
+// A service as the capabilities answer it, with the storage it mounts (lake#666).
+json service_with_stores(ApiContext& context, const control::ManagedService& service) {
+    json value = control::service_json(service);
+    const auto mounts = context.store->list_store_mounts(service.customer_id, service.workspace_id);
+    value["stores"] = mounts ? workload_stores_json(*mounts, "service", service.id) : json::array();
+    return value;
 }
 
 void service_audit(ApiContext& context, std::string kind, const control::ManagedService& service) {
@@ -1133,9 +1193,15 @@ void register_service_capabilities(Registry& registry) {
             if (!listed) {
                 co_return store_failure(listed.error());
             }
+            // The storage each service mounts (lake#666).
+            const auto mounts = context.store->list_store_mounts(input.at("customer_id"));
+            if (!mounts) {
+                co_return store_failure(mounts.error());
+            }
             json services = json::array();
             for (const control::ManagedService& service : *listed) {
                 json value = control::service_json(service);
+                value["stores"] = workload_stores_json(*mounts, "service", service.id);
                 // The operator reports Ready once it has written the Secret; the kubelet copies
                 // it into lake's mount up to a minute later. Until then lake cannot connect.
                 const bool connected = context.workspaces->connection(service).has_value();
@@ -1158,7 +1224,9 @@ void register_service_capabilities(Registry& registry) {
         .title = "Create a service",
         .description = "Ask the operator for a new service from the catalog (Postgres, Zetta, "
                        "Kafka, ClickHouse, TiDB, Cassandra, Valkey as a preview). "
-                       "`instances` is 1-3 (default 1), `storage_gi` 1-100 (default 10).",
+                       "`instances` is 1-3 (default 1), `storage_gi` 1-100 (default 10). "
+                       "`stores` mounts the workspace's storage into a SQLite, DuckDB or Polars "
+                       "service: a volume at `mount_path`, a bucket as environment variables.",
         .input_schema = customer_input_schema(
             {{"kind",
               {{"type", "string"},
@@ -1172,7 +1240,8 @@ void register_service_capabilities(Registry& registry) {
                 }()}}},
              {"name", {{"type", "string"}}},
              {"instances", {{"type", "integer"}, {"minimum", 1}, {"maximum", 3}}},
-             {"storage_gi", {{"type", "integer"}, {"minimum", 1}, {"maximum", 100}}}},
+             {"storage_gi", {{"type", "integer"}, {"minimum", 1}, {"maximum", 100}}},
+             {"stores", store_mounts_schema()}},
             json::array({"kind", "name"})),
         .output_schema = {{"type", "object"}},
         .kind = CapabilityKind::Action,
@@ -1216,12 +1285,24 @@ void register_service_capabilities(Registry& registry) {
                 co_return ApiResult::failure("invalid_input",
                                              "instances must be 1-3 and storage_gi 1-100");
             }
+            if (input.contains("stores")) {
+                auto mounts = checked_store_mounts(input.at("stores"),
+                                                   service.customer_id,
+                                                   service.workspace_id,
+                                                   service.kind,
+                                                   false,
+                                                   *context.store);
+                if (!mounts) {
+                    co_return mounts.error();
+                }
+                service.stores = std::move(*mounts);
+            }
             const auto created = context.workspaces->create_service(std::move(service));
             if (!created) {
                 co_return store_failure(created.error());
             }
             service_audit(context, "service.create", *created);
-            co_return ApiResult::success(control::service_json(*created));
+            co_return ApiResult::success(service_with_stores(context, *created));
         }});
     registry.add(Capability{
         .name = "delete_service",
@@ -1258,6 +1339,59 @@ void register_service_capabilities(Registry& registry) {
                 co_return store_failure(deleted.error());
             }
             co_return ApiResult::success(control::service_json(*deleted));
+        }});
+    registry.add(Capability{
+        .name = "set_service_stores",
+        .title = "Set a service's storage",
+        .description = "Choose the workspace storage a SQLite, DuckDB or Polars service mounts, "
+                       "replacing what it mounted: a volume at an absolute `mount_path` (a volume "
+                       "is mounted by one service or app), a bucket in your own account as "
+                       "environment variables. The operator rolls the service's pods. [] mounts "
+                       "nothing.",
+        .input_schema = control_input_schema(
+            {{"service_id", {{"type", "string"}}}, {"stores", store_mounts_schema()}},
+            json::array({"service_id", "stores"})),
+        .output_schema = {{"type", "object"}},
+        .kind = CapabilityKind::Action,
+        .object = "customer",
+        .action = "write",
+        .resolve_object = customer_object,
+        .async_handler = [](const json& input,
+                            ApiContext& context) -> liquid::runtime::task<ApiResult> {
+            if (!context.workspaces) {
+                co_return unavailable();
+            }
+            const auto found =
+                context.workspaces->service(input.at("customer_id"), input.at("service_id"));
+            if (!found) {
+                co_return store_failure(found.error());
+            }
+            if (found->desired != "present") {
+                co_return ApiResult::failure(
+                    "conflict", "the service " + found->name + " is being deleted", "/service_id");
+            }
+            auto mounts = checked_store_mounts(input.at("stores"),
+                                               found->customer_id,
+                                               found->workspace_id,
+                                               found->kind,
+                                               false,
+                                               *context.store);
+            if (!mounts) {
+                co_return mounts.error();
+            }
+            const auto updated = context.store->set_service_stores(found->id, *mounts);
+            if (!updated) {
+                co_return store_failure(updated.error());
+            }
+            service_audit(context, "service.stores", *updated);
+            context.audit_details["stores"] = [&] {
+                json ids = json::array();
+                for (const control::StoreMountRequest& mount : *mounts) {
+                    ids.push_back(mount.store_id);
+                }
+                return ids;
+            }();
+            co_return ApiResult::success(service_with_stores(context, *updated));
         }});
     registry.add(Capability{
         .name = "service_connection",
@@ -1360,6 +1494,172 @@ json store_providers_enum() {
     return providers;
 }
 
+// Another capability as the same person (defined below).
+liquid::runtime::task<ApiResult> call_capability(ApiContext& context, std::string name, json input);
+
+ApiResult call_result(std::expected<ApiResult, liquid::error> done) {
+    return done ? std::move(*done) : ApiResult::failure("store_error", done.error().message);
+}
+
+// Where a new store's contents are (lake#664), checked with the caller's own authority: a
+// customer's own bucket and the workspace secret that opens it, or a `lake` store's repository
+// (made now when none is named). Fills `store`; the refusal otherwise.
+liquid::runtime::task<std::optional<ApiResult>>
+store_location(const json& input, ApiContext& context, control::NewManagedStore& store) {
+    const bool bucket = control::store_external_bucket(store.type, store.provider);
+    const bool volume = store.type == "volume";
+    if (volume) {
+        store.size_gi = input.value("size_gi", 10);
+        if (store.size_gi < 1 || store.size_gi > 100) {
+            co_return ApiResult::failure("invalid_input", "size_gi must be 1-100", "/size_gi");
+        }
+    } else {
+        store.size_gi = 0;
+        if (input.contains("size_gi")) {
+            co_return ApiResult::failure("invalid_input", "only a volume has a size to ask for",
+                                         "/size_gi");
+        }
+    }
+    for (const char* field : {"bucket", "endpoint", "prefix", "credential"}) {
+        if (!bucket && input.contains(field)) {
+            co_return ApiResult::failure("invalid_input",
+                                         std::string("only your own bucket takes ") + field,
+                                         std::string("/") + field);
+        }
+    }
+    if (store.provider != "lake" && input.contains("repository_id")) {
+        co_return ApiResult::failure("invalid_input", "only a lake store names a repository",
+                                     "/repository_id");
+    }
+    if (bucket) {
+        store.bucket = input.value("bucket", std::string());
+        if (const std::string problem = control::store_bucket_problem(store.provider, store.bucket);
+            !problem.empty()) {
+            co_return ApiResult::failure("invalid_input", problem, "/bucket");
+        }
+        store.endpoint_url = input.value("endpoint", std::string());
+        while (store.endpoint_url.ends_with('/')) {
+            store.endpoint_url.pop_back();
+        }
+        if (store.endpoint_url.empty() &&
+            control::default_store_endpoint(store.provider, store.region).empty()) {
+            co_return ApiResult::failure(
+                "invalid_input",
+                store.provider == "r2"
+                    ? "an R2 bucket needs its endpoint, https://<account id>.r2.cloudflarestorage.com"
+                : store.provider == "azure"
+                    ? "an Azure container needs its endpoint, https://<account>.blob.core.windows.net"
+                    : "a B2 bucket needs its endpoint or its region",
+                "/endpoint");
+        }
+        if (!store.endpoint_url.empty()) {
+            if (const std::string problem = control::store_endpoint_problem(store.endpoint_url);
+                !problem.empty()) {
+                co_return ApiResult::failure("invalid_input", problem, "/endpoint");
+            }
+        }
+        store.prefix = input.value("prefix", std::string());
+        if (const std::string problem = control::store_prefix_problem(store.prefix);
+            !problem.empty()) {
+            co_return ApiResult::failure("invalid_input", problem, "/prefix");
+        }
+        if (!input.contains("credential")) {
+            co_return ApiResult::failure(
+                "invalid_input",
+                "your own bucket names the workspace secret that opens it: credential {mount_id, "
+                "name}",
+                "/credential");
+        }
+        store.credential_mount_id = input.at("credential").value("mount_id", std::string());
+        store.credential_name = input.at("credential").value("name", std::string());
+        // The caller must be able to read the secret, in this workspace's secret store.
+        ApiResult mount = call_result(co_await call_capability(
+            context, "get_secret_mount", {{"mount_id", store.credential_mount_id}}));
+        if (!mount.ok) {
+            co_return ApiResult::failure(
+                mount.error.code == "unauthorized" ? "unauthorized" : "not_found",
+                "no secret mount " + store.credential_mount_id + " you can read",
+                "/credential/mount_id");
+        }
+        if (mount.value.value("workspace_id", std::string()) != store.workspace_id) {
+            co_return ApiResult::failure(
+                "invalid_input",
+                "the secret mount belongs to another workspace than the storage",
+                "/credential/mount_id");
+        }
+        ApiResult secret = call_result(co_await call_capability(
+            context, "read_secret",
+            {{"mount_id", store.credential_mount_id}, {"name", store.credential_name}}));
+        if (!secret.ok) {
+            co_return ApiResult::failure("not_found",
+                                         "the mount has no live secret " + store.credential_name +
+                                             " you can read",
+                                         "/credential/name");
+        }
+        const json value = secret.value.value("value", json::object());
+        const auto has = [&](const char* field) {
+            return value.is_object() && value.contains(field) && value.at(field).is_string() &&
+                   !value.at(field).get<std::string>().empty();
+        };
+        if (store.provider == "azure" ? !(has("account_key") || has("sas_token"))
+                                      : !(has("access_key_id") && has("secret_access_key"))) {
+            co_return ApiResult::failure(
+                "invalid_input",
+                store.provider == "azure"
+                    ? "the secret " + store.credential_name +
+                          " needs an account_key or a sas_token field"
+                    : "the secret " + store.credential_name +
+                          " needs access_key_id and secret_access_key fields",
+                "/credential/name");
+        }
+    }
+    if (store.provider == "lake") {
+        store.repository_id = input.value("repository_id", std::string());
+        if (store.repository_id.empty()) {
+            ApiResult made = call_result(co_await call_capability(context,
+                                                      "create_repository",
+                                                      {{"customer_id", store.customer_id},
+                                                       {"workspace_id", store.workspace_id},
+                                                       {"name", store.name},
+                                                       {"visibility", "private"}}));
+            if (!made.ok) {
+                co_return ApiResult::failure(made.error.code,
+                                             "could not make the store's repository: " +
+                                                 made.error.message,
+                                             "/name");
+            }
+            store.repository_id = made.value.value("id", std::string());
+        } else {
+            const auto repository = context.store->get_repository(store.repository_id);
+            if (!repository || !repository->deleted_at.empty() ||
+                repository->customer_id != store.customer_id ||
+                repository->workspace_id != store.workspace_id) {
+                co_return ApiResult::failure("not_found",
+                                             "no repository " + store.repository_id +
+                                                 " in this workspace",
+                                             "/repository_id");
+            }
+            if (context.acting_identity != "admin") {
+                const auto object =
+                    context.store->find_policy_object("repository", store.repository_id);
+                bool allowed = false;
+                if (object) {
+                    const auto decision =
+                        control::authorize(*context.store, context.acting_identity, object->id,
+                                           "write", context.authorization_cache);
+                    allowed = decision && decision->allowed;
+                }
+                if (!allowed) {
+                    co_return ApiResult::failure("unauthorized",
+                                                 "you may not write to that repository",
+                                                 "/repository_id");
+                }
+            }
+        }
+    }
+    co_return std::nullopt;
+}
+
 // Storage (docs/control-plane/storage.md, lake#196): the provider table and the customer's stores.
 void register_store_capabilities(Registry& registry) {
     registry.add(Capability{
@@ -1398,8 +1698,9 @@ void register_store_capabilities(Registry& registry) {
         .name = "list_stores",
         .title = "List stores",
         .description = "The workspace's stores (buckets, filesystems, network filesystems and "
-                       "volumes) with the operator's phase, message and endpoint. Never includes "
-                       "credentials.",
+                       "volumes) with the operator's phase, message and endpoint, the services "
+                       "and apps that mount each (`mounted_by`), and its `used_bytes` (null until "
+                       "the operator has measured it). Never includes credentials.",
         .input_schema = customer_input_schema(json::object(), json::array()),
         .output_schema = {{"type", "object"}},
         .kind = CapabilityKind::Read,
@@ -1434,16 +1735,32 @@ void register_store_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "create_store",
         .title = "Create a store",
-        .description = "Ask the operator for a new store in this workspace: a `type` and "
-                       "`provider` pair that list_store_providers reports available (today volume "
-                       "on cluster), a `name` unique in the account, and optionally `size_gi` 1-100 "
-                       "(default 10) and `region`. Private by default.",
+        .description =
+            "Ask the operator for a new store in this workspace: a `type` and `provider` pair "
+            "that list_store_providers reports available, and a `name` unique in the account. A "
+            "volume takes `size_gi` 1-100 (default 10). Your own bucket (r2, s3, b2, gcs, azure) "
+            "takes `bucket`, `endpoint` (https; optional for s3 and gcs), `region`, `prefix` (the "
+            "folder in it the store covers) and `credential` {mount_id, name}: a secret of this "
+            "workspace's secret store holding access_key_id and secret_access_key (S3 protocol) or "
+            "account_key or sas_token (Azure). A `lake` store keeps its contents in a liquid "
+            "repository of the workspace, `repository_id` or a new one with the store's name. "
+            "Private by default.",
         .input_schema = customer_input_schema(
             {{"type", {{"type", "string"}, {"enum", store_types_enum()}}},
              {"provider", {{"type", "string"}, {"enum", store_providers_enum()}}},
              {"name", {{"type", "string"}}},
              {"size_gi", {{"type", "integer"}, {"minimum", 1}, {"maximum", 100}}},
-             {"region", {{"type", "string"}}}},
+             {"region", {{"type", "string"}}},
+             {"bucket", {{"type", "string"}}},
+             {"endpoint", {{"type", "string"}}},
+             {"prefix", {{"type", "string"}}},
+             {"credential",
+              {{"type", "object"},
+               {"properties",
+                {{"mount_id", {{"type", "string"}}}, {"name", {{"type", "string"}}}}},
+               {"required", json::array({"mount_id", "name"})},
+               {"additionalProperties", false}}},
+             {"repository_id", {{"type", "string"}}}},
             json::array({"type", "provider", "name"})),
         .output_schema = {{"type", "object"}},
         .kind = CapabilityKind::Action,
@@ -1461,7 +1778,6 @@ void register_store_capabilities(Registry& registry) {
             store.type = input.at("type");
             store.provider = input.at("provider");
             store.name = input.at("name");
-            store.size_gi = input.value("size_gi", 10);
             store.region = input.value("region", std::string());
             store.created_by_taap_id = context.acting_identity;
             if (!valid_service_name(store.name)) {
@@ -1471,8 +1787,18 @@ void register_store_capabilities(Registry& registry) {
                     "most 31 characters",
                     "/name");
             }
-            if (store.size_gi < 1 || store.size_gi > 100) {
-                co_return ApiResult::failure("invalid_input", "size_gi must be 1-100", "/size_gi");
+            const control::StoreProvider* pair =
+                control::find_store_provider(store.type, store.provider);
+            if (pair == nullptr || !pair->available) {
+                // The store's own checks name the reason.
+            } else {
+                auto located = co_await store_location(input, context, store);
+                if (!located) {
+                    co_return ApiResult::failure("store_error", located.error().message);
+                }
+                if (*located) {
+                    co_return std::move(**located);
+                }
             }
             const auto created = context.workspaces->create_store(std::move(store));
             if (!created) {
@@ -1484,8 +1810,12 @@ void register_store_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "delete_store",
         .title = "Delete a store",
-        .description = "Delete one of this workspace's stores. The operator removes it and its "
-                       "data, which cannot be recovered. `confirm` must be the store's name.",
+        .description = "Delete one of this workspace's stores; `confirm` must be the store's name. "
+                       "A volume and a store Lake keeps in the workspace Zetta are deleted with "
+                       "their data, which cannot be recovered. Your own bucket and a `lake` store's "
+                       "repository stay, with what is in them: Lake only forgets them. A store a "
+                       "service or an app mounts is refused (conflict, naming them): remove it "
+                       "from them first.",
         .input_schema = customer_input_schema(
             {{"store_id", {{"type", "string"}}}, {"confirm", {{"type", "string"}}}},
             json::array({"store_id", "confirm"})),
@@ -1507,6 +1837,22 @@ void register_store_capabilities(Registry& registry) {
             if (input.at("confirm") != found->name) {
                 co_return ApiResult::failure(
                     "invalid_input", "confirm must be the store name " + found->name, "/confirm");
+            }
+            // A mounted store is refused before anything is deleted (lake#666): the store's
+            // withdraw refuses it too, but a `zetta` store's items would already be gone.
+            if (!found->mounted_by.empty()) {
+                co_return ApiResult::failure("conflict",
+                                             control::mounted_by_message(found->mounted_by));
+            }
+            if (found->provider == "zetta" && found->desired == "present") {
+                // Lake keeps these bytes itself, so Lake deletes them before the store goes.
+                auto emptied = co_await empty_kept_store(context, *found);
+                ApiResult result = emptied ? std::move(*emptied)
+                                           : ApiResult::failure("store_error",
+                                                                emptied.error().message);
+                if (!result.ok) {
+                    co_return result;
+                }
             }
             store_audit(context, "store.delete", *found);
             const auto deleted =
@@ -1873,6 +2219,15 @@ liquid::runtime::task<ApiResult> predict_rows(const json& input, ApiContext& con
     if (!(**described).value("exposed", false)) {
         co_return ApiResult::failure(
             "invalid_input", "model " + model + " is not published", "/model_id");
+    }
+    // A workspace methodology's model answers from its own server (lake#690).
+    auto served = co_await predict_methodology_model(
+        context, customer, input.value("workspace_id", context.workspace_id), **described, input);
+    if (!served) {
+        co_return ApiResult::failure("store_error", served.error().message);
+    }
+    if (*served) {
+        co_return std::move(**served);
     }
     const json& rows = input.at("rows");
     json score{{"model", model}, {"rows", rows}};
@@ -2580,8 +2935,9 @@ void register_parity_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "list_service_kinds",
         .title = "List service kinds",
-        .description = "Every kind of service a customer can create: key, label and how long a new "
-                       "one usually takes to become ready.",
+        .description = "Every kind of service a customer can create: key, label, how long a new "
+                       "one usually takes to become ready, and whether it can mount the "
+                       "workspace's storage (`mounts_stores`).",
         .input_schema = {{"type", "object"},
                          {"properties", json::object()},
                          {"additionalProperties", false}},
@@ -2599,9 +2955,11 @@ void register_parity_capabilities(Registry& registry) {
             [](const json&, ApiContext&) {
                 json kinds = json::array();
                 for (const control::ServiceKind& kind : control::service_kinds) {
-                    kinds.push_back({{"kind", std::string(kind.key)},
-                                     {"label", std::string(kind.label)},
-                                     {"ready_seconds", kind.ready_seconds}});
+                    kinds.push_back(
+                        {{"kind", std::string(kind.key)},
+                         {"label", std::string(kind.label)},
+                         {"ready_seconds", kind.ready_seconds},
+                         {"mounts_stores", control::service_kind_mounts_stores(kind.key)}});
                 }
                 return ApiResult::success({{"kinds", std::move(kinds)}});
             }});
@@ -5097,7 +5455,13 @@ void register_agent_run_capabilities(Registry& registry) {
                                         .agent_id = agent_id,
                                         .agent_name = agent->value("name", std::string()),
                                         .mode = mode,
-                                        .trigger = "manual",
+                                        // A run a stream message started says so (lake#677).
+                                        .trigger = context.authentication_method ==
+                                                               "agent_stream_trigger" ||
+                                                           context.authentication_method ==
+                                                               "mcp_connection_stream"
+                                                       ? "stream"
+                                                       : "manual",
                                         .input = input.value("input", json(nullptr)),
                                         .scopes = control::agent_launch_scopes_for(*agent),
                                         .created_by_user_id = context.acting_user_id,
@@ -5580,6 +5944,18 @@ void register_agent_run_capabilities(Registry& registry) {
                         }
                     }
                     scopes.push_back("workspace_query");
+                    // New Methodology's Ask Orama (lake#688): a first draft of a workspace
+                    // methodology's files from the person's description (the message), with the
+                    // name and target kind they chose. Nothing is written; draft_methodology
+                    // {task_id} checks the files before the drawer offers them.
+                    if (task_kind == "methodology_draft") {
+                        body["kind"] = task_kind;
+                        body["context"] = input.value("context", json::object());
+                        if (!body["context"].is_object()) {
+                            co_return ApiResult::failure(
+                                "invalid_input", "context is an object", "/context");
+                        }
+                    }
                 } else if (agent == "agent-application") {
                     task_kind = "app";
                     scopes = {"workspace_query",

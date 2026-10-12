@@ -12,6 +12,7 @@ import { useSpacePermissions } from "@/pages/apps/shared";
 import { Chart, ChartContext, newRegistry } from "./Chart";
 import { describe, ExperimentsShell, MetricsView, Table, useCoalesced, useExperimentActions, useExperimentClient, useExperimentUrl, useFollow } from "./common";
 import { cell, metricLabel, type RunDetail } from "./transforms";
+import { trialRuns } from "./workspaceMethodology";
 
 type Trial = { number: number; run: string; state: string; params: Record<string, unknown>; objective?: number; cost?: number; model?: string } & Row;
 type Experiment = { id: string; spec: Row; status: string; trials: Trial[]; spent_cost?: number; stop_reason?: string; promoted_model?: string } & Row;
@@ -352,6 +353,8 @@ function Leaderboard({
     return descending ? -order : order;
   });
   const label = (key: string) => key.replace(/^(param|metric):/, "");
+  // A workspace methodology's trials each run as a training run in Lake's runner (lake#689).
+  const lakeRuns = trialRuns(experiment);
   return (
     <>
       <div className="mb-3 flex flex-wrap items-center gap-2">
@@ -440,6 +443,13 @@ function Leaderboard({
                           {" "}
                           <Status value="promoted" tone="success" />
                         </>
+                      ) : null}
+                      {lakeRuns.has(trial.run) ? (
+                        <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[12px] text-ink-3" title={cell(lakeRuns.get(trial.run)?.run_id)}>
+                          <span>Lake run</span>
+                          <Status value={String(lakeRuns.get(trial.run)?.phase ?? "")} />
+                          <span>{cell(lakeRuns.get(trial.run)?.message)}</span>
+                        </div>
                       ) : null}
                     </td>
                     {visible.map((key) => {

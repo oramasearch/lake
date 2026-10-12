@@ -21,6 +21,9 @@ topic's workspace Zetta (lake#379); `Store` has no reads of the retired `stream_
 which migration `0070` dropped (lake#311). `list_agent_task_stream_scopes` supplies one customer's compact durable task
 and agent scope for the shared Agent events and Agent tasks views.
 `latest_agent_conversation_task` resolves the preceding task for a same-agent, same-kind follow-up.
+`list_conversation_agent_tasks` answers the tasks one person's Ask Orama or Agent Factory
+conversation started, with the tasks they asked for (`parent_task_id`), and `delete_agent_tasks`
+removes their dispatch rows; `delete_ask_conversation` uses both (lake#673).
 `AgentBus::call` carries named
 CRUD read requests over the existing service transport; unsupported custom bus implementations
 fail explicitly. See `docs/control-plane/streams.md`.
@@ -78,12 +81,19 @@ workspace, found by the space, never in PostgreSQL (`docs/api/transcripts.md`).
 `mcp_connections.hpp` (lake#652) is the MCP connection codec (a stdio server's `app_id` and `stdio`,
 lake#659): the connection, the person's decision
 for each tool, the auto-approve grants and the streams, with its credential only named
-(`lake-secret://`), and the OAuth state codec (`docs/api/mcp-connections.md`). See
+(`lake-secret://`), and the OAuth state codec (`docs/api/mcp-connections.md`).
+`agent_stream_triggers.hpp` (lake#677) is the stream trigger codec: an agent, a workspace stream, the
+person its runs act as and its cursor (`docs/api/agent-launches.md#stream-triggers`). See
 `docs/architecture/workspace-records.md`. `drive_share_links.hpp` is the drive share link codec
 (lake#350): a mutable record per link keyed by its id and found by repository and folder, and the
 bearer token format `<workspace id>.<link id>.<secret>` that routes a recipient to the workspace.
 `Store` keeps only the content-free route of a pre-move token (`drive_share_link_route`); the
 retired `drive_share_links` table and its legacy reads are gone (migration `0070`).
+`store_contents.hpp` is the interface a store drive browses (lake#656) and `StoreOpening`, what Lake
+hands a `StoreBrowser` (the store, its connection, the workspace secret's fields; lake#664);
+`store_buckets.hpp` is Lake's own S3 (SigV4) and Azure Blob (Shared Key or SAS) clients over an
+injected `StoreHttp`, and `cloud_store_browser`; `store_kept.hpp` a `zetta` store's sealed
+`lake_store_items` records and `lake_st_<hex>` bucket (`docs/api/storage.md#browsing-a-store`).
 `forge_records.hpp` is the forge record codec (lake#341): a mutable record per issue, comment,
 review, release, webhook, delivery, export or rule, in the workspace of its repository's workspace,
 keyed by its id and found by repository and kind (`forge_record_lookup`). `ForgeRecord` carries the
@@ -128,7 +138,10 @@ workspace, and `transfer_repository` is no longer part of `Store`.
 `lake_metering_usage` hourly transfer counters, added to with a conditional write, and the
 `lake_metering_build_records` per-result records, written `if_absent`, and (lake#658) the
 `lake_metering_job_records` that a finished build, agent job or cron run was charged, written
-`if_absent` before its resources are added to the usage series. `store.hpp` has no
+`if_absent` before its resources are added to the usage series, and (lake#661) the
+`lake_metering_app_transfer_records` that an app's closed hour of ingress traffic was charged.
+`store.hpp`'s `AppTransfer`, `app_transfer` and `add_app_transfer` read the operator's
+`app_transfer` rows (migration `0081_app_transfer`): numbers only. `store.hpp` has no other
 metering store methods: the retired tables and their legacy reads are gone (migration `0070`).
 `store.hpp`'s `UsageLimit`, `usage_limits` and `set_usage_limit` are an account's per-dimension
 usage limits (migration `0072_usage_limits`, lake#564): content-free configuration; the usage stays
@@ -245,3 +258,9 @@ without running anything, drafts and copies of Orama's, the image's Dockerfile a
 sample. `store.hpp`'s `MethodologyRun`, `NewMethodologyRun` and `MethodologyRunStatus` are the
 dispatch rows of its runs (migration `0078_methodology_runs`), and `methodology_run_principal` the
 principal a run's `lmr.` credential resolves to: no person, only the runner's two capabilities.
+
+`store.hpp` also holds a served methodology model's dispatch row, `MethodologyDeployment` (lake#690,
+migration `0083_methodology_deployments`), its operator status, `methodology_deployment_principal`
+(the `lmd.` credential, which reaches only `methodology_deployment_input`) and
+`methodology_deployment_endpoint_valid` (only a serve Service's in-cluster URL). `methodologies.hpp`
+adds the chunked artifact bounds (8 MiB chunks, 1 GiB in all) and the predict row limit.

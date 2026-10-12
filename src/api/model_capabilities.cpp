@@ -396,11 +396,23 @@ ApiResult resolve_file(const json& input, ApiContext& context, std::string_view 
     context.audit_kind = std::string(kind) + ".file.read";
     context.audit_object = "repository/" + repository->id + "/path/" + file->path;
     context.audit_details = {{"blob", file->blob}, {"path", file->path}};
+    // The exact bytes too, in base64, so a binary file (an ONNX model) survives JSON (lake#681).
+    const std::span<const std::byte> raw =
+        file->raw_contents.empty()
+            ? std::as_bytes(std::span<const char>(file->contents.data(), file->contents.size()))
+            : std::span<const std::byte>(file->raw_contents);
+    std::string encoded((raw.size() + 2) / 3 * 4, '\0');
+    if (!raw.empty()) {
+        EVP_EncodeBlock(reinterpret_cast<unsigned char*>(encoded.data()),
+                        reinterpret_cast<const unsigned char*>(raw.data()),
+                        static_cast<int>(raw.size()));
+    }
     return ApiResult::success({{"path", file->path},
                                {"blob", file->blob},
                                {"size", file->size},
                                {"revision", resolved_revision},
-                               {"contents", file->contents}});
+                               {"contents", file->contents},
+                               {"content_base64", std::move(encoded)}});
 }
 
 Capability read_capability(
@@ -696,12 +708,14 @@ void register_model_capabilities(Registry& registry) {
     registry.add(dataset_capability());
     registry.add(read_capability("resolve_model_file",
                                  "Resolve model file",
-                                 "Resolve one model file at a named or immutable revision.",
+                                 "Resolve one model file at a named or immutable revision: `contents` as text and "
+                                 "`content_base64`, the exact bytes of any file, binary included.",
                                  true,
                                  "model"));
     registry.add(read_capability("resolve_dataset_file",
                                  "Resolve dataset file",
-                                 "Resolve one dataset file at a named or immutable revision.",
+                                 "Resolve one dataset file at a named or immutable revision: `contents` as text and "
+                                 "`content_base64`, the exact bytes of any file, binary included.",
                                  true,
                                  "dataset"));
 

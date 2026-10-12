@@ -25,6 +25,7 @@
 #include "api/workspace_records_api.hpp"
 #include "audit_test_support.hpp"
 #include "control/secrets_crypto.hpp"
+#include "lake/api/agent_stream_triggers.hpp"
 #include "lake/api/audit_recorder.hpp"
 #include "lake/api/audit_routing.hpp"
 #include "lake/api/capabilities.hpp"
@@ -70,6 +71,60 @@
 #include "lake/control/zetta_workspace.hpp"
 #include "lake/transparency/log.hpp"
 #include "methodology_repositories.hpp"
+
+namespace lake {
+// Standard base64 for the chunked artifacts and served weights (lake#690).
+inline std::string test_base64_encode(std::string_view bytes) {
+    static constexpr char alphabet[] =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string out;
+    std::size_t i = 0;
+    for (; i + 2 < bytes.size(); i += 3) {
+        const unsigned v = (static_cast<unsigned char>(bytes[i]) << 16) |
+                           (static_cast<unsigned char>(bytes[i + 1]) << 8) |
+                           static_cast<unsigned char>(bytes[i + 2]);
+        out += alphabet[(v >> 18) & 63];
+        out += alphabet[(v >> 12) & 63];
+        out += alphabet[(v >> 6) & 63];
+        out += alphabet[v & 63];
+    }
+    if (i + 1 == bytes.size()) {
+        const unsigned v = static_cast<unsigned char>(bytes[i]) << 16;
+        out += alphabet[(v >> 18) & 63];
+        out += alphabet[(v >> 12) & 63];
+        out += "==";
+    } else if (i + 2 == bytes.size()) {
+        const unsigned v = (static_cast<unsigned char>(bytes[i]) << 16) |
+                           (static_cast<unsigned char>(bytes[i + 1]) << 8);
+        out += alphabet[(v >> 18) & 63];
+        out += alphabet[(v >> 12) & 63];
+        out += alphabet[(v >> 6) & 63];
+        out += '=';
+    }
+    return out;
+}
+inline std::string test_base64_decode(std::string_view text) {
+    std::string out;
+    unsigned value = 0;
+    int bits = -8;
+    for (const char c : text) {
+        int digit = -1;
+        if (c >= 'A' && c <= 'Z') digit = c - 'A';
+        else if (c >= 'a' && c <= 'z') digit = c - 'a' + 26;
+        else if (c >= '0' && c <= '9') digit = c - '0' + 52;
+        else if (c == '+') digit = 62;
+        else if (c == '/') digit = 63;
+        else continue;
+        value = (value << 6) | static_cast<unsigned>(digit);
+        bits += 6;
+        if (bits >= 0) {
+            out.push_back(static_cast<char>((value >> bits) & 0xff));
+            bits -= 8;
+        }
+    }
+    return out;
+}
+} // namespace lake
 #include "mcp_test_server.hpp"
 #include "postgres_fixture.hpp"
 #include "record_fixture.hpp"
@@ -334,6 +389,8 @@ struct TwoSpaces {
     // The runner image of stdio MCP connections (lake#659); empty: none.
     std::string mcp_runner_image;
     std::string apps_wildcard;
+    // Served methodology models' predictions (lake#690); empty: none.
+    lake::api::MethodologyServer methodology_server;
     std::string internal_url;
     std::string public_host;
     // MCP connections' transport (lake#652); null: none. Tests reach a local test server.
@@ -418,6 +475,7 @@ struct TwoSpaces {
         context.methodology_runtime_image = methodology_runtime_image;
         context.mcp_runner_image = mcp_runner_image;
         context.apps_wildcard = apps_wildcard;
+        context.methodology_server = methodology_server;
         context.internal_url = internal_url;
         context.public_host = public_host;
         context.mcp_http = mcp_http;
@@ -4053,6 +4111,166 @@ TEST_P(WorkspaceRecordStores, McpConnectionStreamsMirrorNotificationsAndDriveThe
     EXPECT_EQ(worker.pass(owner).results, 0U) << "published once";
 }
 
+// lake#677: an agent started by a workspace stream. The streams are sealed records in the
+// workspace; each message that arrives after one is set starts one job of the agent with the
+// message as its input, as the person who set it; deleting the agent removes them, and a trigger
+// whose agent is gone is removed by the worker.
+TEST_P(WorkspaceRecordStores, AStreamStartsItsAgentOncePerMessageAsThePersonWhoSetIt) {
+    auto store = make_store();
+    if (!store) {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
+    }
+    TwoSpaces t(store, database_uri_);
+    const auto& first = t.spaces[0];
+    const auto& second = t.spaces[1];
+    const std::string home = first.workspaces[0];
+    const auto in = [&](json input) {
+        input["customer_id"] = first.customer_id;
+        input["workspace_id"] = home;
+        return input;
+    };
+    json agent{{"id", "agent-7"},
+               {"name", "Order Watcher"},
+               {"runtime", "python"},
+               {"skills", json::array()},
+               {"definition", {{"source", "zetta"}, {"instructions", "x"}, {"files", json::array()}}}};
+    bool agent_deleted = false;
+    t.zetta->responder = [&](const std::string& capability,
+                             const json&) -> std::optional<lake::control::ZettaControlResult<json>> {
+        if (capability == "get_agent") {
+            if (agent_deleted) {
+                return lake::control::ZettaControlResult<json>(std::unexpected(
+                    lake::control::ZettaControlError{"not_found", "no such agent"}));
+            }
+            return agent;
+        }
+        if (capability == "delete_agent") {
+            agent_deleted = true;
+            return json{{"deleted", true}};
+        }
+        return std::nullopt;
+    };
+    // A message already on the stream when it is set starts nothing.
+    {
+        auto context = t.context(first);
+        lake::api::WorkspaceApiBus bus(context, first.customer_id, home);
+        ASSERT_TRUE(liquid::runtime::block_on(bus.create_topic("orders")));
+        ASSERT_TRUE(liquid::runtime::block_on(bus.publish("orders", {{"order", "O-0"}}, "o-0")));
+    }
+
+    // Refusals: a system stream, a stream the workspace does not have, a native agent.
+    const auto system = t.call(first,
+                               "set_agent_streams",
+                               in({{"agent_id", "agent-7"}, {"streams", {"agent-events"}}}));
+    ASSERT_FALSE(system.ok);
+    EXPECT_EQ(system.error.code, "invalid_input");
+    EXPECT_EQ(system.error.path, "/streams/0");
+    const auto missing = t.call(first,
+                                "set_agent_streams",
+                                in({{"agent_id", "agent-7"}, {"streams", {"orders", "nowhere"}}}));
+    ASSERT_FALSE(missing.ok);
+    EXPECT_EQ(missing.error.code, "not_found");
+    EXPECT_EQ(missing.error.path, "/streams/1");
+    agent["runtime"] = "native";
+    const auto native = t.call(
+        first, "set_agent_streams", in({{"agent_id", "agent-7"}, {"streams", {"orders"}}}));
+    ASSERT_FALSE(native.ok);
+    EXPECT_EQ(native.error.code, "invalid_input");
+    agent["runtime"] = "python";
+    const auto none =
+        t.call(first, "list_agent_streams", in({{"agent_id", "agent-7"}}));
+    ASSERT_TRUE(none.ok) << none.error.message;
+    EXPECT_TRUE(none.value["streams"].empty()) << "a refused call stores nothing";
+
+    const auto set = t.call(
+        first, "set_agent_streams", in({{"agent_id", "agent-7"}, {"streams", {"topic:orders"}}}));
+    ASSERT_TRUE(set.ok) << set.error.message;
+    ASSERT_EQ(set.value["streams"].size(), 1U);
+    EXPECT_EQ(set.value["streams"][0]["stream"], "orders");
+    EXPECT_EQ(set.value["streams"][0]["cursor"], 1) << "it starts after the message already there";
+    EXPECT_EQ(set.value["streams"][0]["set_by"], first.principal.user_id);
+    const std::string trigger_id = set.value["streams"][0]["id"];
+    // Setting the same set again keeps the trigger (and whose it is).
+    const auto again = t.call(
+        first, "set_agent_streams", in({{"agent_id", "agent-7"}, {"streams", {"orders"}}}));
+    ASSERT_TRUE(again.ok) << again.error.message;
+    EXPECT_EQ(again.value["streams"][0]["id"], trigger_id);
+    // Sealed in the workspace: the stream's name is not on the record at rest.
+    bool stored = false;
+    for (auto& [url, tables] : t.zetta->records) {
+        if (const auto found = tables.collections.find("lake_agent_stream_triggers");
+            found != tables.collections.end()) {
+            for (const auto& [key, row] : found->second.records) {
+                stored = true;
+                EXPECT_EQ(row.dump().find("orders"), std::string::npos);
+            }
+        }
+    }
+    EXPECT_TRUE(stored) << "the trigger is a record in the workspace Zetta";
+    // Another account's person cannot read them.
+    auto foreign = in({{"agent_id", "agent-7"}});
+    EXPECT_FALSE(t.call(second, "list_agent_streams", foreign).ok);
+
+    // Two new messages: two jobs, each with its message, as the person who set the stream.
+    {
+        auto context = t.context(first);
+        lake::api::WorkspaceApiBus bus(context, first.customer_id, home);
+        ASSERT_TRUE(liquid::runtime::block_on(bus.publish("orders", {{"order", "O-1"}}, "o-1")));
+        ASSERT_TRUE(liquid::runtime::block_on(bus.publish("orders", {{"order", "O-2"}}, "o-2")));
+    }
+    lake::api::AgentStreamWorker worker;
+    lake::api::ApiContext owner;
+    owner.store = t.store.get();
+    owner.workspaces = t.service.get();
+    owner.instance_kek = std::string(kek);
+    owner.registry = &t.registry;
+    const auto done = worker.pass(owner);
+    for (const auto& problem : done.problems) {
+        ADD_FAILURE() << problem;
+    }
+    EXPECT_EQ(done.runs, 2U);
+    EXPECT_EQ(worker.pass(owner).runs, 0U) << "a message starts one run only";
+    const auto launches = t.store->list_agent_launches(first.customer_id, "agent-7", 10, home);
+    ASSERT_TRUE(launches);
+    ASSERT_EQ(launches->size(), 2U);
+    std::set<std::string> orders;
+    for (const auto& launch : *launches) {
+        EXPECT_EQ(launch.created_by_user_id, first.principal.user_id);
+        EXPECT_EQ(launch.mode, "job");
+        EXPECT_EQ(launch.trigger, "stream");
+        EXPECT_EQ(launch.input["stream"], "orders");
+        EXPECT_EQ(launch.input["trigger_id"], trigger_id);
+        orders.insert(launch.input["message"]["order"].get<std::string>());
+    }
+    EXPECT_EQ(orders, (std::set<std::string>{"O-1", "O-2"}));
+    const auto listed = t.call(first, "list_agent_streams", in({{"agent_id", "agent-7"}}));
+    ASSERT_TRUE(listed.ok) << listed.error.message;
+    EXPECT_EQ(listed.value["streams"][0]["cursor"], 3) << "its place on the stream is kept";
+
+    // Deleting the agent removes its streams.
+    const auto deleted = t.call(first, "delete_agent", in({{"id", "agent-7"}}));
+    ASSERT_TRUE(deleted.ok) << deleted.error.message;
+    EXPECT_EQ(deleted.value["streams_removed"], 1);
+    EXPECT_TRUE(t.call(first, "list_agent_streams", in(json::object())).value["streams"].empty());
+
+    // A trigger whose agent was deleted elsewhere is removed at its next message.
+    agent_deleted = false;
+    ASSERT_TRUE(t.call(first,
+                       "set_agent_streams",
+                       in({{"agent_id", "agent-7"}, {"streams", {"orders"}}}))
+                    .ok);
+    agent_deleted = true;
+    {
+        auto context = t.context(first);
+        lake::api::WorkspaceApiBus bus(context, first.customer_id, home);
+        ASSERT_TRUE(liquid::runtime::block_on(bus.publish("orders", {{"order", "O-3"}}, "o-3")));
+    }
+    const auto orphaned = worker.pass(owner);
+    EXPECT_EQ(orphaned.runs, 0U);
+    EXPECT_EQ(orphaned.removed, 1U);
+    EXPECT_TRUE(t.call(first, "list_agent_streams", in(json::object())).value["streams"].empty());
+}
+
 // lake#684, lake#685: Lake keeps a dispatch row for each connection that streams or re-exports
 // tools. A re-export, or a change of what it re-exports, changes the workspace endpoint's tool-list
 // digest, so a session that began before is told; the stream worker calls only the workspaces
@@ -4926,7 +5144,13 @@ TEST_P(WorkspaceRecordStores, MethodologiesAreTheWorkspacesOwnAndOramasStayReadO
                   {"editable", false}};
     std::map<std::string, json> own;
     std::vector<json> recorded_runs;
+    json study = json::object();
+    std::vector<json> study_calls;
     int next_id = 0;
+    // lake#690: what the engine staged of a large artifact, and the model Ship → Models serves.
+    std::string staged_artifact;
+    json served_model = json::object();
+    const std::string served_weights(20000, 'w');
     t.zetta->responder =
         [&](const std::string& capability,
             const json& input) -> std::optional<lake::control::ZettaControlResult<json>> {
@@ -4981,9 +5205,141 @@ TEST_P(WorkspaceRecordStores, MethodologiesAreTheWorkspacesOwnAndOramasStayReadO
             own.erase(input.value("id", std::string()));
             return Result(json{{"removed", true}, {"id", input.value("id", std::string())}});
         }
+        if (capability == "create_study" || capability == "get_study" ||
+            capability == "stop_trial" || capability == "stop_study" ||
+            (capability == "record_methodology_run" && input.contains("study"))) {
+            // A workspace methodology's experiment (zetta lake#689): trials wait for Lake's runner.
+            const auto runner = [&] {
+                json waiting = json::array();
+                if (study["status"] != "running") {
+                    return waiting;
+                }
+                for (const json& trial : study["trials"]) {
+                    if (trial["state"] == "running") {
+                        waiting.push_back({{"study", "study-1"},
+                                           {"study_name", study["spec"]["name"]},
+                                           {"trial", trial["run"]},
+                                           {"number", trial["number"]},
+                                           {"methodology", study["spec"]["methodology"]},
+                                           {"params", {{"epochs", 10 + trial["number"].get<int>()}}},
+                                           {"seed", trial["number"]},
+                                           {"dataset_path", study["spec"]["dataset"]},
+                                           {"target", study["spec"]["target"]},
+                                           {"features", json::array()},
+                                           {"holdout_fraction", 0.2}});
+                    }
+                }
+                return waiting;
+            };
+            const auto admit = [&] {
+                std::size_t running = 0;
+                for (const json& trial : study["trials"]) {
+                    running += trial["state"] == "running" ? 1 : 0;
+                }
+                while (study["trials"].size() < 3 && running < 2) {
+                    const std::size_t number = study["trials"].size();
+                    study["trials"].push_back({{"number", number},
+                                               {"run", "trial-run-" + std::to_string(number)},
+                                               {"state", "running"}});
+                    ++running;
+                }
+                if (running == 0) {
+                    study["status"] = "complete";
+                }
+            };
+            const auto answer = [&] {
+                json out = study;
+                out["runner"] = runner();
+                return out;
+            };
+            const auto end = [&](const std::string& run, const std::string& state) {
+                for (json& trial : study["trials"]) {
+                    if (trial["run"] == run) {
+                        trial["state"] = state;
+                    }
+                }
+                admit();
+            };
+            if (capability == "create_study") {
+                study_calls.push_back(input);
+                study = {{"id", "study-1"},
+                         {"spec", input},
+                         {"status", "running"},
+                         {"created", "2026-10-11T10:00:00Z"},
+                         {"updated", "2026-10-11T10:00:00Z"},
+                         {"trials", json::array()},
+                         {"spent_cost", 0.0},
+                         {"stop_reason", ""},
+                         {"promoted_model", ""}};
+                admit();
+                return Result(answer());
+            }
+            if (capability == "get_study") {
+                return Result(answer());
+            }
+            if (capability == "stop_trial") {
+                study_calls.push_back(input);
+                end(input.value("run", std::string()), "failed");
+                return Result(json{{"study", "study-1"},
+                                   {"run", input.value("run", std::string())},
+                                   {"state", "failed"},
+                                   {"status", study["status"]},
+                                   {"runner", runner()}});
+            }
+            if (capability == "stop_study") {
+                study["status"] = "stopped";
+                return Result(json{{"study", "study-1"}, {"status", "stopped"}, {"reason", "stopped"}});
+            }
+            recorded_runs.push_back(input);
+            end(input.value("trial", std::string()), "complete");
+            return Result(json{{"model_id", "model-" + std::to_string(recorded_runs.size())},
+                               {"run_id", input.value("trial", std::string())},
+                               {"study",
+                                {{"id", "study-1"},
+                                 {"trial_state", "complete"},
+                                 {"objective", 0.8},
+                                 {"status", study["status"]},
+                                 {"runner", runner()}}}});
+        }
         if (capability == "record_methodology_run") {
             recorded_runs.push_back(input);
             return Result(json{{"model_id", "model-" + std::to_string(recorded_runs.size())}});
+        }
+        if (capability == "append_methodology_artifact") {
+            // lake#690: the engine stages a large artifact in order.
+            const std::size_t offset = input.value("offset", std::size_t{0});
+            if (offset > staged_artifact.size()) {
+                return Result(std::unexpected(lake::control::ZettaControlError{
+                    "conflict", "expected offset " + std::to_string(staged_artifact.size())}));
+            }
+            staged_artifact.resize(offset);
+            staged_artifact += lake::test_base64_decode(input.value("chunk_base64", std::string()));
+            return Result(json{{"received", staged_artifact.size()}});
+        }
+        if (capability == "get_model") {
+            if (input.value("model_id", std::string()) != served_model.value("id", std::string())) {
+                return Result(std::unexpected(
+                    lake::control::ZettaControlError{"not_found", "no such model"}));
+            }
+            return Result(served_model);
+        }
+        if (capability == "expose_model" || capability == "unexpose_model") {
+            served_model["exposed"] = capability == "expose_model";
+            // The engine's expose_model takes `model` and answers its id (zetta#648).
+            return Result(json{{"model_id", input.value("model", std::string())},
+                               {"exposed", served_model["exposed"]}});
+        }
+        if (capability == "read_model_weights") {
+            const std::size_t offset = input.value("offset", std::size_t{0});
+            const std::size_t limit = input.value("limit", std::size_t{8} << 20);
+            const std::string chunk = served_weights.substr(offset, limit);
+            const std::size_t end = offset + chunk.size();
+            return Result(json{{"model_id", input.value("model_id", std::string())},
+                               {"offset", offset},
+                               {"chunk_base64", lake::test_base64_encode(chunk)},
+                               {"next_offset", end < served_weights.size() ? json(end) : json(nullptr)},
+                               {"total_bytes", served_weights.size()},
+                               {"sha256", lake::control::identity_crypto::sha256_hex(served_weights)}});
         }
         if (capability == "run") {
             // A pipeline whose step is a workspace methodology: the engine hands it to Lake's
@@ -5314,6 +5670,208 @@ TEST_P(WorkspaceRecordStores, MethodologiesAreTheWorkspacesOwnAndOramasStayReadO
     EXPECT_EQ(got.value["run"]["model_id"], "model-1");
     EXPECT_EQ(got.value["run"]["result"]["dropped_metrics"], (json{"note"}));
 
+    // An artifact over 24 MiB moves in chunks before the output (lake#690): Lake forwards each to
+    // the engine, which stages it; the output names its size and SHA-256.
+    const auto large = t.call(first,
+                              "run_methodology",
+                              in(first, 0, {{"id", id}, {"dataset", "sales.payers"}, {"target", "late"}}));
+    ASSERT_TRUE(large.ok) << large.error.code << ": " << large.error.message;
+    const std::string large_run = large.value["run"]["id"];
+    const std::string large_secret = "lmr." + large_run + "." + std::string(48, 'e');
+    report(large_run, "Collecting", large_secret);
+    const std::string artifact = "0123456789abcdef0123";
+    const auto chunk = [&](std::size_t offset, std::size_t length) {
+        return as_runner(large_secret,
+                         "methodology_run_artifact",
+                         {{"run_id", large_run},
+                          {"offset", offset},
+                          {"chunk_base64", lake::test_base64_encode(artifact.substr(offset, length))}});
+    };
+    const auto first_chunk = chunk(0, 12);
+    ASSERT_TRUE(first_chunk.ok) << first_chunk.error.code << ": " << first_chunk.error.message;
+    EXPECT_EQ(first_chunk.value["received"], 12);
+    EXPECT_EQ(chunk(15, 5).error.code, "conflict") << "a gap names where to resume";
+    EXPECT_EQ(chunk(12, 8).value["received"], 20);
+    EXPECT_EQ(staged_artifact, artifact);
+    EXPECT_EQ(as_runner(train_secret,
+                        "methodology_run_artifact",
+                        {{"run_id", large_run}, {"offset", 0}, {"chunk_base64", "AAAA"}})
+                  .error.code,
+              "unauthorized")
+        << "one run's credential never sends another's artifact";
+    const json large_result{{"status", "ok"},
+                            {"metrics", {{"held_out_auc", 0.8}}},
+                            {"artifact_format", "pickle"}};
+    const std::string digest = lake::control::identity_crypto::sha256_hex(artifact);
+    EXPECT_EQ(as_runner(large_secret,
+                        "methodology_run_output",
+                        {{"run_id", large_run},
+                         {"result", large_result},
+                         {"artifact_base64", "aGVsbG8="},
+                         {"artifact", {{"bytes", 20}, {"sha256", digest}}}})
+                  .error.code,
+              "invalid_input")
+        << "inline or in chunks, not both";
+    EXPECT_EQ(as_runner(large_secret,
+                        "methodology_run_output",
+                        {{"run_id", large_run},
+                         {"result", large_result},
+                         {"artifact", {{"bytes", 20}, {"sha256", "not-hex"}}}})
+                  .error.path,
+              "/artifact/sha256");
+    const auto large_out = as_runner(large_secret,
+                                     "methodology_run_output",
+                                     {{"run_id", large_run},
+                                      {"result", large_result},
+                                      {"artifact", {{"bytes", 20}, {"sha256", digest}}}});
+    ASSERT_TRUE(large_out.ok) << large_out.error.code << ": " << large_out.error.message;
+    ASSERT_EQ(recorded_runs.size(), 2U);
+    EXPECT_EQ(recorded_runs[1]["artifact_staged"], (json{{"bytes", 20}, {"sha256", digest}}));
+    EXPECT_FALSE(recorded_runs[1].contains("artifact_base64"));
+    EXPECT_EQ(chunk(0, 4).error.code, "conflict") << "no chunk after the result is recorded";
+
+    // Serving its model from Ship → Models (lake#690): publishing starts a deployment the
+    // operator runs; predict goes to the serve pod through Lake.
+    served_model = {{"id", "model-1"},
+                    {"kind", "python:" + id},
+                    {"exposed", false},
+                    {"feature_schema",
+                     {{"methodology", id},
+                      {"lake_run_id", train_run},
+                      {"features", {"days", "amount"}},
+                      {"artifact_format", "pickle"}}}};
+    std::vector<lake::api::MethodologyServeRequest> served_requests;
+    t.methodology_server = [&](const lake::api::MethodologyServeRequest& request) {
+        served_requests.push_back(request);
+        const json rows = json::parse(request.body).at("rows");
+        json predictions = json::array();
+        for (std::size_t index = 0; index < rows.size(); ++index) {
+            predictions.push_back(0.25 * static_cast<double>(index + 1));
+        }
+        return lake::api::MethodologyServeResponse{
+            200, json{{"predictions", predictions}, {"model_id", "model-1"}}.dump(), ""};
+    };
+    const json predict_input = in(
+        first,
+        0,
+        {{"model_id", "model-1"},
+         {"rows", json::array({{{"entity", "c-1"}, {"days", 30}, {"amount", 1.0}}, {{"days", 2}}})}});
+    const auto published = t.call(
+        first,
+        "workspace_act",
+        in(first, 0, {{"capability", "expose_model"}, {"input", {{"model_id", "model-1"}}}}));
+    ASSERT_TRUE(published.ok) << published.error.code << ": " << published.error.message;
+    EXPECT_EQ(published.value["deployment"]["phase"], "Pending");
+    const std::string deployment_id = published.value["deployment"]["id"];
+    const auto deployment = t.store->get_methodology_deployment(deployment_id);
+    ASSERT_TRUE(deployment);
+    EXPECT_EQ(deployment->model_id, "model-1");
+    EXPECT_EQ(deployment->methodology_id, id);
+    EXPECT_EQ(deployment->run_id, train_run);
+    EXPECT_EQ(deployment->build_id, row->build_id) << "the image that trained it serves it";
+    EXPECT_EQ(deployment->runtime_image, "registry.test/oramasearch/methodology-runtime:1");
+    const auto again_published = t.call(
+        first,
+        "workspace_act",
+        in(first, 0, {{"capability", "expose_model"}, {"input", {{"model_id", "model-1"}}}}));
+    ASSERT_TRUE(again_published.ok) << again_published.error.code << ": " << again_published.error.message;
+    EXPECT_EQ(again_published.value["deployment"]["id"], deployment_id) << "one per model";
+    const auto not_yet = t.call(first, "predict", predict_input);
+    EXPECT_EQ(not_yet.error.code, "conflict");
+    EXPECT_NE(not_yet.error.message.find("not serving yet"), std::string::npos);
+    EXPECT_TRUE(served_requests.empty());
+
+    // The operator stages it with the deployment's credential, which reaches only its input.
+    const std::string deployment_secret = "lmd." + deployment_id + "." + std::string(48, 'd');
+    lake::control::MethodologyDeploymentStatus staging;
+    staging.phase = "Staging";
+    staging.credential_sha256 = lake::control::identity_crypto::sha256_hex(deployment_secret);
+    ASSERT_TRUE(t.store->put_methodology_deployment_status(deployment_id, staging));
+    const auto model_page = as_runner(deployment_secret,
+                                      "methodology_deployment_input",
+                                      {{"deployment_id", deployment_id}, {"limit", 15000}});
+    ASSERT_TRUE(model_page.ok) << model_page.error.code << ": " << model_page.error.message;
+    EXPECT_EQ(model_page.value["spec"]["model_id"], "model-1");
+    EXPECT_EQ(model_page.value["spec"]["methodology_id"], id);
+    EXPECT_EQ(model_page.value["spec"]["features"], (json{"days", "amount"}));
+    EXPECT_EQ(model_page.value["spec"]["artifact_format"], "pickle");
+    EXPECT_FALSE(model_page.value["spec"]["manifest"].empty());
+    EXPECT_EQ(model_page.value["total_bytes"], 20000);
+    EXPECT_EQ(model_page.value["next_offset"], 15000);
+    const auto model_rest = as_runner(deployment_secret,
+                                      "methodology_deployment_input",
+                                      {{"deployment_id", deployment_id}, {"offset", 15000}});
+    ASSERT_TRUE(model_rest.ok) << model_rest.error.code << ": " << model_rest.error.message;
+    EXPECT_TRUE(model_rest.value["next_offset"].is_null());
+    EXPECT_EQ(lake::test_base64_decode(model_page.value["chunk_base64"].get<std::string>()) +
+                  lake::test_base64_decode(model_rest.value["chunk_base64"].get<std::string>()),
+              served_weights);
+    for (const auto& [capability, input] : std::vector<std::pair<std::string, json>>{
+             {"methodology_run_input", {{"run_id", train_run}}},
+             {"get_methodology", in(first, 0, {{"id", id}})},
+             {"methodology_deployment_input", {{"deployment_id", lake::control::new_uuid_v4()}}}}) {
+        EXPECT_EQ(as_runner(deployment_secret, capability, input).error.code, "unauthorized")
+            << capability;
+    }
+    EXPECT_EQ(as_runner(train_secret,
+                        "methodology_deployment_input",
+                        {{"deployment_id", deployment_id}})
+                  .error.code,
+              "unauthorized")
+        << "a run's credential never reads a model";
+    EXPECT_FALSE(t.call(first, "methodology_deployment_input", {{"deployment_id", deployment_id}}).ok)
+        << "nor does a person";
+
+    // The operator's endpoint is a serve Service, nothing else.
+    lake::control::MethodologyDeploymentStatus ready = staging;
+    ready.phase = "Ready";
+    ready.endpoint = "http://169.254.169.254";
+    EXPECT_FALSE(t.store->put_methodology_deployment_status(deployment_id, ready));
+    ready.endpoint = "http://" + deployment->slug + ".lake-prod-methodology-runs.svc.cluster.local";
+    ASSERT_TRUE(t.store->put_methodology_deployment_status(deployment_id, ready));
+    const auto served = t.call(first, "get_methodology_deployment", in(first, 0, {{"model_id", "model-1"}}));
+    ASSERT_TRUE(served.ok) << served.error.message;
+    EXPECT_EQ(served.value["deployment"]["phase"], "Ready");
+    EXPECT_EQ(served.value["deployment"]["ready"], true);
+    EXPECT_FALSE(served.value["deployment"].contains("endpoint")) << "where it runs is the operator's";
+
+    const auto predicted = t.call(first, "predict", predict_input);
+    ASSERT_TRUE(predicted.ok) << predicted.error.code << ": " << predicted.error.message;
+    EXPECT_EQ(predicted.value["runner"], "methodology");
+    ASSERT_EQ(predicted.value["predictions"].size(), 2U);
+    EXPECT_EQ(predicted.value["predictions"][0]["entity"], "c-1");
+    EXPECT_EQ(predicted.value["predictions"][0]["prediction"], 0.25);
+    EXPECT_EQ(predicted.value["predictions"][1]["row"], 1);
+    ASSERT_EQ(served_requests.size(), 1U);
+    EXPECT_EQ(served_requests[0].endpoint, ready.endpoint);
+    EXPECT_EQ(served_requests[0].path, "/predict");
+    t.methodology_server = [](const lake::api::MethodologyServeRequest&) {
+        return lake::api::MethodologyServeResponse{
+            422,
+            json{{"error", {{"code", "methodology_error"}, {"message", "predict raised KeyError"}}}}
+                .dump(),
+            ""};
+    };
+    const auto raised = t.call(first, "predict", predict_input);
+    EXPECT_EQ(raised.error.code, "invalid_input");
+    EXPECT_EQ(raised.error.message, "predict raised KeyError");
+    EXPECT_EQ(t.call(second, "predict", predict_input).error.code.empty(), false)
+        << "another account cannot call it";
+
+    // Unpublishing stops it.
+    const auto unpublished = t.call(
+        first,
+        "workspace_act",
+        in(first, 0, {{"capability", "unexpose_model"}, {"input", {{"model_id", "model-1"}}}}));
+    ASSERT_TRUE(unpublished.ok) << unpublished.error.code << ": " << unpublished.error.message;
+    EXPECT_EQ(unpublished.value["deployment"]["phase"], "Stopped");
+    EXPECT_EQ(t.store->get_methodology_deployment(deployment_id)->desired, "absent");
+    const auto listed_deployments =
+        t.call(first, "list_methodology_deployments", in(first, 0, json::object()));
+    ASSERT_TRUE(listed_deployments.ok) << listed_deployments.error.message;
+    EXPECT_EQ(listed_deployments.value["deployments"].size(), 1U);
+    EXPECT_FALSE(t.store->context_for(deployment_secret)) << "a stopped deployment's credential is gone";
+
     // A pipeline using it as a step: the engine's run hands it to the runner, as a training run
     // of that pipeline.
     const auto step = t.call(first,
@@ -5336,6 +5894,90 @@ TEST_P(WorkspaceRecordStores, MethodologiesAreTheWorkspacesOwnAndOramasStayReadO
     EXPECT_EQ(step_record.value["run"]["params"]["epochs"], 20);
     EXPECT_EQ(step_record.value["run"]["holdout_fraction"], 0.25);
     ASSERT_TRUE(t.store->withdraw_methodology_run(step_run, "test"));
+
+    // An experiment over its parameters (lake#689): the engine admits trials that wait for Lake's
+    // runner; Lake runs each as a training run, once, and reports the result back.
+    const auto started = t.call(first,
+                                "start_experiment",
+                                in(first,
+                                   0,
+                                   {{"name", "late payers tuning"},
+                                    {"methodology", id},
+                                    {"dataset", "sales.payers"},
+                                    {"target", "late"},
+                                    {"from_defaults", true},
+                                    {"confirm", true}}));
+    ASSERT_TRUE(started.ok) << started.error.code << ": " << started.error.message;
+    EXPECT_EQ(started.value["spec"]["target"], "late");
+    ASSERT_EQ(started.value["runner"].size(), 2U);
+    ASSERT_EQ(started.value["methodology_runs"].size(), 2U);
+    EXPECT_EQ(started.value["runner"][0]["experiment_id"], "study-1");
+    ASSERT_TRUE(started.value["runner"][0]["methodology_run"]["run_id"].is_string())
+        << started.value.dump();
+    const std::string trial_run = started.value["runner"][0]["methodology_run"]["run_id"];
+    ASSERT_TRUE(started.value["runner"][1]["methodology_run"]["run_id"].is_string());
+    const std::string failing_run = started.value["runner"][1]["methodology_run"]["run_id"];
+    const auto trial_record =
+        t.call(first, "get_methodology_run", in(first, 0, {{"run_id", trial_run}}));
+    ASSERT_TRUE(trial_record.ok) << trial_record.error.message;
+    EXPECT_EQ(trial_record.value["run"]["experiment_id"], "study-1");
+    EXPECT_EQ(trial_record.value["run"]["trial"], "trial-run-0");
+    EXPECT_EQ(trial_record.value["run"]["params"]["epochs"], 10);
+    EXPECT_EQ(trial_record.value["run"]["mode"], "train");
+    EXPECT_EQ(t.store->get_methodology_run(trial_run)->build_id, row->build_id)
+        << "a trial runs the validated revision's image";
+    // Reading it again dispatches nothing twice.
+    const auto reread =
+        t.call(first, "get_experiment", in(first, 0, {{"experiment_id", "study-1"}}));
+    ASSERT_TRUE(reread.ok) << reread.error.code << ": " << reread.error.message;
+    EXPECT_EQ(reread.value["methodology_runs"].size(), 2U);
+    EXPECT_EQ(reread.value["runner"][0]["methodology_run"]["run_id"], trial_run);
+
+    // Its result completes the trial; the engine admits the third, which Lake queues at once, for
+    // the person who started the experiment.
+    const std::string trial_secret = "lmr." + trial_run + "." + std::string(48, 'd');
+    report(trial_run, "Staging", trial_secret);
+    report(trial_run, "Collecting", trial_secret);
+    const auto trial_out =
+        as_runner(trial_secret,
+                  "methodology_run_output",
+                  {{"run_id", trial_run},
+                   {"result",
+                    {{"status", "ok"},
+                     {"metrics", {{"in_sample_auc", 0.9}, {"held_out_auc", 0.8}}},
+                     {"rows", {{"train", 2}, {"held_out", 1}}}}},
+                   {"artifact_base64", "aGVsbG8="}});
+    ASSERT_TRUE(trial_out.ok) << trial_out.error.code << ": " << trial_out.error.message;
+    const json& trial_recorded = recorded_runs.back();
+    EXPECT_EQ(trial_recorded["study"], "study-1");
+    EXPECT_EQ(trial_recorded["trial"], "trial-run-0");
+    EXPECT_EQ(trial_recorded["duration_seconds"], 90);
+    const auto after =
+        t.call(first, "get_experiment", in(first, 0, {{"experiment_id", "study-1"}}));
+    ASSERT_TRUE(after.ok) << after.error.message;
+    ASSERT_EQ(after.value["methodology_runs"].size(), 3U);
+    ASSERT_TRUE(after.value["methodology_runs"][2]["run_id"].is_string()) << after.value.dump();
+    const std::string third_run = after.value["methodology_runs"][2]["run_id"];
+    EXPECT_EQ(t.store->get_methodology_run(third_run)->created_by_user_id,
+              t.store->get_methodology_run(trial_run)->created_by_user_id);
+
+    // A run that ends without a result ends its trial with the reason.
+    lake::control::MethodologyRunStatus crashed;
+    crashed.phase = "Failed";
+    crashed.message = "the methodology's code exited with 1";
+    ASSERT_TRUE(t.store->put_methodology_run_status(failing_run, crashed));
+    const auto reconciled =
+        t.call(first, "get_experiment", in(first, 0, {{"experiment_id", "study-1"}}));
+    ASSERT_TRUE(reconciled.ok) << reconciled.error.message;
+    ASSERT_FALSE(study_calls.empty());
+    EXPECT_EQ(study_calls.back()["run"], "trial-run-1");
+    EXPECT_EQ(study_calls.back()["reason"], "the methodology's code exited with 1");
+
+    // Stopping the experiment stops its trials' runs.
+    const auto stopped = t.call(
+        first, "stop_experiment", in(first, 0, {{"experiment_id", "study-1"}, {"confirm", true}}));
+    ASSERT_TRUE(stopped.ok) << stopped.error.message;
+    EXPECT_EQ(t.store->get_methodology_run(third_run)->desired, "absent");
 
     // The run's record is sealed in the workspace Zetta; the dispatch row holds no content.
     for (const auto& [key, record] :
