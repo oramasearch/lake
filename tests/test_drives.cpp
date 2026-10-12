@@ -1427,6 +1427,34 @@ TEST(DrivesHttp, ARepositoryDriveWriteIsSearchedDownloadedAndLoaded) {
                        ["path"],
               "/name")
         << "a new model is named";
+
+    // A virtual drive's shortcut to the repository path is followed (lake#682).
+    const json links = lake.call("create_drive", {{"name", "Links"}, {"storage", "virtual"}});
+    ASSERT_TRUE(links.value("ok", false)) << links.dump();
+    const json shortcut = lake.call("create_drive_shortcut",
+                                    {{"drive_id", links["value"]["id"]},
+                                     {"name", "Churn weights"},
+                                     {"target",
+                                      {{"kind", "repository_path"},
+                                       {"repository_id", repository_id},
+                                       {"path", "models/churn.json"}}}});
+    ASSERT_TRUE(shortcut.value("ok", false)) << shortcut.dump();
+    const json via = lake.call("load_drive_model",
+                               {{"drive_id", links["value"]["id"]},
+                                {"id", shortcut["value"]["id"]},
+                                {"name", "via shortcut"}});
+    ASSERT_TRUE(via.value("ok", false)) << via.dump();
+    EXPECT_EQ(via["value"]["source"]["repository_id"], repository_id);
+    EXPECT_EQ(via["value"]["source"]["path"], "models/churn.json");
+    EXPECT_EQ(via["value"]["source"]["shortcut"]["name"], "Churn weights");
+    const auto last = std::ranges::find_if(
+        lake.spaces.zetta->calls.rbegin(), lake.spaces.zetta->calls.rend(), [](const auto& call) {
+            return call.first == "register_model";
+        });
+    ASSERT_NE(last, lake.spaces.zetta->calls.rend());
+    EXPECT_EQ(last->second["weights"], weights);
+    EXPECT_EQ(last->second["source"], "repository docs-drive@main: models/churn.json")
+        << last->second.dump();
     lake.spaces.zetta->responder = [](const std::string& capability, const json&)
         -> std::optional<lake::control::ZettaControlResult<json>> {
         if (capability != "register_model") {
@@ -1650,6 +1678,132 @@ TEST(Drives, AStoreDriveBrowsesItsStoreInPlaceAndLeavesItWhenDeleted) {
     EXPECT_EQ(stores.value["stores"][0]["id"], bucket.id);
     EXPECT_EQ(stores.value["stores"][0]["desired"], "present") << "the store survives";
     EXPECT_FALSE(opened.empty());
+}
+
+// Bring one → A drive (lake#682): a model file is brought from every drive kind and any depth,
+// and a virtual drive's shortcut to a file is followed once.
+TEST(Drives, AModelIsBroughtFromEveryDriveKindAndAShortcutIsFollowed) {
+    Spaces s;
+    const auto& first = s.spaces[0];
+    const std::string weights = R"({"objective":"binary_logistic","trees":[]})";
+    s.zetta->answers["register_model"] = {{"model_id", "m-1"}, {"standalone", true}};
+    const auto registered = [&] {
+        std::vector<json> out;
+        for (const auto& [capability, input] : s.zetta->calls) {
+            if (capability == "register_model") {
+                out.push_back(input);
+            }
+        }
+        return out;
+    };
+
+    // A storage drive's file, three folders down, by its path.
+    const auto bucket = ready_store(s, first, "object", "r2", "models");
+    auto contents = std::make_shared<FakeBucket>();
+    contents->folders.insert("2026");
+    contents->folders.insert("2026/q3");
+    contents->folders.insert("2026/q3/churn");
+    contents->files["2026/q3/churn/model.json"] = weights;
+    s.browser = [&](const lake::control::ManagedStore&, const json&)
+        -> lake::control::ZettaControlResult<std::shared_ptr<lake::control::StoreContents>> {
+        return std::shared_ptr<lake::control::StoreContents>(contents);
+    };
+    const ApiResult store_drive = s.in(
+        first, "create_drive", {{"name", "Models"}, {"storage", "store"}, {"store_id", bucket.id}});
+    ASSERT_TRUE(store_drive.ok) << store_drive.error.message;
+    const ApiResult from_store = s.in(first,
+                                      "load_drive_model",
+                                      {{"drive_id", store_drive.value["id"]},
+                                       {"id", "2026/q3/churn/model.json"},
+                                       {"name", "churn"}});
+    ASSERT_TRUE(from_store.ok) << from_store.error.message;
+    EXPECT_EQ(from_store.value["model_id"], "m-1");
+    EXPECT_EQ(from_store.value["source"]["name"], "model.json");
+    ASSERT_EQ(registered().size(), 1U);
+    EXPECT_EQ(registered()[0]["weights"], weights);
+    EXPECT_EQ(registered()[0]["source"], "drive Models: model.json");
+    EXPECT_EQ(s.in(first,
+                   "load_drive_model",
+                   {{"drive_id", store_drive.value["id"]}, {"id", "2026/q3"}, {"name", "x"}})
+                  .error.code,
+              "not_found")
+        << "a folder is not a model file";
+
+    // A workspace-files drive's file in a subfolder, by its entry id.
+    const ApiResult files = s.in(first, "create_drive", {{"name", "Files"}, {"storage", "files"}});
+    ASSERT_TRUE(files.ok) << files.error.message;
+    const ApiResult uploaded =
+        s.in(first,
+             "upload_drive_entries",
+             {{"drive_id", files.value["id"]},
+              {"files", json::array({{{"path", "a/b/c/model.json"}, {"content", base64(weights)}}})}});
+    ASSERT_TRUE(uploaded.ok) << uploaded.error.message;
+    const std::string file_id = uploaded.value["items"][0]["id"];
+    const ApiResult from_files = s.in(
+        first,
+        "load_drive_model",
+        {{"drive_id", files.value["id"]}, {"id", file_id}, {"name", "deep"}});
+    ASSERT_TRUE(from_files.ok) << from_files.error.message;
+    EXPECT_EQ(from_files.value["source"]["id"], file_id);
+
+    // A virtual drive: its shortcut to the file is followed to the file's own drive; a shortcut to
+    // something that is not a file, a folder, and a broken shortcut are refused at /id.
+    const ApiResult links = s.in(first, "create_drive", {{"name", "Links"}, {"storage", "virtual"}});
+    ASSERT_TRUE(links.ok) << links.error.message;
+    const std::string virtual_id = links.value["id"];
+    const auto shortcut = [&](std::string name, json target) {
+        return s.in(first,
+                    "create_drive_shortcut",
+                    {{"drive_id", virtual_id}, {"name", std::move(name)}, {"target", std::move(target)}});
+    };
+    const ApiResult to_file = shortcut(
+        "Churn model",
+        {{"kind", "drive_entry"}, {"drive_id", files.value["id"]}, {"entry_id", file_id}});
+    ASSERT_TRUE(to_file.ok) << to_file.error.message;
+    const ApiResult followed =
+        s.in(first,
+             "load_drive_model",
+             {{"drive_id", virtual_id}, {"id", to_file.value["id"]}, {"name", "linked"}});
+    ASSERT_TRUE(followed.ok) << followed.error.message;
+    EXPECT_EQ(followed.value["source"]["drive_id"], files.value["id"]) << "the file's own drive";
+    EXPECT_EQ(followed.value["source"]["id"], file_id);
+    EXPECT_EQ(followed.value["source"]["shortcut"]["drive_id"], virtual_id);
+    EXPECT_EQ(followed.value["source"]["shortcut"]["name"], "Churn model");
+    EXPECT_EQ(registered().back()["source"], "drive Files: model.json");
+    EXPECT_EQ(registered().back()["name"], "linked");
+
+    const ApiResult to_site = shortcut("Site", {{"kind", "url"}, {"url", "https://orama.test/"}});
+    ASSERT_TRUE(to_site.ok) << to_site.error.message;
+    const ApiResult site = s.in(
+        first, "load_drive_model", {{"drive_id", virtual_id}, {"id", to_site.value["id"]}, {"name", "x"}});
+    EXPECT_EQ(site.error.code, "invalid_input");
+    EXPECT_EQ(site.error.path, "/id");
+    const ApiResult folder =
+        s.in(first, "create_drive_folder_entry", {{"drive_id", virtual_id}, {"path", "Q3"}});
+    ASSERT_TRUE(folder.ok) << folder.error.message;
+    EXPECT_EQ(s.in(first,
+                   "load_drive_model",
+                   {{"drive_id", virtual_id}, {"id", folder.value["id"]}, {"name", "x"}})
+                  .error.path,
+              "/id");
+    const ApiResult to_links = shortcut(
+        "Loop", {{"kind", "drive_entry"}, {"drive_id", virtual_id}, {"entry_id", to_file.value["id"]}});
+    ASSERT_TRUE(to_links.ok) << to_links.error.message;
+    EXPECT_EQ(s.in(first,
+                   "load_drive_model",
+                   {{"drive_id", virtual_id}, {"id", to_links.value["id"]}, {"name", "x"}})
+                  .error.code,
+              "invalid_input")
+        << "a shortcut is followed once";
+    ASSERT_TRUE(
+        s.in(first, "delete_drive_entry", {{"drive_id", files.value["id"]}, {"id", file_id}}).ok);
+    EXPECT_EQ(s.in(first,
+                   "load_drive_model",
+                   {{"drive_id", virtual_id}, {"id", to_file.value["id"]}, {"name", "x"}})
+                  .error.code,
+              "not_found")
+        << "a broken shortcut";
+    EXPECT_EQ(registered().size(), 3U) << "nothing more was kept";
 }
 
 TEST(Drives, AVolumeIsShownNotBrowsedAndAStoreLakeCannotBrowseIsRefused) {

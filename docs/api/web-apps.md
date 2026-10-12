@@ -83,6 +83,14 @@ read scope. Detaching it clears the operator token hash immediately; service det
 that service from the normalized binding list. Deploy and rollback events retain their exact
 source or image input so the UI can offer history-bound rollback.
 
+## Apps Lake starts for MCP servers
+
+A stdio MCP connection (lake#659, [mcp-connections.md](mcp-connections.md#servers-that-speak-only-stdio))
+creates an ordinary App, as the person: `mode: image` with `LAKE_MCP_RUNNER_IMAGE`, `framework:
+mcp`, port `8080`, named `mcp-<prefix>-<4 hex>`, with `MCP_RUNNER_TOKEN` and `MCP_STDIO_COMMAND`
+from a secret Lake wrote in the person's mount. It is listed, metered, logged, stopped and started
+like any App; deleting its connection deletes it.
+
 ## Lake-protected app authentication
 
 An app with `auth = lake` uses nginx forward authentication without exposing Lake's browser
@@ -167,6 +175,15 @@ operator's `Deleted` acknowledgement before Lake physically removes the row. Sta
 
 Plain environment values are scanned; detected credentials return `secret_required`. Bindings and
 operator tokens are delivered as mounted Secrets.
+
+## Usage
+
+A running app is metered for its replicas' CPU, RAM, GPU and GPU memory (lake#643) and, since
+lake#661, for the bytes it receives and sends through the ingress: the Orama operator reads the
+ingress controller's per-Ingress byte counters and reports them by app and hour (`app_transfer`,
+migration `0081`), and Lake adds each closed hour to the app's workspace as `transfer` (`in`, `out`,
+`object_id` the app), billed at the `transfer` rate. An hour appears on the Usage page once it has
+closed ([metering](metering.md#app-traffic)).
 
 ## Secret environment
 

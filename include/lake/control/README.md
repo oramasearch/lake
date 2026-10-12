@@ -21,6 +21,9 @@ topic's workspace Zetta (lake#379); `Store` has no reads of the retired `stream_
 which migration `0070` dropped (lake#311). `list_agent_task_stream_scopes` supplies one customer's compact durable task
 and agent scope for the shared Agent events and Agent tasks views.
 `latest_agent_conversation_task` resolves the preceding task for a same-agent, same-kind follow-up.
+`list_conversation_agent_tasks` answers the tasks one person's Ask Orama or Agent Factory
+conversation started, with the tasks they asked for (`parent_task_id`), and `delete_agent_tasks`
+removes their dispatch rows; `delete_ask_conversation` uses both (lake#673).
 `AgentBus::call` carries named
 CRUD read requests over the existing service transport; unsupported custom bus implementations
 fail explicitly. See `docs/control-plane/streams.md`.
@@ -75,9 +78,12 @@ first mutable collection (Design → Opportunities, lake#376): derived keys, con
 writes; the retired `opportunities` table is dropped by migration `0070` with its legacy reads.
 `transcripts.hpp` (lake#561) is the transcripts codec: one record per transcript in its
 workspace, found by the space, never in PostgreSQL (`docs/api/transcripts.md`).
-`mcp_connections.hpp` (lake#652) is the MCP connection codec: the connection, the person's decision
+`mcp_connections.hpp` (lake#652) is the MCP connection codec (a stdio server's `app_id` and `stdio`,
+lake#659): the connection, the person's decision
 for each tool, the auto-approve grants and the streams, with its credential only named
-(`lake-secret://`), and the OAuth state codec (`docs/api/mcp-connections.md`). See
+(`lake-secret://`), and the OAuth state codec (`docs/api/mcp-connections.md`).
+`agent_stream_triggers.hpp` (lake#677) is the stream trigger codec: an agent, a workspace stream, the
+person its runs act as and its cursor (`docs/api/agent-launches.md#stream-triggers`). See
 `docs/architecture/workspace-records.md`. `drive_share_links.hpp` is the drive share link codec
 (lake#350): a mutable record per link keyed by its id and found by repository and folder, and the
 bearer token format `<workspace id>.<link id>.<secret>` that routes a recipient to the workspace.
@@ -132,7 +138,10 @@ workspace, and `transfer_repository` is no longer part of `Store`.
 `lake_metering_usage` hourly transfer counters, added to with a conditional write, and the
 `lake_metering_build_records` per-result records, written `if_absent`, and (lake#658) the
 `lake_metering_job_records` that a finished build, agent job or cron run was charged, written
-`if_absent` before its resources are added to the usage series. `store.hpp` has no
+`if_absent` before its resources are added to the usage series, and (lake#661) the
+`lake_metering_app_transfer_records` that an app's closed hour of ingress traffic was charged.
+`store.hpp`'s `AppTransfer`, `app_transfer` and `add_app_transfer` read the operator's
+`app_transfer` rows (migration `0081_app_transfer`): numbers only. `store.hpp` has no other
 metering store methods: the retired tables and their legacy reads are gone (migration `0070`).
 `store.hpp`'s `UsageLimit`, `usage_limits` and `set_usage_limit` are an account's per-dimension
 usage limits (migration `0072_usage_limits`, lake#564): content-free configuration; the usage stays
@@ -236,6 +245,13 @@ operator reports a workload is scheduled with; `Store::workload_resources` lists
 `InvoiceLine::class_name` carry a GPU class rate and the class a line bills; `AgentLaunch::status_updated_at`
 is when the operator last wrote a launch's status (a finished job's end). See
 [metering](../../../docs/api/metering.md#resources).
+
+`store.hpp`'s `McpConnectionDispatch` (lake#684, lake#685, migration `0079_mcp_connection_dispatch`)
+is where a workspace's MCP connection needs Lake outside a request: whether it streams and the digest
+of the tools it re-exports. `put_mcp_connection_dispatch` writes or removes it,
+`mcp_stream_dispatch` lists the streaming rows for the stream worker and `mcp_exported_dispatch` a
+workspace's re-exporting rows for its MCP endpoint. See
+[mcp-connections.md](../../../docs/api/mcp-connections.md).
 
 `methodologies.hpp` (lake#655) is a workspace methodology's manifest, the findings Validate answers
 without running anything, drafts and copies of Orama's, the image's Dockerfile and the validation

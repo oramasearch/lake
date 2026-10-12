@@ -133,6 +133,13 @@ Factory; every `create_agent` and `update_agent` the engine accepts is kept as a
 only agents with something to train, with performance, versions, promote and roll back, the
 training schedule and Launch experiment. The pages call the named engine capabilities. Not
 deployed. See `docs/api/train-agents.md`.
+An agent can be started by a workspace stream (lake#677, no migration): `set_agent_streams` names
+the workspace streams whose new messages each start a job of a Python agent with the message as its
+input, as the person who set them; each trigger is a sealed `lake_agent_stream_triggers` record in
+the workspace Zetta, read by the store root's owner (`AgentStreamWorker`, beside the MCP connection
+streams, through the same `start_stream_runs`), and removed with its agent by `delete_agent`. Design
+→ Agents' New agent and Edit offer the streams; the agent's Design page lists them. Not deployed. See
+`docs/api/agent-launches.md#stream-triggers`.
 
 A workspace's own methodologies from Python code follow (lake#655, migration `0078_methodology_runs`):
 the code is a manifest, an entrypoint with fit, predict and score, and a hashed lock file in a
@@ -276,8 +283,8 @@ Deleting and revoking follow (lake#645, migration `0076_organization_deletion`):
 are marked `deleted_at`, never erased, because the central audit chain names the account),
 `revoke_invitation`, `revoke_grant`, `delete_secret_mount` (every record out of the mount's workspace
 Zetta before its route), `delete_dataset`, `delete_model`, `delete_run`, `delete_index` (the workspace
-engine's deletes, zetta#1257; `not_supported` from an older engine) and `delete_ask_conversation`,
-each with `dry_run: true` and a typed confirmation in Lake Console. Not deployed; the operator must
+engine's deletes, zetta#1257; `not_supported` from an older engine) and `delete_ask_conversation`
+(with the agent tasks the conversation started, lake#673), each with `dry_run: true` and a typed confirmation in Lake Console. Not deployed; the operator must
 vendor the schema and select `organization_deletion_guard`. See `docs/api/deletion.md`.
 A user's secret reaches a Kubernetes Secret only as a sealed projection (lake#625, decision 58, no
 migration): lake has two levels of secrets, Orama's platform credentials as environment variables

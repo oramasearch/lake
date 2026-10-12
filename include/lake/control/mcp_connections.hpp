@@ -69,6 +69,12 @@ struct McpConnection {
     // running whose results go to the output stream.
     std::uint64_t input_cursor = 0;
     std::vector<std::string> pending_launches;
+    // A server that speaks only stdio, which Lake runs as a workspace App (lake#659): the App's id
+    // and what it runs, {runtime, package, command, args, env_keys, secret_env_keys, mount_id,
+    // app_name}. The URL is then the App's address inside the cluster, which Lake made and nobody
+    // changes. Empty for a remote server.
+    std::string app_id;
+    nlohmann::json stdio = nlohmann::json::object();
     std::string status = "new"; // new, connected, needs_sign_in or failing
     std::string last_error;
     std::string refreshed_at;

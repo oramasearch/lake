@@ -34,8 +34,10 @@ lake#654. A model made on its own, not as a project pipeline's step (`docs/api/m
   methodology's `label` input is not required) and Held-out share (0.2 by default, `20%` taken).
   The name, dataset, methodology, target and share are checked before anything is sent
   (`nameProblem`, `needsTarget`, `holdoutOf` in `models.ts`). `train_model`, then the new run's page.
-- **Bring one**: This computer (a `.json` file, `register_model` with its text), A drive (the files
-  of the workspace's drives, newest first from `recent_drive_entries`; `load_drive_model`) or A model
+- **Bring one**: This computer (a `.json` file, `register_model` with its text), A drive (**Choose a
+  file** opens the drive picker, [drives.md](drives.md#the-picker), over every drive of the workspace
+  from `list_drives`, of any kind, with folders and search; it lists files and shortcuts to a file,
+  at any depth; `load_drive_model` with the drive and the file's key, lake#682) or A model
   repository (repository, path, revision; `resolve_model_file`, then `register_model`), a Name and an
   optional held-out AUC measured where it was trained. A banner says what can be brought: the
   engine's own tree weights format. Then the model's page.

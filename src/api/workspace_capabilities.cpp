@@ -17,6 +17,7 @@
 #include <vector>
 
 #include "agent_task_records_api.hpp"
+#include "lake/api/agent_stream_triggers.hpp"
 #include "lake/api/datasets.hpp"
 #include "lake/api/oauth.hpp"
 #include "lake/api/pipeline.hpp"
@@ -901,6 +902,9 @@ liquid::runtime::task<ApiResult> workspace_call(bool read, json input, ApiContex
         } else {
             normalize_dataset_reference(capability, arguments);
         }
+        // The agent a delete_agent removes: its stream triggers go with it (lake#677).
+        const std::string deleted_agent =
+            capability == "delete_agent" ? arguments.value("id", std::string()) : std::string();
         auto called = co_await call_workspace(context,
                                               input.at("customer_id"),
                                               capability,
@@ -974,6 +978,20 @@ liquid::runtime::task<ApiResult> workspace_call(bool read, json input, ApiContex
             value["definition_revision"] =
                 kept ? std::move(*kept)
                      : json{{"recorded", false}, {"message", kept.error().message}};
+        }
+        if (!deleted_agent.empty() && value.is_object()) {
+            // The engine has deleted the agent, whatever happens here: a trigger that cannot be
+            // removed now is reported beside it, and the stream worker removes it on the next
+            // message, when its launch finds no agent.
+            auto removed = co_await remove_agent_stream_triggers(
+                context, input.at("customer_id"), input.at("workspace_id"), deleted_agent);
+            if (removed && *removed) {
+                value["streams_removed"] = **removed;
+            } else {
+                value["streams_removed"] = 0;
+                value["streams_error"] =
+                    removed ? (*removed).error().message : removed.error().message;
+            }
         }
         if (value.is_object() &&
             (capability == "expose_model" || capability == "unexpose_model" ||
@@ -5301,7 +5319,13 @@ void register_agent_run_capabilities(Registry& registry) {
                                         .agent_id = agent_id,
                                         .agent_name = agent->value("name", std::string()),
                                         .mode = mode,
-                                        .trigger = "manual",
+                                        // A run a stream message started says so (lake#677).
+                                        .trigger = context.authentication_method ==
+                                                               "agent_stream_trigger" ||
+                                                           context.authentication_method ==
+                                                               "mcp_connection_stream"
+                                                       ? "stream"
+                                                       : "manual",
                                         .input = input.value("input", json(nullptr)),
                                         .scopes = control::agent_launch_scopes_for(*agent),
                                         .created_by_user_id = context.acting_user_id,

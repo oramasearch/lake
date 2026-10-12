@@ -240,6 +240,7 @@ add_library(lake-core STATIC
   src/control/transcripts.cpp
   src/control/mcp_connections.cpp
   src/control/agent_revisions.cpp
+  src/control/agent_stream_triggers.cpp
   src/control/project_decisions.cpp
   src/control/drives.cpp
   src/control/drive_files.cpp
@@ -281,6 +282,7 @@ add_library(lake-core STATIC
   src/api/mcp_client.cpp
   src/api/mcp_connection_capabilities.cpp
   src/api/mcp_connection_streams.cpp
+  src/api/agent_stream_triggers.cpp
   src/api/audio_duration.cpp
   src/api/workspace_store_capabilities.cpp
   src/api/datasets.cpp

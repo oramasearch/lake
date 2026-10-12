@@ -3,7 +3,8 @@
  * and the workspace's own editable, the "By Orama" / "Yours" filter, Duplicate (of one of Orama's
  * and of one's own), New agent's input, the skills read from Lake's OpenAPI rather than written
  * down, the revisions' changes, and Train → Agents' filter to the agents with something to train,
- * with promote and roll back of a trained version.
+ * with promote and roll back of a trained version, and the workspace streams that start an agent
+ * (lake#677).
  */
 import assert from "node:assert/strict";
 import {readFileSync} from "node:fs";
@@ -28,6 +29,8 @@ import {
     formProblem,
     ownAgents,
     revisionChanges,
+    streamsToSet,
+    triggerStreams,
     runFigures,
     scoreSeries,
     skillChoices,
@@ -251,4 +254,31 @@ test("the training schedule and the experiment ask", () => {
     assert.match(ask, /Its goal: Every at-risk renewal is flagged\./);
     assert.match(experimentAsk(native, "prompts", "fewer false alarms", []), /variations of its instructions\. What it should improve: fewer false alarms\./);
     assert.doesNotMatch(ask, /\bstud(y|ies)\b/i, "an experiment, never a study");
+});
+
+test("the streams an agent may start from: the workspace's own, never a system stream", () => {
+    const groups = [
+        {zetta: "workspace", topics: [
+            {topic: "topic:orders", system: false},
+            {topic: "agent-events", system: true},
+            {topic: "app-events.shop", system: false},
+            {topic: "invoices", system: false},
+            {topic: "orders", system: false},
+        ]},
+        {zetta: "bus", topics: [{topic: "agent-tasks.agent-project", system: true}, {topic: "bus-only"}]},
+    ];
+    assert.deepEqual(triggerStreams(groups), ["invoices", "orders"]);
+    assert.deepEqual(triggerStreams(undefined), []);
+});
+
+test("saving sends the streams only when they change, and none for an agent off a frontier model", () => {
+    const form = {...BLANK_AGENT, name: "Watcher", purpose: "Watch orders", model: "frontier" as const, streams: ["orders"]};
+    assert.deepEqual(streamsToSet(form), ["orders"], "a new agent sends what it chose");
+    assert.equal(streamsToSet({...form, streams: []}), null, "nothing chosen, nothing before: nothing sent");
+    assert.equal(streamsToSet(form, ["orders"]), null, "unchanged");
+    assert.deepEqual(streamsToSet({...form, streams: ["orders", "invoices"]}, ["orders"]), ["orders", "invoices"]);
+    assert.deepEqual(streamsToSet({...form, streams: []}, ["orders"]), [], "all removed");
+    assert.deepEqual(streamsToSet({...form, model: "base"}, ["orders"]), [], "a native agent loses its streams");
+    assert.equal(streamsToSet({...form, model: "base"}), null);
+    assert.deepEqual(agentForm({name: "x", runtime: "python"}).streams, [], "streams are not on the engine's record");
 });

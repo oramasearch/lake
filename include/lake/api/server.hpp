@@ -128,6 +128,9 @@ struct ServerOptions {
     // The oramasearch/methodology-runtime image for workspace methodologies
     // (LAKE_METHODOLOGY_RUNTIME_IMAGE, lake#655, docs/api/methodologies.md).
     std::string methodology_runtime_image;
+    // The oramasearch/lake-mcp-runner image a stdio MCP connection's App runs
+    // (LAKE_MCP_RUNNER_IMAGE, lake#659, docs/api/mcp-connections.md).
+    std::string mcp_runner_image;
     std::string apps_reserved_names;
     std::size_t apps_per_customer = 0;
     std::size_t app_replicas_per_customer = 0;
