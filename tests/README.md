@@ -428,7 +428,9 @@ public addresses and tool bounds, then the client over the server's own transpor
 `mcp_test_server.hpp`, a local MCP server (Streamable HTTP and HTTP+SSE, an OAuth authorization
 server, and hostile modes: slow, huge, garbage, another id first, a sampling request, endless
 events, an unknown version).
-`HttpServer.WorkspaceMcpSessionsLearnThatExportedToolsChanged` (lake#684) drives the notice over
+`McpConnectionDispatchNamesExportsAndStreamingWorkspacesOnly` (lake#684, lake#685) checks the
+dispatch rows, the workspace endpoint's digest and that the stream worker calls only streaming
+workspaces; `HttpServer.WorkspaceMcpSessionsLearnThatExportedToolsChanged` drives the notice over
 `/w/<workspace>/mcp`.
 `test_workspace_records.cpp`'s `McpConnections*` cases run the MCP connection capabilities against
 that server with both stores: the sealed record and its secret, the read-or-change rule for people,

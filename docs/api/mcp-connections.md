@@ -272,7 +272,16 @@ The streams act with the authority of **the person who last set the agent or a s
 workspace decides whether a job starts. The store root's owner runs them, and only it
 (`McpStreamWorker`, on the server's maintenance thread, every `mcp_stream_interval`, 15 s), so two
 replicas never mirror a notification twice; each pass reads at most 64 connections and 20 input
-events each. Metrics: `lake_mcp_stream_passes_total`, `lake_mcp_notifications_mirrored_total`,
+events each.
+
+**Only the workspaces that stream are called** (lake#685). The connection's dispatch row says it
+`streams` when it has a notifications topic, an agent with an input topic, or finished jobs'
+results still to publish; Lake writes it with every connection it writes, on any replica. Each pass
+reads the streaming rows from lake's store and lists the connections of those workspaces only, one
+workspace Zetta call each: a workspace with no streaming connection is never called. A row whose
+connection is gone, or no longer streams, is put right by the pass that finds it, and a deleted
+workspace's rows go with it. A connection whose streams were set before this change has no row
+until it is next saved. Metrics: `lake_mcp_stream_passes_total`, `lake_mcp_notifications_mirrored_total`,
 `lake_mcp_stream_turns_total`, `lake_mcp_stream_problems_total`. Mirrored notifications count as
 the workspace's `calls` (`kind: mcp_connection`).
 
@@ -297,7 +306,11 @@ challenge, a state taken once and by its own person, only the refresh token kept
 token renewed with a rotated refresh token. `...McpConnectionStreamsMirrorNotificationsAndDriveTheAgent`:
 notifications mirrored to their topic after a subscription, one job per input event as the person,
 and its result published once on the output topic.
-`HttpServer.WorkspaceMcpSessionsLearnThatExportedToolsChanged`
+`...McpConnectionDispatchNamesExportsAndStreamingWorkspacesOnly`: no row for a connection that
+neither streams nor re-exports, the endpoint digest changing on export and on an allow-list change
+(and not on a refresh that changes nothing), a session that listed not told again, the worker
+calling no workspace at all with no streaming connection and only the streaming workspace with
+one, and the rows gone when the stream or the connection is. `HttpServer.WorkspaceMcpSessionsLearnThatExportedToolsChanged`
 drives `/w/<workspace>/mcp`: the notice after an export until the session lists, again after a
 change of what is exported, and a new session on Lake's own list once nothing is.
 `Mcp.WorkspaceDigestFollowsExportedToolsAndListedSessionsAreNotToldAgain` checks the digest and the

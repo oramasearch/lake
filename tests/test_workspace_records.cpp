@@ -4036,6 +4036,159 @@ TEST_P(WorkspaceRecordStores, McpConnectionStreamsMirrorNotificationsAndDriveThe
     EXPECT_EQ(worker.pass(owner).results, 0U) << "published once";
 }
 
+// lake#684, lake#685: Lake keeps a dispatch row for each connection that streams or re-exports
+// tools. A re-export, or a change of what it re-exports, changes the workspace endpoint's tool-list
+// digest, so a session that began before is told; the stream worker calls only the workspaces
+// with a streaming connection, never one without.
+TEST_P(WorkspaceRecordStores, McpConnectionDispatchNamesExportsAndStreamingWorkspacesOnly) {
+    auto store = make_store();
+    if (!store) {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
+    }
+    TwoSpaces t(store, database_uri_);
+    lake::test::McpTestServer server;
+    t.mcp_http = lake::api::make_mcp_http(true);
+    const auto& first = t.spaces[0];
+    const auto& second = t.spaces[1];
+    const std::string home = first.workspaces[0];
+    const std::string lab = first.workspaces[1];
+    const auto in = [&](const std::string& workspace, json input) {
+        input["customer_id"] = first.customer_id;
+        input["workspace_id"] = workspace;
+        return input;
+    };
+    const auto exported_digests = [&](const std::string& workspace) {
+        const auto rows = t.store->mcp_exported_dispatch(workspace);
+        EXPECT_TRUE(rows) << rows.error().message;
+        std::vector<lake::api::McpExportedDigest> out;
+        for (const auto& row : rows ? *rows : std::vector<lake::control::McpConnectionDispatch>{}) {
+            EXPECT_EQ(row.exported_digest.size(), 64U);
+            out.push_back({row.connection_id, row.exported_digest});
+        }
+        return out;
+    };
+    const std::string lake_digest = lake::api::mcp_tool_list_digest(t.registry);
+    const auto endpoint_digest = [&](const std::string& workspace) {
+        return lake::api::mcp_workspace_tool_list_digest(lake_digest, exported_digests(workspace));
+    };
+
+    // One connection in each of home and lab, and one of the other account: none streams or
+    // re-exports, so none has a row.
+    const auto at_home =
+        t.call(first, "create_mcp_connection", in(home, {{"name", "Desk"}, {"url", server.url()}}));
+    ASSERT_TRUE(at_home.ok) << at_home.error.message;
+    const std::string id = at_home.value["id"];
+    ASSERT_TRUE(
+        t.call(first, "create_mcp_connection", in(lab, {{"name", "Lab"}, {"url", server.url()}}))
+            .ok);
+    ASSERT_TRUE(t.call(second,
+                       "create_mcp_connection",
+                       {{"customer_id", second.customer_id},
+                        {"workspace_id", second.workspaces[0]},
+                        {"name", "Other"},
+                        {"url", server.url()}})
+                    .ok);
+    EXPECT_TRUE(t.store->mcp_stream_dispatch(100)->empty());
+    EXPECT_TRUE(exported_digests(home).empty());
+    EXPECT_EQ(endpoint_digest(home), lake_digest) << "nothing exported: Lake's own list";
+
+    // A session begins on the workspace endpoint.
+    const std::string session = lake::api::mcp_session_id(endpoint_digest(home));
+    EXPECT_FALSE(lake::api::mcp_session_tool_list_changed(session, endpoint_digest(home)));
+
+    // Exported with one allowed tool: the endpoint's list changed, and the session is told.
+    ASSERT_TRUE(t.call(first,
+                       "update_mcp_connection",
+                       in(home, {{"id", id}, {"tools", {{"echo", {{"allowed", true}}}}}}))
+                    .ok);
+    EXPECT_TRUE(exported_digests(home).empty()) << "allowed, not exported";
+    ASSERT_TRUE(
+        t.call(first, "update_mcp_connection", in(home, {{"id", id}, {"exported", true}})).ok);
+    const auto exported = exported_digests(home);
+    ASSERT_EQ(exported.size(), 1U);
+    EXPECT_EQ(exported[0].connection_id, id);
+    const std::string after_export = endpoint_digest(home);
+    EXPECT_NE(after_export, lake_digest);
+    EXPECT_TRUE(lake::api::mcp_session_tool_list_changed(session, after_export));
+    EXPECT_EQ(endpoint_digest(lab), lake_digest) << "another workspace's list is unchanged";
+
+    // The session lists again; a change of the allow-list tells it once more.
+    lake::api::McpSessionLists lists;
+    lists.listed(session, after_export);
+    EXPECT_FALSE(lists.changed(session, endpoint_digest(home)));
+    ASSERT_TRUE(t.call(first,
+                       "update_mcp_connection",
+                       in(home, {{"id", id}, {"tools", {{"create_ticket", {{"allowed", true}}}}}}))
+                    .ok);
+    const std::string after_allow = endpoint_digest(home);
+    EXPECT_NE(after_allow, after_export);
+    EXPECT_TRUE(lists.changed(session, after_allow));
+    ASSERT_TRUE(t.call(first, "refresh_mcp_connection", in(home, {{"id", id}})).ok);
+    EXPECT_EQ(endpoint_digest(home), after_allow) << "a refresh that changes nothing tells no one";
+
+    // Not exported any more: Lake's own list again.
+    ASSERT_TRUE(
+        t.call(first, "update_mcp_connection", in(home, {{"id", id}, {"exported", false}})).ok);
+    EXPECT_TRUE(exported_digests(home).empty());
+    EXPECT_EQ(endpoint_digest(home), lake_digest);
+
+    // The worker: with no streaming connection, it calls no workspace at all.
+    lake::api::McpStreamWorker worker;
+    lake::api::ApiContext owner;
+    owner.store = t.store.get();
+    owner.workspaces = t.service.get();
+    owner.instance_kek = std::string(kek);
+    owner.registry = &t.registry;
+    owner.mcp_http = t.mcp_http;
+    owner.mcp_allow_private_addresses = true;
+    t.zetta->calls.clear();
+    t.zetta->call_urls.clear();
+    const auto idle = worker.pass(owner);
+    EXPECT_EQ(idle.workspaces, 0U);
+    EXPECT_TRUE(t.zetta->calls.empty()) << "no workspace is called";
+
+    // Notifications mirrored at home: only home's Zetta is called.
+    ASSERT_TRUE(t.call(first,
+                       "update_mcp_connection",
+                       in(home, {{"id", id}, {"notifications_topic", "desk-notices"}}))
+                    .ok);
+    const auto streaming = t.store->mcp_stream_dispatch(100);
+    ASSERT_TRUE(streaming);
+    ASSERT_EQ(streaming->size(), 1U);
+    EXPECT_EQ((*streaming)[0].workspace_id, home);
+    EXPECT_EQ((*streaming)[0].connection_id, id);
+    t.zetta->calls.clear();
+    t.zetta->call_urls.clear();
+    const auto busy = worker.pass(owner);
+    EXPECT_EQ(busy.workspaces, 1U);
+    EXPECT_EQ(busy.connections, 1U);
+    ASSERT_FALSE(t.zetta->call_urls.empty());
+    const std::set<std::string> called(t.zetta->call_urls.begin(), t.zetta->call_urls.end());
+    EXPECT_EQ(called.size(), 1U) << "one workspace, home, is called";
+
+    // The stream taken away: its row goes, and the worker calls nothing again.
+    ASSERT_TRUE(t.call(first,
+                       "update_mcp_connection",
+                       in(home, {{"id", id}, {"notifications_topic", nullptr}}))
+                    .ok);
+    EXPECT_TRUE(t.store->mcp_stream_dispatch(100)->empty());
+    t.zetta->calls.clear();
+    EXPECT_EQ(worker.pass(owner).workspaces, 0U);
+    EXPECT_TRUE(t.zetta->calls.empty());
+
+    // A deleted connection leaves no row.
+    ASSERT_TRUE(t.call(first,
+                       "update_mcp_connection",
+                       in(home, {{"id", id}, {"exported", true}, {"agent_id", "agent-1"},
+                                 {"input_topic", "desk-in"}}))
+                    .ok);
+    EXPECT_EQ(t.store->mcp_stream_dispatch(100)->size(), 1U);
+    EXPECT_EQ(exported_digests(home).size(), 1U);
+    ASSERT_TRUE(t.call(first, "delete_mcp_connection", in(home, {{"id", id}})).ok);
+    EXPECT_TRUE(t.store->mcp_stream_dispatch(100)->empty());
+    EXPECT_TRUE(exported_digests(home).empty());
+}
+
 INSTANTIATE_TEST_SUITE_P(Stores, WorkspaceRecordStores, testing::Values(false, true),
                          [](const auto& info) { return info.param ? "Postgres" : "Memory"; });
 
