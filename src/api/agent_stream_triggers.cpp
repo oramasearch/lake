@@ -16,6 +16,7 @@
 #include "agent_stream_runs.hpp"
 #include "lake/api/capabilities.hpp"
 #include "lake/control/agent_stream_triggers.hpp"
+#include "lake/control/policy.hpp"
 #include "lake/control/store.hpp"
 #include "workspace_bus.hpp"
 #include "workspace_records_api.hpp"
@@ -87,8 +88,7 @@ json streams_output_schema() {
     return {{"type", "object"},
             {"properties",
              {{"agent_id", {{"type", "string"}}},
-              {"streams", {{"type", "array"}, {"items", {{"type", "object"}}}}}}},
-            {"required", json::array({"streams"})}};
+              {"streams", {{"type", "array"}, {"items", {{"type", "object"}}}}}}}};
 }
 
 liquid::runtime::task<ApiResult> set_agent_streams(const json& input, ApiContext& context) {
@@ -236,7 +236,29 @@ liquid::runtime::task<ApiResult> set_agent_streams(const json& input, ApiContext
     co_return ApiResult::success({{"agent_id", agent_id}, {"streams", std::move(out)}});
 }
 
+std::expected<std::string, ApiError> customer_object(const json& input, ApiContext& context);
+
 liquid::runtime::task<ApiResult> list_agent_streams(const json& input, ApiContext& context) {
+    // A list_ read authorizes itself (read on the account), as every list_ read does.
+    if (context.acting_identity != "admin") {
+        const auto object = customer_object(input, context);
+        if (!object) {
+            co_return ApiResult::failure(
+                object.error().code, object.error().message, object.error().path);
+        }
+        const auto decision = control::authorize(*context.store,
+                                                 context.acting_identity,
+                                                 *object,
+                                                 "read",
+                                                 context.authorization_cache);
+        if (!decision) {
+            co_return ApiResult::failure(decision.error().code, decision.error().message);
+        }
+        if (!decision->allowed) {
+            co_return ApiResult::failure("unauthorized",
+                                         "principal is not allowed to read the customer");
+        }
+    }
     if (!context.workspaces) {
         co_return ApiResult::failure("store_unavailable",
                                      "workspaces are not configured on this Lake");
@@ -512,6 +534,7 @@ void register_agent_stream_capabilities(Registry& registry) {
         .object = "customer",
         .action = "read",
         .resolve_object = customer_object,
+        .authorizes_candidates = true,
         .async_handler = list_agent_streams});
 }
 
