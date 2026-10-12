@@ -3210,7 +3210,7 @@ void app_traffic_adds_up_by_app_and_hour(lake::control::Store& store) {
 
 } // namespace
 
-// lake#661, migration 0079_app_transfer: each app's traffic through the ingress by hour.
+// lake#661, migration 0081_app_transfer: each app's traffic through the ingress by hour.
 TEST(PostgresBilling, AppTrafficAddsUpByAppAndHour) {
     {
         lake::control::InMemoryStore memory;
@@ -3232,7 +3232,7 @@ TEST(PostgresBilling, AppTrafficAddsUpByAppAndHour) {
                 << table;
         }
         EXPECT_FALSE(
-            tx.exec("SELECT 1 FROM schema_migrations WHERE version = '0079_app_transfer'").empty());
+            tx.exec("SELECT 1 FROM schema_migrations WHERE version = '0081_app_transfer'").empty());
     }
     app_traffic_adds_up_by_app_and_hour(*store);
 }

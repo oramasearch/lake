@@ -4073,7 +4073,7 @@ INSERT INTO schema_migrations (version) VALUES ('0078_methodology_runs')
     ON CONFLICT DO NOTHING;
 
 -- ---------------------------------------------------------------------------------------------
--- 0079_app_transfer (lake#661, docs/api/metering.md#app-traffic): the bytes each app receives and
+-- 0081_app_transfer (lake#661, docs/api/metering.md#app-traffic): the bytes each app receives and
 -- sends through the cluster's ingress controller, which lake never sees. Written only by the
 -- Orama operator: it reads the ingress controller's per-Ingress byte counters (ingress-nginx's
 -- `nginx_ingress_controller_request_size_sum` and `_response_size_sum`), and adds each poll's
@@ -4098,5 +4098,5 @@ CREATE INDEX IF NOT EXISTS app_transfer_hour_idx ON app_transfer (hour);
 CREATE TABLE IF NOT EXISTS app_transfer_guard (
     applied_at timestamptz NOT NULL DEFAULT now()
 );
-INSERT INTO schema_migrations (version) VALUES ('0079_app_transfer')
+INSERT INTO schema_migrations (version) VALUES ('0081_app_transfer')
     ON CONFLICT DO NOTHING;

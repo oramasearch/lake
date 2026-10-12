@@ -947,7 +947,7 @@ change is rolled.
 
 ## App transfer migration
 
-`0079_app_transfer` (lake#661) adds `app_transfer`, written only by the Orama operator: one row per
+`0081_app_transfer` (lake#661) adds `app_transfer`, written only by the Orama operator: one row per
 app and UTC hour (`app_id`, `workspace_id`, `hour`, which must start on the hour, `in_bytes`,
 `out_bytes`, `observed_at`), the bytes the app received and sent through the ingress controller in
 that hour. The operator reads the controller's per-Ingress byte counters and adds each poll's

@@ -385,7 +385,7 @@ struct WorkloadResources {
     std::uint64_t vram_bytes = 0;
     std::string observed_at;
 };
-// An app's traffic through the ingress in one UTC hour (migration 0079, lake#661,
+// An app's traffic through the ingress in one UTC hour (migration 0081, lake#661,
 // docs/api/metering.md#app-traffic), written only by the Orama operator from the ingress
 // controller's byte counters: `in_bytes` clients sent to the app, `out_bytes` it sent back. The
 // operator adds each poll's increase to its hour's row; lake charges a closed hour once.
@@ -1602,7 +1602,7 @@ public:
     // demos (it replaces the row of the kind and id).
     virtual Result<std::vector<WorkloadResources>> workload_resources() = 0;
     virtual Result<void> put_workload_resources(const WorkloadResources& row) = 0;
-    // Each app's traffic through the ingress by hour (migration 0079, lake#661), the rows of
+    // Each app's traffic through the ingress by hour (migration 0081, lake#661), the rows of
     // `since_hour` and later, oldest hour first. The Orama operator writes them;
     // add_app_transfer is the same write (it adds to the row of the app and hour), for tests and
     // local demos.

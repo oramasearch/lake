@@ -130,7 +130,7 @@ workspace, and `transfer_repository` is no longer part of `Store`.
 `if_absent` before its resources are added to the usage series, and (lake#661) the
 `lake_metering_app_transfer_records` that an app's closed hour of ingress traffic was charged.
 `store.hpp`'s `AppTransfer`, `app_transfer` and `add_app_transfer` read the operator's
-`app_transfer` rows (migration `0079_app_transfer`): numbers only. `store.hpp` has no other
+`app_transfer` rows (migration `0081_app_transfer`): numbers only. `store.hpp` has no other
 metering store methods: the retired tables and their legacy reads are gone (migration `0070`).
 `store.hpp`'s `UsageLimit`, `usage_limits` and `set_usage_limit` are an account's per-dimension
 usage limits (migration `0072_usage_limits`, lake#564): content-free configuration; the usage stays

@@ -174,7 +174,7 @@ filter `list_repositories` by an optional workspace; `transfer_repository` is go
 interface because the routing trigger keeps a repository's space fixed.
 Repository usage lives in workspace Zettas (lake#348, lake#349, `metering.cpp`), as does the
 ledger of charged app traffic hours (`record_metered_app_hour`, lake#661). Both stores read the
-operator's `app_transfer` rows (migration `0079`, numbers only; `add_app_transfer` is the operator's
+operator's `app_transfer` rows (migration `0081`, numbers only; `add_app_transfer` is the operator's
 write, for tests). Neither store writes or reads metering rows any more; `0070` drops the retired tables. Both stores keep an
 account's usage limits (`customer_usage_limits`, migration `0072`, lake#564); a limit of 0 deletes
 the row.

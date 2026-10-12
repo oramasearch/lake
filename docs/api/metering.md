@@ -268,13 +268,13 @@ class; `""` for a GPU of no known class).
 ### App traffic
 
 **Status: implemented (lake#661), not deployed; needs the Orama operator that vendors migration
-`0079_app_transfer` and reports app traffic, and ingress-nginx's metrics turned on.**
+`0081_app_transfer` and reports app traffic, and ingress-nginx's metrics turned on.**
 An app's requests and answers go from the cluster's ingress controller to its pods; Lake never sees
 them. The Orama operator reads the ingress controller's per-Ingress byte counters (ingress-nginx's
 `nginx_ingress_controller_request_size_sum` and `_response_size_sum`, on its metrics port, which
 `controller.metrics.enabled=true` turns on) on its 30-second poll, maps each app's Ingress to its
 app, and adds the increase since its previous read to `app_transfer` in lake's control PostgreSQL
-(migration `0079_app_transfer`,
+(migration `0081_app_transfer`,
 [schema](../control-plane/schema.md#app-transfer-migration)): one row per app and UTC hour,
 `in_bytes` (what clients sent: request line, headers and body) and `out_bytes` (what the app sent
 back), with the app's workspace. Numbers only: no host, path or content. Rows older than eight days

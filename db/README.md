@@ -362,7 +362,7 @@ artifact stay in the workspace Zetta. Nothing is dropped; idempotent. The guard 
 pods (orama-operator#291) before rollout. See
 [schema.md](../docs/control-plane/schema.md#methodology-runs-migration).
 
-Migration `0079_app_transfer` (lake#661) adds `app_transfer`, the bytes each app received and sent
+Migration `0081_app_transfer` (lake#661) adds `app_transfer`, the bytes each app received and sent
 through the ingress controller, one row per app and UTC hour, written only by the Orama operator
 from the controller's per-Ingress byte counters. Numbers only. Lake charges each closed hour once as
 `transfer` in the app's workspace Zetta. Nothing is dropped; idempotent. The latest guard is
