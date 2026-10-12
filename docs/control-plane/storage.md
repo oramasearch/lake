@@ -91,9 +91,22 @@ mount_path, read_only}]`, `used_bytes` (null: not measured) and `used_bytes_at`.
 and the app reads answer each workload's `stores: [{store_id, name, type, provider, mount_path,
 read_only}]`.
 
-**What the operator reads.** Its polls read the mounts with the workload, joined to the stores
-(slug, type, provider, name, desired); a copy of the statement is in
-`tests/test_operator_contract.cpp`.
+**What the operator reads and writes.** Its polls read the mounts joined to the stores, and it
+writes a volume's used bytes; both statements are copied in `tests/test_operator_contract.cpp`
+(`listStoreMountsSQL`, `updateStoreUsedBytesSQL`):
+
+```sql
+SELECT m.store_id::text, m.object_kind, m.object_id::text, m.mount_path, m.read_only,
+       s.slug, s.type, s.provider, s.name, s.desired
+  FROM store_mounts m
+  JOIN stores s ON s.id = m.store_id
+ ORDER BY m.object_kind, m.object_id, s.name;
+
+UPDATE store_status SET used_bytes = $2, used_bytes_at = now() WHERE store_id = $1::uuid;
+```
+
+The status upsert (`upsertStoreStatusSQL`) leaves `used_bytes` alone, so a phase change never
+erases a measurement.
 
 ## What the operator does
 
@@ -123,11 +136,13 @@ after the services:
 - **Capabilities** (REST, OpenAPI and MCP, authorized on the customer): `list_store_providers`,
   `list_stores`, `create_store` (`{customer_id, workspace_id, type, provider, name, size_gi?,
   region?}`; refused for a pair that is not available), `delete_store` (`{customer_id,
-  workspace_id, store_id, confirm}`, `confirm` must be the store's name) and `store_connection`.
+  workspace_id, store_id, confirm}`, `confirm` must be the store's name; a mounted store is a
+  `conflict` naming its services and apps) and `store_connection`. `list_stores` answers
+  `mounted_by`, `used_bytes` and `used_bytes_at` ([Mounts](#mounts)).
   Every capability but `list_store_providers` takes the workspace (from the `/w/<id>/` URL, the
   agent task, or the input) and sees only that workspace's stores; another workspace's store is
   `not_found`.
-- **Data → Drives → Storage** (lake#656; before, Train → Data → Storage): the stores with type, provider, status and endpoint; *New storage*
+- **Data → Drives → Storage** (lake#656; before, Train → Data → Storage): the stores with type, provider, size and used space, who mounts each, status and endpoint; *New storage*
   (type and provider as one choice of the available pairs, name, size); *Show connection*; delete
   with typed confirmation.
 

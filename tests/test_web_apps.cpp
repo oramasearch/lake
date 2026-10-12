@@ -586,3 +586,213 @@ TEST(WebApps, ServiceBindingsAcceptAUniqueServiceName) {
                   .error.code,
               "not_found");
 }
+
+namespace {
+
+// A store of the fixture's workspace, written as create_store writes it (the provider table is
+// create_store's to check; a bucket is not offered on this Lake yet, lake#664).
+std::string make_store(WebApps& apps,
+                       const std::string& type,
+                       const std::string& provider,
+                       const std::string& name,
+                       const std::string& workspace_id = {}) {
+    lake::control::NewManagedStore store{apps.customer_id, type, provider, name, "taap:x"};
+    store.workspace_id = workspace_id.empty() ? apps.workspace->id : workspace_id;
+    const auto created = apps.store->create_store(store);
+    EXPECT_TRUE(created) << created.error().message;
+    return created ? created->id : std::string();
+}
+
+const json* store_named(const json& listed, std::string_view name) {
+    for (const json& store : listed.at("stores")) {
+        if (store.at("name") == name) {
+            return &store;
+        }
+    }
+    return nullptr;
+}
+
+} // namespace
+
+// lake#666: a service and an app name the stores they mount; list_stores says who mounts each and
+// how much of it is used, and a mounted store is not deleted.
+TEST(WebApps, ServicesAndAppsMountStorageAndListStoresSaysWho) {
+    WebApps apps;
+    const std::string uploads = make_store(apps, "volume", "cluster", "uploads");
+    const std::string media = make_store(apps, "object", "s3", "media");
+    const std::string notes = make_store(apps, "object", "zetta", "notes");
+    const auto elsewhere_workspace =
+        apps.store->create_workspace({apps.customer_id, "other", "dev", ""});
+    ASSERT_TRUE(elsewhere_workspace) << elsewhere_workspace.error().message;
+    const std::string elsewhere =
+        make_store(apps, "volume", "cluster", "elsewhere", elsewhere_workspace->id);
+
+    // Only a kind whose pods the operator builds mounts storage.
+    const auto postgres =
+        apps.call("create_service",
+                  {{"kind", "postgres"},
+                   {"name", "orders"},
+                   {"stores", {{{"store_id", uploads}, {"mount_path", "/data"}}}}});
+    ASSERT_FALSE(postgres.ok);
+    EXPECT_EQ(postgres.error.code, "invalid_input");
+    EXPECT_EQ(postgres.error.path, "/stores");
+    EXPECT_NE(postgres.error.message.find("Postgres"), std::string::npos) << postgres.error.message;
+    const auto kinds = apps.call("list_service_kinds", json::object());
+    ASSERT_TRUE(kinds.ok) << kinds.error.message;
+    for (const json& kind : kinds.value.at("kinds")) {
+        EXPECT_EQ(kind.at("mounts_stores"),
+                  kind.at("kind") == "sqlite" || kind.at("kind") == "duckdb" ||
+                      kind.at("kind") == "polars")
+            << kind.dump();
+    }
+
+    // A volume needs an absolute path; a store of another workspace is not found.
+    const auto pathless =
+        apps.call("create_service",
+                  {{"kind", "sqlite"}, {"name", "db"}, {"stores", {{{"store_id", uploads}}}}});
+    ASSERT_FALSE(pathless.ok);
+    EXPECT_EQ(pathless.error.path, "/stores/0/mount_path");
+    EXPECT_EQ(apps.call("create_service",
+                        {{"kind", "sqlite"},
+                         {"name", "db"},
+                         {"stores", {{{"store_id", uploads}, {"mount_path", "data"}}}}})
+                  .error.path,
+              "/stores/0/mount_path");
+    EXPECT_EQ(apps.call("create_service",
+                        {{"kind", "sqlite"},
+                         {"name", "db"},
+                         {"stores", {{{"store_id", uploads}, {"mount_path", "/a/../etc"}}}}})
+                  .error.code,
+              "invalid_input");
+    const auto foreign =
+        apps.call("create_service",
+                  {{"kind", "sqlite"},
+                   {"name", "db"},
+                   {"stores", {{{"store_id", elsewhere}, {"mount_path", "/data"}}}}});
+    ASSERT_FALSE(foreign.ok);
+    EXPECT_EQ(foreign.error.code, "not_found");
+    EXPECT_EQ(foreign.error.path, "/stores/0/store_id");
+
+    const auto db = apps.call("create_service",
+                              {{"kind", "sqlite"},
+                               {"name", "db"},
+                               {"stores", {{{"store_id", uploads}, {"mount_path", "/data"}}}}});
+    ASSERT_TRUE(db.ok) << db.error.message;
+    ASSERT_EQ(db.value.at("stores").size(), 1U);
+    EXPECT_EQ(db.value["stores"][0]["name"], "uploads");
+    EXPECT_EQ(db.value["stores"][0]["mount_path"], "/data");
+    EXPECT_EQ(db.value["stores"][0]["read_only"], false);
+    const std::string db_id = db.value.at("id");
+
+    // A volume is mounted by one workload; the conflict names who mounts it.
+    const auto created = apps.create();
+    ASSERT_TRUE(created.ok) << created.error.message;
+    const std::string app_id = created.value.at("id");
+    EXPECT_EQ(created.value.at("stores"), json::array());
+    const auto taken = apps.call(
+        "set_app_stores",
+        {{"app_id", app_id}, {"stores", {{{"store_id", uploads}, {"mount_path", "/data"}}}}});
+    ASSERT_FALSE(taken.ok);
+    EXPECT_EQ(taken.error.code, "conflict");
+    EXPECT_NE(taken.error.message.find("service db"), std::string::npos) << taken.error.message;
+
+    // A bucket has no path; a store Lake runs is not mounted; a store is named once.
+    EXPECT_EQ(apps.call("set_app_stores",
+                        {{"app_id", app_id},
+                         {"stores", {{{"store_id", media}, {"mount_path", "/media"}}}}})
+                  .error.path,
+              "/stores/0/mount_path");
+    const auto lake_run =
+        apps.call("set_app_stores", {{"app_id", app_id}, {"stores", {{{"store_id", notes}}}}});
+    ASSERT_FALSE(lake_run.ok);
+    EXPECT_EQ(lake_run.error.code, "invalid_input");
+    EXPECT_EQ(
+        apps.call("set_app_stores",
+                  {{"app_id", app_id}, {"stores", {{{"store_id", media}}, {{"store_id", media}}}}})
+            .error.path,
+        "/stores/1/store_id");
+    const std::int64_t before = apps.store->get_web_app(app_id)->generation;
+    const auto mounted =
+        apps.call("set_app_stores",
+                  {{"app_id", app_id}, {"stores", {{{"store_id", media}, {"read_only", true}}}}});
+    ASSERT_TRUE(mounted.ok) << mounted.error.message;
+    EXPECT_EQ(apps.store->get_web_app(app_id)->generation, before + 1)
+        << "the operator rolls the app's pods";
+    ASSERT_EQ(mounted.value.at("stores").size(), 1U);
+    EXPECT_EQ(mounted.value["stores"][0]["name"], "media");
+    EXPECT_EQ(mounted.value["stores"][0]["read_only"], true);
+    const auto read = apps.call("get_app", {{"app_id", app_id}});
+    ASSERT_TRUE(read.ok) << read.error.message;
+    EXPECT_EQ(read.value.at("stores"), mounted.value.at("stores"));
+    const auto listed_apps = apps.call("list_apps", json::object());
+    ASSERT_TRUE(listed_apps.ok) << listed_apps.error.message;
+    EXPECT_EQ(listed_apps.value["apps"][0]["stores"][0]["store_id"], media);
+
+    // list_stores answers who mounts each, and the used space once the operator measured it.
+    ASSERT_TRUE(apps.store->set_store_used_bytes(uploads, 5 * 1024 * 1024));
+    const auto listed = apps.call("list_stores", json::object());
+    ASSERT_TRUE(listed.ok) << listed.error.message;
+    const json* volume = store_named(listed.value, "uploads");
+    ASSERT_NE(volume, nullptr);
+    EXPECT_EQ(volume->at("mounted_by"),
+              json::array({{{"kind", "service"},
+                            {"id", db_id},
+                            {"name", "db"},
+                            {"mount_path", "/data"},
+                            {"read_only", false}}}));
+    EXPECT_EQ(volume->at("used_bytes"), 5 * 1024 * 1024);
+    EXPECT_TRUE(volume->at("used_bytes_at").is_string());
+    const json* bucket = store_named(listed.value, "media");
+    ASSERT_NE(bucket, nullptr);
+    EXPECT_EQ(bucket->at("mounted_by")[0]["kind"], "app");
+    EXPECT_EQ(bucket->at("mounted_by")[0]["name"], "reports");
+    EXPECT_TRUE(bucket->at("used_bytes").is_null()) << "not measured";
+    EXPECT_TRUE(bucket->at("used_bytes_at").is_null());
+    const auto services = apps.call("list_services", json::object());
+    ASSERT_TRUE(services.ok) << services.error.message;
+    for (const json& service : services.value.at("services")) {
+        EXPECT_EQ(service.at("stores").size(), service.at("id") == db_id ? 1U : 0U);
+    }
+
+    // A mounted store is not deleted: the conflict names the workloads.
+    const auto refused = apps.call("delete_store", {{"store_id", uploads}, {"confirm", "uploads"}});
+    ASSERT_FALSE(refused.ok);
+    EXPECT_EQ(refused.error.code, "conflict");
+    EXPECT_NE(refused.error.message.find("service db"), std::string::npos) << refused.error.message;
+    EXPECT_EQ(apps.store->get_store(uploads)->desired, "present");
+
+    // set_service_stores replaces what a service mounts and rolls it; [] mounts nothing.
+    const std::int64_t service_generation = apps.store->get_service(db_id)->generation;
+    const auto cleared =
+        apps.call("set_service_stores", {{"service_id", db_id}, {"stores", json::array()}});
+    ASSERT_TRUE(cleared.ok) << cleared.error.message;
+    EXPECT_EQ(cleared.value.at("stores"), json::array());
+    EXPECT_EQ(apps.store->get_service(db_id)->generation, service_generation + 1);
+    ASSERT_TRUE(apps.call("set_service_stores",
+                          {{"service_id", db_id},
+                           {"stores", {{{"store_id", uploads}, {"mount_path", "/var/db"}}}}})
+                    .ok);
+    const auto other = apps.call("create_service", {{"kind", "postgres"}, {"name", "pg"}});
+    ASSERT_TRUE(other.ok) << other.error.message;
+    EXPECT_EQ(apps.call("set_service_stores",
+                        {{"service_id", other.value.at("id")}, {"stores", {{{"store_id", media}}}}})
+                  .error.code,
+              "invalid_input");
+
+    // Deleting the service and the app removes their mounts; the stores can then go.
+    ASSERT_TRUE(apps.call("delete_service", {{"service_id", db_id}, {"confirm", "db"}}).ok);
+    ASSERT_TRUE(apps.call("delete_app", {{"app_id", app_id}, {"confirm", "reports"}}).ok);
+    const auto after = apps.call("list_stores", json::object());
+    ASSERT_TRUE(after.ok) << after.error.message;
+    EXPECT_EQ(store_named(after.value, "uploads")->at("mounted_by"), json::array());
+    EXPECT_EQ(store_named(after.value, "media")->at("mounted_by"), json::array());
+    EXPECT_TRUE(apps.call("delete_store", {{"store_id", uploads}, {"confirm", "uploads"}}).ok);
+    // A store being deleted is not mounted.
+    const auto gone = apps.create("second");
+    ASSERT_TRUE(gone.ok) << gone.error.message;
+    EXPECT_EQ(apps.call("set_app_stores",
+                        {{"app_id", gone.value.at("id")},
+                         {"stores", {{{"store_id", uploads}, {"mount_path", "/data"}}}}})
+                  .error.code,
+              "invalid_input");
+}

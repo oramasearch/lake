@@ -555,6 +555,18 @@ public:
     control::Result<control::ManagedService> withdraw_service(const std::string& id) override {
         return call("withdraw_service", [&] { return store_->withdraw_service(id); });
     }
+    control::Result<control::ManagedService>
+    set_service_stores(const std::string& service_id,
+                       const std::vector<control::StoreMountRequest>& mounts) override {
+        return call("set_service_stores",
+                    [&] { return store_->set_service_stores(service_id, mounts); });
+    }
+    control::Result<std::vector<control::StoreMount>>
+    list_store_mounts(const std::string& customer_id,
+                      const std::string& workspace_id = {}) override {
+        return call("list_store_mounts",
+                    [&] { return store_->list_store_mounts(customer_id, workspace_id); });
+    }
     control::Result<std::vector<control::WebApp>>
     list_web_apps(const std::string& customer_id) override {
         return call("list_web_apps", [&] { return store_->list_web_apps(customer_id); });

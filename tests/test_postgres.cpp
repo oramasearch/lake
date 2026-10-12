@@ -1707,6 +1707,161 @@ TEST(PostgresBuilds, DesiredRowStatusTokensAndCancellationFollowTheContract) {
     EXPECT_EQ(notified.back(), created->id);
 }
 
+// lake#666: store_mounts, written with the workload in one transaction, checked under the store's
+// lock, read back with the names, refused for a second workload on a volume and for a deleted
+// store, and removed with the workload.
+TEST(PostgresStores, MountsFollowTheirWorkloadAndKeepAVolumeToOne) {
+    const char* uri = lake::test::postgres_uri();
+    if (uri == nullptr || std::string(uri).empty()) {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not set";
+    }
+    auto store = lake::control::make_postgres_store(
+        uri, "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff");
+    const std::string suffix = lake::control::new_uuid_v4().substr(0, 8);
+    const auto user = store->create_user(
+        {"taap:1:ed25519:mt-" + suffix, "mt-" + suffix + "@example.com", "Mounts"});
+    ASSERT_TRUE(user) << user.error().message;
+    const auto customer = store->create_customer({"individual", user->id, "", "mt-" + suffix});
+    ASSERT_TRUE(customer) << customer.error().message;
+    const auto workspace = store->create_workspace({customer->id, "mounts", "dev", ""});
+    ASSERT_TRUE(workspace) << workspace.error().message;
+    const auto other_workspace = store->create_workspace({customer->id, "other", "dev", ""});
+    ASSERT_TRUE(other_workspace) << other_workspace.error().message;
+
+    pqxx::connection listener(uri);
+    std::vector<std::string> notified;
+    listener.listen("lake_services",
+                    [&](pqxx::notification note) { notified.emplace_back(note.payload); });
+
+    const auto make =
+        [&](std::string type, std::string provider, std::string name, std::string workspace_id) {
+            lake::control::NewManagedStore value{customer->id, type, provider, name, "taap:x"};
+            value.workspace_id = workspace_id;
+            return store->create_store(value);
+        };
+    const auto volume = make("volume", "cluster", "uploads", workspace->id);
+    ASSERT_TRUE(volume) << volume.error().message;
+    const auto bucket = make("object", "s3", "media", workspace->id);
+    ASSERT_TRUE(bucket) << bucket.error().message;
+    const auto foreign = make("volume", "cluster", "foreign", other_workspace->id);
+    ASSERT_TRUE(foreign) << foreign.error().message;
+
+    lake::control::NewManagedService sqlite;
+    sqlite.customer_id = customer->id;
+    sqlite.workspace_id = workspace->id;
+    sqlite.kind = "sqlite";
+    sqlite.name = "db";
+    sqlite.created_by_taap_id = "taap:x";
+    sqlite.stores = {{foreign->id, "/data", false}};
+    EXPECT_EQ(store->create_service(sqlite).error().code, "invalid_input")
+        << "a store of another workspace";
+    EXPECT_TRUE(store->list_services(customer->id)->size() == 2U)
+        << "nothing written: the two workspace Zettas only";
+    sqlite.stores = {{volume->id, "/data", false}, {bucket->id, "", true}};
+    const auto db = store->create_service(sqlite);
+    ASSERT_TRUE(db) << db.error().message;
+
+    auto mounts = store->list_store_mounts(customer->id, workspace->id);
+    ASSERT_TRUE(mounts) << mounts.error().message;
+    ASSERT_EQ(mounts->size(), 2U);
+    EXPECT_EQ(mounts->at(0).store_name, "media") << "by store name";
+    EXPECT_EQ(mounts->at(0).mount_path, "");
+    EXPECT_TRUE(mounts->at(0).read_only);
+    EXPECT_EQ(mounts->at(1).store_name, "uploads");
+    EXPECT_EQ(mounts->at(1).object_kind, "service");
+    EXPECT_EQ(mounts->at(1).object_id, db->id);
+    EXPECT_EQ(mounts->at(1).workload_name, "db");
+    EXPECT_EQ(mounts->at(1).store_type, "volume");
+    EXPECT_TRUE(store->list_store_mounts(customer->id, other_workspace->id)->empty());
+
+    // A second workload on the volume is refused, naming the first; a bucket takes any number.
+    const auto app = store->create_web_app({.customer_id = customer->id,
+                                            .workspace_id = workspace->id,
+                                            .name = "site",
+                                            .mode = "image",
+                                            .image = "site:v1",
+                                            .port = 3000,
+                                            .host = "site-" + suffix + ".test",
+                                            .stores = {{volume->id, "/data", false}}});
+    ASSERT_FALSE(app);
+    EXPECT_EQ(app.error().code, "conflict");
+    EXPECT_NE(app.error().message.find("service db"), std::string::npos) << app.error().message;
+    const auto site = store->create_web_app({.customer_id = customer->id,
+                                             .workspace_id = workspace->id,
+                                             .name = "site",
+                                             .mode = "image",
+                                             .image = "site:v1",
+                                             .port = 3000,
+                                             .host = "site-" + suffix + ".test",
+                                             .stores = {{bucket->id, "", false}}});
+    ASSERT_TRUE(site) << site.error().message;
+    lake::control::WebAppPatch steal;
+    steal.stores = std::vector<lake::control::StoreMountRequest>{{volume->id, "/v", false}};
+    EXPECT_EQ(store->update_web_app(site->id, steal).error().code, "conflict");
+    EXPECT_EQ(store->get_web_app(site->id)->generation, site->generation) << "nothing changed";
+
+    // list_stores and get_store read who mounts each; the operator's used bytes come back.
+    auto listed = store->list_stores(customer->id, workspace->id);
+    ASSERT_TRUE(listed) << listed.error().message;
+    const auto media = std::ranges::find(*listed, bucket->id, &lake::control::ManagedStore::id);
+    ASSERT_NE(media, listed->end());
+    ASSERT_EQ(media->mounted_by.size(), 2U);
+    EXPECT_EQ(media->mounted_by[0].object_kind, "app");
+    EXPECT_EQ(media->mounted_by[1].object_kind, "service");
+    EXPECT_FALSE(media->used_bytes.has_value());
+    {
+        pqxx::connection connection(uri);
+        pqxx::work tx(connection);
+        tx.exec_params("INSERT INTO store_status (store_id, phase, used_bytes, used_bytes_at) "
+                       "VALUES ($1::uuid, 'Ready', 4096, now())",
+                       volume->id);
+        tx.commit();
+    }
+    const auto read = store->get_store(volume->id);
+    ASSERT_TRUE(read) << read.error().message;
+    EXPECT_EQ(read->used_bytes, 4096);
+    EXPECT_FALSE(read->used_bytes_at.empty());
+    ASSERT_EQ(read->mounted_by.size(), 1U);
+    EXPECT_EQ(read->mounted_by[0].workload_name, "db");
+
+    // A mounted store is not withdrawn.
+    const auto refused = store->withdraw_store(volume->id);
+    ASSERT_FALSE(refused);
+    EXPECT_EQ(refused.error().code, "conflict");
+    EXPECT_NE(refused.error().message.find("service db"), std::string::npos)
+        << refused.error().message;
+
+    // set_service_stores replaces, bumps the generation and notifies.
+    // What earlier writes notified is delivered first; then the service's own notification.
+    while (listener.await_notification(0, 200000) != 0) {
+    }
+    notified.clear();
+    const auto replaced = store->set_service_stores(db->id, {{bucket->id, "", false}});
+    ASSERT_TRUE(replaced) << replaced.error().message;
+    EXPECT_EQ(replaced->generation, db->generation + 1);
+    for (int waited = 0; notified.empty() && waited < 50; ++waited) {
+        listener.await_notification(0, 100000);
+    }
+    EXPECT_EQ(notified, (std::vector<std::string>{db->id}));
+    EXPECT_TRUE(store->get_store(volume->id)->mounted_by.empty());
+    const auto moved = store->update_web_app(site->id, steal);
+    ASSERT_TRUE(moved) << "the volume is free: " << moved.error().message;
+    EXPECT_EQ(store->get_store(volume->id)->mounted_by.at(0).workload_name, "site");
+
+    // Deleting the workload removes its mounts.
+    ASSERT_TRUE(store->withdraw_service(db->id));
+    lake::control::WebAppPatch remove;
+    remove.desired = "deleted";
+    ASSERT_TRUE(store->update_web_app(site->id, remove));
+    EXPECT_TRUE(store->list_store_mounts(customer->id)->empty());
+    const auto withdrawn = store->withdraw_store(volume->id);
+    ASSERT_TRUE(withdrawn) << withdrawn.error().message;
+    sqlite.name = "late";
+    sqlite.stores = {{volume->id, "/data", false}};
+    EXPECT_EQ(store->create_service(sqlite).error().code, "invalid_input")
+        << "a store being deleted is not mounted";
+}
+
 TEST(PostgresStores, CreateListWithdrawAndNotifyFollowTheContract) {
     const char* uri = lake::test::postgres_uri();
     if (uri == nullptr || std::string(uri).empty()) {

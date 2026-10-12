@@ -226,6 +226,8 @@ const std::vector<std::pair<std::string_view, std::string_view>>& calls_only_cap
         {"resolve_model", "a model's metadata"},
         {"set_app_auth", "app configuration"},
         {"set_app_env", "app configuration"},
+        {"set_app_stores", "app configuration; the storage is billed as the store's"},
+        {"set_service_stores", "service configuration; the storage is billed as the store's"},
         {"set_app_zetta_binding", "app configuration"},
         // Search runs in lake's own process over indexes lake keeps: a call.
         {"search", "lake's repository search; the index is in the repositories' storage"},

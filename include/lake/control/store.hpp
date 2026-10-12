@@ -19,6 +19,7 @@
 #include "lake/control/builds.hpp"
 #include "lake/control/offline_recovery.hpp"
 #include "lake/control/secrets.hpp"
+#include "lake/control/store_mounts.hpp"
 #include "lake/control/web_apps.hpp"
 
 // The control-plane store: users and organizations (identity), customers (the
@@ -660,6 +661,10 @@ struct NewManagedService {
     int instances = 1, storage_gi = 10;
     std::size_t max_per_customer = 0; // live services per customer; 0 (the default) means no limit
     std::string workspace_id;
+    // The stores the service mounts (migration 0079, lake#666), written in the transaction that
+    // creates it. The caller has checked them (api/store_mounts.hpp); the store refuses a volume
+    // another workload mounts.
+    std::vector<StoreMountRequest> stores;
 };
 // A customer's store (docs/control-plane/storage.md, lake#196): a bucket, filesystem, network
 // filesystem or volume. Two axes: the type (what a client gets) and the provider (what runs it).
@@ -677,6 +682,12 @@ struct ManagedStore {
     // The workspace the store belongs to (migration 0044, lake#465); the operator places it in
     // that workspace's namespace, and lake lists a workspace's own stores only.
     std::string workspace_id;
+    // The bytes in use and when the operator measured them (migration 0079, lake#666): empty until
+    // it has mounted and measured the store.
+    std::optional<std::int64_t> used_bytes;
+    std::string used_bytes_at;
+    // The services and apps that mount it (store_mounts), filled by list_stores and get_store.
+    std::vector<StoreMount> mounted_by;
 };
 // A launch credential is `lal.<launch id>.<secret>`, a schedule's `las.<schedule id>.<secret>`:
 // the Orama operator generates it for the pod and writes its SHA-256 into the status row it owns
@@ -1441,8 +1452,18 @@ public:
     // Creates a service. A default one that already exists is returned unchanged; a live name is a
     // conflict; a customer at max_per_customer live services is refused with quota_exceeded.
     virtual Result<ManagedService> create_service(const NewManagedService&) = 0;
-    // Marks a service absent so the operator deletes it. Refuses one already absent.
+    // Marks a service absent so the operator deletes it, and removes its store mounts. Refuses one
+    // already absent.
     virtual Result<ManagedService> withdraw_service(const std::string& id) = 0;
+    // Replaces the stores a live service mounts (lake#666): bumps its generation and NOTIFYs
+    // lake_services in the same transaction. A store must be a present store of the service's
+    // workspace; a volume another workload mounts is a conflict naming it.
+    virtual Result<ManagedService> set_service_stores(const std::string& service_id,
+                                                      const std::vector<StoreMountRequest>&) = 0;
+    // Every store mount of the customer's stores, with the store's and the workload's names
+    // (lake#666); an empty workspace_id lists every workspace's.
+    virtual Result<std::vector<StoreMount>>
+    list_store_mounts(const std::string& customer_id, const std::string& workspace_id = {}) = 0;
     // Ship apps (docs/control-plane/web-apps.md). The apps row carries desired state from lake and
     // status written by the operator. Acknowledged deletions are removed by the owner loop.
     virtual Result<std::vector<WebApp>> list_web_apps(const std::string& customer_id) = 0;
@@ -1479,7 +1500,8 @@ public:
     virtual Result<ManagedStore> get_store(const std::string& id) = 0;
     // Creates a store; a live name is a conflict. The provider table is the caller's to check.
     virtual Result<ManagedStore> create_store(const NewManagedStore&) = 0;
-    // Marks a store absent so the operator deletes it and its data. Refuses one already absent.
+    // Marks a store absent so the operator deletes it and its data. Refuses one already absent,
+    // and one a service or an app mounts (conflict, naming them: lake#666).
     virtual Result<ManagedStore> withdraw_store(const std::string& id) = 0;
     // Agent launches (lake#231). Writing one NOTIFYs lake_services, as services and stores do.
     virtual Result<AgentLaunch> create_agent_launch(const NewAgentLaunch&) = 0;

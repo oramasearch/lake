@@ -34,6 +34,7 @@
 #include "lake/control/project_decisions.hpp"
 #include "lake/control/store.hpp"
 #include "lake/control/zetta_workspace.hpp"
+#include "store_mounts.hpp"
 #include "workspace_bus.hpp"
 #include "workspace_records_api.hpp"
 
@@ -1047,6 +1048,14 @@ ApiResult store_failure(const control::StoreError& error) {
     return ApiResult::failure(error.code, error.message);
 }
 
+// A service as the capabilities answer it, with the storage it mounts (lake#666).
+json service_with_stores(ApiContext& context, const control::ManagedService& service) {
+    json value = control::service_json(service);
+    const auto mounts = context.store->list_store_mounts(service.customer_id, service.workspace_id);
+    value["stores"] = mounts ? workload_stores_json(*mounts, "service", service.id) : json::array();
+    return value;
+}
+
 void service_audit(ApiContext& context, std::string kind, const control::ManagedService& service) {
     context.audit_kind = std::move(kind);
     context.audit_details = {{"customer_id", service.customer_id},
@@ -1133,9 +1142,15 @@ void register_service_capabilities(Registry& registry) {
             if (!listed) {
                 co_return store_failure(listed.error());
             }
+            // The storage each service mounts (lake#666).
+            const auto mounts = context.store->list_store_mounts(input.at("customer_id"));
+            if (!mounts) {
+                co_return store_failure(mounts.error());
+            }
             json services = json::array();
             for (const control::ManagedService& service : *listed) {
                 json value = control::service_json(service);
+                value["stores"] = workload_stores_json(*mounts, "service", service.id);
                 // The operator reports Ready once it has written the Secret; the kubelet copies
                 // it into lake's mount up to a minute later. Until then lake cannot connect.
                 const bool connected = context.workspaces->connection(service).has_value();
@@ -1158,7 +1173,9 @@ void register_service_capabilities(Registry& registry) {
         .title = "Create a service",
         .description = "Ask the operator for a new service from the catalog (Postgres, Zetta, "
                        "Kafka, ClickHouse, TiDB, Cassandra, Valkey as a preview). "
-                       "`instances` is 1-3 (default 1), `storage_gi` 1-100 (default 10).",
+                       "`instances` is 1-3 (default 1), `storage_gi` 1-100 (default 10). "
+                       "`stores` mounts the workspace's storage into a SQLite, DuckDB or Polars "
+                       "service: a volume at `mount_path`, a bucket as environment variables.",
         .input_schema = customer_input_schema(
             {{"kind",
               {{"type", "string"},
@@ -1172,7 +1189,8 @@ void register_service_capabilities(Registry& registry) {
                 }()}}},
              {"name", {{"type", "string"}}},
              {"instances", {{"type", "integer"}, {"minimum", 1}, {"maximum", 3}}},
-             {"storage_gi", {{"type", "integer"}, {"minimum", 1}, {"maximum", 100}}}},
+             {"storage_gi", {{"type", "integer"}, {"minimum", 1}, {"maximum", 100}}},
+             {"stores", store_mounts_schema()}},
             json::array({"kind", "name"})),
         .output_schema = {{"type", "object"}},
         .kind = CapabilityKind::Action,
@@ -1216,12 +1234,24 @@ void register_service_capabilities(Registry& registry) {
                 co_return ApiResult::failure("invalid_input",
                                              "instances must be 1-3 and storage_gi 1-100");
             }
+            if (input.contains("stores")) {
+                auto mounts = checked_store_mounts(input.at("stores"),
+                                                   service.customer_id,
+                                                   service.workspace_id,
+                                                   service.kind,
+                                                   false,
+                                                   *context.store);
+                if (!mounts) {
+                    co_return mounts.error();
+                }
+                service.stores = std::move(*mounts);
+            }
             const auto created = context.workspaces->create_service(std::move(service));
             if (!created) {
                 co_return store_failure(created.error());
             }
             service_audit(context, "service.create", *created);
-            co_return ApiResult::success(control::service_json(*created));
+            co_return ApiResult::success(service_with_stores(context, *created));
         }});
     registry.add(Capability{
         .name = "delete_service",
@@ -1258,6 +1288,59 @@ void register_service_capabilities(Registry& registry) {
                 co_return store_failure(deleted.error());
             }
             co_return ApiResult::success(control::service_json(*deleted));
+        }});
+    registry.add(Capability{
+        .name = "set_service_stores",
+        .title = "Set a service's storage",
+        .description = "Choose the workspace storage a SQLite, DuckDB or Polars service mounts, "
+                       "replacing what it mounted: a volume at an absolute `mount_path` (a volume "
+                       "is mounted by one service or app), a bucket in your own account as "
+                       "environment variables. The operator rolls the service's pods. [] mounts "
+                       "nothing.",
+        .input_schema = control_input_schema(
+            {{"service_id", {{"type", "string"}}}, {"stores", store_mounts_schema()}},
+            json::array({"service_id", "stores"})),
+        .output_schema = {{"type", "object"}},
+        .kind = CapabilityKind::Action,
+        .object = "customer",
+        .action = "write",
+        .resolve_object = customer_object,
+        .async_handler = [](const json& input,
+                            ApiContext& context) -> liquid::runtime::task<ApiResult> {
+            if (!context.workspaces) {
+                co_return unavailable();
+            }
+            const auto found =
+                context.workspaces->service(input.at("customer_id"), input.at("service_id"));
+            if (!found) {
+                co_return store_failure(found.error());
+            }
+            if (found->desired != "present") {
+                co_return ApiResult::failure(
+                    "conflict", "the service " + found->name + " is being deleted", "/service_id");
+            }
+            auto mounts = checked_store_mounts(input.at("stores"),
+                                               found->customer_id,
+                                               found->workspace_id,
+                                               found->kind,
+                                               false,
+                                               *context.store);
+            if (!mounts) {
+                co_return mounts.error();
+            }
+            const auto updated = context.store->set_service_stores(found->id, *mounts);
+            if (!updated) {
+                co_return store_failure(updated.error());
+            }
+            service_audit(context, "service.stores", *updated);
+            context.audit_details["stores"] = [&] {
+                json ids = json::array();
+                for (const control::StoreMountRequest& mount : *mounts) {
+                    ids.push_back(mount.store_id);
+                }
+                return ids;
+            }();
+            co_return ApiResult::success(service_with_stores(context, *updated));
         }});
     registry.add(Capability{
         .name = "service_connection",
@@ -1398,8 +1481,9 @@ void register_store_capabilities(Registry& registry) {
         .name = "list_stores",
         .title = "List stores",
         .description = "The workspace's stores (buckets, filesystems, network filesystems and "
-                       "volumes) with the operator's phase, message and endpoint. Never includes "
-                       "credentials.",
+                       "volumes) with the operator's phase, message and endpoint, the services "
+                       "and apps that mount each (`mounted_by`), and its `used_bytes` (null until "
+                       "the operator has measured it). Never includes credentials.",
         .input_schema = customer_input_schema(json::object(), json::array()),
         .output_schema = {{"type", "object"}},
         .kind = CapabilityKind::Read,
@@ -1485,7 +1569,9 @@ void register_store_capabilities(Registry& registry) {
         .name = "delete_store",
         .title = "Delete a store",
         .description = "Delete one of this workspace's stores. The operator removes it and its "
-                       "data, which cannot be recovered. `confirm` must be the store's name.",
+                       "data, which cannot be recovered. `confirm` must be the store's name. A "
+                       "store a service or an app mounts is refused (conflict, naming them): "
+                       "remove it from them first.",
         .input_schema = customer_input_schema(
             {{"store_id", {{"type", "string"}}}, {"confirm", {{"type", "string"}}}},
             json::array({"store_id", "confirm"})),
@@ -2580,8 +2666,9 @@ void register_parity_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "list_service_kinds",
         .title = "List service kinds",
-        .description = "Every kind of service a customer can create: key, label and how long a new "
-                       "one usually takes to become ready.",
+        .description = "Every kind of service a customer can create: key, label, how long a new "
+                       "one usually takes to become ready, and whether it can mount the "
+                       "workspace's storage (`mounts_stores`).",
         .input_schema = {{"type", "object"},
                          {"properties", json::object()},
                          {"additionalProperties", false}},
@@ -2599,9 +2686,11 @@ void register_parity_capabilities(Registry& registry) {
             [](const json&, ApiContext&) {
                 json kinds = json::array();
                 for (const control::ServiceKind& kind : control::service_kinds) {
-                    kinds.push_back({{"kind", std::string(kind.key)},
-                                     {"label", std::string(kind.label)},
-                                     {"ready_seconds", kind.ready_seconds}});
+                    kinds.push_back(
+                        {{"kind", std::string(kind.key)},
+                         {"label", std::string(kind.label)},
+                         {"ready_seconds", kind.ready_seconds},
+                         {"mounts_stores", control::service_kind_mounts_stores(kind.key)}});
                 }
                 return ApiResult::success({{"kinds", std::move(kinds)}});
             }});

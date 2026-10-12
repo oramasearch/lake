@@ -137,7 +137,24 @@ nlohmann::json store_json(const ManagedStore& store) {
             {"message", store.message},
             {"endpoint", store.endpoint},
             {"observed_generation", store.observed_generation},
-            {"created_at", store.created_at}};
+            {"created_at", store.created_at},
+            // lake#666: which services and apps mount it, and the bytes in use (null until the
+            // operator has measured them).
+            {"mounted_by",
+             [&] {
+                 nlohmann::json mounted = nlohmann::json::array();
+                 for (const StoreMount& mount : store.mounted_by) {
+                     mounted.push_back({{"kind", mount.object_kind},
+                                        {"id", mount.object_id},
+                                        {"name", mount.workload_name},
+                                        {"mount_path", mount.mount_path},
+                                        {"read_only", mount.read_only}});
+                 }
+                 return mounted;
+             }()},
+            {"used_bytes", store.used_bytes ? nlohmann::json(*store.used_bytes) : nlohmann::json()},
+            {"used_bytes_at",
+             store.used_bytes_at.empty() ? nlohmann::json() : nlohmann::json(store.used_bytes_at)}};
 }
 
 nlohmann::json WorkspaceState::to_json() const {

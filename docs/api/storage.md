@@ -30,14 +30,20 @@ The page is described in [../ui/drives.md](../ui/drives.md#storage).
 - **Open as a drive** (a Ready bucket or filesystem): a drive with `storage: store` over it
   ([drives.md](drives.md#store-drives)), browsed in place. A volume reads *Shown, not browsed*:
   its contents belong to the service that mounts it. No bucket or filesystem provider is offered
-  or browsable yet ([lake#664](https://github.com/oramasearch/lake/issues/664)). Which services and
-  apps mount a store, and how much of it is used, are not recorded yet
-  ([lake#666](https://github.com/oramasearch/lake/issues/666)).
+  or browsable yet ([lake#664](https://github.com/oramasearch/lake/issues/664)).
+- **Mounted By** (lake#666): the services and apps that mount the store, each a link (an app to
+  its page, a service to Ship → Services searched for its name) with the path a volume is mounted
+  at and *read-only* when it is; *Not mounted* otherwise. A volume belongs to the one service or
+  app that mounts it.
+- **Size** shows the GiB asked for and, under it, the **used space** the operator measured (*3.0
+  MiB used (0%)* for a volume), *measured once mounted* for a volume no pod mounts yet, or *not
+  measured yet*.
 - **Show connection** (once Ready): answers with the Data page itself, showing every field the
   operator delivered (for a volume: `claim`, `namespace`, `size_gi`, `storage_class`) once. It is
   never put in a URL, a redirect or the list, and lake keeps no copy.
 - **Delete:** a dialog with a warning that deleting a store deletes the data in it,
-  and a field where the person types the store's name. The operator deletes the resource (for a
+  and a field where the person types the store's name. A mounted store is not deleted: the dialog
+  names the services and apps that mount it, and lake answers `conflict` naming them. The operator deletes the resource (for a
   volume, the claim and its data), which cannot be recovered.
 - **New Storage:** one *Type and provider* select holding every pair (`value="volume:cluster"`);
   unavailable pairs are `disabled` and their label says why (*Bucket — Cloudflare R2 — not yet:
@@ -64,9 +70,9 @@ of another workspace is `not_found`.
 | Capability | Kind | Action on the customer | What it does |
 |---|---|---|---|
 | `list_store_providers` | read | `read` (checked by the handler, as every `list_` capability) | `{providers: [{type, provider, label, available, unavailable_reason?}]}`, the provider table `control::store_providers` in order: the available pair first |
-| `list_stores` | read | `read` (checked by the handler) | `{stores: [...]}`, oldest first; each store carries `id, customer_id, workspace_id, type, provider, name, slug, size_gi, region, public, desired, generation, phase, message, endpoint, observed_generation, created_at, connected` and never a credential. A withdrawn store the operator has marked `Deleted` is history and is left out |
+| `list_stores` | read | `read` (checked by the handler) | `{stores: [...]}`, oldest first; each store carries `id, customer_id, workspace_id, type, provider, name, slug, size_gi, region, public, desired, generation, phase, message, endpoint, observed_generation, created_at, connected`, `mounted_by: [{kind: service\|app, id, name, mount_path, read_only}]` and `used_bytes` (null until the operator has measured it) with `used_bytes_at` (lake#666), and never a credential. A withdrawn store the operator has marked `Deleted` is history and is left out |
 | `create_store` | action | `write` | `{type, provider, name, size_gi?, region?}`, recorded in the workspace; `size_gi` 1–100 (default 10). A pair that is not in the table, or not available, is `invalid_input` naming the reason; a live name is `conflict`. The slug is `st-` and the first 12 hex digits of the id, never reused |
-| `delete_store` | action | `admin` | `{store_id, confirm}`, `confirm` equal to the store's name; marks it absent and bumps its generation |
+| `delete_store` | action | `admin` | `{store_id, confirm}`, `confirm` equal to the store's name; marks it absent and bumps its generation. A store a service or an app mounts is `conflict`, naming them: remove it from them first (`set_service_stores`, `set_app_stores`) |
 | `store_connection` | action | `admin` | A Ready store's connection: what the operator wrote to `<slug>.json` beside the services' connections. Refused (`workspace_not_ready`) before Ready, while the connection is still reaching lake, and for a withdrawn store |
 
 Audit kinds: `store.create`, `store.delete`, `store.connection`, each with the customer, workspace,
@@ -75,7 +81,41 @@ transaction of every create and withdrawal, so the operator reconciles at once.
 
 The worked flow *Create a volume* in `llms.txt` and the skill: `list_store_providers` →
 `create_store` (`type: "volume"`, `provider: "cluster"`) → `list_stores` until `Ready` →
-`store_connection`.
+`store_connection` → `create_service` with `stores` → `list_stores` (`mounted_by`, `used_bytes`).
+
+## Mounting a store
+
+A service or an app names the stores it mounts (lake#666, migration `0079_store_mounts`; the
+contract with the operator is [`../control-plane/storage.md#mounts`](../control-plane/storage.md#mounts)).
+`create_service`, `set_service_stores` ([services.md](services.md)), `create_app` and
+`set_app_stores` ([web-apps.md](web-apps.md)) take `stores: [{store_id, mount_path?, read_only?}]`,
+which replaces what the workload mounted (`[]` mounts nothing). Writing it bumps the workload's
+generation and notifies the operator in the same transaction, so its pods roll with the storage.
+
+| Store | `mount_path` | In the workload's containers |
+|---|---|---|
+| volume | required: absolute, letters, digits, `.`, `_`, `-` and `/`, at most 256 characters, no `..` or `//` | mounted at the path; read-only when `read_only` |
+| bucket in your own account (`r2`, `s3`, `b2`, `gcs`, `azure`) | none | its connection as environment variables `STORE_<NAME>_BUCKET`, `_ENDPOINT`, `_REGION`, `_PREFIX` and the credential fields |
+
+Refused, each `invalid_input` at the entry's path (`/stores/<i>/…`) unless said otherwise:
+
+- a store of another workspace or account (`not_found`), one being deleted, or one named twice;
+- a store Lake keeps (`zetta`, `lake`): it is opened as a drive or read through Lake, not mounted;
+- a type not mountable yet (a network filesystem);
+- a volume without a path, or with a path on a bucket;
+- a service kind whose pods its own operator runs (Zetta, Postgres, Kafka, ClickHouse, TiDB,
+  Cassandra, Valkey: `/stores`); SQLite, DuckDB and Polars services and apps mount storage
+  (`list_service_kinds` answers `mounts_stores`);
+- a volume another service or app mounts: `conflict`, naming it. A volume (`ReadWriteOnce`) is
+  mounted by one workload; a bucket by any number.
+
+Deleting a service or an app removes its mounts in the same transaction, and so does deleting its
+workspace; deleting a mounted store is refused (above). `list_services`, `list_apps` and `get_app`
+answer each workload's `stores: [{store_id, name, type, provider, mount_path, read_only}]`.
+
+**Used space.** The operator writes `store_status.used_bytes` from the kubelet's volume stats of
+the pod that mounts a volume; `list_stores` answers it beside `size_gi` (null until mounted and
+measured).
 
 ## Configuration
 
@@ -104,6 +144,13 @@ ctest --test-dir build -R 'Stor'
 - `PostgresStores.MigrationAssignsTheSoleWorkspaceAndRecordsTheRest`: migration 0044 run twice over
   stores without a workspace — the sole workspace assigned, a two-workspace account recorded as
   `needs_selection`, and the workspace immutable afterwards.
+- `WebApps.ServicesAndAppsMountStorageAndListStoresSaysWho`: `stores` on `create_service`,
+  `set_service_stores` and `set_app_stores` — a kind the operator does not build refused, a volume
+  without a path, another workspace's store, a second workload on a volume (the conflict naming the
+  first), a bucket with a path, a Lake-run store, a store named twice; `mounted_by`, `used_bytes`
+  and the workloads' `stores`; a mounted store not deleted; deleting the workloads releasing it.
+- `PostgresStores.MountsFollowTheirWorkloadAndKeepAVolumeToOne`: the same against a real database,
+  with the rows written in the workload's transaction, `used_bytes` read back and the notification.
 - `OperatorContract.*`: the operator's own SQL against lake's schema (see
   [`../control-plane/storage.md`](../control-plane/storage.md#verify)).
 

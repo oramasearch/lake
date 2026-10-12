@@ -598,7 +598,13 @@ const std::vector<Flow>& flows() {
           {"create_store",
            "`type: \"volume\"`, `provider: \"cluster\"`, a `name`; optional `size_gi`"},
           {"list_stores", "poll until the store is `Ready`"},
-          {"store_connection", "the claim, namespace, size and storage class to mount"}}},
+          {"store_connection", "the claim, namespace, size and storage class to mount"},
+          {"create_service",
+           "`kind: \"sqlite\"` (or duckdb, polars), `stores: [{store_id, mount_path: "
+           "\"/data\"}]`; set_service_stores or set_app_stores mounts it into one that exists "
+           "(a volume into one service or app)"},
+          {"list_stores", "`mounted_by` names the services and apps that mount it, `used_bytes` "
+                          "what is used (null until measured)"}}},
         {"Open a bucket as a drive",
          "A bucket or filesystem store opens as a drive, browsed in place: nothing is copied, an "
          "item's id is its path in the store, and deleting the drive never deletes the store. A "

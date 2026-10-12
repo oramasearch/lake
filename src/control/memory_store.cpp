@@ -7,6 +7,7 @@
 #include <format>
 #include <random>
 #include <set>
+#include <tuple>
 
 #include "lake/control/agent_runs.hpp"
 #include "lake/control/handles.hpp"
@@ -605,6 +606,9 @@ Result<Workspace> InMemoryStore::update_workspace(const std::string& id, const W
                 service.updated_at = row->updated_at;
             }
         }
+        if (desired == "deleted") {
+            drop_workspace_store_mounts_locked(id);
+        }
     }
     return *row;
 }
@@ -692,6 +696,8 @@ Result<WorkspaceDeletion> InMemoryStore::delete_workspace_cascade(
             service.updated_at = now;
         }
     }
+    // Its services and apps are deleted, so they mount nothing (lake#666).
+    drop_workspace_store_mounts_locked(row->id);
     workspace_deletions_.push_back(deletion);
     return deletion;
 }
@@ -1010,7 +1016,12 @@ Result<ManagedService> InMemoryStore::create_service(const NewManagedService& in
     service.desired = "present";
     service.created_by_taap_id = in.created_by_taap_id;
     service.created_at = service.updated_at = now_iso8601();
+    if (auto checked = check_store_mounts_locked("service", service.id, in.workspace_id, in.stores);
+        !checked) {
+        return std::unexpected(checked.error());
+    }
     services_.push_back(service);
+    put_store_mounts_locked("service", service.id, in.stores);
     return service;
 }
 
@@ -1026,9 +1037,128 @@ Result<ManagedService> InMemoryStore::withdraw_service(const std::string& id) {
         service.desired = "absent";
         ++service.generation;
         service.updated_at = now_iso8601();
+        put_store_mounts_locked("service", id, {});
         return service;
     }
     return std::unexpected(StoreError{"not_found", "no service " + id});
+}
+
+Result<ManagedService>
+InMemoryStore::set_service_stores(const std::string& service_id,
+                                  const std::vector<StoreMountRequest>& mounts) {
+    std::lock_guard lock(mutex_);
+    const auto service = std::ranges::find(services_, service_id, &ManagedService::id);
+    if (service == services_.end()) {
+        return std::unexpected(StoreError{"not_found", "no service " + service_id});
+    }
+    if (service->desired != "present") {
+        return std::unexpected(StoreError{"conflict", "the service is being deleted"});
+    }
+    if (auto checked =
+            check_store_mounts_locked("service", service_id, service->workspace_id, mounts);
+        !checked) {
+        return std::unexpected(checked.error());
+    }
+    put_store_mounts_locked("service", service_id, mounts);
+    ++service->generation;
+    service->updated_at = now_iso8601();
+    return *service;
+}
+
+Result<std::vector<StoreMount>> InMemoryStore::list_store_mounts(const std::string& customer_id,
+                                                                 const std::string& workspace_id) {
+    std::lock_guard lock(mutex_);
+    return store_mounts_locked(customer_id, workspace_id, "");
+}
+
+std::vector<StoreMount> InMemoryStore::store_mounts_locked(const std::string& customer_id,
+                                                           const std::string& workspace_id,
+                                                           const std::string& store_id) const {
+    std::vector<StoreMount> mounts;
+    for (const StoreMount& row : store_mounts_) {
+        const auto store = std::ranges::find(stores_, row.store_id, &ManagedStore::id);
+        if (store == stores_.end() || (!customer_id.empty() && store->customer_id != customer_id) ||
+            (!workspace_id.empty() && store->workspace_id != workspace_id) ||
+            (!store_id.empty() && row.store_id != store_id)) {
+            continue;
+        }
+        StoreMount mount = row;
+        mount.store_name = store->name;
+        mount.store_type = store->type;
+        mount.store_provider = store->provider;
+        mount.workspace_id = store->workspace_id;
+        if (row.object_kind == "service") {
+            const auto found = std::ranges::find(services_, row.object_id, &ManagedService::id);
+            mount.workload_name = found == services_.end() ? std::string() : found->name;
+        } else {
+            const auto found = std::ranges::find(web_apps_, row.object_id, &WebApp::id);
+            mount.workload_name = found == web_apps_.end() ? std::string() : found->name;
+        }
+        mounts.push_back(std::move(mount));
+    }
+    std::ranges::sort(mounts, [](const StoreMount& a, const StoreMount& b) {
+        return std::tie(a.store_name, a.object_kind, a.workload_name, a.object_id) <
+               std::tie(b.store_name, b.object_kind, b.workload_name, b.object_id);
+    });
+    return mounts;
+}
+
+Result<void>
+InMemoryStore::check_store_mounts_locked(const std::string& object_kind,
+                                         const std::string& object_id,
+                                         const std::string& workspace_id,
+                                         const std::vector<StoreMountRequest>& mounts) const {
+    for (const StoreMountRequest& mount : mounts) {
+        const auto store = std::ranges::find(stores_, mount.store_id, &ManagedStore::id);
+        if (store == stores_.end()) {
+            return std::unexpected(StoreError{"not_found", "no store " + mount.store_id});
+        }
+        if (store->desired != "present") {
+            return std::unexpected(
+                StoreError{"invalid_input", "the store " + store->name + " is being deleted"});
+        }
+        if (store->workspace_id != workspace_id) {
+            return std::unexpected(StoreError{
+                "invalid_input", "the store " + store->name + " belongs to another workspace"});
+        }
+        if (store->type != "volume") {
+            continue;
+        }
+        for (const StoreMount& other : store_mounts_locked("", "", mount.store_id)) {
+            if (other.object_kind == object_kind && other.object_id == object_id) {
+                continue;
+            }
+            return std::unexpected(StoreError{
+                "conflict",
+                "the volume " + store->name + " is already mounted by the " + other.object_kind +
+                    " " + (other.workload_name.empty() ? other.object_id : other.workload_name) +
+                    "; a volume is mounted by one service or app"});
+        }
+    }
+    return {};
+}
+
+void InMemoryStore::drop_workspace_store_mounts_locked(const std::string& workspace_id) {
+    std::erase_if(store_mounts_, [&](const StoreMount& row) {
+        const auto store = std::ranges::find(stores_, row.store_id, &ManagedStore::id);
+        return store != stores_.end() && store->workspace_id == workspace_id;
+    });
+}
+
+void InMemoryStore::put_store_mounts_locked(const std::string& object_kind,
+                                            const std::string& object_id,
+                                            const std::vector<StoreMountRequest>& mounts) {
+    std::erase_if(store_mounts_, [&](const StoreMount& row) {
+        return row.object_kind == object_kind && row.object_id == object_id;
+    });
+    for (const StoreMountRequest& mount : mounts) {
+        store_mounts_.push_back(StoreMount{.store_id = mount.store_id,
+                                           .object_kind = object_kind,
+                                           .object_id = object_id,
+                                           .mount_path = mount.mount_path,
+                                           .read_only = mount.read_only,
+                                           .created_at = now_iso8601()});
+    }
 }
 
 Result<void> InMemoryStore::set_service_status(const std::string& id,
@@ -1254,8 +1384,13 @@ Result<WebApp> InMemoryStore::create_web_app(const NewWebApp& input) {
     app.env = input.env;
     app.secret_env_refs = input.secret_env_refs;
     app.updated_at = now_iso8601();
+    if (auto checked = check_store_mounts_locked("app", app.id, input.workspace_id, input.stores);
+        !checked) {
+        return std::unexpected(checked.error());
+    }
 
     web_apps_.push_back(app);
+    put_store_mounts_locked("app", app.id, input.stores);
     return app;
 }
 
@@ -1282,6 +1417,16 @@ Result<WebApp> InMemoryStore::update_web_app(const std::string& id, const WebApp
     }
     if (patch.max_replicas != 0 && replica_count > patch.max_replicas) {
         return std::unexpected(StoreError{"quota_exceeded", "app replica quota reached"});
+    }
+    // The stores it mounts (lake#666): replaced when asked, and none once deleted.
+    if (desired == "deleted") {
+        put_store_mounts_locked("app", id, {});
+    } else if (patch.stores) {
+        if (auto checked = check_store_mounts_locked("app", id, found->workspace_id, *patch.stores);
+            !checked) {
+            return std::unexpected(checked.error());
+        }
+        put_store_mounts_locked("app", id, *patch.stores);
     }
     if (patch.mode) {
         found->mode = *patch.mode;
@@ -1325,6 +1470,13 @@ Result<WebApp> InMemoryStore::update_web_app(const std::string& id, const WebApp
 
 Result<void> InMemoryStore::purge_deleted_web_apps() {
     std::lock_guard lock(mutex_);
+    std::erase_if(store_mounts_, [&](const StoreMount& row) {
+        if (row.object_kind != "app") {
+            return false;
+        }
+        const auto app = std::ranges::find(web_apps_, row.object_id, &WebApp::id);
+        return app != web_apps_.end() && app->desired == "deleted" && app->phase == "Deleted";
+    });
     std::erase_if(web_apps_, [](const WebApp& app) {
         return app.desired == "deleted" && app.phase == "Deleted";
     });
@@ -1483,6 +1635,7 @@ Result<std::vector<ManagedStore>> InMemoryStore::list_stores(const std::string& 
             (workspace_id.empty() || store.workspace_id == workspace_id) &&
             !(store.desired == "absent" && store.phase == "Deleted")) {
             stores.push_back(store);
+            stores.back().mounted_by = store_mounts_locked("", "", store.id);
         }
     }
     return stores;
@@ -1492,7 +1645,9 @@ Result<ManagedStore> InMemoryStore::get_store(const std::string& id) {
     std::lock_guard lock(mutex_);
     for (const ManagedStore& store : stores_) {
         if (store.id == id) {
-            return store;
+            ManagedStore found = store;
+            found.mounted_by = store_mounts_locked("", "", id);
+            return found;
         }
     }
     return std::unexpected(StoreError{"not_found", "no store " + id});
@@ -1537,6 +1692,10 @@ Result<ManagedStore> InMemoryStore::withdraw_store(const std::string& id) {
         }
         if (store.desired != "present") {
             return std::unexpected(StoreError{"conflict", "the store is already deleted"});
+        }
+        if (const std::vector<StoreMount> mounts = store_mounts_locked("", "", id);
+            !mounts.empty()) {
+            return std::unexpected(StoreError{"conflict", mounted_by_message(mounts)});
         }
         store.desired = "absent";
         ++store.generation;
@@ -2240,6 +2399,18 @@ Result<void> InMemoryStore::set_agent_task_status(const std::string& id,
     }
     found->phase = std::move(phase);
     found->credential_sha256 = std::move(credential_sha256);
+    return {};
+}
+
+Result<void> InMemoryStore::set_store_used_bytes(const std::string& id,
+                                                 std::optional<std::int64_t> bytes) {
+    std::lock_guard lock(mutex_);
+    const auto store = std::ranges::find(stores_, id, &ManagedStore::id);
+    if (store == stores_.end()) {
+        return std::unexpected(StoreError{"not_found", "no store " + id});
+    }
+    store->used_bytes = bytes;
+    store->used_bytes_at = bytes ? now_iso8601() : std::string();
     return {};
 }
 

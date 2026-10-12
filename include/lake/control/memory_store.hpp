@@ -148,6 +148,11 @@ public:
     Result<ManagedService> get_service(const std::string& id) override;
     Result<ManagedService> create_service(const NewManagedService&) override;
     Result<ManagedService> withdraw_service(const std::string& id) override;
+    Result<ManagedService> set_service_stores(const std::string& service_id,
+                                              const std::vector<StoreMountRequest>&) override;
+    Result<std::vector<StoreMount>>
+    list_store_mounts(const std::string& customer_id,
+                      const std::string& workspace_id = {}) override;
     // What the operator writes to service_status; tests and local demos call it directly.
     Result<void> set_service_status(const std::string& id,
                                     std::string phase,
@@ -201,6 +206,8 @@ public:
                                   std::string phase,
                                   std::string message,
                                   std::string endpoint);
+    // What the operator writes to store_status.used_bytes (migration 0079); tests call it.
+    Result<void> set_store_used_bytes(const std::string& id, std::optional<std::int64_t> bytes);
     Result<AgentLaunch> create_agent_launch(const NewAgentLaunch&) override;
     Result<AgentLaunch> get_agent_launch(const std::string& id) override;
     Result<std::vector<AgentLaunch>> list_agent_launches(const std::string& customer_id,
@@ -516,6 +523,20 @@ private:
     std::vector<WebAppAuthorizationCodeRecord> web_app_authorization_codes_;
     std::vector<Build> builds_;
     std::vector<ManagedStore> stores_;
+    // store_mounts (migration 0079): the rows only; the names are read at list time.
+    std::vector<StoreMount> store_mounts_;
+    // With mutex_ held: checks then replaces what one workload mounts, as the Postgres store does.
+    Result<void> check_store_mounts_locked(const std::string& object_kind,
+                                           const std::string& object_id,
+                                           const std::string& workspace_id,
+                                           const std::vector<StoreMountRequest>& mounts) const;
+    void drop_workspace_store_mounts_locked(const std::string& workspace_id);
+    void put_store_mounts_locked(const std::string& object_kind,
+                                 const std::string& object_id,
+                                 const std::vector<StoreMountRequest>& mounts);
+    std::vector<StoreMount> store_mounts_locked(const std::string& customer_id,
+                                                const std::string& workspace_id,
+                                                const std::string& store_id) const;
     std::vector<PkiAuthorityRecord> pki_authorities_;
     std::vector<PkiCallerRecord> pki_callers_;
     std::vector<PkiCertificateRecord> pki_certificates_;

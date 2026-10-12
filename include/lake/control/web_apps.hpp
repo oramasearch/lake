@@ -10,6 +10,8 @@
 
 #include <nlohmann/json.hpp>
 
+#include "lake/control/store_mounts.hpp"
+
 namespace lake::control {
 
 // A Ship app's desired and observed state (docs/control-plane/web-apps.md). This is distinct from
@@ -64,6 +66,9 @@ struct NewWebApp {
     nlohmann::json secret_env_refs = nlohmann::json::object();
     std::size_t max_apps = 0;
     std::size_t max_replicas = 0;
+    // The stores the app mounts (migration 0079, lake#666), written in the transaction that
+    // creates it; checked by the caller, as NewManagedService::stores.
+    std::vector<StoreMountRequest> stores;
 };
 
 // A complete desired-state replacement assembled by a capability from the current row. Store
@@ -81,6 +86,8 @@ struct WebAppPatch {
     std::optional<nlohmann::json> env;
     std::optional<nlohmann::json> secret_env_refs;
     std::optional<std::string> desired;
+    // Replaces the stores the app mounts (lake#666). Deleting the app removes them.
+    std::optional<std::vector<StoreMountRequest>> stores;
     std::size_t max_replicas = 0;
     bool rotate_tokens = false;
 };

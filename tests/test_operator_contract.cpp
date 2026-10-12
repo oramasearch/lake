@@ -6,7 +6,9 @@
 // The statements below are copied verbatim from oramasearch/orama-operator at 188f8ac
 // (internal/controller/*_pgx.go); the workspace and volume snapshot statements (operator#259,
 // operator#260) are copied from oramasearch/orama-operator at 6c32fea (PR #267), and the workload
-// resources statements (lake#643) from b70dab1 (PR #288). When the operator changes one of them, copy it here again; when
+// resources statements (lake#643) from b70dab1 (PR #288). The store mount statements (lake#666) are
+// lake's, written with the contract before the operator's pull request; the operator uses them as
+// they are. When the operator changes one of them, copy it here again; when
 // lake changes a table the operator reads, this test says which statement breaks.
 
 #include "lake/control/agent_runs.hpp"
@@ -56,6 +58,20 @@ ON CONFLICT (store_id) DO UPDATE SET
     endpoint = EXCLUDED.endpoint,
     observed_generation = EXCLUDED.observed_generation,
     updated_at = now())";
+
+// internal/controller/lake_stores_pgx.go (lake#666): which services and apps mount each store,
+// joined to the store the operator mounts.
+constexpr std::string_view listStoreMountsSQL =
+    R"(SELECT m.store_id::text, m.object_kind, m.object_id::text, m.mount_path, m.read_only,
+       s.slug, s.type, s.provider, s.name, s.desired
+  FROM store_mounts m
+  JOIN stores s ON s.id = m.store_id
+ ORDER BY m.object_kind, m.object_id, s.name)";
+
+// internal/controller/lake_stores_pgx.go (lake#666): a volume's bytes in use, from the kubelet's
+// volume stats of the pod that mounts it.
+constexpr std::string_view updateStoreUsedBytesSQL =
+    R"(UPDATE store_status SET used_bytes = $2, used_bytes_at = now() WHERE store_id = $1::uuid)";
 
 // internal/controller/lake_services_pgx.go
 constexpr std::string_view listServicesSQL =
@@ -305,6 +321,8 @@ const std::vector<OperatorStatement>& operator_statements() {
     static const std::vector<OperatorStatement> statements{
         {"lake_stores_pgx.go", "listStoresSQL", listStoresSQL, true},
         {"lake_stores_pgx.go", "upsertStoreStatusSQL", upsertStoreStatusSQL},
+        {"lake_stores_pgx.go", "listStoreMountsSQL", listStoreMountsSQL, true},
+        {"lake_stores_pgx.go", "updateStoreUsedBytesSQL", updateStoreUsedBytesSQL},
         {"lake_services_pgx.go", "listServicesSQL", listServicesSQL, true},
         {"lake_services_pgx.go", "upsertServiceStatusSQL", upsertServiceStatusSQL},
         {"lake_agents_pgx.go", "listAgentLaunchesSQL", listAgentLaunchesSQL, true},
@@ -319,15 +337,20 @@ const std::vector<OperatorStatement>& operator_statements() {
         {"lake_builds_pgx.go", "updateBuildStatusSQL", updateBuildStatusSQL},
         {"lake_workspaces_pgx.go", "listWorkspacesSQL", listWorkspacesSQL, true},
         {"lake_workspaces_pgx.go", "updateWorkspaceStatusSQL", updateWorkspaceStatusSQL},
-        {"lake_volume_snapshots_pgx.go", "listVolumeSnapshotPoliciesSQL",
-         listVolumeSnapshotPoliciesSQL, true},
-        {"lake_volume_snapshots_pgx.go", "upsertVolumeSnapshotStatusSQL",
+        {"lake_volume_snapshots_pgx.go",
+         "listVolumeSnapshotPoliciesSQL",
+         listVolumeSnapshotPoliciesSQL,
+         true},
+        {"lake_volume_snapshots_pgx.go",
+         "upsertVolumeSnapshotStatusSQL",
          upsertVolumeSnapshotStatusSQL},
         {"lake_workload_resources_pgx.go", "listWorkloadResourcesSQL", listWorkloadResourcesSQL},
         {"lake_workload_resources_pgx.go", "listWorkloadObjectsSQL", listWorkloadObjectsSQL},
-        {"lake_workload_resources_pgx.go", "upsertWorkloadResourcesSQL",
+        {"lake_workload_resources_pgx.go",
+         "upsertWorkloadResourcesSQL",
          upsertWorkloadResourcesSQL},
-        {"lake_workload_resources_pgx.go", "deleteWorkloadResourcesSQL",
+        {"lake_workload_resources_pgx.go",
+         "deleteWorkloadResourcesSQL",
          deleteWorkloadResourcesSQL},
     };
     return statements;
@@ -393,7 +416,9 @@ TEST(OperatorContract, RowsLakeWritesAppearInTheOperatorsPolls) {
                                             .mode = "image",
                                             .image = "app:v1",
                                             .port = 3000,
-                                            .host = "contract.test"});
+                                            .host = "contract.test",
+                                            // lake#666: the app mounts the volume.
+                                            .stores = {{created_store->id, "/data", false}}});
     ASSERT_TRUE(app) << app.error().message;
     const auto build = store->create_build({.customer_id = customer->id,
                                             .workspace_id = workspace->id,
@@ -424,6 +449,7 @@ TEST(OperatorContract, RowsLakeWritesAppearInTheOperatorsPolls) {
 
     const std::vector<std::pair<std::string_view, std::string>> expected{
         {"listStoresSQL", created_store->id},
+        {"listStoreMountsSQL", created_store->id},
         {"listServicesSQL", workspace->zetta_service_id},
         {"listAgentLaunchesSQL", launch->id},
         {"listAgentSchedulesSQL", schedule->id},
@@ -459,6 +485,35 @@ TEST(OperatorContract, RowsLakeWritesAppearInTheOperatorsPolls) {
             EXPECT_EQ((*row)[3].as<std::string>(), ns) << statement.name;
         }
     }
+
+    // lake#666: the mount names the app, its path, and the store's slug the operator mounts; the
+    // used bytes the operator writes are what list_stores answers.
+    {
+        pqxx::work tx(connection);
+        const pqxx::result mounts = tx.exec(std::string(listStoreMountsSQL));
+        ASSERT_EQ(mounts.size(), 1U);
+        EXPECT_EQ(mounts[0][1].as<std::string>(), "app");
+        EXPECT_EQ(mounts[0][2].as<std::string>(), app->id);
+        EXPECT_EQ(mounts[0][3].as<std::string>(), "/data");
+        EXPECT_FALSE(mounts[0][4].as<bool>());
+        EXPECT_EQ(mounts[0][5].as<std::string>(), created_store->slug);
+        tx.exec_params(std::string(upsertStoreStatusSQL),
+                       created_store->id,
+                       "Ready",
+                       "",
+                       "",
+                       created_store->generation);
+        tx.exec_params(
+            std::string(updateStoreUsedBytesSQL), created_store->id, std::int64_t{3 * 1024 * 1024});
+        tx.commit();
+    }
+    const auto measured = store->list_stores(customer->id, workspace->id);
+    ASSERT_TRUE(measured) << measured.error().message;
+    ASSERT_EQ(measured->size(), 1U);
+    EXPECT_EQ(measured->front().used_bytes, std::int64_t{3 * 1024 * 1024});
+    EXPECT_FALSE(measured->front().used_bytes_at.empty());
+    ASSERT_EQ(measured->front().mounted_by.size(), 1U);
+    EXPECT_EQ(measured->front().mounted_by.front().workload_name, "app");
 }
 
 } // namespace

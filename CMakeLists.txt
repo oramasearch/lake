@@ -318,6 +318,7 @@ add_library(lake-core STATIC
   src/api/agent_capabilities.cpp
   src/api/platform_capabilities.cpp
   src/api/web_app_capabilities.cpp
+  src/api/store_mounts.cpp
   src/api/build_capabilities.cpp
   src/api/image_capabilities.cpp
   src/api/volume_capabilities.cpp

@@ -3529,6 +3529,12 @@ public:
                            "updated_at = now() WHERE workspace_id = $1::uuid AND desired <> $2 "
                            "AND ($4 = 'deleted' OR id = $3::uuid)",
                            id, desired == "running" ? "present" : "absent", row->zetta_service_id, desired);
+            if (desired == "deleted") {
+                // Its services are deleted, so they mount nothing (lake#666).
+                tx.exec_params("DELETE FROM store_mounts m USING stores s WHERE s.id = m.store_id "
+                               "AND s.workspace_id = $1::uuid",
+                               id);
+            }
             tx.exec_params("SELECT pg_notify('lake_services', $1)", id);
             return one_workspace(tx, id);
         });
@@ -3748,6 +3754,10 @@ public:
                            request.workspace_id);
             tx.exec_params("UPDATE services SET desired = 'absent', generation = generation + 1, "
                            "updated_at = now() WHERE workspace_id = $1::uuid AND desired <> 'absent'",
+                           request.workspace_id);
+            // Its services and apps are deleted, so they mount nothing (lake#666).
+            tx.exec_params("DELETE FROM store_mounts m USING stores s WHERE s.id = m.store_id "
+                           "AND s.workspace_id = $1::uuid",
                            request.workspace_id);
             const auto inserted = tx.exec_params(
                 std::string("INSERT INTO workspace_deletions (workspace_id, customer_id, "
@@ -4052,6 +4062,13 @@ public:
                            spec.dump(),
                            in.created_by_taap_id,
                            in.workspace_id);
+            if (!in.stores.empty()) {
+                if (auto written =
+                        write_store_mounts(tx, "service", id, in.workspace_id, in.stores);
+                    !written) {
+                    return std::unexpected(written.error());
+                }
+            }
             // The operator LISTENs and reconciles at once instead of on its next poll (lake#197);
             // delivered on commit.
             tx.exec_params("SELECT pg_notify('lake_services', $1)", id);
@@ -4072,9 +4089,150 @@ public:
                 }
                 return std::unexpected(StoreError{"conflict", "the service is already deleted"});
             }
+            // A deleted service mounts nothing (lake#666).
+            tx.exec_params(
+                "DELETE FROM store_mounts WHERE object_kind = 'service' AND object_id = $1::uuid",
+                id);
             tx.exec_params("SELECT pg_notify('lake_services', $1)", id);
             return one_service(tx, id);
         });
+    }
+
+    Result<ManagedService>
+    set_service_stores(const std::string& service_id,
+                       const std::vector<StoreMountRequest>& mounts) override {
+        return with_tx<ManagedService>([&](pqxx::work& tx) -> Result<ManagedService> {
+            const pqxx::result rows =
+                tx.exec_params("SELECT desired, COALESCE(workspace_id::text, '') FROM services "
+                               "WHERE id = $1::uuid FOR UPDATE",
+                               service_id);
+            if (rows.empty()) {
+                return std::unexpected(StoreError{"not_found", "no service " + service_id});
+            }
+            if (rows[0][0].as<std::string>() != "present") {
+                return std::unexpected(StoreError{"conflict", "the service is being deleted"});
+            }
+            if (auto written = write_store_mounts(
+                    tx, "service", service_id, rows[0][1].as<std::string>(), mounts);
+                !written) {
+                return std::unexpected(written.error());
+            }
+            tx.exec_params("UPDATE services SET generation = generation + 1, updated_at = now() "
+                           "WHERE id = $1::uuid",
+                           service_id);
+            tx.exec_params("SELECT pg_notify('lake_services', $1)", service_id);
+            return one_service(tx, service_id);
+        });
+    }
+
+    Result<std::vector<StoreMount>> list_store_mounts(const std::string& customer_id,
+                                                      const std::string& workspace_id) override {
+        return with_tx<std::vector<StoreMount>>(
+            [&](pqxx::work& tx) -> Result<std::vector<StoreMount>> {
+                return store_mounts_of(tx, customer_id, workspace_id, "");
+            });
+    }
+
+    // The mounts of the customer's stores (or of one store), with the store's and the workload's
+    // names. A mount whose workload row is gone keeps an empty name.
+    static std::vector<StoreMount> store_mounts_of(pqxx::work& tx,
+                                                   const std::string& customer_id,
+                                                   const std::string& workspace_id,
+                                                   const std::string& store_id) {
+        const pqxx::result rows = tx.exec_params(
+            "SELECT m.store_id::text, m.object_kind, m.object_id::text, m.mount_path, m.read_only, "
+            "to_char(m.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), "
+            "s.name, s.type, s.provider, COALESCE(sv.name, a.name, ''), "
+            "COALESCE(s.workspace_id::text, '') "
+            "FROM store_mounts m JOIN stores s ON s.id = m.store_id "
+            "LEFT JOIN services sv ON m.object_kind = 'service' AND sv.id = m.object_id "
+            "LEFT JOIN apps a ON m.object_kind = 'app' AND a.id = m.object_id "
+            "WHERE ($1 = '' OR s.customer_id = NULLIF($1, '')::uuid) "
+            "AND ($2 = '' OR s.workspace_id = NULLIF($2, '')::uuid) "
+            "AND ($3 = '' OR m.store_id = NULLIF($3, '')::uuid) "
+            "ORDER BY s.name, m.object_kind, COALESCE(sv.name, a.name, ''), m.object_id",
+            customer_id,
+            workspace_id,
+            store_id);
+        std::vector<StoreMount> mounts;
+        for (const pqxx::row& row : rows) {
+            StoreMount mount;
+            mount.store_id = row[0].as<std::string>();
+            mount.object_kind = row[1].as<std::string>();
+            mount.object_id = row[2].as<std::string>();
+            mount.mount_path = row[3].as<std::string>();
+            mount.read_only = row[4].as<bool>();
+            mount.created_at = row[5].as<std::string>();
+            mount.store_name = row[6].as<std::string>();
+            mount.store_type = row[7].as<std::string>();
+            mount.store_provider = row[8].as<std::string>();
+            mount.workload_name = row[9].as<std::string>();
+            mount.workspace_id = row[10].as<std::string>();
+            mounts.push_back(std::move(mount));
+        }
+        return mounts;
+    }
+
+    // Replaces what one workload mounts (lake#666). Each store row is locked first, so two writers
+    // mounting one volume, or a mount racing delete_store, take turns: a store must be present and
+    // in the workload's workspace, and a volume (ReadWriteOnce) is mounted by one workload only.
+    static Result<void> write_store_mounts(pqxx::work& tx,
+                                           const std::string& object_kind,
+                                           const std::string& object_id,
+                                           const std::string& workspace_id,
+                                           const std::vector<StoreMountRequest>& mounts) {
+        for (const StoreMountRequest& mount : mounts) {
+            const pqxx::result stores = tx.exec_params(
+                "SELECT name, type, desired, COALESCE(workspace_id::text, '') FROM stores "
+                "WHERE id = $1::uuid FOR UPDATE",
+                mount.store_id);
+            if (stores.empty()) {
+                return std::unexpected(StoreError{"not_found", "no store " + mount.store_id});
+            }
+            const std::string name = stores[0][0].as<std::string>();
+            if (stores[0][2].as<std::string>() != "present") {
+                return std::unexpected(
+                    StoreError{"invalid_input", "the store " + name + " is being deleted"});
+            }
+            if (stores[0][3].as<std::string>() != workspace_id) {
+                return std::unexpected(StoreError{
+                    "invalid_input", "the store " + name + " belongs to another workspace"});
+            }
+            if (stores[0][1].as<std::string>() != "volume") {
+                continue;
+            }
+            const pqxx::result others = tx.exec_params(
+                "SELECT m.object_kind, COALESCE(sv.name, a.name, m.object_id::text) "
+                "FROM store_mounts m "
+                "LEFT JOIN services sv ON m.object_kind = 'service' AND sv.id = m.object_id "
+                "LEFT JOIN apps a ON m.object_kind = 'app' AND a.id = m.object_id "
+                "WHERE m.store_id = $1::uuid AND NOT (m.object_kind = $2 AND m.object_id = "
+                "$3::uuid)",
+                mount.store_id,
+                object_kind,
+                object_id);
+            if (!others.empty()) {
+                return std::unexpected(StoreError{
+                    "conflict",
+                    "the volume " + name + " is already mounted by the " +
+                        others[0][0].as<std::string>() + " " + others[0][1].as<std::string>() +
+                        "; a volume is mounted by one service or app"});
+            }
+        }
+        tx.exec_params("DELETE FROM store_mounts WHERE object_kind = $1 AND object_id = $2::uuid",
+                       object_kind,
+                       object_id);
+        for (const StoreMountRequest& mount : mounts) {
+            tx.exec_params(
+                "INSERT INTO store_mounts (store_id, object_kind, object_id, mount_path, "
+                "read_only) VALUES ($1::uuid, $2, $3::uuid, $4, $5)",
+                mount.store_id,
+                object_kind,
+                object_id,
+                mount.mount_path,
+                mount.read_only);
+        }
+        return {};
     }
 
     static constexpr const char* web_app_columns =
@@ -4337,6 +4495,14 @@ public:
                 input.secret_env_refs.dump(),
                 input.source_entrypoint,
                 input.workspace_id);
+            if (!input.stores.empty()) {
+                if (auto written =
+                        write_store_mounts(tx, "app", id, input.workspace_id, input.stores);
+                    !written) {
+                    return std::unexpected(written.error());
+                }
+                tx.exec_params("SELECT pg_notify('lake_services', $1)", id);
+            }
             tx.exec_params("SELECT pg_notify('lake_apps', $1)", id);
             return one_web_app(tx, id);
         });
@@ -4410,6 +4576,20 @@ public:
                 tx.exec_params(
                     "UPDATE apps SET token_hashes_json = '{}'::jsonb WHERE id = $1::uuid", id);
             }
+            // The stores it mounts (lake#666): replaced when asked, and none once deleted.
+            if (desired == "deleted") {
+                tx.exec_params(
+                    "DELETE FROM store_mounts WHERE object_kind = 'app' AND object_id = $1::uuid",
+                    id);
+                tx.exec_params("SELECT pg_notify('lake_services', $1)", id);
+            } else if (patch.stores) {
+                if (auto written =
+                        write_store_mounts(tx, "app", id, current->workspace_id, *patch.stores);
+                    !written) {
+                    return std::unexpected(written.error());
+                }
+                tx.exec_params("SELECT pg_notify('lake_services', $1)", id);
+            }
             tx.exec_params("SELECT pg_notify('lake_apps', $1)", id);
             return one_web_app(tx, id);
         });
@@ -4417,6 +4597,8 @@ public:
 
     Result<void> purge_deleted_web_apps() override {
         return with_tx<void>([&](pqxx::work& tx) -> Result<void> {
+            tx.exec("DELETE FROM store_mounts m USING apps a WHERE m.object_kind = 'app' AND "
+                    "a.id = m.object_id AND a.desired = 'deleted' AND a.phase = 'Deleted'");
             tx.exec("DELETE FROM apps WHERE desired = 'deleted' AND phase = 'Deleted'");
             return {};
         });
@@ -4545,7 +4727,9 @@ public:
         "to_char(s.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), "
         "to_char(s.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), "
         "COALESCE(st.phase, ''), COALESCE(st.message, ''), COALESCE(st.endpoint, ''), "
-        "COALESCE(st.observed_generation, 0), COALESCE(s.workspace_id::text, '')";
+        "COALESCE(st.observed_generation, 0), COALESCE(s.workspace_id::text, ''), "
+        "st.used_bytes, COALESCE(to_char(st.used_bytes_at AT TIME ZONE 'UTC', "
+        "'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), '')";
 
     static ManagedStore store_from(const pqxx::row& row) {
         ManagedStore store;
@@ -4568,6 +4752,10 @@ public:
         store.endpoint = row[16].as<std::string>();
         store.observed_generation = row[17].as<std::int64_t>();
         store.workspace_id = row[18].as<std::string>();
+        if (!row[19].is_null()) {
+            store.used_bytes = row[19].as<std::int64_t>();
+        }
+        store.used_bytes_at = row[20].as<std::string>();
         return store;
     }
 
@@ -4580,7 +4768,9 @@ public:
         if (rows.empty()) {
             return std::unexpected(StoreError{"not_found", "no store " + id});
         }
-        return store_from(rows[0]);
+        ManagedStore store = store_from(rows[0]);
+        store.mounted_by = store_mounts_of(tx, "", "", id);
+        return store;
     }
 
     Result<std::vector<ManagedStore>> list_stores(const std::string& customer_id,
@@ -4598,6 +4788,12 @@ public:
                 std::vector<ManagedStore> stores;
                 for (const pqxx::row& row : rows) {
                     stores.push_back(store_from(row));
+                }
+                for (StoreMount& mount : store_mounts_of(tx, customer_id, workspace_id, "")) {
+                    const auto owner = std::ranges::find(stores, mount.store_id, &ManagedStore::id);
+                    if (owner != stores.end()) {
+                        owner->mounted_by.push_back(std::move(mount));
+                    }
                 }
                 return stores;
             });
@@ -4650,6 +4846,12 @@ public:
 
     Result<ManagedStore> withdraw_store(const std::string& id) override {
         return with_tx<ManagedStore>([&](pqxx::work& tx) -> Result<ManagedStore> {
+            // Locked first, as write_store_mounts does, so no mount lands in between (lake#666).
+            tx.exec_params("SELECT 1 FROM stores WHERE id = $1::uuid FOR UPDATE", id);
+            const std::vector<StoreMount> mounts = store_mounts_of(tx, "", "", id);
+            if (!mounts.empty()) {
+                return std::unexpected(StoreError{"conflict", mounted_by_message(mounts)});
+            }
             const pqxx::result rows = tx.exec_params(
                 "UPDATE stores SET desired = 'absent', generation = generation + 1, "
                 "updated_at = now() WHERE id = $1::uuid AND desired = 'present' RETURNING id",
