@@ -306,8 +306,9 @@ research tables with each reference's source URL and date.
 **Metis is not on this list.** Metis is enterprise software priced by Orama's sales team; a
 customer talks to sales. Nothing here prices it.
 
-**Status:** not yet published on lake.oramadev.net (billing is not deployed there). `set_price_list`
+**Status:** published on lake.oramadev.net on 2026-10-11, effective October 2026. `set_price_list`
 needs the operator or the instance administrator; the payload is [below](#publish-the-price-list).
+Why the prices are what they are, and how they are governed: [`../billing/pricing-strategy.md`](../billing/pricing-strategy.md).
 
 ### Rates
 
@@ -364,8 +365,8 @@ Two rates rest on an assumption:
 
 A workspace's engine runs all month: at the operator's default (64 MiB, and 0.1 vCPU, the
 workspace namespace's default request) that is about $6.70 of CPU and $0.47 of RAM a month; at 1
-vCPU and 2 GiB, $66.96 and $15.18. There is no free allowance: usage limits warn and do not refuse
-([metering.md](metering.md#limits)).
+vCPU and 2 GiB, $66.96 and $15.18. There is no free allowance. The monthly `model_tokens` limit is enforced at the model gateway; the
+other usage limits warn and do not refuse ([metering.md](metering.md#limits)).
 
 ### Worked bills
 
