@@ -386,4 +386,83 @@ TEST(McpClient, ThePublicTransportRefusesPrivateAddresses) {
     EXPECT_TRUE(server.seen().empty()) << "nothing was sent";
 }
 
+// lake#659: a stdio server's App is reached at its cluster Service name over plain http, and only
+// there: the flag never opens loopback, a private literal or another host.
+TEST(McpClient, AWorkspaceAppIsReachedOnlyAtAClusterServiceName) {
+    using lake::api::mcp_cluster_service_host;
+    using lake::api::parse_mcp_url;
+    EXPECT_TRUE(mcp_cluster_service_host("app-0a1b2c3d4e5f.dev-ws-1.svc.cluster.local"));
+    for (const std::string host : {"svc.cluster.local",
+                                   "x.svc.cluster.local",
+                                   "a.b.c.svc.cluster.local",
+                                   "App.ns.svc.cluster.local",
+                                   "-a.ns.svc.cluster.local",
+                                   "a.ns.svc.cluster.local.evil.example",
+                                   "10.0.0.1"}) {
+        EXPECT_FALSE(mcp_cluster_service_host(host)) << host;
+    }
+    const std::string app = "http://app-0a1b2c3d4e5f.dev-ws-1.svc.cluster.local/mcp";
+    EXPECT_FALSE(parse_mcp_url(app, false)) << "never without the flag";
+    EXPECT_FALSE(parse_mcp_url(app, true)) << "the test allowance is loopback only";
+    const auto parsed = parse_mcp_url(app, false, true);
+    ASSERT_TRUE(parsed) << parsed.error();
+    EXPECT_EQ(parsed->port, "80");
+    EXPECT_FALSE(parse_mcp_url("http://10.0.0.1/mcp", false, true));
+    EXPECT_FALSE(parse_mcp_url("http://127.0.0.1:9/mcp", false, true));
+    EXPECT_FALSE(parse_mcp_url("http://mcp.example.com/mcp", false, true));
+
+    // A client marked for a workspace App refuses any other host before sending anything.
+    McpTestServer server;
+    McpClientOptions options = options_for(server);
+    options.allow_private_addresses = false;
+    options.cluster_service = true;
+    McpClient client(lake::api::make_mcp_http(false), options);
+    const auto started = client.initialize();
+    ASSERT_FALSE(started);
+    EXPECT_EQ(started.error().kind, "unreachable");
+    EXPECT_TRUE(server.seen().empty());
+}
+
+// lake#659: Lake's own client through lake-mcp-runner (oramasearch/lake-mcp-runner) serving a real
+// stdio server. Run the runner locally first, e.g. with the MCP reference server:
+//   MCP_RUNNER_TOKEN=<32+ chars> MCP_STDIO_COMMAND='["npx","--yes",
+//     "@modelcontextprotocol/server-everything@2026.8.31","stdio"]' go run ./cmd/lake-mcp-runner
+// then LAKE_MCP_RUNNER_URL=http://127.0.0.1:8080/mcp LAKE_MCP_RUNNER_TOKEN=<the token>.
+TEST(McpClient, DrivesAStdioServerThroughTheRunner) {
+    const char* url = std::getenv("LAKE_MCP_RUNNER_URL");
+    const char* token = std::getenv("LAKE_MCP_RUNNER_TOKEN");
+    if (url == nullptr || token == nullptr) {
+        GTEST_SKIP()
+            << "set LAKE_MCP_RUNNER_URL and LAKE_MCP_RUNNER_TOKEN to a running lake-mcp-runner";
+    }
+    McpClientOptions options;
+    options.url = url;
+    options.allow_private_addresses = true;
+    options.credential.bearer = token;
+    options.limits.timeout = std::chrono::milliseconds(30000);
+    options.client_version = "runner-conformance";
+    McpClient client(lake::api::make_mcp_http(true), options);
+    const auto found = client.discover();
+    ASSERT_TRUE(found) << lake::api::mcp_error_text(found.error());
+    EXPECT_EQ(found->transport, "streamable_http");
+    EXPECT_FALSE(found->server.name.empty());
+    const auto echo =
+        std::ranges::find(found->tools, std::string("echo"), &lake::api::McpTool::name);
+    ASSERT_NE(echo, found->tools.end()) << "the reference server's echo tool";
+    const auto called = client.call_tool("echo", {{"message", "through the runner"}});
+    ASSERT_TRUE(called) << lake::api::mcp_error_text(called.error());
+    EXPECT_NE(called->dump().find("through the runner"), std::string::npos) << called->dump();
+    EXPECT_FALSE(found->resources.empty());
+    const auto read = client.read_resource(found->resources[0].uri);
+    ASSERT_TRUE(read) << lake::api::mcp_error_text(read.error());
+    client.close();
+
+    McpClientOptions wrong = options;
+    wrong.credential.bearer = "not-the-token";
+    McpClient refused(lake::api::make_mcp_http(true), wrong);
+    const auto denied = refused.initialize();
+    ASSERT_FALSE(denied);
+    EXPECT_EQ(denied.error().kind, "auth_required") << lake::api::mcp_error_text(denied.error());
+}
+
 } // namespace

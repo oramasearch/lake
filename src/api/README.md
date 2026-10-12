@@ -197,20 +197,27 @@ calls, notifications, the event-stream reader and every bound on a hostile serve
 reading once the answer is in, a byte limit, a deadline on resolution, connection, handshake and
 exchange, and no address that is not public unless `LAKE_MCP_ALLOW_PRIVATE_ADDRESSES=1`. See
 `docs/api/mcp-connections.md#the-client`.
-`mcp_connection_capabilities.cpp` registers the MCP connection capabilities (lake#652): records
+`mcp_connection_capabilities.cpp` registers the MCP connection capabilities (lake#652); a `stdio`
+connection (lake#659) writes the runner's secret and creates its App as the person, then reaches it
+only at that App's cluster Service (`mcp_stdio_app_address`). It records
 through `control::mcp_connections`, the credential read from the workspace's secret store as Lake
 (`as_lake`, never answered), discovery merged into the person's tool decisions, who may call a
 change (a person, or an agent with a person's per-tool grant and its `mcp:<prefix>` skill),
 metering through the `UsageRecorder` (`calls`, `transfer`), the audit read back for a connection's
 calls, and the re-export `mcp.cpp` calls for `/w/<workspace>/mcp`. `mcp_connection_streams.cpp` is
-`McpStreamWorker`, run by the store root's owner on the maintenance thread: notifications mirrored to
+`McpStreamWorker`, run by the store root's owner on the maintenance thread over only the workspaces
+whose dispatch row streams (lake#685; every connection write keeps the row and the digest of what
+it re-exports, which `http_server.cpp` folds into a workspace endpoint's tool-list digest, lake#684):
+notifications mirrored to
 a connection's topic, one agent job per input event as the person who set the streams, and each
 finished job's result on the output topic; `mcp_connection_internal.hpp` lends it the connection's
 bearer, never a capability.
 `deletion_capabilities.cpp` registers what deletes a workspace's data (lake#645):
 `delete_dataset`, `delete_model`, `delete_run` and `delete_index`, named capabilities over the
 workspace engine's own deletes that answer `not_supported` from an older engine, and
-`delete_ask_conversation`, which removes one person's message records from the workspace Zetta.
+`delete_ask_conversation`, which removes one person's message records from the workspace Zetta and
+the agent tasks the conversation started (their `lake_agent_tasks` records, then their dispatch
+rows through `Store::delete_agent_tasks`, lake#673).
 `delete_organization`, `revoke_invitation` and `revoke_grant` sit beside their siblings in
 `capabilities.cpp`, and `delete_secret_mount` in `secrets_capabilities.cpp` over
 `MountSecrets::remove_all` (`secret_records_api.cpp`). Each takes `dry_run`. See

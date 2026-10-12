@@ -328,6 +328,9 @@ static and lifetime amplification, permitted descendants, recursive session/devi
 expired PostgreSQL ancestors, application-pool issuance without an additional JWT, and one signed audit event per call without bearer values. Each
 PostgreSQL case owns an isolated schema in `LAKE_TEST_DB_URI` and removes it afterward. Run the
 full static and shared CTest suites with PostgreSQL configured; see `docs/api/identity.md`.
+`PostgresSessions.AnExpiredCredentialIsToldApartFromAnUnknownOne` (`test_postgres.cpp`) issues an
+hour-long token, proves it live, then moves its `expires_at` into the past with SQL instead of
+sleeping past a one-second lifetime, so a loaded host cannot expire it early or late (lake#679).
 
 `Mcp.ToolSchemasAreByteIdenticalToOpenApi` (`test_api.cpp`) compares every MCP tool's input and
 output schema with its OpenAPI operation, byte for byte, for callers and agent-task credentials;
@@ -428,6 +431,14 @@ public addresses and tool bounds, then the client over the server's own transpor
 `mcp_test_server.hpp`, a local MCP server (Streamable HTTP and HTTP+SSE, an OAuth authorization
 server, and hostile modes: slow, huge, garbage, another id first, a sampling request, endless
 events, an unknown version).
+`McpStdioConnectionsRunAsAWorkspaceApp` (lake#659) checks a stdio connection's secret, App, address
+and lifecycle; `McpClient.AWorkspaceAppIsReachedOnlyAtAClusterServiceName` the address rule, and
+`McpClient.DrivesAStdioServerThroughTheRunner` runs Lake's client through a running
+`lake-mcp-runner` when `LAKE_MCP_RUNNER_URL` and `LAKE_MCP_RUNNER_TOKEN` are set.
+`McpConnectionDispatchNamesExportsAndStreamingWorkspacesOnly` (lake#684, lake#685) checks the
+dispatch rows, the workspace endpoint's digest and that the stream worker calls only streaming
+workspaces; `HttpServer.WorkspaceMcpSessionsLearnThatExportedToolsChanged` drives the notice over
+`/w/<workspace>/mcp`.
 `test_workspace_records.cpp`'s `McpConnections*` cases run the MCP connection capabilities against
 that server with both stores: the sealed record and its secret, the read-or-change rule for people,
 Ask Orama and a user-built agent, auto-approve, the audit, the usage series, re-export through the
