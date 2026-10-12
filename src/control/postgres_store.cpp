@@ -5076,7 +5076,7 @@ public:
         });
     }
 
-    // Methodology deployments (lake#690, migration 0080).
+    // Methodology deployments (lake#690, migration 0083).
     static constexpr const char* methodology_deployment_columns =
         "d.id::text, d.customer_id::text, d.workspace_id::text, d.methodology_id, d.model_id, "
         "COALESCE(d.run_id::text, ''), COALESCE(d.build_id::text, ''), d.image, d.runtime_image, "

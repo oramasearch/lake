@@ -4,9 +4,9 @@
 not deployed.** It needs Zetta with zetta#1261 (zetta PR #1265), the Orama operator with
 orama-operator#291 (operator PR #292) and a published `oramasearch/methodology-runtime` image
 (methodology-runtime PR #2). The per-workspace queue of runs and the placement of GPU runs
-(orama-operator#293, migration `0079_methodology_run_queue`) are implemented in the source tree and
+(orama-operator#293, migration `0082_methodology_run_queue`) are implemented in the source tree and
 not deployed; they need the operator's change of the same issue. Serving a trained model from Ship →
-Models and artifacts over 24 MiB (lake#690, migration `0080_methodology_deployments`) are
+Models and artifacts over 24 MiB (lake#690, migration `0083_methodology_deployments`) are
 implemented in the source tree and not deployed; they need the zetta, operator and
 methodology-runtime changes of the same issue ([below](#serving-its-model)). A workspace has two
 kinds of methodology:
@@ -267,7 +267,7 @@ long as it must.
 ### Queued
 
 The Orama operator runs a limited number of a workspace's methodology runs at once
-(orama-operator#293, migration `0079_methodology_run_queue`): the Lake's
+(orama-operator#293, migration `0082_methodology_run_queue`): the Lake's
 `spec.methodologies.maxConcurrentRunsPerWorkspace`, 2 unless set. A run whose image is built starts
 only while fewer of its workspace's runs are staging, running or collecting; otherwise it is
 `Queued`, oldest first, and its message says how many are running, the limit and its place:
@@ -316,7 +316,7 @@ pipeline still answers `not_supported`; Lake handles these models itself.
 {"model_id": "<model id>", "exposed": true, "deployment": {"id": "…", "model_id": "<model id>", "methodology_id": "W-0a1b2c3d", "phase": "Pending", "message": "Waiting for the Orama operator to start serving this model.", "ready": false}}
 ```
 
-Publishing writes one `methodology_deployments` row (migration `0080`; ids, image, resources and
+Publishing writes one `methodology_deployments` row (migration `0083`; ids, image, resources and
 phase only), from the training run that made the model (its `lake_run_id`): its image build, its
 CPU, memory and GPUs, its network grant. A model whose training run Lake no longer has is refused
 (`conflict`): its image is unknown. One deployment per model; publishing again answers the same one.
@@ -408,6 +408,6 @@ The pure parts are `src/control/methodologies.cpp` (manifest, checks, drafts) an
 `src/control/methodology_templates.cpp` (the Python templates); the capabilities are
 `src/api/methodology_capabilities.cpp` (serving: `serve_methodology_model` and
 `predict_methodology_model`, called from `workspace_capabilities.cpp` and
-`deletion_capabilities.cpp`); the dispatch rows are in `db/schema.sql` (`0078`, `0080`) and both
+`deletion_capabilities.cpp`); the dispatch rows are in `db/schema.sql` (`0078`, `0083`) and both
 stores. The runner's contract is shared with `oramasearch/methodology-runtime` (`docs/cli.md`) and
 the operator (`docs/lake/methodology-runs.md`): change all three together.

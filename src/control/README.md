@@ -260,5 +260,5 @@ memory store in a map keyed by kind and id; prices and invoice lines carry their
 memory store's `age_build` moves a build's request time back for tests.
 
 Both stores keep served methodology models' `methodology_deployments` rows and the operator's
-`methodology_deployment_status` (lake#690, migration `0080`); `methodologies.cpp` holds
+`methodology_deployment_status` (lake#690, migration `0083`); `methodologies.cpp` holds
 `methodology_deployment_endpoint_valid`.

@@ -239,7 +239,7 @@ dispatch rows of its runs (migration `0078_methodology_runs`), and `methodology_
 principal a run's `lmr.` credential resolves to: no person, only the runner's two capabilities.
 
 `store.hpp` also holds a served methodology model's dispatch row, `MethodologyDeployment` (lake#690,
-migration `0080_methodology_deployments`), its operator status, `methodology_deployment_principal`
+migration `0083_methodology_deployments`), its operator status, `methodology_deployment_principal`
 (the `lmd.` credential, which reaches only `methodology_deployment_input`) and
 `methodology_deployment_endpoint_valid` (only a serve Service's in-cluster URL). `methodologies.hpp`
 adds the chunked artifact bounds (8 MiB chunks, 1 GiB in all) and the predict row limit.

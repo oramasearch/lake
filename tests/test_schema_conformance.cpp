@@ -605,7 +605,7 @@ TEST(SchemaConformance, EveryToolAndRequiredOutputUsesHttpContract) {
     http.call("list_methodology_runs", transcript_scope);
     auto methodology_run = transcript_scope;
     methodology_run["run_id"] = training.at("run").at("id");
-    // Held back by the operator (orama-operator#293, migration 0079): the phase is Queued.
+    // Held back by the operator (orama-operator#293, migration 0082): the phase is Queued.
     lake::control::MethodologyRunStatus queued;
     queued.phase = "Queued";
     queued.message = "Queued: 2 of this workspace's methodology runs are already running (the limit "

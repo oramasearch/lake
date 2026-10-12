@@ -808,7 +808,7 @@ inline Principal methodology_run_principal(const MethodologyRun& run, std::strin
                      "",
                      std::move(digest)};
 }
-// A workspace methodology's model served from Ship → Models (lake#690, migration 0080): lake writes
+// A workspace methodology's model served from Ship → Models (lake#690, migration 0083): lake writes
 // the desired deployment when the model is published, the Orama operator stages the model's
 // artifact with the deployment's credential and runs the methodology's image in `serve` mode as a
 // Deployment behind a Service, and writes the status with the Service's in-cluster endpoint. The

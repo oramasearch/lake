@@ -934,7 +934,7 @@ repositories, as untrusted code ([`../api/methodologies.md#runs`](../api/methodo
   `timeout_seconds`, `network` (false unless the person granted it), `slug` (`mr-<12 hex>`),
   `desired` (`present` or `absent`), `generation`, `stop_reason`;
 - `methodology_run_status`, written only by the operator: `phase` (`Building`, `Staging`, `Running`,
-  `Collecting`, `Succeeded`, `Failed`, `Stopped`; `Queued` from `0079`), `message`, `exit_code`, `credential_sha256` (the
+  `Collecting`, `Succeeded`, `Failed`, `Stopped`; `Queued` from `0082`), `message`, `exit_code`, `credential_sha256` (the
   run's `lmr.` credential, never the credential), `observed_generation`, `started_at` and
   `finished_at` of the sandbox pod;
 - `workload_resources.object_kind` adds `methodology_run` to every kind `0077_metered_jobs` allows.
@@ -947,7 +947,7 @@ change is rolled.
 
 ## Methodology run queue migration
 
-`0079_methodology_run_queue` ([orama-operator#293](https://github.com/oramasearch/orama-operator/issues/293))
+`0082_methodology_run_queue` ([orama-operator#293](https://github.com/oramasearch/orama-operator/issues/293))
 adds the phase `Queued` to `methodology_run_status.phase`. The operator writes it, with a message
 saying why, while it holds a run back: its workspace already has
 `spec.methodologies.maxConcurrentRunsPerWorkspace` runs staging, running or collecting (oldest run
@@ -959,7 +959,7 @@ change.
 
 ## Methodology deployments migration
 
-`0080_methodology_deployments` ([lake#690](https://github.com/oramasearch/lake/issues/690)) serves a
+`0083_methodology_deployments` ([lake#690](https://github.com/oramasearch/lake/issues/690)) serves a
 workspace methodology's model from Ship → Models. `methodology_deployments` holds one row per
 deployment (lake writes it when the model is published and notifies `lake_services`): the workspace
 methodology, the engine's model id, the training run and image build whose image serves it, the

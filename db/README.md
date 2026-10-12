@@ -362,13 +362,13 @@ artifact stay in the workspace Zetta. Nothing is dropped; idempotent. The guard 
 pods (orama-operator#291) before rollout. See
 [schema.md](../docs/control-plane/schema.md#methodology-runs-migration).
 
-Migration `0079_methodology_run_queue` (orama-operator#293) lets `methodology_run_status.phase`
+Migration `0082_methodology_run_queue` (orama-operator#293) lets `methodology_run_status.phase`
 say `Queued`: the operator holds a run back while its workspace is at the Lake's cap of
 concurrent methodology runs, or while no node of a GPU run's GPU class exists. Only the phase
 CHECK changes; nothing is dropped; idempotent. Its guard was `methodology_run_queue_guard`. See
 [schema.md](../docs/control-plane/schema.md#methodology-run-queue-migration).
 
-Migration `0080_methodology_deployments` (lake#690) adds `methodology_deployments` (lake writes one
+Migration `0083_methodology_deployments` (lake#690) adds `methodology_deployments` (lake writes one
 row when a workspace methodology's model is published in Ship → Models, and notifies
 `lake_services`), `methodology_deployment_status` (the operator's: phase, message, the SHA-256 of the
 deployment's `lmd.` credential, the serve Service's in-cluster endpoint) and the
