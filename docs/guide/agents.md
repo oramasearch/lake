@@ -50,12 +50,13 @@ for **Confirm and start experiment**.
 | **Orama base model** | The agent runs inside your workspace's engine, on its GPU when there is one. Its instructions are its system prompt. |
 | **Frontier model** | The agent runs on Lake's agent runtime with a frontier model (OpenAI). Only these agents can be run unattended and scheduled. |
 | **Work area** | Where it works: anywhere in this workspace, one project, or specific datasets. |
-| **Skills** | What it may do: *Search data*, *Generate a dataset*, *Train a Model*, *Summarize and explain*, *Call the API*, *Use drives*, *Use transcripts*, *Work in repositories*, *Load datasets*, *Read and publish streams*, *Design pipelines*, *Read usage and billing*. Granted, never assumed. They are the agent runtime's own skills (agent-runtime#7), vendored into Lake. A skill lets the agent read what it covers; anything it would change, it proposes, and you confirm it. |
+| **Skills** | What it may do: *Search data*, *Generate a dataset*, *Train a Model*, *Summarize and explain*, *Call the API*, *Use drives*, *Use transcripts*, *Work in repositories*, *Load datasets*, *Read and publish streams*, *Design pipelines*, *Read usage and billing*. Granted, never assumed. They are the agent runtime's own skills (agent-runtime#7), vendored into Lake. A skill lets the agent read what it covers; anything it would change, it proposes, and you confirm it, except a few engine actions whose own rules already decide (checking and starting a run, generating a dataset, recording a decision or an outcome). Approving a decision is always yours. |
 | **Revision** | One saved definition of your agent. Every create and edit is kept; you can restore any of them. |
 | **Trained version** | A checkpoint training produced for a base-model agent, with the data it learned from and its held-out score. You promote one, or roll back to one, in **Train → Agents**. |
 | **Pipelines as tools** | Approved pipelines you grant an agent; it can check, run and report on each one. |
 | **Unattended run** | One run of a frontier-model agent as a job, from **Run now** or a schedule. |
 | **Schedule** | A cron schedule that runs the agent as a job on every tick, as the person who set it. |
+| **Stream that starts it** | A workspace stream (**Train → Streams**) whose new messages each start a run of the agent, with the message as its input, as the person who chose the stream. |
 
 ## See Your Agents
 
@@ -81,10 +82,12 @@ marked **By Orama**. Search, or filter by **By Orama** and **Yours**.
      **Which project or datasets**;
    - **Runs on its own**: a schedule in plain words, such as *every Monday at 09:00*. Leave it
      empty for an agent you only talk to.
+   - **Starts on new messages in**: for a frontier-model agent, the workspace streams whose new
+     messages each start a run ([Start It From a Stream](#start-it-from-a-stream)).
 3. Choose **Create agent**. The agent's Design page opens.
 
 The agent's Design page shows its definition, **where it is used** (the pipelines it calls, its
-schedules, its runs, Ask Orama) and its **Revisions**. **Edit** saves a new revision; **Restore**
+schedules, the streams that start it, its runs, Ask Orama) and its **Revisions**. **Edit** saves a new revision; **Restore**
 on an older revision saves its definition again as the newest; **Duplicate** makes a copy under a
 new name; **Run it** opens its runs and schedules.
 
@@ -198,6 +201,32 @@ List and remove:
   Removing a schedule stops a run under way; the runs already recorded stay.
 - MCP: `list_agent_schedules` and `unschedule_agent`.
 
+## Start It From a Stream
+
+A frontier-model agent can be started by a workspace stream as well as by a schedule. In **New
+agent** or **Edit**, choose one or more streams under **Starts on new messages in**, then save. From
+then on, each new message on a chosen stream starts one run of the agent, with the message as its
+input: the run is handed `trigger_id`, `stream` (the stream's name), `sequence` (the message's place
+on the stream) and `message` (the message itself).
+
+- A run acts as **you**, the person who chose the stream, as a scheduled run acts as whoever set
+  the schedule. If you can no longer act in the workspace, its runs stop starting.
+- Only messages that arrive after you choose a stream start runs; the ones already on it do not.
+- Each message starts one run. The runs show on the agent's **Runs** tab, marked *stream*.
+- The agent's Design page lists the streams under **Where It Is Used**, each with who set it.
+- System streams (`agent-events`, `agent-*`, `app-events.*`, `build-events.*`, `run-metrics.*`,
+  `study-events.*`) cannot start an agent, so an agent's own events never start it again. An
+  agent that publishes to a stream it starts from would start itself: choose another stream for
+  its output.
+
+Over REST or MCP, `streams` is the whole set: a stream left out stops starting the agent, and
+`[]` removes them all.
+
+- REST: `POST /v1/set_agent_streams` with
+  `{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "agent_id": "<agent id>", "streams": ["orders"]}`
+- REST: `GET /v1/list_agent_streams?customer_id=<customer id>&workspace_id=<workspace id>&agent_id=<agent id>`
+- MCP: `set_agent_streams` and `list_agent_streams`.
+
 ## Train and Improve It
 
 **Train → Agents** lists only the agents with something to train: those on the Orama base model,
@@ -228,7 +257,7 @@ To change what the agent is, choose **Edit its design**.
 ## Delete an Agent
 
 On the agent's Design page choose **Delete**, type its name and confirm. The agent is deleted, and
-its schedules with it; its revisions are kept.
+its schedules and the streams that start it with it; its revisions are kept.
 
 - REST: `POST /v1/delete_agent` with
   `{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "id": "<agent id>"}`
@@ -238,22 +267,26 @@ its schedules with it; its revisions are kept.
 
 | What | Needs |
 |---|---|
-| See agents, revisions, training, runs, schedules and Orama's agents | `read` on the account that owns the workspace (the library: any signed-in person) |
-| Design, change, grant, train, promote, run, stop, schedule, delete, talk | `write` on that account |
+| See agents, revisions, training, runs, schedules, the streams that start them and Orama's agents | `read` on the account that owns the workspace (the library: any signed-in person) |
+| Design, change, grant, train, promote, run, stop, schedule, start from a stream, delete, talk | `write` on that account |
 
-A run acts as the person who started it, and a scheduled run as the person who set the schedule,
+A run acts as the person who started it, a scheduled run as the person who set the schedule, and a
+run a stream started as the person who chose the stream,
 limited to the workspace's reads and actions and the repository and transcript reads. Its
 credential is generated for the run and is never stored in Lake.
 
 ## Limits
 
-- Only frontier-model agents run unattended or on a schedule; base-model agents answer in
-  conversation.
+- Only frontier-model agents run unattended, on a schedule or from a stream; base-model agents
+  answer in conversation.
 - A schedule fires at most once every five minutes; `every 1 minutes` is refused with that rule.
 - A run the platform has not started within five minutes is marked `Failed` with *Timed out* and
   withdrawn, so it cannot start late.
 - Runs and schedules belong to the workspace they were made in; another workspace never lists them.
-- Event triggers ("when a new dataset lands") are kept on the agent but do not fire.
+- An agent starts from at most 20 streams. Lake reads each stream every 15 seconds and starts at most
+  20 runs per stream each time; a busier stream catches up over the next reads.
+- Other event triggers ("when a new dataset lands") are kept on the agent but do not fire: publish
+  such events to a stream and start the agent from it.
 
 ## Troubleshooting
 
@@ -267,6 +300,9 @@ credential is generated for the run and is never stored in Lake.
 | `invalid_input` on `schedule_agent` | The trigger is not one Lake understands, or it would run more often than every five minutes. |
 | `invalid_input` on `create_agent` naming `/input/definition/…` | Remove the field it names; only the fields above are accepted. |
 | `not_found` on `stop_agent_launch` or `unschedule_agent` | The run or schedule belongs to another workspace. |
+| `invalid_input` on `set_agent_streams` | The agent is not on a frontier model, or a stream is a system stream. |
+| `not_found` on `set_agent_streams` at `/streams/<n>` | The workspace has no stream of that name; create it in **Train → Streams** first. |
+| A stream's messages start no run | The person who chose the stream can no longer act in the workspace, or the workspace is stopped. Choose the stream again as someone who can. |
 | `invalid_input` on `approve_agent_proposal` | *This proposal still has defects*: ask AgentCreator to fix them. |
 | `conflict` on `approve_agent_proposal` | The proposal changed; review it again and approve the new one. |
 | A run stays *Pending* | Lake is waiting for the platform to start it; after five minutes it fails with a reason. |

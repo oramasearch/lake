@@ -197,6 +197,7 @@ export function ShortcutDialog({ storage, folder, onClose }: { storage: DriveSto
       {picking && pickingStorage && (
         <FolderPicker
           storage={pickingStorage}
+          scope={{ customerId, workspaceId }}
           start=""
           items
           title={`Choose an Item in ${picking.name}`}

@@ -59,7 +59,9 @@ Grouping is the web app's (`frontend/src/pages/train/models.ts`); no capability 
 - **Ship → Models** is about serving: publishing (`expose_model`, `unexpose_model`), the `predict`
   call and a try-it panel, the keys scoped to `predict`, where answers go, and monitoring from
   `model_traffic` ([workspaces.md](workspaces.md),
-  [../serving/telemetry.md](../serving/telemetry.md#the-per-model-prediction-series)).
+  [../serving/telemetry.md](../serving/telemetry.md#the-per-model-prediction-series)). A model a
+  workspace methodology trained (`python:W-…`) is served by its own code once published, and
+  `predict` answers one prediction per row from it ([methodologies.md](methodologies.md#serving-its-model), lake#690).
 
 A model repository (the routes above) keeps model files with their history. Lake does not record
 which repositories hold a model, so Train → Models does not list them; a file in one becomes a
@@ -77,7 +79,7 @@ account like `workspace_act`, and is audited in the workspace's own chain.
 | `train_model` | `name`, `methodology` (an id from `list_methodologies`), `dataset_path` (`<database>/<name>` or `<database>.<name>`), `target` (required when the methodology's `label` input is), `entity_column?`, `holdout_fraction?` | Trains it: answers the `run_id`; the model appears in `list_models` when the run finishes |
 | `retrain_model` | `model_id` (any version), and optionally a new `dataset_path`, `target`, `entity_column` or `holdout_fraction` | A new version. A standalone model keeps the new settings for its next retrain; a project's model uses them for this run only |
 | `register_model` | `weights` (the file's contents), `name` or `version_of`, `kind?`, `metrics?` (the figures measured where it was trained), `source?` | Brings a model trained elsewhere so `score`, `explain`, `expose_model` and `predict` take it like a trained one |
-| `load_drive_model` (Lake's) | `drive_id`, `id` (the file), `name` or `version_of`, `kind?`, `metrics?` | Reads the file as the caller (`read_drive_file` or `download_drive_file`) and sends it to `register_model`, as `load_drive_dataset` loads a table. At most 16 MiB |
+| `load_drive_model` (Lake's) | `drive_id`, `id` (the file), `name` or `version_of`, `kind?`, `metrics?` | Reads the file as the caller (`read_drive_file` or `download_drive_file`) and sends it to `register_model`, as `load_drive_dataset` loads a table. Any drive kind: a workspace-files drive's entry id, a repository or storage drive's path, or a virtual drive's shortcut to a file, followed once ([drives.md](drives.md#a-drive-file-as-a-model-lake654)). At most 16 MiB |
 | `move_model_to_project` | `model_id`, `project_name?` (default the model's name) | Makes it a project in Design → Projects, with its pipeline and every version |
 
 - **Why the engine keeps a project for it.** Every methodology trains through a project and a
@@ -106,7 +108,7 @@ dry run, naming the capability, the id and what was removed).
 
 | Capability | `id` | Engine input | What goes, and what is kept |
 |---|---|---|---|
-| `delete_dataset` | `<database>/<dataset>`, as `list_datasets` returns it | `dataset`, `database` | the table, its rows and partitions, and every search index on it; a run still reading it is not detected, so delete a dataset no run reads |
+| `delete_dataset` | `<database>/<dataset>`, as `list_datasets` returns it | `dataset`, `database` | the table, its rows and partitions, and every search index on it; refused (`engine_error`, naming them) while a pending or running run or a running study reads it, its dry run too (zetta#1258) |
 | `delete_model` | the model id (`model_id` is accepted too) | `model_id` | the trained model, no longer served if it was published; the run that trained it is kept. A standalone model's last version takes its internal project with it (`removed.standalone_project`) |
 | `delete_run` | the run id (`run_id` too) | `run_id` | a finished run and its report; refused while pending or running; the models it trained are kept and named |
 | `delete_index` | the index id (`index_id` too) | `index_id` | the index, no longer served if it was published; the dataset is kept |
@@ -114,8 +116,9 @@ dry run, naming the capability, the id and what was removed).
 The answer is the engine's (`removed`, and `kept` where something stays) with `id`, `dry_run` and
 `deleted`. `dry_run: true` deletes nothing and answers what would go. An unknown id is
 `not_found` at `/id`. The engine capabilities arrive with zetta#1257; a workspace whose engine is
-older answers `501 not_supported`, saying so, and nothing is deleted. Overview:
-[deletion.md](deletion.md).
+older answers `501 not_supported`, saying so, and nothing is deleted. The refusal of a dataset a run
+or a study is still reading arrives with zetta#1258; an engine before it deletes the dataset
+without that check. Overview: [deletion.md](deletion.md).
 
 ## Training provenance
 

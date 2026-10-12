@@ -169,6 +169,10 @@ export type AgentForm = {
   pipelines: { project: string; graph: string }[];
   /** Runs on its own: a schedule in words or cron; empty is conversation only. */
   trigger: string;
+  /** The workspace streams whose new messages each start a run (lake#677): Lake's
+   * `set_agent_streams`, not a field of the engine's record, so Edit reads them with
+   * `list_agent_streams`. */
+  streams: string[];
 };
 
 export const BLANK_AGENT: AgentForm = {
@@ -183,11 +187,12 @@ export const BLANK_AGENT: AgentForm = {
   workAreaDetail: "",
   pipelines: [],
   trigger: "",
+  streams: [],
 };
 
 /** The form for an agent record (Edit, Duplicate), or blank. */
 export function agentForm(agent: J | null): AgentForm {
-  if (!agent) return { ...BLANK_AGENT, skills: [], pipelines: [] };
+  if (!agent) return { ...BLANK_AGENT, skills: [], pipelines: [], streams: [] };
   const area = agent.work_area && typeof agent.work_area === "object" ? (agent.work_area as J) : {};
   const kind = text(area, "kind");
   const runtime = text(agent, "runtime");
@@ -205,7 +210,38 @@ export function agentForm(agent: J | null): AgentForm {
     workAreaDetail: text(area, "detail"),
     pipelines: pipelinesOf(agent).map(({ project, graph }) => ({ project, graph })),
     trigger: text(agent, "trigger"),
+    streams: [],
   };
+}
+
+/* ------------------------------------------------------------------ streams that start it */
+
+/** System streams Lake and its agents write (Train → Streams marks them): never a trigger, so an
+ * agent's own events cannot start it again. Lake refuses them too. */
+export function isSystemStream(name: string): boolean {
+  return ["agent-", "app-events.", "build-events.", "run-metrics.", "study-events.", "inbox:"].some((p) => name.startsWith(p));
+}
+
+/** The streams an agent may start from: the workspace Zetta's own topics in a `list_streams`
+ * answer (its `groups`), by name, without the system streams or the Lake bus. */
+export function triggerStreams(groups: unknown): string[] {
+  const out: string[] = [];
+  for (const group of Array.isArray(groups) ? (groups as J[]) : []) {
+    if (!group || typeof group !== "object" || text(group, "zetta") !== "workspace") continue;
+    for (const topic of Array.isArray(group.topics) ? (group.topics as J[]) : []) {
+      const name = text(topic, "topic").replace(/^topic:/, "");
+      if (name && topic.system !== true && !isSystemStream(name) && !out.includes(name)) out.push(name);
+    }
+  }
+  return out.sort((a, b) => a.localeCompare(b));
+}
+
+/** What `set_agent_streams` should be sent after saving the form, or null when nothing changes: only
+ * a frontier-model agent runs from a stream, so one that becomes another kind loses its streams. */
+export function streamsToSet(form: AgentForm, before: string[] = []): string[] | null {
+  const after = form.model === "frontier" ? [...new Set(form.streams)] : [];
+  const same = after.length === before.length && after.every((s) => before.includes(s));
+  return same ? null : after;
 }
 
 /** A frontier agent's instructions, composed from what the person wrote. */

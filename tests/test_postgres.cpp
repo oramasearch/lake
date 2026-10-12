@@ -1707,6 +1707,161 @@ TEST(PostgresBuilds, DesiredRowStatusTokensAndCancellationFollowTheContract) {
     EXPECT_EQ(notified.back(), created->id);
 }
 
+// lake#666: store_mounts, written with the workload in one transaction, checked under the store's
+// lock, read back with the names, refused for a second workload on a volume and for a deleted
+// store, and removed with the workload.
+TEST(PostgresStores, MountsFollowTheirWorkloadAndKeepAVolumeToOne) {
+    const char* uri = lake::test::postgres_uri();
+    if (uri == nullptr || std::string(uri).empty()) {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not set";
+    }
+    auto store = lake::control::make_postgres_store(
+        uri, "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff");
+    const std::string suffix = lake::control::new_uuid_v4().substr(0, 8);
+    const auto user = store->create_user(
+        {"taap:1:ed25519:mt-" + suffix, "mt-" + suffix + "@example.com", "Mounts"});
+    ASSERT_TRUE(user) << user.error().message;
+    const auto customer = store->create_customer({"individual", user->id, "", "mt-" + suffix});
+    ASSERT_TRUE(customer) << customer.error().message;
+    const auto workspace = store->create_workspace({customer->id, "mounts", "dev", ""});
+    ASSERT_TRUE(workspace) << workspace.error().message;
+    const auto other_workspace = store->create_workspace({customer->id, "other", "dev", ""});
+    ASSERT_TRUE(other_workspace) << other_workspace.error().message;
+
+    pqxx::connection listener(uri);
+    std::vector<std::string> notified;
+    listener.listen("lake_services",
+                    [&](pqxx::notification note) { notified.emplace_back(note.payload); });
+
+    const auto make =
+        [&](std::string type, std::string provider, std::string name, std::string workspace_id) {
+            lake::control::NewManagedStore value{customer->id, type, provider, name, "taap:x"};
+            value.workspace_id = workspace_id;
+            return store->create_store(value);
+        };
+    const auto volume = make("volume", "cluster", "uploads", workspace->id);
+    ASSERT_TRUE(volume) << volume.error().message;
+    const auto bucket = make("object", "s3", "media", workspace->id);
+    ASSERT_TRUE(bucket) << bucket.error().message;
+    const auto foreign = make("volume", "cluster", "foreign", other_workspace->id);
+    ASSERT_TRUE(foreign) << foreign.error().message;
+
+    lake::control::NewManagedService sqlite;
+    sqlite.customer_id = customer->id;
+    sqlite.workspace_id = workspace->id;
+    sqlite.kind = "sqlite";
+    sqlite.name = "db";
+    sqlite.created_by_taap_id = "taap:x";
+    sqlite.stores = {{foreign->id, "/srv/uploads", false}};
+    EXPECT_EQ(store->create_service(sqlite).error().code, "invalid_input")
+        << "a store of another workspace";
+    EXPECT_TRUE(store->list_services(customer->id)->size() == 2U)
+        << "nothing written: the two workspace Zettas only";
+    sqlite.stores = {{volume->id, "/srv/uploads", false}, {bucket->id, "", true}};
+    const auto db = store->create_service(sqlite);
+    ASSERT_TRUE(db) << db.error().message;
+
+    auto mounts = store->list_store_mounts(customer->id, workspace->id);
+    ASSERT_TRUE(mounts) << mounts.error().message;
+    ASSERT_EQ(mounts->size(), 2U);
+    EXPECT_EQ(mounts->at(0).store_name, "media") << "by store name";
+    EXPECT_EQ(mounts->at(0).mount_path, "");
+    EXPECT_TRUE(mounts->at(0).read_only);
+    EXPECT_EQ(mounts->at(1).store_name, "uploads");
+    EXPECT_EQ(mounts->at(1).object_kind, "service");
+    EXPECT_EQ(mounts->at(1).object_id, db->id);
+    EXPECT_EQ(mounts->at(1).workload_name, "db");
+    EXPECT_EQ(mounts->at(1).store_type, "volume");
+    EXPECT_TRUE(store->list_store_mounts(customer->id, other_workspace->id)->empty());
+
+    // A second workload on the volume is refused, naming the first; a bucket takes any number.
+    const auto app = store->create_web_app({.customer_id = customer->id,
+                                            .workspace_id = workspace->id,
+                                            .name = "site",
+                                            .mode = "image",
+                                            .image = "site:v1",
+                                            .port = 3000,
+                                            .host = "site-" + suffix + ".test",
+                                            .stores = {{volume->id, "/srv/uploads", false}}});
+    ASSERT_FALSE(app);
+    EXPECT_EQ(app.error().code, "conflict");
+    EXPECT_NE(app.error().message.find("service db"), std::string::npos) << app.error().message;
+    const auto site = store->create_web_app({.customer_id = customer->id,
+                                             .workspace_id = workspace->id,
+                                             .name = "site",
+                                             .mode = "image",
+                                             .image = "site:v1",
+                                             .port = 3000,
+                                             .host = "site-" + suffix + ".test",
+                                             .stores = {{bucket->id, "", false}}});
+    ASSERT_TRUE(site) << site.error().message;
+    lake::control::WebAppPatch steal;
+    steal.stores = std::vector<lake::control::StoreMountRequest>{{volume->id, "/v", false}};
+    EXPECT_EQ(store->update_web_app(site->id, steal).error().code, "conflict");
+    EXPECT_EQ(store->get_web_app(site->id)->generation, site->generation) << "nothing changed";
+
+    // list_stores and get_store read who mounts each; the operator's used bytes come back.
+    auto listed = store->list_stores(customer->id, workspace->id);
+    ASSERT_TRUE(listed) << listed.error().message;
+    const auto media = std::ranges::find(*listed, bucket->id, &lake::control::ManagedStore::id);
+    ASSERT_NE(media, listed->end());
+    ASSERT_EQ(media->mounted_by.size(), 2U);
+    EXPECT_EQ(media->mounted_by[0].object_kind, "app");
+    EXPECT_EQ(media->mounted_by[1].object_kind, "service");
+    EXPECT_FALSE(media->used_bytes.has_value());
+    {
+        pqxx::connection connection(uri);
+        pqxx::work tx(connection);
+        tx.exec_params("INSERT INTO store_status (store_id, phase, used_bytes, used_bytes_at) "
+                       "VALUES ($1::uuid, 'Ready', 4096, now())",
+                       volume->id);
+        tx.commit();
+    }
+    const auto read = store->get_store(volume->id);
+    ASSERT_TRUE(read) << read.error().message;
+    EXPECT_EQ(read->used_bytes, 4096);
+    EXPECT_FALSE(read->used_bytes_at.empty());
+    ASSERT_EQ(read->mounted_by.size(), 1U);
+    EXPECT_EQ(read->mounted_by[0].workload_name, "db");
+
+    // A mounted store is not withdrawn.
+    const auto refused = store->withdraw_store(volume->id);
+    ASSERT_FALSE(refused);
+    EXPECT_EQ(refused.error().code, "conflict");
+    EXPECT_NE(refused.error().message.find("service db"), std::string::npos)
+        << refused.error().message;
+
+    // set_service_stores replaces, bumps the generation and notifies.
+    // What earlier writes notified is delivered first; then the service's own notification.
+    while (listener.await_notification(0, 200000) != 0) {
+    }
+    notified.clear();
+    const auto replaced = store->set_service_stores(db->id, {{bucket->id, "", false}});
+    ASSERT_TRUE(replaced) << replaced.error().message;
+    EXPECT_EQ(replaced->generation, db->generation + 1);
+    for (int waited = 0; notified.empty() && waited < 50; ++waited) {
+        listener.await_notification(0, 100000);
+    }
+    EXPECT_EQ(notified, (std::vector<std::string>{db->id}));
+    EXPECT_TRUE(store->get_store(volume->id)->mounted_by.empty());
+    const auto moved = store->update_web_app(site->id, steal);
+    ASSERT_TRUE(moved) << "the volume is free: " << moved.error().message;
+    EXPECT_EQ(store->get_store(volume->id)->mounted_by.at(0).workload_name, "site");
+
+    // Deleting the workload removes its mounts.
+    ASSERT_TRUE(store->withdraw_service(db->id));
+    lake::control::WebAppPatch remove;
+    remove.desired = "deleted";
+    ASSERT_TRUE(store->update_web_app(site->id, remove));
+    EXPECT_TRUE(store->list_store_mounts(customer->id)->empty());
+    const auto withdrawn = store->withdraw_store(volume->id);
+    ASSERT_TRUE(withdrawn) << withdrawn.error().message;
+    sqlite.name = "late";
+    sqlite.stores = {{volume->id, "/srv/uploads", false}};
+    EXPECT_EQ(store->create_service(sqlite).error().code, "invalid_input")
+        << "a store being deleted is not mounted";
+}
+
 TEST(PostgresStores, CreateListWithdrawAndNotifyFollowTheContract) {
     const char* uri = lake::test::postgres_uri();
     if (uri == nullptr || std::string(uri).empty()) {
@@ -2781,7 +2936,8 @@ TEST(PostgresAgentLaunches, LaunchesCredentialsSchedulesAndConversationsFollowTh
 
 TEST(PostgresSessions, AnExpiredCredentialIsToldApartFromAnUnknownOne) {
     // lake#450: a caller holding the real secret of an expired token learns it expired; any other
-    // secret is simply not active.
+    // secret is simply not active. The token's expiry is moved into the past explicitly rather
+    // than waited out, so the test does not depend on how fast a loaded host runs (lake#679).
     const char* uri = lake::test::postgres_uri();
     if (uri == nullptr || std::string(uri).empty()) {
         GTEST_SKIP() << "LAKE_TEST_DB_URI is not set";
@@ -2794,10 +2950,18 @@ TEST(PostgresSessions, AnExpiredCredentialIsToldApartFromAnUnknownOne) {
         {"taap:1:ed25519:exp-" + suffix, "exp-" + suffix + "@example.com", "Expiring"});
     ASSERT_TRUE(user) << user.error().message;
     const auto token =
-        store->create_token({user->id, "lake", "short", "test", {"list_customers"}, 1, false});
+        store->create_token({user->id, "lake", "short", "test", {"list_customers"}, 3600, false});
     ASSERT_TRUE(token) << token.error().message;
     ASSERT_TRUE(store->context_for(token->secret)) << "live before it expires";
-    std::this_thread::sleep_for(std::chrono::milliseconds(2100));
+    {
+        pqxx::connection connection(uri);
+        pqxx::work tx(connection);
+        const pqxx::result moved = tx.exec_params(
+            "UPDATE sessions SET expires_at = now() - interval '1 second' WHERE id = $1::uuid",
+            token->session.id);
+        ASSERT_EQ(moved.affected_rows(), 1);
+        tx.commit();
+    }
     const auto expired = store->context_for(token->secret);
     ASSERT_FALSE(expired);
     EXPECT_EQ(expired.error().code, "expired");
@@ -3174,6 +3338,67 @@ TEST(PostgresBilling, WorkloadResourcesAndClassRatesFollowTheContract) {
     }
     workload_resources_and_classes_follow_the_contract(*store,
                                                        lake::control::new_uuid_v4().substr(0, 8));
+}
+
+namespace {
+
+// lake#661 against one store: the operator adds each poll's increase to the row of the app and
+// hour, and lake reads the rows from an hour on, oldest first.
+void app_traffic_adds_up_by_app_and_hour(lake::control::Store& store) {
+    const std::string app = lake::control::new_uuid_v4();
+    const std::string other = lake::control::new_uuid_v4();
+    const std::string workspace = lake::control::new_uuid_v4();
+    ASSERT_TRUE(store.add_app_transfer({app, workspace, "2026-10-11T09:00:00Z", 100, 1000}));
+    ASSERT_TRUE(store.add_app_transfer({app, workspace, "2026-10-11T09:00:00Z", 5, 50}));
+    ASSERT_TRUE(store.add_app_transfer({app, workspace, "2026-10-11T10:00:00Z", 1, 2}));
+    ASSERT_TRUE(store.add_app_transfer({other, workspace, "2026-10-10T23:00:00Z", 7, 7}));
+    EXPECT_FALSE(store.add_app_transfer({app, workspace, "2026-10-11T09:30:00Z", 1, 1}))
+        << "an hour starts on the hour";
+    const auto rows = store.app_transfer("2026-10-11T09:00:00Z");
+    ASSERT_TRUE(rows) << rows.error().message;
+    std::vector<lake::control::AppTransfer> mine;
+    for (const auto& row : *rows) {
+        if (row.app_id == app || row.app_id == other) {
+            mine.push_back(row);
+        }
+    }
+    ASSERT_EQ(mine.size(), 2U) << "the earlier hour is not read";
+    EXPECT_EQ(mine[0].hour, "2026-10-11T09:00:00Z");
+    EXPECT_EQ(mine[0].workspace_id, workspace);
+    EXPECT_EQ(mine[0].in_bytes, 105U);
+    EXPECT_EQ(mine[0].out_bytes, 1050U);
+    EXPECT_FALSE(mine[0].observed_at.empty());
+    EXPECT_EQ(mine[1].hour, "2026-10-11T10:00:00Z");
+    EXPECT_EQ(mine[1].in_bytes, 1U);
+}
+
+} // namespace
+
+// lake#661, migration 0081_app_transfer: each app's traffic through the ingress by hour.
+TEST(PostgresBilling, AppTrafficAddsUpByAppAndHour) {
+    {
+        lake::control::InMemoryStore memory;
+        app_traffic_adds_up_by_app_and_hour(memory);
+    }
+    const char* uri = lake::test::postgres_uri();
+    if (uri == nullptr || std::string(uri).empty()) {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not set";
+    }
+    auto store = lake::control::make_postgres_store(
+        uri, "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff");
+    ASSERT_TRUE(store->ping()) << store->ping().error().message;
+    {
+        pqxx::connection connection(uri);
+        pqxx::work tx(connection);
+        for (const char* table : {"app_transfer", "app_transfer_guard"}) {
+            EXPECT_FALSE(
+                tx.exec_params("SELECT to_regclass($1)", std::string(table))[0][0].is_null())
+                << table;
+        }
+        EXPECT_FALSE(
+            tx.exec("SELECT 1 FROM schema_migrations WHERE version = '0081_app_transfer'").empty());
+    }
+    app_traffic_adds_up_by_app_and_hour(*store);
 }
 
 // lake#658, migration 0077_metered_jobs: an agent cron run's resources are a workload_resources

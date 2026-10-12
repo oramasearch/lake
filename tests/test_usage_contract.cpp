@@ -100,7 +100,7 @@ TEST(UsageContract, EveryOfferedStoreTypeIsMetered) {
         if (!provider.available) {
             continue;
         }
-        bool metered = false;
+        bool metered = !lake::api::store_metered_as(provider.type, provider.provider).empty();
         for (const auto type : lake::api::metered_store_types()) {
             metered = metered || type == provider.type;
         }

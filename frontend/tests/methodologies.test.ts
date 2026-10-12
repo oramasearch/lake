@@ -20,6 +20,7 @@ import {
     parseParams,
     runIsLive,
     runPhaseTone,
+    runQueuedReason,
     sortedFindings,
     validationState,
 } from "../src/pages/design/methodologies.ts";
@@ -108,6 +109,12 @@ test("Validate's findings list the failed ones first", () => {
 test("a run says whether it is under way and how it ended", () => {
     assert.equal(runIsLive({phase : "Running"}), true);
     assert.equal(runIsLive({phase : "Succeeded"}), false);
+    assert.equal(runIsLive({phase : "Queued"}), true, "a queued run is still under way");
+    assert.equal(runPhaseTone({phase : "Queued"}), "neutral");
+    assert.equal(
+        runQueuedReason({phase : "Queued", message : "Queued: 2 of this workspace's runs are running."}),
+        "Queued: 2 of this workspace's runs are running.");
+    assert.equal(runQueuedReason({phase : "Running", message : "Running your code."}), "");
     assert.equal(runPhaseTone({phase : "Succeeded", outcome : "passed"}), "ok");
     assert.equal(runPhaseTone({phase : "Succeeded", outcome : "failed"}),
                  "bad",

@@ -156,7 +156,30 @@ std::string McpUrl::origin() const {
     return scheme + "://" + shown + (standard ? std::string() : ":" + port);
 }
 
-std::expected<McpUrl, std::string> parse_mcp_url(std::string_view url, bool allow_loopback_http) {
+bool mcp_cluster_service_host(std::string_view host) {
+    constexpr std::string_view suffix = ".svc.cluster.local";
+    if (host.size() <= suffix.size() || !host.ends_with(suffix)) {
+        return false;
+    }
+    // <service>.<namespace>: two labels before the suffix, each a DNS label.
+    const std::string_view name = host.substr(0, host.size() - suffix.size());
+    const std::size_t dot = name.find('.');
+    if (dot == std::string_view::npos || name.find('.', dot + 1) != std::string_view::npos) {
+        return false;
+    }
+    for (const std::string_view label : {name.substr(0, dot), name.substr(dot + 1)}) {
+        if (label.empty() || label.size() > 63 || label.front() == '-' || label.back() == '-' ||
+            !std::ranges::all_of(label, [](unsigned char c) {
+                return std::islower(c) != 0 || std::isdigit(c) != 0 || c == '-';
+            })) {
+            return false;
+        }
+    }
+    return true;
+}
+
+std::expected<McpUrl, std::string>
+parse_mcp_url(std::string_view url, bool allow_loopback_http, bool allow_cluster_service) {
     if (url.empty() || url.size() > 2048) {
         return std::unexpected("the URL is empty or longer than 2048 bytes");
     }
@@ -225,7 +248,8 @@ std::expected<McpUrl, std::string> parse_mcp_url(std::string_view url, bool allo
     if (parsed.host.empty()) {
         return std::unexpected("the URL names no host");
     }
-    if (parsed.scheme == "http" && !(allow_loopback_http && loopback_host(parsed.host))) {
+    if (parsed.scheme == "http" && !(allow_loopback_http && loopback_host(parsed.host)) &&
+        !(allow_cluster_service && mcp_cluster_service_host(parsed.host))) {
         return std::unexpected("an MCP server URL starts with https://");
     }
     return parsed;
@@ -598,6 +622,7 @@ std::expected<json, McpClientError> McpClient::send_streamable(const json& messa
     request.headers = headers(true);
     request.body = message.dump();
     request.timeout = options_.limits.timeout;
+    request.cluster_service = options_.cluster_service;
     request.max_response_bytes = options_.limits.max_response_bytes;
     const json id = notification ? json() : message.at("id");
     // Stop reading once the answer to this request has arrived on an event stream.
@@ -677,6 +702,7 @@ std::expected<void, McpClientError> McpClient::open_legacy() {
     request.headers = headers(false);
     request.headers[0].second = "text/event-stream";
     request.timeout = options_.limits.timeout;
+    request.cluster_service = options_.cluster_service;
     request.max_response_bytes = options_.limits.max_response_bytes;
     legacy_->stream = http_->open(request);
     const McpHttpResponse& head = legacy_->stream->head();
@@ -743,6 +769,7 @@ std::expected<json, McpClientError> McpClient::send_legacy(const json& message, 
     request.headers = headers(true);
     request.body = message.dump();
     request.timeout = options_.limits.timeout;
+    request.cluster_service = options_.cluster_service;
     request.max_response_bytes = 64 * 1024;
     McpHttpResponse response = http_->exchange(request, {});
     ++traffic_.exchanges;
@@ -873,7 +900,12 @@ std::expected<McpServerInfo, McpClientError> McpClient::initialize() {
     if (initialized_ && server_) {
         return *server_;
     }
-    auto parsed = parse_mcp_url(options_.url, options_.allow_private_addresses);
+    auto parsed =
+        parse_mcp_url(options_.url, options_.allow_private_addresses, options_.cluster_service);
+    if (parsed && options_.cluster_service && !mcp_cluster_service_host(parsed->host)) {
+        return std::unexpected(
+            client_error("unreachable", "a workspace App is reached at its cluster Service name"));
+    }
     if (!parsed) {
         return std::unexpected(client_error("unreachable", parsed.error()));
     }
@@ -1093,6 +1125,8 @@ McpClient::listen(std::chrono::milliseconds wait) {
             request.headers = headers(false);
             request.headers[0].second = "text/event-stream";
             request.timeout = options_.limits.timeout;
+            request.cluster_service = options_.cluster_service;
+    request.cluster_service = options_.cluster_service;
             request.max_response_bytes = options_.limits.max_response_bytes;
             listening_ = http_->open(request);
             listening_parser_ = SseParser{};
@@ -1170,6 +1204,7 @@ void McpClient::close() {
         request.url = url_.origin() + url_.path;
         request.headers = headers(false);
         request.timeout = std::min(options_.limits.timeout, std::chrono::milliseconds(5000));
+        request.cluster_service = options_.cluster_service;
         request.max_response_bytes = 4096;
         const McpHttpResponse response = http_->exchange(request, {});
         traffic_.sent_bytes += 0;

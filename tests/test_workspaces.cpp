@@ -410,11 +410,15 @@ TEST(Workspaces, StoresAreNamedPerCustomerAndOnlyAvailablePairsAreCreated) {
     Workspaces w;
     ASSERT_NE(lake::control::find_store_provider("volume", "cluster"), nullptr);
     EXPECT_TRUE(lake::control::find_store_provider("volume", "cluster")->available);
-    EXPECT_EQ(lake::control::store_providers[0].type, "volume") << "the available pair is first";
+    EXPECT_EQ(lake::control::store_providers[0].type, "volume") << "the available pairs first";
+    bool unavailable_seen = false;
     for (const lake::control::StoreProvider& entry : lake::control::store_providers) {
-        EXPECT_EQ(entry.available, entry.type == "volume" && entry.provider == "cluster")
+        // Every bucket and filesystem pair is offered (lake#664); network filesystems wait.
+        EXPECT_EQ(entry.available, entry.type != "network_filesystem")
             << entry.type << "/" << entry.provider;
         EXPECT_EQ(entry.unavailable_reason.empty(), entry.available);
+        EXPECT_FALSE(entry.available && unavailable_seen) << "available pairs come first";
+        unavailable_seen = unavailable_seen || !entry.available;
     }
 
     lake::control::NewManagedStore volume{w.customer_id, "volume", "cluster", "uploads", "taap:x"};
@@ -430,10 +434,11 @@ TEST(Workspaces, StoresAreNamedPerCustomerAndOnlyAvailablePairsAreCreated) {
     ASSERT_FALSE(duplicate);
     EXPECT_EQ(duplicate.error().code, "conflict");
 
-    const auto r2 = w.service->create_store({w.customer_id, "object", "r2", "bucket", "taap:x"});
-    ASSERT_FALSE(r2);
-    EXPECT_EQ(r2.error().code, "invalid_input");
-    EXPECT_NE(r2.error().message.find("needs R2 enabled"), std::string::npos) << r2.error().message;
+    const auto nfs =
+        w.service->create_store({w.customer_id, "network_filesystem", "nfs", "shared", "taap:x"});
+    ASSERT_FALSE(nfs);
+    EXPECT_EQ(nfs.error().code, "invalid_input");
+    EXPECT_NE(nfs.error().message.find("phase 4"), std::string::npos) << nfs.error().message;
     const auto nonsense = w.service->create_store({w.customer_id, "volume", "r2", "odd", "taap:x"});
     ASSERT_FALSE(nonsense);
     EXPECT_EQ(nonsense.error().code, "invalid_input");
@@ -844,17 +849,24 @@ TEST(Workspaces, StoreCapabilitiesRefuseUnavailablePairsAndCheckTheName) {
     ASSERT_EQ(providers.value["providers"].size(), std::size(lake::control::store_providers));
     EXPECT_EQ(providers.value["providers"][0]["type"], "volume");
     EXPECT_EQ(providers.value["providers"][0]["available"], true);
-    EXPECT_NE(providers.value.dump().find("lake#196 phase 2"), std::string::npos);
+    EXPECT_NE(providers.value.dump().find("phase 4"), std::string::npos)
+        << "network filesystems are listed, not offered";
     EXPECT_FALSE(call(*other_principal, "list_store_providers", {{"customer_id", owner}}).ok);
 
-    const auto refused =
-        call(*owner_principal,
-             "create_store",
-             {{"customer_id", owner}, {"type", "object"}, {"provider", "s3"}, {"name", "bucket"}});
+    const auto refused = call(*owner_principal,
+                              "create_store",
+                              {{"customer_id", owner},
+                               {"type", "network_filesystem"},
+                               {"provider", "nfs"},
+                               {"name", "shared"}});
     ASSERT_FALSE(refused.ok);
     EXPECT_EQ(refused.error.code, "invalid_input");
-    EXPECT_NE(refused.error.message.find("your own credentials"), std::string::npos)
-        << refused.error.message;
+    EXPECT_NE(refused.error.message.find("phase 4"), std::string::npos) << refused.error.message;
+    const auto nameless = call(
+        *owner_principal,
+        "create_store",
+        {{"customer_id", owner}, {"type", "object"}, {"provider", "s3"}, {"name", "bucket"}});
+    EXPECT_EQ(nameless.error.path, "/bucket") << "your own bucket names itself";
     EXPECT_FALSE(call(*owner_principal,
                       "create_store",
                       {{"customer_id", owner},

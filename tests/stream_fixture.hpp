@@ -40,6 +40,8 @@ public:
     std::map<std::string, RecordTables> records;
     std::string first_url;
     std::vector<std::pair<std::string, json>> calls;
+    // The workspace endpoint of each call, in order (one per entry of `calls`).
+    std::vector<std::string> call_urls;
     // Fixed answers for workspace capabilities the fake does not model (upload_dataset, ...).
     std::map<std::string, json> answers;
     // Answers that depend on the input (get_solution by id, …); nullopt falls through to the rest.
@@ -58,6 +60,7 @@ public:
         auto& topics = last_url == first_url ? this->topics : routed_topics[last_url];
         last_token = std::move(token);
         calls.emplace_back(capability, input);
+        call_urls.push_back(last_url);
         static_cast<void>(read);
         const auto fail = [](std::string code) -> control::ZettaControlResult<json> {
             return std::unexpected(control::ZettaControlError{code, code});

@@ -17,6 +17,7 @@
 #include "lake/control/policy.hpp"
 #include "lake/control/zetta_workspace.hpp"
 #include "scan/detectors.hpp"
+#include "store_mounts.hpp"
 #include "workspace_bus.hpp"
 
 namespace lake::api {
@@ -83,6 +84,18 @@ void app_audit(ApiContext& context,
                              {"app_name", app.name},
                              {"generation", app.generation}};
     context.audit_details.update(std::move(details));
+}
+
+// An app's answer with the storage it mounts (lake#666): `stores`, read from store_mounts.
+void add_app_stores(ApiContext& context, json& value) {
+    if (!value.is_object() || !value.contains("id") || !value.at("id").is_string()) {
+        return;
+    }
+    const auto mounts = context.store->list_store_mounts(value.value("customer_id", ""),
+                                                         value.value("workspace_id", ""));
+    value["stores"] = mounts
+                          ? workload_stores_json(*mounts, "app", value.at("id").get<std::string>())
+                          : json::array();
 }
 
 bool valid_name(std::string_view name) {
@@ -617,12 +630,19 @@ void register_web_app_capabilities(Registry& registry) {
             if (!apps) {
                 return store_failure(apps.error());
             }
+            const auto mounts =
+                context.store->list_store_mounts(input.at("customer_id"), input.at("workspace_id"));
+            if (!mounts) {
+                return store_failure(mounts.error());
+            }
             json items = json::array();
             for (const control::WebApp& app : *apps) {
                 if (app.workspace_id != input.at("workspace_id").get<std::string>()) {
                     continue;
                 }
-                items.push_back(control::web_app_json(app));
+                json value = control::web_app_json(app);
+                value["stores"] = workload_stores_json(*mounts, "app", app.id);
+                items.push_back(std::move(value));
             }
             context.audit_kind = "app.list";
             return ApiResult::success({{"apps", std::move(items)},
@@ -633,7 +653,8 @@ void register_web_app_capabilities(Registry& registry) {
                             .title = "Get app",
                             .description =
                                 "Read one Ship app: its hosts, revision or image, replicas, bound "
-                                "services, and what the operator reports about its rollout.",
+                                "services, the storage it mounts (`stores`), and what the "
+                                "operator reports about its rollout.",
                             .input_schema = app_input_schema(),
                             .output_schema = {{"type", "object"}},
                             .kind = CapabilityKind::Read,
@@ -646,13 +667,16 @@ void register_web_app_capabilities(Registry& registry) {
                                     return app.error();
                                 }
                                 app_audit(context, "app.read", *app);
-                                return ApiResult::success(control::web_app_json(*app));
+                                json value = control::web_app_json(*app);
+                                add_app_stores(context, value);
+                                return ApiResult::success(std::move(value));
                             }});
     registry.add(Capability{
         .name = "create_app",
         .title = "Create app",
         .description = "Create runtime or image desired state for the app operator. App names "
-                       "cannot use reserved platform hosts.",
+                       "cannot use reserved platform hosts. `stores` mounts the workspace's "
+                       "storage: a volume at `mount_path`, a bucket as environment variables.",
         .input_schema = input_schema(
             {{"name", {{"type", "string"}}},
              {"mode", {{"type", "string"}, {"enum", json::array({"runtime", "image"})}}},
@@ -662,11 +686,11 @@ void register_web_app_capabilities(Registry& registry) {
              {"port", {{"type", "integer"}, {"minimum", 1}, {"maximum", 65535}}},
              {"replicas", {{"type", "integer"}, {"minimum", 1}, {"maximum", 100}}},
              {"host", {{"type", json::array({"string", "null"})}}},
-             {"auth",
-              {{"type", "string"}, {"enum", json::array({"lake", "none", "public"})}}},
+             {"auth", {{"type", "string"}, {"enum", json::array({"lake", "none", "public"})}}},
              {"confirm_public", {{"type", "boolean"}}},
              {"bindings", {{"type", "object"}}},
-             {"env", {{"type", "object"}}}},
+             {"env", {{"type", "object"}}},
+             {"stores", store_mounts_schema()}},
             json::array({"name", "mode", "framework", "port"})),
         .output_schema = {{"type", "object"}},
         .kind = CapabilityKind::Action,
@@ -756,6 +780,15 @@ void register_web_app_capabilities(Registry& registry) {
                 co_return ApiResult::failure(
                     "invalid_input", "replicas must be between 1 and 100", "/replicas");
             }
+            auto mounts = checked_store_mounts(input.value("stores", json::array()),
+                                               input.at("customer_id"),
+                                               input.at("workspace_id"),
+                                               {},
+                                               true,
+                                               *context.store);
+            if (!mounts) {
+                co_return mounts.error();
+            }
             control::NewWebApp app;
             app.customer_id = input.at("customer_id");
             app.workspace_id = input.at("workspace_id");
@@ -778,12 +811,17 @@ void register_web_app_capabilities(Registry& registry) {
             app.source_path = sources.source_path.value_or("");
             app.source_entrypoint = sources.source_entrypoint.value_or("");
             app.image = sources.image.value_or("");
+            app.stores = std::move(*mounts);
             auto created = context.store->create_web_app(app);
             if (!created) {
                 co_return store_failure(created.error());
             }
             app_audit(context, "app.create", *created);
-            co_return co_await publish_event(context, *created, "create");
+            auto published = co_await publish_event(context, *created, "create");
+            if (published && published->ok) {
+                add_app_stores(context, published->value);
+            }
+            co_return published;
         }});
 
     const auto register_deployment = [&](std::string name, bool rollback) {
@@ -1060,6 +1098,46 @@ void register_web_app_capabilities(Registry& registry) {
             patch.replicas = replicas;
             co_return co_await patch_and_publish(
                 input, context, std::move(patch), "app.scale", "scale", {{"replicas", replicas}});
+        }});
+
+    registry.add(Capability{
+        .name = "set_app_stores",
+        .title = "Set app storage",
+        .description = "Choose the workspace storage the app mounts, replacing what it mounted: a "
+                       "volume at an absolute `mount_path` (a volume is mounted by one service or "
+                       "app), a bucket in your own account as environment variables "
+                       "(STORE_<NAME>_BUCKET and the rest). The operator rolls the app's pods. [] "
+                       "mounts nothing.",
+        .input_schema =
+            app_input_schema({{"stores", store_mounts_schema()}}, json::array({"stores"})),
+        .output_schema = {{"type", "object"}},
+        .kind = CapabilityKind::Action,
+        .object = "customer",
+        .action = "write",
+        .resolve_object = customer_object,
+        .async_handler = [](const json& input,
+                            ApiContext& context) -> liquid::runtime::task<ApiResult> {
+            auto app = owned_app(input, context);
+            if (!app) {
+                co_return app.error();
+            }
+            auto mounts = checked_store_mounts(
+                input.at("stores"), app->customer_id, app->workspace_id, {}, true, *context.store);
+            if (!mounts) {
+                co_return mounts.error();
+            }
+            json ids = json::array();
+            for (const control::StoreMountRequest& mount : *mounts) {
+                ids.push_back(mount.store_id);
+            }
+            control::WebAppPatch patch;
+            patch.stores = std::move(*mounts);
+            auto result = co_await patch_and_publish(
+                input, context, std::move(patch), "app.stores", "stores", {{"stores", ids}});
+            if (result && result->ok) {
+                add_app_stores(context, result->value);
+            }
+            co_return result;
         }});
 
     registry.add(Capability{

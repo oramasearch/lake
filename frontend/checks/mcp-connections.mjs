@@ -1,5 +1,6 @@
 // Screenshots of Data → MCP Connections (lake#652, docs/ui/mcp-connections.md) at 1440 and 390 wide:
-// the list, New connection, a connection's page and its "Try it" drawer. Run against
+// the list, New connection (a remote server, and a package Lake runs here), a connection's page, its
+// "Try it" drawer, and a stdio connection's page with its App (lake#659). Run against
 // `npx vite --port 5174`; every /v1 call is answered by the mocks below, so no lake is needed.
 // Playwright is not a dependency of the app:
 //
@@ -60,11 +61,21 @@ const connection = {
   prompts: [{ name: "summarize_ticket" }], skipped: ["tool 'bad name': its name is not an MCP tool name"],
 };
 const failing = { ...connection, id: "c-2", name: "Wiki Search With A Rather Long Name", prefix: "wiki_search_with_a_rath", url: "https://wiki.example.org/mcp", status: "needs_sign_in", last_error: "The MCP server asks for sign-in: its credential is missing, expired or refused.", tool_count: 5, allowed_count: 0, exported: false, agent_id: null, calls_this_month: 0, auth: { kind: "bearer", secret: { mount_id: "m-1", name: "wiki", field: "token" } } };
+const stdioConnection = {
+  ...connection, id: "c-3", name: "Everything", prefix: "everything", kind: "stdio", app_id: "app-3",
+  url: "http://app-0a1b2c3d4e5f.dev-ws-ws-1.svc.cluster.local/mcp", transport: "streamable_http",
+  auth: { kind: "bearer", secret: { mount_id: "m-1", name: "mcp-everything-runner", field: "token" } },
+  status: "starting", last_error: null, tool_count: 0, allowed_count: 0, exported: false, agent_id: null, tools: [], resources: [], prompts: [], skipped: [],
+  stdio: { runtime: "node", package: "@modelcontextprotocol/server-everything@2026.8.31", command: null, args: ["stdio"], env_keys: ["LOG_LEVEL"], secret_env_keys: ["GITHUB_TOKEN"], mount_id: "m-1", app_name: "mcp-everything-3f2a" },
+  app: { phase: "Deploying", ready: false, desired: "running", message: "Waiting for the rollout" },
+};
 const answers = {
   viewer,
   workspace_status: { requested: true, ready: true, phase: "Ready", workspace_id: "ws-1" },
   list_workspaces: { workspaces: [{ id: "ws-1", name: "Support", environment: "dev", phase: "Ready", desired: "running", storage_gi: 5 }] },
-  list_mcp_connections: { connections: [connection, failing] },
+  list_mcp_connections: { connections: [connection, failing, stdioConnection] },
+  get_app: { id: "app-3", name: "mcp-everything-3f2a", phase: "Deploying", ready: false, desired: "running", message: "Waiting for the rollout" },
+  app_logs: { items: [{ ts: "2026-10-11T12:00:01Z", line: "started npx (3 arguments)" }, { ts: "2026-10-11T12:00:09Z", line: "Starting default (STDIO) server..." }, { ts: "2026-10-11T12:00:10Z", line: "the MCP server is initialized; serving MCP at :8080/mcp" }] },
   get_mcp_connection: connection,
   list_mcp_connection_calls: {
     calls: [
@@ -85,6 +96,15 @@ for (const width of [1440, 390]) {
   const context = await browser.newContext({ viewport: { width, height: width > 600 ? 900 : 844 }, deviceScaleFactor: width > 600 ? 1 : 2, colorScheme: "light" });
   await context.route(/\/v1\/[a-z_]+/, async (route) => {
     const name = new URL(route.request().url()).pathname.split("/v1/")[1];
+    let body = null;
+    try {
+      body = route.request().postDataJSON();
+    } catch {
+      body = null;
+    }
+    if (name === "get_mcp_connection" && (body?.id === "c-3" || new URL(route.request().url()).searchParams.get("id") === "c-3")) {
+      return route.fulfill({ contentType: "application/json", body: JSON.stringify({ ok: true, value: stdioConnection }) });
+    }
     return route.fulfill({ contentType: "application/json", body: JSON.stringify({ ok: true, value: answers[name] ?? {} }) });
   });
   const page = await context.newPage();
@@ -119,6 +139,16 @@ for (const width of [1440, 390]) {
   await page.getByRole("button", { name: "Run", exact: true }).click();
   await page.waitForTimeout(300);
   await facts("try");
+  await page.goto(BASE + "/w/ws-1/mcp-connections", { waitUntil: "networkidle" });
+  await page.getByRole("button", { name: "New connection" }).first().click();
+  await page.waitForTimeout(300);
+  await page.getByLabel("Here, from a package (stdio)").check();
+  await page.getByRole("button", { name: "Add variable" }).click();
+  await page.waitForTimeout(200);
+  await facts("new-stdio");
+  await page.goto(BASE + "/w/ws-1/mcp-connection?id=c-3", { waitUntil: "networkidle" });
+  await page.waitForTimeout(400);
+  await facts("stdio");
   await context.close();
 }
 await browser.close();

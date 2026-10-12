@@ -7,6 +7,7 @@
 #include <sstream>
 #include <utility>
 
+#include "lake/control/store.hpp"
 #include "methodology_templates.hpp"
 
 namespace lake::control {
@@ -1119,6 +1120,39 @@ json numeric_metrics(const json& metrics, std::vector<std::string>* dropped) {
         }
     }
     return out;
+}
+
+bool methodology_deployment_endpoint_valid(std::string_view endpoint) {
+    // http://md-<12 hex>.<namespace>.svc.cluster.local[:port], nothing else (lake#690).
+    constexpr std::string_view scheme = "http://md-";
+    constexpr std::string_view suffix = ".svc.cluster.local";
+    if (!endpoint.starts_with(scheme)) {
+        return false;
+    }
+    std::string_view rest = endpoint.substr(scheme.size());
+    if (rest.size() < 13 || rest[12] != '.' ||
+        !std::ranges::all_of(rest.substr(0, 12), [](unsigned char c) {
+            return std::isdigit(c) != 0 || (c >= 'a' && c <= 'f');
+        })) {
+        return false;
+    }
+    rest = rest.substr(13);
+    const auto at = rest.find(suffix);
+    if (at == std::string_view::npos || at == 0) {
+        return false;
+    }
+    const std::string_view space = rest.substr(0, at);
+    if (!std::ranges::all_of(space, [](unsigned char c) {
+            return std::islower(c) != 0 || std::isdigit(c) != 0 || c == '-';
+        })) {
+        return false;
+    }
+    const std::string_view port = rest.substr(at + suffix.size());
+    if (port.empty()) {
+        return true;
+    }
+    return port.size() >= 2 && port.size() <= 6 && port[0] == ':' &&
+           std::ranges::all_of(port.substr(1), [](unsigned char c) { return std::isdigit(c) != 0; });
 }
 
 } // namespace lake::control

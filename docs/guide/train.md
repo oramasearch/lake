@@ -261,7 +261,8 @@ held-out scores, comparisons and serving like any other. Press **New model** on 
   that learns without one, such as segmentation, takes none), and keep a held-out share (0.2 by
   default) so its score is honest. Lake trains it and opens the run; the model appears when the run
   finishes.
-- **Bring one**: a model file from **This computer**, **A drive** or **A model repository**, with
+- **Bring one**: a model file from **This computer**, **A drive** (open any drive and its folders,
+  or search every drive by name, and choose the file or a shortcut to it) or **A model repository**, with
   the held-out AUC it got where it was trained, if you know it. The file is a gradient-boosted tree
   model in the engine's own JSON weights format, the format every model trained in Lake is kept
   in. Any other format is refused and nothing is kept.

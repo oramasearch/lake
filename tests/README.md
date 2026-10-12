@@ -126,6 +126,10 @@ and schema-loads a fresh database on first use in each test and drops it after f
 untouched. Each test receives a random `LAKE_INSTANCE_KEK`. See
 [`testing.md`](../docs/build/testing.md) for ownership, assertion patterns, and the sweep.
 `audit_test_support.hpp` exhausts append-order pages; use exact request filters for specific calls.
+`test_store_providers.cpp` (lake#664) runs one conformance suite against every store provider, each
+over a local fake of it in `store_provider_fakes.hpp` (an S3 server and an Azure Blob server that
+check every signature, and a liquid repository branch), plus the workspace Zetta fakes; SigV4 is
+pinned to the AWS examples and Shared Key to an independently computed signature.
 `drive_history_support.hpp` is the Drive overwrite exercise of lake#123 (upload twice, history,
 comparison, restore and deletion, through the HTTP API) over any running Lake; the Postgres
 scenario and `WorkspaceStoreDrive.*` (account store and switched workspace store) both run it.
@@ -332,6 +336,9 @@ static and lifetime amplification, permitted descendants, recursive session/devi
 expired PostgreSQL ancestors, application-pool issuance without an additional JWT, and one signed audit event per call without bearer values. Each
 PostgreSQL case owns an isolated schema in `LAKE_TEST_DB_URI` and removes it afterward. Run the
 full static and shared CTest suites with PostgreSQL configured; see `docs/api/identity.md`.
+`PostgresSessions.AnExpiredCredentialIsToldApartFromAnUnknownOne` (`test_postgres.cpp`) issues an
+hour-long token, proves it live, then moves its `expires_at` into the past with SQL instead of
+sleeping past a one-second lifetime, so a loaded host cannot expire it early or late (lake#679).
 
 `Mcp.ToolSchemasAreByteIdenticalToOpenApi` (`test_api.cpp`) compares every MCP tool's input and
 output schema with its OpenAPI operation, byte for byte, for callers and agent-task credentials;
@@ -432,11 +439,23 @@ public addresses and tool bounds, then the client over the server's own transpor
 `mcp_test_server.hpp`, a local MCP server (Streamable HTTP and HTTP+SSE, an OAuth authorization
 server, and hostile modes: slow, huge, garbage, another id first, a sampling request, endless
 events, an unknown version).
+`McpStdioConnectionsRunAsAWorkspaceApp` (lake#659) checks a stdio connection's secret, App, address
+and lifecycle; `McpClient.AWorkspaceAppIsReachedOnlyAtAClusterServiceName` the address rule, and
+`McpClient.DrivesAStdioServerThroughTheRunner` runs Lake's client through a running
+`lake-mcp-runner` when `LAKE_MCP_RUNNER_URL` and `LAKE_MCP_RUNNER_TOKEN` are set.
+`McpConnectionDispatchNamesExportsAndStreamingWorkspacesOnly` (lake#684, lake#685) checks the
+dispatch rows, the workspace endpoint's digest and that the stream worker calls only streaming
+workspaces; `HttpServer.WorkspaceMcpSessionsLearnThatExportedToolsChanged` drives the notice over
+`/w/<workspace>/mcp`.
 `test_workspace_records.cpp`'s `McpConnections*` cases run the MCP connection capabilities against
 that server with both stores: the sealed record and its secret, the read-or-change rule for people,
 Ask Orama and a user-built agent, auto-approve, the audit, the usage series, re-export through the
 workspace's MCP endpoint, OAuth sign-in with registration, PKCE and refresh rotation, and the
 stream worker's mirrored notifications, agent jobs and published results.
+`AStreamStartsItsAgentOncePerMessageAsThePersonWhoSetIt` (lake#677) runs `set_agent_streams` and
+`AgentStreamWorker` with both stores: the refusals, the sealed trigger, one job per new message as
+the person who set it with the message as its input, and removal by `delete_agent` and by the worker
+when the agent is gone.
 
 `test_workspace_records.cpp` covers workspace records (lake#370,
 [workspace-records.md](../docs/architecture/workspace-records.md)): sealed records and blind
@@ -494,7 +513,11 @@ stop.
 Usage over time (lake#564): `test_usage.cpp` covers `UsageRecorder` (bounded, flushed, values added
 together dropped together, readings keeping their latest, deleted and refusing workspaces),
 `usage_over_time` across workspaces by hour, day and month and its refusals, limits, `record_model_usage`,
-the owner loop's `sample_usage` and the speech-to-text seconds and tokens of a transcript.
+the owner loop's `sample_usage` and the speech-to-text seconds and tokens of a transcript, and
+(lake#661) each closed hour of an app's ingress traffic charged once as `transfer`
+(`UsageSample.ChargesEachClosedHourOfAppTrafficOnce`); `test_postgres.cpp`'s
+`PostgresBilling.AppTrafficAddsUpByAppAndHour` covers `app_transfer` in both stores and
+`test_operator_contract.cpp` the operator's statements for it.
 `record_fixture.hpp`'s time series now answers a gauge's `last` reading per step.
 
 The model gateway (lake#248): `test_model_gateway.cpp` covers the request as forwarded (a stream
@@ -503,6 +526,10 @@ the provider's refusals without echoing Lake's key, `model_completion` counting 
 launch's tokens in the run's workspace with the prompt kept out of the audit, every other caller
 refused before the provider, the monthly `model_tokens` limit refusing with `usage_limit_reached`,
 and the OpenAI-compatible `/openai/v1/*` route over a real server, all against a fake provider.
+Streaming (lake#665): a stream's usage read piece by piece however the pieces cut its events, a
+relayed stream counted from its last event and one without usage audited `usage_reported: false`,
+and the route over a real server and its outbound client against a loopback provider that holds its
+last event until the caller has read the first.
 
 Billing (lake#564): `test_billing.cpp` covers prices and bill lines, choosing a plan now or next
 month, a month's bill from two workspaces' usage, invoices frozen, voided, reissued and paid, an

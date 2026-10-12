@@ -85,7 +85,7 @@ function ConnectionCard({ row, to }: { row: McpConnection; to: string }) {
           <span className="min-w-0 flex-1 truncate text-[14.5px] font-semibold text-ink">{row.name}</span>
           <Chip tone={statusTone(row.status)}>{statusLabel(row.status)}</Chip>
         </div>
-        <div className="mt-1 truncate font-mono text-[12px] text-ink-3">{hostOf(row.url)}</div>
+        <div className="mt-1 truncate font-mono text-[12px] text-ink-3">{row.kind === "stdio" && row.stdio ? row.stdio.package : hostOf(row.url)}</div>
         <div className="mt-2 flex flex-wrap items-center gap-1.5">
           <Chip>
             {row.allowed_count} of {row.tool_count} tools allowed

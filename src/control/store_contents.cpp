@@ -21,7 +21,8 @@ std::string store_browse_refusal(std::string_view type, std::string_view provide
     const StoreProvider* known = find_store_provider(type, provider);
     const std::string label = known != nullptr ? std::string(known->label)
                                                : std::string(type) + " " + std::string(provider);
-    return "Lake cannot browse this store (" + label + ") yet: " + std::string(store_browse_issue);
+    return "this Lake is not configured to reach external buckets, so it cannot browse this store (" +
+           label + ")";
 }
 
 bool valid_store_path(std::string_view path) {

@@ -4,7 +4,13 @@
 not deployed. Drafts written by Ask Orama (lake#688, no migration) need agent-ask-orama with its
 `methodology_draft` turn; not deployed.** It needs Zetta with zetta#1261 (zetta PR #1265), the Orama operator with
 orama-operator#291 (operator PR #292) and a published `oramasearch/methodology-runtime` image
-(methodology-runtime PR #2). A workspace has two kinds of methodology:
+(methodology-runtime PR #2). The per-workspace queue of runs and the placement of GPU runs
+(orama-operator#293, migration `0082_methodology_run_queue`) are implemented in the source tree and
+not deployed; they need the operator's change of the same issue. Serving a trained model from Ship →
+Models and artifacts over 24 MiB (lake#690, migration `0083_methodology_deployments`) are
+implemented in the source tree and not deployed; they need the zetta, operator and
+methodology-runtime changes of the same issue ([below](#serving-its-model)). A workspace has two
+kinds of methodology:
 
 - **Orama's**: the engine's catalogue, M-1 to M-21, built into the engine as native code. They are
   **read-only**: Lake refuses to edit or delete them, whoever asks. Each can be duplicated.
@@ -91,9 +97,14 @@ carries `workspace_act` the actions (`granted_by_scope`), so agents use them thr
 | `get_methodology_run` | read | `run_id` | `{run}` with its result, model and log |
 | `stop_methodology_run` | action | `run_id` | `{run}` |
 | `methodology_run_input` | read (also POST) | `run_id`, `offset?`, `limit?` | the runner's: `{spec, rows, next_offset, total_rows}` |
-| `methodology_run_output` | action | `run_id`, `result`, `artifact_base64?`, `log?` | the runner's: `{recorded, model_id}` |
+| `methodology_run_artifact` | action | `run_id`, `offset`, `chunk_base64` | the runner's: `{received}`, an artifact over 24 MiB in 8 MiB chunks (lake#690) |
+| `methodology_run_output` | action | `run_id`, `result`, `artifact_base64?` or `artifact {bytes, sha256}?`, `log?` | the runner's: `{recorded, model_id}` |
+| `get_methodology_deployment` | read | `model_id` | `{deployment}`: whether the model is served, its phase and message, or null (lake#690) |
+| `list_methodology_deployments` | read | `limit?` | `{deployments}`, newest first, stopped ones included |
+| `methodology_deployment_input` | read (also POST) | `deployment_id`, `offset?`, `limit?` | the stage's: `{spec, chunk_base64, offset, next_offset, total_bytes, sha256}` |
 
-The last two answer only the run's own credential (below); a person's call is `unauthorized`.
+The runner's three answer only the run's own credential (below), and `methodology_deployment_input`
+only the deployment's ([below](#serving-its-model)); a person's call is `unauthorized`.
 
 ### Creating one
 
@@ -252,26 +263,60 @@ environment or a token file, or reaches the network it was not granted (methodol
 **Data goes in and the result comes out only through Lake.** The operator generates a credential
 `lmr.<run id>.<secret>` for the stage and collect pods and writes only its SHA-256 to
 `methodology_run_status`; Lake resolves it by comparing digests in constant time. It acts as no
-person, reaches only `methodology_run_input` and `methodology_run_output` for its own run (and a
-pull of its own image), and stops resolving when the run ends:
+person, reaches only `methodology_run_input`, `methodology_run_artifact` and
+`methodology_run_output` for its own run (and a pull of its own image), and stops resolving when the
+run ends:
 
 - `methodology_run_input` answers the run's spec (mode, parameters, target, features, holdout,
   seed, network, manifest) and its rows, 5,000 at a time, read from the workspace through the
   engine (`SELECT … LIMIT … OFFSET …`) or generated for Validate.
 - `methodology_run_output` takes the result once (a second is `conflict`, "already recorded"):
   its status, findings, metrics (only numbers named `in_sample_` or `held_out_` are kept; others
-  are listed in `dropped_metrics`), row counts, the artifact (base64, at most 24 MiB) and the last
-  64 KiB of the log. Validate's outcome is written to the engine's entry; a training run's model is
-  registered with the engine's `record_methodology_run`.
+  are listed in `dropped_metrics`), row counts, the artifact and the last 64 KiB of the log.
+  Validate's outcome is written to the engine's entry; a training run's model is registered with the
+  engine's `record_methodology_run`.
+
+**The artifact.** Up to 24 MiB it comes inline, `artifact_base64`. A larger one, up to **1 GiB**
+(lake#690), comes first with `methodology_run_artifact`, in order, 8 MiB at a time:
+
+```json
+{"run_id": "<run id>", "offset": 0, "chunk_base64": "…"}
+```
+
+Lake forwards each chunk to the workspace engine (`append_methodology_artifact`), which stages it on
+its disk, and answers `{received}`, the bytes held. A chunk at an offset below that replaces what was
+held from there, so a collect that runs again starts over safely; an offset past it is `conflict`,
+naming where to resume; a chunk after the result is recorded is `conflict`. The output then names
+the artifact instead of carrying it, `"artifact": {"bytes": N, "sha256": "<64 hex>"}` (not both), and
+the engine checks the staged file's size and SHA-256 before it becomes the model's weights
+(`record_methodology_run` with `artifact_staged`). The bytes never pass through Lake's PostgreSQL.
 
 ### Where a run lives
 
 Its dispatch row and the operator's status are in PostgreSQL; what it read and produced (dataset,
 target, features, parameters, result, metrics, log, model) is a sealed `lake_methodology_runs`
 record in the workspace Zetta, found by the account and methodology. A run's phase is the operator's
-(`Building`, `Staging`, `Running`, `Collecting`, `Succeeded`, `Failed`, `Stopped`), with a message in
-Lake's words while it waits. A run the operator has not reported on within 30 minutes (its image
-build included) is withdrawn with the reason.
+(`Building`, `Queued`, `Staging`, `Running`, `Collecting`, `Succeeded`, `Failed`, `Stopped`), with a
+message in Lake's words while it waits. A run the operator has not reported on within 30 minutes (its
+image build included) is withdrawn with the reason; a `Queued` run has been reported on and waits as
+long as it must.
+
+### Queued
+
+The Orama operator runs a limited number of a workspace's methodology runs at once
+(orama-operator#293, migration `0082_methodology_run_queue`): the Lake's
+`spec.methodologies.maxConcurrentRunsPerWorkspace`, 2 unless set. A run whose image is built starts
+only while fewer of its workspace's runs are staging, running or collecting; otherwise it is
+`Queued`, oldest first, and its message says how many are running, the limit and its place:
+
+```json
+{"run": {"id": "…", "phase": "Queued", "message": "Queued: 2 of this workspace's methodology runs are running (the limit is 2); this run is next."}}
+```
+
+A run that asks for GPUs is also `Queued` while no node of its GPU class (or, with no class, no GPU
+node) exists, with that reason; its work volume is placed in a zone where such nodes are, so its
+code can be scheduled next to its data. Stop a queued run with `stop_methodology_run` as any other.
+Design → Methodologies shows the reason beside the run's state.
 
 ### Metering
 
@@ -291,24 +336,84 @@ training run of that project and pipeline; the answer is `{runner: "lake", statu
 methodology, methodology_run}`. The engine records the Run and its lineage when the result comes
 back.
 
+## Serving its model
+
+A training run's model (kind `python:W-…`) is served by its own code (lake#690), from Ship → Models
+like any model: **Publish** it, and Lake starts its server; `predict` answers from it; **Unpublish**
+or delete it, and the server stops. The engine never runs the Python, so its own `deploy` of such a
+pipeline still answers `not_supported`; Lake handles these models itself.
+
+`POST /v1/workspace_act`
+
+```json
+{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "capability": "expose_model", "input": {"model_id": "<model id>"}}
+```
+
+```json
+{"model_id": "<model id>", "exposed": true, "deployment": {"id": "…", "model_id": "<model id>", "methodology_id": "W-0a1b2c3d", "phase": "Pending", "message": "Waiting for the Orama operator to start serving this model.", "ready": false}}
+```
+
+Publishing writes one `methodology_deployments` row (migration `0083`; ids, image, resources and
+phase only), from the training run that made the model (its `lake_run_id`): its image build, its
+CPU, memory and GPUs, its network grant. A model whose training run Lake no longer has is refused
+(`conflict`): its image is unknown. One deployment per model; publishing again answers the same one.
+If Lake cannot start it (`LAKE_METHODOLOGY_RUNTIME_IMAGE` unset), the engine's publish is undone and
+the reason answered.
+
+**How it runs.** The Orama operator runs it in the methodology-runs namespace
+(orama-operator `docs/lake/methodology-runs.md#serving-a-model`): a **stage** Job of the pristine
+runtime image, holding the deployment's credential `lmd.<deployment id>.<secret>`, reads the model's
+artifact through `methodology_deployment_input` (Lake reads it from the engine's
+`read_model_weights`, 8 MiB at a time, with its size and SHA-256) onto a volume; then a **serve**
+Deployment of the methodology's own image (`methodology serve`) mounts that volume read-only, with no
+credential, no service account token and no network of its own unless granted, and answers on a
+Service that only Lake's pods can reach. The serve pod checks its sandbox before it imports the code,
+as a run does. The credential reaches `methodology_deployment_input` for that deployment only (and a
+pull of its image, which kubelet repeats when a serve pod restarts), and stops resolving when it
+stops.
+
+Its phase is the operator's: `Building`, `Queued` (a GPU model with no node of its class),
+`Staging`, `Starting`, `Ready`, `Failed` (the build or the stage failed, or the server kept exiting:
+the message says what it said) or `Stopped`. `get_methodology_deployment` answers it:
+
+```json
+{"deployment": {"id": "…", "model_id": "<model id>", "phase": "Ready", "message": "Serving predictions.", "ready": true, "resources": {"cpu_millis": 1000, "memory_bytes": 2147483648, "gpus": 0, "gpu_class": ""}}}
+```
+
+**Predictions go through Lake.** `predict` of such a model, published and `Ready`, sends the rows
+(at most 10,000) to its server's `POST /predict` and answers one prediction per row, each with its
+`row` and, when the row carries it, its `entity`:
+
+```json
+{"model": "<model id>", "runner": "methodology", "methodology_id": "W-0a1b2c3d", "predictions": [{"row": 0, "entity": "c-1", "prediction": 0.82}], "entity_column": "entity"}
+```
+
+Before it is ready the answer is `conflict` with its phase; an error the methodology's `predict`
+raised is `invalid_input` with its message. The call is authorized, audited and metered like any
+`predict`: one `predictions` per answered call, and the per-model traffic series.
+
+**Metering.** While its serve pods run, the operator reports their resources as
+`methodology_deployment` in `workload_resources`, and Lake's usage sampler charges their CPU, RAM, GPU
+and GPU memory for that time, as kind `methodology` in the workspace, as for apps and services
+([metering.md](metering.md#resources)). Staging the model is the operator's transfer and is not
+charged.
+
 ## What is not built yet
 
 - Experiments over a workspace methodology's parameters: the engine lists it with `studies: false`
   (lake#689).
-- Serving a workspace methodology's model from Ship → Models: its predictions need the runner, so
-  the engine refuses to deploy it (lake#690).
-- Artifacts larger than 24 MiB (lake#690).
 
 ## Errors
 
 | Code | When |
 |---|---|
 | `forbidden` | an edit or delete of one of Orama's methodologies |
-| `conflict` | a run of a methodology not validated for its current code; a second result; its repository is gone |
+| `conflict` | a run of a methodology not validated for its current code; a second result; its repository is gone; a chunk past the bytes received or after the result; `predict` of a served model that is not `Ready`; publishing a model whose training run is gone |
 | `invalid_input` | a manifest that cannot be read; a file path outside the folder; a parameter of the wrong kind; a dataset not `<database>.<table>` |
 | `not_found` | no such methodology or run in this workspace |
 | `store_unavailable` | `LAKE_METHODOLOGY_RUNTIME_IMAGE` is not configured, or no repository store |
-| `unauthorized` | the runner's capabilities called with anything but that run's credential |
+| `unauthorized` | the runner's capabilities called with anything but that run's credential; `methodology_deployment_input` with anything but that deployment's |
+| `not_supported` | `predict` of a served model on a Lake with no client for its server |
 
 ## Configuration
 
@@ -337,12 +442,17 @@ Dockerfile, the sample and every template run through the interface with python3
 `WorkspaceRecordStores.MethodologiesAreTheWorkspacesOwnAndOramasStayReadOnly` (memory and
 PostgreSQL) covers create, read-only, duplicate both kinds, Validate refusing a broken one and
 passing a good one, the runner's credential reaching nothing but its own run, the result accepted
-once, training registering a model, the pipeline hand-off, edit and delete.
+once, training registering a model, an artifact in chunks (in order, resumable, named by size and
+SHA-256), publishing a model starting one deployment, the deployment's credential reaching only its
+input, the endpoint refused unless it is a serve Service, `predict` forwarded to the server and its
+errors answered, unpublishing stopping it, the pipeline hand-off, edit and delete.
 
 ## How to change it
 
 The pure parts are `src/control/methodologies.cpp` (manifest, checks, drafts) and
 `src/control/methodology_templates.cpp` (the Python templates); the capabilities are
-`src/api/methodology_capabilities.cpp`; the dispatch rows are in `db/schema.sql` (`0078`) and both
+`src/api/methodology_capabilities.cpp` (serving: `serve_methodology_model` and
+`predict_methodology_model`, called from `workspace_capabilities.cpp` and
+`deletion_capabilities.cpp`); the dispatch rows are in `db/schema.sql` (`0078`, `0083`) and both
 stores. The runner's contract is shared with `oramasearch/methodology-runtime` (`docs/cli.md`) and
 the operator (`docs/lake/methodology-runs.md`): change all three together.
