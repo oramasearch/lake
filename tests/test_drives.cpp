@@ -1704,7 +1704,7 @@ TEST(Drives, AModelIsBroughtFromEveryDriveKindAndAShortcutIsFollowed) {
     contents->folders.insert("2026/q3");
     contents->folders.insert("2026/q3/churn");
     contents->files["2026/q3/churn/model.json"] = weights;
-    s.browser = [&](const lake::control::ManagedStore&, const json&)
+    s.browser = [&](const lake::control::StoreOpening&)
         -> lake::control::ZettaControlResult<std::shared_ptr<lake::control::StoreContents>> {
         return std::shared_ptr<lake::control::StoreContents>(contents);
     };
