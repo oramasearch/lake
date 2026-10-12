@@ -3919,7 +3919,9 @@ INSERT INTO schema_migrations (version) VALUES ('0074_payment_provider')
 -- ---------------------------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS workload_resources (
     object_kind  text        NOT NULL CHECK (object_kind IN ('workspace', 'service', 'store', 'app',
-                                                             'build', 'agent_launch')),
+                                                             'build', 'agent_launch',
+                                                             'agent_cron_run', 'methodology_run',
+                                                             'methodology_deployment')),
     object_id    uuid        NOT NULL,
     pods         integer     NOT NULL DEFAULT 0 CHECK (pods >= 0),
     cpu_millis   bigint      NOT NULL DEFAULT 0 CHECK (cpu_millis >= 0),
@@ -3973,7 +3975,7 @@ INSERT INTO schema_migrations (version) VALUES ('0076_organization_deletion')
 ALTER TABLE workload_resources DROP CONSTRAINT IF EXISTS workload_resources_object_kind_check;
 ALTER TABLE workload_resources ADD CONSTRAINT workload_resources_object_kind_check
     CHECK (object_kind IN ('workspace', 'service', 'store', 'app', 'build', 'agent_launch',
-                           'agent_cron_run'));
+                           'agent_cron_run', 'methodology_run', 'methodology_deployment'));
 
 CREATE TABLE IF NOT EXISTS metered_jobs_guard (
     applied_at timestamptz NOT NULL DEFAULT now()
@@ -4064,7 +4066,7 @@ CREATE INDEX IF NOT EXISTS methodology_run_status_credential_idx
 ALTER TABLE workload_resources DROP CONSTRAINT IF EXISTS workload_resources_object_kind_check;
 ALTER TABLE workload_resources ADD CONSTRAINT workload_resources_object_kind_check
     CHECK (object_kind IN ('workspace', 'service', 'store', 'app', 'build', 'agent_launch',
-                           'agent_cron_run', 'methodology_run'));
+                           'agent_cron_run', 'methodology_run', 'methodology_deployment'));
 
 CREATE TABLE IF NOT EXISTS methodology_runs_guard (
     applied_at timestamptz NOT NULL DEFAULT now()
