@@ -215,7 +215,9 @@ bearer, never a capability.
 `deletion_capabilities.cpp` registers what deletes a workspace's data (lake#645):
 `delete_dataset`, `delete_model`, `delete_run` and `delete_index`, named capabilities over the
 workspace engine's own deletes that answer `not_supported` from an older engine, and
-`delete_ask_conversation`, which removes one person's message records from the workspace Zetta.
+`delete_ask_conversation`, which removes one person's message records from the workspace Zetta and
+the agent tasks the conversation started (their `lake_agent_tasks` records, then their dispatch
+rows through `Store::delete_agent_tasks`, lake#673).
 `delete_organization`, `revoke_invitation` and `revoke_grant` sit beside their siblings in
 `capabilities.cpp`, and `delete_secret_mount` in `secrets_capabilities.cpp` over
 `MountSecrets::remove_all` (`secret_records_api.cpp`). Each takes `dry_run`. See

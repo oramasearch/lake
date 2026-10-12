@@ -1559,6 +1559,18 @@ public:
                                                              const std::string& agent,
                                                              const std::string& kind,
                                                              const std::string& workspace_id) = 0;
+    // The tasks one person's conversation started in a workspace (kind ask or factory, any
+    // agent), and every task those asked for in turn (parent_task_id, lake#451), oldest first:
+    // what deleting the conversation removes (lake#673). Empty for an id that is not a UUID.
+    virtual Result<std::vector<AgentTask>>
+    list_conversation_agent_tasks(const std::string& customer_id,
+                                  const std::string& workspace_id,
+                                  const std::string& conversation_id,
+                                  const std::string& requested_by_user_id) = 0;
+    // Removes these tasks' dispatch rows (their status goes with them) when they belong to
+    // `customer_id`; answers how many went. Ids of another space, or already gone, are skipped.
+    virtual Result<std::size_t> delete_agent_tasks(const std::string& customer_id,
+                                                   const std::vector<std::string>& ids) = 0;
     // The task's agent claims it: Running, with the SHA-256 of the credential lake just handed
     // it and where on agent-events its events will start. Exactly one claim per attempt succeeds;
     // another is a conflict, as is a claim by a different agent.

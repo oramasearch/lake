@@ -24,7 +24,7 @@ OpenAPI, MCP), and each:
 | `delete_model` | … `id` (or `model_id`) | a trained model, no longer served; its run is kept | workspace | [models.md](models.md#deleting-from-a-workspace) |
 | `delete_run` | … `id` (or `run_id`) | a finished run and its report; the models it trained are kept | workspace | [models.md](models.md#deleting-from-a-workspace) |
 | `delete_index` | … `id` (or `index_id`) | a search index, no longer served; its dataset is kept | workspace | [models.md](models.md#deleting-from-a-workspace) |
-| `delete_ask_conversation` | `customer_id`, `workspace_id`, `conversation_id`, `dry_run?` | every message of one of the caller's conversations | workspace | [ask-orama.md](ask-orama.md#deleting-a-conversation) |
+| `delete_ask_conversation` | `customer_id`, `workspace_id`, `conversation_id`, `dry_run?` | every message of one of the caller's conversations, and the agent tasks it started (their records and dispatch rows, lake#673) | workspace | [ask-orama.md](ask-orama.md#deleting-a-conversation) |
 
 ## Why an organization is marked, not erased
 

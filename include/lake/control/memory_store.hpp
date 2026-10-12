@@ -272,6 +272,13 @@ public:
                                                      const std::string& agent,
                                                      const std::string& kind,
                                                      const std::string& workspace_id) override;
+    Result<std::vector<AgentTask>>
+    list_conversation_agent_tasks(const std::string& customer_id,
+                                  const std::string& workspace_id,
+                                  const std::string& conversation_id,
+                                  const std::string& requested_by_user_id) override;
+    Result<std::size_t> delete_agent_tasks(const std::string& customer_id,
+                                           const std::vector<std::string>& ids) override;
     Result<AgentTask> claim_agent_task(const std::string& id,
                                        const std::string& agent,
                                        const std::string& credential_sha256,
