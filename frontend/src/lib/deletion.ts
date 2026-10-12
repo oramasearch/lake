@@ -113,7 +113,8 @@ export function conversationLines(plan: Plan): DeletionLine[] {
   const first = typeof plan.first_message === "string" ? plan.first_message.trim() : "";
   const lines: DeletionLine[] = [line(messages, "message", "messages")];
   if (first) lines.push({ count: null, text: `It starts: “${first.length > 120 ? `${first.slice(0, 119)}…` : first}”` });
-  lines.push({ count: null, text: "Kept: the agent tasks it started, in Agent Tasks." });
+  const tasks = list(plan.agent_tasks).length;
+  if (tasks > 0) lines.push(line(tasks, "agent task it started", "agent tasks it started", ", with what was asked and answered"));
   return lines;
 }
 

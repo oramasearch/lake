@@ -2,11 +2,13 @@
  * server and status, its tools (allow each, say whether it changes something, try it, auto-approve
  * a change for one agent), the switch that exposes its allowed tools through Lake's own MCP (with
  * what that means, decision 60), its agent and streams, its recent calls from the audit, and what
- * the server also offers. Refresh asks the server again; Delete names what goes. */
-import { useMemo, useState } from "react";
+ * the server also offers. A server Lake runs here (lake#659) also shows its App: its state, Start,
+ * Stop and Restart, and its logs; its tools are discovered once the App is ready. Refresh asks the
+ * server again; Delete names what goes. */
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { Activity, Bot, CalendarClock, Plug, RefreshCw, ShieldCheck, Wrench } from "lucide-react";
-import { act, ApiError, useList, type Row } from "@/lib/api";
+import { Activity, Bot, Box, CalendarClock, Plug, RefreshCw, ShieldCheck, Wrench } from "lucide-react";
+import { act, ApiError, useList, useRead, type Row } from "@/lib/api";
 import { date, dateTime } from "@/lib/format";
 import { Banner, Button, Card, Chip, DataTable, Empty, ErrorBlock, Field, KeyValue, Page, Section, Skeleton, Stat, StatRow } from "@/lib/ui";
 import { ConfirmButton, Modal } from "@/lib/overlay";
@@ -14,7 +16,9 @@ import { useToast } from "@/lib/toast";
 import { useTrail } from "@/lib/trail";
 import { WorkspaceGate } from "@/components/WorkspaceGate";
 import { qs, useSpaceRead, useWorkspace, useWq, useWsPath } from "@/pages/train/workspace";
-import { authLabel, exportWarning, statusLabel, transportLabel, viaLabel, type McpConnection, type McpTool } from "./logic";
+import { authLabel, exportWarning, runtimeLabel, statusLabel, stdioCommandLine, transportLabel, viaLabel, type McpConnection, type McpTool } from "./logic";
+import { AppPhase } from "@/pages/apps/AppsPage";
+import { Terminal } from "@/pages/apps/shared";
 import { TryTool } from "./TryTool";
 
 export default function McpConnectionPage() {
@@ -55,6 +59,7 @@ function ConnectionView({ c }: { c: McpConnection }) {
   const [trying, setTrying] = useState<McpTool | null>(null);
   const tools = c.tools ?? [];
   const serverName = c.server?.name || c.name;
+  const stdio = c.kind === "stdio" && c.stdio ? c.stdio : null;
 
   const refresh = async () => {
     setRefreshing(true);
@@ -85,7 +90,8 @@ function ConnectionView({ c }: { c: McpConnection }) {
         typed={c.name}
         confirm={
           <>
-            People, Ask Orama and agents lose its tools at once, and its agent loses its only tools. The secret it used stays in its mount.
+            People, Ask Orama and agents lose its tools at once, and its agent loses its only tools.{" "}
+            {stdio ? "Its App is deleted with it. " : ""}The secret it used stays in its mount.
           </>
         }
         onConfirm={async () => {
@@ -100,8 +106,13 @@ function ConnectionView({ c }: { c: McpConnection }) {
   );
 
   return (
-    <Page eyebrow="MCP Connection" title={c.name} sub={<span className="font-mono text-[12.5px] break-all">{c.url}</span>} actions={actions}>
-      {c.status !== "connected" && (
+    <Page eyebrow="MCP Connection" title={c.name} sub={<span className="font-mono text-[12.5px] break-all">{stdio ? stdioCommandLine(stdio) : c.url}</span>} actions={actions}>
+      {c.status === "starting" && (
+        <Banner tone="info" title="Starting">
+          {c.last_error || "Lake runs this server as an App of this workspace. Its tools are discovered once the App is ready; the first start installs the package."}
+        </Banner>
+      )}
+      {c.status !== "connected" && c.status !== "starting" && (
         <Banner
           tone={c.status === "failing" ? "warn" : "info"}
           title={c.status === "needs_sign_in" ? "A person needs to sign in" : c.status === "failing" ? "Lake cannot use this server" : "Not discovered yet"}
@@ -143,6 +154,7 @@ function ConnectionView({ c }: { c: McpConnection }) {
         )}
       </Section>
 
+      {stdio && <RunsHereSection c={c} />}
       <ExportSection c={c} serverName={serverName} />
       <AgentSection c={c} />
       <CallsSection c={c} />
@@ -482,5 +494,96 @@ function SignIn({ c, onClose }: { c: McpConnection; onClose: () => void }) {
         {error ? <p className="error m-0">{(error as Error).message}</p> : null}
       </div>
     </Modal>
+  );
+}
+
+/** A server Lake runs here (lake#659): its App's state, Start, Stop and Restart, and its logs. Once
+ * the App is ready while the connection is still starting, the page asks Lake to discover it. */
+function RunsHereSection({ c }: { c: McpConnection }) {
+  const scope = useWorkspace();
+  const toast = useToast();
+  const wsPath = useWsPath();
+  const base = { customer_id: scope.customerId, workspace_id: scope.workspaceId, app_id: c.app_id ?? "" };
+  const app = useRead<Row>(c.app_id ? "get_app" : null, base, { refetchInterval: c.status === "starting" ? 5_000 : 30_000 });
+  const logs = useRead<{ items?: Row[] }>(c.app_id ? "app_logs" : null, { ...base, limit: 200 });
+  const [busy, setBusy] = useState("");
+  const discovered = useRef(false);
+  const ready = !!app.data?.ready;
+  useEffect(() => {
+    if (ready && c.status === "starting" && !discovered.current) {
+      discovered.current = true;
+      void act("refresh_mcp_connection", { customer_id: scope.customerId, workspace_id: scope.workspaceId, id: c.id }).catch(() => {});
+    }
+  }, [ready, c.status, c.id, scope.customerId, scope.workspaceId]);
+  const lifecycle = async (capability: string, done: string) => {
+    setBusy(capability);
+    try {
+      await act(capability, base);
+      toast(done);
+      void app.refetch();
+    } catch (e) {
+      toast((e as Error).message);
+    } finally {
+      setBusy("");
+    }
+  };
+  const stdio = c.stdio!;
+  const stopped = app.data?.desired === "stopped";
+  return (
+    <Section
+      title="Runs in This Workspace"
+      sub="Lake runs this server as an App of this workspace, metered like any App, and reaches it inside the cluster. Its token and secret variables come from the workspace's secrets."
+      actions={
+        <div className="flex flex-wrap gap-2">
+          {stopped ? (
+            <Button onClick={() => void lifecycle("start_app", "Start requested")} loading={busy === "start_app"}>
+              Start
+            </Button>
+          ) : (
+            <>
+              <Button onClick={() => void lifecycle("restart_app", "Restart requested")} loading={busy === "restart_app"}>
+                Restart
+              </Button>
+              <Button onClick={() => void lifecycle("stop_app", "Stop requested")} loading={busy === "stop_app"}>
+                Stop
+              </Button>
+            </>
+          )}
+        </div>
+      }
+    >
+      <KeyValue
+        rows={[
+          ["App", app.data ? <AppPhase phase={String(app.data.phase ?? "")} ready={ready} /> : app.isLoading ? "…" : "Not found"],
+          ["Package", <span className="font-mono text-[12.5px] break-all">{stdio.package}</span>],
+          ["Runtime", runtimeLabel(stdio.runtime)],
+          ["Command", <span className="font-mono text-[12.5px] break-all">{stdioCommandLine(stdio)}</span>],
+          ["Environment", [...(stdio.env_keys ?? []), ...(stdio.secret_env_keys ?? []).map((k) => `${k} (secret)`)].join(", ") || "—"],
+          [
+            "Details",
+            c.app_id ? (
+              <a href={wsPath("/ship/app") + qs({ customer_id: scope.customerId, app_id: c.app_id })}>
+                <Box size={13} aria-hidden /> {stdio.app_name || "Open the App"}
+              </a>
+            ) : (
+              "—"
+            ),
+          ],
+        ]}
+      />
+      {app.data?.message && <p className="muted mt-2 mb-0 text-[13px]">{String(app.data.message)}</p>}
+      <Terminal
+        className="mt-3"
+        title="Logs · last 200 lines"
+        empty="No log lines yet."
+        actions={
+          <button type="button" className="button button-ghost" onClick={() => void logs.refetch()}>
+            Refresh
+          </button>
+        }
+      >
+        {logs.isError || !Array.isArray(logs.data?.items) ? "" : logs.data!.items!.map((item) => `${String(item.ts ?? "")} ${String(item.line ?? "")}\n`).join("")}
+      </Terminal>
+    </Section>
   );
 }

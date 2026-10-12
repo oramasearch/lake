@@ -219,3 +219,31 @@ npm run build        # tsc, the tests, vite build and both source checks
 
 `cmake --build build` runs `npm ci` and `npm run build` itself; `-DLAKE_FRONTEND_DIST=<dist>`
 embeds an already-built app instead (the image's Node stage).
+
+### Reads outside `frontend/` (lake#693)
+
+The image builds the app in its own `frontend` stage, which has `frontend/` at `/frontend` and only
+the other files the Dockerfile copies (`assets/catalogue-icons/`, `src/api/engine_openapi.json`). A
+test that reads a file beside `frontend/` passes in a checkout and fails only in the image build;
+it happened twice (lake#639, lake#653).
+
+`npm test` and the two source checks in `npm run build` run with
+`--import ./scripts/watch-copied-reads.mjs`. The preload records every path a process reads, lists,
+stats or imports in the repository outside `frontend/`, and at exit fails that process (one test
+file) when the `frontend` stage does not put the path at `/<path>`, where the stage's tests read it
+from `/frontend`. It names the path, the file that read it, and the line to add:
+
+```text
+The Dockerfile's frontend stage does not copy what the frontend tests and scripts read (lake#693):
+  assets/catalogue-icons (read by tests/catalogue-icons.test.ts)
+    add to the frontend stage of Dockerfile, after line 36:  COPY assets/catalogue-icons/ /assets/catalogue-icons/
+```
+
+It watches the reads rather than scanning the sources for `../`, so a path built in pieces
+(`join(import.meta.dirname, "..", "..", "assets")`) or read inside a helper is caught too. A path
+that does not exist in the checkout is ignored (the image answers the same). In the image the
+Dockerfile is not beside `frontend/`, so the preload stands down there. `vite build` and `tsc` are
+not watched: Vite looks for its workspace root in parent folders, and `tsc` reads only `src/`.
+`LAKE_FRONTEND_DOCKERFILE=<file>` checks against another Dockerfile; `tests/copied-reads.test.ts`
+proves it fails on the two stages that broke, before their COPY lines were added. The parsing is in
+`scripts/copied-paths.mjs`.

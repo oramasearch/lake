@@ -1,4 +1,5 @@
 #include "lake/api/capabilities.hpp"
+#include "lake/api/agent_stream_triggers.hpp"
 #include "lake/api/mcp_connections.hpp"
 
 #include "audit_logs.hpp"
@@ -6142,6 +6143,7 @@ void register_core_capabilities(Registry& registry, std::string_view version) {
     register_workspace_store_capabilities(registry);
     register_transcript_capabilities(registry);
     register_mcp_connection_capabilities(registry);
+    register_agent_stream_capabilities(registry);
     register_solution_capabilities(registry);
     register_methodology_capabilities(registry);
     register_drives_capabilities(registry);

@@ -29,6 +29,8 @@ WORKDIR /frontend
 COPY frontend/package.json frontend/package-lock.json ./
 RUN npm ci --no-audit --no-fund
 COPY frontend/ ./
+# Anything else the tests or scripts read must be copied here; `npm test` names what is missing
+# (frontend/scripts/watch-copied-reads.mjs, lake#693).
 # The icon test checks the website's exported copy (lake#639), which lives beside frontend/.
 COPY assets/catalogue-icons/ /assets/catalogue-icons/
 # The agents test checks the vendored skills against the engine's create_agent schema (lake#653).

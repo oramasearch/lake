@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <map>
 #include <memory>
 #include <optional>
 #include <string>
@@ -57,21 +58,33 @@ public:
     virtual liquid::runtime::task<ZettaControlResult<void>> remove(std::string path) = 0;
 };
 
-// Opens a Ready store's contents with what the operator delivered for it (`store_connection`).
-// Injected (ServerOptions::store_browser, tests' fakes); empty, Lake browses no provider and
-// store_browse_refusal says why for each.
-using StoreBrowser = std::function<ZettaControlResult<std::shared_ptr<StoreContents>>(
-    const ManagedStore& store, const nlohmann::json& connection)>;
+// What Lake hands a store browser to open one store (lake#664): the store, what the operator
+// delivered for it (`store_connection`), and the fields of the workspace secret its spec names,
+// read by Lake in the workspace's secret store (decision 58: the workspace's credential, never
+// Orama's). `credential` is empty for a store that names none.
+struct StoreOpening {
+    ManagedStore store;
+    nlohmann::json connection;
+    std::map<std::string, std::string> credential;
+};
 
-// The issue that tracks browsing each bucket and filesystem provider (lake#664).
+// Opens the contents of a customer's own bucket (store_external_bucket). Injected
+// (ServerOptions::store_browser, tests' fakes); the HTTP server's default is cloud_store_browser
+// over its public-only outbound transport (store_buckets.hpp). Empty, Lake browses no external
+// bucket and store_browse_refusal says why. Stores Lake keeps itself (zetta, lake) are opened by
+// Lake, not by this.
+using StoreBrowser =
+    std::function<ZettaControlResult<std::shared_ptr<StoreContents>>(const StoreOpening& opening)>;
+
+// The issue that added browsing each bucket and filesystem provider (lake#664).
 inline constexpr std::string_view store_browse_issue =
     "https://github.com/oramasearch/lake/issues/664";
 
 // Why no store of this type opens as a drive (a volume, whose contents belong to the service that
 // mounts it; anything but a bucket or a filesystem), or empty.
 std::string store_kind_refusal(std::string_view type);
-// Why Lake, with no StoreBrowser, cannot open a store of this type and provider: the kind's
-// refusal, or that the provider is not browsable yet, naming store_browse_issue.
+// Why Lake cannot open a store of this type and provider when it has no StoreBrowser: the kind's
+// refusal, or that this Lake is not configured to reach external buckets.
 std::string store_browse_refusal(std::string_view type, std::string_view provider);
 
 // Whether `path` is a store path: "" or names joined by "/", each a valid drive name.

@@ -1,8 +1,9 @@
 /** Ship → Apps → one app (web_ui.cpp web_ui_app; handlers serve_app_page and the nineteen
  * serve_app_form actions), as a Split: tabs for Overview (deploy history with rollback), Builds,
  * Logs, Events (live, by long poll), Settings (environment and authentication) and Services
- * (bindings); a side column with the status and rollout track, scale, deploy, lifecycle controls
- * and deletion. Every control calls its capability directly. */
+ * (bindings, and the workspace storage it mounts, lake#666); a side column with the status and
+ * rollout track, scale, deploy, lifecycle controls and deletion. Every control calls its
+ * capability directly. */
 import { type FormEvent, type ReactNode, useEffect, useMemo, useState } from "react";
 import { Link, Navigate, useSearchParams } from "react-router-dom";
 import { ExternalLink, Hammer, Play, Plus, RotateCcw, Square, Undo2 } from "lucide-react";
@@ -17,6 +18,8 @@ import { AppPhase, AppUrl, decimal, formValues } from "./AppsPage";
 import { PageError, pause, qs, QueryTabs, storedNumber, storeNumber, streamHref, Terminal, useQueryTab, useRunner, useWorkspaceLink } from "./shared";
 import { stopsPolling } from "@/lib/errors";
 import { UsageThisMonth } from "../usage/UsageThisMonth";
+import { StorePicker } from "../drives/StorePicker";
+import { mountInput, storageHref, type MountRequest } from "../drives/stores";
 
 type AppEvent = Row & { sequence?: number; type?: string; message?: string; status?: Row };
 
@@ -283,7 +286,7 @@ export default function AppPage() {
               { id: "logs", label: "Logs" },
               { id: "events", label: "Events", count: events.length },
               { id: "settings", label: "Settings", count: envCount },
-              { id: "services", label: "Services", count: boundServices.length + (hasZetta ? 1 : 0) },
+              { id: "services", label: "Services", count: boundServices.length + (hasZetta ? 1 : 0) + (Array.isArray(app.stores) ? app.stores.length : 0) },
             ]}
           />
 
@@ -500,6 +503,7 @@ export default function AppPage() {
                   {services.isError && <ErrorBlock error={services.error} retry={() => void services.refetch()} what="services" />}
                 </div>
               </Card>
+              <AppStorage app={app} workspaceId={workspaceId ?? ""} busy={runner.busy} call={call} />
               <Card label="New service" title="Create and Attach">
                 <ResetForm
                   className="row-form grid grid-cols-1 items-end gap-2 sm:grid-cols-[1fr_1fr_8rem_auto]"
@@ -776,6 +780,88 @@ function BuildRow({
           {logs.isError ? (logs.error as Error).message : [retained, ...live].filter(Boolean).join("\n")}
         </Terminal>
       </details>
+    </Card>
+  );
+}
+
+/** The workspace storage the app mounts (lake#666): each store linking to Data → Drives → Storage,
+ * and the picker that replaces the set (set_app_stores), which rolls the app's pods. */
+function AppStorage({
+  app,
+  workspaceId,
+  busy,
+  call,
+}: {
+  app: Row;
+  workspaceId: string;
+  busy: string | null;
+  call: (key: string, capability: string, input: Row, done: string) => Promise<unknown>;
+}) {
+  const mounted = (Array.isArray(app.stores) ? app.stores : []) as Row[];
+  const current = (): MountRequest[] =>
+    mounted.map((m) => ({ store_id: String(m.store_id ?? ""), mount_path: String(m.mount_path ?? "") || undefined, read_only: m.read_only === true }));
+  const [editing, setEditing] = useState(false);
+  const [choice, setChoice] = useState<MountRequest[]>(current);
+  const stores = useRead<{ stores?: Row[] }>(editing ? "list_stores" : null, { customer_id: String(app.customer_id ?? ""), workspace_id: workspaceId });
+  return (
+    <Card
+      label="Mounts"
+      title="Storage"
+      padded={false}
+      actions={
+        !editing ? (
+          <Button
+            variant="ghost"
+            onClick={() => {
+              setChoice(current());
+              setEditing(true);
+            }}
+          >
+            Choose storage
+          </Button>
+        ) : null
+      }
+    >
+      {mounted.length === 0 ? (
+        <p className="muted m-0 px-4 py-3 text-[13px]">No storage mounted.</p>
+      ) : (
+        <ul className="m-0 list-none p-0">
+          {mounted.map((m) => (
+            <li key={String(m.store_id)} className="flex flex-wrap items-center justify-between gap-2 border-b border-hairline px-4 py-2.5 last:border-b-0">
+              <div className="min-w-0">
+                <Link className="font-semibold" to={storageHref(workspaceId)}>
+                  {String(m.name ?? m.store_id)}
+                </Link>
+                <div className="truncate text-[12px] text-ink-3">
+                  {m.type === "volume" ? `Volume at ${String(m.mount_path ?? "")}` : "Bucket, as environment variables"}
+                  {m.read_only === true ? " · read-only" : ""}
+                </div>
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+      {editing && (
+        <form
+          className="space-y-3 border-t border-hairline px-4 py-3"
+          onSubmit={(event) => {
+            event.preventDefault();
+            void call("stores", "set_app_stores", { stores: mountInput(choice, stores.data?.stores ?? []) }, "Storage saved").then((saved) => {
+              if (saved !== undefined) setEditing(false);
+            });
+          }}
+        >
+          {stores.isError && <ErrorBlock error={stores.error} retry={() => void stores.refetch()} what="storage" />}
+          <StorePicker stores={stores.data?.stores ?? []} value={choice} onChange={setChoice} owner={{ kind: "app", id: String(app.id ?? "") }} workspaceId={workspaceId} loading={stores.isLoading} />
+          <p className="muted m-0 text-[12.5px]">Saving rolls the app's pods with the storage you choose.</p>
+          <div className="flex flex-wrap justify-end gap-2">
+            <Button onClick={() => setEditing(false)}>Cancel</Button>
+            <Button type="submit" variant="primary" loading={busy === "stores"}>
+              Save storage
+            </Button>
+          </div>
+        </form>
+      )}
     </Card>
   );
 }

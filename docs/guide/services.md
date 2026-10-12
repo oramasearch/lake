@@ -138,6 +138,19 @@ listed in the form and disabled, each with the reason; they cannot be created.
 - REST: `GET /v1/list_store_providers?customer_id=<customer id>`
 - MCP: `list_stores`, `list_store_providers`.
 
+### Mount Storage into a Service or an App
+
+A SQLite, DuckDB or Polars service, and any app, can mount the workspace's storage: a volume at a
+path in its containers (a volume is mounted by one service or app), or a bucket in your own account
+as environment variables (`STORE_<NAME>_BUCKET`, `_ENDPOINT`, `_REGION`, `_PREFIX` and the
+credential). Choose it in **New service**, with a service's **Storage** action on **Ship →
+Services**, or with **Choose storage** on an app's **Services** tab. Saving rolls the pods.
+The Storage tab shows who mounts each store and how much of it is used.
+
+- REST: `POST /v1/set_service_stores` `{"customer_id": "<customer id>", "service_id": "<service id>", "stores": [{"store_id": "<store id>", "mount_path": "/mnt/uploads"}]}`
+- REST: `POST /v1/set_app_stores` `{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "app_id": "<app id>", "stores": [{"store_id": "<store id>", "mount_path": "/mnt/uploads"}]}`
+- MCP: `set_service_stores`, `set_app_stores`; `create_service` and `create_app` take `stores` too.
+
 ### Create a Volume
 
 1. On **Data → Drives**, open the **Storage** tab and press **New storage**.

@@ -555,6 +555,18 @@ public:
     control::Result<control::ManagedService> withdraw_service(const std::string& id) override {
         return call("withdraw_service", [&] { return store_->withdraw_service(id); });
     }
+    control::Result<control::ManagedService>
+    set_service_stores(const std::string& service_id,
+                       const std::vector<control::StoreMountRequest>& mounts) override {
+        return call("set_service_stores",
+                    [&] { return store_->set_service_stores(service_id, mounts); });
+    }
+    control::Result<std::vector<control::StoreMount>>
+    list_store_mounts(const std::string& customer_id,
+                      const std::string& workspace_id = {}) override {
+        return call("list_store_mounts",
+                    [&] { return store_->list_store_mounts(customer_id, workspace_id); });
+    }
     control::Result<std::vector<control::WebApp>>
     list_web_apps(const std::string& customer_id) override {
         return call("list_web_apps", [&] { return store_->list_web_apps(customer_id); });
@@ -657,6 +669,33 @@ public:
     }
     control::Result<void> put_workload_resources(const control::WorkloadResources& row) override {
         return call("put_workload_resources", [&] { return store_->put_workload_resources(row); });
+    }
+    control::Result<void>
+    put_mcp_connection_dispatch(const control::McpConnectionDispatch& row) override {
+        return call("put_mcp_connection_dispatch",
+                    [&] { return store_->put_mcp_connection_dispatch(row); });
+    }
+    control::Result<void> remove_mcp_connection_dispatch(const std::string& workspace_id,
+                                                         const std::string& connection_id) override {
+        return call("remove_mcp_connection_dispatch", [&] {
+            return store_->remove_mcp_connection_dispatch(workspace_id, connection_id);
+        });
+    }
+    control::Result<std::vector<control::McpConnectionDispatch>>
+    mcp_stream_dispatch(int limit) override {
+        return call("mcp_stream_dispatch", [&] { return store_->mcp_stream_dispatch(limit); });
+    }
+    control::Result<std::vector<control::McpConnectionDispatch>>
+    mcp_exported_dispatch(const std::string& workspace_id) override {
+        return call("mcp_exported_dispatch",
+                    [&] { return store_->mcp_exported_dispatch(workspace_id); });
+    }
+    control::Result<std::vector<control::AppTransfer>>
+    app_transfer(const std::string& since_hour) override {
+        return call("app_transfer", [&] { return store_->app_transfer(since_hour); });
+    }
+    control::Result<void> add_app_transfer(const control::AppTransfer& row) override {
+        return call("add_app_transfer", [&] { return store_->add_app_transfer(row); });
     }
     control::Result<control::BillingPlan>
     put_billing_plan(const control::BillingPlan& plan) override {
@@ -786,6 +825,21 @@ public:
             return store_->latest_agent_conversation_task(
                 customer_id, conversation_id, agent, kind, workspace_id);
         });
+    }
+    control::Result<std::vector<control::AgentTask>>
+    list_conversation_agent_tasks(const std::string& customer_id,
+                                  const std::string& workspace_id,
+                                  const std::string& conversation_id,
+                                  const std::string& requested_by_user_id) override {
+        return call("list_conversation_agent_tasks", [&] {
+            return store_->list_conversation_agent_tasks(
+                customer_id, workspace_id, conversation_id, requested_by_user_id);
+        });
+    }
+    control::Result<std::size_t> delete_agent_tasks(const std::string& customer_id,
+                                                    const std::vector<std::string>& ids) override {
+        return call("delete_agent_tasks",
+                    [&] { return store_->delete_agent_tasks(customer_id, ids); });
     }
     control::Result<control::AgentTask> claim_agent_task(const std::string& id,
                                                          const std::string& agent,

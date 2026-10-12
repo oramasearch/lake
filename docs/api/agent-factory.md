@@ -18,15 +18,20 @@ What a person's agent may do is the **skills** a person grants it, in the Agent 
 or the New agent drawer, and shown on the agent page. agent-runtime decides what each grants
 ([`skills.py`](https://github.com/oramasearch/agent-runtime/blob/main/src/agent_runtime/skills.py),
 agent-runtime#7): reads are tools that call Lake, and changes are proposals a person confirms, as App
-changes are. The workspace engine's agent record accepts exactly these names.
+changes are. The exception is a few engine actions the engine's own policy governs, which the agent
+calls directly: `check_pipeline` and `start_run` (*train*), `generate_dataset` (*generate-data*),
+`decide` and `record_outcome` (*call-api*); `approve_decision` stays a proposal (agent-runtime#11,
+its `docs/skills/README.md`, *Direct actions*). Every skill names Lake's capabilities, the engine's
+under their Lake names ([engine-capabilities.md](engine-capabilities.md)). The workspace engine's
+agent record accepts exactly these names.
 
 | Skill | Label | What it reaches |
 |---|---|---|
 | `search` | Search data | datasets, connections, search indexes (creating or exposing one is a proposal), Lake-wide `search`, the Docs, solution reads |
-| `generate-data` | Generate a dataset | dataset generators |
-| `train` | Train a Model | projects, runs, jobs, models, experiments (starting or stopping one is a proposal), solution reads |
+| `generate-data` | Generate a dataset | dataset generators; `generate_dataset` directly |
+| `train` | Train a Model | projects, pipelines, runs, jobs, models, experiments (starting or stopping one is a proposal), solution reads; `check_pipeline` and `start_run` directly |
 | `summarize` | Summarize and explain | projects, runs, models, model health and traffic, traces, the workspace's status |
-| `call-api` | Call the API | models (`score`, `explain`, `predict`), exposing a model as a proposal, solution decisions |
+| `call-api` | Call the API | models (`score`, `explain`, `predict`), `search_workspace_index`, exposing a model as a proposal, solution reads; `decide` and `record_outcome` directly, `approve_decision` as a proposal |
 | `drives` | Use drives | browse, read, preview, history and search; uploads, folders, moves, deletes as proposals |
 | `transcripts` | Use transcripts | list and read; adding, editing, deleting and `transcribe` as proposals |
 | `repositories` | Work in repositories | files, refs, changes, issues, reviews, releases, artifacts, environments; issues, comments, reviews and commits as proposals |

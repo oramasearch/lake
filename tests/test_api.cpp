@@ -4126,6 +4126,38 @@ TEST(Mcp, SessionsNameTheToolListTheyBeganOn) {
               json({{"jsonrpc", "2.0"}, {"method", "notifications/tools/list_changed"}}));
 }
 
+// lake#684: a workspace endpoint's digest is Lake's own until a connection re-exports tools, and
+// follows what each re-exports; a session that listed the current tools is not told again.
+TEST(Mcp, WorkspaceDigestFollowsExportedToolsAndListedSessionsAreNotToldAgain) {
+    const std::string lake(64, '1');
+    EXPECT_EQ(mcp_workspace_tool_list_digest(lake, {}), lake);
+    EXPECT_EQ(mcp_workspace_tool_list_digest(lake, {{"c-1", ""}}), lake) << "an empty digest";
+    const std::string one = mcp_workspace_tool_list_digest(lake, {{"c-1", std::string(64, 'a')}});
+    ASSERT_EQ(one.size(), 64U);
+    EXPECT_NE(one, lake);
+    EXPECT_NE(one, mcp_workspace_tool_list_digest(lake, {{"c-1", std::string(64, 'b')}}));
+    EXPECT_NE(one, mcp_workspace_tool_list_digest(std::string(64, '2'),
+                                                  {{"c-1", std::string(64, 'a')}}))
+        << "an upgrade still changes it";
+    EXPECT_EQ(mcp_workspace_tool_list_digest(
+                  lake, {{"c-2", std::string(64, 'b')}, {"c-1", std::string(64, 'a')}}),
+              mcp_workspace_tool_list_digest(
+                  lake, {{"c-1", std::string(64, 'a')}, {"c-2", std::string(64, 'b')}}))
+        << "in connection order, however the rows came";
+
+    McpSessionLists lists(2);
+    const std::string session = mcp_session_id(lake);
+    EXPECT_FALSE(lists.changed(session, lake)) << "judged by the list it began on";
+    EXPECT_TRUE(lists.changed(session, one));
+    lists.listed(session, one);
+    EXPECT_FALSE(lists.changed(session, one));
+    EXPECT_TRUE(lists.changed(session, lake));
+    lists.listed("", one);
+    lists.listed(mcp_session_id(lake), one);
+    lists.listed(mcp_session_id(lake), one);
+    EXPECT_TRUE(lists.changed(session, one)) << "forgotten past capacity: its first list again";
+}
+
 // lake#441: the published bounds are enforced, so REST cannot accept what MCP's schema refuses.
 TEST(Registry, EnforcesEnumsAndNumericBoundsOnEveryTransport) {
     Registry registry;

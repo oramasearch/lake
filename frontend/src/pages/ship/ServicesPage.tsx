@@ -1,7 +1,10 @@
 /** Services (web_ui.cpp services_content): every database, stream and engine the space runs on
  * lake. Not a workspace page: the services belong to the space. The catalog of kinds is a card
  * grid (each opens the New Service drawer on its kind); the services are a table. A connection is
- * shown in a dialog when asked for, never in the URL, and not kept; deleting one asks for its name. */
+ * shown in a dialog when asked for, never in the URL, and not kept; deleting one asks for its name.
+ * A SQLite, DuckDB or Polars service mounts its workspace's storage (lake#666): its row links to
+ * Data → Drives → Storage, Storage chooses it, and New service offers it. `?q=` opens the page
+ * searched (the Storage tab links a service that way). */
 import { type ComponentType, useMemo, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
@@ -53,12 +56,20 @@ import {
   type Tone,
 } from "@/lib/ui";
 import { qs, secondsSince, spokenDuration, text, useAsync, wq } from "../train/workspace";
+import { StorePicker } from "../drives/StorePicker";
+import { mountInput, storageHref, type MountRequest } from "../drives/stores";
 import { formatValue, usageLink, usageOf, windows, type Reading } from "../usage/usage";
 import { CopyMono } from "./parts";
 
 const SUB = "The databases, streams and engines your workspaces run on Lake, each its own, with its data kept apart from every other customer's.";
 
-type Kind = { kind: string; label: string; ready_seconds: number };
+type Kind = { kind: string; label: string; ready_seconds: number; mounts_stores?: boolean };
+
+/** What a service mounts now (list_services' `stores`, lake#666), as the picker holds it. */
+function serviceMounts(service: Row): MountRequest[] {
+  const stores = Array.isArray(service.stores) ? (service.stores as Row[]) : [];
+  return stores.map((m) => ({ store_id: text(m, "store_id"), mount_path: text(m, "mount_path") || undefined, read_only: m.read_only === true }));
+}
 
 /** How each kind looks in the catalog: an icon and what it is, in two or three words. */
 const KIND_LOOK: Record<string, { icon: ComponentType<{ size?: number; className?: string }>; what: string }> = {
@@ -204,7 +215,9 @@ function Services({ customerId, creating, setCreating }: { customerId: string; c
     ]);
   const [shown, setShown] = useState<Row | null>(null);
   const [deleting, setDeleting] = useState<Row | null>(null);
-  const [needle, setNeedle] = useState("");
+  const [params] = useSearchParams();
+  const [needle, setNeedle] = useState(params.get("q") ?? "");
+  const [storage, setStorage] = useState<Row | null>(null);
   const [kindFilter, setKindFilter] = useState<string | null>(null);
 
   const limit = String(listed.data?.limit ?? "");
@@ -300,6 +313,7 @@ function Services({ customerId, creating, setCreating }: { customerId: string; c
                             {service.default === true && <Chip tone="action">workspace</Chip>}
                           </div>
                           <div className="text-[12px] text-ink-3">{labelOf(kind)}</div>
+                          <MountedStores service={service} />
                         </div>
                       </div>
                     );
@@ -374,6 +388,11 @@ function Services({ customerId, creating, setCreating }: { customerId: string; c
                     return (
                       <div className="flex flex-wrap justify-end gap-1.5">
                         {kind !== "zetta" && servicePhase(service) === "Ready" && <ShowConnection customerId={customerId} service={service} onShown={setShown} />}
+                        {kinds.find((k) => k.kind === kind)?.mounts_stores && text(service, "workspace_id") && (
+                          <Button variant="ghost" onClick={() => setStorage(service)} aria-label={`Storage ${text(service, "name")} mounts`}>
+                            <HardDrive size={14} aria-hidden /> Storage
+                          </Button>
+                        )}
                         <Button variant="ghost" onClick={() => setDeleting(service)} aria-label={`Delete ${text(service, "name")}`}>
                           <Trash2 size={14} aria-hidden /> Delete
                         </Button>
@@ -405,6 +424,7 @@ function Services({ customerId, creating, setCreating }: { customerId: string; c
           </dl>
         </Modal>
       )}
+      {storage && <ServiceStorage customerId={customerId} service={storage} onClose={() => setStorage(null)} />}
       {deleting && <DeleteService customerId={customerId} service={deleting} used={used.has(text(deleting, "name"))} onClose={() => setDeleting(null)} />}
     </>
   );
@@ -549,8 +569,11 @@ function NewService({
   const [name, setName] = useState("");
   const [instances, setInstances] = useState("1");
   const [storage, setStorage] = useState("10");
+  const [mounts, setMounts] = useState<MountRequest[]>([]);
   const create = useAsync();
   const chosen = kinds.find((k) => k.kind === kind);
+  // The workspace's storage, for a kind that mounts it (lake#666).
+  const stores = useRead<{ stores?: Row[] }>(chosen?.mounts_stores && workspaceId ? "list_stores" : null, { customer_id: customerId, workspace_id: workspaceId }, { workspace: null });
   const Icon = lookOf(kind).icon;
   const submit = () =>
     create.run(async () => {
@@ -562,6 +585,7 @@ function NewService({
       ] as const) {
         if (/^-?\d+$/.test(value)) input[field] = Number(value);
       }
+      if (chosen?.mounts_stores && mounts.length) input.stores = mountInput(mounts, stores.data?.stores ?? []);
       await act("create_service", input);
       setName("");
       toast(`Creating ${name}`);
@@ -588,7 +612,7 @@ function NewService({
           A service is created in a workspace. <Link to="/workspaces">Choose or create a workspace</Link> to create one.
         </Empty>
       ) : (
-        <Form id="new-service" onSubmit={submit} error={["kind", "name", "instances", "storage_gi"].some((f) => fieldError(create.error, f)) ? undefined : create.error}>
+        <Form id="new-service" onSubmit={submit} error={["kind", "name", "instances", "storage_gi", "stores"].some((f) => fieldError(create.error, f)) ? undefined : create.error}>
           {kindsQ.isError && <ErrorBlock error={kindsQ.error} retry={() => void kindsQ.refetch()} what="service kinds" />}
           <Field label="Kind" error={fieldError(create.error, "kind")}>
             <select name="kind" value={kind} onChange={(e) => setKind(e.target.value)}>
@@ -612,9 +636,79 @@ function NewService({
           <Field label="Storage (GiB)" error={fieldError(create.error, "storage_gi")}>
             <input name="storage_gi" type="number" min={1} max={100} value={storage} onChange={(e) => setStorage(e.target.value)} />
           </Field>
+          {chosen?.mounts_stores && (
+            <Field label="Storage" help="Workspace storage to mount: a volume at a path (one service or app per volume), a bucket as environment variables." error={fieldError(create.error, "stores")}>
+              <StorePicker stores={stores.data?.stores ?? []} value={mounts} onChange={setMounts} owner={{ kind: "service" }} workspaceId={workspaceId} loading={stores.isLoading} />
+            </Field>
+          )}
           {limit && limit !== "0" && <Banner tone="quiet">Your workspaces may run {limit} services at once.</Banner>}
         </Form>
       )}
     </Drawer>
+  );
+}
+
+/** The storage a service mounts, under its name: each store linking to its workspace's Storage tab. */
+function MountedStores({ service }: { service: Row }) {
+  const stores = Array.isArray(service.stores) ? (service.stores as Row[]) : [];
+  if (!stores.length) return null;
+  const workspaceId = text(service, "workspace_id");
+  return (
+    <div className="mt-0.5 text-[12px] text-ink-3">
+      <HardDrive size={12} className="mr-1 inline align-[-2px]" aria-hidden />
+      {stores.map((m, i) => (
+        <span key={text(m, "store_id")}>
+          {i > 0 ? ", " : "Mounts "}
+          <Link to={storageHref(workspaceId)}>{text(m, "name")}</Link>
+          {text(m, "mount_path") ? ` at ${text(m, "mount_path")}` : ""}
+          {m.read_only === true ? " (read-only)" : ""}
+        </span>
+      ))}
+    </div>
+  );
+}
+
+/** Choose what a service mounts (set_service_stores): the picker over its workspace's storage. */
+function ServiceStorage({ customerId, service, onClose }: { customerId: string; service: Row; onClose: () => void }) {
+  const toast = useToast();
+  const id = text(service, "id");
+  const name = text(service, "name");
+  const workspaceId = text(service, "workspace_id");
+  const [mounts, setMounts] = useState<MountRequest[]>(() => serviceMounts(service));
+  const stores = useRead<{ stores?: Row[] }>("list_stores", { customer_id: customerId, workspace_id: workspaceId }, { workspace: null });
+  const save = useAsync();
+  return (
+    <Modal
+      title={`Storage for ${name}`}
+      subtitle="Saving rolls the service's pods with the storage you choose."
+      onClose={onClose}
+      width={560}
+      footer={
+        <>
+          <Button onClick={onClose}>Cancel</Button>
+          <Button type="submit" form="service-storage" variant="primary" loading={save.busy}>
+            Save
+          </Button>
+        </>
+      }
+    >
+      <Form
+        id="service-storage"
+        error={save.error}
+        onSubmit={() =>
+          save.run(async () => {
+            await act("set_service_stores", { customer_id: customerId, service_id: id, stores: mountInput(mounts, stores.data?.stores ?? []) });
+            toast(`Storage of ${name} saved`);
+            onClose();
+          })
+        }
+      >
+        {stores.isError ? <ErrorBlock error={stores.error} retry={() => void stores.refetch()} what="storage" /> : null}
+        <StorePicker stores={stores.data?.stores ?? []} value={mounts} onChange={setMounts} owner={{ kind: "service", id }} workspaceId={workspaceId} loading={stores.isLoading} />
+        <p className="muted m-0 text-[12.5px]">
+          Storage is created on <Link to={storageHref(workspaceId)}>Data → Drives → Storage</Link>.
+        </p>
+      </Form>
+    </Modal>
   );
 }
