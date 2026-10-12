@@ -8,16 +8,21 @@ document rules, confidentiality, and the decisions not to drift past. Read both.
 
 ## Status
 
-Status: 2026-10-01. `Lake/prod` on the dev AKS cluster (there is no production environment yet)
-serves `oramasearch/lake:20261001d`, source `36679e1`. The dated
-[`docs/deployment/dev-2026-10-01.md`](docs/deployment/dev-2026-10-01.md) record is the
-authoritative statement of its artifact, source revision, schema, observed routes, and what was
-exercised there. [`docs/design/status.md`](docs/design/status.md) distinguishes implemented,
-exercised locally, deployed, and exercised-in-deployment behavior; do not infer an end-to-end
-deployment exercise from a route's presence in OpenAPI. `tools/docs/check-status.py` (run by
-`DocsStatus.MatchesTheObservedOpenApi`) fails when that page calls a capability undeployed that
-the newest snapshot in `docs/deployment/observed/` lists; after a deployment, record a new
-snapshot and update the page.
+Status: 2026-10-12. The current release is **v0.1.0**, the first tagged release
+([`docs/releases/v0.1.0.md`](docs/releases/v0.1.0.md) lists everything in it). `Lake/prod` on the
+dev AKS cluster (there is no production environment yet) serves `oramasearch/lake:20261011u`,
+source `dd1574fd`, the commit v0.1.0 was cut from; its OpenAPI lists 554 paths and the operator's
+schema is applied through `0083_methodology_deployments`.
+
+The newest dated record, [`docs/deployment/dev-2026-10-01.md`](docs/deployment/dev-2026-10-01.md),
+and [`docs/design/status.md`](docs/design/status.md) still describe the 2026-10-01 deployment
+(`oramasearch/lake:20261001d`, `36679e1`); they have not been brought up to `dd1574fd`. Until they
+are, the record is authoritative only for what was exercised on that date.
+`status.md` distinguishes implemented, exercised locally, deployed, and exercised-in-deployment
+behavior; do not infer an end-to-end deployment exercise from a route's presence in OpenAPI.
+`tools/docs/check-status.py` (run by `DocsStatus.MatchesTheObservedOpenApi`) fails when that page
+calls a capability undeployed that the newest snapshot in `docs/deployment/observed/` lists; after
+a deployment, record a new snapshot and update the page.
 
 Train → Experiments is implemented in the source tree with eleven registered REST/MCP operations,
 live charts, confirmed promotion, and ExperimentsAgent's editable proposal and confirmed start,
@@ -833,6 +838,30 @@ that licence boundary.
 - Deployment images are built on the cluster BuildKit (liquid-dev skill) as immutable
   `oramasearch/lake:<tag>` images, never `latest`. The Docker Hub repo is private; the `Lake` CR
   needs `spec.pullSecretName` and the Secret in `spec.namespace`.
+
+## Cutting a release
+
+A release is a tag on `main`, which is what the deployment runs. The pages and their conventions
+are in [`docs/releases/`](docs/releases/README.md); read its `README.md` first. `v0.1.0`
+(2026-10-12) was the first.
+
+1. **Confirm what is deployed is `main`.** `GET /v1/server_info` reports the running `revision`;
+   it must be an ancestor of `origin/main`. Steve names the version.
+2. **On a branch `docs/release-vX.Y.Z`**, move the version in both places: `version_string()` in
+   `src/version.cpp` and `project(lake VERSION ...)` in `CMakeLists.txt`. Tests read the version
+   from `lake::version_string()`; never write the number into a test.
+3. **Write `docs/releases/vX.Y.Z.md`** and add it to `docs/releases/README.md`: what the release
+   includes, what it does not, known issues with their tracking issues (a security defect first),
+   and verification. Claims follow `docs/design/status.md`; every number is measured.
+4. **Prove it**: build, then the full suite with `LAKE_TEST_DB_URI` set, and put the counts in the
+   page. A failure is fixed or listed as a known issue with an issue filed, never left out.
+5. **Open the pull request into `main`** and merge it with a merge commit, never a squash.
+6. **Tag the merge commit** `vX.Y.Z` (`git tag vX.Y.Z <merge commit> && git push origin vX.Y.Z`),
+   then publish the GitHub release from the page:
+   `gh release create vX.Y.Z --repo oramasearch/lake --verify-tag --title "Release vX.Y.Z" --notes-file <page without its first heading, relative links made absolute at the tag>`.
+
+A release does not deploy anything. Building and rolling an image stays the separate step under
+**Container image**.
 
 ## Open decisions
 
