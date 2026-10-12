@@ -237,11 +237,12 @@ the operator is the one place that knows them.
 | `agent_launch` | the launch | agent-runtime's Job (`job`) or Deployment (`service`) |
 | `agent_cron_run` | the run (`agent_cron_runs.id`) | one Job an agent's cron schedule started (lake#658, migration `0077_metered_jobs`) |
 | `methodology_run` | the run | a workspace methodology's sandbox pod, the code itself (lake#655, migration `0078`); counted once after it finishes, for `started_at` to `finished_at` of that pod, as kind `methodology` ([methodologies.md](methodologies.md#metering)) |
+| `methodology_deployment` | the deployment | a served workspace methodology model's serve pods (lake#690, migration `0080`); charged while they run, as kind `methodology` ([methodologies.md](methodologies.md#serving-its-model)) |
 
 **What the sampler records** (`sample_usage`, every fifteen minutes, by the store root's owner):
 
 - **A running workload**, one whose row has `pods` above 0 and whose object is live (a running
-  workspace, a present service or store, an app not deleted, a present `service`-mode launch): the
+  workspace, a present service or store, an app not deleted, a present `service`-mode launch, a present methodology deployment): the
   seconds since the last sample (at most two intervals) times its CPU, memory, GPUs and GPU memory.
 - **A finished build, agent job (`job`-mode launch) or cron run once** (lake#658), whenever a sample
   first finds it finished (`Succeeded`, `Failed`, `Cancelled`) with its resources reported, however

@@ -8,6 +8,7 @@
 #include <string>
 #include <utility>
 
+#include "methodology_serving.hpp"
 #include "lake/api/capabilities.hpp"
 #include "lake/api/datasets.hpp"
 #include "lake/control/ask_messages.hpp"
@@ -106,6 +107,14 @@ delete_in_engine(const EngineDeletion& deletion, const json& input, ApiContext& 
     value["deleted"] = !dry_run;
     if (value.contains("removed")) {
         context.audit_details["removed"] = value["removed"];
+    }
+    // A deleted model is served no more (lake#690): its deployment, if it had one, is stopped.
+    if (!dry_run && deletion.name == "delete_model") {
+        auto stopped = co_await serve_methodology_model(
+            context, customer_id, input.value("workspace_id", context.workspace_id), id, false);
+        if (stopped && stopped->ok && stopped->value.is_object()) {
+            value["deployment"] = stopped->value.value("deployment", json(nullptr));
+        }
     }
     co_return ApiResult::success(std::move(value));
 }

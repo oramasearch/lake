@@ -167,6 +167,13 @@ std::string methodology_dockerfile(std::string_view packages);
 // The engine keeps an artifact as a model's weights and takes at most 24 MiB of it in one call
 // (zetta#1261: its request bodies are bounded at 33 MiB, and base64 grows a payload by a third).
 inline constexpr std::size_t max_methodology_artifact_bytes = std::size_t{24} << 20;
+// A larger artifact (lake#690) is sent in chunks of at most methodology_artifact_chunk_bytes, staged
+// in the workspace's engine, up to max_methodology_staged_artifact_bytes; a served model's artifact
+// is read back in chunks of the same size.
+inline constexpr std::size_t methodology_artifact_chunk_bytes = std::size_t{8} << 20;
+inline constexpr std::size_t max_methodology_staged_artifact_bytes = std::size_t{1} << 30;
+// What a served model takes in one predict call (lake#690), as the runtime's serve mode does.
+inline constexpr std::size_t max_methodology_predict_rows = 10'000;
 inline constexpr std::size_t max_methodology_log_bytes = 64 * 1024;
 inline constexpr std::int64_t max_methodology_train_rows = 1'000'000;
 inline constexpr std::int64_t methodology_validation_rows = 200;

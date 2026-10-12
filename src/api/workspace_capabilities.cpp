@@ -1,3 +1,4 @@
+#include "methodology_serving.hpp"
 #include "lake/api/capabilities.hpp"
 
 #include <algorithm>
@@ -979,6 +980,33 @@ liquid::runtime::task<ApiResult> workspace_call(bool read, json input, ApiContex
              capability == "expose_index" || capability == "unexpose_index")) {
             published_call(value, capability, input);
         }
+        // A workspace methodology's model is served by its own code (lake#690): publishing it
+        // starts its server, unpublishing stops it.
+        if (value.is_object() && (capability == "expose_model" || capability == "unexpose_model")) {
+            const std::string model_id = value.value("model_id", std::string());
+            if (!model_id.empty()) {
+                const ApiResult served = take(co_await serve_methodology_model(
+                    context,
+                    input.at("customer_id"),
+                    input.at("workspace_id"),
+                    model_id,
+                    capability == "expose_model" && value.value("exposed", false)));
+                if (!served.ok) {
+                    // Not served after all: the engine's publish is undone, and the reason given.
+                    if (capability == "expose_model") {
+                        static_cast<void>(co_await call_workspace(context,
+                                                                  input.at("customer_id"),
+                                                                  "unexpose_model",
+                                                                  false,
+                                                                  {{"model_id", model_id}}));
+                    }
+                    co_return served;
+                }
+                if (served.value.is_object()) {
+                    value["deployment"] = served.value.value("deployment", json(nullptr));
+                }
+            }
+        }
         if (capability == "list_datasets") {
             datasets::annotate_list(value);
         } else if (capability == "get_dataset" && value.is_object() &&
@@ -1873,6 +1901,15 @@ liquid::runtime::task<ApiResult> predict_rows(const json& input, ApiContext& con
     if (!(**described).value("exposed", false)) {
         co_return ApiResult::failure(
             "invalid_input", "model " + model + " is not published", "/model_id");
+    }
+    // A workspace methodology's model answers from its own server (lake#690).
+    auto served = co_await predict_methodology_model(
+        context, customer, input.value("workspace_id", context.workspace_id), **described, input);
+    if (!served) {
+        co_return ApiResult::failure("store_error", served.error().message);
+    }
+    if (*served) {
+        co_return std::move(**served);
     }
     const json& rows = input.at("rows");
     json score{{"model", model}, {"rows", rows}};

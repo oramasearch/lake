@@ -141,6 +141,14 @@ is registered by the engine; a pipeline's `runner_required` run is dispatched to
 metered as `methodology_run`. Not deployed; the operator must vendor the schema and select
 `methodology_runs_guard`, and `oramasearch/methodology-runtime` must be published. See
 `docs/api/methodologies.md`.
+Serving a workspace methodology's model and artifacts over 24 MiB follow (lake#690, migration
+`0080_methodology_deployments`): publishing a `python:W-…` model in Ship → Models writes a
+`methodology_deployments` row the operator runs as a stage Job (the `lmd.` credential,
+`methodology_deployment_input`) and a sandboxed `serve` Deployment only Lake's pods reach; `predict`
+is forwarded there through the injected `MethodologyServer`; the serve pods are metered as
+`methodology_deployment`; collect sends an artifact up to 1 GiB through `methodology_run_artifact`.
+Not deployed; needs the zetta, operator and methodology-runtime changes of lake#690 and the operator
+selecting `methodology_deployments_guard`.
 The operator queues a workspace's methodology runs past the Lake's
 `spec.methodologies.maxConcurrentRunsPerWorkspace` (default 2) and places a GPU run's work volume in a
 zone where its GPU class has nodes (orama-operator#293, migration `0079_methodology_run_queue`, guard

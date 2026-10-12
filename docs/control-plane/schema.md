@@ -957,6 +957,23 @@ not apply to it. Only the CHECK changes; nothing is dropped; idempotent; guard
 `methodology_run_queue_guard`. The operator vendors the schema and selects that guard in the same
 change.
 
+## Methodology deployments migration
+
+`0080_methodology_deployments` ([lake#690](https://github.com/oramasearch/lake/issues/690)) serves a
+workspace methodology's model from Ship → Models. `methodology_deployments` holds one row per
+deployment (lake writes it when the model is published and notifies `lake_services`): the workspace
+methodology, the engine's model id, the training run and image build whose image serves it, the
+pristine runtime image, CPU, memory, GPUs and GPU class, `network`, slug `md-<12 hex>`, `desired`
+and `generation`; at most one present deployment per model of a workspace.
+`methodology_deployment_status` is the operator's: phase (`Building`, `Queued`, `Staging`,
+`Starting`, `Ready`, `Failed`, `Stopped`), message, the SHA-256 of the deployment's credential
+(`lmd.<deployment id>.<secret>`), the serve Service's in-cluster `endpoint` (only
+`http://md-<12 hex>.<namespace>.svc.cluster.local[:port]`), and when it became ready and stopped.
+`workload_resources.object_kind` adds `methodology_deployment`, the serve pods' resources while they
+run. Ids, images, resources and phases only: the model, its artifact and its predictions stay in the
+workspace Zetta. Nothing is dropped; idempotent; guard `methodology_deployments_guard`. The operator
+vendors the schema, selects that guard and runs the deployments in the same change.
+
 ## Repository workspaces migration
 
 `0051_repository_workspaces` adds `repositories.workspace_id` (references `workspaces`, index

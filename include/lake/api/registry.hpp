@@ -154,6 +154,25 @@ struct ModelProviderResponse {
 // run_blocking.
 using ModelProvider = std::function<ModelProviderResponse(const ModelProviderRequest& request)>;
 
+// A served methodology model (lake#690, docs/api/methodologies.md#serving-its-model): one request
+// to its serve pod's Service, `endpoint` (only ever what
+// control::methodology_deployment_endpoint_valid accepts) plus `path` (/predict or /explain).
+struct MethodologyServeRequest {
+    std::string endpoint;
+    std::string path;
+    std::string body; // {"rows": [...]}, JSON text
+};
+struct MethodologyServeResponse {
+    int status = 0;
+    std::string body;  // the serve pod's JSON answer
+    std::string error; // the transport's failure
+};
+// Sends one prediction request to a served model. The HTTP server injects one over its outbound
+// client; tests inject a fake. Empty: Lake serves no methodology model. It blocks for the length
+// of the exchange, so a handler runs it with run_blocking.
+using MethodologyServer =
+    std::function<MethodologyServeResponse(const MethodologyServeRequest& request)>;
+
 enum class CapabilityKind { Read, Action };
 std::string_view to_string(CapabilityKind kind);
 
@@ -355,6 +374,9 @@ struct ApiContext {
     // The model gateway's provider (model_completion, docs/api/model-gateway.md); empty when this
     // lake has no OpenAI key.
     ModelProvider model_provider;
+    // Predictions of a workspace methodology's served model (lake#690); empty when this lake
+    // serves none.
+    MethodologyServer methodology_server;
     // The transport to workspace Zettas' object routes, for workspace files (drives with
     // `files` storage, docs/api/drives.md): the HTTP server's pooled client, or a test's fake.
     // Null: this lake keeps no workspace files.

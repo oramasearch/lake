@@ -5076,6 +5076,220 @@ public:
         });
     }
 
+    // Methodology deployments (lake#690, migration 0080).
+    static constexpr const char* methodology_deployment_columns =
+        "d.id::text, d.customer_id::text, d.workspace_id::text, d.methodology_id, d.model_id, "
+        "COALESCE(d.run_id::text, ''), COALESCE(d.build_id::text, ''), d.image, d.runtime_image, "
+        "d.slug, d.desired, d.cpu_millis, d.memory_bytes, d.gpus, d.gpu_class, d.network, "
+        "d.generation, d.stop_reason, COALESCE(d.created_by_user_id::text, ''), "
+        "d.created_by_taap_id, "
+        "to_char(d.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), "
+        "to_char(d.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), "
+        "COALESCE(ds.phase, ''), COALESCE(ds.message, ''), COALESCE(ds.credential_sha256, ''), "
+        "COALESCE(ds.endpoint, ''), COALESCE(ds.observed_generation, 0), "
+        "COALESCE(to_char(ds.ready_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), ''), "
+        "COALESCE(to_char(ds.stopped_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), "
+        "''), "
+        "COALESCE(to_char(ds.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), '')";
+
+    static MethodologyDeployment methodology_deployment_from(const pqxx::row& row) {
+        MethodologyDeployment deployment;
+        deployment.id = row[0].as<std::string>();
+        deployment.customer_id = row[1].as<std::string>();
+        deployment.workspace_id = row[2].as<std::string>();
+        deployment.methodology_id = row[3].as<std::string>();
+        deployment.model_id = row[4].as<std::string>();
+        deployment.run_id = row[5].as<std::string>();
+        deployment.build_id = row[6].as<std::string>();
+        deployment.image = row[7].as<std::string>();
+        deployment.runtime_image = row[8].as<std::string>();
+        deployment.slug = row[9].as<std::string>();
+        deployment.desired = row[10].as<std::string>();
+        deployment.cpu_millis = row[11].as<std::int64_t>();
+        deployment.memory_bytes = row[12].as<std::int64_t>();
+        deployment.gpus = row[13].as<int>();
+        deployment.gpu_class = row[14].as<std::string>();
+        deployment.network = row[15].as<bool>();
+        deployment.generation = row[16].as<std::int64_t>();
+        deployment.stop_reason = row[17].as<std::string>();
+        deployment.created_by_user_id = row[18].as<std::string>();
+        deployment.created_by_taap_id = row[19].as<std::string>();
+        deployment.created_at = row[20].as<std::string>();
+        deployment.updated_at = row[21].as<std::string>();
+        deployment.phase = row[22].as<std::string>();
+        deployment.message = row[23].as<std::string>();
+        deployment.credential_sha256 = row[24].as<std::string>();
+        deployment.endpoint = row[25].as<std::string>();
+        deployment.observed_generation = row[26].as<std::int64_t>();
+        deployment.ready_at = row[27].as<std::string>();
+        deployment.stopped_at = row[28].as<std::string>();
+        deployment.status_updated_at = row[29].as<std::string>();
+        return deployment;
+    }
+
+    static Result<MethodologyDeployment> one_methodology_deployment(pqxx::work& tx,
+                                                                    const std::string& id) {
+        const pqxx::result rows = tx.exec_params(
+            std::string("SELECT ") + methodology_deployment_columns +
+                " FROM methodology_deployments d LEFT JOIN methodology_deployment_status ds ON "
+                "ds.deployment_id = d.id WHERE d.id = $1::uuid",
+            id);
+        if (rows.empty()) {
+            return std::unexpected(StoreError{"not_found", "no methodology deployment " + id});
+        }
+        return methodology_deployment_from(rows[0]);
+    }
+
+    // A deployment's credential (lake#690): live while the deployment is present, with the digest
+    // the operator wrote. It acts as no person.
+    Result<Principal> methodology_deployment_credential(const std::string& secret) {
+        const auto parsed = parse_agent_credential(secret, methodology_deployment_credential_prefix);
+        if (!parsed) {
+            return std::unexpected(StoreError{"not_found", "session is not active"});
+        }
+        return with_tx<Principal>([&](pqxx::work& tx) -> Result<Principal> {
+            auto deployment = one_methodology_deployment(tx, parsed->first);
+            const std::string digest = identity_crypto::sha256_hex(secret);
+            if (!deployment || !methodology_deployment_credential_live(*deployment) ||
+                !constant_time_hex_equal(digest, deployment->credential_sha256)) {
+                return std::unexpected(StoreError{"not_found", "session is not active"});
+            }
+            return methodology_deployment_principal(*deployment, digest);
+        });
+    }
+
+    Result<MethodologyDeployment>
+    create_methodology_deployment(const NewMethodologyDeployment& in) override {
+        if (in.methodology_id.empty() || in.model_id.empty() || in.runtime_image.empty() ||
+            in.cpu_millis <= 0 || in.memory_bytes <= 0 || in.gpus < 0) {
+            return std::unexpected(StoreError{"invalid_input", "methodology deployment is invalid"});
+        }
+        return with_tx<MethodologyDeployment>([&](pqxx::work& tx) -> Result<MethodologyDeployment> {
+            const std::string id = new_uuid_v4();
+            try {
+                tx.exec_params(
+                    "INSERT INTO methodology_deployments (id, customer_id, workspace_id, "
+                    "methodology_id, model_id, run_id, build_id, image, runtime_image, cpu_millis, "
+                    "memory_bytes, gpus, gpu_class, network, slug, created_by_user_id, "
+                    "created_by_taap_id) VALUES ($1::uuid, $2::uuid, $3::uuid, $4, $5, "
+                    "NULLIF($6, '')::uuid, NULLIF($7, '')::uuid, $8, $9, $10, $11, $12, $13, $14, "
+                    "$15, NULLIF($16, '')::uuid, $17)",
+                    id,
+                    in.customer_id,
+                    in.workspace_id,
+                    in.methodology_id,
+                    in.model_id,
+                    in.run_id,
+                    in.build_id,
+                    in.image,
+                    in.runtime_image,
+                    in.cpu_millis,
+                    in.memory_bytes,
+                    in.gpus,
+                    in.gpu_class,
+                    in.network,
+                    managed_service_slug("md", id),
+                    in.created_by_user_id,
+                    in.created_by_taap_id);
+            } catch (const pqxx::unique_violation&) {
+                return std::unexpected(StoreError{"conflict", "this model is already deployed"});
+            } catch (const pqxx::check_violation&) {
+                return std::unexpected(StoreError{
+                    "invalid_input", "workspace_id must name a workspace in this space"});
+            } catch (const pqxx::foreign_key_violation&) {
+                return std::unexpected(StoreError{"not_found", "no such customer, run or build"});
+            }
+            tx.exec_params("SELECT pg_notify('lake_services', $1)", id);
+            return one_methodology_deployment(tx, id);
+        });
+    }
+
+    Result<MethodologyDeployment> get_methodology_deployment(const std::string& id) override {
+        return with_tx<MethodologyDeployment>([&](pqxx::work& tx) -> Result<MethodologyDeployment> {
+            return one_methodology_deployment(tx, id);
+        });
+    }
+
+    Result<std::vector<MethodologyDeployment>>
+    list_methodology_deployments(const std::string& customer_id,
+                                 const std::string& workspace_id,
+                                 const std::string& model_id,
+                                 int limit) override {
+        return with_tx<std::vector<MethodologyDeployment>>(
+            [&](pqxx::work& tx) -> Result<std::vector<MethodologyDeployment>> {
+                const pqxx::result rows = tx.exec_params(
+                    std::string("SELECT ") + methodology_deployment_columns +
+                        " FROM methodology_deployments d LEFT JOIN methodology_deployment_status "
+                        "ds ON ds.deployment_id = d.id WHERE d.customer_id = $1::uuid AND "
+                        "d.workspace_id = $2::uuid AND ($3 = '' OR d.model_id = $3) ORDER BY "
+                        "d.created_at DESC, d.id DESC LIMIT $4",
+                    customer_id,
+                    workspace_id,
+                    model_id,
+                    limit > 0 ? limit : 100);
+                std::vector<MethodologyDeployment> deployments;
+                for (const pqxx::row& row : rows) {
+                    deployments.push_back(methodology_deployment_from(row));
+                }
+                return deployments;
+            });
+    }
+
+    Result<MethodologyDeployment> withdraw_methodology_deployment(const std::string& id,
+                                                                  const std::string& reason) override {
+        return with_tx<MethodologyDeployment>([&](pqxx::work& tx) -> Result<MethodologyDeployment> {
+            const pqxx::result changed = tx.exec_params(
+                "UPDATE methodology_deployments SET desired = 'absent', generation = generation + "
+                "1, stop_reason = $2, updated_at = now() WHERE id = $1::uuid AND desired = "
+                "'present' RETURNING id",
+                id,
+                reason);
+            if (changed.empty()) {
+                auto existing = one_methodology_deployment(tx, id);
+                if (!existing) {
+                    return existing;
+                }
+                return std::unexpected(StoreError{"conflict", "the deployment is already stopped"});
+            }
+            tx.exec_params("SELECT pg_notify('lake_services', $1)", id);
+            return one_methodology_deployment(tx, id);
+        });
+    }
+
+    Result<void> put_methodology_deployment_status(const std::string& id,
+                                                   const MethodologyDeploymentStatus& status) override {
+        return with_tx<void>([&](pqxx::work& tx) -> Result<void> {
+            pqxx::result rows;
+            try {
+                rows = tx.exec_params(
+                    "INSERT INTO methodology_deployment_status (deployment_id, phase, message, "
+                    "credential_sha256, endpoint, observed_generation, ready_at, stopped_at, "
+                    "updated_at) SELECT d.id, $2, $3, $4, $5, CASE WHEN $6 = 0 THEN d.generation "
+                    "ELSE $6 END, NULLIF($7, '')::timestamptz, NULLIF($8, '')::timestamptz, now() "
+                    "FROM methodology_deployments d WHERE d.id = $1::uuid ON CONFLICT "
+                    "(deployment_id) DO UPDATE SET phase = EXCLUDED.phase, message = "
+                    "EXCLUDED.message, credential_sha256 = EXCLUDED.credential_sha256, endpoint = "
+                    "EXCLUDED.endpoint, observed_generation = EXCLUDED.observed_generation, "
+                    "ready_at = EXCLUDED.ready_at, stopped_at = EXCLUDED.stopped_at, updated_at = "
+                    "now() RETURNING deployment_id",
+                    id,
+                    status.phase,
+                    status.message,
+                    status.credential_sha256,
+                    status.endpoint,
+                    status.observed_generation,
+                    status.ready_at,
+                    status.stopped_at);
+            } catch (const pqxx::check_violation&) {
+                return std::unexpected(StoreError{"invalid_input", "not a deployment status"});
+            }
+            if (rows.empty()) {
+                return std::unexpected(StoreError{"not_found", "no methodology deployment " + id});
+            }
+            return {};
+        });
+    }
+
     static constexpr const char* cron_schedule_columns =
         "s.id::text, s.customer_id::text, s.agent_id, s.agent_name, s.cron, s.time_zone, "
         "s.description, s.slug, s.desired, s.input::text, array_to_json(s.scopes)::text, "
@@ -6974,6 +7188,9 @@ public:
         }
         if (auto principal = app_principal(secret)) {
             return principal;
+        }
+        if (secret.starts_with(methodology_deployment_credential_prefix)) {
+            return methodology_deployment_credential(secret);
         }
         if (secret.starts_with(methodology_run_credential_prefix)) {
             return methodology_run_credential(secret);

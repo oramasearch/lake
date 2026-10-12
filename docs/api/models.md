@@ -59,7 +59,9 @@ Grouping is the web app's (`frontend/src/pages/train/models.ts`); no capability 
 - **Ship → Models** is about serving: publishing (`expose_model`, `unexpose_model`), the `predict`
   call and a try-it panel, the keys scoped to `predict`, where answers go, and monitoring from
   `model_traffic` ([workspaces.md](workspaces.md),
-  [../serving/telemetry.md](../serving/telemetry.md#the-per-model-prediction-series)).
+  [../serving/telemetry.md](../serving/telemetry.md#the-per-model-prediction-series)). A model a
+  workspace methodology trained (`python:W-…`) is served by its own code once published, and
+  `predict` answers one prediction per row from it ([methodologies.md](methodologies.md#serving-its-model), lake#690).
 
 A model repository (the routes above) keeps model files with their history. Lake does not record
 which repositories hold a model, so Train → Models does not list them; a file in one becomes a

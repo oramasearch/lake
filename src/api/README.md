@@ -229,6 +229,14 @@ as `methodology_runs` rows the Orama operator runs; each run's record is sealed
 answer only a run's `lmr.` credential, which `Registry::call` checks
 (`authorize_methodology_run_token`) in place of policy. `workspace_capabilities.cpp` dispatches an
 engine `run` that answers `runner_required` to `run_methodology`. See `docs/api/methodologies.md`.
+An artifact over 24 MiB comes in with `methodology_run_artifact` (forwarded in order to the engine's
+`append_methodology_artifact`) before the output names its size and SHA-256 (lake#690). A model such
+a run trained is served by its own code (lake#690): publishing it (`workspace_act expose_model`)
+writes a `methodology_deployments` row the operator runs, unpublishing or `delete_model` withdraws it
+(`serve_methodology_model`, declared in `methodology_serving.hpp`), `predict` of it is forwarded to
+its serve Service through the injected `MethodologyServer` (`predict_methodology_model`), and
+`methodology_deployment_input` answers only the deployment's `lmd.` credential
+(`authorize_methodology_deployment_token`).
 
 Repository terminal instructions receive a validated explicit `ServerOptions::external_origin` or
 the HTTPS fallback derived from trusted `public_host`. Request and proxy headers cannot select

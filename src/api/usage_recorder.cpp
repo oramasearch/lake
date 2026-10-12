@@ -246,7 +246,7 @@ const std::vector<std::pair<std::string_view, std::string_view>>& calls_only_cap
 const std::vector<std::string_view>& metered_workload_kinds() {
     static const std::vector<std::string_view> kinds{
         "workspace", "service", "store", "app", "build", "agent_launch", "agent_cron_run",
-        "methodology_run"};
+        "methodology_run", "methodology_deployment"};
     return kinds;
 }
 

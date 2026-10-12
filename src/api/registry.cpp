@@ -643,14 +643,30 @@ ApiResult authorize_methodology_run_token(const Capability& entry,
                                           const nlohmann::json& input,
                                           ApiContext& context) {
     if (!context.authorized || context.credential_workload_id.empty() ||
-        (entry.name != "methodology_run_input" && entry.name != "methodology_run_output") ||
+        (entry.name != "methodology_run_input" && entry.name != "methodology_run_output" &&
+         entry.name != "methodology_run_artifact") ||
         input.value("run_id", "") != context.credential_workload_id) {
         return ApiResult::failure("unauthorized",
                                   "a methodology run's credential reaches only its own run's "
-                                  "input and output");
+                                  "input, artifact and output");
     }
     context.audit_customer_id = context.credential_customer_id;
     context.audit_object = "methodology_run/" + context.credential_workload_id;
+    return ApiResult::success(nullptr);
+}
+
+ApiResult authorize_methodology_deployment_token(const Capability& entry,
+                                                 const nlohmann::json& input,
+                                                 ApiContext& context) {
+    if (!context.authorized || context.credential_workload_id.empty() ||
+        entry.name != "methodology_deployment_input" ||
+        input.value("deployment_id", "") != context.credential_workload_id) {
+        return ApiResult::failure("unauthorized",
+                                  "a methodology deployment's credential reaches only its own "
+                                  "deployment's input");
+    }
+    context.audit_customer_id = context.credential_customer_id;
+    context.audit_object = "methodology_deployment/" + context.credential_workload_id;
     return ApiResult::success(nullptr);
 }
 
@@ -799,6 +815,9 @@ CallState prepare_call(std::shared_ptr<const Capability> capability,
         state.proceed = state.result.ok;
     } else if (context.credential_kind == "methodology_run") {
         state.result = authorize_methodology_run_token(entry, input, context);
+        state.proceed = state.result.ok;
+    } else if (context.credential_kind == "methodology_deployment") {
+        state.result = authorize_methodology_deployment_token(entry, input, context);
         state.proceed = state.result.ok;
     } else if (entry.requires_auth && context.session_credential &&
                std::ranges::find(context.scopes, "*") == context.scopes.end() &&

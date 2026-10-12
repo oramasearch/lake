@@ -175,6 +175,9 @@ struct ServerOptions {
     // not_supported.
     std::string model_provider_url;
     ModelProvider model_provider;
+    // An injected client for served methodology models (tests, lake#690); empty: the server's
+    // outbound client, plain http to the serve Service inside the cluster.
+    MethodologyServer methodology_server;
     // Configured external attestation verifiers. Lake owns their invocation but
     // callers retain their lifetime for the server lifetime.
     control::callers::TokenReviewer* token_reviewer = nullptr;

@@ -181,3 +181,7 @@ move (`transfer_to_workspace_store`, `switch_workspace_store`, `create_repositor
 `register_deletion_capabilities` (`capabilities.hpp`, lake#645) registers `delete_dataset`,
 `delete_model`, `delete_run`, `delete_index` and `delete_ask_conversation`
 ([deletion.md](../../../docs/api/deletion.md)).
+
+`MethodologyServer` (`registry.hpp`, `ServerOptions::methodology_server`, lake#690) sends one
+prediction request to a served methodology model's Service; the HTTP server injects one over its
+outbound client (plain http to `*.svc.cluster.local` only), tests inject a fake.

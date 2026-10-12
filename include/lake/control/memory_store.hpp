@@ -234,6 +234,18 @@ public:
                                             const MethodologyRunStatus& status) override;
     // Moves a run's creation `seconds` into the past, as age_agent_launch does.
     Result<void> age_methodology_run(const std::string& id, std::int64_t seconds);
+    Result<MethodologyDeployment>
+    create_methodology_deployment(const NewMethodologyDeployment&) override;
+    Result<MethodologyDeployment> get_methodology_deployment(const std::string& id) override;
+    Result<std::vector<MethodologyDeployment>>
+    list_methodology_deployments(const std::string& customer_id,
+                                 const std::string& workspace_id,
+                                 const std::string& model_id,
+                                 int limit) override;
+    Result<MethodologyDeployment> withdraw_methodology_deployment(const std::string& id,
+                                                                  const std::string& reason) override;
+    Result<void> put_methodology_deployment_status(const std::string& id,
+                                                   const MethodologyDeploymentStatus& status) override;
     Result<AgentCronSchedule> create_agent_cron_schedule(const NewAgentCronSchedule&) override;
     Result<AgentCronSchedule> get_agent_cron_schedule(const std::string& id) override;
     Result<std::vector<AgentCronSchedule>>
@@ -523,6 +535,7 @@ private:
     std::set<std::string> non_expiring_customers_;
     std::vector<AgentLaunch> agent_launches_;
     std::vector<MethodologyRun> methodology_runs_;
+    std::vector<MethodologyDeployment> methodology_deployments_;
     std::vector<AgentCronSchedule> agent_cron_schedules_;
     std::vector<std::pair<std::string, AgentLaunch>> agent_cron_runs_; // schedule id, run
     std::vector<AgentTask> agent_tasks_;

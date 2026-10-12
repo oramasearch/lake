@@ -755,6 +755,19 @@ std::vector<std::string> unreported_workloads(control::Store& store,
             }
         }
     }
+    // Served methodology models (lake#690): a present deployment whose serve pods the operator
+    // has not reported.
+    for (const std::string& workspace_id : chosen) {
+        if (const auto deployments =
+                store.list_methodology_deployments(customer_id, workspace_id, "", 1000)) {
+            for (const control::MethodologyDeployment& deployment : *deployments) {
+                if (deployment.desired == "present" && deployment.phase == "Ready" &&
+                    !resources_of(rows, "methodology_deployment", deployment.id)) {
+                    names.push_back("served model " + deployment.model_id);
+                }
+            }
+        }
+    }
     std::size_t jobs = 0;
     for (const FinishedJob& job : finished_jobs(store, customer_id, chosen).jobs) {
         const auto ended = utc_ms(job.ended);
@@ -2052,6 +2065,28 @@ liquid::runtime::task<UsageSampleReport> sample_usage(ApiContext& context,
             } else {
                 report.unmeasured.push_back("Agent launches of " + customer.id + ": " +
                                             launches.error().message);
+            }
+            // Served methodology models (lake#690): a present deployment's serve pods, for as long
+            // as they run, as kind `methodology` like the runs that trained them.
+            for (const std::string& workspace_id : live_ids) {
+                const auto deployments = context.store->list_methodology_deployments(
+                    customer.id, workspace_id, "", 1000);
+                if (!deployments) {
+                    report.unmeasured.push_back("Methodology deployments of " + customer.id + ": " +
+                                                deployments.error().message);
+                    continue;
+                }
+                for (const control::MethodologyDeployment& deployment : *deployments) {
+                    if (deployment.desired != "present") {
+                        continue;
+                    }
+                    if (const auto* row = running("methodology_deployment", deployment.id)) {
+                        charge(deployment.workspace_id,
+                               *row,
+                               seconds,
+                               {{"kind", "methodology"}, {"object_id", deployment.id}});
+                    }
+                }
             }
             // Builds, job launches and cron runs (lake#658): each finished one is charged once,
             // whenever lake first finds it finished with its resources reported.

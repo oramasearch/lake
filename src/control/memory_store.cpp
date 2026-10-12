@@ -1820,6 +1820,124 @@ Result<void> InMemoryStore::age_methodology_run(const std::string& id, std::int6
     return {};
 }
 
+Result<MethodologyDeployment>
+InMemoryStore::create_methodology_deployment(const NewMethodologyDeployment& in) {
+    std::lock_guard lock(mutex_);
+    if (std::ranges::none_of(customers_,
+                             [&](const Customer& value) { return value.id == in.customer_id; })) {
+        return std::unexpected(StoreError{"not_found", "no customer " + in.customer_id});
+    }
+    if (in.methodology_id.empty() || in.model_id.empty() || in.runtime_image.empty() ||
+        in.cpu_millis <= 0 || in.memory_bytes <= 0 || in.gpus < 0) {
+        return std::unexpected(StoreError{"invalid_input", "methodology deployment is invalid"});
+    }
+    const auto workspace = std::ranges::find_if(workspaces_, [&](const Workspace& value) {
+        return value.id == in.workspace_id && value.customer_id == in.customer_id &&
+               value.desired != "deleted";
+    });
+    if (workspace == workspaces_.end()) {
+        return std::unexpected(
+            StoreError{"invalid_input", "workspace_id must name a workspace in this space"});
+    }
+    if (std::ranges::any_of(methodology_deployments_, [&](const MethodologyDeployment& value) {
+            return value.workspace_id == in.workspace_id && value.model_id == in.model_id &&
+                   value.desired == "present";
+        })) {
+        return std::unexpected(StoreError{"conflict", "this model is already deployed"});
+    }
+    MethodologyDeployment deployment;
+    deployment.id = new_uuid_v4();
+    deployment.customer_id = in.customer_id;
+    deployment.workspace_id = in.workspace_id;
+    deployment.methodology_id = in.methodology_id;
+    deployment.model_id = in.model_id;
+    deployment.run_id = in.run_id;
+    deployment.build_id = in.build_id;
+    deployment.image = in.image;
+    deployment.runtime_image = in.runtime_image;
+    deployment.cpu_millis = in.cpu_millis;
+    deployment.memory_bytes = in.memory_bytes;
+    deployment.gpus = in.gpus;
+    deployment.gpu_class = in.gpu_class;
+    deployment.network = in.network;
+    deployment.slug = managed_service_slug("md", deployment.id);
+    deployment.desired = "present";
+    deployment.created_by_user_id = in.created_by_user_id;
+    deployment.created_by_taap_id = in.created_by_taap_id;
+    deployment.created_at = deployment.updated_at = std::format(
+        "{:%FT%TZ}", std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now()));
+    methodology_deployments_.push_back(deployment);
+    return deployment;
+}
+
+Result<MethodologyDeployment> InMemoryStore::get_methodology_deployment(const std::string& id) {
+    std::lock_guard lock(mutex_);
+    const auto found = std::ranges::find(methodology_deployments_, id, &MethodologyDeployment::id);
+    if (found == methodology_deployments_.end()) {
+        return std::unexpected(StoreError{"not_found", "no methodology deployment " + id});
+    }
+    return *found;
+}
+
+Result<std::vector<MethodologyDeployment>>
+InMemoryStore::list_methodology_deployments(const std::string& customer_id,
+                                            const std::string& workspace_id,
+                                            const std::string& model_id,
+                                            int limit) {
+    std::lock_guard lock(mutex_);
+    std::vector<MethodologyDeployment> deployments;
+    for (auto it = methodology_deployments_.rbegin(); it != methodology_deployments_.rend(); ++it) {
+        if (limit > 0 && static_cast<int>(deployments.size()) >= limit) {
+            break;
+        }
+        if (it->customer_id == customer_id && it->workspace_id == workspace_id &&
+            (model_id.empty() || it->model_id == model_id)) {
+            deployments.push_back(*it);
+        }
+    }
+    return deployments;
+}
+
+Result<MethodologyDeployment>
+InMemoryStore::withdraw_methodology_deployment(const std::string& id, const std::string& reason) {
+    std::lock_guard lock(mutex_);
+    const auto found = std::ranges::find(methodology_deployments_, id, &MethodologyDeployment::id);
+    if (found == methodology_deployments_.end()) {
+        return std::unexpected(StoreError{"not_found", "no methodology deployment " + id});
+    }
+    if (found->desired == "absent") {
+        return std::unexpected(StoreError{"conflict", "the deployment is already stopped"});
+    }
+    found->desired = "absent";
+    ++found->generation;
+    found->stop_reason = reason;
+    found->updated_at = now_iso8601();
+    return *found;
+}
+
+Result<void>
+InMemoryStore::put_methodology_deployment_status(const std::string& id,
+                                                 const MethodologyDeploymentStatus& status) {
+    if (!status.endpoint.empty() && !methodology_deployment_endpoint_valid(status.endpoint)) {
+        return std::unexpected(StoreError{"invalid_input", "not a serve Service endpoint"});
+    }
+    std::lock_guard lock(mutex_);
+    const auto found = std::ranges::find(methodology_deployments_, id, &MethodologyDeployment::id);
+    if (found == methodology_deployments_.end()) {
+        return std::unexpected(StoreError{"not_found", "no methodology deployment " + id});
+    }
+    found->phase = status.phase;
+    found->message = status.message;
+    found->credential_sha256 = status.credential_sha256;
+    found->endpoint = status.endpoint;
+    found->observed_generation =
+        status.observed_generation ? status.observed_generation : found->generation;
+    found->ready_at = status.ready_at;
+    found->stopped_at = status.stopped_at;
+    found->status_updated_at = now_iso8601();
+    return {};
+}
+
 Result<AgentCronSchedule>
 InMemoryStore::create_agent_cron_schedule(const NewAgentCronSchedule& in) {
     std::lock_guard lock(mutex_);
@@ -2378,7 +2496,7 @@ Result<std::vector<WorkloadResources>> InMemoryStore::workload_resources() {
 Result<void> InMemoryStore::put_workload_resources(const WorkloadResources& row) {
     static const std::set<std::string> kinds{
         "workspace", "service", "store", "app", "build", "agent_launch", "agent_cron_run",
-        "methodology_run"};
+        "methodology_run", "methodology_deployment"};
     if (!kinds.contains(row.object_kind) || row.object_id.empty() || row.pods < 0 || row.gpus < 0) {
         return std::unexpected(StoreError{"invalid_input", "not a workload resources row"});
     }
@@ -3712,6 +3830,21 @@ Result<Principal> InMemoryStore::context_for(const std::string& secret) {
             return std::unexpected(StoreError{"not_found", "session is not active"});
         }
         return methodology_run_principal(*run, identity_crypto::sha256_hex(secret));
+    }
+    if (secret.starts_with(methodology_deployment_credential_prefix)) {
+        const auto parsed = parse_agent_credential(secret, methodology_deployment_credential_prefix);
+        if (!parsed) {
+            return std::unexpected(StoreError{"not_found", "session is not active"});
+        }
+        const auto deployment = std::ranges::find(
+            methodology_deployments_, parsed->first, &MethodologyDeployment::id);
+        if (deployment == methodology_deployments_.end() ||
+            !methodology_deployment_credential_live(*deployment) ||
+            !constant_time_hex_equal(identity_crypto::sha256_hex(secret),
+                                     deployment->credential_sha256)) {
+            return std::unexpected(StoreError{"not_found", "session is not active"});
+        }
+        return methodology_deployment_principal(*deployment, identity_crypto::sha256_hex(secret));
     }
     if (secret.starts_with(agent_launch_credential_prefix)) {
         const auto parsed = parse_agent_launch_credential(secret);

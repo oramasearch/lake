@@ -785,8 +785,9 @@ struct MethodologyRunStatus {
     std::string started_at, finished_at;
 };
 // A methodology run's credential (`lmr.<run id>.<secret>`, lake#655) is live while the run is
-// present and not finished; it acts as no person, and may call only methodology_run_input and
-// methodology_run_output for its own run (the registry checks the run).
+// present and not finished; it acts as no person, and may call only methodology_run_input,
+// methodology_run_artifact (lake#690) and methodology_run_output for its own run (the registry
+// checks the run).
 inline constexpr std::string_view methodology_run_credential_prefix = "lmr.";
 inline bool methodology_run_credential_live(const MethodologyRun& run) {
     return run.desired == "present" && !run.credential_sha256.empty() && run.phase != "Succeeded" &&
@@ -799,7 +800,7 @@ inline Principal methodology_run_principal(const MethodologyRun& run, std::strin
                      "",
                      "lake",
                      "methodology_run",
-                     {"methodology_run_input", "methodology_run_output"},
+                     {"methodology_run_input", "methodology_run_artifact", "methodology_run_output"},
                      std::nullopt,
                      run.id,
                      run.customer_id,
@@ -807,6 +808,70 @@ inline Principal methodology_run_principal(const MethodologyRun& run, std::strin
                      "",
                      std::move(digest)};
 }
+// A workspace methodology's model served from Ship → Models (lake#690, migration 0080): lake writes
+// the desired deployment when the model is published, the Orama operator stages the model's
+// artifact with the deployment's credential and runs the methodology's image in `serve` mode as a
+// Deployment behind a Service, and writes the status with the Service's in-cluster endpoint. The
+// stage Job authenticates with `lmd.<deployment id>.<secret>`; lake keeps only its SHA-256. Ids,
+// images, resources and phases only: the model and every prediction stay in the workspace Zetta.
+struct MethodologyDeployment {
+    std::string id, customer_id, workspace_id, methodology_id, model_id, run_id, build_id, image,
+        runtime_image, slug, desired;
+    std::int64_t cpu_millis = 0, memory_bytes = 0;
+    int gpus = 0;
+    std::string gpu_class;
+    bool network = false;
+    std::int64_t generation = 1;
+    std::string stop_reason;
+    std::string created_by_user_id, created_by_taap_id, created_at, updated_at;
+    // Written by the operator; empty until it reports.
+    std::string phase, message, credential_sha256, endpoint;
+    std::int64_t observed_generation = 0;
+    std::string ready_at, stopped_at, status_updated_at;
+};
+struct NewMethodologyDeployment {
+    std::string customer_id, workspace_id, methodology_id, model_id, run_id, build_id, image,
+        runtime_image;
+    std::int64_t cpu_millis = 0, memory_bytes = 0;
+    int gpus = 0;
+    std::string gpu_class;
+    bool network = false;
+    std::string created_by_user_id, created_by_taap_id;
+};
+// What the operator reports about a deployment (methodology_deployment_status). Tests and the
+// operator contract write it; lake never does in production.
+struct MethodologyDeploymentStatus {
+    std::string phase, message, credential_sha256, endpoint;
+    std::int64_t observed_generation = 0;
+    std::string ready_at, stopped_at;
+};
+// A deployment's credential (`lmd.<deployment id>.<secret>`, lake#690) is live while the deployment
+// is present: the stage Job reads the model through methodology_deployment_input, and kubelet pulls
+// the methodology's image with it whenever a serve pod (re)starts. It acts as no person.
+inline constexpr std::string_view methodology_deployment_credential_prefix = "lmd.";
+inline bool methodology_deployment_credential_live(const MethodologyDeployment& deployment) {
+    return deployment.desired == "present" && !deployment.credential_sha256.empty() &&
+           deployment.phase != "Stopped";
+}
+inline Principal methodology_deployment_principal(const MethodologyDeployment& deployment,
+                                                  std::string digest) {
+    return Principal{"",
+                     "methodology_deployment:" + deployment.id,
+                     "methodology_deployment:" + deployment.id,
+                     "",
+                     "lake",
+                     "methodology_deployment",
+                     {"methodology_deployment_input"},
+                     std::nullopt,
+                     deployment.id,
+                     deployment.customer_id,
+                     "",
+                     "",
+                     std::move(digest)};
+}
+// Whether `endpoint` is a serve Service the operator could have written: only
+// `http://md-<12 hex>.<namespace>.svc.cluster.local[:port]`, so a predict is never sent elsewhere.
+bool methodology_deployment_endpoint_valid(std::string_view endpoint);
 // One cron schedule of a Python agent (docs/api/agent-launches.md): an agent may have several.
 // lake writes the desired schedule (agent_cron_schedules, migration 0031); the Orama operator makes
 // each present one a Kubernetes CronJob and writes agent_cron_schedule_status, and one
@@ -1514,6 +1579,26 @@ public:
     // The operator's report, for tests and the operator contract; lake never calls it otherwise.
     virtual Result<void> put_methodology_run_status(const std::string& id,
                                                     const MethodologyRunStatus& status) = 0;
+    // Methodology deployments (lake#690). Creating or withdrawing one NOTIFYs lake_services.
+    // Creating refuses a second present deployment of the same model in a workspace (`conflict`).
+    virtual Result<MethodologyDeployment>
+    create_methodology_deployment(const NewMethodologyDeployment&) = 0;
+    virtual Result<MethodologyDeployment> get_methodology_deployment(const std::string& id) = 0;
+    // Newest first; an empty model_id lists every model's deployments in the workspace, absent
+    // ones included.
+    virtual Result<std::vector<MethodologyDeployment>>
+    list_methodology_deployments(const std::string& customer_id,
+                                 const std::string& workspace_id,
+                                 const std::string& model_id,
+                                 int limit) = 0;
+    // Marks a deployment absent so the operator removes its pods, recording `reason`. Refuses one
+    // already absent.
+    virtual Result<MethodologyDeployment>
+    withdraw_methodology_deployment(const std::string& id, const std::string& reason) = 0;
+    // The operator's report, for tests and the operator contract; lake never calls it otherwise.
+    virtual Result<void>
+    put_methodology_deployment_status(const std::string& id,
+                                      const MethodologyDeploymentStatus& status) = 0;
     // Cron schedules: any number per agent. Creating or withdrawing one NOTIFYs lake_services.
     virtual Result<AgentCronSchedule> create_agent_cron_schedule(const NewAgentCronSchedule&) = 0;
     virtual Result<AgentCronSchedule> get_agent_cron_schedule(const std::string& id) = 0;

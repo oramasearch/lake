@@ -29,6 +29,14 @@ answers go and how it is doing. Each page links to the other for the same versio
 opens a model's training page. A standalone model (lake#654, [train.md](train.md#a-standalone-model))
 is served exactly as a project's: its source reads "trained on its own" or "brought from a file".
 
+A model a workspace methodology trained (kind `python:W-…`, lake#690) is served by its own code. Its
+Serving card says so, links the methodology and shows its server's state (`get_methodology_deployment`,
+refreshed every 4 seconds until it is serving, failed or stopped: pending, building, queued, staging,
+starting, serving). Publish starts the server; Try It's Predict waits until it is serving and then shows
+one prediction per row (row, entity, prediction) instead of ranked rows. `methodologyOf`,
+`serverState` and `predictionRows` in `pages/train/models.ts`; see
+[methodologies.md](../api/methodologies.md#serving-its-model).
+
 ## Deleting a Model Version or a Search Index (lake#645)
 
 Ship → Model has **Delete** in its header: it removes that version's trained model (`delete_model`),

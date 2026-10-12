@@ -69,6 +69,60 @@
 #include "lake/control/zetta_workspace.hpp"
 #include "lake/transparency/log.hpp"
 #include "methodology_repositories.hpp"
+
+namespace lake {
+// Standard base64 for the chunked artifacts and served weights (lake#690).
+inline std::string test_base64_encode(std::string_view bytes) {
+    static constexpr char alphabet[] =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string out;
+    std::size_t i = 0;
+    for (; i + 2 < bytes.size(); i += 3) {
+        const unsigned v = (static_cast<unsigned char>(bytes[i]) << 16) |
+                           (static_cast<unsigned char>(bytes[i + 1]) << 8) |
+                           static_cast<unsigned char>(bytes[i + 2]);
+        out += alphabet[(v >> 18) & 63];
+        out += alphabet[(v >> 12) & 63];
+        out += alphabet[(v >> 6) & 63];
+        out += alphabet[v & 63];
+    }
+    if (i + 1 == bytes.size()) {
+        const unsigned v = static_cast<unsigned char>(bytes[i]) << 16;
+        out += alphabet[(v >> 18) & 63];
+        out += alphabet[(v >> 12) & 63];
+        out += "==";
+    } else if (i + 2 == bytes.size()) {
+        const unsigned v = (static_cast<unsigned char>(bytes[i]) << 16) |
+                           (static_cast<unsigned char>(bytes[i + 1]) << 8);
+        out += alphabet[(v >> 18) & 63];
+        out += alphabet[(v >> 12) & 63];
+        out += alphabet[(v >> 6) & 63];
+        out += '=';
+    }
+    return out;
+}
+inline std::string test_base64_decode(std::string_view text) {
+    std::string out;
+    unsigned value = 0;
+    int bits = -8;
+    for (const char c : text) {
+        int digit = -1;
+        if (c >= 'A' && c <= 'Z') digit = c - 'A';
+        else if (c >= 'a' && c <= 'z') digit = c - 'a' + 26;
+        else if (c >= '0' && c <= '9') digit = c - '0' + 52;
+        else if (c == '+') digit = 62;
+        else if (c == '/') digit = 63;
+        else continue;
+        value = (value << 6) | static_cast<unsigned>(digit);
+        bits += 6;
+        if (bits >= 0) {
+            out.push_back(static_cast<char>((value >> bits) & 0xff));
+            bits -= 8;
+        }
+    }
+    return out;
+}
+} // namespace lake
 #include "mcp_test_server.hpp"
 #include "postgres_fixture.hpp"
 #include "record_fixture.hpp"
@@ -330,6 +384,8 @@ struct TwoSpaces {
     // Repositories and image builds, for workspace methodologies (lake#655); unset: none.
     lake::api::SyncStore* sync_store = nullptr;
     std::string methodology_runtime_image;
+    // Served methodology models' predictions (lake#690); empty: none.
+    lake::api::MethodologyServer methodology_server;
     std::string internal_url;
     std::string public_host;
     // MCP connections' transport (lake#652); null: none. Tests reach a local test server.
@@ -401,6 +457,7 @@ struct TwoSpaces {
         context.transcriber = transcriber;
         context.sync_store = sync_store;
         context.methodology_runtime_image = methodology_runtime_image;
+        context.methodology_server = methodology_server;
         context.internal_url = internal_url;
         context.public_host = public_host;
         context.mcp_http = mcp_http;
@@ -4590,6 +4647,10 @@ TEST_P(WorkspaceRecordStores, MethodologiesAreTheWorkspacesOwnAndOramasStayReadO
     std::map<std::string, json> own;
     std::vector<json> recorded_runs;
     int next_id = 0;
+    // lake#690: what the engine staged of a large artifact, and the model Ship → Models serves.
+    std::string staged_artifact;
+    json served_model = json::object();
+    const std::string served_weights(20000, 'w');
     t.zetta->responder =
         [&](const std::string& capability,
             const json& input) -> std::optional<lake::control::ZettaControlResult<json>> {
@@ -4647,6 +4708,42 @@ TEST_P(WorkspaceRecordStores, MethodologiesAreTheWorkspacesOwnAndOramasStayReadO
         if (capability == "record_methodology_run") {
             recorded_runs.push_back(input);
             return Result(json{{"model_id", "model-" + std::to_string(recorded_runs.size())}});
+        }
+        if (capability == "append_methodology_artifact") {
+            // lake#690: the engine stages a large artifact in order.
+            const std::size_t offset = input.value("offset", std::size_t{0});
+            if (offset > staged_artifact.size()) {
+                return Result(std::unexpected(lake::control::ZettaControlError{
+                    "conflict", "expected offset " + std::to_string(staged_artifact.size())}));
+            }
+            staged_artifact.resize(offset);
+            staged_artifact += lake::test_base64_decode(input.value("chunk_base64", std::string()));
+            return Result(json{{"received", staged_artifact.size()}});
+        }
+        if (capability == "get_model") {
+            if (input.value("model_id", std::string()) != served_model.value("id", std::string())) {
+                return Result(std::unexpected(
+                    lake::control::ZettaControlError{"not_found", "no such model"}));
+            }
+            return Result(served_model);
+        }
+        if (capability == "expose_model" || capability == "unexpose_model") {
+            served_model["exposed"] = capability == "expose_model";
+            // The engine's expose_model takes `model` and answers its id (zetta#648).
+            return Result(json{{"model_id", input.value("model", std::string())},
+                               {"exposed", served_model["exposed"]}});
+        }
+        if (capability == "read_model_weights") {
+            const std::size_t offset = input.value("offset", std::size_t{0});
+            const std::size_t limit = input.value("limit", std::size_t{8} << 20);
+            const std::string chunk = served_weights.substr(offset, limit);
+            const std::size_t end = offset + chunk.size();
+            return Result(json{{"model_id", input.value("model_id", std::string())},
+                               {"offset", offset},
+                               {"chunk_base64", lake::test_base64_encode(chunk)},
+                               {"next_offset", end < served_weights.size() ? json(end) : json(nullptr)},
+                               {"total_bytes", served_weights.size()},
+                               {"sha256", lake::control::identity_crypto::sha256_hex(served_weights)}});
         }
         if (capability == "run") {
             // A pipeline whose step is a workspace methodology: the engine hands it to Lake's
@@ -4976,6 +5073,208 @@ TEST_P(WorkspaceRecordStores, MethodologiesAreTheWorkspacesOwnAndOramasStayReadO
     ASSERT_TRUE(got.ok) << got.error.message;
     EXPECT_EQ(got.value["run"]["model_id"], "model-1");
     EXPECT_EQ(got.value["run"]["result"]["dropped_metrics"], (json{"note"}));
+
+    // An artifact over 24 MiB moves in chunks before the output (lake#690): Lake forwards each to
+    // the engine, which stages it; the output names its size and SHA-256.
+    const auto large = t.call(first,
+                              "run_methodology",
+                              in(first, 0, {{"id", id}, {"dataset", "sales.payers"}, {"target", "late"}}));
+    ASSERT_TRUE(large.ok) << large.error.code << ": " << large.error.message;
+    const std::string large_run = large.value["run"]["id"];
+    const std::string large_secret = "lmr." + large_run + "." + std::string(48, 'e');
+    report(large_run, "Collecting", large_secret);
+    const std::string artifact = "0123456789abcdef0123";
+    const auto chunk = [&](std::size_t offset, std::size_t length) {
+        return as_runner(large_secret,
+                         "methodology_run_artifact",
+                         {{"run_id", large_run},
+                          {"offset", offset},
+                          {"chunk_base64", lake::test_base64_encode(artifact.substr(offset, length))}});
+    };
+    const auto first_chunk = chunk(0, 12);
+    ASSERT_TRUE(first_chunk.ok) << first_chunk.error.code << ": " << first_chunk.error.message;
+    EXPECT_EQ(first_chunk.value["received"], 12);
+    EXPECT_EQ(chunk(15, 5).error.code, "conflict") << "a gap names where to resume";
+    EXPECT_EQ(chunk(12, 8).value["received"], 20);
+    EXPECT_EQ(staged_artifact, artifact);
+    EXPECT_EQ(as_runner(train_secret,
+                        "methodology_run_artifact",
+                        {{"run_id", large_run}, {"offset", 0}, {"chunk_base64", "AAAA"}})
+                  .error.code,
+              "unauthorized")
+        << "one run's credential never sends another's artifact";
+    const json large_result{{"status", "ok"},
+                            {"metrics", {{"held_out_auc", 0.8}}},
+                            {"artifact_format", "pickle"}};
+    const std::string digest = lake::control::identity_crypto::sha256_hex(artifact);
+    EXPECT_EQ(as_runner(large_secret,
+                        "methodology_run_output",
+                        {{"run_id", large_run},
+                         {"result", large_result},
+                         {"artifact_base64", "aGVsbG8="},
+                         {"artifact", {{"bytes", 20}, {"sha256", digest}}}})
+                  .error.code,
+              "invalid_input")
+        << "inline or in chunks, not both";
+    EXPECT_EQ(as_runner(large_secret,
+                        "methodology_run_output",
+                        {{"run_id", large_run},
+                         {"result", large_result},
+                         {"artifact", {{"bytes", 20}, {"sha256", "not-hex"}}}})
+                  .error.path,
+              "/artifact/sha256");
+    const auto large_out = as_runner(large_secret,
+                                     "methodology_run_output",
+                                     {{"run_id", large_run},
+                                      {"result", large_result},
+                                      {"artifact", {{"bytes", 20}, {"sha256", digest}}}});
+    ASSERT_TRUE(large_out.ok) << large_out.error.code << ": " << large_out.error.message;
+    ASSERT_EQ(recorded_runs.size(), 2U);
+    EXPECT_EQ(recorded_runs[1]["artifact_staged"], (json{{"bytes", 20}, {"sha256", digest}}));
+    EXPECT_FALSE(recorded_runs[1].contains("artifact_base64"));
+    EXPECT_EQ(chunk(0, 4).error.code, "conflict") << "no chunk after the result is recorded";
+
+    // Serving its model from Ship → Models (lake#690): publishing starts a deployment the
+    // operator runs; predict goes to the serve pod through Lake.
+    served_model = {{"id", "model-1"},
+                    {"kind", "python:" + id},
+                    {"exposed", false},
+                    {"feature_schema",
+                     {{"methodology", id},
+                      {"lake_run_id", train_run},
+                      {"features", {"days", "amount"}},
+                      {"artifact_format", "pickle"}}}};
+    std::vector<lake::api::MethodologyServeRequest> served_requests;
+    t.methodology_server = [&](const lake::api::MethodologyServeRequest& request) {
+        served_requests.push_back(request);
+        const json rows = json::parse(request.body).at("rows");
+        json predictions = json::array();
+        for (std::size_t index = 0; index < rows.size(); ++index) {
+            predictions.push_back(0.25 * static_cast<double>(index + 1));
+        }
+        return lake::api::MethodologyServeResponse{
+            200, json{{"predictions", predictions}, {"model_id", "model-1"}}.dump(), ""};
+    };
+    const json predict_input = in(
+        first,
+        0,
+        {{"model_id", "model-1"},
+         {"rows", json::array({{{"entity", "c-1"}, {"days", 30}, {"amount", 1.0}}, {{"days", 2}}})}});
+    const auto published = t.call(
+        first,
+        "workspace_act",
+        in(first, 0, {{"capability", "expose_model"}, {"input", {{"model_id", "model-1"}}}}));
+    ASSERT_TRUE(published.ok) << published.error.code << ": " << published.error.message;
+    EXPECT_EQ(published.value["deployment"]["phase"], "Pending");
+    const std::string deployment_id = published.value["deployment"]["id"];
+    const auto deployment = t.store->get_methodology_deployment(deployment_id);
+    ASSERT_TRUE(deployment);
+    EXPECT_EQ(deployment->model_id, "model-1");
+    EXPECT_EQ(deployment->methodology_id, id);
+    EXPECT_EQ(deployment->run_id, train_run);
+    EXPECT_EQ(deployment->build_id, row->build_id) << "the image that trained it serves it";
+    EXPECT_EQ(deployment->runtime_image, "registry.test/oramasearch/methodology-runtime:1");
+    const auto again_published = t.call(
+        first,
+        "workspace_act",
+        in(first, 0, {{"capability", "expose_model"}, {"input", {{"model_id", "model-1"}}}}));
+    ASSERT_TRUE(again_published.ok) << again_published.error.code << ": " << again_published.error.message;
+    EXPECT_EQ(again_published.value["deployment"]["id"], deployment_id) << "one per model";
+    const auto not_yet = t.call(first, "predict", predict_input);
+    EXPECT_EQ(not_yet.error.code, "conflict");
+    EXPECT_NE(not_yet.error.message.find("not serving yet"), std::string::npos);
+    EXPECT_TRUE(served_requests.empty());
+
+    // The operator stages it with the deployment's credential, which reaches only its input.
+    const std::string deployment_secret = "lmd." + deployment_id + "." + std::string(48, 'd');
+    lake::control::MethodologyDeploymentStatus staging;
+    staging.phase = "Staging";
+    staging.credential_sha256 = lake::control::identity_crypto::sha256_hex(deployment_secret);
+    ASSERT_TRUE(t.store->put_methodology_deployment_status(deployment_id, staging));
+    const auto model_page = as_runner(deployment_secret,
+                                      "methodology_deployment_input",
+                                      {{"deployment_id", deployment_id}, {"limit", 15000}});
+    ASSERT_TRUE(model_page.ok) << model_page.error.code << ": " << model_page.error.message;
+    EXPECT_EQ(model_page.value["spec"]["model_id"], "model-1");
+    EXPECT_EQ(model_page.value["spec"]["methodology_id"], id);
+    EXPECT_EQ(model_page.value["spec"]["features"], (json{"days", "amount"}));
+    EXPECT_EQ(model_page.value["spec"]["artifact_format"], "pickle");
+    EXPECT_FALSE(model_page.value["spec"]["manifest"].empty());
+    EXPECT_EQ(model_page.value["total_bytes"], 20000);
+    EXPECT_EQ(model_page.value["next_offset"], 15000);
+    const auto model_rest = as_runner(deployment_secret,
+                                      "methodology_deployment_input",
+                                      {{"deployment_id", deployment_id}, {"offset", 15000}});
+    ASSERT_TRUE(model_rest.ok) << model_rest.error.code << ": " << model_rest.error.message;
+    EXPECT_TRUE(model_rest.value["next_offset"].is_null());
+    EXPECT_EQ(lake::test_base64_decode(model_page.value["chunk_base64"].get<std::string>()) +
+                  lake::test_base64_decode(model_rest.value["chunk_base64"].get<std::string>()),
+              served_weights);
+    for (const auto& [capability, input] : std::vector<std::pair<std::string, json>>{
+             {"methodology_run_input", {{"run_id", train_run}}},
+             {"get_methodology", in(first, 0, {{"id", id}})},
+             {"methodology_deployment_input", {{"deployment_id", lake::control::new_uuid_v4()}}}}) {
+        EXPECT_EQ(as_runner(deployment_secret, capability, input).error.code, "unauthorized")
+            << capability;
+    }
+    EXPECT_EQ(as_runner(train_secret,
+                        "methodology_deployment_input",
+                        {{"deployment_id", deployment_id}})
+                  .error.code,
+              "unauthorized")
+        << "a run's credential never reads a model";
+    EXPECT_FALSE(t.call(first, "methodology_deployment_input", {{"deployment_id", deployment_id}}).ok)
+        << "nor does a person";
+
+    // The operator's endpoint is a serve Service, nothing else.
+    lake::control::MethodologyDeploymentStatus ready = staging;
+    ready.phase = "Ready";
+    ready.endpoint = "http://169.254.169.254";
+    EXPECT_FALSE(t.store->put_methodology_deployment_status(deployment_id, ready));
+    ready.endpoint = "http://" + deployment->slug + ".lake-prod-methodology-runs.svc.cluster.local";
+    ASSERT_TRUE(t.store->put_methodology_deployment_status(deployment_id, ready));
+    const auto served = t.call(first, "get_methodology_deployment", in(first, 0, {{"model_id", "model-1"}}));
+    ASSERT_TRUE(served.ok) << served.error.message;
+    EXPECT_EQ(served.value["deployment"]["phase"], "Ready");
+    EXPECT_EQ(served.value["deployment"]["ready"], true);
+    EXPECT_FALSE(served.value["deployment"].contains("endpoint")) << "where it runs is the operator's";
+
+    const auto predicted = t.call(first, "predict", predict_input);
+    ASSERT_TRUE(predicted.ok) << predicted.error.code << ": " << predicted.error.message;
+    EXPECT_EQ(predicted.value["runner"], "methodology");
+    ASSERT_EQ(predicted.value["predictions"].size(), 2U);
+    EXPECT_EQ(predicted.value["predictions"][0]["entity"], "c-1");
+    EXPECT_EQ(predicted.value["predictions"][0]["prediction"], 0.25);
+    EXPECT_EQ(predicted.value["predictions"][1]["row"], 1);
+    ASSERT_EQ(served_requests.size(), 1U);
+    EXPECT_EQ(served_requests[0].endpoint, ready.endpoint);
+    EXPECT_EQ(served_requests[0].path, "/predict");
+    t.methodology_server = [](const lake::api::MethodologyServeRequest&) {
+        return lake::api::MethodologyServeResponse{
+            422,
+            json{{"error", {{"code", "methodology_error"}, {"message", "predict raised KeyError"}}}}
+                .dump(),
+            ""};
+    };
+    const auto raised = t.call(first, "predict", predict_input);
+    EXPECT_EQ(raised.error.code, "invalid_input");
+    EXPECT_EQ(raised.error.message, "predict raised KeyError");
+    EXPECT_EQ(t.call(second, "predict", predict_input).error.code.empty(), false)
+        << "another account cannot call it";
+
+    // Unpublishing stops it.
+    const auto unpublished = t.call(
+        first,
+        "workspace_act",
+        in(first, 0, {{"capability", "unexpose_model"}, {"input", {{"model_id", "model-1"}}}}));
+    ASSERT_TRUE(unpublished.ok) << unpublished.error.code << ": " << unpublished.error.message;
+    EXPECT_EQ(unpublished.value["deployment"]["phase"], "Stopped");
+    EXPECT_EQ(t.store->get_methodology_deployment(deployment_id)->desired, "absent");
+    const auto listed_deployments =
+        t.call(first, "list_methodology_deployments", in(first, 0, json::object()));
+    ASSERT_TRUE(listed_deployments.ok) << listed_deployments.error.message;
+    EXPECT_EQ(listed_deployments.value["deployments"].size(), 1U);
+    EXPECT_FALSE(t.store->context_for(deployment_secret)) << "a stopped deployment's credential is gone";
 
     // A pipeline using it as a step: the engine's run hands it to the runner, as a training run
     // of that pipeline.

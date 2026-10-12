@@ -883,6 +883,35 @@ public:
         return call("put_methodology_run_status",
                     [&] { return store_->put_methodology_run_status(id, status); });
     }
+    control::Result<control::MethodologyDeployment>
+    create_methodology_deployment(const control::NewMethodologyDeployment& in) override {
+        return call("create_methodology_deployment",
+                    [&] { return store_->create_methodology_deployment(in); });
+    }
+    control::Result<control::MethodologyDeployment> get_methodology_deployment(const std::string& id) override {
+        return call("get_methodology_deployment",
+                    [&] { return store_->get_methodology_deployment(id); });
+    }
+    control::Result<std::vector<control::MethodologyDeployment>>
+    list_methodology_deployments(const std::string& customer_id,
+                                 const std::string& workspace_id,
+                                 const std::string& model_id,
+                                 int limit) override {
+        return call("list_methodology_deployments", [&] {
+            return store_->list_methodology_deployments(customer_id, workspace_id, model_id, limit);
+        });
+    }
+    control::Result<control::MethodologyDeployment>
+    withdraw_methodology_deployment(const std::string& id, const std::string& reason) override {
+        return call("withdraw_methodology_deployment",
+                    [&] { return store_->withdraw_methodology_deployment(id, reason); });
+    }
+    control::Result<void>
+    put_methodology_deployment_status(const std::string& id,
+                                      const control::MethodologyDeploymentStatus& status) override {
+        return call("put_methodology_deployment_status",
+                    [&] { return store_->put_methodology_deployment_status(id, status); });
+    }
     control::Result<std::vector<control::AgentLaunch>>
     list_agent_cron_runs(const std::string& customer_id, const std::string& agent_id, int limit,
                          const std::string& workspace_id = {}) override {

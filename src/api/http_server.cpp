@@ -6690,6 +6690,9 @@ struct OutboundRequest {
     std::chrono::seconds timeout{30};
     // The largest response body read; a model's answer or event stream can be larger (lake#248).
     std::size_t body_limit = 2 * 1024 * 1024;
+    // Plain http to a cluster Service (`<name>.<namespace>.svc.cluster.local`): a served
+    // methodology's model (lake#690), whose Service only Lake's pods can reach.
+    bool cluster_http = false;
 };
 
 struct OutboundResponse {
@@ -6705,7 +6708,7 @@ struct OutboundTarget {
     std::string path;
 };
 
-bool parse_outbound_url(std::string_view url, OutboundTarget& target) {
+bool parse_outbound_url(std::string_view url, OutboundTarget& target, bool cluster_http = false) {
     if (url.starts_with("https://")) {
         url.remove_prefix(8);
         target.secure = true;
@@ -6748,7 +6751,8 @@ bool parse_outbound_url(std::string_view url, OutboundTarget& target) {
     }
     const bool loopback =
         target.host == "127.0.0.1" || target.host == "::1" || target.host == "localhost";
-    return !target.host.empty() && !target.port.empty() && (target.secure || loopback);
+    const bool cluster = cluster_http && target.host.ends_with(".svc.cluster.local");
+    return !target.host.empty() && !target.port.empty() && (target.secure || loopback || cluster);
 }
 
 std::string outbound_host_header(const OutboundTarget& target) {
@@ -6932,7 +6936,7 @@ private:
 
     boost::capy::task<> perform(std::shared_ptr<Pending> pending) {
         OutboundTarget target;
-        if (!parse_outbound_url(pending->request.url, target)) {
+        if (!parse_outbound_url(pending->request.url, target, pending->request.cluster_http)) {
             pending->response.error = "outbound URL must use HTTPS, except for loopback tests";
             finish(pending);
             co_return;
@@ -7555,6 +7559,7 @@ struct ApiServer::Impl {
     std::shared_ptr<McpHttp> mcp_http;
     // The model gateway's provider (docs/api/model-gateway.md): the injected one, else OpenAI's
     // API over outbound_http when LAKE_OPENAI_API_KEY is set (lake#248).
+    MethodologyServer methodology_server;
     ModelProvider model_provider;
     // The workspace Zettas' object transport (configure_workspace_stores), for workspace files;
     // null without workspaces.
@@ -10700,7 +10705,31 @@ struct ApiServer::Impl {
             }
             return {RegistryAccess::Allowed, customer->id, run->workspace_id, false};
         }
-        if (credential.username == "app" || credential.username == "methodology-run") {
+        if (principal->kind == "methodology_deployment") {
+            // A served methodology model's serve pods pull its image with the deployment's own
+            // credential (lake#690) whenever one (re)starts: that one image repository, read only,
+            // while the deployment is present.
+            if (write || credential.username != "methodology-deployment") {
+                return {RegistryAccess::Denied};
+            }
+            const auto deployment =
+                options.store->get_methodology_deployment(principal->workload_id);
+            const auto customer = options.store->get_customer(principal->workload_customer_id);
+            if (!deployment || !customer || deployment->customer_id != customer->id ||
+                deployment->build_id.empty()) {
+                return {RegistryAccess::Denied};
+            }
+            const auto build = options.store->get_build(deployment->build_id);
+            const std::string image =
+                build ? build_target_image(build->target, customer->name) : std::string();
+            if (!build || build->customer_id != customer->id || image.empty() ||
+                repository != customer->name + "/" + image) {
+                return {RegistryAccess::Denied};
+            }
+            return {RegistryAccess::Allowed, customer->id, deployment->workspace_id, false};
+        }
+        if (credential.username == "app" || credential.username == "methodology-run" ||
+            credential.username == "methodology-deployment") {
             return {RegistryAccess::Denied};
         }
         if (write || principal->taap_id.empty() ||

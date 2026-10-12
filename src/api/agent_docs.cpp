@@ -58,7 +58,9 @@ constexpr std::array group_rules{
               "lock file, then runs it on a sample in its sandbox; run_methodology trains it on a "
               "dataset (no network unless granted, no Lake or Zetta credentials) and registers its "
               "model. Orama's are read-only (`forbidden`); duplicate_methodology copies either "
-              "kind. A pipeline step that uses one runs through the same runner.",
+              "kind. A pipeline step that uses one runs through the same runner. Its model is "
+              "served by its own code once published (workspace_act expose_model); "
+              "get_methodology_deployment says whether it is serving, and predict answers from it.",
               [](std::string_view n) {
                   return n.find("methodology") != std::string_view::npos &&
                          n != "list_methodologies";
