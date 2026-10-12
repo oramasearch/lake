@@ -401,3 +401,7 @@ deployment's `lmd.` credential, the serve Service's in-cluster endpoint) and the
 Nothing is dropped; idempotent. The latest guard is `methodology_deployments_guard`; the operator
 must vendor this schema and select that guard before rollout. See
 [schema.md](../docs/control-plane/schema.md#methodology-deployments-migration).
+
+Every `workload_resources` kind check (the table's own and those of `0077`, `0078` and `0083`) lists
+every kind, so applying the schema again over rows of a later kind (`methodology_run`,
+`methodology_deployment`) does not fail at an earlier migration's check.
