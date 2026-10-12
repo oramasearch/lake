@@ -3105,7 +3105,8 @@ TEST(TelemetryHttp, MetricsRequireExistingAuthAndUsePrometheusContentType) {
     const std::string served = http_get(server.port(), "/metrics", "Bearer test-token");
     EXPECT_NE(served.find(" 200 "), std::string::npos);
     EXPECT_NE(served.find("Content-Type: text/plain; version=0.0.4"), std::string::npos);
-    EXPECT_NE(served.find("lake_build_info{version=\"0.0.1\",node=\"test-node\"} 1\n"),
+    EXPECT_NE(served.find("lake_build_info{version=\"" + std::string(lake::version_string()) +
+                          "\",node=\"test-node\"} 1\n"),
               std::string::npos);
     EXPECT_NE(served.find("lake_up 1\n"), std::string::npos);
     EXPECT_NE(served.find("lake_http_requests_total{method=\"GET\",route=\"/"
