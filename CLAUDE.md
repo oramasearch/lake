@@ -72,9 +72,21 @@ whose Load data picks from them; old `?browse=`/`#connections` links redirect
 bucket or filesystem store opens as a fourth drive kind, `store` (lake#656, no migration):
 `create_drive {storage: "store", store_id}` and the entry capabilities browse it in place through
 `control::StoreContents` and the injected `StoreBrowser` (an item's id is its path; deleting the
-drive never deletes the store; a volume is refused). No provider is browsable yet, so without a
-browser it answers `not_supported` (lake#664); which services and apps mount a store is not
+drive never deletes the store; a volume is refused). Every bucket and filesystem pair is offered
+and browsable (lake#664, no migration): the customer's own bucket (`r2`, `s3`, `b2`, `gcs`, `azure`)
+named with a secret of the workspace's secret store (decision 58, never Orama's) and reached by
+Lake's own S3 (SigV4) and Azure Blob clients (no SDK) over a public-only transport
+(`control::cloud_store_browser`); a `zetta` store kept as sealed `lake_store_items` records and a
+sealed `lake_st_<hex>` bucket in the workspace Zetta; a `lake` store on a liquid repository's
+`main`. One conformance suite runs against each over a local fake. Not deployed: the operator must
+reconcile them first (orama-operator#294). Which services and apps mount a store is not
 recorded (lake#666). Not deployed. See `docs/api/drives.md#store-drives` and
+drive never deletes the store; a volume is refused). No provider is browsable yet, so without a
+browser it answers `not_supported` (lake#664). Which services and apps mount a store is recorded
+(lake#666, migration `0080_store_mounts`): `stores` on `create_service`, `set_service_stores`,
+`create_app` and `set_app_stores`, one workload per volume, a mounted store not deleted, and
+`list_stores` answering `mounted_by` and `used_bytes`; the operator must vendor the schema, mount
+the stores and report bytes in use. Not deployed. See `docs/api/drives.md#store-drives` and
 `docs/ui/drives.md#storage`.
 
 A workspace's own AI solutions follow (lake#597, no migration): sealed `lake_solutions` records in
@@ -127,6 +139,13 @@ Factory; every `create_agent` and `update_agent` the engine accepts is kept as a
 only agents with something to train, with performance, versions, promote and roll back, the
 training schedule and Launch experiment. The pages call the named engine capabilities. Not
 deployed. See `docs/api/train-agents.md`.
+An agent can be started by a workspace stream (lake#677, no migration): `set_agent_streams` names
+the workspace streams whose new messages each start a job of a Python agent with the message as its
+input, as the person who set them; each trigger is a sealed `lake_agent_stream_triggers` record in
+the workspace Zetta, read by the store root's owner (`AgentStreamWorker`, beside the MCP connection
+streams, through the same `start_stream_runs`), and removed with its agent by `delete_agent`. Design
+→ Agents' New agent and Edit offer the streams; the agent's Design page lists them. Not deployed. See
+`docs/api/agent-launches.md#stream-triggers`.
 
 A workspace's own methodologies from Python code follow (lake#655, migration `0078_methodology_runs`):
 the code is a manifest, an entrypoint with fit, predict and score, and a hashed lock file in a
@@ -284,8 +303,8 @@ Deleting and revoking follow (lake#645, migration `0076_organization_deletion`):
 are marked `deleted_at`, never erased, because the central audit chain names the account),
 `revoke_invitation`, `revoke_grant`, `delete_secret_mount` (every record out of the mount's workspace
 Zetta before its route), `delete_dataset`, `delete_model`, `delete_run`, `delete_index` (the workspace
-engine's deletes, zetta#1257; `not_supported` from an older engine) and `delete_ask_conversation`,
-each with `dry_run: true` and a typed confirmation in Lake Console. Not deployed; the operator must
+engine's deletes, zetta#1257; `not_supported` from an older engine) and `delete_ask_conversation`
+(with the agent tasks the conversation started, lake#673), each with `dry_run: true` and a typed confirmation in Lake Console. Not deployed; the operator must
 vendor the schema and select `organization_deletion_guard`. See `docs/api/deletion.md`.
 A user's secret reaches a Kubernetes Secret only as a sealed projection (lake#625, decision 58, no
 migration): lake has two levels of secrets, Orama's platform credentials as environment variables

@@ -1,5 +1,7 @@
 #include "lake/api/usage_recorder.hpp"
 
+#include "lake/control/store.hpp"
+
 #include <algorithm>
 #include <limits>
 #include <utility>
@@ -39,6 +41,9 @@ std::int64_t hour_of(std::int64_t at_ms) {
 const std::vector<UsageDimension>& usage_dimensions() {
     static const std::vector<UsageDimension> dimensions{
         {"storage", "bytes", "last", "Storage"},
+        // What a workspace engine holds on its own volume (decision 61, lake#663): measured and
+        // shown, never billed, since the engine's disk is billed as its volume (`volumes`).
+        {"engine_storage", "bytes", "last", "Engine Storage", false, false},
         {"transfer", "bytes", "sum", "Transfer"},
         {"cpu", "mcpu_seconds", "sum", "CPU", true, false},
         {"ram", "mib_seconds", "sum", "RAM", true, false},
@@ -61,8 +66,9 @@ const std::vector<CapabilityMeter>& capability_meters() {
     static const std::vector<CapabilityMeter> meters{
         // Workloads: what the Orama operator schedules them with (workload_resources), sampled.
         {"create_workspace",
-         {"cpu", "ram", "gpu", "vram", "volumes", "storage"},
-         "its engine's resources and volume while it runs; what it holds, sampled"},
+         {"cpu", "ram", "gpu", "vram", "volumes"},
+         "its engine's resources and volume while it runs; what the engine holds on that volume is "
+         "engine_storage, shown and not billed (decision 61)"},
         {"start_workspace",
          {"cpu", "ram", "gpu", "vram", "volumes"},
          "its engine's resources and volume while it runs"},
@@ -85,29 +91,31 @@ const std::vector<CapabilityMeter>& capability_meters() {
         {"run_pipeline", {"cpu", "ram", "gpu", "vram"}, "in the workspace's engine"},
         {"start_experiment", {"cpu", "ram", "gpu", "vram"}, "its trials, in the engine"},
         {"start_solution", {"cpu", "ram", "gpu", "vram"}, "its first run, in the engine"},
-        {"load_drive_dataset", {"storage"}, "the dataset, in the engine's databases"},
+        // What the engine keeps is on its own volume, billed as `volumes` by its size (decision 61,
+        // lake#663); the bytes are engine_storage, shown and never billed.
+        {"load_drive_dataset", {"volumes"}, "the dataset, on the engine's volume"},
         // The engine's own capabilities, named in Lake (lake#650): their work and what they keep
-        // are the workspace engine's CPU, RAM, GPU and storage.
+        // are the workspace engine's CPU, RAM, GPU and volume.
         {"train_model",
-         {"cpu", "ram", "gpu", "vram", "storage"},
-         "training in the engine; the model, in its storage"},
+         {"cpu", "ram", "gpu", "vram", "volumes"},
+         "training in the engine; the model, on its volume"},
         {"start_run",
-         {"cpu", "ram", "gpu", "vram", "storage"},
-         "the run in the engine; its artifacts, in its storage"},
-        {"run_solution", {"cpu", "ram", "gpu", "vram", "storage"}, "as start_run"},
+         {"cpu", "ram", "gpu", "vram", "volumes"},
+         "the run in the engine; its artifacts, on its volume"},
+        {"run_solution", {"cpu", "ram", "gpu", "vram", "volumes"}, "as start_run"},
         {"deploy_pipeline", {"cpu", "ram", "gpu", "vram"}, "the deployed pipeline, in the engine"},
-        {"create_index", {"cpu", "ram", "storage"}, "built in the engine; kept in its storage"},
+        {"create_index", {"cpu", "ram", "volumes"}, "built in the engine; kept on its volume"},
         {"create_dataset_from_query",
-         {"cpu", "ram", "storage"},
-         "the query in the engine; the dataset, in its storage"},
-        {"upload_dataset", {"transfer", "storage"}, "the rows, in the engine's databases"},
-        {"load_drive_model", {"storage"}, "the model, in the engine's storage"},
-        {"import_n8n", {"storage"}, "the workflow, kept as a project artifact"},
-        {"create_stream", {"storage"}, "its topic's bytes, in the engine's streams"},
-        {"publish_stream_message", {"storage"}, "as create_stream"},
-        {"publish_agent_event", {"storage"}, "the event, in the workspace's topic"},
-        {"publish_app_event", {"storage"}, "the event, in the workspace's topic"},
-        {"publish_build_event", {"storage"}, "the event, in the workspace's topic"},
+         {"cpu", "ram", "volumes"},
+         "the query in the engine; the dataset, on its volume"},
+        {"upload_dataset", {"transfer", "volumes"}, "the rows, on the engine's volume"},
+        {"load_drive_model", {"volumes"}, "the model, on the engine's volume"},
+        {"import_n8n", {"volumes"}, "the workflow, kept as a project artifact on the engine's volume"},
+        {"create_stream", {"volumes"}, "its topic's bytes, on the engine's volume"},
+        {"publish_stream_message", {"volumes"}, "as create_stream"},
+        {"publish_agent_event", {"volumes"}, "the event, in the workspace's topic"},
+        {"publish_app_event", {"volumes"}, "the event, in the workspace's topic"},
+        {"publish_build_event", {"volumes"}, "the event, in the workspace's topic"},
         // Serving.
         {"predict", {"predictions"}, "each answered prediction, by model"},
         {"search_index", {"searches"}, "each answered search, by index"},
@@ -226,6 +234,8 @@ const std::vector<std::pair<std::string_view, std::string_view>>& calls_only_cap
         {"resolve_model", "a model's metadata"},
         {"set_app_auth", "app configuration"},
         {"set_app_env", "app configuration"},
+        {"set_app_stores", "app configuration; the storage is billed as the store's"},
+        {"set_service_stores", "service configuration; the storage is billed as the store's"},
         {"set_app_zetta_binding", "app configuration"},
         // Search runs in lake's own process over indexes lake keeps: a call.
         {"search", "lake's repository search; the index is in the repositories' storage"},
@@ -253,6 +263,19 @@ const std::vector<std::string_view>& metered_workload_kinds() {
 const std::vector<std::string_view>& metered_store_types() {
     static const std::vector<std::string_view> types{"volume"};
     return types;
+}
+
+std::string_view store_metered_as(std::string_view type, std::string_view provider) {
+    if (type == "volume") {
+        return "volumes";
+    }
+    if (control::store_kept_by_lake(type, provider)) {
+        return provider == "zetta" ? "storage (buckets)" : "storage (repositories)";
+    }
+    if (control::store_external_bucket(type, provider)) {
+        return "transfer";
+    }
+    return {};
 }
 
 const UsageDimension* find_usage_dimension(std::string_view name) {

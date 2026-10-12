@@ -76,6 +76,10 @@ nlohmann::json workspace_json(const Workspace& workspace, bool operator_detail =
 std::string workspace_storage_reason(std::string_view phase);
 // A store as the API and the pages show it (docs/control-plane/storage.md): never its credential.
 nlohmann::json store_json(const ManagedStore& store);
+// Where a store's contents are (lake#664): a bucket's {bucket, endpoint, region, prefix,
+// credential: {mount_id, name}}, a `lake` store's {repository_id}, or null. Never a credential's
+// value.
+nlohmann::json store_location_json(const ManagedStore& store);
 
 struct WorkspaceState {
     std::string slug, service_id, workspace_id;

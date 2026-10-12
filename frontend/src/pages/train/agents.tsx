@@ -4,7 +4,7 @@
  * rules are in `@/lib/agents`. */
 import { useRead, type Row } from "@/lib/api";
 import { Chip, Field, Form, FormError, fieldError } from "@/lib/ui";
-import { OFFERED_SKILLS, skillChoices, skillLabel, text, type AgentForm } from "@/lib/agents";
+import { OFFERED_SKILLS, skillChoices, skillLabel, text, triggerStreams, type AgentForm } from "@/lib/agents";
 import { useWorkspace } from "./workspace";
 
 export { modelLabel, runsWhere, skillLabel, skillLabels } from "@/lib/agents";
@@ -49,6 +49,7 @@ export function approvedPipelines(projects: unknown): { project: string; graph: 
 export function AgentFields({ id, form, onChange, onSubmit, error }: { id: string; form: AgentForm; onChange: (form: AgentForm) => void; onSubmit: () => void | Promise<unknown>; error: unknown }) {
   const models = useEngineRead<{ models?: Row[] }>("list_models", {}, { retry: false });
   const projects = useEngineRead<{ projects?: Row[] }>("list_projects", {}, { retry: false });
+  const streamList = useEngineRead<{ groups?: Row[] }>("list_streams", { limit: 200 }, { retry: false });
   const set = <K extends keyof AgentForm>(key: K, value: AgentForm[K]) => onChange({ ...form, [key]: value });
   const skills = skillChoices(OFFERED_SKILLS, form.skills);
   const workspaceModels = (models.data?.models ?? []).filter((m) => !!m && typeof m === "object");
@@ -56,7 +57,10 @@ export function AgentFields({ id, form, onChange, onSubmit, error }: { id: strin
   const approved = approvedPipelines(projects.data?.projects);
   for (const grant of form.pipelines) if (!approved.some((a) => a.project === grant.project && a.graph === grant.graph)) approved.push(grant);
   const granted = (p: { project: string; graph: string }) => form.pipelines.some((g) => g.project === p.project && g.graph === p.graph);
-  const inField = ["name", "purpose", "model", "skills", "pipelines", "trigger"].some((f) => fieldError(error, f));
+  const streams = triggerStreams(streamList.data?.groups);
+  for (const chosen of form.streams) if (!streams.includes(chosen)) streams.push(chosen);
+  const frontier = form.model === "frontier";
+  const inField = ["name", "purpose", "model", "skills", "pipelines", "trigger", "streams", "agent_id"].some((f) => fieldError(error, f));
   return (
     <Form id={id} onSubmit={onSubmit}>
       <FormError error={inField ? null : error} />
@@ -150,6 +154,28 @@ export function AgentFields({ id, form, onChange, onSubmit, error }: { id: strin
       </div>
       <Field label="Runs on its own" help="A schedule, in words or five cron fields. Leave empty to use it only in conversation." error={fieldError(error, "trigger")}>
         <input name="trigger" placeholder="every Monday at 09:00" value={form.trigger} onChange={(e) => set("trigger", e.target.value)} />
+      </Field>
+      <Field
+        label="Starts on new messages in"
+        help={frontier ? "Each new message on a chosen stream starts a run, with the message as its input. Runs act as you, as a schedule's do." : "Only an agent on a frontier model runs from a stream, as only one runs on a schedule."}
+        error={fieldError(error, "streams") ?? fieldError(error, "agent_id")}
+      >
+        {!frontier ? (
+          <span className="muted text-[12.5px]">{form.streams.length ? "Its streams are removed when you save it on this model." : "Choose a frontier model to start it from a stream."}</span>
+        ) : streams.length ? (
+          <div className="flex flex-wrap gap-1.5" role="group" aria-label="Streams that start it">
+            {streams.map((name) => {
+              const on = form.streams.includes(name);
+              return (
+                <Chip key={name} active={on} onClick={() => set("streams", on ? form.streams.filter((s) => s !== name) : [...form.streams, name])}>
+                  {name}
+                </Chip>
+              );
+            })}
+          </div>
+        ) : (
+          <span className="muted text-[12.5px]">{streamList.isLoading ? "Reading the workspace's streams…" : "No stream in this workspace yet. Create one in Train → Streams."}</span>
+        )}
       </Field>
     </Form>
   );

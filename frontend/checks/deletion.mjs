@@ -1,6 +1,7 @@
 // Screenshots of the delete and revoke confirmations (lake#645, docs/ui/deletion.md) at 1440 and 390
 // wide: an organization that still owns a workspace (blocked, with the workspace linked), one that
-// owns none (typed handle), a dataset and a secret mount. Run against `npx vite --port 5174`; every
+// owns none (typed handle), a dataset, a secret mount and an Ask Orama conversation with the agent
+// tasks it started (lake#673). Run against `npx vite --port 5174`; every
 // /v1 call is answered by the mocks below, so no lake is needed. Playwright is not a dependency:
 //
 //   PLAYWRIGHT_FROM=/path/to/a/project/with/playwright/package.json OUT=/tmp/shots node checks/deletion.mjs
@@ -52,6 +53,10 @@ function answer(name, body, blocked) {
   if (name === "delete_secret_mount")
     return { mount_id: "mt-1", name: "payments-vault", workspace_id: "me-0", dry_run: true, deleted: false, counts: { secrets: 3, versions: 5, encryption_keys: 1, data_keys: 2, leases: 0, mount: 1 }, secrets: ["database", "stripe", "smtp"] };
   if (name === "delete_dataset") return { id: "datasets/orders", dataset: "orders", database: "datasets", dry_run: true, deleted: false, removed: { rows: 120344, size_bytes: 18_400_000, partitions: 1, indexes: ["i-1"] } };
+  if (name === "get_ask_conversation")
+    return { conversation_id: "cv-1", messages: [{ id: "m-1", role: "user", content: "Which customers are likely to churn next quarter?", created_at: "2026-10-11T10:00:00Z" }, { id: "m-2", role: "assistant", content: "The renewals table shows 42 at risk.", created_at: "2026-10-11T10:00:05Z" }] };
+  if (name === "delete_ask_conversation")
+    return { conversation_id: "cv-1", messages: 2, first_message: "Which customers are likely to churn next quarter?", agent_tasks: [{ task_id: "t-1", agent: "agent-ask-orama", kind: "ask", status: "succeeded" }, { task_id: "t-2", agent: "agent-autosuggest", kind: "api", status: "succeeded" }], dry_run: true, deleted: false };
   if (name === "workspace_query" && body?.capability === "get_dataset") return { dataset: "orders", rows: 120344, size_bytes: 18400000, format: "parquet", columns: ["id", "total"], partitions: [] };
   return {};
 }
@@ -60,6 +65,7 @@ const SHOTS = [
   { tag: "org-blocked", path: "/organization?id=o-1", open: "Delete organization", blocked: true },
   { tag: "org", path: "/organization?id=o-1", open: "Delete organization", typed: "acme-analytics" },
   { tag: "mount", path: "/secret-mounts?workspace_id=me-0", open: "Delete", typed: "payments-vault" },
+  { tag: "conversation", path: "/?conversation=cv-1", open: "Delete", typed: "delete" },
   { tag: "dataset", path: "/w/me-0/train/dataset?name=orders&database=datasets", open: "Delete dataset", typed: "orders" },
 ];
 

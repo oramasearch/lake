@@ -142,40 +142,65 @@ std::expected<nlohmann::json, ApiError> prepare_model_request(std::string_view e
 }
 
 ModelUsage model_usage(std::string_view body, bool stream) {
-    ModelUsage out;
     if (!stream) {
+        ModelUsage out;
         read_answer(nlohmann::json::parse(body, nullptr, false), out);
         return out;
     }
-    // Server-sent events: each `data:` line is one JSON event, and the last one that reports
-    // usage is the answer's total.
+    ModelStreamUsage reader;
+    reader.feed(body);
+    reader.finish();
+    return reader.usage();
+}
+
+void ModelStreamUsage::feed(std::string_view piece) {
     std::size_t start = 0;
-    while (start < body.size()) {
-        std::size_t end = body.find('\n', start);
+    for (;;) {
+        const std::size_t end = piece.find('\n', start);
         if (end == std::string_view::npos) {
-            end = body.size();
+            partial_.append(piece.substr(start));
+            return;
         }
-        std::string_view line = trim(body.substr(start, end - start));
+        if (partial_.empty()) {
+            line(piece.substr(start, end - start));
+        } else {
+            partial_.append(piece.substr(start, end - start));
+            line(partial_);
+            partial_.clear();
+        }
         start = end + 1;
-        if (!line.starts_with("data:")) {
-            continue;
-        }
-        line = trim(line.substr(5));
-        if (line.empty() || line == "[DONE]") {
-            continue;
-        }
-        ModelUsage event;
-        read_answer(nlohmann::json::parse(line, nullptr, false), event);
-        if (!event.model.empty()) {
-            out.model = event.model;
-        }
-        if (event.reported) {
-            out.input_tokens = event.input_tokens;
-            out.output_tokens = event.output_tokens;
-            out.reported = true;
-        }
     }
-    return out;
+}
+
+void ModelStreamUsage::finish() {
+    if (!partial_.empty()) {
+        const std::string last = std::move(partial_);
+        partial_.clear();
+        line(last);
+    }
+}
+
+// Server-sent events: each `data:` line is one JSON event, and the last one that reports usage is
+// the answer's total.
+void ModelStreamUsage::line(std::string_view text) {
+    text = trim(text);
+    if (!text.starts_with("data:")) {
+        return;
+    }
+    text = trim(text.substr(5));
+    if (text.empty() || text == "[DONE]") {
+        return;
+    }
+    ModelUsage event;
+    read_answer(nlohmann::json::parse(text, nullptr, false), event);
+    if (!event.model.empty()) {
+        usage_.model = event.model;
+    }
+    if (event.reported) {
+        usage_.input_tokens = event.input_tokens;
+        usage_.output_tokens = event.output_tokens;
+        usage_.reported = true;
+    }
 }
 
 ApiError model_provider_failure(int status, std::string_view body, std::string_view transport) {
@@ -214,7 +239,8 @@ ModelProvider openai_model_provider(std::string api_key, std::string base_url, M
                      {"Content-Type", "application/json"},
                      {"Accept", request.stream ? "text/event-stream" : "application/json"},
                      {"User-Agent", "lake-model-gateway/1"}},
-                    model_timeout);
+                    model_timeout,
+                    request.on_body);
     };
 }
 

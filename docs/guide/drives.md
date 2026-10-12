@@ -165,7 +165,10 @@ provider, size, its volume time this month (linking to **Usage**), status and en
 
 - **Open as a drive** for a Ready bucket or filesystem: it opens **New drive** with that storage
   chosen. Once a drive opens it, the row says **Open drive**.
-- *Shown, not browsed* on a volume: a service mounts it and owns what is in it.
+- *Shown, not browsed* on a volume: a service mounts it and owns what is in it. **Mounted By** names
+  the services and apps that mount each store (a link to each), and **Size** shows the bytes in use
+  beside the size you asked for. Storage that is mounted cannot be deleted until the mount is
+  removed.
 - **Show connection** once it is Ready, and **Delete**, which asks you to type its name and deletes
   the storage and everything in it.
 

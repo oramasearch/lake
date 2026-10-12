@@ -141,6 +141,11 @@ read_workspace_file(ApiContext& context,
                     std::uint64_t offset,
                     std::uint64_t length,
                     std::string store_drive_id = {});
+// Removes everything in a store Lake keeps in the workspace Zetta (provider `zetta`, lake#664),
+// before delete_store withdraws it: its items' records and their sealed bytes. A store that never
+// became Ready holds nothing and succeeds at once.
+liquid::runtime::task<ApiResult> empty_kept_store(ApiContext& context,
+                                                  const control::ManagedStore& store);
 // The live workspace a new repository is created in (lake#315): `input.workspace_id` must name a
 // workspace of `input.customer_id`'s space that is not deleted. Anything else, including a missing
 // id, is invalid_input at /workspace_id; there is no default workspace.

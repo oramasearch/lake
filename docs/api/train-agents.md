@@ -46,11 +46,14 @@ The definition a person designs, in New agent and Edit:
 | Pipelines it may use | `pipelines`: approved pipelines only (`list_projects`); the engine pins each grant to its approval |
 | Where it works | `work_area` `{kind, detail}` |
 | Runs on its own | `trigger`; a frontier-model agent's trigger also becomes Lake's schedule (`schedule_agent`) |
+| Starts on new messages in | Not an engine field: Lake's stream triggers (`set_agent_streams`, lake#677). The drawer offers the workspace Zetta's own streams from `list_streams` (no system stream, no Lake bus stream) for a frontier-model agent; Edit opens with `list_agent_streams` and sends `set_agent_streams` only when the set changed, and `[]` when the agent moves off a frontier model. A refused set is said beside the saved agent, which is kept ([agent-launches](agent-launches.md#stream-triggers)) |
 
 An agent's Design page (`/design/agent?id=`) shows its definition and **where it is used**: the
-pipelines it calls, Lake's schedules for it, its recent unattended runs, and Ask Orama. Its
+pipelines it calls, Lake's schedules for it, the streams that start it (`list_agent_streams`, each
+linked to its stream page and with who set it), its recent unattended runs, and Ask Orama. Its
 actions are **Edit** (a new revision), **Duplicate** (`create_agent` with its definition under a
-new name), **Delete** (typed name; its schedules go with it, its revisions are kept), and **Run
+new name; streams are not copied), **Delete** (typed name; its schedules go with it, and
+`delete_agent` removes its streams, answering `streams_removed`; its revisions are kept), and **Run
 it**, which opens its Train page. Running an agent stays where it was.
 
 ### Definition revisions
@@ -147,6 +150,7 @@ internal generators are not offered in Ask Orama (lake#451). The definition form
 | `list_agents`, `get_agent`, `agent_training_status` (also through `workspace_query`) | read | `read` on the customer | The workspace's agents and how each one's training stands |
 | `create_agent`, `update_agent`, `delete_agent`, `set_training_schedule`, `agent_run`, `chat_with_agent` (also through `workspace_act`, `chat` there) | action | `write` on the customer | Design, change, train, run and talk to agents; `create_agent` and `update_agent` answer `definition_revision` |
 | `list_agent_revisions` | read | `read` on the customer | `{customer_id, workspace_id, agent_id, limit?}`: an agent's [definition revisions](#definition-revisions), newest first |
+| `set_agent_streams`, `list_agent_streams` | action, read | `write`, `read` on the customer | The workspace streams that start an agent ([agent-launches](agent-launches.md#stream-triggers), lake#677) |
 
 `chat` is a read in Zetta, which takes it with `GET`, but it loads a model and spends compute, so
 lake allows it only through `workspace_act` (`write`) and calls it with `GET`
@@ -174,7 +178,8 @@ first, the base model on an update, and an unrecorded revision that does not fai
 `AgentRuns.CreateAgentRefusesDefinitionFieldsZettaWouldDrop`. `frontend/tests/agents.test.ts`
 covers the read-only rule for Orama's agents, the By Orama / Yours filter, Duplicate of each kind,
 New agent's and Edit's input, the skills vendored from agent-runtime, revision changes, the filter to
-trainable agents, and promote and roll back.
+trainable agents, promote and roll back, and the streams the form offers and sends (lake#677). `frontend/checks/agent-streams.mjs` screenshots the Design page's streams, Edit and New agent at
+1440 and 390 px against mocked reads.
 
 ## Change it
 

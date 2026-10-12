@@ -66,7 +66,15 @@ test("a conversation shows its count and how it starts, shortened", () => {
   const lines = conversationLines({ messages: 4, first_message: long });
   assert.deepEqual(lines[0], { count: 4, text: "messages" });
   assert.equal(lines[1].text.length, "It starts: “”".length + 120);
-  assert.equal(conversationLines({ messages: 1, first_message: "" }).length, 2);
+  assert.equal(conversationLines({ messages: 1, first_message: "" }).length, 1);
+});
+
+test("a conversation counts the agent tasks that go with it (lake#673)", () => {
+  const tasks = [{ task_id: "a", agent: "agent-ask-orama", status: "succeeded" }, { task_id: "b", agent: "agent-autosuggest", status: "running" }];
+  const lines = conversationLines({ messages: 2, first_message: "hi", agent_tasks: tasks });
+  assert.deepEqual(lines[2], { count: 2, text: "agent tasks it started, with what was asked and answered" });
+  assert.deepEqual(conversationLines({ messages: 2, agent_tasks: [tasks[0]] })[1], { count: 1, text: "agent task it started, with what was asked and answered" });
+  assert.equal(conversationLines({ messages: 2, agent_tasks: [] }).length, 1);
 });
 
 test("revokes name who and what", () => {

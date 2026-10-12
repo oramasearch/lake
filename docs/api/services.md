@@ -41,6 +41,11 @@ writes the connection (orama-operator#183), so this lasts seconds, not the minut
 - **Show connection** (every kind but Zetta, once Ready): answers with the page itself, showing
   every field the operator delivered for that kind (a Postgres URI, Kafka's bootstrap and SASL
   settings, and so on) once. It is never put in a URL, a redirect or the list.
+- **Storage** (lake#666): a SQLite, DuckDB or Polars service mounts the workspace's storage (a
+  volume at a path, a bucket as environment variables); its row names what it mounts, linking to
+  Data → Drives → Storage, and its **Storage** action chooses it. New service offers the same
+  choice for those kinds. The other kinds' pods are run by their own operators, so they mount none.
+  `/services?q=<name>` opens the page searched for one service (the Storage tab links here).
 - **Delete:** type the service's name. When a connection (Data → Connections) uses the service, the form says so. The operator deletes the cluster and its data, which cannot
   be recovered; the row shows *Deleting* until it is gone.
 
@@ -74,14 +79,15 @@ All are in lake's registry (REST, OpenAPI, MCP) and authorized on the customer's
 
 | Capability | Kind | Action on the customer | What it does |
 |---|---|---|---|
-| `list_service_kinds` | read | the caller | The catalog, Zetta first: each kind's key, label and `ready_seconds` |
-| `list_services` | read | `read` (checked by the handler, as every `list_` capability) | `{services: [...], limit}`; each service carries `id, kind, name, slug, default, instances, storage_gi, desired, generation, phase, message, endpoint, observed_generation, created_at, updated_at, connected, status` and, when it cannot progress on its own, `status_reason`; never a credential |
-| `create_service` | action | `write` | `{kind, name, instances?, storage_gi?}`, `kind` one of `postgres, zetta, kafka, clickhouse, tidb, cassandra, valkey, sqlite` (a SQLite service has exactly one instance); `conflict` for a live name, `quota_exceeded` at `LAKE_SERVICES_PER_CUSTOMER` |
-| `delete_service` | action | `admin` | `{service_id, confirm}`, `confirm` equal to the service name; marks it absent |
+| `list_service_kinds` | read | the caller | The catalog, Zetta first: each kind's key, label, `ready_seconds` and `mounts_stores` (true for SQLite, DuckDB and Polars, whose pods the Orama operator builds) |
+| `list_services` | read | `read` (checked by the handler, as every `list_` capability) | `{services: [...], limit}`; each service carries `id, kind, name, slug, default, instances, storage_gi, desired, generation, phase, message, endpoint, observed_generation, created_at, updated_at, connected, status`, `stores: [{store_id, name, type, provider, mount_path, read_only}]` (what it mounts, lake#666) and, when it cannot progress on its own, `status_reason`; never a credential |
+| `create_service` | action | `write` | `{kind, name, instances?, storage_gi?, stores?}`, `kind` one of `postgres, zetta, kafka, clickhouse, tidb, cassandra, valkey, sqlite, duckdb, polars` (a SQLite or DuckDB service has exactly one instance); `stores` as in [storage.md](storage.md#mounting-a-store), refused for a kind other than SQLite, DuckDB and Polars; `conflict` for a live name or a volume another workload mounts, `quota_exceeded` at `LAKE_SERVICES_PER_CUSTOMER` |
+| `set_service_stores` | action | `write` | `{service_id, stores}`: replaces what the service mounts ([storage.md](storage.md#mounting-a-store)), bumps its generation and notifies the operator, which rolls its pods; `[]` mounts nothing |
+| `delete_service` | action | `admin` | `{service_id, confirm}`, `confirm` equal to the service name; marks it absent and removes its store mounts |
 | `service_connection` | action | `admin` | A Ready service's connection: every field the operator delivered for its kind except `kind` (the catalog table lists them). A Zetta service's admin token is never returned: lake calls Zetta for the customer through `workspace_query` / `workspace_act`, whose allow-lists keep Zetta's administrative surface out of reach |
 
-Audit kinds: `service.create`, `service.delete`, `service.connection`, each with the customer,
-service id, kind and name. `start_workspace` and `delete_workspace`
+Audit kinds: `service.create`, `service.delete`, `service.connection`, `service.stores` (with the
+store ids), each with the customer, service id, kind and name. `start_workspace` and `delete_workspace`
 ([`workspaces.md`](workspaces.md)) create and delete the default Zetta service.
 
 ## Configuration

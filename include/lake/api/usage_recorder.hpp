@@ -177,7 +177,12 @@ const std::vector<std::pair<std::string_view, std::string_view>>& calls_only_cap
 // The workload_resources kinds the owner loop's sample charges: every kind the schema allows.
 const std::vector<std::string_view>& metered_workload_kinds();
 // The store types whose stores are metered (as `volumes`): a provider may be offered only for
-// these.
+// these, or when store_metered_as names how its bytes are metered.
 const std::vector<std::string_view>& metered_store_types();
+// How a store's bytes are metered (lake#664): a volume as `volumes` time; a store Lake keeps in the
+// workspace Zetta as `storage` kind `buckets` (its `lake_st_<hex>` bucket); a `lake` store as
+// `storage` kind `repositories`; the customer's own bucket as `transfer` only, since its bytes stay
+// in the customer's account and its provider bills them. Empty: not metered.
+std::string_view store_metered_as(std::string_view type, std::string_view provider);
 
 } // namespace lake::api
