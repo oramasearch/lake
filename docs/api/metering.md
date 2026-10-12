@@ -311,8 +311,11 @@ resource but write only records are in `calls_only_capabilities()`, each with wh
   `predict`, `search`, …) is in neither table, or a meter names an unbilled dimension;
 - a `workload_resources` kind the schema allows is not one the sample charges
   (`metered_workload_kinds()`);
-- a store type is offered (`control::store_providers`) whose bytes are not metered
-  (`metered_store_types()`: volumes);
+- a store pair is offered (`control::store_providers`) whose bytes are not metered
+  (`metered_store_types()`: volumes; `store_metered_as`, lake#664: a store Lake keeps in the
+  workspace Zetta is `storage` kind `buckets`, its `lake_st_<hex>` bucket; a `lake` store is
+  `repositories`; the customer's own bucket is `transfer` only, the bytes a drive moves through
+  Lake, because the bucket's bytes stay in the customer's account and its provider bills them);
 - a dimension the price list may rate has no rate in [billing.md](billing.md#publish-the-price-list)
   or in the web app's `LIST_RATES`.
 

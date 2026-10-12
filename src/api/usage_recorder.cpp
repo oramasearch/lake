@@ -1,5 +1,7 @@
 #include "lake/api/usage_recorder.hpp"
 
+#include "lake/control/store.hpp"
+
 #include <algorithm>
 #include <limits>
 #include <utility>
@@ -253,6 +255,19 @@ const std::vector<std::string_view>& metered_workload_kinds() {
 const std::vector<std::string_view>& metered_store_types() {
     static const std::vector<std::string_view> types{"volume"};
     return types;
+}
+
+std::string_view store_metered_as(std::string_view type, std::string_view provider) {
+    if (type == "volume") {
+        return "volumes";
+    }
+    if (control::store_kept_by_lake(type, provider)) {
+        return provider == "zetta" ? "storage (buckets)" : "storage (repositories)";
+    }
+    if (control::store_external_bucket(type, provider)) {
+        return "transfer";
+    }
+    return {};
 }
 
 const UsageDimension* find_usage_dimension(std::string_view name) {
