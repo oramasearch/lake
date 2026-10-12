@@ -23,9 +23,11 @@ injected dependency on `ApiContext` and `ServerOptions` (lake#561, `docs/api/tra
 own MCP endpoint re-exports (`exported_mcp_tools`, `call_exported_mcp_tool`). `registry.hpp`'s
 `acting_agent` names the agent whose credential made a call.
 `model_gateway.hpp` declares the model gateway's pure helpers (`prepare_model_request`,
-`model_usage`, `model_provider_failure`) and `openai_model_provider`. `registry.hpp` declares the
-`ModelProvider` injected dependency on `ApiContext`, and `server.hpp` the provider and its URL on
-`ServerOptions` (lake#248, `docs/api/model-gateway.md`).
+`model_usage`, `ModelStreamUsage` for a stream read as it arrives, `model_provider_failure`) and
+`openai_model_provider`. `registry.hpp` declares the `ModelProvider` injected dependency on
+`ApiContext`, the `ModelBodySink` a streamed answer goes to as it arrives, and the caller's
+`model_stream` (lake#665); `server.hpp` the provider and its URL on `ServerOptions` (lake#248,
+`docs/api/model-gateway.md`).
 
 `ServerOptions::external_origin` is trusted instance configuration for repository terminal
 instructions (`repository_external_origin`). It takes precedence over `https://` plus the trusted

@@ -114,7 +114,11 @@ to the run's workspace usage and refused past the monthly `model_tokens` limit. 
 holds the gateway's pure parts (the request as forwarded, the usage of every answer shape, the
 provider's refusals, `openai_model_provider`), and `http_server.cpp` serves the OpenAI-compatible
 `POST /openai/v1/<endpoint>` over `model_completion` and builds the provider over its outbound client
-when `LAKE_OPENAI_API_KEY` is set (`docs/api/model-gateway.md`). `metering_capabilities.cpp`'s
+when `LAKE_OPENAI_API_KEY` is set (`docs/api/model-gateway.md`). A streamed call is relayed as it
+arrives (lake#665): the outbound client's `on_body` hands the provider's body on piece by piece, the
+route sets `ApiContext::model_stream` to queue each piece, and its relay writes them to the caller in
+chunked transfer while `model_completion` reads the usage from the events as they pass
+(`ModelStreamUsage`). `metering_capabilities.cpp`'s
 `queue_repository_builds` is the build-record queueing the sample shares with `metering_usage`. See
 [metering](../../docs/api/metering.md#usage-over-time).
 
