@@ -4,7 +4,7 @@
 not deployed.** It needs Zetta with zetta#1261 (zetta PR #1265), the Orama operator with
 orama-operator#291 (operator PR #292) and a published `oramasearch/methodology-runtime` image
 (methodology-runtime PR #2). The per-workspace queue of runs and the placement of GPU runs
-(orama-operator#293, migration `0079_methodology_run_queue`) are implemented in the source tree and
+(orama-operator#293, migration `0082_methodology_run_queue`) are implemented in the source tree and
 not deployed; they need the operator's change of the same issue. A workspace has two kinds of
 methodology:
 
@@ -243,7 +243,7 @@ long as it must.
 ### Queued
 
 The Orama operator runs a limited number of a workspace's methodology runs at once
-(orama-operator#293, migration `0079_methodology_run_queue`): the Lake's
+(orama-operator#293, migration `0082_methodology_run_queue`): the Lake's
 `spec.methodologies.maxConcurrentRunsPerWorkspace`, 2 unless set. A run whose image is built starts
 only while fewer of its workspace's runs are staging, running or collecting; otherwise it is
 `Queued`, oldest first, and its message says how many are running, the limit and its place:
