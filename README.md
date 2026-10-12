@@ -13,10 +13,14 @@ Set `LAKE_ZETTA_SOURCE_DIR` to the authorized checkout named in [`docs/build/loc
 
 ```sh
 cmake -S . -B build -G Ninja \
-  -DLAKE_ZETTA_SOURCE_DIR=/path/to/zetta-bridge/modules/zetta
+  -DLAKE_ZETTA_SOURCE_DIR=/path/to/zetta-bridge/modules/zetta \
+  -DLAKE_LIQUID_SOURCE_DIR=/path/to/liquid
 cmake --build build -j 6
 ctest --test-dir build --output-on-failure
 ```
+
+`LAKE_LIQUID_SOURCE_DIR` names a checkout of `oramasearch/liquid`, which is a sibling module of
+liquid-bridge and not a submodule of lake. It defaults to `../liquid`.
 
 The web app's Design, Train, Ship and Ask pages live under `/w/<workspace_id>/...`; the top-bar
 selector lists the space's workspaces ([`docs/ui/web-app.md`](docs/ui/web-app.md)). Person-scoped
@@ -139,15 +143,23 @@ For the full PostgreSQL-backed suite, local database setup, and every run option
 [`docs/build/local.md`](docs/build/local.md). The route reference is
 [`docs/serving/http.md`](docs/serving/http.md).
 
+## Releases
+
+The current release is **v0.1.0** (2026-10-12), the first tagged release.
+[`docs/releases/v0.1.0.md`](docs/releases/v0.1.0.md) lists every feature, capability, web app page
+and guide in it, what it does not include, and its known issues.
+[`docs/releases/README.md`](docs/releases/README.md) is the index, and `CLAUDE.md` has the steps for
+cutting one.
+
 ## Deployment status
 
-Status: 2026-10-01. `Lake/prod` on the dev AKS cluster (there is no production environment yet)
-runs `oramasearch/lake:20261001d`, source `36679e1`; the dated
-[deployment record](docs/deployment/dev-2026-10-01.md) names the artifact, revision, schema and
-what was exercised there. [`docs/design/status.md`](docs/design/status.md) distinguishes what is
-implemented, exercised locally, deployed, and exercised in deployment, and
-`DocsStatus.MatchesTheObservedOpenApi` fails when it calls a capability undeployed that the
-observed OpenAPI lists.
+Status: 2026-10-12. `Lake/prod` on the dev AKS cluster (there is no production environment yet)
+runs `oramasearch/lake:20261011u`, source `dd1574fd`, the commit v0.1.0 was cut from; its OpenAPI
+lists 554 paths. The newest dated [deployment record](docs/deployment/dev-2026-10-01.md) and
+[`docs/design/status.md`](docs/design/status.md) describe the 2026-10-01 deployment (`36679e1`) and
+have not been brought up to this one. `status.md` distinguishes what is implemented, exercised
+locally, deployed, and exercised in deployment, and `DocsStatus.MatchesTheObservedOpenApi` fails
+when it calls a capability undeployed that the observed OpenAPI lists.
 
 ## Documentation
 

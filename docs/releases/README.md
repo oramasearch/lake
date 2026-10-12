@@ -3,10 +3,9 @@
 One page per tagged release, newest first. A page states what the release includes, what it
 does not, what is knowingly still broken, and how it was verified.
 
-- [v0.1.0](v0.1.0.md) — 2026-10-12. The first tagged release: the web app, REST and MCP over one
-  registry, workspaces whose data lives in their own Zetta, Design, Train and Ship, repositories
-  and drives, secrets, MCP connections, usage and billing. Note its known issues, above all the
-  open `sign_in_sso` security defect.
+- [v0.1.0](v0.1.0.md) — 2026-10-12. The first tagged release, so the page is the full inventory:
+  every feature by area, all 554 deployed capabilities by name, every page of the web app and
+  every guide. Note its known issues, above all the open `sign_in_sso` security defect.
 
 ## Conventions
 
@@ -16,6 +15,9 @@ does not, what is knowingly still broken, and how it was verified.
   `lake::version_string()`. The steps are in the root `CLAUDE.md`, under *Cutting a release*.
 - **Tag the merge commit** of that pull request `vX.Y.Z` and publish the GitHub release from the
   page.
+- **A first release, or one after a long gap, lists everything in it**, not a summary. Check the
+  page against the deployed OpenAPI: every path is named on the page, and the page names no
+  capability the deployment does not serve.
 - **Every number is measured** and says what it was measured on. A figure with no run behind it
   does not go in.
 - **Claims follow [`docs/design/status.md`](../design/status.md)**: implemented, exercised
