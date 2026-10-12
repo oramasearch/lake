@@ -217,7 +217,8 @@ columns.
   "<database>/<dataset>"}`; add `"dry_run": true` to check first.
 - MCP: `delete_dataset`.
 
-Delete a dataset no run is still reading: the deletion does not wait for one. It cannot be undone.
+A dataset a run or a study is still reading is not deleted: the deletion is refused, naming them.
+Wait for the runs to finish and stop the study, then delete it. It cannot be undone.
 
 ## Storage
 
