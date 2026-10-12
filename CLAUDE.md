@@ -141,6 +141,12 @@ is registered by the engine; a pipeline's `runner_required` run is dispatched to
 metered as `methodology_run`. Not deployed; the operator must vendor the schema and select
 `methodology_runs_guard`, and `oramasearch/methodology-runtime` must be published. See
 `docs/api/methodologies.md`.
+The operator queues a workspace's methodology runs past the Lake's
+`spec.methodologies.maxConcurrentRunsPerWorkspace` (default 2) and places a GPU run's work volume in a
+zone where its GPU class has nodes (orama-operator#293, migration `0079_methodology_run_queue`, guard
+`methodology_run_queue_guard`): phase `Queued` with the operator's reason, shown in Design →
+Methodologies; a queued run is never withdrawn as unreported. Not deployed; the operator vendors the
+schema and selects the guard in the same issue.
 
 Every future deployment image receives OCI revision and creation labels. The binary reports the
 same embedded revision through `GET /v1/server_info`; details are in

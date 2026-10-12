@@ -3,7 +3,10 @@
 **Status: implemented 2026-10-11 in the source tree (lake#655, migration `0078_methodology_runs`);
 not deployed.** It needs Zetta with zetta#1261 (zetta PR #1265), the Orama operator with
 orama-operator#291 (operator PR #292) and a published `oramasearch/methodology-runtime` image
-(methodology-runtime PR #2). A workspace has two kinds of methodology:
+(methodology-runtime PR #2). The per-workspace queue of runs and the placement of GPU runs
+(orama-operator#293, migration `0079_methodology_run_queue`) are implemented in the source tree and
+not deployed; they need the operator's change of the same issue. A workspace has two kinds of
+methodology:
 
 - **Orama's**: the engine's catalogue, M-1 to M-21, built into the engine as native code. They are
   **read-only**: Lake refuses to edit or delete them, whoever asks. Each can be duplicated.
@@ -232,9 +235,27 @@ pull of its own image), and stops resolving when the run ends:
 Its dispatch row and the operator's status are in PostgreSQL; what it read and produced (dataset,
 target, features, parameters, result, metrics, log, model) is a sealed `lake_methodology_runs`
 record in the workspace Zetta, found by the account and methodology. A run's phase is the operator's
-(`Building`, `Staging`, `Running`, `Collecting`, `Succeeded`, `Failed`, `Stopped`), with a message in
-Lake's words while it waits. A run the operator has not reported on within 30 minutes (its image
-build included) is withdrawn with the reason.
+(`Building`, `Queued`, `Staging`, `Running`, `Collecting`, `Succeeded`, `Failed`, `Stopped`), with a
+message in Lake's words while it waits. A run the operator has not reported on within 30 minutes (its
+image build included) is withdrawn with the reason; a `Queued` run has been reported on and waits as
+long as it must.
+
+### Queued
+
+The Orama operator runs a limited number of a workspace's methodology runs at once
+(orama-operator#293, migration `0079_methodology_run_queue`): the Lake's
+`spec.methodologies.maxConcurrentRunsPerWorkspace`, 2 unless set. A run whose image is built starts
+only while fewer of its workspace's runs are staging, running or collecting; otherwise it is
+`Queued`, oldest first, and its message says how many are running, the limit and its place:
+
+```json
+{"run": {"id": "…", "phase": "Queued", "message": "Queued: 2 of this workspace's methodology runs are running (the limit is 2); this run is next."}}
+```
+
+A run that asks for GPUs is also `Queued` while no node of its GPU class (or, with no class, no GPU
+node) exists, with that reason; its work volume is placed in a zone where such nodes are, so its
+code can be scheduled next to its data. Stop a queued run with `stop_methodology_run` as any other.
+Design → Methodologies shows the reason beside the run's state.
 
 ### Metering
 

@@ -292,7 +292,9 @@ repository of the workspace.
 
 - **Train** (once usable) runs it on a dataset you choose, with its target column and parameters.
   The model it trains appears in **Train → Models**; the run, its held-out metrics and its log are
-  on the page under **Runs**.
+  on the page under **Runs**. A workspace runs a few methodology runs at a time (two unless your
+  Lake is set otherwise); a run started past that is **Queued**, with the reason beside it, and
+  starts when one ends. A run that asks for GPUs also waits while no GPU node of its class exists.
 
   `POST /v1/run_methodology`
 

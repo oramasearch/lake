@@ -110,8 +110,19 @@ export function runPhaseTone(run: J): "ok"|"bad"|"warn"|"neutral" {
 
 /** Whether a run is still under way, so its page refreshes. */
 export function runIsLive(run: J): boolean {
-    return [ "Pending", "Building", "Staging", "Running", "Collecting" ].includes(
+    return [ "Pending", "Building", "Queued", "Staging", "Running", "Collecting" ].includes(
         String(run?.phase ?? ""));
+}
+
+/**
+ * Why a queued run waits, in the operator's words (orama-operator#293): its workspace is at the
+ * Lake's cap of concurrent methodology runs, or no node of its GPU class exists yet. Empty for a
+ * run that is not queued.
+ */
+export function runQueuedReason(run: J): string {
+    if (String(run?.phase ?? "") !== "Queued")
+        return "";
+    return String(run?.message ?? "") || "Queued: waiting for a place among this workspace's runs.";
 }
 
 /** A run's held-out metrics, the ones to quote first: "held_out_auc 0.84". */

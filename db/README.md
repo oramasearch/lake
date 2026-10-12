@@ -357,7 +357,14 @@ workspace's own methodology (lake writes it and notifies `lake_services`), and
 `methodology_run_status` (the Orama operator writes it: phase, message, exit code, the SHA-256 of
 the run's credential, when the sandbox pod started and finished), and the `methodology_run` kind of
 `workload_resources`. Ids, images, resources and phases only: parameters, data, metrics and the
-artifact stay in the workspace Zetta. Nothing is dropped; idempotent. The latest guard is
+artifact stay in the workspace Zetta. Nothing is dropped; idempotent. The guard was
 `methodology_runs_guard`; the operator must vendor this schema, select that guard and run the
 pods (orama-operator#291) before rollout. See
 [schema.md](../docs/control-plane/schema.md#methodology-runs-migration).
+
+Migration `0079_methodology_run_queue` (orama-operator#293) lets `methodology_run_status.phase`
+say `Queued`: the operator holds a run back while its workspace is at the Lake's cap of
+concurrent methodology runs, or while no node of a GPU run's GPU class exists. Only the phase
+CHECK changes; nothing is dropped; idempotent. The latest guard is
+`methodology_run_queue_guard`; the operator must vendor this schema and select that guard before
+rollout. See [schema.md](../docs/control-plane/schema.md#methodology-run-queue-migration).

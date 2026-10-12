@@ -605,7 +605,15 @@ TEST(SchemaConformance, EveryToolAndRequiredOutputUsesHttpContract) {
     http.call("list_methodology_runs", transcript_scope);
     auto methodology_run = transcript_scope;
     methodology_run["run_id"] = training.at("run").at("id");
-    http.call("get_methodology_run", methodology_run);
+    // Held back by the operator (orama-operator#293, migration 0079): the phase is Queued.
+    lake::control::MethodologyRunStatus queued;
+    queued.phase = "Queued";
+    queued.message = "Queued: 2 of this workspace's methodology runs are already running (the limit "
+                     "is 2); this run is next.";
+    ASSERT_TRUE(store->put_methodology_run_status(training.at("run").at("id"), queued));
+    const auto queued_run = http.call("get_methodology_run", methodology_run);
+    EXPECT_EQ(queued_run.at("run").at("phase"), "Queued");
+    EXPECT_EQ(queued_run.at("run").at("message"), queued.message);
     // The runner's side, with the run's own credential (the operator writes its digest).
     const std::string run_secret = "lmr." + validate_run + "." + std::string(48, 'f');
     lake::control::MethodologyRunStatus staging;

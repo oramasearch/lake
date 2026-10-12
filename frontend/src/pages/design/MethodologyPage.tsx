@@ -28,6 +28,7 @@ import {
   parseParams,
   runIsLive,
   runPhaseTone,
+  runQueuedReason,
   sortedFindings,
   validationState,
 } from "./methodologies";
@@ -329,7 +330,16 @@ function OwnMethodology({ entry, source, open, onOpen, refetch }: { entry: J; so
             rowKey={(run) => text(run, "id")}
             columns={[
               { key: "mode", label: "Run", render: (run) => (text(run, "mode") === "train" ? "Train" : "Validate") },
-              { key: "phase", label: "State", render: (run) => <Chip tone={runPhaseTone(run)}>{text(run, "phase")}</Chip> },
+              {
+                key: "phase",
+                label: "State",
+                render: (run) => (
+                  <>
+                    <Chip tone={runPhaseTone(run)}>{text(run, "phase")}</Chip>
+                    {runQueuedReason(run) && <div className="mt-1 max-w-[280px] text-[12px] text-ink-3">{runQueuedReason(run)}</div>}
+                  </>
+                ),
+              },
               { key: "dataset", label: "Data", render: (run) => text(run, "dataset") || (text(run, "mode") === "validate" ? "Sample" : "—") },
               {
                 key: "metrics",

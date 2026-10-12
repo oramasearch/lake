@@ -560,6 +560,12 @@ json run_json(const control::MethodologyRun& run, const std::optional<json>& rec
         message = "Waiting for the Orama operator to start this run.";
     } else if (run.phase == "Building") {
         message = "Building the methodology's image.";
+    } else if (run.phase == "Queued") {
+        // The operator holds it back (orama-operator#293): the workspace is at its cap of
+        // concurrent runs, or no node of its GPU class exists yet. Its message says which.
+        message = run.message.empty()
+                      ? std::string("Queued: waiting for a place among this workspace's runs.")
+                      : run.message;
     } else if (run.phase == "Staging") {
         message = "Handing the data to the sandbox.";
     } else if (run.phase == "Running") {

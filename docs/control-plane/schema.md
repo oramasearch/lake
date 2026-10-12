@@ -934,7 +934,7 @@ repositories, as untrusted code ([`../api/methodologies.md#runs`](../api/methodo
   `timeout_seconds`, `network` (false unless the person granted it), `slug` (`mr-<12 hex>`),
   `desired` (`present` or `absent`), `generation`, `stop_reason`;
 - `methodology_run_status`, written only by the operator: `phase` (`Building`, `Staging`, `Running`,
-  `Collecting`, `Succeeded`, `Failed`, `Stopped`), `message`, `exit_code`, `credential_sha256` (the
+  `Collecting`, `Succeeded`, `Failed`, `Stopped`; `Queued` from `0079`), `message`, `exit_code`, `credential_sha256` (the
   run's `lmr.` credential, never the credential), `observed_generation`, `started_at` and
   `finished_at` of the sandbox pod;
 - `workload_resources.object_kind` adds `methodology_run` to every kind `0077_metered_jobs` allows.
@@ -944,6 +944,18 @@ the workspace Zetta. Nothing is dropped; idempotent; guard `methodology_runs_gua
 vendors the schema, selects that guard and runs the pods in its own pull request
 ([orama-operator#291](https://github.com/oramasearch/orama-operator/issues/291)) before a lake with this
 change is rolled.
+
+## Methodology run queue migration
+
+`0079_methodology_run_queue` ([orama-operator#293](https://github.com/oramasearch/orama-operator/issues/293))
+adds the phase `Queued` to `methodology_run_status.phase`. The operator writes it, with a message
+saying why, while it holds a run back: its workspace already has
+`spec.methodologies.maxConcurrentRunsPerWorkspace` runs staging, running or collecting (oldest run
+first), or no node of a GPU run's GPU class exists to place its work volume next to. A queued run
+has been reported on, so lake's 30-minute withdrawal of runs the operator never reported on does
+not apply to it. Only the CHECK changes; nothing is dropped; idempotent; guard
+`methodology_run_queue_guard`. The operator vendors the schema and selects that guard in the same
+change.
 
 ## Repository workspaces migration
 
