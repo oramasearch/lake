@@ -74,7 +74,7 @@ bucket or filesystem store opens as a fourth drive kind, `store` (lake#656, no m
 `control::StoreContents` and the injected `StoreBrowser` (an item's id is its path; deleting the
 drive never deletes the store; a volume is refused). No provider is browsable yet, so without a
 browser it answers `not_supported` (lake#664). Which services and apps mount a store is recorded
-(lake#666, migration `0079_store_mounts`): `stores` on `create_service`, `set_service_stores`,
+(lake#666, migration `0080_store_mounts`): `stores` on `create_service`, `set_service_stores`,
 `create_app` and `set_app_stores`, one workload per volume, a mounted store not deleted, and
 `list_stores` answering `mounted_by` and `used_bytes`; the operator must vendor the schema, mount
 the stores and report bytes in use. Not deployed. See `docs/api/drives.md#store-drives` and

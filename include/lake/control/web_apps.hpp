@@ -66,7 +66,7 @@ struct NewWebApp {
     nlohmann::json secret_env_refs = nlohmann::json::object();
     std::size_t max_apps = 0;
     std::size_t max_replicas = 0;
-    // The stores the app mounts (migration 0079, lake#666), written in the transaction that
+    // The stores the app mounts (migration 0080, lake#666), written in the transaction that
     // creates it; checked by the caller, as NewManagedService::stores.
     std::vector<StoreMountRequest> stores;
 };

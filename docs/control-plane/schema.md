@@ -947,7 +947,7 @@ change is rolled.
 
 ## Store mounts migration
 
-`0079_store_mounts` (lake#666) records which services and apps mount a store, and how much of a
+`0080_store_mounts` (lake#666) records which services and apps mount a store, and how much of a
 store is used ([`storage.md#mounts`](storage.md#mounts)):
 
 - `store_mounts` (lake writes it when a service or an app is created or edited with `stores`, in

@@ -41,7 +41,7 @@ Workspace assignment and event-client cutover are tracked in
 | `updated_at` | both |
 
 The storage an app mounts is not a column: it is the app's rows of `store_mounts` (migration
-`0079_store_mounts`, lake#666), written by `create_app` and `set_app_stores` in the transaction that
+`0080_store_mounts`, lake#666), written by `create_app` and `set_app_stores` in the transaction that
 bumps `generation`, which `NOTIFY`s `lake_apps` and `lake_services`. Deleting the app removes them.
 The operator mounts each into the LakeApp's pods: a volume's claim at `mount_path`, a bucket's
 connection as `STORE_<NAME>_*` environment variables

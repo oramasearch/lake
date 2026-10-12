@@ -6,7 +6,7 @@
 #include <string_view>
 #include <vector>
 
-// Which services and apps mount a store (migration 0079_store_mounts, lake#666,
+// Which services and apps mount a store (migration 0080_store_mounts, lake#666,
 // docs/control-plane/storage.md#mounts). lake writes the rows when a service or an app is created
 // or edited with `stores`; the Orama operator mounts each store into the workload's pods.
 // Content-free desired state: ids, a path and a flag.

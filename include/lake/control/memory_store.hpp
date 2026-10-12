@@ -206,7 +206,7 @@ public:
                                   std::string phase,
                                   std::string message,
                                   std::string endpoint);
-    // What the operator writes to store_status.used_bytes (migration 0079); tests call it.
+    // What the operator writes to store_status.used_bytes (migration 0080); tests call it.
     Result<void> set_store_used_bytes(const std::string& id, std::optional<std::int64_t> bytes);
     Result<AgentLaunch> create_agent_launch(const NewAgentLaunch&) override;
     Result<AgentLaunch> get_agent_launch(const std::string& id) override;
@@ -523,7 +523,7 @@ private:
     std::vector<WebAppAuthorizationCodeRecord> web_app_authorization_codes_;
     std::vector<Build> builds_;
     std::vector<ManagedStore> stores_;
-    // store_mounts (migration 0079): the rows only; the names are read at list time.
+    // store_mounts (migration 0080): the rows only; the names are read at list time.
     std::vector<StoreMount> store_mounts_;
     // With mutex_ held: checks then replaces what one workload mounts, as the Postgres store does.
     Result<void> check_store_mounts_locked(const std::string& object_kind,

@@ -85,7 +85,7 @@ The worked flow *Create a volume* in `llms.txt` and the skill: `list_store_provi
 
 ## Mounting a store
 
-A service or an app names the stores it mounts (lake#666, migration `0079_store_mounts`; the
+A service or an app names the stores it mounts (lake#666, migration `0080_store_mounts`; the
 contract with the operator is [`../control-plane/storage.md#mounts`](../control-plane/storage.md#mounts)).
 `create_service`, `set_service_stores` ([services.md](services.md)), `create_app` and
 `set_app_stores` ([web-apps.md](web-apps.md)) take `stores: [{store_id, mount_path?, read_only?}]`,

@@ -4073,7 +4073,7 @@ INSERT INTO schema_migrations (version) VALUES ('0078_methodology_runs')
     ON CONFLICT DO NOTHING;
 
 -- ---------------------------------------------------------------------------------------------
--- 0079_store_mounts (lake#666, docs/control-plane/storage.md#mounts): which services and apps
+-- 0080_store_mounts (lake#666, docs/control-plane/storage.md#mounts): which services and apps
 -- mount a store, and how much of a store is used. lake writes store_mounts when a service or an
 -- app is created or edited with `stores`, bumps the workload's generation and NOTIFYs
 -- lake_services; the operator mounts each store into the workload's pods and writes
@@ -4102,5 +4102,5 @@ ALTER TABLE store_status ADD COLUMN IF NOT EXISTS used_bytes_at timestamptz;
 CREATE TABLE IF NOT EXISTS store_mounts_guard (
     applied_at timestamptz NOT NULL DEFAULT now()
 );
-INSERT INTO schema_migrations (version) VALUES ('0079_store_mounts')
+INSERT INTO schema_migrations (version) VALUES ('0080_store_mounts')
     ON CONFLICT DO NOTHING;

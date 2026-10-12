@@ -133,7 +133,7 @@ labels, before writing `Deleted`. Only the Orama operator's own resources are ev
   reconciles the Lake at once instead of on its next poll (lake#197); the poll remains the
   fallback, so a missed notification only delays.
 - **Storage a service mounts** (lake#666): `create_service` and `set_service_stores` write the
-  service's rows of `store_mounts` (migration `0079_store_mounts`) in the transaction that bumps
+  service's rows of `store_mounts` (migration `0080_store_mounts`) in the transaction that bumps
   its `generation` and `NOTIFY`s `lake_services`; `withdraw_service` removes them. Only the kinds
   whose pod template the operator writes itself (`sqlite`, `duckdb`, `polars`,
   `control::store_mounting_service_kinds`) may mount; lake refuses the others. The operator adds

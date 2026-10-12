@@ -661,7 +661,7 @@ struct NewManagedService {
     int instances = 1, storage_gi = 10;
     std::size_t max_per_customer = 0; // live services per customer; 0 (the default) means no limit
     std::string workspace_id;
-    // The stores the service mounts (migration 0079, lake#666), written in the transaction that
+    // The stores the service mounts (migration 0080, lake#666), written in the transaction that
     // creates it. The caller has checked them (api/store_mounts.hpp); the store refuses a volume
     // another workload mounts.
     std::vector<StoreMountRequest> stores;
@@ -682,7 +682,7 @@ struct ManagedStore {
     // The workspace the store belongs to (migration 0044, lake#465); the operator places it in
     // that workspace's namespace, and lake lists a workspace's own stores only.
     std::string workspace_id;
-    // The bytes in use and when the operator measured them (migration 0079, lake#666): empty until
+    // The bytes in use and when the operator measured them (migration 0080, lake#666): empty until
     // it has mounted and measured the store.
     std::optional<std::int64_t> used_bytes;
     std::string used_bytes_at;

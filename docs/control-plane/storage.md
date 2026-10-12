@@ -54,7 +54,7 @@ withdrawal, on the same channel as services, so the operator's listener wakes th
 
 ## Mounts
 
-Migration `0079_store_mounts` (lake#666) records **which services and apps mount a store** and
+Migration `0080_store_mounts` (lake#666) records **which services and apps mount a store** and
 **how much of a store is used**.
 
 `store_mounts` — written by lake only, one row per store a workload mounts: `store_id`,
