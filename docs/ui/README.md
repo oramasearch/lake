@@ -7,6 +7,8 @@ capabilities, the same ones REST and MCP callers use, with the same authorizatio
 can do nothing the API cannot.
 
 - How the app is built, its kit and the rules for a page: [web-app.md](web-app.md).
+  Tests and scripts that read outside `frontend/` fail unless the image's `frontend` stage copies
+  what they read ([web-app.md](web-app.md#reads-outside-frontend-lake693), lake#693).
 - The Train and Data pages (Agents, Agent, Agent Factory, Runs, Run, Models, Model, Datasets,
   Dataset, Query): [train.md](train.md). Agents are designed in Design → Agents and trained in
   Train → Agents (lake#653, [../api/train-agents.md](../api/train-agents.md)).
