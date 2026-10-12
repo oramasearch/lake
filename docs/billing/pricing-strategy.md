@@ -89,6 +89,6 @@ charged even when their pods are gone (lake#658).
 - [x] Publish the price list on the development Lake (2026-10-11, effective October 2026).
 - [ ] Set the Stripe keys and webhook so invoices can be paid by card. The development Lake reads
       them from the Secret `lake-prod-stripe`, which holds blank values today
-      ([`../deployment/aks.md`](../deployment/aks.md#stripe)).
+      ([runbook](../deployment/stripe.md)).
 - [ ] Decide whether a card is required before any usage.
 - [ ] Decide whether committed-use discounts are offered for large accounts.
