@@ -1458,7 +1458,7 @@ TEST(DrivesHttp, ARepositoryDriveWriteIsSearchedDownloadedAndLoaded) {
             return call.first == "register_model";
         });
     ASSERT_NE(last, lake.spaces.zetta->calls.rend());
-    EXPECT_EQ(last->second["weights"], weights);
+    EXPECT_EQ(last->second["weights_base64"], base64(weights));
     EXPECT_EQ(last->second["source"], "repository docs-drive@main: models/churn.json")
         << last->second.dump();
     lake.spaces.zetta->responder = [](const std::string& capability, const json&)
@@ -1726,7 +1726,7 @@ TEST(Drives, AModelIsBroughtFromEveryDriveKindAndAShortcutIsFollowed) {
     EXPECT_EQ(from_store.value["model_id"], "m-1");
     EXPECT_EQ(from_store.value["source"]["name"], "model.json");
     ASSERT_EQ(registered().size(), 1U);
-    EXPECT_EQ(registered()[0]["weights"], weights);
+    EXPECT_EQ(registered()[0]["weights_base64"], base64(weights));
     EXPECT_EQ(registered()[0]["source"], "drive Models: model.json");
     EXPECT_EQ(s.in(first,
                    "load_drive_model",
