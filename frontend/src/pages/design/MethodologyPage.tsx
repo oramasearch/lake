@@ -353,7 +353,9 @@ function OwnMethodology({ entry, source, open, onOpen, refetch }: { entry: J; so
               { key: "created_at", label: "Started", render: (run) => <When value={text(run, "created_at")} />, sort: (run) => text(run, "created_at") },
             ]}
           />
-          {all.some((run) => text(run, "message") && runIsLive(run)) && <p className="mb-0 mt-2 text-[12.5px] text-ink-3">{text(all.find(runIsLive) ?? {}, "message")}</p>}
+          {all.some((run) => text(run, "message") && runIsLive(run) && !runQueuedReason(run)) && (
+            <p className="mb-0 mt-2 text-[12.5px] text-ink-3">{text(all.find((run) => runIsLive(run) && !runQueuedReason(run)) ?? {}, "message")}</p>
+          )}
         </Panel>
       </Split>
       {open === "train" && <TrainDrawer entry={entry} parameters={parameters} onClose={() => onOpen(null)} onStarted={() => setLive(true)} />}
