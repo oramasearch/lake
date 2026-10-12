@@ -48,8 +48,8 @@ Zetta beside Orama's read-only catalogue (`list_solutions`, `get_solution`, `cre
 `update_solution`, `delete_solution`, `duplicate_solution`; `forbidden` for Orama's).
 lake#655: [methodologies.md](methodologies.md) documents a workspace's own methodologies from Python
 code in a workspace repository beside Orama's read-only ones: the interface, Validate, runs as
-untrusted code in the Orama operator's sandbox with the runner's two capabilities, metering, and the
-pipeline step.
+untrusted code in the Orama operator's sandbox with the runner's two capabilities, metering, the
+pipeline step, and experiments over its parameters whose trials run as its training runs (lake#689).
 [web-app.md](web-app.md) documents the capabilities the web app reads that the pages
 computed themselves (`viewer`, `my_permissions`, `list_packages`, `list_docs`, `get_doc`,
 `mcp_setup`, `resolve_model`, `latest_agent_task`, `compile_pipeline`, `render_pipeline`);

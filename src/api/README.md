@@ -228,7 +228,12 @@ as `methodology_runs` rows the Orama operator runs; each run's record is sealed
 `lake_methodology_runs` in the workspace Zetta. `methodology_run_input` and `methodology_run_output`
 answer only a run's `lmr.` credential, which `Registry::call` checks
 (`authorize_methodology_run_token`) in place of policy. `workspace_capabilities.cpp` dispatches an
-engine `run` that answers `runner_required` to `run_methodology`. See `docs/api/methodologies.md`.
+engine `run` that answers `runner_required` to `run_methodology`. An experiment over a workspace
+methodology's parameters (lake#689) runs each trial the engine admits as a training run of it:
+`methodology_experiments.hpp` (`current_experiment`, `stop_experiment_runs`) is what
+`experiment_capabilities.cpp` calls on start, read and stop; a trial's run is claimed once in the
+sealed `lake_methodology_trials` record, and `methodology_run_output` reports its result with the
+engine's `study` and `trial`. See `docs/api/methodologies.md#experiments`.
 
 Repository terminal instructions receive a validated explicit `ServerOptions::external_origin` or
 the HTTPS fallback derived from trusted `public_host`. Request and proxy headers cannot select

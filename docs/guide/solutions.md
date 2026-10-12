@@ -385,8 +385,8 @@ Only the person who started a solution (or the operator) can confirm its foundat
   **Start this solution**; the others are listed with where their work is tracked.
 - Orama's solutions and methodologies cannot be edited or deleted; duplicate one to make it yours.
 - A methodology of your own runs only once Validate passed for its current code. Its training data
-  is at most 1,000,000 rows and what it learns at most 24 MiB. Experiments over its parameters and
-  serving its model from Ship → Models are not available yet.
+  is at most 1,000,000 rows and what it learns at most 24 MiB. Serving its model from Ship → Models is
+  not available yet. Experiments over its parameters run in **Train → Experiments**.
 - Your own solution starts as a project with its first pipeline, not with the governed foundation
   (policy, holdout, ROI readout) Orama's get.
 - A name is at most 200 bytes, the problem and decision 4,000 bytes each, and a solution composes at

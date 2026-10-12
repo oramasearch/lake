@@ -140,7 +140,11 @@ image); its record is sealed `lake_methodology_runs` in the workspace Zetta; a t
 is registered by the engine; a pipeline's `runner_required` run is dispatched to it; finished runs are
 metered as `methodology_run`. Not deployed; the operator must vendor the schema and select
 `methodology_runs_guard`, and `oramasearch/methodology-runtime` must be published. See
-`docs/api/methodologies.md`.
+`docs/api/methodologies.md`. Experiments over its parameters follow (lake#689, no migration): the
+engine samples its declared parameters and lists the waiting trials as `runner` work; Lake queues
+each as a training run (claimed once in the sealed `lake_methodology_trials` record), reports the
+result with the experiment and trial, ends a trial whose run failed, and stops the runs with the
+experiment. Needs the zetta lake#689 change. See `docs/api/methodologies.md#experiments`.
 
 Every future deployment image receives OCI revision and creation labels. The binary reports the
 same embedded revision through `GET /v1/server_info`; details are in

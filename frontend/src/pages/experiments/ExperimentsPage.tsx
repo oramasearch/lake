@@ -28,6 +28,8 @@ import {
 import { useConfirm } from "@/pages/streams/common";
 import { describe, ExperimentsShell, useExperimentActions, useExperimentClient, useExperimentUrl } from "./common";
 import { cell, METRIC_NAMES, metricLabel } from "./transforms";
+import { useWq } from "@/pages/train/workspace";
+import { isWorkspaceMethodology, minimized, needsTargetColumn, objectiveMetrics, parameterRange, searchedParameters, studyMethodologies } from "./workspaceMethodology";
 
 const STATES = ["", "pending", "running", "succeeded", "failed", "stopped", "complete"];
 
@@ -65,6 +67,13 @@ export default function ExperimentsPage() {
   const [open, setOpen] = useState<"agent" | "experiment" | null>(null);
   const [search, setSearch] = useState("");
   const [confirmDialog, confirm] = useConfirm();
+  // What an experiment can search: Orama's methodologies and the workspace's own (lake#689).
+  const [methodology, setMethodology] = useState("M-1");
+  const listedMethodologies = useWq<Row>("list_methodologies", {}, { retry: false, enabled: open === "experiment" });
+  const studied = studyMethodologies(listedMethodologies.data?.methodologies);
+  const chosen = studied.find((entry) => entry.id === methodology);
+  const own = isWorkspaceMethodology(chosen) || /^W-[0-9a-f]{8}$/.test(methodology);
+  const ownMetrics = own ? objectiveMetrics(chosen) : [];
   const listing = useQuery({
     queryKey: ["list_experiments", client.workspaceId, project, state],
     queryFn: () => client.read<{ experiments?: Experiment[]; runs?: Row[] }>("list_experiments", { project, state }),
@@ -433,31 +442,64 @@ export default function ExperimentsPage() {
             Selection uses the validation split. The final test split is never used for tuning. Metrics are named as the run report names them: held_out_auc, held_out_log_loss,
             held_out_accuracy, held_out_rmse, held_out_mae.
           </Banner>
+          {own && (
+            <Banner tone="quiet">
+              {cell(chosen?.name ?? methodology)} is your workspace's own methodology. Each trial runs its Python code as a training run in its sandbox, metered like any other run, and reports
+              its held-out metrics back. Its trials are compared on the rows each run holds out.
+            </Banner>
+          )}
           <form id="start-experiment" className="experiments" onSubmit={startExperiment}>
-            <div className="experiment-fields">
+            <div className="experiment-fields" key={methodology}>
               <label>
                 Experiment name
                 <input name="name" required />
               </label>
               <label>
-                Project
-                <input name="project" required />
+                Methodology
+                {studied.length > 0 ? (
+                  <select name="methodology" value={methodology} onChange={(e) => setMethodology(e.target.value)} required>
+                    {studied.map((entry) => (
+                      <option key={String(entry.id)} value={String(entry.id)}>
+                        {String(entry.id)} · {cell(entry.name)}
+                        {isWorkspaceMethodology(entry) ? " (yours)" : ""}
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <input name="methodology" value={methodology} onChange={(e) => setMethodology(e.target.value.trim())} required />
+                )}
               </label>
               <label>
-                Pipeline
-                <input name="pipeline" required />
+                Project{own ? " (optional)" : ""}
+                <input name="project" required={!own} />
+              </label>
+              <label>
+                Pipeline{own ? " (optional)" : ""}
+                <input name="pipeline" required={!own} />
               </label>
               <label>
                 Dataset
-                <input name="dataset" required />
+                <input name="dataset" placeholder="database.table" required />
               </label>
-              <label>
-                Methodology
-                <input name="methodology" defaultValue="M-1" required />
-              </label>
+              {own && (
+                <label>
+                  Column to predict{needsTargetColumn(chosen) ? "" : " (optional)"}
+                  <input name="target" required={needsTargetColumn(chosen)} />
+                </label>
+              )}
               <label>
                 Objective metric
-                <input name="objective.metric" defaultValue="held_out_auc" list="metric-names" required />
+                {own && ownMetrics.length > 0 ? (
+                  <select name="objective.metric" defaultValue={ownMetrics[0]} required>
+                    {ownMetrics.map((metric) => (
+                      <option key={metric} value={metric}>
+                        {metric}
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <input name="objective.metric" defaultValue="held_out_auc" list="metric-names" required />
+                )}
               </label>
               <datalist id="metric-names">
                 {METRIC_NAMES.map(([name]) => (
@@ -466,14 +508,14 @@ export default function ExperimentsPage() {
               </datalist>
               <label>
                 Direction
-                <select name="objective.direction">
+                <select name="objective.direction" defaultValue={own && ownMetrics.length > 0 && minimized(ownMetrics[0]) ? "minimize" : "maximize"}>
                   <option value="maximize">Maximize</option>
                   <option value="minimize">Minimize</option>
                 </select>
               </label>
               <label>
                 Validation split
-                <input name="objective.validation_split" defaultValue="validation" required />
+                <input name="objective.validation_split" defaultValue="validation" readOnly={own} required />
               </label>
               <label>
                 Sampler
@@ -485,11 +527,17 @@ export default function ExperimentsPage() {
               </label>
               <label>
                 Pruner
-                <select name="pruner">
-                  <option>asha</option>
-                  <option>median</option>
-                  <option>none</option>
-                </select>
+                {own ? (
+                  <select name="pruner" defaultValue="none" disabled title="A runner trial reports one result, so nothing is pruned part-way">
+                    <option>none</option>
+                  </select>
+                ) : (
+                  <select name="pruner">
+                    <option>asha</option>
+                    <option>median</option>
+                    <option>none</option>
+                  </select>
+                )}
               </label>
               <label>
                 Trial budget
@@ -512,14 +560,28 @@ export default function ExperimentsPage() {
                 <input name="seed" type="number" min={0} defaultValue="1138" required />
               </label>
             </div>
+            {own && searchedParameters(chosen).length > 0 && (
+              <div className="stack">
+                <span className="text-[12.5px] text-ink-2">Parameters it searches, as its manifest declares them</span>
+                <ul className="m-0 pl-4 text-[13px]">
+                  {searchedParameters(chosen).map((parameter) => (
+                    <li key={parameter.name}>
+                      <span className="font-mono">{parameter.name}</span> · {parameter.kind} · {parameterRange(parameter)}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
             <label>
-              Search parameters (JSON; leave blank for methodology defaults)
+              Search parameters (JSON; leave blank for {own ? "the declared ranges" : "methodology defaults"})
               <textarea name="search_space" rows={4} />
             </label>
-            <label>
-              <input type="checkbox" name="differential_privacy" /> Differential privacy
-            </label>
-            <label>
+            {!own && (
+              <label>
+                <input type="checkbox" name="differential_privacy" /> Differential privacy
+              </label>
+            )}
+            <label hidden={own}>
               Released metrics for private experiments (comma separated)
               <input name="released_metrics" />
             </label>

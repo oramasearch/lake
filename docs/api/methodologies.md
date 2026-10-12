@@ -1,7 +1,7 @@
 # Methodologies: Orama's and Your Own, in Python
 
-**Status: implemented 2026-10-11 in the source tree (lake#655, migration `0078_methodology_runs`);
-not deployed.** It needs Zetta with zetta#1261 (zetta PR #1265), the Orama operator with
+**Status: implemented 2026-10-11 in the source tree (lake#655, migration `0078_methodology_runs`;
+experiments over its parameters, lake#689, no migration); not deployed.** It needs Zetta with zetta#1261 (zetta PR #1265), the Orama operator with
 orama-operator#291 (operator PR #292) and a published `oramasearch/methodology-runtime` image
 (methodology-runtime PR #2). A workspace has two kinds of methodology:
 
@@ -254,10 +254,61 @@ training run of that project and pipeline; the answer is `{runner: "lake", statu
 methodology, methodology_run}`. The engine records the Run and its lineage when the result comes
 back.
 
+## Experiments
+
+**Implemented in the source tree (lake#689, no migration); not deployed. It needs the engine with
+lake#689 (`zetta` branch `lake-689-studies`).** An experiment can search a workspace methodology's
+declared parameters, as it searches Orama's M-1. The engine chooses each trial's parameters; Lake
+runs each trial as a training run of the methodology.
+
+**What it searches.** Once a methodology passed Validate for its current code, `list_methodologies`
+lists it with `studies: true` and the ranges an experiment tries: every parameter its manifest declares with a
+range (an `int` or `float` with both `minimum` and `maximum`, a `categorical` with its choices, a
+`bool` as false and true), and its metrics as `held_out_<m>`, compared on the `validation` split,
+the rows each run holds out. A parameter without a range keeps its default. Before Validate it lists
+`studies: false` with the reason.
+
+`POST /v1/start_experiment`
+
+```json
+{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "name": "Late payers tuning", "methodology": "W-0a1b2c3d", "dataset": "sales.payers", "target": "late", "from_defaults": true, "budgets": {"max_trials": 8, "max_parallel_trials": 2, "max_wall_time_ms": 0, "cost_cap": 0}, "confirm": true}
+```
+
+- `dataset` is `<database>.<table>`; `target` names the column to predict (required when the
+  methodology has a target); `features` is optional (every column but the target). Or name
+  `project` and `pipeline` of a pipeline whose model step is this methodology; its connect step's
+  table, its target and its holdout are used.
+- `from_defaults: true` fills the declared ranges, the first `held_out_` metric as the objective
+  (minimized when it names a loss or an error) and the budgets.
+- A searched parameter must be one it declares, of its kind, within its bounds and choices
+  (`invalid_input` at `/search_space/<name>/…`). The pruner is always `none`, since a run reports
+  one result; differential privacy is refused.
+
+**How the trials run.** The engine admits up to `max_parallel_trials` trials at once, each a run of
+the experiment waiting for Lake, and lists them in the experiment's `runner`. Lake dispatches each
+as a `run_methodology` training run: the same image, sandbox, metering (CPU, RAM, GPU and VRAM
+through `workload_resources`, charged once per finished run) and record as any training run, its
+record naming `experiment_id`, `trial` and `trial_number`. Which run serves which trial is a sealed
+`lake_methodology_trials` record in the workspace Zetta, claimed before the run is queued, so a
+trial is dispatched once however many callers read the experiment.
+
+- When the run's result comes back (`methodology_run_output`), Lake reports it to the engine with
+  the experiment and the trial (`record_methodology_run` with `study`, `trial` and the seconds the
+  code ran). The engine completes the trial from its `held_out_` metric, registers its model
+  (`<experiment name>-trial-<n>`, promotable as any trial's) and admits the next trials, which Lake
+  queues at once, for the person who started the experiment.
+- A run that fails in its code, fails before it runs, or is stopped ends its trial with the reason
+  (the engine's `stop_trial` with `reason`), and the experiment goes on. Two trials in a row failing
+  the same way fail the experiment.
+- `start_experiment` and `get_experiment` make the experiment current: a waiting trial without a
+  run is queued, and a trial whose run ended without a result is ended. They answer `runner` (each
+  waiting trial with its `methodology_run`) and `methodology_runs` (every trial's run: `trial`,
+  `number`, `run_id`, `phase`, `message`).
+- `stop_experiment` stops the runs of its trials that have not finished their code;
+  `stop_experiment_trial` stops that trial's run. An experiment that ended runs nothing more.
+
 ## What is not built yet
 
-- Experiments over a workspace methodology's parameters: the engine lists it with `studies: false`
-  (lake#689).
 - Serving a workspace methodology's model from Ship → Models: its predictions need the runner, so
   the engine refuses to deploy it (lake#690).
 - Artifacts larger than 24 MiB (lake#690).
@@ -279,6 +330,14 @@ back.
 |---|---|
 | `LAKE_METHODOLOGY_RUNTIME_IMAGE` | the `oramasearch/methodology-runtime` image methodologies are built from and staged with; the operator sets it from `spec.methodologies.runtimeImage` |
 | `LAKE_INTERNAL_URL` | the in-cluster Service the image build pushes to (as for app builds) |
+
+## How to verify (experiments)
+
+`WorkspaceRecordStores.MethodologiesAreTheWorkspacesOwnAndOramasStayReadOnly` also starts an
+experiment on the methodology: two trials queued as training runs of its validated image, read again
+without a second run, a result reported with the experiment and trial and the third trial queued for
+the person who started it, a failed run ending its trial with the reason, and the experiment's stop
+stopping the rest. `frontend/tests/experiment-methodologies.test.ts` covers the drawer's choices.
 
 ## How to verify
 

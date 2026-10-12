@@ -4589,6 +4589,8 @@ TEST_P(WorkspaceRecordStores, MethodologiesAreTheWorkspacesOwnAndOramasStayReadO
                   {"editable", false}};
     std::map<std::string, json> own;
     std::vector<json> recorded_runs;
+    json study = json::object();
+    std::vector<json> study_calls;
     int next_id = 0;
     t.zetta->responder =
         [&](const std::string& capability,
@@ -4643,6 +4645,102 @@ TEST_P(WorkspaceRecordStores, MethodologiesAreTheWorkspacesOwnAndOramasStayReadO
         if (capability == "delete_methodology") {
             own.erase(input.value("id", std::string()));
             return Result(json{{"removed", true}, {"id", input.value("id", std::string())}});
+        }
+        if (capability == "create_study" || capability == "get_study" ||
+            capability == "stop_trial" || capability == "stop_study" ||
+            (capability == "record_methodology_run" && input.contains("study"))) {
+            // A workspace methodology's experiment (zetta lake#689): trials wait for Lake's runner.
+            const auto runner = [&] {
+                json waiting = json::array();
+                if (study["status"] != "running") {
+                    return waiting;
+                }
+                for (const json& trial : study["trials"]) {
+                    if (trial["state"] == "running") {
+                        waiting.push_back({{"study", "study-1"},
+                                           {"study_name", study["spec"]["name"]},
+                                           {"trial", trial["run"]},
+                                           {"number", trial["number"]},
+                                           {"methodology", study["spec"]["methodology"]},
+                                           {"params", {{"epochs", 10 + trial["number"].get<int>()}}},
+                                           {"seed", trial["number"]},
+                                           {"dataset_path", study["spec"]["dataset"]},
+                                           {"target", study["spec"]["target"]},
+                                           {"features", json::array()},
+                                           {"holdout_fraction", 0.2}});
+                    }
+                }
+                return waiting;
+            };
+            const auto admit = [&] {
+                std::size_t running = 0;
+                for (const json& trial : study["trials"]) {
+                    running += trial["state"] == "running" ? 1 : 0;
+                }
+                while (study["trials"].size() < 3 && running < 2) {
+                    const std::size_t number = study["trials"].size();
+                    study["trials"].push_back({{"number", number},
+                                               {"run", "trial-run-" + std::to_string(number)},
+                                               {"state", "running"}});
+                    ++running;
+                }
+                if (running == 0) {
+                    study["status"] = "complete";
+                }
+            };
+            const auto answer = [&] {
+                json out = study;
+                out["runner"] = runner();
+                return out;
+            };
+            const auto end = [&](const std::string& run, const std::string& state) {
+                for (json& trial : study["trials"]) {
+                    if (trial["run"] == run) {
+                        trial["state"] = state;
+                    }
+                }
+                admit();
+            };
+            if (capability == "create_study") {
+                study_calls.push_back(input);
+                study = {{"id", "study-1"},
+                         {"spec", input},
+                         {"status", "running"},
+                         {"created", "2026-10-11T10:00:00Z"},
+                         {"updated", "2026-10-11T10:00:00Z"},
+                         {"trials", json::array()},
+                         {"spent_cost", 0.0},
+                         {"stop_reason", ""},
+                         {"promoted_model", ""}};
+                admit();
+                return Result(answer());
+            }
+            if (capability == "get_study") {
+                return Result(answer());
+            }
+            if (capability == "stop_trial") {
+                study_calls.push_back(input);
+                end(input.value("run", std::string()), "failed");
+                return Result(json{{"study", "study-1"},
+                                   {"run", input.value("run", std::string())},
+                                   {"state", "failed"},
+                                   {"status", study["status"]},
+                                   {"runner", runner()}});
+            }
+            if (capability == "stop_study") {
+                study["status"] = "stopped";
+                return Result(json{{"study", "study-1"}, {"status", "stopped"}, {"reason", "stopped"}});
+            }
+            recorded_runs.push_back(input);
+            end(input.value("trial", std::string()), "complete");
+            return Result(json{{"model_id", "model-" + std::to_string(recorded_runs.size())},
+                               {"run_id", input.value("trial", std::string())},
+                               {"study",
+                                {{"id", "study-1"},
+                                 {"trial_state", "complete"},
+                                 {"objective", 0.8},
+                                 {"status", study["status"]},
+                                 {"runner", runner()}}}});
         }
         if (capability == "record_methodology_run") {
             recorded_runs.push_back(input);
@@ -4999,6 +5097,90 @@ TEST_P(WorkspaceRecordStores, MethodologiesAreTheWorkspacesOwnAndOramasStayReadO
     EXPECT_EQ(step_record.value["run"]["params"]["epochs"], 20);
     EXPECT_EQ(step_record.value["run"]["holdout_fraction"], 0.25);
     ASSERT_TRUE(t.store->withdraw_methodology_run(step_run, "test"));
+
+    // An experiment over its parameters (lake#689): the engine admits trials that wait for Lake's
+    // runner; Lake runs each as a training run, once, and reports the result back.
+    const auto started = t.call(first,
+                                "start_experiment",
+                                in(first,
+                                   0,
+                                   {{"name", "late payers tuning"},
+                                    {"methodology", id},
+                                    {"dataset", "sales.payers"},
+                                    {"target", "late"},
+                                    {"from_defaults", true},
+                                    {"confirm", true}}));
+    ASSERT_TRUE(started.ok) << started.error.code << ": " << started.error.message;
+    EXPECT_EQ(started.value["spec"]["target"], "late");
+    ASSERT_EQ(started.value["runner"].size(), 2U);
+    ASSERT_EQ(started.value["methodology_runs"].size(), 2U);
+    EXPECT_EQ(started.value["runner"][0]["experiment_id"], "study-1");
+    ASSERT_TRUE(started.value["runner"][0]["methodology_run"]["run_id"].is_string())
+        << started.value.dump();
+    const std::string trial_run = started.value["runner"][0]["methodology_run"]["run_id"];
+    ASSERT_TRUE(started.value["runner"][1]["methodology_run"]["run_id"].is_string());
+    const std::string failing_run = started.value["runner"][1]["methodology_run"]["run_id"];
+    const auto trial_record =
+        t.call(first, "get_methodology_run", in(first, 0, {{"run_id", trial_run}}));
+    ASSERT_TRUE(trial_record.ok) << trial_record.error.message;
+    EXPECT_EQ(trial_record.value["run"]["experiment_id"], "study-1");
+    EXPECT_EQ(trial_record.value["run"]["trial"], "trial-run-0");
+    EXPECT_EQ(trial_record.value["run"]["params"]["epochs"], 10);
+    EXPECT_EQ(trial_record.value["run"]["mode"], "train");
+    EXPECT_EQ(t.store->get_methodology_run(trial_run)->build_id, row->build_id)
+        << "a trial runs the validated revision's image";
+    // Reading it again dispatches nothing twice.
+    const auto reread =
+        t.call(first, "get_experiment", in(first, 0, {{"experiment_id", "study-1"}}));
+    ASSERT_TRUE(reread.ok) << reread.error.code << ": " << reread.error.message;
+    EXPECT_EQ(reread.value["methodology_runs"].size(), 2U);
+    EXPECT_EQ(reread.value["runner"][0]["methodology_run"]["run_id"], trial_run);
+
+    // Its result completes the trial; the engine admits the third, which Lake queues at once, for
+    // the person who started the experiment.
+    const std::string trial_secret = "lmr." + trial_run + "." + std::string(48, 'd');
+    report(trial_run, "Staging", trial_secret);
+    report(trial_run, "Collecting", trial_secret);
+    const auto trial_out =
+        as_runner(trial_secret,
+                  "methodology_run_output",
+                  {{"run_id", trial_run},
+                   {"result",
+                    {{"status", "ok"},
+                     {"metrics", {{"in_sample_auc", 0.9}, {"held_out_auc", 0.8}}},
+                     {"rows", {{"train", 2}, {"held_out", 1}}}}},
+                   {"artifact_base64", "aGVsbG8="}});
+    ASSERT_TRUE(trial_out.ok) << trial_out.error.code << ": " << trial_out.error.message;
+    const json& trial_recorded = recorded_runs.back();
+    EXPECT_EQ(trial_recorded["study"], "study-1");
+    EXPECT_EQ(trial_recorded["trial"], "trial-run-0");
+    EXPECT_EQ(trial_recorded["duration_seconds"], 90);
+    const auto after =
+        t.call(first, "get_experiment", in(first, 0, {{"experiment_id", "study-1"}}));
+    ASSERT_TRUE(after.ok) << after.error.message;
+    ASSERT_EQ(after.value["methodology_runs"].size(), 3U);
+    ASSERT_TRUE(after.value["methodology_runs"][2]["run_id"].is_string()) << after.value.dump();
+    const std::string third_run = after.value["methodology_runs"][2]["run_id"];
+    EXPECT_EQ(t.store->get_methodology_run(third_run)->created_by_user_id,
+              t.store->get_methodology_run(trial_run)->created_by_user_id);
+
+    // A run that ends without a result ends its trial with the reason.
+    lake::control::MethodologyRunStatus crashed;
+    crashed.phase = "Failed";
+    crashed.message = "the methodology's code exited with 1";
+    ASSERT_TRUE(t.store->put_methodology_run_status(failing_run, crashed));
+    const auto reconciled =
+        t.call(first, "get_experiment", in(first, 0, {{"experiment_id", "study-1"}}));
+    ASSERT_TRUE(reconciled.ok) << reconciled.error.message;
+    ASSERT_FALSE(study_calls.empty());
+    EXPECT_EQ(study_calls.back()["run"], "trial-run-1");
+    EXPECT_EQ(study_calls.back()["reason"], "the methodology's code exited with 1");
+
+    // Stopping the experiment stops its trials' runs.
+    const auto stopped = t.call(
+        first, "stop_experiment", in(first, 0, {{"experiment_id", "study-1"}, {"confirm", true}}));
+    ASSERT_TRUE(stopped.ok) << stopped.error.message;
+    EXPECT_EQ(t.store->get_methodology_run(third_run)->desired, "absent");
 
     // The run's record is sealed in the workspace Zetta; the dispatch row holds no content.
     for (const auto& [key, record] :

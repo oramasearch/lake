@@ -83,7 +83,10 @@ experiment, the promoted marker,
 the run report's held-out score lead, and `ZettaWorkspaceCaller` keeping `error.path` behind a fake
 Zetta HTTP transport. `experiment_fixture.hpp` supplies a stateful fake caller against the
 authorized engine contract and an opt-in browser fixture. `frontend/tests/experiments.test.ts` tests
-the chart transformations in `frontend/src/pages/experiments/transforms.ts` without a browser.
+the chart transformations in `frontend/src/pages/experiments/transforms.ts` without a browser, and
+`frontend/tests/experiment-methodologies.test.ts` the Start an Experiment choices for a workspace
+methodology (lake#689); the methodology case in `test_workspace_records.cpp` runs such an
+experiment's trials end to end.
 Independent response validation also uses these fixtures. See
 [API](../docs/api/experiments.md) and [UI](../docs/ui/experiments.md) contracts.
 
