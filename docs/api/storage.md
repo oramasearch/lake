@@ -177,7 +177,7 @@ ctest --test-dir build -R 'Stor'
   mismatched `confirm` deleting nothing, and the connection only once Ready and delivered.
 - `StoreProviders.*` (lake#664, `tests/test_store_providers.cpp`): SigV4 against the AWS examples,
   Shared Key against an independently computed signature, and one conformance suite (folders,
-  writes, ranged reads, replacing, names with spaces and symbols, conflicts, moves, removal) run
+  writes, ranged reads, replacing, names with blanks and symbols, conflicts, moves, removal) run
   against an S3 bucket path-style and on its own host under a prefix, an Azure container with a
   Shared Key and with a SAS, a store kept in the workspace Zetta (its bytes sealed, its records
   sealed, a move copying nothing) and a liquid repository branch, each over a local fake of the
