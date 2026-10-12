@@ -2056,6 +2056,49 @@ Result<AgentTask> InMemoryStore::latest_agent_conversation_task(
     return std::unexpected(StoreError{"not_found", "no earlier turn in this conversation"});
 }
 
+Result<std::vector<AgentTask>>
+InMemoryStore::list_conversation_agent_tasks(const std::string& customer_id,
+                                             const std::string& workspace_id,
+                                             const std::string& conversation_id,
+                                             const std::string& requested_by_user_id) {
+    std::lock_guard lock(mutex_);
+    std::vector<AgentTask> found;
+    std::set<std::string> ids;
+    for (const AgentTask& task : agent_tasks_) {
+        if (!conversation_id.empty() && task.customer_id == customer_id &&
+            task.workspace_id == workspace_id && task.conversation_id == conversation_id &&
+            task.requested_by_user_id == requested_by_user_id &&
+            (task.kind == "ask" || task.kind == "factory")) {
+            found.push_back(task);
+            ids.insert(task.id);
+        }
+    }
+    // The tasks those turns asked for, at any depth (a task is created after its asking one).
+    for (const AgentTask& task : agent_tasks_) {
+        if (task.customer_id == customer_id && task.workspace_id == workspace_id &&
+            ids.contains(task.parent_task_id) && !ids.contains(task.id)) {
+            found.push_back(task);
+            ids.insert(task.id);
+        }
+    }
+    return found;
+}
+
+Result<std::size_t> InMemoryStore::delete_agent_tasks(const std::string& customer_id,
+                                                      const std::vector<std::string>& ids) {
+    std::lock_guard lock(mutex_);
+    const std::set<std::string> wanted(ids.begin(), ids.end());
+    const auto removed = std::erase_if(agent_tasks_, [&](const AgentTask& task) {
+        return task.customer_id == customer_id && wanted.contains(task.id);
+    });
+    for (const std::string& id : wanted) {
+        if (std::ranges::find(agent_tasks_, id, &AgentTask::id) == agent_tasks_.end()) {
+            agent_task_clocks_.erase(id);
+        }
+    }
+    return static_cast<std::size_t>(removed);
+}
+
 Result<AgentTask> InMemoryStore::claim_agent_task(const std::string& id,
                                                   const std::string& agent,
                                                   const std::string& credential_sha256,

@@ -21,6 +21,9 @@ topic's workspace Zetta (lake#379); `Store` has no reads of the retired `stream_
 which migration `0070` dropped (lake#311). `list_agent_task_stream_scopes` supplies one customer's compact durable task
 and agent scope for the shared Agent events and Agent tasks views.
 `latest_agent_conversation_task` resolves the preceding task for a same-agent, same-kind follow-up.
+`list_conversation_agent_tasks` answers the tasks one person's Ask Orama or Agent Factory
+conversation started, with the tasks they asked for (`parent_task_id`), and `delete_agent_tasks`
+removes their dispatch rows; `delete_ask_conversation` uses both (lake#673).
 `AgentBus::call` carries named
 CRUD read requests over the existing service transport; unsupported custom bus implementations
 fail explicitly. See `docs/control-plane/streams.md`.

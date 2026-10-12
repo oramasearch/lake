@@ -5,11 +5,14 @@
 // chain (decision 52). The organization, invitation, grant and secret mount deletions live beside
 // their siblings (capabilities.cpp, secrets_capabilities.cpp).
 
+#include <cctype>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include "lake/api/capabilities.hpp"
 #include "lake/api/datasets.hpp"
+#include "lake/control/agent_task_records.hpp"
 #include "lake/control/ask_messages.hpp"
 #include "lake/control/store.hpp"
 #include "workspace_records_api.hpp"
@@ -134,19 +137,51 @@ void register_engine_deletion(Registry& registry,
         .input_aliases = std::move(aliases)});
 }
 
+// A task's status in the words get_agent_task uses.
+std::string task_status(const control::AgentTask& task) {
+    if (task.phase.empty()) {
+        return "pending";
+    }
+    std::string status = task.phase;
+    for (char& c : status) {
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+    return status;
+}
+
+// Removes each task's record from the workspace Zetta; a record already gone is not an error.
+liquid::runtime::task<control::ZettaControlResult<void>>
+remove_task_records(control::WorkspaceRecords& records,
+                    const std::vector<control::AgentTask>& tasks) {
+    for (const control::AgentTask& task : tasks) {
+        auto removed = control::settled(
+            co_await records.remove(control::AgentTaskContentCodec::collection, task.id));
+        if (!removed && removed.error().code != "not_found") {
+            co_return control::ZettaControlResult<void>(std::unexpected(removed.error()));
+        }
+    }
+    co_return control::ZettaControlResult<void>();
+}
+
 // delete_ask_conversation: every message of one of the caller's conversations in the workspace,
-// removed from the workspace Zetta by key.
+// removed from the workspace Zetta by key, and the agent tasks the conversation started (and the
+// tasks those asked for, lake#673): each task's record (its request, which repeats the person's
+// message, and the agent's answer) in the workspace Zetta, then its content-free dispatch row in
+// PostgreSQL. The records go first, so a deletion that fails part way is finished by calling it
+// again; they are removed once more after the rows, for an event an agent recorded in between.
 liquid::runtime::task<ApiResult> delete_ask_conversation(const json& input, ApiContext& context) {
     if (!context.store || context.acting_user_id.empty()) {
         co_return ApiResult::failure("unauthorized", "deleting a conversation needs a person");
     }
     const bool dry_run = input.value("dry_run", false);
+    const std::string customer_id = input.at("customer_id");
+    const std::string workspace_id = input.at("workspace_id");
     const std::string conversation_id = input.at("conversation_id");
-    context.audit_customer_id = input.at("customer_id");
+    context.audit_customer_id = customer_id;
     context.audit_kind = dry_run ? "ask_conversation.delete.plan" : "ask_conversation.delete";
     context.audit_object = "ask_conversation/" + conversation_id;
     context.audit_details = {{"conversation_id", conversation_id}};
-    auto records = workspace_records(context, input.at("customer_id"), input.at("workspace_id"));
+    auto records = workspace_records(context, customer_id, workspace_id);
     if (!records) {
         co_return ApiResult::failure(
             records.error().code, records.error().message, records.error().path);
@@ -158,13 +193,22 @@ liquid::runtime::task<ApiResult> delete_ask_conversation(const json& input, ApiC
         co_return ApiResult::failure(
             messages.error().code, messages.error().message, messages.error().path);
     }
-    if (messages->empty()) {
+    auto tasks = context.store->list_conversation_agent_tasks(
+        customer_id, workspace_id, conversation_id, context.acting_user_id);
+    if (!tasks) {
+        co_return ApiResult::failure(tasks.error().code, tasks.error().message);
+    }
+    if (messages->empty() && tasks->empty()) {
         co_return ApiResult::failure("not_found",
                                      "you have no conversation " + conversation_id +
                                          " in this workspace",
                                      "/conversation_id");
     }
     if (!dry_run) {
+        if (auto removed = control::settled(co_await remove_task_records(*records, *tasks));
+            !removed) {
+            co_return ApiResult::failure(removed.error().code, removed.error().message);
+        }
         for (const control::AskMessage& message : *messages) {
             auto removed = control::settled(
                 co_await records->remove(control::AskMessageCodec::collection, message.id));
@@ -172,14 +216,41 @@ liquid::runtime::task<ApiResult> delete_ask_conversation(const json& input, ApiC
                 co_return ApiResult::failure(removed.error().code, removed.error().message);
             }
         }
+        if (!tasks->empty()) {
+            std::vector<std::string> ids;
+            ids.reserve(tasks->size());
+            for (const control::AgentTask& task : *tasks) {
+                ids.push_back(task.id);
+            }
+            auto dropped = context.store->delete_agent_tasks(customer_id, ids);
+            if (!dropped) {
+                co_return ApiResult::failure(dropped.error().code, dropped.error().message);
+            }
+            if (auto again = control::settled(co_await remove_task_records(*records, *tasks));
+                !again) {
+                co_return ApiResult::failure(again.error().code, again.error().message);
+            }
+        }
+    }
+    json listed = json::array();
+    for (const control::AgentTask& task : *tasks) {
+        listed.push_back({{"task_id", task.id},
+                          {"agent", task.agent},
+                          {"kind", task.kind},
+                          {"status", task_status(task)},
+                          {"created_at", task.created_at}});
     }
     const auto count = static_cast<std::int64_t>(messages->size());
     context.audit_details["messages"] = count;
-    co_return ApiResult::success({{"conversation_id", conversation_id},
-                                  {"messages", count},
-                                  {"first_message", messages->front().content.substr(0, 200)},
-                                  {"dry_run", dry_run},
-                                  {"deleted", !dry_run}});
+    context.audit_details["agent_tasks"] = static_cast<std::int64_t>(tasks->size());
+    co_return ApiResult::success(
+        {{"conversation_id", conversation_id},
+         {"messages", count},
+         {"first_message",
+          messages->empty() ? std::string() : messages->front().content.substr(0, 200)},
+         {"agent_tasks", std::move(listed)},
+         {"dry_run", dry_run},
+         {"deleted", !dry_run}});
 }
 
 } // namespace
@@ -236,9 +307,10 @@ void register_deletion_capabilities(Registry& registry) {
         .description =
             "Delete one of your conversations with Ask Orama or the Agent Factory in one "
             "workspace: every message is removed from the workspace Zetta and cannot be "
-            "recovered. Only the person who had it can delete it. The agent tasks it started "
-            "stay in Agent Tasks. `dry_run: true` deletes nothing and answers how many messages "
-            "would go.",
+            "recovered, and so are the agent tasks it started (and the tasks those asked for): "
+            "their requests and answers in the workspace Zetta and their dispatch rows. Only the "
+            "person who had it can delete it. `dry_run: true` deletes nothing and answers how "
+            "many messages, and which agent tasks, would go.",
         .input_schema = workspace_input({{"conversation_id", {{"type", "string"}}}},
                                         json::array({"conversation_id"})),
         .output_schema = {{"type", "object"},
@@ -246,10 +318,22 @@ void register_deletion_capabilities(Registry& registry) {
                            {{"conversation_id", {{"type", "string"}}},
                             {"messages", {{"type", "integer"}}},
                             {"first_message", {{"type", "string"}}},
+                            {"agent_tasks",
+                             {{"type", "array"},
+                              {"items",
+                               {{"type", "object"},
+                                {"properties",
+                                 {{"task_id", {{"type", "string"}}},
+                                  {"agent", {{"type", "string"}}},
+                                  {"kind", {{"type", "string"}}},
+                                  {"status", {{"type", "string"}}},
+                                  {"created_at", {{"type", "string"}}}}},
+                                {"required", json::array({"task_id", "agent", "status"})},
+                                {"additionalProperties", false}}}}},
                             {"dry_run", {{"type", "boolean"}}},
                             {"deleted", {{"type", "boolean"}}}}},
                           {"required",
-                           json::array({"conversation_id", "messages", "dry_run", "deleted"})},
+                           json::array({"conversation_id", "messages", "agent_tasks", "dry_run", "deleted"})},
                           {"additionalProperties", false}},
         .kind = CapabilityKind::Action,
         .object = "customer",

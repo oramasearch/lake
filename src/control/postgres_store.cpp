@@ -5460,6 +5460,62 @@ public:
         });
     }
 
+    Result<std::vector<AgentTask>>
+    list_conversation_agent_tasks(const std::string& customer_id,
+                                  const std::string& workspace_id,
+                                  const std::string& conversation_id,
+                                  const std::string& requested_by_user_id) override {
+        if (!agent_task_uuid(conversation_id) || !agent_task_uuid(requested_by_user_id) ||
+            !agent_task_uuid(workspace_id)) {
+            return std::vector<AgentTask>{};
+        }
+        return with_tx<std::vector<AgentTask>>([&](pqxx::work& tx) -> Result<std::vector<AgentTask>> {
+            // The conversation's turns, then every task they asked for at any depth (lake#451).
+            const pqxx::result rows = tx.exec_params(
+                std::string("WITH RECURSIVE started(id) AS ("
+                            "SELECT id FROM agent_tasks WHERE customer_id = $1::uuid "
+                            "AND workspace_id = $2::uuid AND conversation_id = $3::uuid "
+                            "AND requested_by_user_id = $4::uuid AND kind IN ('ask', 'factory') "
+                            "UNION SELECT c.id FROM agent_tasks c JOIN started s "
+                            "ON c.parent_task_id = s.id WHERE c.customer_id = $1::uuid "
+                            "AND c.workspace_id = $2::uuid) SELECT ") +
+                    task_columns +
+                    " FROM agent_tasks t LEFT JOIN agent_task_status ts ON ts.task_id = t.id "
+                    "WHERE t.id IN (SELECT id FROM started) ORDER BY t.created_at, t.id",
+                customer_id,
+                workspace_id,
+                conversation_id,
+                requested_by_user_id);
+            std::vector<AgentTask> tasks;
+            tasks.reserve(rows.size());
+            for (const pqxx::row& row : rows) {
+                tasks.push_back(task_from(row));
+            }
+            return tasks;
+        });
+    }
+
+    Result<std::size_t> delete_agent_tasks(const std::string& customer_id,
+                                           const std::vector<std::string>& ids) override {
+        std::vector<std::string> valid;
+        for (const std::string& id : ids) {
+            if (agent_task_uuid(id)) {
+                valid.push_back(id);
+            }
+        }
+        if (valid.empty() || !agent_task_uuid(customer_id)) {
+            return std::size_t{0};
+        }
+        return with_tx<std::size_t>([&](pqxx::work& tx) -> Result<std::size_t> {
+            const pqxx::result rows = tx.exec_params(
+                "DELETE FROM agent_tasks WHERE customer_id = $1::uuid AND id IN "
+                "(SELECT jsonb_array_elements_text($2::jsonb)::uuid) RETURNING id",
+                customer_id,
+                nlohmann::json(valid).dump());
+            return static_cast<std::size_t>(rows.size());
+        });
+    }
+
     Result<AgentTask> claim_agent_task(const std::string& id,
                                        const std::string& agent,
                                        const std::string& credential_sha256,
