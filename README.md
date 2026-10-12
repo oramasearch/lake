@@ -154,8 +154,8 @@ cutting one.
 ## Deployment status
 
 Status: 2026-10-12. `Lake/prod` on the dev AKS cluster (there is no production environment yet)
-runs `oramasearch/lake:20261011u`, source `dd1574fd`, the commit v0.1.0 was cut from; its OpenAPI
-lists 554 paths. The newest dated [deployment record](docs/deployment/dev-2026-10-01.md) and
+runs `oramasearch/lake:20261012a` (also tagged `v0.1.0`), built from the v0.1.0 tag (`2e6f6d7`);
+`GET /v1/server_info` reports version `0.1.0` and its OpenAPI lists 554 paths. The newest dated [deployment record](docs/deployment/dev-2026-10-01.md) and
 [`docs/design/status.md`](docs/design/status.md) describe the 2026-10-01 deployment (`36679e1`) and
 have not been brought up to this one. `status.md` distinguishes what is implemented, exercised
 locally, deployed, and exercised in deployment, and `DocsStatus.MatchesTheObservedOpenApi` fails
