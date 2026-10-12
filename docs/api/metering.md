@@ -152,8 +152,11 @@ Each dimension has one unit. Billing's prices are set per dimension `name` and c
 (`usage_dimensions()`, `src/api/usage_recorder.cpp`; [billing.md](billing.md#prices-and-bills)).
 `build_compute`, `run_compute` and `instances` are measured and charted as **detail, never billed**
 (lake#643, lake#658): compute is billed as `cpu`, `ram`, `gpu` and `vram`, and these say how long
-builds, runs and services ran. `usage_over_time` answers each dimension's `billed`, false for these
-three, and the Usage page marks their tiles *Detail, not billed*.
+builds, runs and services ran. `engine_storage` is detail too (decision 61, lake#663): a workspace
+engine's disk is billed once, as its volume (`volumes`), so the bytes it holds on that volume are
+shown and never billed. `usage_over_time` answers each dimension's `billed`, false for these four,
+and the Usage page marks their tiles *Detail, not billed* (*Detail, billed as the engine's volume*
+for `engine_storage`).
 
 | Dimension | Unit | Kinds | Where it comes from |
 |---|---|---|---|
@@ -161,8 +164,9 @@ three, and the Usage page marks their tiles *Detail, not billed*.
 | `ram` | `mib_seconds`: a MiB of memory for a second | as `cpu` | as `cpu` |
 | `gpu` | `gpu_seconds` | as `cpu`, and `class` (`l4`, `a10g`, `a100`, `h100`, …; absent when unknown) | as `cpu` |
 | `vram` | `mib_seconds` of GPU memory | as `gpu` | as `cpu` |
-| `storage` | bytes, the latest reading of each period | `repositories`, `images`, `workspace_data`, `transcripts`, `drive_files`, and what the engine holds: `models`, `indexes`, `runs` (run artifacts and experiments), `streams` (topics), `files`, `buckets` (the workspace's own) | the owner loop's sample, below |
-| `transfer` | bytes | `in`, `out` | the exact hourly repository transfer records (`lake_metering_usage`, above), plus every other byte lake moves for a workspace (lake#658): drive uploads and reads, tenant image pushes and pulls, repository file reads, Hub `resolve` downloads, LFS staging and commits, shared-file downloads, datasets uploaded with `upload_dataset`, and any other caller that adds `transfer` to the workspace's `lake_usage` through the usage recorder (an MCP connection's bytes, say): `usage_over_time` and the bill read every `transfer` row of the series, whatever its labels, beside the repository records |
+| `storage` | bytes, the latest reading of each period | `repositories`, `images`, `transcripts`, `drive_files` | what Lake holds outside a workspace engine's volume, from the owner loop's sample, below; billed |
+| `engine_storage` | bytes, the latest reading of each period | `workspace_data` (datasets), `models`, `indexes`, `runs` (run artifacts and experiments), `streams` (topics), `files`, `buckets` (the workspace's own, never lake's `lake_store` and `lake_files`) | what the workspace engine holds on its own volume: Zetta's `storage_usage` (an older engine: its datasets only), from the same sample. Detail, never billed: the volume is (decision 61, lake#663). Titled Engine Storage |
+| `transfer` | bytes | `in`, `out` | the exact hourly repository transfer records (`lake_metering_usage`, above), plus every other byte lake moves for a workspace (lake#658): drive uploads and reads, tenant image pushes and pulls, repository file reads, Hub `resolve` downloads, LFS staging and commits, shared-file downloads, datasets uploaded with `upload_dataset`, each app's traffic through the ingress (`object_id` the app, [below](#app-traffic), lake#661), and any other caller that adds `transfer` to the workspace's `lake_usage` through the usage recorder (an MCP connection's bytes, say): `usage_over_time` and the bill read every `transfer` row of the series, whatever its labels, beside the repository records |
 | `build_compute` | seconds | `repository`, `image` | the repository build records (above) and the operator's finished image builds, at the hour each finished; titled Build Time |
 | `run_compute` | seconds | `run` | the workspace's runs (`list_runs`), training and experiment trials included, at the time each last changed; titled Workspace Run Time. A run executes in its workspace's engine, so its CPU and RAM are the engine's, never counted twice |
 | `speech` | seconds | `transcript`, `dictation` | the audio length of each transcript made from audio (`create_transcript`) and of each dictation (`transcribe`, in the workspace it names, lake#613), rounded up: what the speech-to-text model reports (`whisper-1`), else what lake measures from the recording ([transcripts.md](transcripts.md#how-long-a-recording-is)). The tokens `gpt-4o-transcribe` reports are audit detail only and never `model_tokens` (lake#658): speech is billed once, by the minute |
@@ -171,7 +175,7 @@ three, and the Usage page marks their tiles *Detail, not billed*.
 | `searches` | calls | — (`object_id` is the index) | each answered `search_index` of a published index (lake#658) |
 | `model_tokens` | tokens | `input`, `output` (also `agent`, `launch_id`, `model`) | every agent model call through the [model gateway](model-gateway.md) (`/openai/v1/*`, lake#248), counted from the provider's own `usage`; what an agent reports with `record_model_usage` for a call made outside Lake (below); and the tokens a speech-to-text model reports for a transcript (`model` only); never speech-to-text, which is `speech` (lake#658) |
 | `instances` | instance-seconds | the service kind (`zetta`, `postgres`, …) or `app` (`object_id` is the service or app) | the owner loop's sample of running services and apps; detail, never billed |
-| `volumes` | GiB-seconds | `service`, `store` (`object_id`) | the owner loop's sample of running services' and stores' volumes |
+| `volumes` | GiB-seconds | `service`, `store` (`object_id`) | the owner loop's sample of running services' and stores' volumes; the workspace engine is a service, and its volume is how its disk is billed (decision 61) |
 
 ### What the sampler reads
 
@@ -191,7 +195,9 @@ never count one service twice, samples every live workspace on its maintenance t
   own buckets are left out (`lake_store` is `repositories`, `lake_files` is `drive_files`), and so
   are lake's sealed records and the engine's catalogue and system files: lake's bookkeeping is not
   billed. An engine without `storage_usage` (a Zetta before it) gives `list_datasets` `size_bytes`
-  as `workspace_data` and nothing else, and `usage_over_time` names the workspace.
+  as `workspace_data` and nothing else, and `usage_over_time` names the workspace. These kinds are
+  sampled into `lake_storage` as before, and `usage_over_time` answers them as `engine_storage`,
+  never `storage`: the engine's disk is billed as its volume (decision 61, lake#663).
 - **Transcripts and drive files.** The text of the workspace's transcripts, and the size of each
   finished file of its `files` drives. A workspace that is not ready is skipped, never sampled as
   zero.
@@ -237,11 +243,12 @@ the operator is the one place that knows them.
 | `agent_launch` | the launch | agent-runtime's Job (`job`) or Deployment (`service`) |
 | `agent_cron_run` | the run (`agent_cron_runs.id`) | one Job an agent's cron schedule started (lake#658, migration `0077_metered_jobs`) |
 | `methodology_run` | the run | a workspace methodology's sandbox pod, the code itself (lake#655, migration `0078`); counted once after it finishes, for `started_at` to `finished_at` of that pod, as kind `methodology` ([methodologies.md](methodologies.md#metering)) |
+| `methodology_deployment` | the deployment | a served workspace methodology model's serve pods (lake#690, migration `0083`); charged while they run, as kind `methodology` ([methodologies.md](methodologies.md#serving-its-model)) |
 
 **What the sampler records** (`sample_usage`, every fifteen minutes, by the store root's owner):
 
 - **A running workload**, one whose row has `pods` above 0 and whose object is live (a running
-  workspace, a present service or store, an app not deleted, a present `service`-mode launch): the
+  workspace, a present service or store, an app not deleted, a present `service`-mode launch, a present methodology deployment): the
   seconds since the last sample (at most two intervals) times its CPU, memory, GPUs and GPU memory.
 - **A finished build, agent job (`job`-mode launch) or cron run once** (lake#658), whenever a sample
   first finds it finished (`Succeeded`, `Failed`, `Cancelled`) with its resources reported, however
@@ -265,6 +272,37 @@ vCPU-minute, GiB-minute and GPU-minute ([billing.md](billing.md#prices-and-bills
 `usage_over_time` answers them with `by_object` and, for `gpu` and `vram`, `by_class` (`key` the
 class; `""` for a GPU of no known class).
 
+### App traffic
+
+**Status: implemented (lake#661), not deployed; needs the Orama operator that vendors migration
+`0081_app_transfer` and reports app traffic, and ingress-nginx's metrics turned on.**
+An app's requests and answers go from the cluster's ingress controller to its pods; Lake never sees
+them. The Orama operator reads the ingress controller's per-Ingress byte counters (ingress-nginx's
+`nginx_ingress_controller_request_size_sum` and `_response_size_sum`, on its metrics port, which
+`controller.metrics.enabled=true` turns on) on its 30-second poll, maps each app's Ingress to its
+app, and adds the increase since its previous read to `app_transfer` in lake's control PostgreSQL
+(migration `0081_app_transfer`,
+[schema](../control-plane/schema.md#app-transfer-migration)): one row per app and UTC hour,
+`in_bytes` (what clients sent: request line, headers and body) and `out_bytes` (what the app sent
+back), with the app's workspace. Numbers only: no host, path or content. Rows older than eight days
+are deleted by the operator (orama-operator's `docs/lake/app-transfer.md`).
+
+**What the sampler records.** Each sample charges every closed hour (ended at least five minutes
+ago, so the operator's last read of it has landed) of the last seven days that was not charged
+before: the hour's `in_bytes` and `out_bytes` as `transfer` `in` and `out`, `object_id` the app, in
+the app's workspace, at the start of the hour they moved in. Before adding them, lake records
+`if_absent` in that workspace that the hour was charged (`lake_metering_app_transfer_records`, one
+sealed record per app and hour under the blind key of both), so an hour is charged at most once, by
+any lake and any sample; at most 500 hours a workspace are charged per sample. An hour therefore
+shows on the Usage page once it has closed. The bill prices them at the `transfer` rate, like every
+other `transfer` row.
+
+What it does not count: the operator's first read after it starts is its baseline (bytes moved
+between its last read before a restart and that first read, at most one poll, are not counted); an
+ingress controller pod that started after the operator counts whole. An app's Lake sign-in
+handoff (`auth-url`) is Lake's own request. If the ingress controller's metrics are off, the
+operator logs it and writes nothing.
+
 ### Not measured
 
 `usage_over_time` names these in `not_measured` whenever the dimension is asked for:
@@ -277,9 +315,8 @@ class; `""` for a GPU of no known class).
   (orama-operator's `docs/lake/workload-resources.md`). If the table cannot be read, the reading
   says so.
 - Model files, indexes, run artifacts, topics, files and buckets of a workspace whose engine does
-  not report `storage_usage` yet (a Zetta before it): named by workspace.
-- App traffic through the ingress (`transfer`): the operator does not report it yet
-  ([lake#661](https://github.com/oramasearch/lake/issues/661)).
+  not report `storage_usage` yet (a Zetta before it): named by workspace, when `engine_storage` is
+  asked for. They are detail only; the engine's volume is billed either way.
 - Usage before this change: the series start empty, and nothing is copied into them.
 
 ### What is not usage
@@ -302,7 +339,7 @@ Every capability call routed to a workspace counts in `calls`. A capability that
 resource for a workspace names the dimensions its use adds to in `capability_meters()`
 (`src/api/usage_recorder.cpp`): the workloads it starts (CPU, RAM, GPU, GPU memory, volumes), the
 work it runs in the engine, the predictions and searches it answers, the speech it transcribes, the
-bytes it moves (`transfer`) and stores (`storage`). The workspace engine's own capabilities that Lake names (lake#650) are in the same tables: training, runs, deployed pipelines and index builds are the engine's CPU, RAM and GPU; datasets, models and indexes they keep are its storage; a member's own `score` and `search_workspace_index` run on the engine and are billed as its compute, while the served `predict` and `search_index` are priced per request. Capabilities whose names look like they consume a
+bytes it moves (`transfer`) and stores (`storage`). The workspace engine's own capabilities that Lake names (lake#650) are in the same tables: training, runs, deployed pipelines and index builds are the engine's CPU, RAM and GPU; datasets, models and indexes they keep are on its volume, billed as `volumes` by its size, with their bytes shown as `engine_storage` and not billed (decision 61, lake#663); a member's own `score` and `search_workspace_index` run on the engine and are billed as its compute, while the served `predict` and `search_index` are priced per request. Capabilities whose names look like they consume a
 resource but write only records are in `calls_only_capabilities()`, each with why.
 `tests/test_usage_contract.cpp` fails when:
 
@@ -311,8 +348,11 @@ resource but write only records are in `calls_only_capabilities()`, each with wh
   `predict`, `search`, …) is in neither table, or a meter names an unbilled dimension;
 - a `workload_resources` kind the schema allows is not one the sample charges
   (`metered_workload_kinds()`);
-- a store type is offered (`control::store_providers`) whose bytes are not metered
-  (`metered_store_types()`: volumes);
+- a store pair is offered (`control::store_providers`) whose bytes are not metered
+  (`metered_store_types()`: volumes; `store_metered_as`, lake#664: a store Lake keeps in the
+  workspace Zetta is `storage` kind `buckets`, its `lake_st_<hex>` bucket; a `lake` store is
+  `repositories`; the customer's own bucket is `transfer` only, the bytes a drive moves through
+  Lake, because the bucket's bytes stay in the customer's account and its provider bills them);
 - a dimension the price list may rate has no rate in [billing.md](billing.md#publish-the-price-list)
   or in the web app's `LIST_RATES`.
 
@@ -399,6 +439,12 @@ named, then charged once in the hour each ended, with one job record each, and n
 older engine's datasets and its workspace named); `UsageOverTime.CountsDictationInTheWorkspaceItWasDictatedIn`;
 `UsageOverTime.CountsEachIndexsAnsweredSearches`; `UsageOverTime.AddsTransferOutsideSyncAndSaysWhatIsNotBilled`;
 `Drives.UploadsAndReadsAreTheWorkspacesTransfer`; `UsageContract.TransferFromAnyRecorderCallerIsShownAndBilled` (`tests/test_billing.cpp`: a `transfer` row an arbitrary caller records, with labels of its own, is in `usage_over_time` and on the month's bill); and `UsageContract.*` (above).
+lake#661: `UsageSample.ChargesEachClosedHourOfAppTrafficOnce` (an app's closed hour charged as
+`transfer` `in` and `out` in its workspace, in the hour it moved, once; the open hour only after it
+closes; another account's row ignored; nothing about the ingress left in `not_measured`) and
+`PostgresBilling.AppTrafficAddsUpByAppAndHour` (both stores add a poll's bytes to the app's hour and
+refuse an hour that does not start on the hour); `OperatorContract.*` prepares the operator's
+`app_transfer` statements against the schema.
 `HttpServer.RequestLogsNameRoutesAndEachWorkspaceGetsItsOwnRequestSeries` counts calls through a
 real server and writes them only at stop. `SchemaConformance.*` validates the three readable
 capabilities' answers over REST and MCP.

@@ -15,6 +15,7 @@
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <cstdio>
 #include <format>
 #include <map>
 #include <optional>
@@ -23,12 +24,14 @@
 #include <utility>
 #include <vector>
 
+#include "methodology_serving.hpp"
 #include "lake/api/capabilities.hpp"
 #include "lake/control/builds.hpp"
 #include "lake/control/methodologies.hpp"
 #include "lake/control/policy.hpp"
 #include "lake/control/store.hpp"
 #include "lake/control/workspace_records.hpp"
+#include "methodology_experiments.hpp"
 #include "workspace_records_api.hpp"
 
 namespace lake::api {
@@ -560,6 +563,12 @@ json run_json(const control::MethodologyRun& run, const std::optional<json>& rec
         message = "Waiting for the Orama operator to start this run.";
     } else if (run.phase == "Building") {
         message = "Building the methodology's image.";
+    } else if (run.phase == "Queued") {
+        // The operator holds it back (orama-operator#293): the workspace is at its cap of
+        // concurrent runs, or no node of its GPU class exists yet. Its message says which.
+        message = run.message.empty()
+                      ? std::string("Queued: waiting for a place among this workspace's runs.")
+                      : run.message;
     } else if (run.phase == "Staging") {
         message = "Handing the data to the sandbox.";
     } else if (run.phase == "Running") {
@@ -599,7 +608,10 @@ json run_json(const control::MethodologyRun& run, const std::optional<json>& rec
                                 "holdout_fraction",
                                 "revision",
                                 "project",
-                                "graph"}) {
+                                "graph",
+                                "experiment_id",
+                                "trial",
+                                "trial_number"}) {
             out[key] = body.value(key, json(nullptr));
         }
         const json result = body.value("result", json(nullptr));
@@ -705,6 +717,13 @@ struct RunRequest {
     json params = json::object();
     double holdout_fraction = 0.2;
     std::string project, graph;
+    std::uint64_t seed = 42;
+    // An experiment's trial (lake#689): the engine's study and the trial's Run id and number.
+    std::string experiment_id, trial;
+    std::int64_t trial_number = -1;
+    // Who the run is on behalf of when it is not the caller: a trial dispatched while Lake records
+    // another trial's result runs for whoever started that one.
+    std::optional<std::pair<std::string, std::string>> created_by;
 };
 
 // Queues one run: the dispatch row, then the sealed record of what it reads.
@@ -739,6 +758,10 @@ liquid::runtime::task<ApiResult> queue_run(ApiContext& context,
     row.network = entry.value("network", false) == true;
     row.created_by_user_id = context.acting_user_id;
     row.created_by_taap_id = context.acting_identity;
+    if (request.created_by) {
+        row.created_by_user_id = request.created_by->first;
+        row.created_by_taap_id = request.created_by->second;
+    }
     const auto created = context.store->create_methodology_run(row);
     if (!created) {
         co_return store_failed(created.error());
@@ -751,7 +774,7 @@ liquid::runtime::task<ApiResult> queue_run(ApiContext& context,
               {"features", request.features},
               {"params", request.params},
               {"holdout_fraction", request.holdout_fraction},
-              {"seed", 42},
+              {"seed", request.seed},
               {"network", row.network},
               {"manifest", control::manifest_json(manifest)},
               {"repository_id", code.value("repository_id", std::string())},
@@ -762,6 +785,11 @@ liquid::runtime::task<ApiResult> queue_run(ApiContext& context,
               {"created_at", created->created_at},
               {"result", nullptr},
               {"model_id", nullptr}};
+    if (!request.experiment_id.empty()) {
+        body["experiment_id"] = request.experiment_id;
+        body["trial"] = request.trial;
+        body["trial_number"] = request.trial_number;
+    }
     auto records = workspace_records(context, customer_id, workspace_id);
     if (!records) {
         static_cast<void>(context.store->withdraw_methodology_run(
@@ -859,23 +887,139 @@ checked_entry_code(ApiContext& context,
 
 // --- Capabilities --------------------------------------------------------------------------------
 
-liquid::runtime::task<ApiResult> draft_methodology(const json& input, ApiContext&) {
-    const std::string description = input.at("description");
-    if (description.find_first_not_of(" \t\r\n") == std::string::npos) {
-        co_return refused("invalid_input", "say what the methodology should do", "/description");
-    }
+// Lake's own template draft, as draft_methodology answers it.
+json template_draft(const json& input, const std::string& description) {
     const control::MethodologyDraft draft = control::draft_methodology(
         description, input.value("name", std::string()), input.value("target_kind", std::string()));
     json files = json::array();
     for (const control::MethodologyFile& file : draft.files) {
         files.push_back({{"path", file.path}, {"contents", file.contents}});
     }
+    return {{"name", draft.manifest.name},
+            {"drafted_by", "template"},
+            {"template", draft.template_name},
+            {"reason", draft.reason},
+            {"manifest", control::manifest_json(draft.manifest)},
+            {"files", std::move(files)}};
+}
+
+// The files of Ask Orama's draft as a folder, or why they cannot be one: each a {path, contents}
+// inside the folder, at most as many and as large as a methodology's source files.
+std::expected<std::map<std::string, std::string>, std::string> draft_files(const json& files) {
+    if (!files.is_array() || files.empty()) {
+        return std::unexpected("the draft has no files");
+    }
+    if (files.size() > max_source_files) {
+        return std::unexpected("the draft has more than " + std::to_string(max_source_files) +
+                               " files");
+    }
+    std::map<std::string, std::string> folder;
+    for (const json& file : files) {
+        if (!file.is_object() || !file.value("path", json()).is_string() ||
+            !file.value("contents", json()).is_string()) {
+            return std::unexpected("each file of the draft is {path, contents}");
+        }
+        const std::string path = file.at("path");
+        if (!control::methodology_path("", path)) {
+            return std::unexpected("the draft's file " + path +
+                                   " is not a path inside the methodology's folder");
+        }
+        if (file.at("contents").get_ref<const std::string&>().size() > max_source_file_bytes) {
+            return std::unexpected("the draft's file " + path + " is larger than 1 MiB");
+        }
+        if (!folder.emplace(path, file.at("contents").get<std::string>()).second) {
+            return std::unexpected("the draft names " + path + " twice");
+        }
+    }
+    return folder;
+}
+
+// draft_methodology {task_id} (lake#688): the draft Ask Orama wrote in that methodology_draft
+// turn, offered only when Lake's own checks pass (the manifest reads, the entrypoint defines fit,
+// predict and score, every lock line is pinned and hashed). Otherwise Lake's template, with
+// `orama` saying why Ask Orama's draft was not offered. A turn still working is `conflict`.
+liquid::runtime::task<ApiResult> orama_draft(const json& input,
+                                             ApiContext& context,
+                                             const std::string& description) {
+    const std::string task_id = input.at("task_id");
+    const ApiResult got = finished(co_await call_capability(context,
+                                                            "get_agent_task",
+                                                            {{"customer_id", input.at("customer_id")},
+                                                             {"workspace_id", input.at("workspace_id")},
+                                                             {"task_id", task_id}}));
+    if (!got.ok) {
+        co_return got;
+    }
+    const json& task = got.value;
+    if (task.value("agent", std::string()) != "agent-ask-orama" ||
+        task.value("kind", std::string()) != "methodology_draft") {
+        co_return refused("invalid_input",
+                          "that task is not an Ask Orama methodology draft (agent_turn with "
+                          "agent-ask-orama and kind methodology_draft)",
+                          "/task_id");
+    }
+    const std::string status = task.value("status", std::string());
+    if (status == "pending" || status == "running" || status.empty()) {
+        co_return refused("conflict", "Ask Orama is still writing the draft", "/task_id");
+    }
+    const auto fallback = [&](std::string reason, json findings) {
+        json draft = template_draft(input, description);
+        draft["orama"] = {{"task_id", task_id},
+                          {"offered", false},
+                          {"reason", std::move(reason)},
+                          {"findings", std::move(findings)}};
+        return ApiResult::success({{"draft", std::move(draft)}});
+    };
+    const json answer = task.value("answer", json::object());
+    const json result = answer.is_object() ? answer.value("result", json()) : json();
+    if (status != "succeeded" || !result.is_object() ||
+        result.value("kind", std::string()) != "methodology_draft") {
+        std::string why = task.value("message", std::string());
+        if (why.empty() && answer.is_object() && answer.value("error", json()).is_string()) {
+            why = answer.at("error");
+        }
+        co_return fallback(
+            "Ask Orama did not write a draft" + (why.empty() ? std::string() : ": " + why) + ".",
+            json::array());
+    }
+    auto folder = draft_files(result.value("files", json()));
+    if (!folder) {
+        co_return fallback("Ask Orama's draft could not be read: " + folder.error() + ".",
+                           json::array());
+    }
+    Checked checked = check_code(*folder);
+    if (!checked.manifest || !control::all_ok(checked.findings)) {
+        co_return fallback("Ask Orama's draft did not pass the checks Validate runs first, so this "
+                           "is Lake's template instead.",
+                           findings_json(checked.findings));
+    }
+    json files = json::array();
+    for (const json& file : result.at("files")) {
+        files.push_back({{"path", file.at("path")}, {"contents", file.at("contents")}});
+    }
+    std::string reason = result.value("reason", std::string());
+    if (reason.empty()) {
+        reason = "Ask Orama wrote this first version for your description.";
+    }
     co_return ApiResult::success({{"draft",
-                                   {{"name", draft.manifest.name},
-                                    {"template", draft.template_name},
-                                    {"reason", draft.reason},
-                                    {"manifest", control::manifest_json(draft.manifest)},
-                                    {"files", std::move(files)}}}});
+                                   {{"name", checked.manifest->name},
+                                    {"drafted_by", "orama"},
+                                    {"task_id", task_id},
+                                    {"reason", std::move(reason)},
+                                    {"manifest", control::manifest_json(*checked.manifest)},
+                                    {"files", std::move(files)},
+                                    {"findings", findings_json(checked.findings)}}}});
+}
+
+liquid::runtime::task<ApiResult> draft_methodology(const json& input, ApiContext& context) {
+    const std::string description = input.at("description");
+    if (description.find_first_not_of(" \t\r\n") == std::string::npos) {
+        co_return refused("invalid_input", "say what the methodology should do", "/description");
+    }
+    if (input.contains("task_id")) {
+        co_return co_await orama_draft(input, context, description);
+    }
+    co_return ApiResult::success({{"draft", template_draft(input, description)}});
 }
 
 // Registers a workspace entry for the code at `revision`, with `extra` (duplicated_from, network).
@@ -1615,6 +1759,392 @@ liquid::runtime::task<ApiResult> stop_methodology_run(const json& input, ApiCont
     co_return ApiResult::success({{"run", run_json(*stopped, std::nullopt)}});
 }
 
+// --- Experiments over a workspace methodology's parameters (lake#689) ---------------------------
+
+// Which Lake run serves which trial: one sealed record per trial, keyed by the trial's engine Run
+// id and found by the experiment, written (if absent) before the run is queued, so a trial is
+// dispatched once however many callers reconcile the experiment at the same time.
+constexpr control::RecordCollection trial_records{"methodology_trials", 1};
+
+std::string trial_lookup(const std::string& customer_id, const std::string& experiment_id) {
+    return "customer:" + customer_id + ":experiment:" + experiment_id;
+}
+
+// A claim that never got its run (Lake stopped between the two writes) is retried after this long.
+constexpr std::int64_t trial_claim_retry_seconds = 600;
+
+// Seconds since the Unix epoch of an ISO 8601 or PostgreSQL timestamp (UTC); nullopt otherwise.
+std::optional<std::int64_t> epoch_seconds(const std::string& text) {
+    int year = 0, month = 0, day = 0, hour = 0, minute = 0, second = 0;
+    if (text.size() < 19 ||
+        std::sscanf(text.c_str(), "%4d-%2d-%2d%*c%2d:%2d:%2d", &year, &month, &day, &hour, &minute,
+                    &second) != 6) {
+        return std::nullopt;
+    }
+    const std::chrono::year_month_day date{std::chrono::year{year},
+                                           std::chrono::month{static_cast<unsigned>(month)},
+                                           std::chrono::day{static_cast<unsigned>(day)}};
+    if (!date.ok()) {
+        return std::nullopt;
+    }
+    return std::chrono::sys_days{date}.time_since_epoch() / std::chrono::seconds{1} +
+           hour * 3600 + minute * 60 + second;
+}
+
+std::int64_t now_seconds() {
+    return std::chrono::duration_cast<std::chrono::seconds>(
+               std::chrono::system_clock::now().time_since_epoch())
+        .count();
+}
+
+// A task's value, or `fallback` when the task itself failed.
+template <class T> T awaited(std::expected<T, liquid::error> done, T fallback) {
+    return done ? std::move(*done) : std::move(fallback);
+}
+
+// The trial claims of one experiment, by trial.
+liquid::runtime::task<control::ZettaControlResult<std::map<std::string, json>>>
+trial_claims(ApiContext& context,
+             const std::string& customer_id,
+             const std::string& workspace_id,
+             const std::string& experiment_id) {
+    using Claims = std::map<std::string, json>;
+    auto records = workspace_records(context, customer_id, workspace_id);
+    if (!records) {
+        co_return control::ZettaControlResult<Claims>(std::unexpected(records.error()));
+    }
+    auto listed = control::settled(
+        co_await records->list(trial_records, trial_lookup(customer_id, experiment_id)));
+    if (!listed) {
+        co_return control::ZettaControlResult<Claims>(std::unexpected(listed.error()));
+    }
+    Claims claims;
+    for (const control::StoredRecord& record : *listed) {
+        if (record.body.value("customer_id", std::string()) == customer_id) {
+            claims[record.id] = record.body;
+        }
+    }
+    co_return control::ZettaControlResult<Claims>(std::move(claims));
+}
+
+// What a trial's Lake run says, for the experiment's answer.
+json trial_run_json(const json& claim, const std::optional<control::MethodologyRun>& run) {
+    json out{{"trial", claim.value("trial", std::string())},
+             {"number", claim.value("number", json(nullptr))},
+             {"run_id", claim.value("run_id", json(nullptr))},
+             {"phase", "Pending"},
+             {"message", "Waiting for Lake to queue this trial's run."}};
+    if (run) {
+        const json shown = run_json(*run, std::nullopt);
+        out["phase"] = shown.at("phase");
+        out["message"] = shown.at("message");
+        out["started_at"] = shown.at("started_at");
+        out["finished_at"] = shown.at("finished_at");
+    } else if (!claim.value("error", std::string()).empty()) {
+        out["phase"] = "Failed";
+        out["message"] = claim.at("error");
+    }
+    return out;
+}
+
+// One waiting trial, dispatched: the claim (if absent), then the run, then the claim's run id.
+// Answers the claim as written; a claim another caller holds is answered as it stands.
+liquid::runtime::task<json> dispatch_trial(ApiContext& context,
+                                           const std::string& customer_id,
+                                           const std::string& workspace_id,
+                                           const json& entry,
+                                           const MethodologyManifest& manifest,
+                                           const control::Build& build,
+                                           const json& item,
+                                           const std::optional<json>& existing,
+                                           std::optional<std::pair<std::string, std::string>> by) {
+    const std::string experiment_id = item.value("study", std::string());
+    const std::string trial = item.value("trial", std::string());
+    json claim{{"customer_id", customer_id},
+               {"experiment_id", experiment_id},
+               {"trial", trial},
+               {"number", item.value("number", json(nullptr))},
+               {"methodology_id", item.value("methodology", std::string())},
+               {"run_id", nullptr},
+               {"claimed_at", now_text()},
+               {"claimed_at_s", now_seconds()}};
+    auto records = workspace_records(context, customer_id, workspace_id);
+    if (!records) {
+        co_return claim;
+    }
+    // Claim the trial: if absent, or retaking a claim that never got its run.
+    bool ours = false;
+    auto claimed = control::settled(co_await records->update(
+        trial_records,
+        trial,
+        trial_lookup(customer_id, experiment_id),
+        [&](const std::optional<control::StoredRecord>& current) -> std::optional<json> {
+            ours = false;
+            if (current) {
+                const json& held = current->body;
+                const bool stale = held.value("run_id", json(nullptr)).is_null() &&
+                                   held.value("error", std::string()).empty() &&
+                                   now_seconds() - held.value("claimed_at_s", std::int64_t{0}) >
+                                       trial_claim_retry_seconds;
+                if (!stale) {
+                    return std::optional<json>(std::in_place, held);
+                }
+            }
+            ours = true;
+            return claim;
+        }));
+    if (!claimed || !*claimed) {
+        co_return existing.value_or(claim);
+    }
+    if (!ours) {
+        co_return (**claimed).body;
+    }
+    RunRequest request;
+    request.mode = "train";
+    request.dataset = item.value("dataset_path", std::string());
+    request.target = item.value("target", std::string());
+    const json features = item.value("features", json::array());
+    request.features = features.is_array() && !features.empty() ? features : json(nullptr);
+    auto params = checked_params(manifest, item.value("params", json::object()));
+    request.params = params ? *params : item.value("params", json::object());
+    request.holdout_fraction = item.value("holdout_fraction", 0.2);
+    request.project = item.value("project", std::string());
+    request.graph = item.value("graph", std::string());
+    request.seed = item.value("seed", std::uint64_t{42});
+    request.experiment_id = experiment_id;
+    request.trial = trial;
+    request.trial_number = item.value("number", std::int64_t{-1});
+    request.created_by = std::move(by);
+    std::string error;
+    if (!params) {
+        error = "the experiment sampled parameters this methodology refuses: " +
+                params.error().error.message;
+    } else if (request.dataset.empty()) {
+        error = "the experiment names no dataset for this trial";
+    }
+    json run = nullptr;
+    if (error.empty()) {
+        ApiResult queued = finished(co_await queue_run(
+            context, customer_id, workspace_id, entry, manifest, build, std::move(request)));
+        if (queued.ok) {
+            run = queued.value.at("run");
+        } else {
+            error = queued.error.message;
+        }
+    }
+    claim["run_id"] = run.is_object() ? run.at("id") : json(nullptr);
+    if (!error.empty()) {
+        claim["error"] = "Lake could not queue this trial's run: " + error;
+    }
+    static_cast<void>(control::settled(co_await records->update(
+        trial_records,
+        trial,
+        trial_lookup(customer_id, experiment_id),
+        [&](const std::optional<control::StoredRecord>&) -> std::optional<json> { return claim; })));
+    co_return claim;
+}
+
+// The methodology, its manifest and its image, to run an experiment's trials; nullopt (with the
+// reason) when they cannot run.
+struct TrialSource {
+    json entry;
+    MethodologyManifest manifest;
+    control::Build build;
+};
+
+liquid::runtime::task<std::expected<TrialSource, std::string>>
+trial_source(ApiContext& context,
+             const std::string& customer_id,
+             const std::string& workspace_id,
+             const std::string& methodology_id,
+             const std::optional<json>& manifest_json) {
+    using Result = std::expected<TrialSource, std::string>;
+    auto found = control::settled(
+        co_await methodology_entry(context, customer_id, workspace_id, methodology_id));
+    if (!found || !*found) {
+        co_return Result(std::unexpected(found ? "the methodology " + methodology_id + " is gone"
+                                               : found.error().message));
+    }
+    TrialSource source;
+    source.entry = **found;
+    if (!control::validated_for_revision(source.entry)) {
+        co_return Result(std::unexpected(
+            "the methodology's current code has not passed Validate; validate it, then start "
+            "the experiment again"));
+    }
+    std::optional<MethodologyManifest> manifest;
+    if (manifest_json && manifest_json->is_object()) {
+        // A result being recorded carries the manifest its run ran with.
+        manifest = control::read_manifest(manifest_json->dump()).manifest;
+    }
+    if (!manifest) {
+        auto checked =
+            settled_api(co_await checked_entry_code(context, customer_id, workspace_id, source.entry));
+        if (!checked || !checked->manifest) {
+            co_return Result(std::unexpected(
+                checked ? std::string("the methodology's manifest cannot be read")
+                        : checked.error().error.message));
+        }
+        manifest = checked->manifest;
+    }
+    source.manifest = *manifest;
+    auto build = settled_api(
+        co_await image_build(context, customer_id, workspace_id, source.entry, source.manifest));
+    if (!build) {
+        co_return Result(std::unexpected(build.error().error.message));
+    }
+    source.build = *build;
+    co_return Result(std::move(source));
+}
+
+// Ends a trial whose Lake run ended without a result (or could not be queued); answers the
+// engine's runner work after it, which may admit the next trials.
+liquid::runtime::task<json> end_trial(ApiContext& context,
+                                      const std::string& customer_id,
+                                      const std::string& workspace_id,
+                                      const std::string& experiment_id,
+                                      const std::string& trial,
+                                      const std::string& reason) {
+    auto ended = control::settled(co_await engine(
+        context,
+        customer_id,
+        workspace_id,
+        "stop_trial",
+        false,
+        {{"study", experiment_id}, {"run", trial}, {"reason", reason.substr(0, 2000)}}));
+    if (!ended) {
+        co_return json::array();
+    }
+    if (ended->value("status", std::string("running")) != "running") {
+        // Two trials failing the same way ended the experiment: its other trials stop too.
+        static_cast<void>(
+            co_await stop_experiment_runs(context, customer_id, workspace_id, experiment_id));
+    }
+    co_return ended->value("runner", json::array());
+}
+
+// Dispatches every runner work item without a claim, and ends every trial whose run ended without
+// a result, until the engine has nothing new to run; answers the claims by trial.
+liquid::runtime::task<std::map<std::string, json>>
+drive_trials(ApiContext& context,
+             const std::string& customer_id,
+             const std::string& workspace_id,
+             const std::string& experiment_id,
+             json runner,
+             const std::optional<json>& manifest_json,
+             std::optional<std::pair<std::string, std::string>> by) {
+    // Recording another trial's result, Lake acts with that run's credential, which cannot start an
+    // image build: a trial it cannot run then waits for the next reconcile (get_experiment) rather
+    // than failing.
+    const bool end_unrunnable = !by.has_value();
+    std::map<std::string, json> claims;
+    if (auto listed = control::settled(
+            co_await trial_claims(context, customer_id, workspace_id, experiment_id));
+        listed) {
+        claims = std::move(*listed);
+    }
+    std::optional<TrialSource> source;
+    std::optional<std::string> source_error;
+    // Each pass either dispatches the waiting trials or ends one that cannot run; the engine admits
+    // at most max_trials, so this ends.
+    for (int pass = 0; pass < 64 && runner.is_array() && !runner.empty(); ++pass) {
+        json next = json::array();
+        bool changed = false;
+        for (const json& item : runner) {
+            const std::string trial = item.value("trial", std::string());
+            const auto held = claims.find(trial);
+            std::optional<json> existing;
+            if (held != claims.end()) {
+                existing = held->second;
+            }
+            std::string ended_reason;
+            if (existing) {
+                const json run_id = existing->value("run_id", json(nullptr));
+                if (run_id.is_string()) {
+                    const auto run = context.store->get_methodology_run(run_id.get<std::string>());
+                    if (!run) {
+                        ended_reason = "this trial's Lake run is gone";
+                    } else {
+                        const bool ended = run->desired == "absent" || run->phase == "Failed" ||
+                                           run->phase == "Stopped" || run->phase == "Succeeded";
+                        // A run that succeeded reports its own result; one that ended any other way
+                        // without a result ends its trial, as does a success whose result never
+                        // reached the experiment.
+                        const auto finished_at = epoch_seconds(run->finished_at);
+                        if (run->phase == "Succeeded" && finished_at &&
+                            now_seconds() - *finished_at > trial_claim_retry_seconds) {
+                            ended_reason = "this trial's run finished, but its result did not reach "
+                                           "the experiment";
+                        } else if (ended && run->phase != "Succeeded") {
+                            const json shown = run_json(*run, std::nullopt);
+                            ended_reason = shown.value("message", std::string("the run ended"));
+                            if (ended_reason.empty()) {
+                                ended_reason = "this trial's run " + run->phase;
+                            }
+                        }
+                    }
+                } else if (!existing->value("error", std::string()).empty()) {
+                    ended_reason = existing->at("error");
+                } else {
+                    const std::int64_t claimed = existing->value("claimed_at_s", std::int64_t{0});
+                    if (now_seconds() - claimed <= trial_claim_retry_seconds) {
+                        continue;
+                    }
+                    existing.reset();
+                }
+            }
+            if (!ended_reason.empty()) {
+                json after = awaited(co_await end_trial(
+                    context, customer_id, workspace_id, experiment_id, trial, ended_reason),
+                    json::array());
+                for (json& waiting : after) {
+                    next.push_back(std::move(waiting));
+                }
+                changed = true;
+                break;
+            }
+            if (existing) {
+                continue;
+            }
+            if (!source && !source_error) {
+                auto got = awaited(
+                    co_await trial_source(context, customer_id, workspace_id,
+                                          item.value("methodology", std::string()), manifest_json),
+                    std::expected<TrialSource, std::string>(
+                        std::unexpect, std::string("Lake could not read the methodology")));
+                if (got) {
+                    source = std::move(*got);
+                } else {
+                    source_error = got.error();
+                }
+            }
+            if (!source && !end_unrunnable) {
+                continue;
+            }
+            if (!source) {
+                json after = awaited(co_await end_trial(context, customer_id, workspace_id, experiment_id,
+                                                trial,
+                                                "Lake could not run this trial: " + *source_error),
+                                     json::array());
+                for (json& waiting : after) {
+                    next.push_back(std::move(waiting));
+                }
+                changed = true;
+                break;
+            }
+            claims[trial] = awaited(co_await dispatch_trial(context, customer_id, workspace_id,
+                                                            source->entry, source->manifest,
+                                                            source->build, item, existing, by),
+                                    existing.value_or(json::object()));
+        }
+        if (!changed) {
+            break;
+        }
+        runner = std::move(next);
+    }
+    co_return claims;
+}
+
 // --- The runner's side ---------------------------------------------------------------------------
 
 std::expected<control::MethodologyRun, ApiResult> own_run(ApiContext& context,
@@ -1778,6 +2308,32 @@ liquid::runtime::task<ApiResult> methodology_run_output(const json& input, ApiCo
         }
         artifact = encoded;
     }
+    // An artifact over 24 MiB was sent first with methodology_run_artifact (lake#690); the output
+    // names its size and SHA-256, which the engine checks against what it staged.
+    json staged = nullptr;
+    if (input.contains("artifact")) {
+        if (!artifact.empty()) {
+            co_return refused("invalid_input",
+                              "send the artifact inline or in chunks, not both",
+                              "/artifact");
+        }
+        const json& named = input.at("artifact");
+        const json bytes = named.value("bytes", json(nullptr));
+        const std::string digest = named.value("sha256", std::string());
+        if (!bytes.is_number_integer() || bytes.get<std::int64_t>() <= 0 ||
+            bytes.get<std::uint64_t>() > control::max_methodology_staged_artifact_bytes) {
+            co_return refused("invalid_input",
+                              "the artifact's size is 1 byte to 1 GiB",
+                              "/artifact/bytes");
+        }
+        if (digest.size() != 64 || !std::ranges::all_of(digest, [](unsigned char c) {
+                return std::isdigit(c) != 0 || (c >= 'a' && c <= 'f');
+            })) {
+            co_return refused(
+                "invalid_input", "the artifact's sha256 is 64 lowercase hex", "/artifact/sha256");
+        }
+        staged = {{"bytes", bytes}, {"sha256", digest}};
+    }
     std::string log = input.value("log", std::string());
     if (log.size() > control::max_methodology_log_bytes) {
         log = log.substr(log.size() - control::max_methodology_log_bytes);
@@ -1833,6 +2389,7 @@ liquid::runtime::task<ApiResult> methodology_run_output(const json& input, ApiCo
     }
     const std::string mode = stored_body.value("mode", std::string());
     json model_id = nullptr;
+    json trial_runner = json::array();
     if (mode == "validate") {
         // Validate: the static findings and the sandbox's, for the revision it ran.
         json findings = engine_findings(kept.value("findings", json::array()));
@@ -1863,22 +2420,47 @@ liquid::runtime::task<ApiResult> methodology_run_output(const json& input, ApiCo
         if (!artifact.empty()) {
             body["artifact_base64"] = artifact;
             body["artifact_format"] = kept.value("artifact_format", std::string("pickle"));
+        } else if (!staged.is_null()) {
+            body["artifact_staged"] = staged;
+            body["artifact_format"] = kept.value("artifact_format", std::string("pickle"));
         }
         for (const char* key : {"project", "graph"}) {
             if (stored_body.value(key, json(nullptr)).is_string()) {
                 body[key] = stored_body.at(key);
             }
         }
+        // An experiment's trial (lake#689): the result completes that trial.
+        if (stored_body.value("experiment_id", json(nullptr)).is_string()) {
+            body["study"] = stored_body.at("experiment_id");
+            body["trial"] = stored_body.at("trial");
+            const auto started = epoch_seconds(run->started_at);
+            const auto ended = epoch_seconds(run->finished_at);
+            body["duration_seconds"] =
+                started && ended && *ended >= *started ? *ended - *started : 0;
+        }
+        const bool trial = body.contains("study");
         auto recorded = control::settled(co_await engine(context,
                                                          run->customer_id,
                                                          run->workspace_id,
                                                          "record_methodology_run",
                                                          false,
                                                          std::move(body)));
+        if (!recorded && trial && recorded.error().code == "conflict") {
+            // The trial ended while it ran (its experiment was stopped or failed): the result is
+            // kept in the run's record, and the experiment does not take it.
+            recorded = json{{"model_id", nullptr}};
+        }
         if (!recorded) {
             co_return failed(recorded.error());
         }
         model_id = recorded->value("model_id", json(nullptr));
+        trial_runner = recorded->value("study", json::object()).value("runner", json::array());
+        if (recorded->value("study", json::object()).value("status", std::string("running")) !=
+            "running") {
+            static_cast<void>(co_await stop_experiment_runs(
+                context, run->customer_id, run->workspace_id,
+                recorded->at("study").value("id", std::string())));
+        }
         if (!model_id.is_null()) {
             static_cast<void>(control::settled(co_await records->update(
                 run_records,
@@ -1894,9 +2476,330 @@ liquid::runtime::task<ApiResult> methodology_run_output(const json& input, ApiCo
                 })));
         }
     }
+    const std::string experiment_id =
+        stored_body.value("experiment_id", json(nullptr)).is_string()
+            ? stored_body.at("experiment_id").get<std::string>()
+            : std::string();
+    if (!experiment_id.empty()) {
+        if (mode == "train" && !ok) {
+            // A trial whose code failed ends with its error, and the experiment goes on.
+            std::string reason = kept.value("error", json(nullptr)).is_string()
+                                     ? kept.at("error").get<std::string>()
+                                     : std::string("the methodology's code reported a failure");
+            trial_runner = awaited(co_await end_trial(context, run->customer_id,
+                                                      run->workspace_id, experiment_id,
+                                                      stored_body.value("trial", std::string()),
+                                                      reason),
+                                   json::array());
+        }
+        // The next trials run for whoever started this one, on the same runtime.
+        if (context.methodology_runtime_image.empty()) {
+            context.methodology_runtime_image = run->runtime_image;
+        }
+        static_cast<void>(co_await drive_trials(
+            context, run->customer_id, run->workspace_id, experiment_id, trial_runner,
+            stored_body.value("manifest", json(nullptr)),
+            std::pair{run->created_by_user_id, run->created_by_taap_id}));
+    }
     context.audit_details = {
         {"run_id", run->id}, {"status", ok ? "ok" : "failed"}, {"model_id", model_id}};
     co_return ApiResult::success({{"recorded", true}, {"model_id", model_id}});
+}
+
+// One chunk of a large artifact (lake#690), before the output: forwarded in order to the engine,
+// which stages it until record_methodology_run adopts it as the model's weights.
+liquid::runtime::task<ApiResult> methodology_run_artifact(const json& input, ApiContext& context) {
+    const std::string run_id = input.at("run_id");
+    auto run = own_run(context, run_id);
+    if (!run) {
+        co_return run.error();
+    }
+    if (run->mode != "train") {
+        co_return refused("invalid_input", "only a training run keeps an artifact", "/run_id");
+    }
+    const std::string encoded = input.at("chunk_base64");
+    if (encoded.empty() ||
+        encoded.size() / 4 * 3 > control::methodology_artifact_chunk_bytes + 3) {
+        co_return refused("invalid_input",
+                          "a chunk is 1 byte to 8 MiB, base64",
+                          "/chunk_base64");
+    }
+    const std::int64_t offset = input.at("offset").get<std::int64_t>();
+    if (offset < 0 || static_cast<std::uint64_t>(offset) + encoded.size() / 4 * 3 >
+                          control::max_methodology_staged_artifact_bytes + 3) {
+        co_return refused("invalid_input", "an artifact is at most 1 GiB", "/offset");
+    }
+    auto record = control::settled(
+        co_await run_record(context, run->customer_id, run->workspace_id, run->id));
+    if (!record) {
+        co_return failed(record.error());
+    }
+    if (!*record) {
+        co_return refused("not_found", "this run has no record", "/run_id");
+    }
+    if (!(**record).value("result", json(nullptr)).is_null()) {
+        co_return refused("conflict", "this run's result is already recorded", "/run_id");
+    }
+    auto appended = control::settled(co_await engine(context,
+                                                     run->customer_id,
+                                                     run->workspace_id,
+                                                     "append_methodology_artifact",
+                                                     false,
+                                                     {{"methodology", run->methodology_id},
+                                                      {"run_id", run->id},
+                                                      {"offset", offset},
+                                                      {"chunk_base64", encoded}}));
+    if (!appended) {
+        co_return failed(appended.error());
+    }
+    const json received = appended->value("received", json(nullptr));
+    context.audit_details = {{"run_id", run->id}, {"offset", offset}, {"received", received}};
+    co_return ApiResult::success({{"received", received}});
+}
+
+// --- Serving a workspace methodology's model (lake#690) -----------------------------------------
+
+// The workspace methodology a model's kind names (`python:W-<8 hex>`), or empty.
+std::string served_methodology_of(const json& model) {
+    const std::string kind = model.is_object() ? model.value("kind", std::string()) : std::string();
+    constexpr std::string_view prefix = "python:";
+    if (!kind.starts_with(prefix)) {
+        return {};
+    }
+    const std::string id = kind.substr(prefix.size());
+    return control::workspace_methodology_id(id) ? id : std::string();
+}
+
+// What a person is told about a deployment: the operator's phase, in Lake's words while it waits.
+json deployment_json(const control::MethodologyDeployment& deployment) {
+    std::string phase = deployment.phase.empty() ? std::string("Pending") : deployment.phase;
+    std::string message;
+    if (deployment.desired == "absent") {
+        phase = "Stopped";
+        message = deployment.stop_reason.empty() ? std::string("Not served.")
+                                                 : deployment.stop_reason;
+    } else if (deployment.phase.empty()) {
+        message = "Waiting for the Orama operator to start serving this model.";
+    } else if (deployment.phase == "Building") {
+        message = "Building the methodology's image.";
+    } else if (deployment.phase == "Queued") {
+        message = deployment.message.empty() ? std::string("Queued.") : deployment.message;
+    } else if (deployment.phase == "Staging") {
+        message = "Handing the model to its server.";
+    } else if (deployment.phase == "Starting") {
+        message = "Starting the server: checking its sandbox and loading the model.";
+    } else if (deployment.phase == "Ready") {
+        message = "Serving predictions.";
+    } else {
+        message = deployment.message;
+    }
+    return {{"id", deployment.id},
+            {"model_id", deployment.model_id},
+            {"methodology_id", deployment.methodology_id},
+            {"run_id", deployment.run_id.empty() ? json(nullptr) : json(deployment.run_id)},
+            {"phase", phase},
+            {"message", message},
+            {"operator_phase", deployment.phase},
+            {"operator_message", deployment.message},
+            {"ready", deployment.desired == "present" && deployment.phase == "Ready"},
+            {"network", deployment.network},
+            {"resources",
+             {{"cpu_millis", deployment.cpu_millis},
+              {"memory_bytes", deployment.memory_bytes},
+              {"gpus", deployment.gpus},
+              {"gpu_class", deployment.gpu_class}}},
+            {"created_at", deployment.created_at},
+            {"created_by", deployment.created_by_user_id},
+            {"ready_at", deployment.ready_at.empty() ? json(nullptr) : json(deployment.ready_at)},
+            {"stopped_at",
+             deployment.stopped_at.empty() ? json(nullptr) : json(deployment.stopped_at)}};
+}
+
+// The present deployment of a model in a workspace, if any.
+std::optional<control::MethodologyDeployment> present_deployment(ApiContext& context,
+                                                                 const std::string& customer_id,
+                                                                 const std::string& workspace_id,
+                                                                 const std::string& model_id) {
+    const auto deployments =
+        context.store->list_methodology_deployments(customer_id, workspace_id, model_id, 20);
+    if (!deployments) {
+        return std::nullopt;
+    }
+    for (const control::MethodologyDeployment& deployment : *deployments) {
+        if (deployment.desired == "present") {
+            return deployment;
+        }
+    }
+    return std::nullopt;
+}
+
+// Starts serving a model: one deployment row from the training run that made it (its image, its
+// resources, its network grant). Answers the deployment.
+liquid::runtime::task<ApiResult> start_serving(ApiContext& context,
+                                               const std::string& customer_id,
+                                               const std::string& workspace_id,
+                                               const json& model) {
+    const std::string model_id = model.value("id", model.value("model_id", std::string()));
+    const std::string methodology_id = served_methodology_of(model);
+    if (auto existing = present_deployment(context, customer_id, workspace_id, model_id)) {
+        co_return ApiResult::success({{"deployment", deployment_json(*existing)}});
+    }
+    if (context.methodology_runtime_image.empty()) {
+        co_return refused("store_unavailable",
+                          "workspace methodologies cannot be served here: "
+                          "LAKE_METHODOLOGY_RUNTIME_IMAGE is not configured",
+                          "/model_id");
+    }
+    const json schema = model.value("feature_schema", json::object());
+    const std::string lake_run = schema.is_object() ? schema.value("lake_run_id", std::string())
+                                                    : std::string();
+    const auto run = lake_run.empty() ? control::Result<control::MethodologyRun>(std::unexpected(
+                                            control::StoreError{"not_found", "no run"}))
+                                      : context.store->get_methodology_run(lake_run);
+    if (!run || run->customer_id != customer_id || run->workspace_id != workspace_id ||
+        run->build_id.empty()) {
+        co_return refused("conflict",
+                          "this model's training run is not in Lake any more, so the image that "
+                          "serves it is unknown; train it again with run_methodology",
+                          "/model_id");
+    }
+    control::NewMethodologyDeployment row;
+    row.customer_id = customer_id;
+    row.workspace_id = workspace_id;
+    row.methodology_id = methodology_id;
+    row.model_id = model_id;
+    row.run_id = run->id;
+    row.build_id = run->build_id;
+    row.image = run->image;
+    row.runtime_image = context.methodology_runtime_image;
+    row.cpu_millis = run->cpu_millis;
+    row.memory_bytes = run->memory_bytes;
+    row.gpus = run->gpus;
+    row.gpu_class = run->gpu_class;
+    row.network = run->network;
+    row.created_by_user_id = context.acting_user_id;
+    row.created_by_taap_id = context.acting_identity;
+    const auto created = context.store->create_methodology_deployment(row);
+    if (!created) {
+        if (created.error().code == "conflict") {
+            if (auto existing = present_deployment(context, customer_id, workspace_id, model_id)) {
+                co_return ApiResult::success({{"deployment", deployment_json(*existing)}});
+            }
+        }
+        co_return store_failed(created.error());
+    }
+    co_return ApiResult::success({{"deployment", deployment_json(*created)}});
+}
+
+liquid::runtime::task<ApiResult> get_methodology_deployment(const json& input,
+                                                            ApiContext& context) {
+    const std::string customer_id = input.at("customer_id");
+    const std::string workspace_id = input.at("workspace_id");
+    const std::string model_id = input.at("model_id");
+    const auto deployments =
+        context.store->list_methodology_deployments(customer_id, workspace_id, model_id, 1);
+    if (!deployments) {
+        co_return store_failed(deployments.error());
+    }
+    co_return ApiResult::success(
+        {{"deployment",
+          deployments->empty() ? json(nullptr) : deployment_json(deployments->front())}});
+}
+
+liquid::runtime::task<ApiResult> list_methodology_deployments(const json& input,
+                                                              ApiContext& context) {
+    if (auto refusal = authorize_space_read(input, context)) {
+        co_return *refusal;
+    }
+    const std::string customer_id = input.at("customer_id");
+    const std::string workspace_id = input.at("workspace_id");
+    const auto deployments = context.store->list_methodology_deployments(
+        customer_id, workspace_id, "", input.value("limit", 50));
+    if (!deployments) {
+        co_return store_failed(deployments.error());
+    }
+    json out = json::array();
+    for (const control::MethodologyDeployment& deployment : *deployments) {
+        out.push_back(deployment_json(deployment));
+    }
+    co_return ApiResult::success({{"deployments", std::move(out)}});
+}
+
+// The stage Job's side (lake#690), with the deployment's own credential: the spec its server
+// needs and the model's artifact, read from the engine 8 MiB at a time.
+liquid::runtime::task<ApiResult> methodology_deployment_input(const json& input,
+                                                              ApiContext& context) {
+    const std::string deployment_id = input.at("deployment_id");
+    if (context.credential_kind != "methodology_deployment" ||
+        context.credential_workload_id != deployment_id) {
+        co_return refused("unauthorized",
+                          "only this deployment's own credential reaches its input");
+    }
+    const auto deployment = context.store->get_methodology_deployment(deployment_id);
+    if (!deployment || deployment->desired != "present") {
+        co_return refused("not_found", "this deployment is not present", "/deployment_id");
+    }
+    context.audit_workspace_id = deployment->workspace_id;
+    const std::int64_t offset = std::max<std::int64_t>(input.value("offset", 0), 0);
+    const std::int64_t limit = std::clamp<std::int64_t>(
+        input.value("limit", static_cast<std::int64_t>(control::methodology_artifact_chunk_bytes)),
+        1,
+        static_cast<std::int64_t>(control::methodology_artifact_chunk_bytes));
+    auto weights = control::settled(co_await engine(context,
+                                                    deployment->customer_id,
+                                                    deployment->workspace_id,
+                                                    "read_model_weights",
+                                                    true,
+                                                    {{"model_id", deployment->model_id},
+                                                     {"offset", offset},
+                                                     {"limit", limit}}));
+    if (!weights) {
+        co_return failed(weights.error());
+    }
+    auto model = control::settled(co_await engine(context,
+                                                  deployment->customer_id,
+                                                  deployment->workspace_id,
+                                                  "get_model",
+                                                  true,
+                                                  {{"model_id", deployment->model_id}}));
+    if (!model) {
+        co_return failed(model.error());
+    }
+    const json schema = model->value("feature_schema", json::object());
+    json manifest = json::object();
+    if (!deployment->run_id.empty()) {
+        auto record = control::settled(co_await run_record(
+            context, deployment->customer_id, deployment->workspace_id, deployment->run_id));
+        if (record && *record) {
+            manifest = (**record).value("manifest", json::object());
+        }
+    }
+    json spec{{"interface", 1},
+              {"deployment_id", deployment->id},
+              {"model_id", deployment->model_id},
+              {"methodology_id", deployment->methodology_id},
+              {"artifact_format",
+               schema.is_object() ? schema.value("artifact_format", std::string("pickle"))
+                                  : std::string("pickle")},
+              {"features",
+               schema.is_object() ? schema.value("features", json::array()) : json::array()},
+              {"network", deployment->network},
+              {"manifest", std::move(manifest)}};
+    context.audit_details = {{"deployment_id", deployment->id}, {"offset", offset}};
+    co_return ApiResult::success({{"spec", std::move(spec)},
+                                  {"chunk_base64", weights->value("chunk_base64", std::string())},
+                                  {"offset", offset},
+                                  {"next_offset", weights->value("next_offset", json(nullptr))},
+                                  {"total_bytes", weights->value("total_bytes", 0)},
+                                  {"sha256", weights->value("sha256", std::string())}});
+}
+
+std::expected<std::string, ApiError> deployment_object(const json&, ApiContext& context) {
+    if (context.credential_kind != "methodology_deployment") {
+        return std::unexpected(ApiError{
+            "unauthorized", "only a methodology deployment's own credential calls this", {}});
+    }
+    return std::string("methodology_deployment/") + context.credential_workload_id;
 }
 
 // --- Registration --------------------------------------------------------------------------------
@@ -1962,6 +2865,220 @@ capability(std::string name,
 
 } // namespace
 
+// Ship → Models publishing a model (lake#690): for a workspace methodology's model, publish starts
+// serving it and unpublish (or delete) stops it. Answers {deployment} for such a model, null for
+// any other, or the refusal.
+liquid::runtime::task<ApiResult> serve_methodology_model(ApiContext& context,
+                                                         const std::string& customer_id,
+                                                         const std::string& workspace_id,
+                                                         const std::string& model_id,
+                                                         bool serve) {
+    if (!context.store) {
+        co_return ApiResult::success(nullptr);
+    }
+    if (!serve) {
+        // Unpublished or deleted: stop whatever serves it, whatever its kind says now.
+        auto existing = present_deployment(context, customer_id, workspace_id, model_id);
+        if (!existing) {
+            co_return ApiResult::success(nullptr);
+        }
+        auto stopped = context.store->withdraw_methodology_deployment(existing->id, "Unpublished.");
+        if (!stopped) {
+            co_return store_failed(stopped.error());
+        }
+        co_return ApiResult::success({{"deployment", deployment_json(*stopped)}});
+    }
+    auto model = control::settled(
+        co_await engine(context, customer_id, workspace_id, "get_model", true,
+                        {{"model_id", model_id}}));
+    if (!model) {
+        co_return failed(model.error());
+    }
+    if (served_methodology_of(*model).empty()) {
+        co_return ApiResult::success(nullptr);
+    }
+    json described = *model;
+    described["id"] = model_id;
+    co_return co_await start_serving(context, customer_id, workspace_id, described);
+}
+
+// predict for a workspace methodology's model (lake#690): the rows go to its serve pod through
+// the deployment's Service and its answer comes back, one prediction per row. `model` is the
+// engine's get_model answer. Answers null when the model is not a workspace methodology's.
+liquid::runtime::task<std::optional<ApiResult>>
+predict_methodology_model(ApiContext& context,
+                          const std::string& customer_id,
+                          const std::string& workspace_id,
+                          const json& model,
+                          const json& input) {
+    const std::string model_id = input.value("model_id", std::string());
+    if (served_methodology_of(model).empty()) {
+        co_return std::nullopt;
+    }
+    const json& rows = input.at("rows");
+    if (rows.size() > control::max_methodology_predict_rows) {
+        co_return refused("invalid_input",
+                          "at most 10000 rows in one call to a workspace methodology's model",
+                          "/rows");
+    }
+    if (!context.methodology_server) {
+        co_return refused("not_supported",
+                          "this Lake serves no workspace methodology's model");
+    }
+    const auto deployment = present_deployment(context, customer_id, workspace_id, model_id);
+    if (!deployment) {
+        co_return refused("conflict",
+                          "model " + model_id +
+                              " is published, but nothing serves it; publish it again",
+                          "/model_id");
+    }
+    if (deployment->phase != "Ready" ||
+        !control::methodology_deployment_endpoint_valid(deployment->endpoint)) {
+        const json described = deployment_json(*deployment);
+        co_return refused("conflict",
+                          "model " + model_id + " is not serving yet (" +
+                              described.value("phase", std::string()) + "): " +
+                              described.value("message", std::string()),
+                          "/model_id");
+    }
+    MethodologyServeRequest request{
+        deployment->endpoint, "/predict", json{{"rows", rows}}.dump()};
+    struct Served {
+        MethodologyServeResponse response;
+    };
+    auto ran = co_await run_blocking(
+        [server = context.methodology_server, request = std::move(request)]() -> Served {
+            return {server(request)};
+        });
+    if (!ran) {
+        co_return refused("busy", ran.error().message);
+    }
+    const MethodologyServeResponse& response = ran->response;
+    if (!response.error.empty() || response.status == 0) {
+        co_return refused("store_unavailable",
+                          "the model's server did not answer: " + response.error);
+    }
+    const json answer = json::parse(response.body, nullptr, false);
+    if (response.status != 200) {
+        std::string message = "the model's server answered " + std::to_string(response.status);
+        if (answer.is_object() && answer.contains("error") && answer.at("error").is_object()) {
+            message = answer.at("error").value("message", message);
+        }
+        co_return refused(response.status >= 500 ? std::string("store_unavailable")
+                                                 : std::string("invalid_input"),
+                          message,
+                          "/rows");
+    }
+    if (!answer.is_object() || !answer.contains("predictions") ||
+        !answer.at("predictions").is_array() || answer.at("predictions").size() != rows.size()) {
+        co_return refused("store_unavailable",
+                          "the model's server did not answer one prediction per row");
+    }
+    const std::string key = input.value("entity_column", std::string("entity"));
+    json predictions = json::array();
+    for (std::size_t index = 0; index < rows.size(); ++index) {
+        json entry{{"row", index}, {"prediction", answer.at("predictions").at(index)}};
+        if (rows.at(index).is_object() && rows.at(index).contains(key)) {
+            entry["entity"] = rows.at(index).at(key);
+        }
+        predictions.push_back(std::move(entry));
+    }
+    context.audit_details["deployment_id"] = deployment->id;
+    co_return ApiResult::success({{"model", model_id},
+                                  {"runner", "methodology"},
+                                  {"methodology_id", deployment->methodology_id},
+                                  {"predictions", std::move(predictions)},
+                                  {"entity_column", key}});
+}
+
+liquid::runtime::task<json> current_experiment(ApiContext& context,
+                                               const std::string& customer_id,
+                                               const std::string& workspace_id,
+                                               json experiment) {
+    if (!experiment.is_object() || !experiment.contains("spec") ||
+        !control::workspace_methodology_id(
+            experiment.at("spec").value("methodology", std::string()))) {
+        co_return experiment;
+    }
+    const std::string experiment_id = experiment.value("id", std::string());
+    json runner = experiment.value("runner", json::array());
+    std::map<std::string, json> claims;
+    if (experiment.value("status", std::string()) != "running") {
+        // An experiment that ended (stopped, failed or complete) runs nothing more.
+        static_cast<void>(
+            co_await stop_experiment_runs(context, customer_id, workspace_id, experiment_id));
+    } else if (!runner.empty()) {
+        claims = awaited(co_await drive_trials(context, customer_id, workspace_id, experiment_id,
+                                               runner, std::nullopt, std::nullopt),
+                         std::map<std::string, json>{});
+        // Ending a trial may have admitted others or ended the experiment: read it again.
+        auto again = control::settled(co_await engine(
+            context, customer_id, workspace_id, "get_study", true, {{"study", experiment_id}}));
+        if (again && again->is_object()) {
+            experiment = std::move(*again);
+        }
+    }
+    if (auto listed = control::settled(
+            co_await trial_claims(context, customer_id, workspace_id, experiment_id));
+        listed) {
+        claims = std::move(*listed);
+    }
+    json runs = json::array();
+    std::map<std::string, json> by_trial;
+    for (const auto& [trial, claim] : claims) {
+        std::optional<control::MethodologyRun> run;
+        if (claim.value("run_id", json(nullptr)).is_string()) {
+            if (auto found = context.store->get_methodology_run(claim.at("run_id")); found) {
+                run = *found;
+            }
+        }
+        by_trial[trial] = trial_run_json(claim, run);
+        runs.push_back(by_trial[trial]);
+    }
+    std::sort(runs.begin(), runs.end(), [](const json& left, const json& right) {
+        return left.value("number", std::int64_t{0}) < right.value("number", std::int64_t{0});
+    });
+    json waiting = json::array();
+    for (json item : experiment.value("runner", json::array())) {
+        const auto found = by_trial.find(item.value("trial", std::string()));
+        item["methodology_run"] = found == by_trial.end() ? json(nullptr) : found->second;
+        waiting.push_back(std::move(item));
+    }
+    experiment["runner"] = std::move(waiting);
+    experiment["methodology_runs"] = std::move(runs);
+    co_return experiment;
+}
+
+liquid::runtime::task<void> stop_experiment_runs(ApiContext& context,
+                                                 const std::string& customer_id,
+                                                 const std::string& workspace_id,
+                                                 const std::string& experiment_id,
+                                                 const std::string& trial) {
+    auto claims = control::settled(
+        co_await trial_claims(context, customer_id, workspace_id, experiment_id));
+    if (!claims) {
+        co_return {};
+    }
+    for (const auto& [claimed, claim] : *claims) {
+        if (!trial.empty() && claimed != trial) {
+            continue;
+        }
+        const json run_id = claim.value("run_id", json(nullptr));
+        if (!run_id.is_string()) {
+            continue;
+        }
+        const auto run = context.store->get_methodology_run(run_id.get<std::string>());
+        // A run that is collecting has finished its code: its result is on its way, and stopping
+        // it would only lose that.
+        if (run && run->desired == "present" && run->phase != "Succeeded" &&
+            run->phase != "Failed" && run->phase != "Stopped" && run->phase != "Collecting") {
+            static_cast<void>(context.store->withdraw_methodology_run(
+                run->id, "Stopped with its experiment."));
+        }
+    }
+    co_return {};
+}
+
 void register_methodology_capabilities(Registry& registry) {
     const json id{{"type", "string"},
                   {"description",
@@ -1981,13 +3098,19 @@ void register_methodology_capabilities(Registry& registry) {
         "draft_methodology",
         "Draft a methodology",
         "A first version of a methodology's files from a description of what it should do: "
-        "methodology.json, methodology.py with fit, predict and score, and an empty lock file. "
-        "The template follows the problem the description names (groups with no target, an "
-        "amount, one of several categories, otherwise a yes-or-no outcome), or `target_kind`. "
-        "Nothing is saved: pass the files to create_methodology.",
+        "methodology.json, methodology.py with fit, predict and score, and a lock file. With "
+        "`task_id`, the draft Ask Orama wrote in that turn (agent_turn with agent-ask-orama, "
+        "kind methodology_draft, the description as its message), offered only when it passes "
+        "the manifest, entrypoint and lock checks Validate runs first (`drafted_by: orama`); "
+        "otherwise, or without `task_id`, Lake's template (`drafted_by: template`) for the "
+        "problem the description names (groups with no target, an amount, one of several "
+        "categories, otherwise a yes-or-no outcome) or `target_kind`, with `orama` saying why "
+        "Ask Orama's draft was not offered. Nothing is saved: pass the files to "
+        "create_methodology.",
         workspace_input(
             {{"description", text()},
              {"name", text()},
+             {"task_id", text()},
              {"target_kind",
               {{"type", "string"}, {"enum", {"binary", "multiclass", "regression", "none"}}}}},
             json::array({"description"})),
@@ -2192,13 +3315,23 @@ void register_methodology_capabilities(Registry& registry) {
         .description =
             "The runner's side of a methodology run (its collect pod), with the run's own "
             "credential only: the result (status, findings, in_sample_ and held_out_ metrics, row "
-            "counts), the artifact (base64, at most 24 MiB) and the log. Accepted once. A "
+            "counts), the artifact (base64, at most 24 MiB; a larger one, up to 1 GiB, sent first "
+            "with methodology_run_artifact and named by `artifact`) and the log. Accepted once. A "
             "training run's artifact becomes the weights of a model the engine registers.",
         .input_schema = {{"type", "object"},
                          {"properties",
                           {{"run_id", text()},
                            {"result", {{"type", "object"}}},
                            {"artifact_base64", text()},
+                           {"artifact",
+                            {{"type", "object"},
+                             {"description",
+                              "an artifact over 24 MiB sent first with methodology_run_artifact: "
+                              "its size and SHA-256"},
+                             {"properties",
+                              {{"bytes", {{"type", "integer"}, {"minimum", 1}}},
+                               {"sha256", text()}}},
+                             {"required", json::array({"bytes", "sha256"})}}},
                            {"log", text()}}},
                          {"required", json::array({"run_id", "result"})},
                          {"additionalProperties", false}},
@@ -2212,6 +3345,100 @@ void register_methodology_capabilities(Registry& registry) {
         .action = "write",
         .resolve_object = run_object,
         .async_handler = methodology_run_output});
+    registry.add(Capability{
+        .name = "methodology_run_artifact",
+        .title = "Methodology run artifact",
+        .description =
+            "The runner's side of a training run (its collect pod), with the run's own credential "
+            "only: an artifact over 24 MiB, up to 1 GiB, in order, 8 MiB at a time (`offset`, "
+            "`chunk_base64`), before methodology_run_output names its size and SHA-256. Answers "
+            "the bytes received; a chunk at an offset below that replaces what was held from "
+            "there.",
+        .input_schema = {{"type", "object"},
+                         {"properties",
+                          {{"run_id", text()},
+                           {"offset", {{"type", "integer"}, {"minimum", 0}}},
+                           {"chunk_base64", text()}}},
+                         {"required", json::array({"run_id", "offset", "chunk_base64"})},
+                         {"additionalProperties", false}},
+        .output_schema = {{"type", "object"},
+                          {"properties", {{"received", {{"type", "integer"}}}}},
+                          {"required", json::array({"received"})}},
+        .kind = CapabilityKind::Action,
+        .object = "methodology_run",
+        .action = "write",
+        .resolve_object = run_object,
+        .async_handler = methodology_run_artifact});
+    const json deployment_schema{
+        {"type", json::array({"object", "null"})},
+        {"description",
+         "a served workspace methodology model: its phase (Pending, Building, Queued, Staging, "
+         "Starting, Ready, Failed, Stopped), message, resources and whether it is ready"},
+        {"properties",
+         {{"id", text()},
+          {"model_id", text()},
+          {"methodology_id", text()},
+          {"phase", text()},
+          {"message", text()},
+          {"ready", {{"type", "boolean"}}}}}};
+    registry.add(capability(
+        "get_methodology_deployment",
+        "Read a served methodology model",
+        "Whether a model a workspace methodology trained is being served (Ship → Models publishes "
+        "it): the newest deployment of `model_id` with its phase and message, or null.",
+        workspace_input({{"model_id", text()}}, json::array({"model_id"})),
+        {{"type", "object"},
+         {"properties", {{"deployment", deployment_schema}}},
+         {"required", json::array({"deployment"})}},
+        true,
+        get_methodology_deployment));
+    Capability deployments = capability(
+        "list_methodology_deployments",
+        "List served methodology models",
+        "The workspace's deployments of models its own methodologies trained, newest first, "
+        "stopped ones included: each with its model, phase, message and resources.",
+        workspace_input({{"limit", {{"type", "integer"}, {"minimum", 1}, {"maximum", 100}}}},
+                        json::array()),
+        {{"type", "object"},
+         {"properties", {{"deployments", {{"type", "array"}, {"items", deployment_schema}}}}},
+         {"required", json::array({"deployments"})}},
+        true,
+        list_methodology_deployments);
+    deployments.authorizes_candidates = true;
+    registry.add(std::move(deployments));
+    Capability deployment_input{
+        .name = "methodology_deployment_input",
+        .title = "Methodology deployment input",
+        .description =
+            "The stage side of a served methodology model (lake#690), with the deployment's own "
+            "credential only: the spec its server needs (model, methodology, artifact format, "
+            "features, network, manifest) and the model's artifact, 8 MiB at a time (`offset`, "
+            "`limit`), until `next_offset` is null, with its total size and SHA-256.",
+        .input_schema = {{"type", "object"},
+                         {"properties",
+                          {{"deployment_id", text()},
+                           {"offset", {{"type", "integer"}, {"minimum", 0}}},
+                           {"limit", {{"type", "integer"}, {"minimum", 1}, {"maximum", 8388608}}}}},
+                         {"required", json::array({"deployment_id"})},
+                         {"additionalProperties", false}},
+        .output_schema = {{"type", "object"},
+                          {"properties",
+                           {{"spec", {{"type", "object"}}},
+                            {"chunk_base64", text()},
+                            {"offset", {{"type", "integer"}}},
+                            {"next_offset", {{"type", json::array({"integer", "null"})}}},
+                            {"total_bytes", {{"type", "integer"}}},
+                            {"sha256", text()}}},
+                          {"required",
+                           json::array({"spec", "chunk_base64", "next_offset", "total_bytes",
+                                        "sha256"})}},
+        .kind = CapabilityKind::Read,
+        .post_alias = true,
+        .object = "methodology_deployment",
+        .action = "read",
+        .resolve_object = deployment_object,
+        .async_handler = methodology_deployment_input};
+    registry.add(std::move(deployment_input));
 }
 
 } // namespace lake::api

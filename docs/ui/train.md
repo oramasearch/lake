@@ -35,10 +35,12 @@ lake#654. A model made on its own, not as a project pipeline's step (`docs/api/m
   The name, dataset, methodology, target and share are checked before anything is sent
   (`nameProblem`, `needsTarget`, `holdoutOf` in `models.ts`). `train_model`, then the new run's page.
 - **Bring one**: This computer (`.onnx`, `.json`, `.ubj` or `.txt`; `register_model` with the
-  file as `weights_base64`), A drive (the files of the workspace's drives, newest first from
-  `recent_drive_entries`; `load_drive_model`) or A model repository (repository, path, revision;
-  `resolve_model_file`, then `register_model` with its `content_base64`), a Name, Columns (optional,
-  comma-separated, sent as `feature_names`; its help asks for them when the file is `.onnx`, which
+  file as `weights_base64`), A drive (**Choose a file** opens the drive picker,
+  [drives.md](drives.md#the-picker), over every drive of the workspace from `list_drives`, of any
+  kind, with folders and search; it lists files and shortcuts to a file, at any depth;
+  `load_drive_model` with the drive and the file's key, lake#682) or A model repository
+  (repository, path, revision; `resolve_model_file`, then `register_model` with its
+  `content_base64`), a Name, Columns (optional, comma-separated, sent as `feature_names`; its help asks for them when the file is `.onnx`, which
   names none; a column named twice is refused before sending, `featureNamesProblem`) and an
   optional held-out AUC measured where it was trained. A banner says what can be brought (ONNX,
   XGBoost, LightGBM or Lake's own weights) and what is refused (lake#681). Then the model's page.

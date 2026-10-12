@@ -605,7 +605,15 @@ TEST(SchemaConformance, EveryToolAndRequiredOutputUsesHttpContract) {
     http.call("list_methodology_runs", transcript_scope);
     auto methodology_run = transcript_scope;
     methodology_run["run_id"] = training.at("run").at("id");
-    http.call("get_methodology_run", methodology_run);
+    // Held back by the operator (orama-operator#293, migration 0082): the phase is Queued.
+    lake::control::MethodologyRunStatus queued;
+    queued.phase = "Queued";
+    queued.message = "Queued: 2 of this workspace's methodology runs are already running (the limit "
+                     "is 2); this run is next.";
+    ASSERT_TRUE(store->put_methodology_run_status(training.at("run").at("id"), queued));
+    const auto queued_run = http.call("get_methodology_run", methodology_run);
+    EXPECT_EQ(queued_run.at("run").at("phase"), "Queued");
+    EXPECT_EQ(queued_run.at("run").at("message"), queued.message);
     // The runner's side, with the run's own credential (the operator writes its digest).
     const std::string run_secret = "lmr." + validate_run + "." + std::string(48, 'f');
     lake::control::MethodologyRunStatus staging;
@@ -618,7 +626,53 @@ TEST(SchemaConformance, EveryToolAndRequiredOutputUsesHttpContract) {
     http.call(
         "methodology_run_output",
         {{"run_id", validate_run}, {"result", {{"status", "ok"}, {"findings", json::array()}}}});
+    // An artifact over 24 MiB, in chunks, with the training run's credential (lake#690).
+    const std::string train_secret =
+        "lmr." + training.at("run").at("id").get<std::string>() + "." + std::string(48, 'e');
+    lake::control::MethodologyRunStatus collecting;
+    collecting.phase = "Collecting";
+    collecting.credential_sha256 = lake::control::identity_crypto::sha256_hex(train_secret);
+    ASSERT_TRUE(store->put_methodology_run_status(training.at("run").at("id"), collecting));
+    experiments.caller->answers["append_methodology_artifact"] = {{"received", 3}};
+    http.bearer = train_secret;
+    http.call("methodology_run_artifact",
+              {{"run_id", training.at("run").at("id")}, {"offset", 0}, {"chunk_base64", "YWJj"}});
+    // A served model (lake#690): its deployment, and the stage's side with its own credential.
     http.bearer = methodology_operator;
+    auto served_model = transcript_scope;
+    served_model["model_id"] = "model-schema";
+    http.call("get_methodology_deployment", served_model);
+    http.call("list_methodology_deployments", transcript_scope);
+    lake::control::NewMethodologyDeployment served;
+    served.customer_id = customer.id;
+    served.workspace_id = experiments.id;
+    served.methodology_id = "W-0000000a";
+    served.model_id = "model-schema";
+    served.run_id = training.at("run").at("id");
+    served.runtime_image = "registry.test/oramasearch/methodology-runtime:1";
+    served.cpu_millis = 1000;
+    served.memory_bytes = 1 << 30;
+    const auto deployment = store->create_methodology_deployment(served);
+    ASSERT_TRUE(deployment) << deployment.error().message;
+    const std::string deployment_secret = "lmd." + deployment->id + "." + std::string(48, 'd');
+    lake::control::MethodologyDeploymentStatus deployment_staging;
+    deployment_staging.phase = "Staging";
+    deployment_staging.credential_sha256 = lake::control::identity_crypto::sha256_hex(deployment_secret);
+    ASSERT_TRUE(store->put_methodology_deployment_status(deployment->id, deployment_staging));
+    experiments.caller->answers["read_model_weights"] = {{"model_id", "model-schema"},
+                                                         {"offset", 0},
+                                                         {"chunk_base64", "YWJj"},
+                                                         {"next_offset", nullptr},
+                                                         {"total_bytes", 3},
+                                                         {"sha256", std::string(64, 'a')}};
+    experiments.caller->answers["get_model"] = {
+        {"id", "model-schema"},
+        {"kind", "python:W-0000000a"},
+        {"feature_schema", {{"features", {"days"}}, {"artifact_format", "bytes"}}}};
+    http.bearer = deployment_secret;
+    http.call("methodology_deployment_input", {{"deployment_id", deployment->id}});
+    http.bearer = methodology_operator;
+    http.call("get_methodology_deployment", served_model);
     http.call("stop_methodology_run", methodology_run);
     http.call("delete_methodology", methodology_id);
     // Drives (docs/api/drives.md): a workspace-files drive in the workspace Zetta's fake object

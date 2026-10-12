@@ -308,6 +308,16 @@ new `id`, `status:"running"`, initially empty `trials`, zero `spent_cost`, times
 {"id":"experiment-id","spec":{"name":"Retention Tuning","project":"retention","pipeline":"training","dataset":"accounts","methodology":"M-1","objective":{"metric":"held_out_auc","direction":"maximize","validation_split":"validation"},"search_space":[{"name":"learning_rate","kind":"float","minimum":0.01,"maximum":0.3,"step":0,"log":true,"choices":[],"condition_parameter":"","condition_values":[]}],"sampler":"tpe","pruner":"asha","budgets":{"max_trials":10,"max_wall_time_ms":60000,"max_parallel_trials":1,"cost_cap":5},"seed":1138,"differential_privacy":false,"released_metrics":[]},"status":"running","created":"2026-09-28T18:20:00Z","updated":"2026-09-28T18:20:00Z","trials":[],"spent_cost":0,"stop_reason":"","promoted_model":""}
 ```
 
+**A workspace methodology's experiment (lake#689).** `methodology` may name one of the workspace's
+own methodologies (`W-<8 hex>`). Its experiment searches the parameters its manifest declares;
+`dataset` with `target` (and optional `features`), or a `project` and `pipeline` running it, say
+what each trial trains on. Lake runs each trial as a training run of the methodology in the Orama
+operator's sandbox, metered as any run, and reports its result back; `start_experiment` and
+`get_experiment` add `runner` (the trials waiting for a run, each with its `methodology_run`) and
+`methodology_runs` (every trial's run and phase), and `stop_experiment` and `stop_experiment_trial`
+stop those runs. `stop_experiment_trial` takes an optional `reason`. See
+[methodologies.md](methodologies.md#experiments).
+
 `stop_experiment` (MCP: `stop_experiment`) cooperatively stops an experiment and its active trials.
 
 ```json

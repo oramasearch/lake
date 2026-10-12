@@ -244,7 +244,7 @@ Step 5, **Worked Flows**, shows the tools an agent calls, in order, for the jobs
 | Make a model on its own | `list_methodologies`, `train_model`, `retrain_model`, `register_model` (or `load_drive_model`), `move_model_to_project`, `export_model`, `delete_model` |
 | Build and run a pipeline | `create_pipeline`, `edit_pipeline`, `get_pipeline`, `approve_pipeline`, `run_pipeline` |
 | Stand up a Postgres service and connect it | `list_service_kinds`, `create_service`, `list_services`, `service_connection`, `connect_service` |
-| Create a volume | `list_store_providers`, `create_store`, `list_stores`, `store_connection` |
+| Create a volume | `list_store_providers`, `create_store`, `list_stores`, `store_connection`, `create_service`, `list_stores` |
 | Search a published index | `list_indexes`, `expose_index`, `search_index` |
 
 The first step of loading a dataset as raw `tools/call` requests:

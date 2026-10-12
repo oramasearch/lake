@@ -371,6 +371,41 @@ export function filledSteps(traffic: Traffic, fromMs: number, toMs: number, step
   return out;
 }
 
+/* ------------------------------------------------------------------ served by its own code (lake#690) */
+
+/** The workspace methodology a model's kind names (`python:W-<8 hex>`), or "" for any other
+ * model. Such a model is served by its own code: publishing it starts its server. */
+export function methodologyOf(version: Row | undefined): string {
+  const kind = version ? text(version, "kind") : "";
+  const id = kind.startsWith("python:") ? kind.slice("python:".length) : "";
+  return /^W-[0-9a-f]{8}$/.test(id) ? id : "";
+}
+
+export type ServerState = { label: string; tone: "success" | "warning" | "danger" | "neutral" | "info"; settled: boolean; ready: boolean };
+
+/** What a person is told about a served model's server, from `get_methodology_deployment`. */
+export function serverState(deployment: Row | null | undefined): ServerState {
+  if (!deployment) return { label: "not served", tone: "neutral", settled: true, ready: false };
+  const phase = text(deployment, "phase") || "Pending";
+  switch (phase) {
+    case "Ready":
+      return { label: "serving", tone: "success", settled: true, ready: true };
+    case "Failed":
+      return { label: "failed", tone: "danger", settled: true, ready: false };
+    case "Stopped":
+      return { label: "not served", tone: "neutral", settled: true, ready: false };
+    case "Queued":
+      return { label: "queued", tone: "warning", settled: false, ready: false };
+    default:
+      return { label: phase.toLowerCase(), tone: "info", settled: false, ready: false };
+  }
+}
+
+/** A served model's answer to `predict`: one prediction per row, with the row's entity. */
+export function predictionRows(answer: Row | null | undefined): Row[] {
+  return answer && Array.isArray(answer.predictions) ? (answer.predictions as Row[]) : [];
+}
+
 /* ------------------------------------------------- bring and download (lake#681) */
 
 /** "tenure, spend , tickets" typed as a model's columns, in its order. */

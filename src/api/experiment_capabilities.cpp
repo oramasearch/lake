@@ -7,6 +7,7 @@
 #include <set>
 
 #include "experiment_schemas.hpp"
+#include "methodology_experiments.hpp"
 #include "lake/control/agent_bus.hpp"
 #include "lake/control/zetta_workspace.hpp"
 
@@ -165,6 +166,16 @@ json experiment_answer(json value) {
         value["experiment_id"] = std::move(value["study"]);
         value.erase("study");
     }
+    // A workspace methodology's waiting trials name their experiment too (lake#689).
+    if (value.is_object() && value.contains("runner") && value.at("runner").is_array()) {
+        for (json& item : value.at("runner")) {
+            item = experiment_answer(std::move(item));
+            if (item.is_object() && item.contains("study_name")) {
+                item["experiment_name"] = std::move(item["study_name"]);
+                item.erase("study_name");
+            }
+        }
+    }
     return value;
 }
 
@@ -197,7 +208,7 @@ Task list(ApiContext& context, const json& input) {
             trial_runs.insert(row.at("run"));
         }
         if (selected(input, item.at("spec").at("project"), item.at("status"))) {
-            answer["experiments"].push_back(item);
+            answer["experiments"].push_back(experiment_answer(item));
         }
     }
     for (auto item : runs.value.at("runs")) {
@@ -353,6 +364,37 @@ Task dispatch(ApiContext& context, const json& input, const std::string& name,
     auto result = completed(co_await proxy(context, input, upstream, std::move(args)));
     if (name == "get_run_metrics" && result.ok && result.value.contains("metrics_suppressed")) {
         result.value["series"] = json::array();
+    }
+    // A workspace methodology's experiment runs its trials in Lake's runner (lake#689): its
+    // waiting trials are dispatched as training runs, and stopping it stops their runs.
+    const std::string customer_id = input.at("customer_id");
+    const std::string workspace_id = input.at("workspace_id");
+    if (result.ok && (name == "start_experiment" || name == "get_experiment")) {
+        json answered = result.value;
+        auto current =
+            co_await current_experiment(context, customer_id, workspace_id, std::move(answered));
+        if (current) {
+            result.value = std::move(*current);
+        }
+    }
+    if (result.ok && name == "stop_experiment") {
+        co_await stop_experiment_runs(context, customer_id, workspace_id,
+                                      input.at("experiment_id"));
+    }
+    if (result.ok && name == "stop_experiment_trial") {
+        const std::string experiment_id = input.at("experiment_id");
+        co_await stop_experiment_runs(context, customer_id, workspace_id, experiment_id,
+                                      input.at("run_id"));
+        if (result.value.contains("runner")) {
+            // The engine admitted the next trial: dispatch it.
+            if (auto again = completed(co_await proxy(context, input, "get_study",
+                                                      {{"study", experiment_id}}));
+                again.ok) {
+                static_cast<void>(co_await current_experiment(context, customer_id, workspace_id,
+                                                              std::move(again.value)));
+            }
+            result.value.erase("runner");
+        }
     }
     if (result.ok) {
         result.value = experiment_answer(std::move(result.value));
@@ -554,11 +596,15 @@ void register_experiment_capabilities(Registry& registry) {
     add(registry,
         "stop_experiment_trial",
         "stop_trial",
-        {{"experiment_id", identifier()}, {"run_id", identifier()}},
+        {{"experiment_id", identifier()},
+         {"run_id", identifier()},
+         {"reason", {{"type", "string"}, {"maxLength", 2000}}}},
         {"experiment_id", "run_id"},
-        object(
-            {{"experiment_id", identifier()}, {"run", identifier()}, {"state", choice({"failed"})}},
-            {"experiment_id", "run", "state"}),
+        object({{"experiment_id", identifier()},
+                {"run", identifier()},
+                {"state", choice({"failed"})},
+                {"status", choice({"running", "stopped", "complete", "failed"})}},
+               {"experiment_id", "run", "state"}),
         "write");
     add(registry,
         "promote_trial",

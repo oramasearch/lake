@@ -260,9 +260,15 @@ rows it did not. Quote the held-out figure.
 1. On **Design → Methodologies**, press **New methodology**.
 2. Give it a **Name**, say **What it should do**, and optionally its **target** (a yes-or-no
    outcome, one of several categories, an amount, or no target to find groups).
-3. Press **Draft a first version** to read the files Lake drafts from Orama's templates, then
-   **Create methodology**. Lake commits them to a new private repository, `methodology-<name>`, and
-   the methodology's page opens, marked **Yours**, *Not validated*.
+3. Press **Ask Orama**. Ask Orama writes a first version for your description: the manifest,
+   `methodology.py` and the lock file, with every package it uses pinned and hashed. Lake checks
+   the files the way Validate does before running anything, and only then shows them, marked
+   **Written by Ask Orama**, for you to read. If Ask Orama is not running on your Lake, or its draft
+   does not pass those checks, Lake shows its own template for the kind of problem you described,
+   marked **Lake's template**, and says why.
+4. Read the files, then press **Create methodology**. Lake commits them to a new private
+   repository, `methodology-<name>`, and the methodology's page opens, marked **Yours**, *Not
+   validated*. Nothing is saved before you press Create.
 
 Through the API:
 
@@ -273,7 +279,10 @@ Through the API:
 ```
 
 Send `files` (`{path, contents}`) to commit your own, or `repository_id` to use code already in a
-repository of the workspace.
+repository of the workspace. To have Ask Orama write the files, send it a `methodology_draft` turn
+(`agent_turn` with `agent: "agent-ask-orama"`, `kind: "methodology_draft"`, your description as the
+`message`), follow it with `get_agent_task`, then read the checked draft with
+`draft_methodology` and its `task_id` ([methodologies](/docs/api/methodologies#drafts)).
 
 ### Edit, Validate and Train
 
@@ -292,7 +301,9 @@ repository of the workspace.
 
 - **Train** (once usable) runs it on a dataset you choose, with its target column and parameters.
   The model it trains appears in **Train → Models**; the run, its held-out metrics and its log are
-  on the page under **Runs**.
+  on the page under **Runs**. A workspace runs a few methodology runs at a time (two unless your
+  Lake is set otherwise); a run started past that is **Queued**, with the reason beside it, and
+  starts when one ends. A run that asks for GPUs also waits while no GPU node of its class exists.
 
   `POST /v1/run_methodology`
 
@@ -385,8 +396,8 @@ Only the person who started a solution (or the operator) can confirm its foundat
   **Start this solution**; the others are listed with where their work is tracked.
 - Orama's solutions and methodologies cannot be edited or deleted; duplicate one to make it yours.
 - A methodology of your own runs only once Validate passed for its current code. Its training data
-  is at most 1,000,000 rows and what it learns at most 24 MiB. Experiments over its parameters and
-  serving its model from Ship → Models are not available yet.
+  is at most 1,000,000 rows and what it learns at most 24 MiB. Serving its model from Ship → Models is
+  not available yet. Experiments over its parameters run in **Train → Experiments**.
 - Your own solution starts as a project with its first pipeline, not with the governed foundation
   (policy, holdout, ROI readout) Orama's get.
 - A name is at most 200 bytes, the problem and decision 4,000 bytes each, and a solution composes at

@@ -12,6 +12,7 @@
 #include <expected>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <set>
 #include <string>
@@ -27,8 +28,10 @@
 #include "lake/control/policy.hpp"
 #include "lake/control/store.hpp"
 #include "lake/control/store_contents.hpp"
+#include "lake/control/store_kept.hpp"
 #include "lake/control/transcripts.hpp"
 #include "lake/control/zetta_workspace.hpp"
+#include "store_repository.hpp"
 #include "workspace_records_api.hpp"
 
 namespace lake::api {
@@ -651,50 +654,183 @@ struct StoreOpened {
     std::optional<ApiResult> failure;
 };
 
-// The workspace's store `store_id`, Ready and delivered, opened by the store browser; or why not
-// (at `field`).
-StoreOpened open_store(ApiContext& context,
-                       const std::string& customer_id,
-                       const std::string& workspace_id,
-                       const std::string& store_id,
-                       const std::string& field) {
+// The fields of the workspace secret a customer's own bucket names (decision 58: the workspace's
+// credential, never Orama's), read by Lake in the workspace's secret store with its own authority:
+// the person who created the store showed they could read it (create_store). Kept in this process
+// for a minute, so a download's windows do not each read the secret.
+struct CachedCredential {
+    std::map<std::string, std::string> fields;
+    std::chrono::steady_clock::time_point expires;
+};
+std::mutex& credential_mutex() {
+    static std::mutex mutex;
+    return mutex;
+}
+std::map<std::string, CachedCredential>& credential_cache() {
+    static std::map<std::string, CachedCredential> cache;
+    return cache;
+}
+
+liquid::runtime::task<std::expected<std::map<std::string, std::string>, ApiResult>>
+store_credential(ApiContext& context, const control::ManagedStore& store, std::string field) {
+    using Out = std::expected<std::map<std::string, std::string>, ApiResult>;
+    const std::string key =
+        store.id + "\n" + store.credential_mount_id + "\n" + store.credential_name;
+    {
+        std::lock_guard lock(credential_mutex());
+        const auto found = credential_cache().find(key);
+        if (found != credential_cache().end() &&
+            found->second.expires > std::chrono::steady_clock::now()) {
+            co_return Out(found->second.fields);
+        }
+    }
+    if (store.credential_mount_id.empty() || store.credential_name.empty()) {
+        co_return Out(std::unexpected(ApiResult::failure(
+            "invalid_input", "the store names no workspace secret to open its bucket", field)));
+    }
+    ApiContext lake = context;
+    lake.authorized = true;
+    lake.operator_credential = true;
+    lake.session_credential = false;
+    lake.acting_identity = "admin";
+    lake.acting_user_id.clear();
+    lake.authentication_method = "store_browser";
+    lake.credential_kind.clear();
+    lake.credential_session_id.clear();
+    lake.scopes.clear();
+    lake.workspace_id.clear();
+    lake.path_workspace_id.clear();
+    ApiResult read = called(co_await call_as(
+        lake, "read_secret",
+        {{"mount_id", store.credential_mount_id}, {"name", store.credential_name}}));
+    if (!read.ok) {
+        co_return Out(std::unexpected(ApiResult::failure(
+            "store_unavailable",
+            "the secret this storage names (" + store.credential_name +
+                ") cannot be read: " + read.error.message,
+            field)));
+    }
+    std::map<std::string, std::string> fields;
+    const json value = read.value.value("value", json::object());
+    if (value.is_object()) {
+        for (const auto& [name, text] : value.items()) {
+            if (text.is_string()) {
+                fields[name] = text.get<std::string>();
+            }
+        }
+    }
+    {
+        std::lock_guard lock(credential_mutex());
+        credential_cache()[key] = {fields, std::chrono::steady_clock::now() + std::chrono::minutes(1)};
+    }
+    co_return Out(std::move(fields));
+}
+
+// The workspace's store `store_id`, Ready and delivered, opened: a store Lake keeps itself by
+// Lake (store_kept.hpp, store_repository.hpp), a customer's own bucket by the store browser with
+// the workspace secret it names; or why not (at `field`).
+liquid::runtime::task<StoreOpened> open_store(ApiContext& context,
+                                              std::string customer_id,
+                                              std::string workspace_id,
+                                              std::string store_id,
+                                              std::string field) {
     const auto refuse = [&](std::string code, std::string message) {
         return StoreOpened{nullptr, ApiResult::failure(std::move(code), std::move(message), field)};
     };
     if (!context.workspaces) {
-        return refuse("store_unavailable", "this Lake has no storage");
+        co_return refuse("store_unavailable", "this Lake has no storage");
     }
     const auto found = context.workspaces->store(customer_id, store_id, workspace_id);
     if (!found) {
-        return refuse(found.error().code == "not_found" ? "not_found" : found.error().code,
-                      found.error().code == "not_found" ? "no such store in this workspace"
-                                                        : found.error().message);
+        co_return refuse(found.error().code == "not_found" ? "not_found" : found.error().code,
+                         found.error().code == "not_found" ? "no such store in this workspace"
+                                                           : found.error().message);
     }
     if (const std::string kind = control::store_kind_refusal(found->type); !kind.empty()) {
-        return refuse("invalid_input", kind);
+        co_return refuse("invalid_input", kind);
     }
     if (found->desired != "present" || found->phase != "Ready") {
-        return refuse("workspace_not_ready", "the store is not ready");
+        co_return refuse("workspace_not_ready", "the store is not ready");
     }
     const auto connection = context.workspaces->store_connection(*found);
     if (!connection) {
-        return refuse("workspace_not_ready",
-                      "the store is ready and its connection is still being delivered to Lake; "
-                      "try again in a minute");
+        co_return refuse("workspace_not_ready",
+                         "the store is ready and its connection is still being delivered to "
+                         "Lake; try again in a minute");
+    }
+    if (found->provider == "zetta") {
+        auto records = workspace_records(context, customer_id, workspace_id);
+        if (!records) {
+            co_return refuse(records.error().code, records.error().message);
+        }
+        if (!context.object_transport) {
+            co_return refuse("not_supported",
+                             "this Lake keeps no workspace files: it has no workspace Zetta object "
+                             "transport");
+        }
+        const auto endpoint = context.workspaces->endpoint(customer_id, workspace_id);
+        if (!endpoint) {
+            co_return refuse(endpoint.error().code, endpoint.error().message);
+        }
+        auto cipher = control::DriveFileCipher::open(context.instance_kek, workspace_id);
+        if (!cipher) {
+            co_return refuse(cipher.error().code, cipher.error().message);
+        }
+        auto client = std::make_shared<control::ZettaObjectClient>(
+            context.object_transport,
+            control::ObjectEndpoint{endpoint->url, endpoint->token},
+            control::kept_store_bucket(found->slug));
+        co_return StoreOpened{
+            control::zetta_store_contents(std::move(*records),
+                                          control::DriveFileStore(std::move(client),
+                                                                  std::move(*cipher)),
+                                          found->id),
+            std::nullopt};
+    }
+    if (found->provider == "lake") {
+        if (context.sync_store == nullptr) {
+            co_return refuse("not_supported", "this Lake has no repository store");
+        }
+        if (found->repository_id.empty()) {
+            co_return refuse("invalid_input", "the store names no repository");
+        }
+        co_return StoreOpened{
+            repository_store_contents(context.sync_store, customer_id, found->repository_id),
+            std::nullopt};
     }
     if (!context.store_browser) {
-        return refuse("not_supported", control::store_browse_refusal(found->type, found->provider));
+        co_return refuse("not_supported",
+                         control::store_browse_refusal(found->type, found->provider));
     }
-    auto opened = context.store_browser(*found, *connection);
+    control::StoreOpening opening{*found, *connection, {}};
+    if (control::store_external_bucket(found->type, found->provider) &&
+        !found->credential_mount_id.empty()) {
+        auto credential = co_await store_credential(context, *found, field);
+        if (!credential) {
+            co_return refuse("store_error", credential.error().message);
+        }
+        if (!*credential) {
+            co_return StoreOpened{nullptr, credential->error()};
+        }
+        opening.credential = std::move(**credential);
+    }
+    auto opened = context.store_browser(opening);
     if (!opened) {
-        return refuse(opened.error().code, opened.error().message);
+        co_return refuse(opened.error().code, opened.error().message);
     }
-    return {std::move(*opened), std::nullopt};
+    co_return StoreOpened{std::move(*opened), std::nullopt};
 }
 
-StoreOpened store_of(ApiContext& context, const control::Drive& drive, const json& input) {
-    return open_store(
-        context, drive.customer_id, input.at("workspace_id"), drive.store_id, "/drive_id");
+StoreOpened opened_store(std::expected<StoreOpened, liquid::error> completed) {
+    return completed ? std::move(*completed)
+                     : StoreOpened{nullptr,
+                                   ApiResult::failure("store_error", completed.error().message)};
+}
+
+liquid::runtime::task<StoreOpened>
+store_of(ApiContext& context, const control::Drive& drive, const json& input) {
+    co_return opened_store(co_await open_store(
+        context, drive.customer_id, input.at("workspace_id"), drive.store_id, "/drive_id"));
 }
 
 json store_entry_json(const control::Drive& drive, const control::StoreItem& item) {
@@ -772,7 +908,7 @@ StoreFound awaited_found(std::expected<StoreFound, liquid::error> completed) {
 
 liquid::runtime::task<ApiResult>
 store_list(const json& input, ApiContext& context, const control::Drive& drive) {
-    StoreOpened store = store_of(context, drive, input);
+    StoreOpened store = opened_store(co_await store_of(context, drive, input));
     if (store.failure) {
         co_return *store.failure;
     }
@@ -822,7 +958,7 @@ store_list(const json& input, ApiContext& context, const control::Drive& drive) 
 
 liquid::runtime::task<ApiResult>
 store_get(const json& input, ApiContext& context, const control::Drive& drive) {
-    StoreOpened store = store_of(context, drive, input);
+    StoreOpened store = opened_store(co_await store_of(context, drive, input));
     if (store.failure) {
         co_return *store.failure;
     }
@@ -840,7 +976,7 @@ store_get(const json& input, ApiContext& context, const control::Drive& drive) {
 
 liquid::runtime::task<ApiResult>
 store_make_folder(const json& input, ApiContext& context, const control::Drive& drive) {
-    StoreOpened store = store_of(context, drive, input);
+    StoreOpened store = opened_store(co_await store_of(context, drive, input));
     if (store.failure) {
         co_return *store.failure;
     }
@@ -885,7 +1021,7 @@ store_make_folder(const json& input, ApiContext& context, const control::Drive& 
 
 liquid::runtime::task<ApiResult>
 store_move(const json& input, ApiContext& context, const control::Drive& drive) {
-    StoreOpened store = store_of(context, drive, input);
+    StoreOpened store = opened_store(co_await store_of(context, drive, input));
     if (store.failure) {
         co_return *store.failure;
     }
@@ -949,7 +1085,7 @@ store_move(const json& input, ApiContext& context, const control::Drive& drive) 
 
 liquid::runtime::task<ApiResult>
 store_remove(const json& input, ApiContext& context, const control::Drive& drive) {
-    StoreOpened store = store_of(context, drive, input);
+    StoreOpened store = opened_store(co_await store_of(context, drive, input));
     if (store.failure) {
         co_return *store.failure;
     }
@@ -998,7 +1134,7 @@ liquid::runtime::task<ApiResult> store_upload(const json& input,
                                               std::vector<std::string> paths,
                                               std::vector<std::string> contents,
                                               std::uint64_t total) {
-    StoreOpened store = store_of(context, drive, input);
+    StoreOpened store = opened_store(co_await store_of(context, drive, input));
     if (store.failure) {
         co_return *store.failure;
     }
@@ -1063,7 +1199,7 @@ liquid::runtime::task<ApiResult> store_upload(const json& input,
 
 liquid::runtime::task<ApiResult>
 store_read(const json& input, ApiContext& context, const control::Drive& drive) {
-    StoreOpened store = store_of(context, drive, input);
+    StoreOpened store = opened_store(co_await store_of(context, drive, input));
     if (store.failure) {
         co_return *store.failure;
     }
@@ -1116,7 +1252,7 @@ struct StoreWalk {
 
 liquid::runtime::task<StoreWalk>
 store_walk(ApiContext& context, const control::Drive& drive, const json& input) {
-    StoreOpened store = store_of(context, drive, input);
+    StoreOpened store = opened_store(co_await store_of(context, drive, input));
     if (store.failure) {
         co_return StoreWalk{{}, store.failure->error.message};
     }
@@ -1251,7 +1387,8 @@ liquid::runtime::task<ApiResult> create_drive(const json& input, ApiContext& con
             co_return ApiResult::failure(
                 "invalid_input", "a store drive names one of the workspace's stores", "/store_id");
         }
-        StoreOpened store = open_store(context, customer_id, workspace_id, store_id, "/store_id");
+        StoreOpened store = opened_store(
+            co_await open_store(context, customer_id, workspace_id, store_id, "/store_id"));
         if (store.failure) {
             co_return *store.failure;
         }
@@ -2383,13 +2520,65 @@ liquid::runtime::task<ApiResult> load_drive_dataset(const json& input, ApiContex
 
 // ---- A drive file as a model (lake#654) ----
 
+// Hands a model file's bytes (read_drive_file or download_drive_file's answer) to the workspace
+// engine's register_model, with where they came from.
+liquid::runtime::task<ApiResult> register_model_file(const json& input,
+                                                     ApiContext& context,
+                                                     const ApiResult& read,
+                                                     std::string source) {
+    if (!read.ok) {
+        co_return ApiResult::failure(read.error.code, read.error.message, "/id");
+    }
+    if (!read.value.contains("content_base64") || !read.value.at("content_base64").is_string() ||
+        read.value.value("size", std::uint64_t{0}) > max_inline_bytes) {
+        co_return ApiResult::failure(
+            "size_invalid", "a model is brought from a file of at most 16 MiB", "/id");
+    }
+    auto bytes = decode_base64(read.value.at("content_base64").get<std::string>(), "/id");
+    if (!bytes) {
+        co_return ApiResult::failure("corrupt", "the file's bytes did not decode", "/id");
+    }
+    // The file goes as `weights_base64`, so a binary model (ONNX, XGBoost's UBJSON) arrives
+    // intact (lake#681).
+    json model{{"weights_base64", read.value.at("content_base64")}, {"source", std::move(source)}};
+    for (const char* key : {"name", "version_of", "kind", "metrics", "format", "feature_names"}) {
+        if (input.contains(key)) {
+            model[key] = input.at(key);
+        }
+    }
+    ApiResult brought = called_as(co_await call_as(context,
+                                                   "workspace_act",
+                                                   {{"customer_id", input.at("customer_id")},
+                                                    {"workspace_id", input.at("workspace_id")},
+                                                    {"capability", "register_model"},
+                                                    {"input", std::move(model)}}));
+    if (!brought.ok) {
+        // register_model's own fields are this call's fields of the same name; the file is `id`.
+        std::string path = brought.error.path;
+        if (path.starts_with("/input/")) {
+            path = path.substr(6);
+        }
+        if (path == "/weights" || path == "/weights_base64" || path == "/source") {
+            path = "/id";
+        }
+        co_return ApiResult::failure(brought.error.code, brought.error.message, path);
+    }
+    co_return brought.value.is_object()
+        ? ApiResult::success(brought.value)
+        : ApiResult::success(json{{"result", brought.value}});
+}
+
 // Brings a model file of a drive into the workspace as a standalone model, as load_drive_dataset
 // brings a table: the bytes are read as the caller (read_drive_file or download_drive_file, so
 // the drive's authorization and audit apply), then the workspace engine's register_model keeps
-// them through workspace_act. The file goes as `weights_base64`, so a binary model (ONNX, XGBoost's
-// UBJSON) arrives intact; the engine reads ONNX tree ensembles, XGBoost and LightGBM models and its
-// own weights format, and refuses any other (lake#681). At most 16 MiB.
-liquid::runtime::task<ApiResult> load_drive_model(const json& input, ApiContext& context) {
+// them through workspace_act. Every drive kind (lake#682): a workspace-files drive's file by its
+// id, a repository or store drive's by its path, and a virtual drive's shortcut to a file, which
+// is followed once (to an item of another drive, or a path in a repository). The file goes as
+// `weights_base64`, so a binary model (ONNX, XGBoost's UBJSON) arrives intact; the engine reads
+// ONNX tree ensembles, XGBoost and LightGBM models and its own weights format, and refuses any
+// other (lake#681). At most 16 MiB.
+liquid::runtime::task<ApiResult>
+bring_drive_model(const json& input, ApiContext& context, bool follow_shortcut) {
     Opened opened = awaited(co_await open_drive(input, context, false));
     if (opened.failure) {
         co_return *opened.failure;
@@ -2397,18 +2586,84 @@ liquid::runtime::task<ApiResult> load_drive_model(const json& input, ApiContext&
     const std::string customer_id = input.at("customer_id");
     const std::string workspace_id = input.at("workspace_id");
     const std::string id = input.at("id");
-    if (opened.drive.storage == "virtual") {
-        co_return ApiResult::failure(
-            "invalid_input",
-            "a virtual drive holds shortcuts only; open the file where it lives",
-            "/drive_id");
-    }
     if (!input.contains("name") && !input.contains("version_of")) {
         co_return ApiResult::failure(
             "invalid_input", "name the model, or give version_of for a new version of one", "/name");
     }
+    if (opened.drive.storage == "virtual") {
+        if (!follow_shortcut) {
+            co_return ApiResult::failure(
+                "invalid_input",
+                "the shortcut opens an item of a virtual drive; choose the file where it lives",
+                "/id");
+        }
+        ApiResult entry = called_as(co_await call_as(context,
+                                                     "get_drive_entry",
+                                                     {{"customer_id", customer_id},
+                                                      {"workspace_id", workspace_id},
+                                                      {"drive_id", opened.drive.id},
+                                                      {"id", id}}));
+        if (!entry.ok) {
+            co_return ApiResult::failure(entry.error.code, entry.error.message, "/id");
+        }
+        if (entry.value.value("kind", "") != "shortcut") {
+            co_return ApiResult::failure(
+                "invalid_input",
+                "a virtual drive holds folders and shortcuts; choose a shortcut to a file",
+                "/id");
+        }
+        if (entry.value.value("status", "") == "broken") {
+            co_return ApiResult::failure("not_found",
+                                         "the shortcut is broken: " +
+                                             entry.value.value("reason", std::string()),
+                                         "/id");
+        }
+        const json target = entry.value.value("target", json::object());
+        const std::string kind = target.value("kind", "");
+        const json shortcut{{"drive_id", opened.drive.id},
+                            {"id", id},
+                            {"name", entry.value.value("name", std::string())}};
+        ApiResult brought;
+        if (kind == "drive_entry") {
+            json next = input;
+            next["drive_id"] = target.value("drive_id", "");
+            next["id"] = target.value("entry_id", "");
+            brought = called_as(co_await bring_drive_model(next, context, false));
+        } else if (kind == "repository_path") {
+            const std::string repository_id = target.value("repository_id", "");
+            const std::string ref = target.value("ref", "main");
+            const std::string path = target.value("path", "");
+            const auto repository = context.store->get_repository(repository_id);
+            const std::string repository_name = repository ? repository->name : repository_id;
+            ApiResult read = called_as(co_await call_as(
+                context,
+                "download_drive_file",
+                {{"repository_id", repository_id}, {"ref", ref}, {"path", path}}));
+            brought = called_as(co_await register_model_file(
+                input, context, read, "repository " + repository_name + "@" + ref + ": " + path));
+            if (brought.ok) {
+                brought.value["source"] = {{"repository_id", repository_id},
+                                           {"ref", ref},
+                                           {"path", path},
+                                           {"name", path.substr(path.rfind('/') + 1)}};
+            }
+        } else {
+            co_return ApiResult::failure("invalid_input",
+                                         "the shortcut opens " +
+                                             (kind.empty() ? std::string("nothing") : "a " + kind) +
+                                             ", not a file; choose a shortcut to a file",
+                                         "/id");
+        }
+        if (!brought.ok) {
+            co_return brought;
+        }
+        brought.value["source"]["shortcut"] = shortcut;
+        context.audit_details["shortcut_drive_id"] = opened.drive.id;
+        context.audit_details["shortcut_id"] = id;
+        co_return brought;
+    }
     std::string name = id.substr(id.rfind('/') == std::string::npos ? 0 : id.rfind('/') + 1);
-    if (opened.drive.storage == "files") {
+    if (opened.drive.storage == "files" || opened.drive.storage == "store") {
         ApiResult entry = called_as(co_await call_as(context,
                                                      "get_drive_entry",
                                                      {{"customer_id", customer_id},
@@ -2439,47 +2694,19 @@ liquid::runtime::task<ApiResult> load_drive_model(const json& input, ApiContext&
                                           {"workspace_id", workspace_id},
                                           {"drive_id", opened.drive.id},
                                           {"id", id}}));
-    if (!read.ok) {
-        co_return ApiResult::failure(read.error.code, read.error.message, "/id");
-    }
-    if (!read.value.contains("content_base64") || !read.value.at("content_base64").is_string() ||
-        read.value.value("size", std::uint64_t{0}) > max_inline_bytes) {
-        co_return ApiResult::failure(
-            "size_invalid", "a model is brought from a file of at most 16 MiB", "/id");
-    }
-    auto bytes = decode_base64(read.value.at("content_base64").get<std::string>(), "/id");
-    if (!bytes) {
-        co_return ApiResult::failure("corrupt", "the file's bytes did not decode", "/id");
-    }
-    json model{{"weights_base64", read.value.at("content_base64")},
-               {"source", "drive " + opened.drive.name + ": " + name}};
-    for (const char* key : {"name", "version_of", "kind", "metrics", "format", "feature_names"}) {
-        if (input.contains(key)) {
-            model[key] = input.at(key);
-        }
-    }
-    ApiResult brought = called_as(co_await call_as(context,
-                                                   "workspace_act",
-                                                   {{"customer_id", customer_id},
-                                                    {"workspace_id", workspace_id},
-                                                    {"capability", "register_model"},
-                                                    {"input", std::move(model)}}));
+    ApiResult brought = called_as(co_await register_model_file(
+        input, context, read, "drive " + opened.drive.name + ": " + name));
     if (!brought.ok) {
-        // register_model's own fields are this call's fields of the same name; the file is `id`.
-        std::string path = brought.error.path;
-        if (path.starts_with("/input/")) {
-            path = path.substr(6);
-        }
-        if (path == "/weights" || path == "/weights_base64" || path == "/source") {
-            path = "/id";
-        }
-        co_return ApiResult::failure(brought.error.code, brought.error.message, path);
+        co_return brought;
     }
-    json value = brought.value.is_object() ? brought.value : json{{"result", brought.value}};
-    value["source"] = {{"drive_id", opened.drive.id}, {"id", id}, {"name", name}};
+    brought.value["source"] = {{"drive_id", opened.drive.id}, {"id", id}, {"name", name}};
     context.audit_details["drive_id"] = opened.drive.id;
     context.audit_details["id"] = id;
-    co_return ApiResult::success(std::move(value));
+    co_return brought;
+}
+
+liquid::runtime::task<ApiResult> load_drive_model(const json& input, ApiContext& context) {
+    co_return called_as(co_await bring_drive_model(input, context, true));
 }
 
 // ---- Search ----
@@ -3023,8 +3250,10 @@ void register_drives_capabilities(Registry& registry) {
            "Bring a model file of a drive into the workspace as a standalone model, scored, "
            "served and compared like a trained one (the engine's register_model). `id` is the "
            "file: its entry id in a workspace-files drive, its path in a repository drive (on "
-           "main). `name` names a new model; `version_of` (a brought model's id) adds the file as "
-           "its next version. The engine reads tree models as ONNX (TreeEnsembleRegressor or "
+           "main) or a storage drive, or a virtual drive's shortcut to a file (an item of "
+           "another drive or a path in a repository), followed once. `name` names a new "
+           "model; `version_of` (a brought model's id) adds the file as its next version. "
+           "The engine reads tree models as ONNX (TreeEnsembleRegressor or "
            "TreeEnsembleClassifier, from scikit-learn, XGBoost or LightGBM), XGBoost's JSON or "
            "UBJSON model, LightGBM's text model and its own JSON weights, converted exactly; "
            "anything else is refused. `format` skips detection; `feature_names` names the "
@@ -3171,7 +3400,8 @@ find_store_file(ApiContext& context,
         co_return Result(std::unexpected(
             control::ZettaControlError{"not_found", "no such store drive", "/drive_id"}));
     }
-    StoreOpened store = store_of(context, **drive, {{"workspace_id", workspace_id}});
+    StoreOpened store =
+        opened_store(co_await store_of(context, **drive, {{"workspace_id", workspace_id}}));
     if (store.failure) {
         co_return Result(std::unexpected(
             control::ZettaControlError{store.failure->error.code, store.failure->error.message}));
@@ -3197,6 +3427,29 @@ find_store_file(ApiContext& context,
     co_return Result(std::move(out));
 }
 
+liquid::runtime::task<ApiResult> empty_kept_store(ApiContext& context,
+                                                  const control::ManagedStore& store) {
+    if (store.phase != "Ready") {
+        co_return ApiResult::success(json::object());
+    }
+    StoreOpened opened = opened_store(co_await open_store(
+        context, store.customer_id, store.workspace_id, store.id, "/store_id"));
+    if (opened.failure) {
+        co_return *opened.failure;
+    }
+    auto top = control::settled(co_await opened.contents->list(""));
+    if (!top) {
+        co_return store_failed(top.error(), "/store_id");
+    }
+    for (const control::StoreItem& item : *top) {
+        auto removed = control::settled(co_await opened.contents->remove(item.path));
+        if (!removed && removed.error().code != "not_found") {
+            co_return store_failed(removed.error(), "/store_id");
+        }
+    }
+    co_return ApiResult::success({{"removed", top->size()}});
+}
+
 // The plaintext of a workspace file window, for GET /drive/files/download (http_server.cpp).
 liquid::runtime::task<control::ZettaControlResult<std::string>>
 read_workspace_file(ApiContext& context,
@@ -3220,7 +3473,8 @@ read_workspace_file(ApiContext& context,
                 drive ? control::ZettaControlError{"not_found", "no such store drive"}
                       : drive.error()));
         }
-        StoreOpened store = store_of(context, **drive, {{"workspace_id", workspace_id}});
+        StoreOpened store =
+        opened_store(co_await store_of(context, **drive, {{"workspace_id", workspace_id}}));
         if (store.failure) {
             co_return control::ZettaControlResult<std::string>(
                 std::unexpected(control::ZettaControlError{store.failure->error.code,

@@ -141,6 +141,20 @@ split) and budgets (10 trials, 2 in parallel, 10 minutes, no cost cap), field by
 a missing `objective` or `budgets` is refused at `/objective` or `/budgets` before anything reaches
 the workspace.
 
+### An Experiment on Your Own Methodology
+
+A methodology of your own, once Validate passed, can be tuned the same way. Choose it in
+**Methodology** (it is marked *(yours)*), name the dataset and the column to predict (or a project
+and pipeline that use it), and pick one of its held-out metrics. Leave the search parameters blank
+to try the ranges its `methodology.json` declares. Each trial runs your code as a training run in
+its sandbox, metered like any run; the trial's row on the experiment's page shows that run's phase.
+A trial whose code fails ends with the reason and the experiment goes on; two failing the same way
+stop it.
+
+- REST: `POST /v1/start_experiment` with
+  `{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "name": "Late payers tuning", "methodology": "W-0a1b2c3d", "dataset": "sales.payers", "target": "late", "from_defaults": true, "confirm": true}`
+- MCP: `start_experiment`.
+
 ## Follow an Experiment
 
 Open an experiment from the list. The header shows its name and state, figures (best objective,
