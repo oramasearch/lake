@@ -1752,12 +1752,12 @@ TEST(PostgresStores, MountsFollowTheirWorkloadAndKeepAVolumeToOne) {
     sqlite.kind = "sqlite";
     sqlite.name = "db";
     sqlite.created_by_taap_id = "taap:x";
-    sqlite.stores = {{foreign->id, "/data", false}};
+    sqlite.stores = {{foreign->id, "/srv/uploads", false}};
     EXPECT_EQ(store->create_service(sqlite).error().code, "invalid_input")
         << "a store of another workspace";
     EXPECT_TRUE(store->list_services(customer->id)->size() == 2U)
         << "nothing written: the two workspace Zettas only";
-    sqlite.stores = {{volume->id, "/data", false}, {bucket->id, "", true}};
+    sqlite.stores = {{volume->id, "/srv/uploads", false}, {bucket->id, "", true}};
     const auto db = store->create_service(sqlite);
     ASSERT_TRUE(db) << db.error().message;
 
@@ -1782,7 +1782,7 @@ TEST(PostgresStores, MountsFollowTheirWorkloadAndKeepAVolumeToOne) {
                                             .image = "site:v1",
                                             .port = 3000,
                                             .host = "site-" + suffix + ".test",
-                                            .stores = {{volume->id, "/data", false}}});
+                                            .stores = {{volume->id, "/srv/uploads", false}}});
     ASSERT_FALSE(app);
     EXPECT_EQ(app.error().code, "conflict");
     EXPECT_NE(app.error().message.find("service db"), std::string::npos) << app.error().message;
@@ -1857,7 +1857,7 @@ TEST(PostgresStores, MountsFollowTheirWorkloadAndKeepAVolumeToOne) {
     const auto withdrawn = store->withdraw_store(volume->id);
     ASSERT_TRUE(withdrawn) << withdrawn.error().message;
     sqlite.name = "late";
-    sqlite.stores = {{volume->id, "/data", false}};
+    sqlite.stores = {{volume->id, "/srv/uploads", false}};
     EXPECT_EQ(store->create_service(sqlite).error().code, "invalid_input")
         << "a store being deleted is not mounted";
 }

@@ -35,7 +35,7 @@ The page is described in [../ui/drives.md](../ui/drives.md#storage).
   its page, a service to Ship → Services searched for its name) with the path a volume is mounted
   at and *read-only* when it is; *Not mounted* otherwise. A volume belongs to the one service or
   app that mounts it.
-- **Size** shows the GiB asked for and, under it, the **used space** the operator measured (*3.0
+- **Size** shows the GiB asked for and, under it, the **bytes in use** the operator measured (*3.0
   MiB used (0%)* for a volume), *measured once mounted* for a volume no pod mounts yet, or *not
   measured yet*.
 - **Show connection** (once Ready): answers with the Data page itself, showing every field the
@@ -94,7 +94,7 @@ generation and notifies the operator in the same transaction, so its pods roll w
 
 | Store | `mount_path` | In the workload's containers |
 |---|---|---|
-| volume | required: absolute, letters, digits, `.`, `_`, `-` and `/`, at most 256 characters, no `..` or `//` | mounted at the path; read-only when `read_only` |
+| volume | required: absolute, letters, digits, `.`, `_`, `-` and `/`, at most 256 characters, no `..` or `//`, and not `/`, `/data`, `/tmp`, `/proc`, `/sys`, `/dev` or beneath them (the workload's own; the operator skips them too) | mounted at the path; read-only when `read_only` |
 | bucket in your own account (`r2`, `s3`, `b2`, `gcs`, `azure`) | none | its connection as environment variables `STORE_<NAME>_BUCKET`, `_ENDPOINT`, `_REGION`, `_PREFIX` and the credential fields |
 
 Refused, each `invalid_input` at the entry's path (`/stores/<i>/…`) unless said otherwise:
@@ -113,7 +113,7 @@ Deleting a service or an app removes its mounts in the same transaction, and so 
 workspace; deleting a mounted store is refused (above). `list_services`, `list_apps` and `get_app`
 answer each workload's `stores: [{store_id, name, type, provider, mount_path, read_only}]`.
 
-**Used space.** The operator writes `store_status.used_bytes` from the kubelet's volume stats of
+**Bytes in use.** The operator writes `store_status.used_bytes` from the kubelet's volume stats of
 the pod that mounts a volume; `list_stores` answers it beside `size_gi` (null until mounted and
 measured).
 

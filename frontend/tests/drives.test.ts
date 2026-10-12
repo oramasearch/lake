@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import { ancestors, chunkBySize, chunkRanges, cleanPath, datasetFormat, datasetName, driveSlug, expandTo, isWithin, joinPath, nameOf, parentOf, planMoves, planUpload, rangeSelect, sortEntries, validName } from "../src/pages/drives/paths.ts";
 import { cleanTarget, nameAfterTarget, selectsOnFocus, storageLabel, targetHref, targetProblem } from "../src/pages/drives/targets.ts";
 import { folderKey, matchLink, matchWhere, parentKey, type DriveMatch } from "../src/pages/drives/search.ts";
-import { browsable, driveForStore, phaseTone, storeFigures, storeKindWords, storePhase } from "../src/pages/drives/stores.ts";
+import { browsable, bytesWords, defaultMountPath, driveForStore, mountedBy, mountInput, mountProblem, phaseTone, storageHref, storeFigures, storeKindWords, storePhase, usedWords, workloadHref } from "../src/pages/drives/stores.ts";
 import { STORAGE } from "../src/pages/drives/targets.ts";
 import { movedFromDatasets } from "../src/pages/connections/connections.ts";
 import { readFileSync } from "node:fs";
@@ -233,4 +233,52 @@ test("Datasets keeps datasets only: no storage and no connections on its page (l
   for (const gone of ["list_stores", "create_store", "delete_store", "store_connection", "list_store_providers", "connect_service", "delete_connection", "list_source_tables"]) {
     assert.ok(!page.includes(`"${gone}"`), `Datasets no longer calls ${gone}`);
   }
+});
+
+test("who mounts a store, and its used space (lake#666)", () => {
+  const volume = {
+    id: "v",
+    type: "volume",
+    provider: "cluster",
+    name: "uploads",
+    size_gi: 10,
+    desired: "present",
+    used_bytes: 3 * 1024 * 1024,
+    mounted_by: [{ kind: "service", id: "s1", name: "db", mount_path: "/data", read_only: false }],
+  };
+  assert.deepEqual(mountedBy(volume), [{ kind: "service", id: "s1", name: "db", mount_path: "/data", read_only: false }]);
+  assert.deepEqual(mountedBy({}), []);
+  assert.equal(usedWords(volume), "3.0 MiB used (0%)");
+  assert.equal(usedWords({ type: "volume", size_gi: 1, used_bytes: 512 * 1024 * 1024 }), "512.0 MiB used (50%)");
+  assert.equal(usedWords({ type: "volume", used_bytes: null }), "measured once mounted");
+  assert.equal(usedWords({ ...volume, used_bytes: null }), "not measured yet");
+  assert.equal(usedWords({ type: "object", provider: "s3", used_bytes: 100 }), "100 B used");
+  assert.equal(bytesWords(1536), "1.5 KiB");
+  // A service opens Ship → Services searched for it; an app its page in the store's workspace.
+  assert.equal(workloadHref(mountedBy(volume)[0], "c1", "w1"), "/services?customer_id=c1&q=db");
+  assert.equal(workloadHref({ kind: "app", id: "a1", name: "site", mount_path: "", read_only: false }, "c1", "w 1"), "/w/w%201/ship/app?customer_id=c1&app_id=a1");
+  assert.equal(storageHref("w1"), "/w/w1/drives?tab=storage");
+});
+
+test("what a service or an app may mount (lake#666)", () => {
+  const volume = { id: "v", type: "volume", provider: "cluster", name: "uploads", mounted_by: [{ kind: "service", id: "s1", name: "db" }] };
+  assert.equal(mountProblem(volume, { kind: "app", id: "a1" }), "mounted by the service db", "a volume is mounted by one workload");
+  assert.equal(mountProblem(volume, { kind: "service", id: "s1" }), "", "its own mount");
+  assert.equal(mountProblem({ type: "volume", provider: "cluster" }, { kind: "service" }), "");
+  assert.equal(mountProblem({ type: "object", provider: "s3", mounted_by: [{ kind: "app", id: "x" }] }, { kind: "app", id: "y" }), "", "a bucket by any number");
+  assert.equal(mountProblem({ type: "object", provider: "zetta" }, { kind: "app" }), "kept by Lake; open it as a drive");
+  assert.equal(mountProblem({ type: "network_filesystem", provider: "nfs" }, { kind: "app" }), "cannot be mounted yet");
+  assert.equal(mountProblem({ type: "volume", provider: "cluster", desired: "absent" }, { kind: "app" }), "being deleted");
+  assert.equal(defaultMountPath("uploads"), "/mnt/uploads");
+  // A bucket takes no path; read_only only when chosen.
+  assert.deepEqual(
+    mountInput(
+      [
+        { store_id: "v", mount_path: "/data" },
+        { store_id: "b", mount_path: "/ignored", read_only: true },
+      ],
+      [volume, { id: "b", type: "object", provider: "s3" }],
+    ),
+    [{ store_id: "v", mount_path: "/data" }, { store_id: "b", read_only: true }],
+  );
 });

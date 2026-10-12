@@ -1,9 +1,10 @@
 /** Data → Drives → Storage (`/w/<id>/drives?tab=storage`, lake#656, docs/ui/drives.md#storage): the
- * workspace's storage, moved from Datasets. Figures, the table (type and provider, size, this
- * month's volume time, status with the operator's message, endpoint), New storage in a dialog, the
- * connection in a dialog, and delete with the name typed. A bucket or filesystem opens as a drive
- * (a `store` drive); a volume is shown, not browsed. Shown whether or not the workspace is ready:
- * storage does not need it. */
+ * workspace's storage, moved from Datasets. Figures, the table (type and provider, size with the
+ * used space, who mounts it, this month's volume time, status with the operator's message,
+ * endpoint), New storage in a dialog, the connection in a dialog, and delete with the name typed.
+ * A bucket or filesystem opens as a drive (a `store` drive); a volume is shown, not browsed, and
+ * links to the service or app that mounts it (lake#666). Shown whether or not the workspace is
+ * ready: storage does not need it. */
 import { useState } from "react";
 import { Link } from "react-router-dom";
 import { Box, Gauge, HardDrive, Plus, Timer } from "lucide-react";
@@ -14,7 +15,7 @@ import { Banner, Button, Card, Chip, DataTable, Empty, ErrorBlock, Field, Form, 
 import { qs, text, useAsync, useSpaceRead, useWorkspace, useWsPath } from "@/pages/train/workspace";
 import { formatValue, usageLink, usageOf, windows, type Reading } from "@/pages/usage/usage";
 import type { Drive } from "./storage";
-import { browsable, driveForStore, phaseTone, storeFigures, storeKindWords, storePhase, storeSettled } from "./stores";
+import { browsable, driveForStore, mountedBy, phaseTone, storeFigures, storeKindWords, storePhase, storeSettled, usedWords, workloadHref } from "./stores";
 
 /** The workspace's stores, checked every 3 seconds while one is changing. */
 export function useStores() {
@@ -45,7 +46,7 @@ export function StorageTab({ drives, onOpenAsDrive }: { drives: Drive[]; onOpenA
   const show = useAsync();
   const [connection, setConnection] = useState<Row | null>(null);
   const [creating, setCreating] = useState(false);
-  const [deleting, setDeleting] = useState<{ id: string; name: string } | null>(null);
+  const [deleting, setDeleting] = useState<Row | null>(null);
   const newButton = (
     <Button onClick={() => setCreating(true)}>
       <Plus size={14} aria-hidden /> New storage
@@ -94,7 +95,41 @@ export function StorageTab({ drives, onOpenAsDrive }: { drives: Drive[]; onOpenA
                       );
                     },
                   },
-                  { key: "size", label: "Size", numeric: true, sort: (s) => Number(s.size_gi) || 0, render: (s) => <span className="font-mono">{text(s, "size_gi")} GiB</span> },
+                  {
+                    key: "size",
+                    label: "Size",
+                    numeric: true,
+                    sort: (s) => Number(s.size_gi) || 0,
+                    render: (s) => (
+                      <div className="whitespace-nowrap">
+                        <span className="font-mono">{text(s, "size_gi")} GiB</span>
+                        <div className="text-[12px] text-ink-3">{usedWords(s)}</div>
+                      </div>
+                    ),
+                  },
+                  {
+                    key: "mounted",
+                    label: "Mounted By",
+                    sort: (s) => mountedBy(s).map((m) => m.name).join(","),
+                    render: (store) => {
+                      const mounts = mountedBy(store);
+                      if (!mounts.length) return <span className="text-[12.5px] text-ink-3">Not mounted</span>;
+                      return (
+                        <ul className="m-0 list-none space-y-0.5 p-0">
+                          {mounts.map((m) => (
+                            <li key={`${m.kind}:${m.id}`} className="text-[12.5px]">
+                              <Link to={workloadHref(m, scope.customerId, scope.workspaceId)}>{m.name || m.id}</Link>{" "}
+                              <span className="text-ink-3">
+                                {m.kind === "app" ? "app" : "service"}
+                                {m.mount_path ? ` · ${m.mount_path}` : ""}
+                                {m.read_only ? " · read-only" : ""}
+                              </span>
+                            </li>
+                          ))}
+                        </ul>
+                      );
+                    },
+                  },
                   {
                     key: "month",
                     label: "This Month",
@@ -161,7 +196,7 @@ export function StorageTab({ drives, onOpenAsDrive }: { drives: Drive[]; onOpenA
                               Show connection
                             </Button>
                           )}
-                          <Button variant="ghost" onClick={() => setDeleting({ id, name })}>
+                          <Button variant="ghost" onClick={() => setDeleting(store)}>
                             Delete
                           </Button>
                         </div>
@@ -176,7 +211,7 @@ export function StorageTab({ drives, onOpenAsDrive }: { drives: Drive[]; onOpenA
         {list.some((s) => !storeSettled(s)) && <Banner tone="quiet">This list checks again every 3 seconds while storage is changing.</Banner>}
       </Card>
       {creating && <NewStorage providers={providerList} providersError={providers.isError ? providers.error : null} onClose={() => setCreating(false)} />}
-      {deleting && <DeleteStore id={deleting.id} name={deleting.name} onClose={() => setDeleting(null)} onDeleted={() => toast(`Deleting ${deleting.name}`)} />}
+      {deleting && <DeleteStore store={deleting} onClose={() => setDeleting(null)} onDeleted={() => toast(`Deleting ${text(deleting, "name")}`)} />}
       {connection && (
         <Modal title={`Connection to ${text(connection, "name")}`} subtitle="What a service in your workspace mounts or calls to use it. It is not shown again unless you ask." onClose={() => setConnection(null)}>
           <dl>
@@ -197,9 +232,13 @@ export function StorageTab({ drives, onOpenAsDrive }: { drives: Drive[]; onOpenA
   );
 }
 
-/** Delete storage: the person types its name, which the server checks too. */
-function DeleteStore({ id, name, onClose, onDeleted }: { id: string; name: string; onClose: () => void; onDeleted: () => void }) {
+/** Delete storage: the person types its name, which the server checks too. Storage a service or
+ * an app mounts is not deleted: the dialog names them, and Lake refuses it too (lake#666). */
+function DeleteStore({ store, onClose, onDeleted }: { store: Row; onClose: () => void; onDeleted: () => void }) {
   const scope = useWorkspace();
+  const id = text(store, "id");
+  const name = text(store, "name");
+  const mounts = mountedBy(store);
   const remove = useAsync();
   const [confirm, setConfirm] = useState("");
   return (
@@ -210,13 +249,25 @@ function DeleteStore({ id, name, onClose, onDeleted }: { id: string; name: strin
       footer={
         <>
           <Button onClick={onClose}>Cancel</Button>
-          <Button variant="danger" type="submit" form="delete-store" loading={remove.busy} disabled={confirm !== name}>
+          <Button variant="danger" type="submit" form="delete-store" loading={remove.busy} disabled={confirm !== name || mounts.length > 0}>
             Delete {name}
           </Button>
         </>
       }
     >
-      <Banner tone="warn">Deleting storage deletes the data in it, which cannot be recovered. A drive that opens it stops working; delete that drive too.</Banner>
+      {mounts.length > 0 ? (
+        <Banner tone="warn">
+          {mounts.map((m, i) => (
+            <span key={`${m.kind}:${m.id}`}>
+              {i > 0 ? (i === mounts.length - 1 ? " and " : ", ") : ""}
+              {i === 0 ? "The" : "the"} {m.kind} <Link to={workloadHref(m, scope.customerId, scope.workspaceId)}>{m.name || m.id}</Link>
+            </span>
+          ))}{" "}
+          {mounts.length === 1 ? "mounts" : "mount"} it. Remove {mounts.length === 1 ? "the mount" : "the mounts"} first, in the service's or app's storage.
+        </Banner>
+      ) : (
+        <Banner tone="warn">Deleting storage deletes the data in it, which cannot be recovered. A drive that opens it stops working; delete that drive too.</Banner>
+      )}
       <Form
         id="delete-store"
         error={remove.error}

@@ -88,7 +88,10 @@ only now. It shows whether or not the workspace is ready (storage does not need 
 - **Figures:** Storage (how many, or how many are changing), Opens as a drive (Ready buckets and
   filesystems), Volumes (shown, not browsed) and Size (the GiB asked for, in all).
 - **The table:** each store's name with its type and provider in words (*Volume · cluster disk*),
-  its size, **This Month** (its `volumes` time from `usage_over_time` by object, linking to
+  its size with the bytes in use under it (`usedWords`: *2.5 GiB used (25%)*, *measured once
+  mounted* for a volume no pod mounts, *not measured yet*), **Mounted By** (lake#666: each service
+  or app that mounts it, linking to the app's page or to Ship → Services searched for the service
+  with `?q=`, with the path and *read-only*; *Not mounted* otherwise), **This Month** (its `volumes` time from `usage_over_time` by object, linking to
   Usage), the status (Waiting for the operator, Creating, Connecting, Ready, Deleting, Failed) with
   the operator's message, the endpoint, and the actions: **Open as a drive** (a Ready bucket or
   filesystem, opening New drive with it chosen) or **Open drive** when a drive already opens it;
@@ -97,9 +100,27 @@ only now. It shows whether or not the workspace is ready (storage does not need 
   again every 3 seconds while a store is changing.
 - **Words.** A *drive* is where people work with files; *storage* is a bucket, filesystem or volume
   that holds bytes. The page says storage; the API's name is *store* (`list_stores`).
-- **Not shown yet:** which services and apps mount a store, a volume's link to that service and
-  Ship → Services' link back, and each store's used space. Lake records none of them
-  ([lake#666](https://github.com/oramasearch/lake/issues/666)).
+- **Delete** of a mounted store names the services and apps that mount it and stays disabled;
+  lake refuses it too (`conflict`).
+
+### Mounts
+
+Which storage a service or an app mounts (lake#666, [`../api/storage.md#mounting-a-store`](../api/storage.md#mounting-a-store))
+is chosen with one picker, `drives/StorePicker.tsx`: a row per store of the workspace, a volume
+with the path it is mounted at (offered as `/mnt/<name>`), a bucket as `STORE_<NAME>_…`
+environment variables, each read-only or not. A store it cannot mount says why
+(`mountProblem`: a volume another service or app mounts, a store Lake keeps, a store being
+deleted). It appears in:
+
+- **Ship → Services:** New service, for SQLite, DuckDB and Polars (`list_service_kinds`'
+  `mounts_stores`); a service's **Storage** action (`set_service_stores`); and under each service's
+  name, *Mounts uploads at /mnt/uploads, media*, each linking to its workspace's Storage tab.
+- **Ship → Apps → an app → Services:** the **Storage** card lists what the app mounts, each linking
+  to the Storage tab, and *Choose storage* opens the picker (`set_app_stores`).
+
+Saving rolls the workload's pods. `frontend/checks/store-mounts.mjs` screenshots the tab, the
+delete dialog, Services, the Storage dialog and an app's Services tab at 1440 and 390 px against
+mocked `/v1` answers.
 
 Old links: `/train/data#storage` goes to `/drives?tab=storage` (`movedFromDatasets`), and
 `/drives#storage` opens the tab too.

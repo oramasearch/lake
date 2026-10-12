@@ -6,9 +6,8 @@
 // The statements below are copied verbatim from oramasearch/orama-operator at 188f8ac
 // (internal/controller/*_pgx.go); the workspace and volume snapshot statements (operator#259,
 // operator#260) are copied from oramasearch/orama-operator at 6c32fea (PR #267), and the workload
-// resources statements (lake#643) from b70dab1 (PR #288). The store mount statements (lake#666) are
-// lake's, written with the contract before the operator's pull request; the operator uses them as
-// they are. When the operator changes one of them, copy it here again; when
+// resources statements (lake#643) from b70dab1 (PR #288). The store mount and usage statements (lake#666)
+// from orama-operator PR #294. When the operator changes one of them, copy it here again; when
 // lake changes a table the operator reads, this test says which statement breaks.
 
 #include "lake/control/agent_runs.hpp"
@@ -66,12 +65,21 @@ constexpr std::string_view listStoreMountsSQL =
        s.slug, s.type, s.provider, s.name, s.desired
   FROM store_mounts m
   JOIN stores s ON s.id = m.store_id
- ORDER BY m.object_kind, m.object_id, s.name)";
+ ORDER BY m.object_kind, m.object_id, s.name, m.store_id)";
+
+// internal/controller/lake_stores_pgx.go (lake#666): the used bytes already written, so the
+// operator rewrites one only when it moved by more than 1 MiB or 15 minutes passed.
+constexpr std::string_view listStoreUsageSQL =
+    R"(SELECT store_id::text, used_bytes, used_bytes_at
+  FROM store_status
+ WHERE used_bytes IS NOT NULL)";
 
 // internal/controller/lake_stores_pgx.go (lake#666): a volume's bytes in use, from the kubelet's
 // volume stats of the pod that mounts it.
 constexpr std::string_view updateStoreUsedBytesSQL =
-    R"(UPDATE store_status SET used_bytes = $2, used_bytes_at = now() WHERE store_id = $1::uuid)";
+    R"(UPDATE store_status
+   SET used_bytes = $2, used_bytes_at = now()
+ WHERE store_id = $1::uuid)";
 
 // internal/controller/lake_services_pgx.go
 constexpr std::string_view listServicesSQL =
@@ -322,6 +330,7 @@ const std::vector<OperatorStatement>& operator_statements() {
         {"lake_stores_pgx.go", "listStoresSQL", listStoresSQL, true},
         {"lake_stores_pgx.go", "upsertStoreStatusSQL", upsertStoreStatusSQL},
         {"lake_stores_pgx.go", "listStoreMountsSQL", listStoreMountsSQL, true},
+        {"lake_stores_pgx.go", "listStoreUsageSQL", listStoreUsageSQL},
         {"lake_stores_pgx.go", "updateStoreUsedBytesSQL", updateStoreUsedBytesSQL},
         {"lake_services_pgx.go", "listServicesSQL", listServicesSQL, true},
         {"lake_services_pgx.go", "upsertServiceStatusSQL", upsertServiceStatusSQL},
@@ -418,7 +427,7 @@ TEST(OperatorContract, RowsLakeWritesAppearInTheOperatorsPolls) {
                                             .port = 3000,
                                             .host = "contract.test",
                                             // lake#666: the app mounts the volume.
-                                            .stores = {{created_store->id, "/data", false}}});
+                                            .stores = {{created_store->id, "/srv/uploads", false}}});
     ASSERT_TRUE(app) << app.error().message;
     const auto build = store->create_build({.customer_id = customer->id,
                                             .workspace_id = workspace->id,
@@ -494,7 +503,7 @@ TEST(OperatorContract, RowsLakeWritesAppearInTheOperatorsPolls) {
         ASSERT_EQ(mounts.size(), 1U);
         EXPECT_EQ(mounts[0][1].as<std::string>(), "app");
         EXPECT_EQ(mounts[0][2].as<std::string>(), app->id);
-        EXPECT_EQ(mounts[0][3].as<std::string>(), "/data");
+        EXPECT_EQ(mounts[0][3].as<std::string>(), "/srv/uploads");
         EXPECT_FALSE(mounts[0][4].as<bool>());
         EXPECT_EQ(mounts[0][5].as<std::string>(), created_store->slug);
         tx.exec_params(std::string(upsertStoreStatusSQL),
@@ -513,6 +522,13 @@ TEST(OperatorContract, RowsLakeWritesAppearInTheOperatorsPolls) {
     EXPECT_EQ(measured->front().used_bytes, std::int64_t{3 * 1024 * 1024});
     EXPECT_FALSE(measured->front().used_bytes_at.empty());
     ASSERT_EQ(measured->front().mounted_by.size(), 1U);
+    {
+        pqxx::work tx(connection);
+        const pqxx::result usage = tx.exec(std::string(listStoreUsageSQL));
+        ASSERT_EQ(usage.size(), 1U);
+        EXPECT_EQ(usage[0][0].as<std::string>(), created_store->id);
+        EXPECT_EQ(usage[0][1].as<std::int64_t>(), 3 * 1024 * 1024);
+    }
     EXPECT_EQ(measured->front().mounted_by.front().workload_name, "app");
 }
 

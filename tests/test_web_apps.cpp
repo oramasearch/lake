@@ -632,7 +632,7 @@ TEST(WebApps, ServicesAndAppsMountStorageAndListStoresSaysWho) {
         apps.call("create_service",
                   {{"kind", "postgres"},
                    {"name", "orders"},
-                   {"stores", {{{"store_id", uploads}, {"mount_path", "/data"}}}}});
+                   {"stores", {{{"store_id", uploads}, {"mount_path", "/srv/uploads"}}}}});
     ASSERT_FALSE(postgres.ok);
     EXPECT_EQ(postgres.error.code, "invalid_input");
     EXPECT_EQ(postgres.error.path, "/stores");
@@ -664,11 +664,21 @@ TEST(WebApps, ServicesAndAppsMountStorageAndListStoresSaysWho) {
                          {"stores", {{{"store_id", uploads}, {"mount_path", "/a/../etc"}}}}})
                   .error.code,
               "invalid_input");
+    // The workload's own directories are not mount points.
+    for (const char* reserved : {"/data", "/tmp/x", "/"}) {
+        EXPECT_EQ(apps.call("create_service",
+                            {{"kind", "sqlite"},
+                             {"name", "db"},
+                             {"stores", {{{"store_id", uploads}, {"mount_path", reserved}}}}})
+                      .error.path,
+                  "/stores/0/mount_path")
+            << reserved;
+    }
     const auto foreign =
         apps.call("create_service",
                   {{"kind", "sqlite"},
                    {"name", "db"},
-                   {"stores", {{{"store_id", elsewhere}, {"mount_path", "/data"}}}}});
+                   {"stores", {{{"store_id", elsewhere}, {"mount_path", "/srv/uploads"}}}}});
     ASSERT_FALSE(foreign.ok);
     EXPECT_EQ(foreign.error.code, "not_found");
     EXPECT_EQ(foreign.error.path, "/stores/0/store_id");
@@ -676,11 +686,11 @@ TEST(WebApps, ServicesAndAppsMountStorageAndListStoresSaysWho) {
     const auto db = apps.call("create_service",
                               {{"kind", "sqlite"},
                                {"name", "db"},
-                               {"stores", {{{"store_id", uploads}, {"mount_path", "/data"}}}}});
+                               {"stores", {{{"store_id", uploads}, {"mount_path", "/srv/uploads"}}}}});
     ASSERT_TRUE(db.ok) << db.error.message;
     ASSERT_EQ(db.value.at("stores").size(), 1U);
     EXPECT_EQ(db.value["stores"][0]["name"], "uploads");
-    EXPECT_EQ(db.value["stores"][0]["mount_path"], "/data");
+    EXPECT_EQ(db.value["stores"][0]["mount_path"], "/srv/uploads");
     EXPECT_EQ(db.value["stores"][0]["read_only"], false);
     const std::string db_id = db.value.at("id");
 
@@ -691,7 +701,7 @@ TEST(WebApps, ServicesAndAppsMountStorageAndListStoresSaysWho) {
     EXPECT_EQ(created.value.at("stores"), json::array());
     const auto taken = apps.call(
         "set_app_stores",
-        {{"app_id", app_id}, {"stores", {{{"store_id", uploads}, {"mount_path", "/data"}}}}});
+        {{"app_id", app_id}, {"stores", {{{"store_id", uploads}, {"mount_path", "/srv/uploads"}}}}});
     ASSERT_FALSE(taken.ok);
     EXPECT_EQ(taken.error.code, "conflict");
     EXPECT_NE(taken.error.message.find("service db"), std::string::npos) << taken.error.message;
@@ -738,7 +748,7 @@ TEST(WebApps, ServicesAndAppsMountStorageAndListStoresSaysWho) {
               json::array({{{"kind", "service"},
                             {"id", db_id},
                             {"name", "db"},
-                            {"mount_path", "/data"},
+                            {"mount_path", "/srv/uploads"},
                             {"read_only", false}}}));
     EXPECT_EQ(volume->at("used_bytes"), 5 * 1024 * 1024);
     EXPECT_TRUE(volume->at("used_bytes_at").is_string());
@@ -792,7 +802,7 @@ TEST(WebApps, ServicesAndAppsMountStorageAndListStoresSaysWho) {
     ASSERT_TRUE(gone.ok) << gone.error.message;
     EXPECT_EQ(apps.call("set_app_stores",
                         {{"app_id", gone.value.at("id")},
-                         {"stores", {{{"store_id", uploads}, {"mount_path", "/data"}}}}})
+                         {"stores", {{{"store_id", uploads}, {"mount_path", "/srv/uploads"}}}}})
                   .error.code,
               "invalid_input");
 }

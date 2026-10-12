@@ -367,9 +367,9 @@ mounts (lake writes it when a service or an app is created or edited with `store
 workload's generation and notifies `lake_services`): `store_id`, `object_kind` (`service` or
 `app`), `object_id`, `mount_path` (a volume's absolute path in the containers; '' for a bucket,
 which is mounted as environment variables) and `read_only`. It also adds `store_status.used_bytes`
-and `used_bytes_at`, which the Orama operator writes when it can measure a store's used space.
+and `used_bytes_at`, which the Orama operator writes when it can measure a store's bytes in use.
 Ids, a path and a flag only. Nothing is dropped; idempotent. The latest guard is
 `store_mounts_guard`; the operator must vendor this schema, select that guard, mount the stores and
-report used space before rollout. See
+report bytes in use before rollout. See
 [storage.md](../docs/control-plane/storage.md#mounts) and
 [schema.md](../docs/control-plane/schema.md#store-mounts-migration).

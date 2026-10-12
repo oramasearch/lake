@@ -601,7 +601,7 @@ const std::vector<Flow>& flows() {
           {"store_connection", "the claim, namespace, size and storage class to mount"},
           {"create_service",
            "`kind: \"sqlite\"` (or duckdb, polars), `stores: [{store_id, mount_path: "
-           "\"/data\"}]`; set_service_stores or set_app_stores mounts it into one that exists "
+           "\"/mnt/uploads\"}]`; set_service_stores or set_app_stores mounts it into one that exists "
            "(a volume into one service or app)"},
           {"list_stores", "`mounted_by` names the services and apps that mount it, `used_bytes` "
                           "what is used (null until measured)"}}},

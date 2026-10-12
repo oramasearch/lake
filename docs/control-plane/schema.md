@@ -961,7 +961,7 @@ store is used ([`storage.md#mounts`](storage.md#mounts)):
 
 Content-free desired state: ids, a path and a flag. Nothing is dropped; idempotent; guard
 `store_mounts_guard`. The operator vendors the schema, selects that guard, mounts the stores into
-the workloads' pods and reports used space in its own pull request before a lake with this change
+the workloads' pods and reports bytes in use in its own pull request before a lake with this change
 is rolled.
 
 ## Repository workspaces migration

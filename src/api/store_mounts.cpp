@@ -121,7 +121,7 @@ checked_store_mounts(const json& stores,
             if (mount.mount_path.empty()) {
                 return std::unexpected(ApiResult::failure(
                     "invalid_input",
-                    "a volume is mounted at a path: give mount_path, for example /data",
+                    "a volume is mounted at a path: give mount_path, for example /mnt/uploads",
                     at + "/mount_path"));
             }
             if (!control::valid_mount_path(mount.mount_path) ||
@@ -132,6 +132,14 @@ checked_store_mounts(const json& stores,
                     "invalid_input",
                     "mount_path must be an absolute path of letters, digits, '.', '_', '-' and "
                     "'/', at most 256 characters, without '..' or '//'",
+                    at + "/mount_path"));
+            }
+            if (control::reserved_mount_path(mount.mount_path)) {
+                return std::unexpected(ApiResult::failure(
+                    "invalid_input",
+                    "mount_path " + mount.mount_path +
+                        " is kept for the workload itself (/, /data, /tmp, /proc, /sys, /dev and "
+                        "beneath); choose another, for example /mnt/" + found->name,
                     at + "/mount_path"));
             }
         } else if (found->type == "object" && control::cloud_bucket_provider(found->provider)) {

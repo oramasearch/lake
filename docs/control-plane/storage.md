@@ -66,7 +66,7 @@ content.
 
 | Store | Mounted by | `mount_path` | What the operator gives the workload's containers |
 |---|---|---|---|
-| `volume` (`ReadWriteOnce`) | at most one workload; a second is refused (`conflict`, naming who mounts it) | required, absolute (`^/[A-Za-z0-9._/-]{1,255}$`) | the claim `<lake>-<slug>` mounted at `mount_path`, read-only when `read_only` |
+| `volume` (`ReadWriteOnce`) | at most one workload; a second is refused (`conflict`, naming who mounts it) | required, absolute (`^/[A-Za-z0-9._/-]{1,255}$`), not `/`, `/data`, `/tmp`, `/proc`, `/sys`, `/dev` or beneath (lake refuses them; the operator skips them) | the claim `<lake>-<slug>` mounted at `mount_path`, read-only when `read_only` |
 | bucket (`r2`, `s3`, `b2`, `gcs`, `azure`) | any number of workloads | none (`''`) | the connection as environment variables, prefix `STORE_<NAME>_` (the store name upper-cased, `-` to `_`): `_BUCKET`, `_ENDPOINT`, `_REGION`, `_PREFIX`, and the credential fields from Secret `<lake>-<slug>` (`_ACCESS_KEY_ID`, `_SECRET_ACCESS_KEY`, `_SESSION_TOKEN` / `_ACCOUNT_KEY`, `_SAS_TOKEN`, each optional) |
 | Lake-run (`zetta`, `lake`) | not mountable: lake refuses it (`invalid_input`); the workspace reads it through Lake | | |
 
@@ -81,7 +81,7 @@ Deleting a service or an app removes its mounts in the same transaction. Deletin
 mounted is refused (`conflict`, naming the services and apps that mount it): remove it from them
 first, so a workload never loses a volume it was given without being told.
 
-**Used space.** `store_status.used_bytes` and `used_bytes_at` are written by the operator only:
+**Bytes in use.** `store_status.used_bytes` and `used_bytes_at` are written by the operator only:
 for a volume, from the kubelet's volume stats of the pod that mounts it (null until it is mounted
 and measured). The row is not rewritten on every poll unless the value moved by more than 1 MiB or
 15 minutes passed.
@@ -93,16 +93,24 @@ read_only}]`.
 
 **What the operator reads and writes.** Its polls read the mounts joined to the stores, and it
 writes a volume's used bytes; both statements are copied in `tests/test_operator_contract.cpp`
-(`listStoreMountsSQL`, `updateStoreUsedBytesSQL`):
+(`listStoreMountsSQL`, `listStoreUsageSQL`, `updateStoreUsedBytesSQL`, from orama-operator PR #294);
+the operator measures at most once a minute and writes only a move of more than 1 MiB or after 15
+minutes:
 
 ```sql
 SELECT m.store_id::text, m.object_kind, m.object_id::text, m.mount_path, m.read_only,
        s.slug, s.type, s.provider, s.name, s.desired
   FROM store_mounts m
   JOIN stores s ON s.id = m.store_id
- ORDER BY m.object_kind, m.object_id, s.name;
+ ORDER BY m.object_kind, m.object_id, s.name, m.store_id;
 
-UPDATE store_status SET used_bytes = $2, used_bytes_at = now() WHERE store_id = $1::uuid;
+SELECT store_id::text, used_bytes, used_bytes_at
+  FROM store_status
+ WHERE used_bytes IS NOT NULL;
+
+UPDATE store_status
+   SET used_bytes = $2, used_bytes_at = now()
+ WHERE store_id = $1::uuid;
 ```
 
 The status upsert (`upsertStoreStatusSQL`) leaves `used_bytes` alone, so a phase change never
@@ -142,7 +150,7 @@ after the services:
   Every capability but `list_store_providers` takes the workspace (from the `/w/<id>/` URL, the
   agent task, or the input) and sees only that workspace's stores; another workspace's store is
   `not_found`.
-- **Data → Drives → Storage** (lake#656; before, Train → Data → Storage): the stores with type, provider, size and used space, who mounts each, status and endpoint; *New storage*
+- **Data → Drives → Storage** (lake#656; before, Train → Data → Storage): the stores with type, provider, size and bytes in use, who mounts each, status and endpoint; *New storage*
   (type and provider as one choice of the available pairs, name, size); *Show connection*; delete
   with typed confirmation.
 

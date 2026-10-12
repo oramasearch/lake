@@ -65,8 +65,25 @@ inline bool valid_mount_path(std::string_view path) {
     });
 }
 
+// Paths a store is never mounted at, nor beneath: the root, the directories the operator's
+// wrapper services keep their own volumes at (/data, /tmp), and the kernel's.
+inline bool reserved_mount_path(std::string_view path) {
+    while (path.size() > 1 && path.back() == '/') {
+        path.remove_suffix(1);
+    }
+    if (path == "/") {
+        return true;
+    }
+    for (std::string_view reserved : {"/data", "/tmp", "/proc", "/sys", "/dev"}) {
+        if (path == reserved || (path.starts_with(reserved) && path[reserved.size()] == '/')) {
+            return true;
+        }
+    }
+    return false;
+}
+
 // Why a mounted store is not deleted: "the store uploads is mounted by the service crm and the app
-// site; remove it from them first" (delete_store's conflict, lake#666).
+// site; remove the mounts first" (delete_store's conflict, lake#666).
 inline std::string mounted_by_message(const std::vector<StoreMount>& mounts) {
     std::string named;
     for (std::size_t i = 0; i < mounts.size(); ++i) {
@@ -77,8 +94,8 @@ inline std::string mounted_by_message(const std::vector<StoreMount>& mounts) {
                  (mounts[i].workload_name.empty() ? mounts[i].object_id : mounts[i].workload_name);
     }
     const std::string store = mounts.empty() ? std::string("it") : mounts.front().store_name;
-    return "the store " + store + " is mounted by " + named + "; remove it from " +
-           (mounts.size() == 1 ? "it" : "them") + " first";
+    return "the store " + store + " is mounted by " + named + "; remove " +
+           (mounts.size() == 1 ? "the mount" : "the mounts") + " first";
 }
 
 } // namespace lake::control
