@@ -328,6 +328,9 @@ static and lifetime amplification, permitted descendants, recursive session/devi
 expired PostgreSQL ancestors, application-pool issuance without an additional JWT, and one signed audit event per call without bearer values. Each
 PostgreSQL case owns an isolated schema in `LAKE_TEST_DB_URI` and removes it afterward. Run the
 full static and shared CTest suites with PostgreSQL configured; see `docs/api/identity.md`.
+`PostgresSessions.AnExpiredCredentialIsToldApartFromAnUnknownOne` (`test_postgres.cpp`) issues an
+hour-long token, proves it live, then moves its `expires_at` into the past with SQL instead of
+sleeping past a one-second lifetime, so a loaded host cannot expire it early or late (lake#679).
 
 `Mcp.ToolSchemasAreByteIdenticalToOpenApi` (`test_api.cpp`) compares every MCP tool's input and
 output schema with its OpenAPI operation, byte for byte, for callers and agent-task credentials;
