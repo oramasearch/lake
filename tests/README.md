@@ -126,6 +126,10 @@ and schema-loads a fresh database on first use in each test and drops it after f
 untouched. Each test receives a random `LAKE_INSTANCE_KEK`. See
 [`testing.md`](../docs/build/testing.md) for ownership, assertion patterns, and the sweep.
 `audit_test_support.hpp` exhausts append-order pages; use exact request filters for specific calls.
+`test_store_providers.cpp` (lake#664) runs one conformance suite against every store provider, each
+over a local fake of it in `store_provider_fakes.hpp` (an S3 server and an Azure Blob server that
+check every signature, and a liquid repository branch), plus the workspace Zetta fakes; SigV4 is
+pinned to the AWS examples and Shared Key to an independently computed signature.
 `drive_history_support.hpp` is the Drive overwrite exercise of lake#123 (upload twice, history,
 comparison, restore and deletion, through the HTTP API) over any running Lake; the Postgres
 scenario and `WorkspaceStoreDrive.*` (account store and switched workspace store) both run it.

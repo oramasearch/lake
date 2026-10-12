@@ -137,7 +137,23 @@ nlohmann::json store_json(const ManagedStore& store) {
             {"message", store.message},
             {"endpoint", store.endpoint},
             {"observed_generation", store.observed_generation},
-            {"created_at", store.created_at}};
+            {"created_at", store.created_at},
+            {"location", store_location_json(store)}};
+}
+
+nlohmann::json store_location_json(const ManagedStore& store) {
+    if (!store.bucket.empty()) {
+        return {{"bucket", store.bucket},
+                {"endpoint", store.endpoint_url},
+                {"region", store.region},
+                {"prefix", store.prefix},
+                {"credential",
+                 {{"mount_id", store.credential_mount_id}, {"name", store.credential_name}}}};
+    }
+    if (!store.repository_id.empty()) {
+        return {{"repository_id", store.repository_id}};
+    }
+    return nullptr;
 }
 
 nlohmann::json WorkspaceState::to_json() const {

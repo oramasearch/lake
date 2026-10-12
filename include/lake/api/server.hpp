@@ -165,9 +165,13 @@ struct ServerOptions {
     // development and tests only), and an injected transport (tests); null: the server's own.
     bool mcp_allow_private_addresses = false;
     std::shared_ptr<McpHttp> mcp_http;
-    // An injected store browser (tests' fakes; lake#656). Empty: no bucket or filesystem provider
-    // is browsable yet (lake#664).
+    // How a customer's own bucket is browsed as a drive (lake#664, docs/api/storage.md): an
+    // injected browser (tests' fakes), else control::cloud_store_browser over the server's own
+    // public-only transport. `store_allow_private_addresses` (LAKE_STORE_ALLOW_PRIVATE_ADDRESSES=1,
+    // local development against a bucket on this machine or a private network) also lets it reach
+    // loopback and private addresses.
     control::StoreBrowser store_browser;
+    bool store_allow_private_addresses = false;
     // The model gateway (docs/api/model-gateway.md, lake#248): agents' model calls go to
     // `model_provider_url` (LAKE_MODEL_PROVIDER_URL, empty: OpenAI's API) with `openai_api_key`,
     // Orama's own key. `model_provider` is an injected provider (tests); empty: that one over the

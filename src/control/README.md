@@ -258,3 +258,9 @@ open and silent. It never sends a request twice; `ZettaObjectClient` keeps the r
 Both stores keep `workload_resources` rows (lake#643): PostgreSQL in the operator-written table, the
 memory store in a map keyed by kind and id; prices and invoice lines carry their `class`, and the
 memory store's `age_build` moves a build's request time back for tests.
+
+Store drives (lake#664, [storage.md](../../docs/api/storage.md#browsing-a-store)):
+`store_buckets.cpp` is one `BucketContents` (folders as `<path>/` prefixes and markers) over a small
+object protocol with two implementations, S3 (SigV4, `ListObjectsV2`, ranged `GET`, `PUT`, copy and
+`DELETE`) and Azure Blob (Shared Key or SAS), its own XML reader and no provider SDK;
+`store_kept.cpp` keeps a `zetta` store as sealed records and sealed objects in the workspace Zetta.

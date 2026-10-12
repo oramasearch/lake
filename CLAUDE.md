@@ -72,8 +72,14 @@ whose Load data picks from them; old `?browse=`/`#connections` links redirect
 bucket or filesystem store opens as a fourth drive kind, `store` (lake#656, no migration):
 `create_drive {storage: "store", store_id}` and the entry capabilities browse it in place through
 `control::StoreContents` and the injected `StoreBrowser` (an item's id is its path; deleting the
-drive never deletes the store; a volume is refused). No provider is browsable yet, so without a
-browser it answers `not_supported` (lake#664); which services and apps mount a store is not
+drive never deletes the store; a volume is refused). Every bucket and filesystem pair is offered
+and browsable (lake#664, no migration): the customer's own bucket (`r2`, `s3`, `b2`, `gcs`, `azure`)
+named with a secret of the workspace's secret store (decision 58, never Orama's) and reached by
+Lake's own S3 (SigV4) and Azure Blob clients (no SDK) over a public-only transport
+(`control::cloud_store_browser`); a `zetta` store kept as sealed `lake_store_items` records and a
+sealed `lake_st_<hex>` bucket in the workspace Zetta; a `lake` store on a liquid repository's
+`main`. One conformance suite runs against each over a local fake. Not deployed: the operator must
+reconcile them first (orama-operator#294). Which services and apps mount a store is not
 recorded (lake#666). Not deployed. See `docs/api/drives.md#store-drives` and
 `docs/ui/drives.md#storage`.
 

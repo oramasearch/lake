@@ -83,6 +83,11 @@ for each tool, the auto-approve grants and the streams, with its credential only
 bearer token format `<workspace id>.<link id>.<secret>` that routes a recipient to the workspace.
 `Store` keeps only the content-free route of a pre-move token (`drive_share_link_route`); the
 retired `drive_share_links` table and its legacy reads are gone (migration `0070`).
+`store_contents.hpp` is the interface a store drive browses (lake#656) and `StoreOpening`, what Lake
+hands a `StoreBrowser` (the store, its connection, the workspace secret's fields; lake#664);
+`store_buckets.hpp` is Lake's own S3 (SigV4) and Azure Blob (Shared Key or SAS) clients over an
+injected `StoreHttp`, and `cloud_store_browser`; `store_kept.hpp` a `zetta` store's sealed
+`lake_store_items` records and `lake_st_<hex>` bucket (`docs/api/storage.md#browsing-a-store`).
 `forge_records.hpp` is the forge record codec (lake#341): a mutable record per issue, comment,
 review, release, webhook, delivery, export or rule, in the workspace of its repository's workspace,
 keyed by its id and found by repository and kind (`forge_record_lookup`). `ForgeRecord` carries the

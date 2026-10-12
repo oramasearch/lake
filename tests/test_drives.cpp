@@ -33,10 +33,13 @@
 #include "lake/control/drive_files.hpp"
 #include "lake/control/drives.hpp"
 #include "lake/control/memory_store.hpp"
+#include "lake/control/store_buckets.hpp"
 #include "lake/control/store_contents.hpp"
+#include "lake/control/store_kept.hpp"
 #include "lake/control/zetta_workspace.hpp"
 #include "lake/search/index.hpp"
 #include "one_thread_io.hpp"
+#include "store_provider_fakes.hpp"
 #include "stream_fixture.hpp"
 #include "temporary_directory.hpp"
 #include "zetta_object_fixture.hpp"
@@ -333,8 +336,8 @@ private:
 };
 
 // A store of the space's first workspace as the operator leaves it: Ready, with its connection
-// delivered beside the services'. Written past the provider table, as the operator test does,
-// since no bucket is offered yet (lake#664).
+// delivered beside the services'. Written straight to the store, past create_store's checks of a
+// bucket's location and secret, which test_store_providers.cpp covers.
 lake::control::ManagedStore ready_store(Spaces& s,
                                         const Spaces::Space& space,
                                         std::string type,
@@ -1500,10 +1503,12 @@ TEST(Drives, AStoreDriveBrowsesItsStoreInPlaceAndLeavesItWhenDeleted) {
     contents->files["Reports/q3.csv"] = "account,plan\n1,pro\n";
     contents->folders.insert("Reports");
     std::vector<std::string> opened;
-    s.browser = [&](const lake::control::ManagedStore& store, const json& connection)
+    s.browser = [&](const lake::control::StoreOpening& opening)
         -> lake::control::ZettaControlResult<std::shared_ptr<lake::control::StoreContents>> {
-        opened.push_back(store.id);
-        EXPECT_EQ(connection.value("bucket", ""), store.slug) << "the operator's connection";
+        opened.push_back(opening.store.id);
+        EXPECT_EQ(opening.connection.value("bucket", ""), opening.store.slug)
+            << "the operator's connection";
+        EXPECT_TRUE(opening.credential.empty()) << "the store names no secret";
         return std::shared_ptr<lake::control::StoreContents>(contents);
     };
 
@@ -1657,15 +1662,14 @@ TEST(Drives, AVolumeIsShownNotBrowsedAndAStoreLakeCannotBrowseIsRefused) {
         return s.in(
             first, "create_drive", {{"name", name}, {"storage", "store"}, {"store_id", store_id}});
     };
-    // No store browser, as on a Lake that browses no provider yet.
+    // No store browser, as on a Lake not configured to reach external buckets.
     const ApiResult refused = create("Archive", bucket.id);
     EXPECT_EQ(refused.error.code, "not_supported");
     EXPECT_EQ(refused.error.path, "/store_id");
-    EXPECT_NE(refused.error.message.find("Bucket — AWS S3"), std::string::npos)
+    EXPECT_NE(refused.error.message.find("Bucket — your AWS S3 bucket"), std::string::npos)
         << refused.error.message;
-    EXPECT_NE(refused.error.message.find(lake::control::store_browse_issue), std::string::npos);
 
-    s.browser = [](const lake::control::ManagedStore&, const json&)
+    s.browser = [](const lake::control::StoreOpening&)
         -> lake::control::ZettaControlResult<std::shared_ptr<lake::control::StoreContents>> {
         return std::shared_ptr<lake::control::StoreContents>(std::make_shared<FakeBucket>());
     };
@@ -1683,4 +1687,168 @@ TEST(Drives, AVolumeIsShownNotBrowsedAndAStoreLakeCannotBrowseIsRefused) {
     EXPECT_EQ(lake::control::join_store_path("", "a"), "a");
     EXPECT_EQ(lake::control::store_parent("a/b/c"), "a/b");
     EXPECT_EQ(lake::control::store_name("a/b/c"), "c");
+}
+
+// The operator's side of a store it reconciles: Ready, with its connection delivered.
+void deliver(Spaces& s, const json& store) {
+    EXPECT_TRUE(s.store->set_store_status(store["id"], "Ready", "", ""));
+    std::ofstream(s.dir / (store["slug"].get<std::string>() + ".json"))
+        << json{{"type", store["type"]}, {"provider", store["provider"]}}.dump();
+}
+
+TEST(Drives, YourOwnBucketIsNamedWithAWorkspaceSecretAndOpensAsADrive) {
+    Spaces s;
+    const auto& first = s.spaces[0];
+    lake::test::stores::FakeS3 r2;
+    s.browser = lake::control::cloud_store_browser(
+        r2.http(), [] { return lake::test::stores::at(2026, 10, 11, 12); });
+    const ApiResult mount = s.in(first, "create_secret_mount", {{"name", "buckets"}});
+    ASSERT_TRUE(mount.ok) << mount.error.message;
+    const std::string mount_id = mount.value["id"];
+    ASSERT_TRUE(s.call(first,
+                       "put_secret",
+                       {{"mount_id", mount_id},
+                        {"name", "r2-keys"},
+                        {"value",
+                         {{"access_key_id", r2.access_key_id},
+                          {"secret_access_key", r2.secret_access_key}}}})
+                    .ok);
+    ASSERT_TRUE(s.call(first,
+                       "put_secret",
+                       {{"mount_id", mount_id}, {"name", "half"}, {"value", {{"access_key_id", "x"}}}})
+                    .ok);
+    const ApiResult elsewhere = s.in(first, "create_secret_mount", {{"name", "lab-buckets"}}, 1);
+    ASSERT_TRUE(elsewhere.ok) << elsewhere.error.message;
+
+    const json good{{"type", "object"},
+                    {"provider", "r2"},
+                    {"name", "media"},
+                    {"bucket", "media"},
+                    {"endpoint", "https://account.r2.cloudflarestorage.com/"},
+                    {"credential", {{"mount_id", mount_id}, {"name", "r2-keys"}}}};
+    const auto refused_at = [&](json change, std::string remove = {}) {
+        json input = good;
+        if (change.is_object()) {
+            input.update(change);
+        }
+        if (!remove.empty()) {
+            input.erase(remove);
+        }
+        const ApiResult refused = s.in(first, "create_store", input);
+        EXPECT_FALSE(refused.ok);
+        return refused.error.path;
+    };
+    EXPECT_EQ(refused_at(json::object(), "credential"), "/credential");
+    EXPECT_EQ(refused_at({{"size_gi", 10}}), "/size_gi") << "only a volume has a size";
+    EXPECT_EQ(refused_at(json::object(), "endpoint"), "/endpoint") << "an R2 bucket needs its account";
+    EXPECT_EQ(refused_at({{"endpoint", "http://account.r2.cloudflarestorage.com"}}), "/endpoint");
+    EXPECT_EQ(refused_at({{"bucket", "Media!"}}), "/bucket");
+    EXPECT_EQ(refused_at({{"prefix", "/top"}}), "/prefix");
+    EXPECT_EQ(refused_at({{"credential", {{"mount_id", elsewhere.value["id"]}, {"name", "r2-keys"}}}}),
+              "/credential/mount_id")
+        << "the secret is this workspace's";
+    EXPECT_EQ(refused_at({{"credential", {{"mount_id", mount_id}, {"name", "half"}}}}),
+              "/credential/name");
+    EXPECT_EQ(refused_at({{"credential", {{"mount_id", mount_id}, {"name", "missing"}}}}),
+              "/credential/name");
+    EXPECT_EQ(s.in(first,
+                   "create_store",
+                   {{"type", "volume"}, {"provider", "cluster"}, {"name", "disk"}, {"bucket", "media"}})
+                  .error.path,
+              "/bucket");
+
+    const ApiResult created = s.in(first, "create_store", good);
+    ASSERT_TRUE(created.ok) << created.error.message;
+    EXPECT_EQ(created.value["size_gi"], 0);
+    EXPECT_EQ(created.value["location"]["bucket"], "media");
+    EXPECT_EQ(created.value["location"]["endpoint"], "https://account.r2.cloudflarestorage.com");
+    EXPECT_EQ(created.value["location"]["credential"],
+              json({{"mount_id", mount_id}, {"name", "r2-keys"}}));
+    EXPECT_EQ(created.value.dump().find(r2.secret_access_key), std::string::npos)
+        << "a secret is named, never copied";
+    const ApiResult early = s.in(first,
+                                 "create_drive",
+                                 {{"name", "Media"}, {"storage", "store"}, {"store_id", created.value["id"]}});
+    EXPECT_EQ(early.error.code, "workspace_not_ready") << "until the operator has it Ready";
+    deliver(s, created.value);
+
+    const ApiResult drive = s.in(first,
+                                 "create_drive",
+                                 {{"name", "Media"}, {"storage", "store"}, {"store_id", created.value["id"]}});
+    ASSERT_TRUE(drive.ok) << drive.error.message;
+    const std::string id = drive.value["id"];
+    const ApiResult uploaded = s.in(first,
+                                    "upload_drive_entries",
+                                    {{"drive_id", id},
+                                     {"files",
+                                      json::array({{{"path", "2026/q3.csv"},
+                                                    {"content", base64("account,plan\n")}}})}});
+    ASSERT_TRUE(uploaded.ok) << uploaded.error.message;
+    EXPECT_EQ(r2.objects["2026/q3.csv"].bytes, "account,plan\n") << "the bytes are in the bucket";
+    const ApiResult listed = s.in(first, "list_drive_entries", {{"drive_id", id}, {"folder_id", "2026"}});
+    ASSERT_TRUE(listed.ok) << listed.error.message;
+    ASSERT_EQ(listed.value["items"].size(), 1U);
+    EXPECT_EQ(listed.value["items"][0]["path"], "2026/q3.csv");
+    const ApiResult read = s.in(first, "read_drive_file", {{"drive_id", id}, {"id", "2026/q3.csv"}});
+    ASSERT_TRUE(read.ok) << read.error.message;
+    EXPECT_EQ(read.value["content_base64"], base64("account,plan\n"));
+    EXPECT_TRUE(r2.signed_failures.empty());
+
+    // Deleting the storage forgets the bucket; what is in it stays in the customer's account.
+    ASSERT_TRUE(s.in(first, "delete_store", {{"store_id", created.value["id"]}, {"confirm", "media"}}).ok);
+    EXPECT_TRUE(r2.objects.contains("2026/q3.csv"));
+}
+
+TEST(Drives, AStoreKeptInTheWorkspaceZettaIsDeletedWithItsBytes) {
+    Spaces s;
+    const auto& first = s.spaces[0];
+    const ApiResult created = s.in(first,
+                                   "create_store",
+                                   {{"type", "filesystem"}, {"provider", "zetta"}, {"name", "scratch"}});
+    ASSERT_TRUE(created.ok) << created.error.message;
+    EXPECT_TRUE(created.value["location"].is_null());
+    EXPECT_EQ(s.in(first,
+                   "create_store",
+                   {{"type", "object"}, {"provider", "zetta"}, {"name", "other"}, {"size_gi", 5}})
+                  .error.path,
+              "/size_gi");
+    deliver(s, created.value);
+    const ApiResult drive = s.in(first,
+                                 "create_drive",
+                                 {{"name", "Scratch"}, {"storage", "store"}, {"store_id", created.value["id"]}});
+    ASSERT_TRUE(drive.ok) << drive.error.message;
+    ASSERT_TRUE(s.in(first,
+                     "upload_drive_entries",
+                     {{"drive_id", drive.value["id"]},
+                      {"files", json::array({{{"path", "a/b.txt"}, {"content", base64("kept")}}})}})
+                    .ok);
+    const std::string bucket = lake::control::kept_store_bucket(created.value["slug"].get<std::string>());
+    EXPECT_EQ(s.objects->objects(Spaces::url(first.workspaces[0]), bucket).size(), 1U);
+    const ApiResult read =
+        s.in(first, "read_drive_file", {{"drive_id", drive.value["id"]}, {"id", "a/b.txt"}});
+    ASSERT_TRUE(read.ok) << read.error.message;
+    EXPECT_EQ(read.value["content_base64"], base64("kept"));
+
+    ASSERT_TRUE(
+        s.in(first, "delete_store", {{"store_id", created.value["id"]}, {"confirm", "scratch"}}).ok);
+    EXPECT_TRUE(s.objects->objects(Spaces::url(first.workspaces[0]), bucket).empty())
+        << "Lake deletes the bytes it keeps";
+}
+
+TEST(Drives, ALakeStoreNamesARepositoryOfItsWorkspace) {
+    Spaces s;
+    const auto& first = s.spaces[0];
+    const ApiResult refused = s.in(first,
+                                   "create_store",
+                                   {{"type", "object"},
+                                    {"provider", "lake"},
+                                    {"name", "models"},
+                                    {"repository_id", "00000000-0000-4000-8000-000000000000"}});
+    EXPECT_EQ(refused.error.code, "not_found");
+    EXPECT_EQ(refused.error.path, "/repository_id");
+    EXPECT_EQ(s.in(first,
+                   "create_store",
+                   {{"type", "object"}, {"provider", "zetta"}, {"name", "x"}, {"repository_id", "r"}})
+                  .error.path,
+              "/repository_id");
 }

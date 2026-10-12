@@ -87,14 +87,24 @@ only now. It shows whether or not the workspace is ready (storage does not need 
 
 - **Figures:** Storage (how many, or how many are changing), Opens as a drive (Ready buckets and
   filesystems), Volumes (shown, not browsed) and Size (the GiB asked for, in all).
-- **The table:** each store's name with its type and provider in words (*Volume · cluster disk*),
-  its size, **This Month** (its `volumes` time from `usage_over_time` by object, linking to
+- **The table:** each store's name with its type and provider in words (*Volume · cluster disk*)
+  and, for your own bucket, its name and folder, its size (a volume's GiB; *—* for anything else), **This Month** (its `volumes` time from `usage_over_time` by object, linking to
   Usage), the status (Waiting for the operator, Creating, Connecting, Ready, Deleting, Failed) with
   the operator's message, the endpoint, and the actions: **Open as a drive** (a Ready bucket or
   filesystem, opening New drive with it chosen) or **Open drive** when a drive already opens it;
   a *Shown, not browsed* chip on a volume; **Show connection** once Ready; **Delete**.
-- **New storage** and **Delete** (the name typed) are the dialogs Datasets had; the list checks
-  again every 3 seconds while a store is changing.
+- **New storage** (lake#664) asks for the type and provider, a name, and what that pair needs
+  (`storeNeeds` in `stores.ts`): a volume's size; for **your own bucket** (Cloudflare R2, AWS S3,
+  Backblaze B2, Google Cloud Storage, Azure Blob) its name, the folder in it the storage covers,
+  the endpoint (`endpointHint`: required for R2 and Azure) and region, and the workspace secret
+  that opens it, as a secret mount of this workspace and the secret's name (the secret's value is
+  never typed here; the dialog says which fields it holds, `credentialFields`); for a **liquid
+  repository** one of the workspace's repositories, or a new one named after the storage; nothing
+  for storage **Lake keeps in the workspace**. A refusal is shown under its field (`fieldError`).
+- **Delete** (the name typed) warns according to what happens to the contents (`deleteWarning`):
+  a volume and storage Lake keeps in the workspace are deleted with their data; Lake only forgets
+  your own bucket and a repository, which keep what is in them. The list checks again every 3
+  seconds while a store is changing.
 - **Words.** A *drive* is where people work with files; *storage* is a bucket, filesystem or volume
   that holds bytes. The page says storage; the API's name is *store* (`list_stores`).
 - **Not shown yet:** which services and apps mount a store, a volume's link to that service and
@@ -123,5 +133,8 @@ shortcut selected (`focus`).
 plans, upload chunks, what each shortcut opens, which files load as datasets under which name,
 where each search match opens (`matchLink`, `matchWhere`, `folderKey`, `parentKey`), and the
 Storage tab (`stores.ts`: each store's state, the figures, which open as drives, a volume never),
-the storage drive kind, the old `#storage` link, and Datasets without storage or connections. `npx tsc --noEmit -p .`, `npm test` and
-`npm run build` from `frontend/`.
+the storage drive kind, the old `#storage` link, and Datasets without storage or connections, and
+New storage's fields and the delete warnings per provider (lake#664). `npx tsc --noEmit -p .`,
+`npm test` and `npm run build` from `frontend/`. `frontend/checks/storage.mjs` screenshots the
+Storage tab, New storage for each kind of provider and both delete warnings at 1440 and 390 px
+against mocked answers, and reports any sideways scroll or page error.

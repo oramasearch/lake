@@ -17,7 +17,7 @@ can do nothing the API cannot.
 - Data → MCP Connections, the remote MCP servers a workspace is a client of: [mcp-connections.md](mcp-connections.md).
 - Data → Drives, one file manager over repository, workspace-files and virtual drives: [drives.md](drives.md).
 - Data → Drives, one file manager over repository, workspace-files, virtual and storage drives,
-  and its Storage tab (lake#656): [drives.md](drives.md).
+  and its Storage tab (lake#656; New storage asks each provider for what it needs, lake#664): [drives.md](drives.md).
 - Data → Connections, the databases a workspace reads (lake#651): [connections.md](connections.md).
 - The Organization, Administration and Account pages: [organization.md](organization.md).
 - Deleting and revoking (organizations, invitations, grants, secret mounts, datasets, models,

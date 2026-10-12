@@ -3349,7 +3349,10 @@ public:
         "to_char(s.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), "
         "to_char(s.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), "
         "COALESCE(st.phase, ''), COALESCE(st.message, ''), COALESCE(st.endpoint, ''), "
-        "COALESCE(st.observed_generation, 0), COALESCE(s.workspace_id::text, '')";
+        "COALESCE(st.observed_generation, 0), COALESCE(s.workspace_id::text, ''), "
+        "COALESCE(s.spec->>'bucket', ''), COALESCE(s.spec->>'endpoint', ''), "
+        "COALESCE(s.spec->>'prefix', ''), COALESCE(s.spec->'credential'->>'mount_id', ''), "
+        "COALESCE(s.spec->'credential'->>'name', ''), COALESCE(s.spec->>'repository_id', '')";
 
     static ManagedService service_from(const pqxx::row& row) {
         ManagedService service;
@@ -4539,13 +4542,17 @@ public:
 
     static constexpr const char* store_columns =
         "s.id::text, s.customer_id::text, s.type, s.provider, s.name, s.slug, "
-        "COALESCE((s.spec->>'size_gi')::int, 10), COALESCE(s.spec->>'region', ''), "
+        "COALESCE((s.spec->>'size_gi')::int, CASE WHEN s.type = 'volume' THEN 10 ELSE 0 END), "
+        "COALESCE(s.spec->>'region', ''), "
         "COALESCE((s.spec->>'public')::boolean, false), "
         "s.desired, s.generation, s.created_by_taap_id, "
         "to_char(s.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), "
         "to_char(s.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), "
         "COALESCE(st.phase, ''), COALESCE(st.message, ''), COALESCE(st.endpoint, ''), "
-        "COALESCE(st.observed_generation, 0), COALESCE(s.workspace_id::text, '')";
+        "COALESCE(st.observed_generation, 0), COALESCE(s.workspace_id::text, ''), "
+        "COALESCE(s.spec->>'bucket', ''), COALESCE(s.spec->>'endpoint', ''), "
+        "COALESCE(s.spec->>'prefix', ''), COALESCE(s.spec->'credential'->>'mount_id', ''), "
+        "COALESCE(s.spec->'credential'->>'name', ''), COALESCE(s.spec->>'repository_id', '')";
 
     static ManagedStore store_from(const pqxx::row& row) {
         ManagedStore store;
@@ -4568,6 +4575,12 @@ public:
         store.endpoint = row[16].as<std::string>();
         store.observed_generation = row[17].as<std::int64_t>();
         store.workspace_id = row[18].as<std::string>();
+        store.bucket = row[19].as<std::string>();
+        store.endpoint_url = row[20].as<std::string>();
+        store.prefix = row[21].as<std::string>();
+        store.credential_mount_id = row[22].as<std::string>();
+        store.credential_name = row[23].as<std::string>();
+        store.repository_id = row[24].as<std::string>();
         return store;
     }
 
@@ -4626,8 +4639,7 @@ public:
                     StoreError{"conflict", "a store named " + in.name + " already exists"});
             }
             const std::string id = new_uuid_v4();
-            const nlohmann::json spec{
-                {"size_gi", in.size_gi}, {"region", in.region}, {"public", in.is_public}};
+            const nlohmann::json spec = store_spec(in);
             // The routing trigger refuses a store without a live workspace of this space.
             tx.exec_params("INSERT INTO stores (id, customer_id, type, provider, name, slug, spec, "
                            "created_by_taap_id, workspace_id) VALUES ($1::uuid, $2::uuid, $3, $4, "

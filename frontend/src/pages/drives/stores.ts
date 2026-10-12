@@ -63,3 +63,64 @@ export function storeFigures(stores: StoreRow[]): StoreFigures {
 export function driveForStore<T extends { store_id?: string | null }>(drives: T[], storeId: string): T | undefined {
   return drives.find((d) => d.store_id === storeId);
 }
+
+/** What New storage asks for beside the name (lake#664): a volume's size, your own bucket's
+ * location and the workspace secret that opens it, a liquid repository for a `lake` store, or
+ * nothing for a store Lake keeps in the workspace Zetta. */
+export function storeNeeds(type: string, provider: string): "size" | "bucket" | "repository" | "none" {
+  if (type === "volume") return "size";
+  if (type === "object" && ["r2", "s3", "b2", "gcs", "azure"].includes(provider)) return "bucket";
+  if (provider === "lake") return "repository";
+  return "none";
+}
+
+/** The endpoint a bucket form suggests, and whether it must be given (R2's account, Azure's
+ * account; B2 without a region). */
+export function endpointHint(provider: string): { placeholder: string; required: boolean; help: string } {
+  switch (provider) {
+    case "r2":
+      return { placeholder: "https://<account id>.r2.cloudflarestorage.com", required: true, help: "Your account's S3 API endpoint." };
+    case "azure":
+      return { placeholder: "https://<account>.blob.core.windows.net", required: true, help: "Your storage account's Blob endpoint." };
+    case "b2":
+      return { placeholder: "https://s3.<region>.backblazeb2.com", required: false, help: "Or leave it empty and give the region." };
+    case "gcs":
+      return { placeholder: "https://storage.googleapis.com", required: false, help: "Empty: Google Cloud Storage's XML API." };
+    default:
+      return { placeholder: "https://s3.<region>.amazonaws.com", required: false, help: "Empty: AWS S3 in the region below." };
+  }
+}
+
+/** The fields the workspace secret must hold for a bucket of this provider. */
+export function credentialFields(provider: string): string {
+  return provider === "azure" ? "account_key, or sas_token" : "access_key_id and secret_access_key";
+}
+
+/** What deleting a store does to what is in it: a volume's and a workspace Zetta store's data
+ * go with it; your own bucket and a `lake` store's repository stay. */
+export function deleteWarning(store: StoreRow): { tone: "warn" | "quiet"; text: string } {
+  const type = str(store, "type");
+  const provider = str(store, "provider");
+  if (storeNeeds(type, provider) === "bucket") {
+    return { tone: "quiet", text: "Lake forgets this bucket. The bucket and what is in it stay in your account. A drive that opens it stops working; delete that drive too." };
+  }
+  if (provider === "lake") {
+    return { tone: "quiet", text: "Lake forgets this storage. Its repository stays, with its history. A drive that opens it stops working; delete that drive too." };
+  }
+  return { tone: "warn", text: "Deleting storage deletes the data in it, which cannot be recovered. A drive that opens it stops working; delete that drive too." };
+}
+
+/** The size column: a volume's GiB asked for; nothing to ask for otherwise. */
+export function storeSizeText(store: StoreRow): string {
+  return str(store, "type") === "volume" ? `${str(store, "size_gi")} GiB` : "—";
+}
+
+/** Your own bucket's name and folder, shown under the storage's name. */
+export function storeWhere(store: StoreRow): string {
+  const location = (store.location ?? null) as StoreRow | null;
+  if (location && str(location, "bucket")) {
+    const prefix = str(location, "prefix");
+    return `${str(location, "bucket")}${prefix ? "/" + prefix : ""}`;
+  }
+  return "";
+}

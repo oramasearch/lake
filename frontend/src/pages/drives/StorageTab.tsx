@@ -7,14 +7,14 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
 import { Box, Gauge, HardDrive, Plus, Timer } from "lucide-react";
-import { act, useRead, type Row } from "@/lib/api";
+import { act, useList, useRead, type Row } from "@/lib/api";
 import { Modal } from "@/lib/overlay";
 import { useToast } from "@/lib/toast";
-import { Banner, Button, Card, Chip, DataTable, Empty, ErrorBlock, Field, Form, Mono, Query, Stat, StatRow, Status } from "@/lib/ui";
+import { Banner, Button, Card, Chip, DataTable, Empty, ErrorBlock, Field, Form, Mono, Query, Stat, StatRow, Status, fieldError } from "@/lib/ui";
 import { qs, text, useAsync, useSpaceRead, useWorkspace, useWsPath } from "@/pages/train/workspace";
 import { formatValue, usageLink, usageOf, windows, type Reading } from "@/pages/usage/usage";
 import type { Drive } from "./storage";
-import { browsable, driveForStore, phaseTone, storeFigures, storeKindWords, storePhase, storeSettled } from "./stores";
+import { browsable, credentialFields, deleteWarning, driveForStore, endpointHint, phaseTone, storeFigures, storeKindWords, storeNeeds, storePhase, storeSettled, storeSizeText, storeWhere } from "./stores";
 
 /** The workspace's stores, checked every 3 seconds while one is changing. */
 export function useStores() {
@@ -45,7 +45,7 @@ export function StorageTab({ drives, onOpenAsDrive }: { drives: Drive[]; onOpenA
   const show = useAsync();
   const [connection, setConnection] = useState<Row | null>(null);
   const [creating, setCreating] = useState(false);
-  const [deleting, setDeleting] = useState<{ id: string; name: string } | null>(null);
+  const [deleting, setDeleting] = useState<Row | null>(null);
   const newButton = (
     <Button onClick={() => setCreating(true)}>
       <Plus size={14} aria-hidden /> New storage
@@ -61,7 +61,7 @@ export function StorageTab({ drives, onOpenAsDrive }: { drives: Drive[]; onOpenA
       </StatRow>
       <Card label="Storage" title="Buckets, Filesystems and Volumes" actions={newButton}>
         <p className="muted mt-0 text-[12.5px]">
-          Storage for your services and apps, private to this workspace. A bucket or filesystem opens as a drive; a volume belongs to the service that mounts it. Each one's volume time is on{" "}
+          Storage for your services and apps, private to this workspace: a volume, your own bucket, or a bucket or filesystem Lake keeps for you. A bucket or filesystem opens as a drive; a volume belongs to the service that mounts it. Each volume's time is on{" "}
           <Link to={usageLink({ dimension: "volumes" })}>Usage</Link>.
         </p>
         {show.error ? <ErrorBlock error={show.error} /> : null}
@@ -69,7 +69,7 @@ export function StorageTab({ drives, onOpenAsDrive }: { drives: Drive[]; onOpenA
           {(value) =>
             (value.stores ?? []).length === 0 ? (
               <Empty compact icon={HardDrive} title="No storage yet" action={<Button onClick={() => setCreating(true)}>New storage</Button>}>
-                Create a volume your services can mount.
+                Create a volume your services can mount, connect your own bucket, or keep a filesystem in the workspace.
               </Empty>
             ) : (
               <DataTable<Row>
@@ -84,22 +84,24 @@ export function StorageTab({ drives, onOpenAsDrive }: { drives: Drive[]; onOpenA
                     sort: (s) => text(s, "name"),
                     render: (store) => {
                       const [type, provider] = storeKindWords(providerList, text(store, "type"), text(store, "provider"));
+                      const where = storeWhere(store);
                       return (
                         <div className="min-w-0">
                           <div className="font-semibold text-ink">{text(store, "name")}</div>
                           <div className="text-[12px] text-ink-3">
                             {type} · {provider}
                           </div>
+                          {where && <div className="truncate font-mono text-[12px] text-ink-3">{where}</div>}
                         </div>
                       );
                     },
                   },
-                  { key: "size", label: "Size", numeric: true, sort: (s) => Number(s.size_gi) || 0, render: (s) => <span className="font-mono">{text(s, "size_gi")} GiB</span> },
+                  { key: "size", label: "Size", numeric: true, sort: (s) => Number(s.size_gi) || 0, render: (s) => <span className="font-mono">{storeSizeText(s)}</span> },
                   {
                     key: "month",
                     label: "This Month",
                     render: (store) => {
-                      if (!usage.data) return <span className="text-ink-3">—</span>;
+                      if (!usage.data || text(store, "type") !== "volume") return <span className="text-ink-3">—</span>;
                       const [volumes] = usageOf(usage.data, [{ dimension: "volumes", breakdown: "by_object", keys: [text(store, "id")] }]);
                       return (
                         <Link to={usageLink({ dimension: "volumes" })} className="font-mono text-[12.5px] whitespace-nowrap tabular-nums text-inherit no-underline hover:underline">
@@ -161,7 +163,7 @@ export function StorageTab({ drives, onOpenAsDrive }: { drives: Drive[]; onOpenA
                               Show connection
                             </Button>
                           )}
-                          <Button variant="ghost" onClick={() => setDeleting({ id, name })}>
+                          <Button variant="ghost" onClick={() => setDeleting(store)}>
                             Delete
                           </Button>
                         </div>
@@ -176,7 +178,7 @@ export function StorageTab({ drives, onOpenAsDrive }: { drives: Drive[]; onOpenA
         {list.some((s) => !storeSettled(s)) && <Banner tone="quiet">This list checks again every 3 seconds while storage is changing.</Banner>}
       </Card>
       {creating && <NewStorage providers={providerList} providersError={providers.isError ? providers.error : null} onClose={() => setCreating(false)} />}
-      {deleting && <DeleteStore id={deleting.id} name={deleting.name} onClose={() => setDeleting(null)} onDeleted={() => toast(`Deleting ${deleting.name}`)} />}
+      {deleting && <DeleteStore store={deleting} onClose={() => setDeleting(null)} onDeleted={() => toast(`Deleting ${text(deleting, "name")}`)} />}
       {connection && (
         <Modal title={`Connection to ${text(connection, "name")}`} subtitle="What a service in your workspace mounts or calls to use it. It is not shown again unless you ask." onClose={() => setConnection(null)}>
           <dl>
@@ -197,9 +199,13 @@ export function StorageTab({ drives, onOpenAsDrive }: { drives: Drive[]; onOpenA
   );
 }
 
-/** Delete storage: the person types its name, which the server checks too. */
-function DeleteStore({ id, name, onClose, onDeleted }: { id: string; name: string; onClose: () => void; onDeleted: () => void }) {
+/** Delete storage: the person types its name, which the server checks too. The warning says what
+ * happens to what is in it (lake#664): your own bucket and a repository stay. */
+function DeleteStore({ store, onClose, onDeleted }: { store: Row; onClose: () => void; onDeleted: () => void }) {
   const scope = useWorkspace();
+  const id = text(store, "id");
+  const name = text(store, "name");
+  const warning = deleteWarning(store);
   const remove = useAsync();
   const [confirm, setConfirm] = useState("");
   return (
@@ -216,7 +222,7 @@ function DeleteStore({ id, name, onClose, onDeleted }: { id: string; name: strin
         </>
       }
     >
-      <Banner tone="warn">Deleting storage deletes the data in it, which cannot be recovered. A drive that opens it stops working; delete that drive too.</Banner>
+      <Banner tone={warning.tone}>{warning.text}</Banner>
       <Form
         id="delete-store"
         error={remove.error}
@@ -240,6 +246,10 @@ function DeleteStore({ id, name, onClose, onDeleted }: { id: string; name: strin
   );
 }
 
+/** New storage (lake#664): the type and provider, a name, and what that pair needs — a volume's
+ * size; your own bucket's name, endpoint, region, folder and the workspace secret that opens it
+ * (the secret is named, never typed here); a liquid repository for a `lake` store, or a new one
+ * named after the storage; nothing for a store Lake keeps in the workspace Zetta. */
 function NewStorage({ providers, providersError, onClose }: { providers: Row[]; providersError: unknown; onClose: () => void }) {
   const scope = useWorkspace();
   const toast = useToast();
@@ -249,7 +259,23 @@ function NewStorage({ providers, providersError, onClose }: { providers: Row[]; 
   const [store, setStore] = useState("");
   const [name, setName] = useState("");
   const [size, setSize] = useState("10");
+  const [bucket, setBucket] = useState("");
+  const [endpoint, setEndpoint] = useState("");
+  const [region, setRegion] = useState("");
+  const [prefix, setPrefix] = useState("");
+  const [mountId, setMountId] = useState("");
+  const [secretName, setSecretName] = useState("");
+  const [repositoryId, setRepositoryId] = useState("");
   const chosen = store || (available[0] ? `${text(available[0], "type")}:${text(available[0], "provider")}` : "");
+  const colon = chosen.indexOf(":");
+  const type = colon < 0 ? chosen : chosen.slice(0, colon);
+  const provider = colon < 0 ? "" : chosen.slice(colon + 1);
+  const needs = storeNeeds(type, provider);
+  const hint = endpointHint(provider);
+  const mounts = useList<Row>(needs === "bucket" ? "list_secret_mounts" : null, { customer_id: scope.customerId, workspace_id: scope.workspaceId, limit: 200 }, { pick: "items" });
+  const repositories = useList<Row>(needs === "repository" ? "list_repositories" : null, { customer_id: scope.customerId, limit: 500 }, { pick: "items" });
+  const workspaceRepositories = (repositories.data ?? []).filter((r) => !r.workspace_id || r.workspace_id === scope.workspaceId);
+  const error = create.error;
   return (
     <Modal
       title="New Storage"
@@ -266,18 +292,19 @@ function NewStorage({ providers, providersError, onClose }: { providers: Row[]; 
       {providersError ? <ErrorBlock error={providersError} what="storage providers" /> : null}
       <Form
         id="new-storage"
-        error={create.error}
+        error={error}
         onSubmit={() =>
           create.run(async () => {
-            const colon = chosen.indexOf(":");
-            const input: Row = {
-              customer_id: scope.customerId,
-              workspace_id: scope.workspaceId,
-              type: colon < 0 ? chosen : chosen.slice(0, colon),
-              provider: colon < 0 ? "" : chosen.slice(colon + 1),
-              name,
-            };
-            if (/^-?\d+$/.test(size)) input.size_gi = Number(size);
+            const input: Row = { customer_id: scope.customerId, workspace_id: scope.workspaceId, type, provider, name };
+            if (needs === "size" && /^-?\d+$/.test(size)) input.size_gi = Number(size);
+            if (needs === "bucket") {
+              input.bucket = bucket.trim();
+              if (endpoint.trim()) input.endpoint = endpoint.trim();
+              if (region.trim()) input.region = region.trim();
+              if (prefix.trim()) input.prefix = prefix.trim();
+              input.credential = { mount_id: mountId, name: secretName.trim() };
+            }
+            if (needs === "repository" && repositoryId) input.repository_id = repositoryId;
             await act("create_store", input);
             toast(`Creating ${name}`);
             setName("");
@@ -285,7 +312,7 @@ function NewStorage({ providers, providersError, onClose }: { providers: Row[]; 
           })
         }
       >
-        <Field label="Type and provider" help={more ? "Buckets (Cloudflare R2, AWS S3, Backblaze B2, Azure, Google Cloud) and shared filesystems are coming later." : undefined}>
+        <Field label="Type and provider" help={more ? "Shared network filesystems are coming later." : undefined}>
           <select name="store" value={chosen} onChange={(e) => setStore(e.target.value)}>
             {available.map((p, i) => (
               <option key={i} value={`${text(p, "type")}:${text(p, "provider")}`}>
@@ -294,14 +321,69 @@ function NewStorage({ providers, providersError, onClose }: { providers: Row[]; 
             ))}
           </select>
         </Field>
-        <div className="grid grid-cols-1 gap-3 sm:grid-cols-[minmax(0,1fr)_8rem]">
-          <Field label="Name">
+        <div className={needs === "size" ? "grid grid-cols-1 gap-3 sm:grid-cols-[minmax(0,1fr)_8rem]" : undefined}>
+          <Field label="Name" error={fieldError(error, "name")}>
             <input name="name" required pattern="[a-z][a-z0-9\-]{0,30}" placeholder="uploads" value={name} onChange={(e) => setName(e.target.value)} />
           </Field>
-          <Field label="Size (GiB)">
-            <input name="size_gi" type="number" min={1} max={100} value={size} onChange={(e) => setSize(e.target.value)} />
-          </Field>
+          {needs === "size" && (
+            <Field label="Size (GiB)" error={fieldError(error, "size_gi")}>
+              <input name="size_gi" type="number" min={1} max={100} value={size} onChange={(e) => setSize(e.target.value)} />
+            </Field>
+          )}
         </div>
+        {needs === "bucket" && (
+          <>
+            <p className="muted m-0 text-[12.5px]">
+              Your own {provider === "azure" ? "container" : "bucket"}, opened with a secret of this workspace that holds {credentialFields(provider)}. Lake reads the secret to browse it and never shows it; deleting the storage leaves the bucket and what is in it.
+            </p>
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+              <Field label={provider === "azure" ? "Container" : "Bucket"} required error={fieldError(error, "bucket")}>
+                <input name="bucket" required value={bucket} onChange={(e) => setBucket(e.target.value)} placeholder="media" autoComplete="off" spellCheck={false} />
+              </Field>
+              <Field label="Folder in it" help="Optional: the storage covers only this folder." error={fieldError(error, "prefix")}>
+                <input name="prefix" value={prefix} onChange={(e) => setPrefix(e.target.value)} placeholder="team/shared" autoComplete="off" spellCheck={false} />
+              </Field>
+            </div>
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-[minmax(0,1fr)_10rem]">
+              <Field label="Endpoint" required={hint.required} help={hint.help} error={fieldError(error, "endpoint")}>
+                <input name="endpoint" type="url" required={hint.required} value={endpoint} onChange={(e) => setEndpoint(e.target.value)} placeholder={hint.placeholder} autoComplete="off" spellCheck={false} />
+              </Field>
+              {provider !== "azure" && (
+                <Field label="Region" error={fieldError(error, "region")}>
+                  <input name="region" value={region} onChange={(e) => setRegion(e.target.value)} placeholder={provider === "s3" ? "us-east-1" : provider === "b2" ? "us-west-004" : "auto"} autoComplete="off" spellCheck={false} />
+                </Field>
+              )}
+            </div>
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+              <Field label="Secret mount" required error={fieldError(error, "credential/mount_id")}>
+                <select name="mount_id" required value={mountId} onChange={(e) => setMountId(e.target.value)}>
+                  <option value="">{mounts.isLoading ? "Loading mounts…" : "Choose a mount"}</option>
+                  {(mounts.data ?? []).map((m) => (
+                    <option key={text(m, "id")} value={text(m, "id")}>
+                      {text(m, "name")}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+              <Field label="Secret" required error={fieldError(error, "credential/name")}>
+                <input name="secret" required value={secretName} onChange={(e) => setSecretName(e.target.value)} placeholder="bucket-keys" autoComplete="off" spellCheck={false} />
+              </Field>
+            </div>
+          </>
+        )}
+        {needs === "repository" && (
+          <Field label="Repository" help="Its main branch holds the storage; every change is kept in its history." error={fieldError(error, "repository_id")}>
+            <select name="repository_id" value={repositoryId} onChange={(e) => setRepositoryId(e.target.value)}>
+              <option value="">A new repository named after the storage</option>
+              {workspaceRepositories.map((r) => (
+                <option key={text(r, "id")} value={text(r, "id")}>
+                  {text(r, "name")}
+                </option>
+              ))}
+            </select>
+          </Field>
+        )}
+        {needs === "none" && <p className="muted m-0 text-[12.5px]">Lake keeps it in this workspace, sealed, and deletes it with the storage.</p>}
       </Form>
     </Modal>
   );

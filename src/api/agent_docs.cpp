@@ -592,8 +592,8 @@ const std::vector<Flow>& flows() {
            "table_name}`: one read-only SELECT loaded into a dataset"},
           {"workspace_act", "`capability: \"delete_connection\"`, `input: {name}`"}}},
         {"Create a volume",
-         "A store is a bucket, filesystem, network filesystem or volume Lake provisions for your "
-         "workspace; today a cluster volume.",
+         "A store is a volume, your own bucket, or a bucket or filesystem Lake keeps in your "
+         "workspace; this flow makes a cluster volume.",
          {{"list_store_providers", "every type and provider, and which are available"},
           {"create_store",
            "`type: \"volume\"`, `provider: \"cluster\"`, a `name`; optional `size_gi`"},
@@ -602,9 +602,16 @@ const std::vector<Flow>& flows() {
         {"Open a bucket as a drive",
          "A bucket or filesystem store opens as a drive, browsed in place: nothing is copied, an "
          "item's id is its path in the store, and deleting the drive never deletes the store. A "
-         "volume is never browsed. No bucket or filesystem provider is offered yet, so today "
-         "create_drive answers not_supported with the reason.",
-         {{"list_stores", "a `Ready` store whose `type` is `object` or `filesystem`"},
+         "volume is never browsed. Your own bucket (r2, s3, b2, gcs, azure) is named with a "
+         "secret of the workspace's secret store that holds its keys.",
+         {{"put_secret",
+           "your bucket's keys in a mount of this workspace: `access_key_id` and "
+           "`secret_access_key` (S3 protocol), or `account_key` or `sas_token` (Azure)"},
+          {"create_store",
+           "`type: \"object\"`, `provider`, `name`, `bucket`, `endpoint`, optional `region` "
+           "and `prefix`, `credential: {mount_id, name}`; or `provider: \"zetta\"` with "
+           "nothing more"},
+          {"list_stores", "a `Ready` store whose `type` is `object` or `filesystem`"},
           {"create_drive", "`name`, `storage: \"store\"`, `store_id`"},
           {"list_drive_entries", "`drive_id`, optional `path`: the store's folders and files"},
           {"upload_drive_entries",

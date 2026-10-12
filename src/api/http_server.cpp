@@ -10,6 +10,7 @@
 #include "lake/api/audit_recorder.hpp"
 #include "lake/api/billing.hpp"
 #include "lake/api/mcp_client.hpp"
+#include "lake/control/store_buckets.hpp"
 #include "lake/api/mcp_connections.hpp"
 #include "lake/api/metering_recorder.hpp"
 #include "lake/api/request_recorder.hpp"
@@ -7553,6 +7554,10 @@ struct ApiServer::Impl {
     // MCP connections' transport (docs/api/mcp-connections.md#the-client): the injected one, else
     // the server's own, which refuses private addresses unless the options allow them.
     std::shared_ptr<McpHttp> mcp_http;
+    // A customer's own buckets (lake#664): their transport, public addresses only, and the
+    // browser over it.
+    std::shared_ptr<McpHttp> store_transport;
+    control::StoreBrowser store_browser;
     // The model gateway's provider (docs/api/model-gateway.md): the injected one, else OpenAI's
     // API over outbound_http when LAKE_OPENAI_API_KEY is set (lake#248).
     ModelProvider model_provider;
@@ -8399,6 +8404,41 @@ struct ApiServer::Impl {
         }
         mcp_http = options.mcp_http ? options.mcp_http
                                     : make_mcp_http(options.mcp_allow_private_addresses);
+        store_browser = options.store_browser;
+        if (!store_browser) {
+            // Its own transport, on its own io thread, so a slow bucket never holds up an MCP
+            // server; each exchange runs on the blocking pool.
+            store_transport = make_mcp_http(options.store_allow_private_addresses);
+            store_browser = control::cloud_store_browser(
+                [transport = store_transport](control::StoreHttpRequest request)
+                    -> liquid::runtime::task<control::StoreHttpResponse> {
+                    auto ran = co_await run_blocking([transport, request = std::move(request)] {
+                        McpHttpRequest out;
+                        out.method = request.method;
+                        out.url = request.url;
+                        out.headers = request.headers;
+                        out.body = request.body;
+                        out.timeout = request.timeout;
+                        out.max_response_bytes = request.max_response_bytes;
+                        McpHttpResponse answer = transport->exchange(out, {});
+                        control::StoreHttpResponse response;
+                        response.status = answer.status;
+                        response.headers = std::move(answer.headers);
+                        response.body = std::move(answer.body);
+                        response.error = answer.timed_out ? std::string("the bucket timed out")
+                                         : answer.truncated
+                                             ? std::string("the bucket's answer was too large")
+                                             : std::move(answer.error);
+                        return response;
+                    });
+                    if (!ran) {
+                        control::StoreHttpResponse failed;
+                        failed.error = ran.error().message;
+                        co_return failed;
+                    }
+                    co_return std::move(*ran);
+                });
+        }
         model_provider = options.model_provider;
         if (!model_provider && !options.openai_api_key.empty()) {
             model_provider = openai_model_provider(
@@ -8951,7 +8991,7 @@ struct ApiServer::Impl {
         ctx.transcriber = transcriber;
         ctx.mcp_http = mcp_http;
         ctx.mcp_allow_private_addresses = options.mcp_allow_private_addresses;
-        ctx.store_browser = options.store_browser;
+        ctx.store_browser = store_browser;
         ctx.model_provider = model_provider;
         ctx.payments = payments;
         ctx.object_transport = object_transport;

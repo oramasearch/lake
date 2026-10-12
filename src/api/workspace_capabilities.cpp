@@ -33,6 +33,7 @@
 #include "lake/control/policy.hpp"
 #include "lake/control/project_decisions.hpp"
 #include "lake/control/store.hpp"
+#include "lake/control/store_buckets.hpp"
 #include "lake/control/zetta_workspace.hpp"
 #include "workspace_bus.hpp"
 #include "workspace_records_api.hpp"
@@ -1360,6 +1361,172 @@ json store_providers_enum() {
     return providers;
 }
 
+// Another capability as the same person (defined below).
+liquid::runtime::task<ApiResult> call_capability(ApiContext& context, std::string name, json input);
+
+ApiResult call_result(std::expected<ApiResult, liquid::error> done) {
+    return done ? std::move(*done) : ApiResult::failure("store_error", done.error().message);
+}
+
+// Where a new store's contents are (lake#664), checked with the caller's own authority: a
+// customer's own bucket and the workspace secret that opens it, or a `lake` store's repository
+// (made now when none is named). Fills `store`; the refusal otherwise.
+liquid::runtime::task<std::optional<ApiResult>>
+store_location(const json& input, ApiContext& context, control::NewManagedStore& store) {
+    const bool bucket = control::store_external_bucket(store.type, store.provider);
+    const bool volume = store.type == "volume";
+    if (volume) {
+        store.size_gi = input.value("size_gi", 10);
+        if (store.size_gi < 1 || store.size_gi > 100) {
+            co_return ApiResult::failure("invalid_input", "size_gi must be 1-100", "/size_gi");
+        }
+    } else {
+        store.size_gi = 0;
+        if (input.contains("size_gi")) {
+            co_return ApiResult::failure("invalid_input", "only a volume has a size to ask for",
+                                         "/size_gi");
+        }
+    }
+    for (const char* field : {"bucket", "endpoint", "prefix", "credential"}) {
+        if (!bucket && input.contains(field)) {
+            co_return ApiResult::failure("invalid_input",
+                                         std::string("only your own bucket takes ") + field,
+                                         std::string("/") + field);
+        }
+    }
+    if (store.provider != "lake" && input.contains("repository_id")) {
+        co_return ApiResult::failure("invalid_input", "only a lake store names a repository",
+                                     "/repository_id");
+    }
+    if (bucket) {
+        store.bucket = input.value("bucket", std::string());
+        if (const std::string problem = control::store_bucket_problem(store.provider, store.bucket);
+            !problem.empty()) {
+            co_return ApiResult::failure("invalid_input", problem, "/bucket");
+        }
+        store.endpoint_url = input.value("endpoint", std::string());
+        while (store.endpoint_url.ends_with('/')) {
+            store.endpoint_url.pop_back();
+        }
+        if (store.endpoint_url.empty() &&
+            control::default_store_endpoint(store.provider, store.region).empty()) {
+            co_return ApiResult::failure(
+                "invalid_input",
+                store.provider == "r2"
+                    ? "an R2 bucket needs its endpoint, https://<account id>.r2.cloudflarestorage.com"
+                : store.provider == "azure"
+                    ? "an Azure container needs its endpoint, https://<account>.blob.core.windows.net"
+                    : "a B2 bucket needs its endpoint or its region",
+                "/endpoint");
+        }
+        if (!store.endpoint_url.empty()) {
+            if (const std::string problem = control::store_endpoint_problem(store.endpoint_url);
+                !problem.empty()) {
+                co_return ApiResult::failure("invalid_input", problem, "/endpoint");
+            }
+        }
+        store.prefix = input.value("prefix", std::string());
+        if (const std::string problem = control::store_prefix_problem(store.prefix);
+            !problem.empty()) {
+            co_return ApiResult::failure("invalid_input", problem, "/prefix");
+        }
+        if (!input.contains("credential")) {
+            co_return ApiResult::failure(
+                "invalid_input",
+                "your own bucket names the workspace secret that opens it: credential {mount_id, "
+                "name}",
+                "/credential");
+        }
+        store.credential_mount_id = input.at("credential").value("mount_id", std::string());
+        store.credential_name = input.at("credential").value("name", std::string());
+        // The caller must be able to read the secret, in this workspace's secret store.
+        ApiResult mount = call_result(co_await call_capability(
+            context, "get_secret_mount", {{"mount_id", store.credential_mount_id}}));
+        if (!mount.ok) {
+            co_return ApiResult::failure(
+                mount.error.code == "unauthorized" ? "unauthorized" : "not_found",
+                "no secret mount " + store.credential_mount_id + " you can read",
+                "/credential/mount_id");
+        }
+        if (mount.value.value("workspace_id", std::string()) != store.workspace_id) {
+            co_return ApiResult::failure(
+                "invalid_input",
+                "the secret mount belongs to another workspace than the storage",
+                "/credential/mount_id");
+        }
+        ApiResult secret = call_result(co_await call_capability(
+            context, "read_secret",
+            {{"mount_id", store.credential_mount_id}, {"name", store.credential_name}}));
+        if (!secret.ok) {
+            co_return ApiResult::failure("not_found",
+                                         "the mount has no live secret " + store.credential_name +
+                                             " you can read",
+                                         "/credential/name");
+        }
+        const json value = secret.value.value("value", json::object());
+        const auto has = [&](const char* field) {
+            return value.is_object() && value.contains(field) && value.at(field).is_string() &&
+                   !value.at(field).get<std::string>().empty();
+        };
+        if (store.provider == "azure" ? !(has("account_key") || has("sas_token"))
+                                      : !(has("access_key_id") && has("secret_access_key"))) {
+            co_return ApiResult::failure(
+                "invalid_input",
+                store.provider == "azure"
+                    ? "the secret " + store.credential_name +
+                          " needs an account_key or a sas_token field"
+                    : "the secret " + store.credential_name +
+                          " needs access_key_id and secret_access_key fields",
+                "/credential/name");
+        }
+    }
+    if (store.provider == "lake") {
+        store.repository_id = input.value("repository_id", std::string());
+        if (store.repository_id.empty()) {
+            ApiResult made = call_result(co_await call_capability(context,
+                                                      "create_repository",
+                                                      {{"customer_id", store.customer_id},
+                                                       {"workspace_id", store.workspace_id},
+                                                       {"name", store.name},
+                                                       {"visibility", "private"}}));
+            if (!made.ok) {
+                co_return ApiResult::failure(made.error.code,
+                                             "could not make the store's repository: " +
+                                                 made.error.message,
+                                             "/name");
+            }
+            store.repository_id = made.value.value("id", std::string());
+        } else {
+            const auto repository = context.store->get_repository(store.repository_id);
+            if (!repository || !repository->deleted_at.empty() ||
+                repository->customer_id != store.customer_id ||
+                repository->workspace_id != store.workspace_id) {
+                co_return ApiResult::failure("not_found",
+                                             "no repository " + store.repository_id +
+                                                 " in this workspace",
+                                             "/repository_id");
+            }
+            if (context.acting_identity != "admin") {
+                const auto object =
+                    context.store->find_policy_object("repository", store.repository_id);
+                bool allowed = false;
+                if (object) {
+                    const auto decision =
+                        control::authorize(*context.store, context.acting_identity, object->id,
+                                           "write", context.authorization_cache);
+                    allowed = decision && decision->allowed;
+                }
+                if (!allowed) {
+                    co_return ApiResult::failure("unauthorized",
+                                                 "you may not write to that repository",
+                                                 "/repository_id");
+                }
+            }
+        }
+    }
+    co_return std::nullopt;
+}
+
 // Storage (docs/control-plane/storage.md, lake#196): the provider table and the customer's stores.
 void register_store_capabilities(Registry& registry) {
     registry.add(Capability{
@@ -1434,16 +1601,32 @@ void register_store_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "create_store",
         .title = "Create a store",
-        .description = "Ask the operator for a new store in this workspace: a `type` and "
-                       "`provider` pair that list_store_providers reports available (today volume "
-                       "on cluster), a `name` unique in the account, and optionally `size_gi` 1-100 "
-                       "(default 10) and `region`. Private by default.",
+        .description =
+            "Ask the operator for a new store in this workspace: a `type` and `provider` pair "
+            "that list_store_providers reports available, and a `name` unique in the account. A "
+            "volume takes `size_gi` 1-100 (default 10). Your own bucket (r2, s3, b2, gcs, azure) "
+            "takes `bucket`, `endpoint` (https; optional for s3 and gcs), `region`, `prefix` (the "
+            "folder in it the store covers) and `credential` {mount_id, name}: a secret of this "
+            "workspace's secret store holding access_key_id and secret_access_key (S3 protocol) or "
+            "account_key or sas_token (Azure). A `lake` store keeps its contents in a liquid "
+            "repository of the workspace, `repository_id` or a new one with the store's name. "
+            "Private by default.",
         .input_schema = customer_input_schema(
             {{"type", {{"type", "string"}, {"enum", store_types_enum()}}},
              {"provider", {{"type", "string"}, {"enum", store_providers_enum()}}},
              {"name", {{"type", "string"}}},
              {"size_gi", {{"type", "integer"}, {"minimum", 1}, {"maximum", 100}}},
-             {"region", {{"type", "string"}}}},
+             {"region", {{"type", "string"}}},
+             {"bucket", {{"type", "string"}}},
+             {"endpoint", {{"type", "string"}}},
+             {"prefix", {{"type", "string"}}},
+             {"credential",
+              {{"type", "object"},
+               {"properties",
+                {{"mount_id", {{"type", "string"}}}, {"name", {{"type", "string"}}}}},
+               {"required", json::array({"mount_id", "name"})},
+               {"additionalProperties", false}}},
+             {"repository_id", {{"type", "string"}}}},
             json::array({"type", "provider", "name"})),
         .output_schema = {{"type", "object"}},
         .kind = CapabilityKind::Action,
@@ -1461,7 +1644,6 @@ void register_store_capabilities(Registry& registry) {
             store.type = input.at("type");
             store.provider = input.at("provider");
             store.name = input.at("name");
-            store.size_gi = input.value("size_gi", 10);
             store.region = input.value("region", std::string());
             store.created_by_taap_id = context.acting_identity;
             if (!valid_service_name(store.name)) {
@@ -1471,8 +1653,18 @@ void register_store_capabilities(Registry& registry) {
                     "most 31 characters",
                     "/name");
             }
-            if (store.size_gi < 1 || store.size_gi > 100) {
-                co_return ApiResult::failure("invalid_input", "size_gi must be 1-100", "/size_gi");
+            const control::StoreProvider* pair =
+                control::find_store_provider(store.type, store.provider);
+            if (pair == nullptr || !pair->available) {
+                // The store's own checks name the reason.
+            } else {
+                auto located = co_await store_location(input, context, store);
+                if (!located) {
+                    co_return ApiResult::failure("store_error", located.error().message);
+                }
+                if (*located) {
+                    co_return std::move(**located);
+                }
             }
             const auto created = context.workspaces->create_store(std::move(store));
             if (!created) {
@@ -1484,8 +1676,10 @@ void register_store_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "delete_store",
         .title = "Delete a store",
-        .description = "Delete one of this workspace's stores. The operator removes it and its "
-                       "data, which cannot be recovered. `confirm` must be the store's name.",
+        .description = "Delete one of this workspace's stores; `confirm` must be the store's name. "
+                       "A volume and a store Lake keeps in the workspace Zetta are deleted with "
+                       "their data, which cannot be recovered. Your own bucket and a `lake` store's "
+                       "repository stay, with what is in them: Lake only forgets them.",
         .input_schema = customer_input_schema(
             {{"store_id", {{"type", "string"}}}, {"confirm", {{"type", "string"}}}},
             json::array({"store_id", "confirm"})),
@@ -1507,6 +1701,16 @@ void register_store_capabilities(Registry& registry) {
             if (input.at("confirm") != found->name) {
                 co_return ApiResult::failure(
                     "invalid_input", "confirm must be the store name " + found->name, "/confirm");
+            }
+            if (found->provider == "zetta" && found->desired == "present") {
+                // Lake keeps these bytes itself, so Lake deletes them before the store goes.
+                auto emptied = co_await empty_kept_store(context, *found);
+                ApiResult result = emptied ? std::move(*emptied)
+                                           : ApiResult::failure("store_error",
+                                                                emptied.error().message);
+                if (!result.ok) {
+                    co_return result;
+                }
             }
             store_audit(context, "store.delete", *found);
             const auto deleted =

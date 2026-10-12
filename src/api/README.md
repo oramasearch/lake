@@ -566,3 +566,12 @@ keep) and `volume_snapshots`. Only the operator credential and the instance admi
 their handlers; their audit events are central. A store failure is `store_unavailable`, here and in
 the registry's own `workspace_id` check. Workspace rows carry `storage_reason` for every reader and
 `storage_message` only for the operator and the instance administrator (`operator_view`). See [volumes.md](../../docs/api/volumes.md).
+
+`store_repository.cpp` is a `lake` store's contents over a liquid repository's `main` branch
+(lake#664): reads through the repository store and one change per write, folder, move and removal,
+each call on the blocking pool. `drives_capabilities.cpp`'s `open_store` opens every store kind:
+`zetta` and `lake` by Lake, the customer's own bucket by the server's `StoreBrowser` with the fields
+of the workspace secret the store names (read as Lake, kept a minute). `http_server.cpp` builds the
+default browser, `control::cloud_store_browser` over its own public-only transport
+(`LAKE_STORE_ALLOW_PRIVATE_ADDRESSES` for local development). See
+[storage.md](../../docs/api/storage.md#browsing-a-store).

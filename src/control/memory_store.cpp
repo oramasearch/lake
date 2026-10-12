@@ -1524,6 +1524,12 @@ Result<ManagedStore> InMemoryStore::create_store(const NewManagedStore& in) {
     store.desired = "present";
     store.created_by_taap_id = in.created_by_taap_id;
     store.workspace_id = in.workspace_id;
+    store.bucket = in.bucket;
+    store.endpoint_url = in.endpoint_url;
+    store.prefix = in.prefix;
+    store.credential_mount_id = in.credential_mount_id;
+    store.credential_name = in.credential_name;
+    store.repository_id = in.repository_id;
     store.created_at = store.updated_at = now_iso8601();
     stores_.push_back(store);
     return store;

@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import { ancestors, chunkBySize, chunkRanges, cleanPath, datasetFormat, datasetName, driveSlug, expandTo, isWithin, joinPath, nameOf, parentOf, planMoves, planUpload, rangeSelect, sortEntries, validName } from "../src/pages/drives/paths.ts";
 import { cleanTarget, nameAfterTarget, selectsOnFocus, storageLabel, targetHref, targetProblem } from "../src/pages/drives/targets.ts";
 import { folderKey, matchLink, matchWhere, parentKey, type DriveMatch } from "../src/pages/drives/search.ts";
-import { browsable, driveForStore, phaseTone, storeFigures, storeKindWords, storePhase } from "../src/pages/drives/stores.ts";
+import { browsable, credentialFields, deleteWarning, driveForStore, endpointHint, phaseTone, storeFigures, storeKindWords, storeNeeds, storePhase, storeSizeText, storeWhere } from "../src/pages/drives/stores.ts";
 import { STORAGE } from "../src/pages/drives/targets.ts";
 import { movedFromDatasets } from "../src/pages/connections/connections.ts";
 import { readFileSync } from "node:fs";
@@ -233,4 +233,27 @@ test("Datasets keeps datasets only: no storage and no connections on its page (l
   for (const gone of ["list_stores", "create_store", "delete_store", "store_connection", "list_store_providers", "connect_service", "delete_connection", "list_source_tables"]) {
     assert.ok(!page.includes(`"${gone}"`), `Datasets no longer calls ${gone}`);
   }
+});
+
+test("New storage asks each provider for what it needs, and deleting says what stays (lake#664)", () => {
+  assert.equal(storeNeeds("volume", "cluster"), "size");
+  for (const provider of ["r2", "s3", "b2", "gcs", "azure"]) assert.equal(storeNeeds("object", provider), "bucket", provider);
+  assert.equal(storeNeeds("object", "lake"), "repository");
+  assert.equal(storeNeeds("filesystem", "lake"), "repository");
+  assert.equal(storeNeeds("filesystem", "zetta"), "none");
+  assert.equal(endpointHint("r2").required, true);
+  assert.equal(endpointHint("azure").required, true);
+  assert.equal(endpointHint("s3").required, false);
+  assert.match(credentialFields("azure"), /account_key/);
+  assert.match(credentialFields("s3"), /access_key_id/);
+  assert.equal(deleteWarning({ type: "object", provider: "r2" }).tone, "quiet");
+  assert.match(deleteWarning({ type: "object", provider: "r2" }).text, /stay in your account/);
+  assert.match(deleteWarning({ type: "filesystem", provider: "lake" }).text, /repository stays/);
+  assert.equal(deleteWarning({ type: "volume", provider: "cluster" }).tone, "warn");
+  assert.equal(deleteWarning({ type: "object", provider: "zetta" }).tone, "warn");
+  assert.equal(storeSizeText({ type: "volume", size_gi: 10 }), "10 GiB");
+  assert.equal(storeSizeText({ type: "object", size_gi: 0 }), "—");
+  assert.equal(storeWhere({ provider: "r2", location: { bucket: "media", prefix: "team" } }), "media/team");
+  assert.equal(storeWhere({ provider: "zetta", location: null }), "");
+  assert.equal(storeWhere({ provider: "cluster" }), "");
 });

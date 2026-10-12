@@ -677,6 +677,13 @@ struct ManagedStore {
     // The workspace the store belongs to (migration 0044, lake#465); the operator places it in
     // that workspace's namespace, and lake lists a workspace's own stores only.
     std::string workspace_id;
+    // Where the store's contents are (lake#664, in `stores.spec`): for the customer's own bucket
+    // (r2, s3, b2, gcs, azure) its name, endpoint and the folder in it the store covers, and the
+    // workspace secret that opens it (decision 58: the workspace's credential, never Orama's);
+    // for a `lake` store the liquid repository that keeps it. Empty otherwise.
+    std::string bucket, endpoint_url, prefix;
+    std::string credential_mount_id, credential_name;
+    std::string repository_id;
 };
 // A launch credential is `lal.<launch id>.<secret>`, a schedule's `las.<schedule id>.<secret>`:
 // the Orama operator generates it for the pod and writes its SHA-256 into the status row it owns
@@ -900,11 +907,37 @@ struct AskMessage {
 };
 struct NewManagedStore {
     std::string customer_id, type, provider, name, created_by_taap_id;
-    int size_gi = 10;
+    int size_gi = 10; // a volume's; 0 for every other type, which has no size to ask for
     std::string region;
     bool is_public = false;
     std::string workspace_id; // required by the routing trigger (migration 0044)
+    // As ManagedStore's (lake#664).
+    std::string bucket, endpoint_url, prefix;
+    std::string credential_mount_id, credential_name;
+    std::string repository_id;
 };
+// `stores.spec` for a new store (docs/control-plane/storage.md): a volume's {size_gi, region,
+// public}; a bucket's {public, bucket, endpoint, region, prefix, credential: {mount_id, name}}; a
+// `lake` store's {public, repository_id}; otherwise {public}. Content-free: a secret is named,
+// never copied.
+inline nlohmann::json store_spec(const NewManagedStore& in) {
+    nlohmann::json spec{{"public", in.is_public}};
+    if (in.type == "volume") {
+        spec["size_gi"] = in.size_gi;
+        spec["region"] = in.region;
+    }
+    if (!in.bucket.empty()) {
+        spec["bucket"] = in.bucket;
+        spec["endpoint"] = in.endpoint_url;
+        spec["region"] = in.region;
+        spec["prefix"] = in.prefix;
+        spec["credential"] = {{"mount_id", in.credential_mount_id}, {"name", in.credential_name}};
+    }
+    if (!in.repository_id.empty()) {
+        spec["repository_id"] = in.repository_id;
+    }
+    return spec;
+}
 // One valid type × provider pair and whether this lake offers it. Order: what is available first,
 // then by type. The schema's store_type_check and store_provider_check list the same keys.
 struct StoreProvider {
@@ -912,28 +945,35 @@ struct StoreProvider {
     bool available = false;
     std::string_view unavailable_reason; // empty when available
 };
-inline constexpr std::string_view store_phase_two_reason =
-    "needs an Orama account or your own credentials (lake#196 phase 2)";
 inline constexpr StoreProvider store_providers[] = {
     {"volume", "cluster", "Volume — cluster disk", true, ""},
-    {"object",
-     "r2",
-     "Bucket — Cloudflare R2",
-     false,
-     "needs R2 enabled on Orama's Cloudflare account and a token that can issue bucket keys"},
-    {"object", "s3", "Bucket — AWS S3", false, store_phase_two_reason},
-    {"object", "b2", "Bucket — Backblaze B2", false, store_phase_two_reason},
-    {"object", "azure", "Bucket — Azure Blob", false, store_phase_two_reason},
-    {"object", "gcs", "Bucket — Google Cloud Storage", false, store_phase_two_reason},
-    {"object", "lake", "Bucket — liquid repository", false, "phase 3"},
-    {"object", "zetta", "Bucket — Zetta large objects", false, "phase 3"},
-    {"filesystem", "lake", "Filesystem — Drive", false, "phase 3"},
-    {"filesystem", "zetta", "Filesystem — Zetta", false, "phase 3"},
+    // The customer's own bucket, opened with a secret in the workspace's secret store (lake#664).
+    {"object", "r2", "Bucket — your Cloudflare R2 bucket", true, ""},
+    {"object", "s3", "Bucket — your AWS S3 bucket", true, ""},
+    {"object", "b2", "Bucket — your Backblaze B2 bucket", true, ""},
+    {"object", "gcs", "Bucket — your Google Cloud Storage bucket", true, ""},
+    {"object", "azure", "Bucket — your Azure Blob container", true, ""},
+    // Kept by Lake in the workspace (lake#664).
+    {"object", "zetta", "Bucket — kept by Lake in the workspace", true, ""},
+    {"object", "lake", "Bucket — a liquid repository", true, ""},
+    {"filesystem", "zetta", "Filesystem — kept by Lake in the workspace", true, ""},
+    {"filesystem", "lake", "Filesystem — Drive (a liquid repository)", true, ""},
     {"network_filesystem", "nfs", "Network filesystem — NFS in the cluster", false, "phase 4"},
     {"network_filesystem", "azure", "Network filesystem — Azure Files", false, "phase 4"},
     {"network_filesystem", "s3", "Network filesystem — EFS", false, "phase 4"},
     {"network_filesystem", "gcs", "Network filesystem — Filestore", false, "phase 4"},
 };
+// The customer's own bucket at a cloud provider, reached over the provider's protocol with the
+// workspace's credential (lake#664).
+inline bool store_external_bucket(std::string_view type, std::string_view provider) {
+    return type == "object" && (provider == "r2" || provider == "s3" || provider == "b2" ||
+                                provider == "gcs" || provider == "azure");
+}
+// A store whose contents Lake keeps itself in the workspace (lake#664): the workspace Zetta or a
+// liquid repository.
+inline bool store_kept_by_lake(std::string_view type, std::string_view provider) {
+    return (type == "object" || type == "filesystem") && (provider == "zetta" || provider == "lake");
+}
 inline const StoreProvider* find_store_provider(std::string_view type, std::string_view provider) {
     for (const StoreProvider& entry : store_providers) {
         if (entry.type == type && entry.provider == provider) {
