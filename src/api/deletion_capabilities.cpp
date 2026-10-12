@@ -272,7 +272,8 @@ void register_deletion_capabilities(Registry& registry) {
          "Delete a dataset of the workspace, its rows and every search index built on it, from "
          "the workspace's engine; it cannot be recovered. Name it by the <database>/<dataset> id "
          "list_datasets returns. `dry_run: true` deletes nothing and answers what would go (rows, "
-         "size, indexes). Refused, naming them, while a run or a study is still reading it.",
+         "size, indexes). Refused, naming them, while a run or an experiment is still reading "
+         "it.",
          "datasets",
          "dataset"},
         "the dataset's <database>/<dataset> id, as list_datasets returns it",
