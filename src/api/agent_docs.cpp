@@ -653,8 +653,8 @@ const std::vector<Flow>& flows() {
            "`drive_id`, `id` (a CSV or JSONL file of a workspace-files drive), `table_name`: "
            "loads it into a dataset of the workspace"},
           {"load_drive_model",
-           "`drive_id`, `id` (a model file), `name` (or `version_of`): brings it into the "
-           "workspace as a standalone model"}}},
+           "`drive_id`, `id` (a model file of any drive kind, or a virtual drive's shortcut to "
+           "one), `name` (or `version_of`): brings it into the workspace as a standalone model"}}},
         {"Search everything",
          "Search what you can open, place by place, as the Lake Console's search does.",
          {{"search", "`query`: repository code, ranked (`history: true` searches past changes)"},

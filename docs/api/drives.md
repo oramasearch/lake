@@ -41,7 +41,7 @@ audited in the workspace's own log ([audit.md](audit.md#which-log)).
 | `read_drive_file` | read | `drive_id`, `id`, `offset?`, `length?` | `{id, name, size, content_type, sha256, offset, content_base64}` |
 | `recent_drive_entries` | read | `limit?` (1 to 100, default 20) | `{items: [{drive: {id, name}, entry}]}` |
 | `load_drive_dataset` | action | `drive_id`, `id`, `table_name`, `format?`, `if_exists?` | `upload_dataset`'s answer, with `source: {drive_id, id, name}` |
-| `load_drive_model` | action | `drive_id`, `id`, `name` or `version_of`, `kind?`, `metrics?` | `register_model`'s answer (`model_id`, …), with `source: {drive_id, id, name}` ([models.md](models.md#a-standalone-model-lake654)) |
+| `load_drive_model` | action | `drive_id`, `id`, `name` or `version_of`, `kind?`, `metrics?` | `register_model`'s answer (`model_id`, …), with `source: {drive_id, id, name}`; from any drive kind, a virtual drive's shortcut to a file followed once ([below](#a-drive-file-as-a-model-lake654), [models.md](models.md#a-standalone-model-lake654)) |
 
 | `search_drives` | read | `q` (1 to 255 bytes), `drive_id?`, `limit?` (1 to 200, default 50) | `{items: [match], truncated, skipped: [{drive, reason}]}` ([Search](#search)) |
 
@@ -245,12 +245,27 @@ dataset. The Drives page offers it as **Load as dataset** on a CSV or JSONL file
 ## A Drive File as a Model (lake#654)
 
 `load_drive_model` brings a model file of a drive into the workspace as a standalone model, the same
-way: `id` is the file, a virtual drive is refused at `/drive_id`, the bytes are read as the caller,
+way: `id` is the file, the bytes are read as the caller,
 and the text goes to the workspace engine's `register_model` through `workspace_act` with `name`
 (or `version_of`), `kind?`, `metrics?` and `source` (`drive <drive name>: <file name>`). A new model
 needs `name` (`invalid_input` at `/name` before a byte is read). The engine's refusal of the file
 (`not_supported` for a format it cannot read) comes back at `/id`. At most 16 MiB. Train → Models'
 **New model**, Bring one, A drive offers it ([models.md](models.md#a-standalone-model-lake654)).
+
+Every drive kind brings a file (lake#682):
+
+- **Workspace files:** `id` is the file's entry id; a folder, or an upload not finished, is
+  `not_found` at `/id`.
+- **Repository:** `id` is the file's path on `main`.
+- **Storage:** `id` is the file's path in the store; a folder is `not_found` at `/id`.
+- **Virtual:** `id` is a shortcut to a file, which is followed once. A shortcut to a drive item
+  brings that item as if it were named directly (the answer's `source` is the item's drive and id).
+  A shortcut to a repository path reads it at the shortcut's `ref` (`main` when it has none), with
+  `source: {repository_id, ref, path, name}` and the text `repository <name>@<ref>: <path>` sent as
+  `register_model`'s `source`. Either way `source.shortcut` is `{drive_id, id, name}` of the
+  shortcut, and the audit event carries `shortcut_drive_id` and `shortcut_id`. A folder, a shortcut
+  to anything else (a dataset, a web address, …), a shortcut to another virtual drive's item, and a
+  broken shortcut are refused at `/id` (`invalid_input`, or `not_found` for a broken one).
 
 ## Search
 
