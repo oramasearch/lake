@@ -1,5 +1,9 @@
 # Public control types
 
+`network.hpp` defines the four network specifications, desired records, operator observations,
+workspace scope and write actor. `Store` exposes create, replacement update, withdrawal/revocation,
+get and list; both stores implement the same contract. See [network.md](../../../docs/control-plane/network.md).
+
 `ServiceCondition` / `service_condition` (`zetta_workspace.hpp`) are the shared service status and
 its reason; `service_json` now includes `updated_at`. `InMemoryStore::set_workspace_status` writes
 the operator's workspace observation in tests (lake#452).

@@ -16,6 +16,11 @@ is also `oramasearch/lake:v0.1.0`, built from the tag (`2e6f6d7`) against liquid
 operator's schema is applied through `0083_methodology_deployments`. Its bus and workspace Zettas
 run `oramasearch/zetta:main-4015ef76` (zetta `v0.2.0`).
 
+Secure-networking desired state is implemented in the source tree (lake#727, `0084_network`):
+four desired/status pairs, scoped stores, signed atomic audit and app-to-service rollout rows.
+Tunnel grants end through revocation or expiry; internet egress stays implicit in the operator.
+Operator adoption and deployment are not claimed. See [`docs/control-plane/network.md`](docs/control-plane/network.md).
+
 The newest dated record, [`docs/deployment/dev-2026-10-01.md`](docs/deployment/dev-2026-10-01.md),
 and [`docs/design/status.md`](docs/design/status.md) still describe the 2026-10-01 deployment
 (`oramasearch/lake:20261001d`, `36679e1`); they have not been brought up to the release. Until they
@@ -794,7 +799,7 @@ one adapter TU) and the pure renderers in `include/zetta/api/web_ui.hpp`.
 - **Schema.** `db/schema.sql` is the source of truth; the operator carries a byte-identical
   vendored copy at `internal/controller/assets/lake-schema.sql` and applies it per Lake as an
   owned `PostgresSchema` (one transaction, guarded on the table the **newest** migration creates,
-  `metered_jobs_guard` in the source tree, versioned by content hash).
+  `network_guard` in the source tree, versioned by content hash).
   Change the schema HERE, then copy it into the operator in the same change; the operator's test
   checks the copy carries the source-of-truth header. Migrations are single-shot today
   (incremental migrations are the PostgresSchema follow-up), so until then a schema change means

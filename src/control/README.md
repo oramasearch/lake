@@ -1,5 +1,9 @@
 # Control stores
 
+`network.cpp` shares secure-networking validation and row codecs; `network_memory.cpp` and
+`postgres_store.cpp` implement scoped desired writes, joined status reads and atomic signed audit.
+The rollout and operator handoff are in [network.md](../../docs/control-plane/network.md).
+
 `control::service_condition` derives the one status `list_services` and the Services page show,
 with the reason a service cannot progress on its own (unassigned, delete not yet observed). Both
 stores leave a deleted workspace's primary Zetta out of `list_services` once the workspace is

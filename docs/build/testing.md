@@ -23,6 +23,10 @@ schema loading and cleanup errors fail the test; they do not turn into skips.
 
 ### Databases the runner owns
 
+Set `LAKE_TEST_SKIP_STALE_SWEEP=1` when a run may remove only databases it creates itself.
+This disables the start-up sweep of earlier runs' databases; each current test still drops its
+own private copy. The network control-plane proof uses this on the shared development host.
+
 Every database the runner creates starts with `lake_fixture_`:
 
 | Name | What it is | Lifetime |

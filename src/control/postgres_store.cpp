@@ -34,6 +34,7 @@
 
 #include "lake/control/handles.hpp"
 #include "lake/control/identity_crypto.hpp"
+#include "network_internal.hpp"
 #include "secrets_crypto.hpp"
 
 #include <pqxx/pqxx>
@@ -3223,43 +3224,45 @@ public:
     }
 
     Result<void> append_audit_event(const audit::Event& event) override {
-        return with_tx<void>([&](pqxx::work& tx) -> Result<void> {
-            tx.exec("SELECT pg_advisory_xact_lock(hashtext('lake_audit_events'))");
-            const pqxx::result previous =
-                tx.exec("SELECT digest FROM audit_events ORDER BY sequence DESC LIMIT 1");
-            const std::string digest = previous.empty() ? "" : previous[0][0].as<std::string>();
-            if (event.previous_digest != digest) {
-                return std::unexpected(
-                    StoreError{"conflict", "audit event predecessor changed before append"});
-            }
-            tx.exec_params("INSERT INTO audit_events "
-                           "(id, occurred_at, customer_id, kind, principal, object, action, "
-                           "outcome, "
-                           "request_id, method, device, details, previous_digest, signer, "
-                           "signature, digest) "
-                           "VALUES ($1::uuid, $2::timestamptz, NULLIF($3, '')::uuid, $4, $5, "
-                           "$6, $7, $8, "
-                           "$9, NULLIF($10, ''), NULLIF($11, ''), $12::jsonb, NULLIF($13, ''), "
-                           "$14, "
-                           "$15, $16)",
-                           event.id,
-                           event.occurred_at,
-                           event.draft.customer_id,
-                           event.draft.kind,
-                           event.draft.principal,
-                           event.draft.object,
-                           event.draft.action,
-                           event.draft.outcome,
-                           event.draft.request_id,
-                           event.draft.method,
-                           event.draft.device,
-                           event.draft.details.dump(),
-                           event.previous_digest,
-                           event.signer,
-                           event.signature,
-                           event.digest);
-            return {};
-        });
+        return with_tx<void>([&](pqxx::work& tx) { return append_audit_tx(tx, event); });
+    }
+
+    static Result<void> append_audit_tx(pqxx::work& tx, const audit::Event& event) {
+        tx.exec("SELECT pg_advisory_xact_lock(hashtext('lake_audit_events'))");
+        const pqxx::result previous =
+            tx.exec("SELECT digest FROM audit_events ORDER BY sequence DESC LIMIT 1");
+        const std::string digest = previous.empty() ? "" : previous[0][0].as<std::string>();
+        if (event.previous_digest != digest) {
+            return std::unexpected(
+                StoreError{"conflict", "audit event predecessor changed before append"});
+        }
+        tx.exec_params("INSERT INTO audit_events "
+                       "(id, occurred_at, customer_id, kind, principal, object, action, "
+                       "outcome, "
+                       "request_id, method, device, details, previous_digest, signer, "
+                       "signature, digest) "
+                       "VALUES ($1::uuid, $2::timestamptz, NULLIF($3, '')::uuid, $4, $5, "
+                       "$6, $7, $8, "
+                       "$9, NULLIF($10, ''), NULLIF($11, ''), $12::jsonb, NULLIF($13, ''), "
+                       "$14, "
+                       "$15, $16)",
+                       event.id,
+                       event.occurred_at,
+                       event.draft.customer_id,
+                       event.draft.kind,
+                       event.draft.principal,
+                       event.draft.object,
+                       event.draft.action,
+                       event.draft.outcome,
+                       event.draft.request_id,
+                       event.draft.method,
+                       event.draft.device,
+                       event.draft.details.dump(),
+                       event.previous_digest,
+                       event.signer,
+                       event.signature,
+                       event.digest);
+        return {};
     }
 
     Result<audit::Event> latest_audit_event() override {
@@ -3974,6 +3977,365 @@ public:
             }
             return {};
         });
+    }
+
+    static Result<void> check_network_workspace(pqxx::work& tx, const NetworkScope& scope) {
+        const auto rows = tx.exec_params(
+            "SELECT 1 FROM workspaces WHERE id = $1::uuid AND customer_id = $2::uuid "
+            "AND desired <> 'deleted' FOR SHARE",
+            scope.workspace_id,
+            scope.customer_id);
+        if (rows.empty()) {
+            return std::unexpected(
+                StoreError{"invalid_input", "no live workspace in this customer"});
+        }
+        return {};
+    }
+
+    static Result<void> check_network_target(pqxx::work& tx,
+                                             const NetworkScope& scope,
+                                             const std::string& kind,
+                                             const std::string& id) {
+        // These are fixed SQL fragments, never caller-supplied identifiers.
+        std::string source;
+        if (kind == "app") {
+            source = "apps WHERE desired <> 'deleted'";
+        } else if (kind == "service") {
+            source = "services WHERE desired = 'present'";
+        } else if (kind == "agent") {
+            source = "agent_launches WHERE desired = 'present'";
+        } else if (kind == "tunnel") {
+            source = "network_tunnel_grants WHERE revoked_at IS NULL AND expires_at > now()";
+        } else {
+            return std::unexpected(StoreError{"invalid_input", "unknown network workload kind"});
+        }
+        const auto rows = tx.exec_params("SELECT 1 FROM " + source +
+                                             " AND id = $1::uuid AND customer_id = $2::uuid AND "
+                                             "workspace_id = $3::uuid FOR SHARE",
+                                         id,
+                                         scope.customer_id,
+                                         scope.workspace_id);
+        if (rows.empty()) {
+            return std::unexpected(
+                StoreError{"invalid_input", "network workload is not live in this workspace"});
+        }
+        return {};
+    }
+
+    static std::string network_select(const network_detail::Table& table) {
+        std::string value = "to_jsonb(n)";
+        if (table.tunnel) {
+            value +=
+                " || jsonb_build_object('expires_at', "
+                "to_char(n.expires_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"'), "
+                "'expired', n.expires_at <= now())";
+        }
+        return "SELECT (" + value + " || jsonb_build_object('status', to_jsonb(s)))::text FROM " +
+               table.name + " n LEFT JOIN " + table.status + " s ON s." + table.status_key +
+               " = n.id WHERE n.customer_id = $1::uuid AND n.workspace_id = $2::uuid";
+    }
+
+    template <class Row>
+    static Result<Row>
+    one_network(pqxx::work& tx, const NetworkScope& scope, const std::string& id) {
+        const auto rows =
+            tx.exec_params(network_select(network_detail::table<Row>()) + " AND n.id = $3::uuid",
+                           scope.customer_id,
+                           scope.workspace_id,
+                           id);
+        if (rows.empty()) {
+            return std::unexpected(StoreError{"not_found", "no network record in this workspace"});
+        }
+        return network_detail::decode<Row>(
+            nlohmann::json::parse(rows[0][0].template as<std::string>()));
+    }
+
+    template <class Row> Result<Row> get_network(const NetworkScope& scope, const std::string& id) {
+        if (auto checked = network_detail::validate_scope(scope); !checked) {
+            return std::unexpected(checked.error());
+        }
+        if (!network_detail::uuid(id)) {
+            return std::unexpected(StoreError{"invalid_input", "network id must be a UUID"});
+        }
+        return with_tx<Row>([&](pqxx::work& tx) { return one_network<Row>(tx, scope, id); });
+    }
+
+    template <class Row> Result<std::vector<Row>> list_network(const NetworkScope& scope) {
+        if (auto checked = network_detail::validate_scope(scope); !checked) {
+            return std::unexpected(checked.error());
+        }
+        return with_tx<std::vector<Row>>([&](pqxx::work& tx) -> Result<std::vector<Row>> {
+            const auto rows = tx.exec_params(network_select(network_detail::table<Row>()) +
+                                                 " ORDER BY n.created_at, n.id",
+                                             scope.customer_id,
+                                             scope.workspace_id);
+            std::vector<Row> result;
+            for (const auto& row : rows) {
+                result.push_back(network_detail::decode<Row>(
+                    nlohmann::json::parse(row[0].template as<std::string>())));
+            }
+            return result;
+        });
+    }
+
+    static Result<void> write_network_spec(pqxx::work& tx,
+                                           const network_detail::Table& table,
+                                           const NetworkScope& scope,
+                                           const std::string& id,
+                                           const nlohmann::json& spec,
+                                           const NetworkActor& actor,
+                                           bool create) {
+        std::string columns;
+        std::string values;
+        std::string assignments;
+        for (const auto& field : table.fields) {
+            if (!columns.empty()) {
+                columns += ", ";
+                values += ", ";
+                assignments += ", ";
+            }
+            columns += field;
+            values += "v." + field;
+            assignments += field + " = v." + field;
+        }
+        const std::string decoded =
+            "jsonb_populate_record(NULL::" + std::string(table.name) + ", $4::jsonb) v";
+        if (create) {
+            tx.exec_params("INSERT INTO " + std::string(table.name) +
+                               " (id, customer_id, workspace_id, created_by, " + columns +
+                               ") SELECT $1::uuid, $2::uuid, $3::uuid, NULLIF($5, '')::uuid, " +
+                               values + " FROM " + decoded,
+                           id,
+                           scope.customer_id,
+                           scope.workspace_id,
+                           spec.dump(),
+                           actor.user_id);
+        } else {
+            tx.exec_params("UPDATE " + std::string(table.name) + " n SET " + assignments +
+                               ", generation = n.generation + 1, updated_at = now() FROM " +
+                               decoded +
+                               " WHERE n.id = $1::uuid AND n.customer_id = $2::uuid AND "
+                               "n.workspace_id = $3::uuid",
+                           id,
+                           scope.customer_id,
+                           scope.workspace_id,
+                           spec.dump());
+        }
+        return {};
+    }
+
+    template <class Row>
+    Result<Row> change_network(const NetworkScope& scope,
+                               const std::string& supplied_id,
+                               const nlohmann::json& spec,
+                               const NetworkActor& actor,
+                               const std::string& operation) {
+        if (auto checked = network_detail::validate_scope(scope); !checked) {
+            return std::unexpected(checked.error());
+        }
+        const bool create = operation == "create";
+        if (!create && !network_detail::uuid(supplied_id)) {
+            return std::unexpected(StoreError{"invalid_input", "network id must be a UUID"});
+        }
+        const audit::IdentityOptions options{.instance_kek = instance_kek_};
+        auto signer = network_detail::prepare_audit(*this, actor, options);
+        if (!signer) {
+            return std::unexpected(signer.error());
+        }
+        const std::string id = create ? new_uuid_v4() : supplied_id;
+        return with_tx<Row>([&](pqxx::work& tx) -> Result<Row> {
+            const auto& table = network_detail::table<Row>();
+            if (auto checked = check_network_workspace(tx, scope); !checked) {
+                return std::unexpected(checked.error());
+            }
+            if (!create) {
+                const auto rows =
+                    tx.exec_params(network_select(table) + " AND n.id = $3::uuid FOR UPDATE OF n",
+                                   scope.customer_id,
+                                   scope.workspace_id,
+                                   id);
+                if (rows.empty()) {
+                    return std::unexpected(
+                        StoreError{"not_found", "no network record in this workspace"});
+                }
+                const auto previous = nlohmann::json::parse(rows[0][0].template as<std::string>());
+                const bool ended = table.tunnel ? !previous.at("revoked_at").is_null() ||
+                                                      previous.at("expired").template get<bool>()
+                                                : previous.at("desired") != "present";
+                if (ended) {
+                    return std::unexpected(StoreError{"conflict", "the network record has ended"});
+                }
+            }
+            if (create || operation == "update") {
+                auto checked = network_detail::validate(
+                    table, spec, [&](const std::string& kind, const std::string& target) {
+                        return check_network_target(tx, scope, kind, target);
+                    });
+                if (!checked) {
+                    return std::unexpected(checked.error());
+                }
+                if (table.tunnel && tx.exec_params("SELECT 1 FROM users WHERE id = $1::uuid",
+                                                   spec.at("user_id").get<std::string>())
+                                        .empty()) {
+                    return std::unexpected(StoreError{"invalid_input", "no tunnel user"});
+                }
+                write_network_spec(tx, table, scope, id, spec, actor, create);
+            } else {
+                tx.exec_params(
+                    "UPDATE " + std::string(table.name) + " SET " +
+                        (table.tunnel ? "revoked_at = now()" : "desired = 'absent'") +
+                        ", generation = generation + 1, updated_at = now() WHERE id = $1::uuid",
+                    id);
+            }
+            auto result = one_network<Row>(tx, scope, id);
+            if (!result) {
+                return result;
+            }
+            tx.exec("SELECT pg_advisory_xact_lock(hashtext('lake_audit_events'))");
+            const auto previous =
+                tx.exec("SELECT digest FROM audit_events ORDER BY sequence DESC LIMIT 1");
+            auto event = network_detail::sign_change(
+                *this,
+                *signer,
+                actor,
+                scope,
+                table,
+                id,
+                operation,
+                result->generation,
+                previous.empty() ? "" : previous[0][0].as<std::string>(),
+                options);
+            if (!event) {
+                return std::unexpected(event.error());
+            }
+            if (auto appended = append_audit_tx(tx, *event); !appended) {
+                return std::unexpected(appended.error());
+            }
+            return result;
+        });
+    }
+
+    Result<NetworkConnection> create_network_connection(const NetworkScope& scope,
+                                                        const NetworkConnectionSpec& spec,
+                                                        const NetworkActor& actor) override {
+        return change_network<NetworkConnection>(
+            scope, "", network_detail::encode(spec), actor, "create");
+    }
+
+    Result<NetworkConnection> update_network_connection(const NetworkScope& scope,
+                                                        const std::string& id,
+                                                        const NetworkConnectionSpec& spec,
+                                                        const NetworkActor& actor) override {
+        return change_network<NetworkConnection>(
+            scope, id, network_detail::encode(spec), actor, "update");
+    }
+
+    Result<NetworkConnection> withdraw_network_connection(const NetworkScope& scope,
+                                                          const std::string& id,
+                                                          const NetworkActor& actor) override {
+        return change_network<NetworkConnection>(scope, id, nullptr, actor, "withdraw");
+    }
+
+    Result<NetworkConnection> get_network_connection(const NetworkScope& scope,
+                                                     const std::string& id) override {
+        return get_network<NetworkConnection>(scope, id);
+    }
+
+    Result<std::vector<NetworkConnection>>
+    list_network_connections(const NetworkScope& scope) override {
+        return list_network<NetworkConnection>(scope);
+    }
+
+    Result<NetworkEgressRule> create_network_egress_rule(const NetworkScope& scope,
+                                                         const NetworkEgressRuleSpec& spec,
+                                                         const NetworkActor& actor) override {
+        return change_network<NetworkEgressRule>(
+            scope, "", network_detail::encode(spec), actor, "create");
+    }
+
+    Result<NetworkEgressRule> update_network_egress_rule(const NetworkScope& scope,
+                                                         const std::string& id,
+                                                         const NetworkEgressRuleSpec& spec,
+                                                         const NetworkActor& actor) override {
+        return change_network<NetworkEgressRule>(
+            scope, id, network_detail::encode(spec), actor, "update");
+    }
+
+    Result<NetworkEgressRule> withdraw_network_egress_rule(const NetworkScope& scope,
+                                                           const std::string& id,
+                                                           const NetworkActor& actor) override {
+        return change_network<NetworkEgressRule>(scope, id, nullptr, actor, "withdraw");
+    }
+
+    Result<NetworkEgressRule> get_network_egress_rule(const NetworkScope& scope,
+                                                      const std::string& id) override {
+        return get_network<NetworkEgressRule>(scope, id);
+    }
+
+    Result<std::vector<NetworkEgressRule>>
+    list_network_egress_rules(const NetworkScope& scope) override {
+        return list_network<NetworkEgressRule>(scope);
+    }
+
+    Result<NetworkTunnelGrant> create_network_tunnel_grant(const NetworkScope& scope,
+                                                           const NetworkTunnelGrantSpec& spec,
+                                                           const NetworkActor& actor) override {
+        return change_network<NetworkTunnelGrant>(
+            scope, "", network_detail::encode(spec), actor, "create");
+    }
+
+    Result<NetworkTunnelGrant> update_network_tunnel_grant(const NetworkScope& scope,
+                                                           const std::string& id,
+                                                           const NetworkTunnelGrantSpec& spec,
+                                                           const NetworkActor& actor) override {
+        return change_network<NetworkTunnelGrant>(
+            scope, id, network_detail::encode(spec), actor, "update");
+    }
+
+    Result<NetworkTunnelGrant> revoke_network_tunnel_grant(const NetworkScope& scope,
+                                                           const std::string& id,
+                                                           const NetworkActor& actor) override {
+        return change_network<NetworkTunnelGrant>(scope, id, nullptr, actor, "revoke");
+    }
+
+    Result<NetworkTunnelGrant> get_network_tunnel_grant(const NetworkScope& scope,
+                                                        const std::string& id) override {
+        return get_network<NetworkTunnelGrant>(scope, id);
+    }
+
+    Result<std::vector<NetworkTunnelGrant>>
+    list_network_tunnel_grants(const NetworkScope& scope) override {
+        return list_network<NetworkTunnelGrant>(scope);
+    }
+
+    Result<NetworkPeer> create_network_peer(const NetworkScope& scope,
+                                            const NetworkPeerSpec& spec,
+                                            const NetworkActor& actor) override {
+        return change_network<NetworkPeer>(
+            scope, "", network_detail::encode(spec), actor, "create");
+    }
+
+    Result<NetworkPeer> update_network_peer(const NetworkScope& scope,
+                                            const std::string& id,
+                                            const NetworkPeerSpec& spec,
+                                            const NetworkActor& actor) override {
+        return change_network<NetworkPeer>(
+            scope, id, network_detail::encode(spec), actor, "update");
+    }
+
+    Result<NetworkPeer> withdraw_network_peer(const NetworkScope& scope,
+                                              const std::string& id,
+                                              const NetworkActor& actor) override {
+        return change_network<NetworkPeer>(scope, id, nullptr, actor, "withdraw");
+    }
+
+    Result<NetworkPeer> get_network_peer(const NetworkScope& scope,
+                                         const std::string& id) override {
+        return get_network<NetworkPeer>(scope, id);
+    }
+
+    Result<std::vector<NetworkPeer>> list_network_peers(const NetworkScope& scope) override {
+        return list_network<NetworkPeer>(scope);
     }
 
     Result<std::vector<ManagedService>> list_services(const std::string& customer_id) override {
