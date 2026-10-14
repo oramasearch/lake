@@ -8,7 +8,7 @@ export type Audience = "visitor" | "account" | "operator";
 
 /** The rail's groups, in order. "top" items have no group label; "home" is a signed-in person's
  * Home group (Ask Orama, Dashboard). */
-export type SectionKey = "top" | "home" | "data" | "design" | "train" | "ship" | "organization" | "administration" | "developer" | "account" | "none";
+export type SectionKey = "top" | "home" | "data" | "design" | "train" | "ship" | "network" | "organization" | "administration" | "developer" | "account" | "none";
 
 export type Screen = {
   /** The router pattern, without the `/w/:workspaceId` prefix. Keep lake's existing URL and query

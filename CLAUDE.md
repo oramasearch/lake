@@ -28,6 +28,10 @@ interface. Operator adoption, live relay session termination and deployment are 
 [`docs/control-plane/network.md`](docs/control-plane/network.md) and
 [`docs/api/network.md`](docs/api/network.md), [scoped credentials](docs/api/scoped-credentials.md)
 and [tunnel credentials](docs/api/tunnel-grants.md).
+Each workspace has a Network section in the console after Ship (lake#729): Overview, Connections,
+Developer Access, Private Networks, Egress and DNS, Policies and Activity, which together call all
+fourteen capabilities. Data → Connections (datasets) stays separate and each links the other. Not
+deployed. See [`docs/ui/network.md`](docs/ui/network.md) and the [Network guide](docs/guide/network.md).
 
 The newest dated record, [`docs/deployment/dev-2026-10-01.md`](docs/deployment/dev-2026-10-01.md),
 and [`docs/design/status.md`](docs/design/status.md) still describe the 2026-10-01 deployment

@@ -33,6 +33,12 @@ connections, and with none it links to Connections to add one.
 | `/train/data?browse=<name>` | `/connections/connection?name=<name>` |
 | `/train/data#connections` | `/connections` |
 
+## Not the Network's Connections
+
+Network → Connections ([network.md](network.md), lake#729) is a different thing: which apps may
+reach which services, kept by Lake's control plane for the cluster to enforce. This page's
+description says so and links it, and that page links back here.
+
 ## Navigation and search
 
 The rail's Data group (`DATA_NAV` in `routes/nav.ts`) lists Connections after Datasets. Go to (⌘K)

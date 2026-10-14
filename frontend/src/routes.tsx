@@ -2,7 +2,7 @@
  * lookups the shell, breadcrumbs and command palette share. */
 import type { Session } from "@/lib/session";
 import type { Audience, Screen, SectionKey } from "@/routes/types";
-import { DATA_NAV, HOME_NAV, billingVisible, currentNavIn, localPath, type NavItem } from "@/routes/nav";
+import { DATA_NAV, HOME_NAV, NETWORK_NAV, billingVisible, currentNavIn, localPath, type NavItem } from "@/routes/nav";
 import { screens as account } from "@/pages/account/routes";
 import { screens as admin } from "@/pages/admin/routes";
 import { screens as apps } from "@/pages/apps/routes";
@@ -15,6 +15,7 @@ import { screens as drives } from "@/pages/drives/routes";
 import { screens as experiments } from "@/pages/experiments/routes";
 import { screens as home } from "@/pages/home/routes";
 import { screens as mcp } from "@/pages/mcp/routes";
+import { screens as network } from "@/pages/network/routes";
 import { screens as organizations } from "@/pages/organizations/routes";
 import { screens as repositories } from "@/pages/repositories/routes";
 import { screens as search } from "@/pages/search/routes";
@@ -44,6 +45,7 @@ export const SCREENS: Screen[] = [
   ...experiments,
   ...streams,
   ...ship,
+  ...network,
   ...apps,
   ...ask,
   ...organizations,
@@ -60,6 +62,7 @@ const SECTION_LABELS: Record<SectionKey, string> = {
   design: "Design",
   train: "Train",
   ship: "Ship",
+  network: "Network",
   organization: "Organization",
   administration: "Administration",
   developer: "Developer",
@@ -100,6 +103,8 @@ export const NAV: NavItem[] = [
   { section: "ship", path: "/deployments", label: "Deployments", icon: "api", audience: AO },
   { section: "ship", path: "/services", label: "Services", icon: "api", audience: AO },
   { section: "ship", path: "/workspaces", label: "Workspaces", icon: "api", audience: AO },
+  // A workspace's network (lake#729), after Ship.
+  ...NETWORK_NAV,
   { section: "organization", path: "/organizations", label: "Organizations", icon: "organization", audience: ["account"] },
   { section: "organization", path: "/secret-mounts", label: "Secrets", icon: "secrets", audience: ["account"] },
   // Usage over time across a person's workspaces (lake#564); /metering is its repository usage by hour.
@@ -160,7 +165,7 @@ export function workspacePath(workspaceId: string | null, path: string): string 
 /** Whether a page path is a workspace page (lake's workspace_page_path). */
 export function isWorkspacePath(path: string): boolean {
   if (["/workspaces", "/workspaces/create", "/workspaces/delete", "/workspace/select"].includes(path)) return false;
-  return ["/design", "/train", "/ship", "/workspace", "/workspaces", "/transcripts", "/transcript"].some((p) => path === p || path.startsWith(p + "/"));
+  return ["/design", "/train", "/ship", "/network", "/workspace", "/workspaces", "/transcripts", "/transcript"].some((p) => path === p || path.startsWith(p + "/"));
 }
 
 /** The pages the palette offers: rail items the viewer can open, plus account pages. */

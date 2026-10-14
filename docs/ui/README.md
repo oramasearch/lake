@@ -22,6 +22,8 @@ can do nothing the API cannot.
 - Data → Drives, one file manager over repository, workspace-files, virtual and storage drives,
   and its Storage tab (lake#656; New storage asks each provider for what it needs, lake#664): [drives.md](drives.md).
 - Data → Connections, the databases a workspace reads (lake#651): [connections.md](connections.md).
+- Network, a workspace's connections, developer access (tunnels), private networks, egress and DNS,
+  policies and activity (lake#729): [network.md](network.md). Not Data → Connections.
 - The Organization, Administration and Account pages: [organization.md](organization.md).
 - Deleting and revoking (organizations, invitations, grants, secret mounts, datasets, models,
   runs, search indexes, Ask Orama conversations): one typed confirmation that first lists what
@@ -210,6 +212,7 @@ Workspaces)
 | `/ship/apps`, `/ship/app` | `apps/AppsPage.tsx`, `AppPage.tsx` | apps, ApplicationAgent, one app ([apps.md](apps.md)) | see apps.md |
 | `/deployments` | `apps/DeploymentsPage.tsx` | every environment across readable repositories | `server_info` (whether Deployments are set up, lake#605), `list_repositories`, `list_environments` |
 | `/services` | `ship/ServicesPage.tsx` | the account's databases, streams and engines | `list_services`, `list_service_kinds`, `create_service`, `delete_service`, `service_connection` |
+| `/network/overview`, `/network/connections`, `/network/access`, `/network/private-networks`, `/network/egress`, `/network/policies`, `/network/activity` (`/network` opens the overview) | `network/*.tsx`, `network.ts` | Network: a workspace's declared connections with scoped credentials, developer tunnel grants and their credentials, peer connections, egress by DNS name or address range, the effective policy in sentences and network activity ([network.md](network.md)) | `network_rules`, `list_network_connections`, `create_network_connection`, `rotate_network_connection_credential`, `remove_network_connection`, `list_network_tunnel_grants`, `grant_network_tunnel`, `issue_network_tunnel_certificate`, `revoke_network_tunnel`, `list_network_tunnel_sessions`, `list_network_peers`, `list_network_egress_rules`, `create_network_egress_rule`, `network_activity`, `list_apps`, `list_services`, `get_customer`, `list_memberships` |
 | `/workspaces` | `workspaces/WorkspacesPage.tsx` | every workspace the person can reach, grouped by owner as the picker groups them, with phase and storage; New workspace (`?new=1`, asking the owner), Rename and deletion in dialogs ([workspace-selection.md](workspace-selection.md#the-workspaces-page)) | `list_workspaces`, `create_workspace`, `update_workspace`, `delete_workspace` |
 | `/ask`, `/w/<id>/ask` | `ask/AskRedirect.tsx` | the old Ask Orama page's address: opens the home (`/`) with its query, less `customer_id`; `/w/<id>/ask` first makes `<id>` the current workspace ([../api/ask-orama.md](../api/ask-orama.md)) | none; the home calls `send_ask_message`, `settle_ask_turn`, `confirm_ask_proposal`, `get_ask_conversation`, `get_agent_task`, `list_agent_library` |
 
