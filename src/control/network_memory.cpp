@@ -74,7 +74,7 @@ Result<Row> InMemoryStore::change_network(const NetworkScope& scope,
     if (!create && !network_detail::uuid(id)) {
         return std::unexpected(StoreError{"invalid_input", "network id must be a UUID"});
     }
-    auto signer = network_detail::prepare_audit(*this, actor, {});
+    auto signer = network_detail::prepare_audit(*this, actor, actor.identity_options);
     if (!signer) {
         return std::unexpected(signer.error());
     }
@@ -142,7 +142,7 @@ Result<Row> InMemoryStore::change_network(const NetworkScope& scope,
                                     operation,
                                     result.generation,
                                     audit_events_.empty() ? "" : audit_events_.back().digest,
-                                    {});
+                                    actor.identity_options);
     if (!event) {
         return std::unexpected(event.error());
     }

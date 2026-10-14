@@ -10,6 +10,10 @@ failure's page, and the pure helpers capabilities share (`web_ui_escape`, `web_u
 read policy and identical OpenAPI/MCP schemas. See `docs/api/streams.md` and `docs/ui/streams.md`
 for the Streams contracts and `docs/api/experiments.md` for the Experiments operations.
 
+`capabilities.hpp` declares the secure-networking registry entry point. Its connection, egress,
+tunnel, peer, effective-rule, session and activity contract is in
+[`docs/api/network.md`](../../../docs/api/network.md).
+
 `transcription.hpp` declares speech-to-text's pure helpers (audio decoding, caption cleaning,
 OpenAI's request and answer) and `openai_transcriber`. `registry.hpp` declares the `Transcriber`
 injected dependency on `ApiContext` and `ServerOptions` (lake#561, `docs/api/transcripts.md`).

@@ -170,7 +170,8 @@ when it calls a capability undeployed that the observed OpenAPI lists.
 [`docs/api/auth.md`](docs/api/auth.md) describes bearer credentials and the session migration;
 its [measurement proof](docs/build/session-authentication.md) records the regression coverage.
 [`docs/control-plane/network.md`](docs/control-plane/network.md) describes secure-networking
-desired state, audit, rollout and the operator handoff.
+desired state, audit, rollout and the operator handoff; [`docs/api/network.md`](docs/api/network.md)
+defines its permission-checked REST and MCP capabilities.
 
 ## Repository rules
 

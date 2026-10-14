@@ -5,6 +5,12 @@ records through the telemetry wrapper. PostgreSQL-only cases verify contract col
 foreign keys, backfill idempotency, notifications, expired grants, audit rollback and concurrent
 updates. See [network.md](../docs/control-plane/network.md#verify) for the proof command.
 
+`test_network_capabilities.cpp` covers desired-state lifecycle, effective rules, account
+permissions, OpenAPI and MCP registration, an MCP call, and the explicit workspace-record boundary.
+The schema-conformance case also calls every available network capability successfully and checks
+its required output with the independent validator. See [the capability
+contract](../docs/api/network.md#verify).
+
 `LAKE_TEST_SKIP_STALE_SWEEP=1` disables cleanup of previous runs' databases when a shared-host
 work order permits deleting only databases created by the current run. Current fixtures still
 clean up their own copies; see [testing.md](../docs/build/testing.md).

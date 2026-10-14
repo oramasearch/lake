@@ -21,6 +21,7 @@
 #include "lake/api/server.hpp"
 #include "lake/control/identity_crypto.hpp"
 #include "lake/control/memory_store.hpp"
+#include "lake/control/network.hpp"
 #include "mcp_test_server.hpp"
 #include "objects/records.hpp"
 #include "one_thread_io.hpp"
@@ -359,6 +360,62 @@ void check_proofs(HttpEvidence& http) {
     http.read("transparency_proof_bundle", "?leaf_index=0");
 }
 
+void check_network(HttpEvidence& http,
+                   lake::control::Store& store,
+                   const lake::control::Customer& customer,
+                   const lake::control::User& user,
+                   const std::string& workspace_id) {
+    const auto object = checked(store.find_policy_object("customer", customer.id));
+    checked(store.create_grant({user.taap_id,
+                                object.id,
+                                "read",
+                                "schema-network-attestation",
+                                "admin",
+                                "schema-network-grant"}));
+    const auto workspace = checked(store.get_workspace(workspace_id));
+    const auto app = checked(store.create_web_app({.customer_id = customer.id,
+                                                   .workspace_id = workspace_id,
+                                                   .name = "schema-network-client",
+                                                   .mode = "image",
+                                                   .image = "client:v1",
+                                                   .port = 3000,
+                                                   .host = "schema-network-client.test"}));
+    const json scope{{"customer_id", customer.id}, {"workspace_id", workspace_id}};
+    auto connection_input = scope;
+    connection_input.update({{"source_kind", "app"},
+                             {"source_id", app.id},
+                             {"target_kind", "service"},
+                             {"target_id", workspace.zetta_service_id},
+                             {"ports", json::array({4800})}});
+    const auto connection = http.call("create_network_connection", connection_input);
+    http.call("list_network_connections", scope);
+
+    auto egress_input = scope;
+    egress_input.update({{"dns_name", "schema.example.test"}, {"ports", json::array({443})}});
+    http.call("create_network_egress_rule", egress_input);
+    http.call("list_network_egress_rules", scope);
+
+    auto tunnel_input = scope;
+    tunnel_input.update(
+        {{"user_id", user.id},
+         {"target_kind", "service"},
+         {"target_id", workspace.zetta_service_id},
+         {"port", 4800},
+         {"expires_at",
+          lake::control::iso8601_at(std::chrono::system_clock::now() + std::chrono::hours(1))}});
+    const auto tunnel = http.call("grant_network_tunnel", tunnel_input);
+    http.call("list_network_tunnel_grants", scope);
+    http.call("list_network_peers", scope);
+    http.call("network_rules", scope);
+
+    auto remove = scope;
+    remove["connection_id"] = connection.at("id");
+    http.call("remove_network_connection", remove);
+    auto revoke = scope;
+    revoke["tunnel_grant_id"] = tunnel.at("id");
+    http.call("revoke_network_tunnel", revoke);
+}
+
 void validate_evidence(const json& document) {
     const auto path = lake::test::fixture_path("schema-responses.json");
     std::ofstream(path) << document.dump(2);
@@ -436,6 +493,7 @@ TEST(SchemaConformance, EveryToolAndRequiredOutputUsesHttpContract) {
         http.call(tool.at("name"), json::object(), false);
     }
     http.call("server_info");
+    check_network(http, *store, customer, user, experiments.id);
     for (const auto& [name, input] : lake::test::experiment_calls(customer.id, experiments.id)) {
         http.call(name, input);
         const auto [status, body] = http.request("POST", "/v1/" + name, input);

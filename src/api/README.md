@@ -1,5 +1,11 @@
 # API implementation
 
+`network_capabilities.cpp` defines twelve account-authorized secure-networking operations once for
+REST, OpenAPI and MCP. Desired state uses the network store; sessions and activity retain their
+workspace-record boundary. Its list handlers authorize their scoped candidates, and
+`agent_docs.cpp` places all twelve in the Network group. See [the API
+contract](../../docs/api/network.md).
+
 **The console is the web app (lake#561).** The pages are `frontend/`, embedded in the binary and
 answered for every browser page request by the `web_app` middleware (`web_app.cpp`,
 [web-app.md](../../docs/ui/web-app.md)); they call only `/v1`. lake#561 retired the

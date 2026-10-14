@@ -438,3 +438,20 @@ template <> NetworkPeer decode<NetworkPeer>(const json& value) {
     return result;
 }
 } // namespace lake::control::network_detail
+
+namespace lake::control {
+
+bool network_tunnel_grant_active(const NetworkTunnelGrant& grant,
+                                 std::chrono::system_clock::time_point now) {
+    if (grant.revoked_at) {
+        return false;
+    }
+    const auto expires = network_detail::instant(grant.spec.expires_at);
+    if (!expires) {
+        return false;
+    }
+    const double current = std::chrono::duration<double>(now.time_since_epoch()).count();
+    return *expires > current;
+}
+
+} // namespace lake::control
