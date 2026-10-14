@@ -1,5 +1,9 @@
 # Tests
 
+`LAKE_TEST_SKIP_STALE_SWEEP=1` disables cleanup of previous runs' databases when a shared-host
+work order permits deleting only databases created by the current run. Current fixtures still
+clean up their own copies; see [testing.md](../docs/build/testing.md).
+
 `test_main.cpp` is the shared GoogleTest runner. `lake::test::postgres_uri()` gives each
 Postgres-backed test a private database copied from a `lake_fixture_template_<digest>` template
 loaded once per `db/schema.sql` version, and drops it afterwards; a start-up sweep removes only

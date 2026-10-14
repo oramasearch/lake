@@ -237,7 +237,9 @@ public:
         const std::string template_name = std::string(template_prefix) + schema_digest(sql);
         if (!swept) {
             swept = true;
-            sweep_stale_databases(admin_, template_name);
+            if (std::getenv("LAKE_TEST_SKIP_STALE_SWEEP") == nullptr) {
+                sweep_stale_databases(admin_, template_name);
+            }
         }
         ensure_template(admin_, template_name, sql);
         name_ = std::string(fixture_prefix) + std::to_string(server_epoch(admin_)) + "_" +
