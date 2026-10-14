@@ -27,7 +27,12 @@ export default function ConnectionsPage() {
   );
   return (
     <>
-      <WorkspaceFrame eyebrow="Data" title="Connections" sub="The databases this workspace reads. Browse their tables and load one into a dataset." actions={ready ? add : null}>
+      <WorkspaceFrame eyebrow="Data" title="Connections" sub={
+          <>
+            The databases this workspace reads. Browse their tables and load one into a dataset. Which apps may reach which services is under{" "}
+            <Link to={ws("/network/connections")}>Network → Connections</Link>.
+          </>
+        } actions={ready ? add : null}>
         {() => <ConnectionsContent onAdd={() => setAdding(true)} />}
       </WorkspaceFrame>
       {adding && <AddConnection onClose={() => setAdding(false)} />}

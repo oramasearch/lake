@@ -14,6 +14,7 @@ set(GUIDE_SECTIONS
   "Design|design solutions"
   "Train|train agents experiments streams"
   "Ship|ship apps registry deployments services"
+  "Network|network"
   "Organization|organizations access sso tokens secrets activity usage billing"
   "Developer|developer mcp cli"
   "Reference|security faq"

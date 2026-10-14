@@ -176,7 +176,9 @@ when it calls a capability undeployed that the observed OpenAPI lists.
 its [measurement proof](docs/build/session-authentication.md) records the regression coverage.
 [`docs/control-plane/network.md`](docs/control-plane/network.md) describes secure-networking
 desired state, audit, rollout and the operator handoff; [`docs/api/network.md`](docs/api/network.md)
-defines its permission-checked REST and MCP capabilities.
+defines its permission-checked REST and MCP capabilities; [`docs/ui/network.md`](docs/ui/network.md)
+describes the Network section each workspace has in the console (lake#729), and the
+[Network guide](docs/guide/network.md) is what a customer reads.
 
 ## Repository rules
 

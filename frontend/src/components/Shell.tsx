@@ -26,6 +26,7 @@ import {
   type LucideIcon,
   Menu,
   Moon,
+  Network,
   Rocket,
   Search,
   Share2,
@@ -53,7 +54,7 @@ import { PHONE_QUERY } from "@/lib/phoneSheet";
 const AskPanel = lazy(() => import("./AskPanel").then((m) => ({ default: m.AskPanel })));
 
 /** G then this letter jumps to the group's first page (R for Data: its first page is Repositories). */
-const JUMPS: Record<string, SectionKey> = { r: "data", d: "design", t: "train", s: "ship", o: "organization", a: "administration" };
+const JUMPS: Record<string, SectionKey> = { r: "data", d: "design", t: "train", s: "ship", n: "network", o: "organization", a: "administration" };
 
 /** Each group's icon, and the icons of the ungrouped items at the top. */
 const SECTION_ICONS: Partial<Record<SectionKey, LucideIcon>> = {
@@ -62,6 +63,7 @@ const SECTION_ICONS: Partial<Record<SectionKey, LucideIcon>> = {
   design: Compass,
   train: FlaskConical,
   ship: Rocket,
+  network: Network,
   organization: Building2,
   administration: ShieldCheck,
   developer: Code2,

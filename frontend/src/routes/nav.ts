@@ -40,6 +40,20 @@ export const DATA_NAV: NavItem[] = [
   { section: "data", path: "/mcp-connections", label: "MCP Connections", icon: "api", audience: AO },
 ];
 
+/** The Network group (lake#729): a workspace's connections, developer access, private networks,
+ * egress and DNS, the effective policy and activity, after Ship. Every item is a workspace page.
+ * Overview is `/network/overview`, not `/network`, so it does not own the section's other pages. */
+export const NETWORK_NAV: NavItem[] = [
+  { section: "network", path: "/network/overview", label: "Overview", icon: "api", audience: AO },
+  // An app's or service's declared paths; Data → Connections is the databases a workspace reads.
+  { section: "network", path: "/network/connections", label: "Connections", icon: "api", audience: AO },
+  { section: "network", path: "/network/access", label: "Developer Access", icon: "api", audience: AO },
+  { section: "network", path: "/network/private-networks", label: "Private Networks", icon: "api", audience: AO },
+  { section: "network", path: "/network/egress", label: "Egress and DNS", icon: "api", audience: AO },
+  { section: "network", path: "/network/policies", label: "Policies", icon: "audit", audience: AO },
+  { section: "network", path: "/network/activity", label: "Activity", icon: "audit", audience: AO },
+];
+
 /** Strip `/w/<id>` from a path: the workspace-local path the registry is keyed by. */
 export function localPath(pathname: string): string {
   const match = /^\/w\/[^/]+(\/.*)?$/.exec(pathname);

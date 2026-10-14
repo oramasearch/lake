@@ -42,6 +42,7 @@ may wrap across source lines.
 | | `registry` | Packages, Builds and the Registry |
 | | `deployments` | Deployments and Environments |
 | | `services` | Services and Storage |
+| Network | `network` | Network (lake#729) |
 | Organization | `organizations` | Organizations, Members and Teams |
 | | `access` | Grants and Effective Access |
 | | `sso` | Single Sign-On and SCIM |
