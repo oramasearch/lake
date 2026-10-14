@@ -48,12 +48,27 @@ grant's generation with an endpoint and relay trust (`grantReady`), which is wha
 
 ### Get credentials
 
-The drawer shows the `openssl` command that makes `tunnel.key` and `tunnel.csr` on the developer's
-machine, then takes the pasted request. The page refuses an empty paste, one over 16 KiB, anything
-that is not a PEM certificate request, and a paste that contains a private key, before sending it.
-The answer is shown once (endpoint, `tunnel.crt` as the certificate followed by its chain, and
-`relay-ca.crt`) with Copy buttons, and is not kept: closing the drawer forgets it. The key never
-reaches Lake.
+The drawer is a set of numbered copy-and-paste steps (lake#745), all run in one folder,
+`~/orama-tunnel/<first 8 characters of the grant id>`:
+
+1. make the folder, then the `openssl` command that makes `tunnel.key` and `tunnel.csr`, then `cat tunnel.csr`;
+2. paste the request. The page refuses an empty paste, one over 16 KiB, anything that is not a PEM
+   certificate request, and a paste that contains a private key, before sending it;
+3. one paste that writes `tunnel.crt` (the certificate followed by its chain) and `relay-ca.crt`;
+4. the `zetta-tunnel client` command with the grant's endpoint and a local port filled in. The local
+   port is the target's port plus one, or 10000 plus a port below 1024 (`tunnelLocalPort`);
+5. how to connect through it, by the target's kind (`tunnelInstructions` in `network.ts`):
+   - `psql` for Postgres, `mysql` for TiDB, `valkey-cli` and `cqlsh`;
+   - `curl` for an app or the workspace's API;
+   - the local address for any other kind;
+   - with a reminder that the service's own user and password come from Ship → Services, Show connection.
+
+The endpoint and the two files on their own are under a disclosure. The answer is shown once and is
+not kept: closing the drawer forgets it. The key never reaches Lake.
+
+Ship → Services links here: a Ready service in a workspace has **Developer access**, which opens
+this page with Grant access filled in (lake#741): that service, the port of its address, you, for one hour
+(`?grant=<service id>&port=<port>`, built by `serviceAccessHref`).
 
 ### Sessions and activity not recorded yet
 
