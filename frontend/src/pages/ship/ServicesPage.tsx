@@ -7,8 +7,10 @@
  * searched (the Storage tab links a service that way). */
 import { type ComponentType, useMemo, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
+import { serviceAccessHref } from "@/pages/network/network";
 import { useQuery } from "@tanstack/react-query";
 import {
+  KeyRound,
   Cable,
   ChartColumn,
   CircleCheck,
@@ -388,6 +390,16 @@ function Services({ customerId, creating, setCreating }: { customerId: string; c
                     return (
                       <div className="flex flex-wrap justify-end gap-1.5">
                         {kind !== "zetta" && servicePhase(service) === "Ready" && <ShowConnection customerId={customerId} service={service} onShown={setShown} />}
+                        {servicePhase(service) === "Ready" && text(service, "workspace_id") && (
+                          <Button
+                            variant="ghost"
+                            to={serviceAccessHref(text(service, "workspace_id"), text(service, "id"), text(service, "endpoint"))}
+                            aria-label={`Developer access to ${text(service, "name")}`}
+                            title="Reach this service from your machine through a tunnel"
+                          >
+                            <KeyRound size={14} aria-hidden /> Developer access
+                          </Button>
+                        )}
                         {kinds.find((k) => k.kind === kind)?.mounts_stores && text(service, "workspace_id") && (
                           <Button variant="ghost" onClick={() => setStorage(service)} aria-label={`Storage ${text(service, "name")} mounts`}>
                             <HardDrive size={14} aria-hidden /> Storage

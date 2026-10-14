@@ -106,11 +106,13 @@ with a certificate made for that grant and for a key only they hold.
 ### Get Your Tunnel Credentials
 
 Only the person granted can get credentials, and only once the grant's **Tunnel** column reads
-**Ready**.
+**Ready**. You can also start from Ship → Services: a service's **Developer access** opens Grant
+access for it, for you, for an hour.
 
-1. On your grant's row press **Get credentials**.
-2. On your own machine run the command the drawer shows. It makes `tunnel.key` (your key, which
-   stays on your machine) and `tunnel.csr` (a request for a certificate):
+1. On your grant's row press **Get credentials**. Every step below is a block with a Copy button;
+   paste each into a terminal on your own machine, in order.
+2. **Make a key and a request.** The first block makes a folder for this grant, then
+   `tunnel.key` (your key, which stays on your machine) and `tunnel.csr`, and prints the request:
 
    ```sh
    umask 077
@@ -118,11 +120,19 @@ Only the person granted can get credentials, and only once the grant's **Tunnel*
      -keyout tunnel.key -out tunnel.csr -subj '/CN=developer'
    ```
 
-3. Paste the contents of `tunnel.csr` and press **Get certificate**.
-4. Copy the three answers: the **Tunnel endpoint**, `tunnel.crt` (your certificate followed by its
-   chain) and `relay-ca.crt` (the certificate authority the tunnel itself uses). Lake does not keep
-   them to show again; while your access lasts you can ask for another certificate.
-5. Give the tunnel client `tunnel.crt`, `tunnel.key`, `relay-ca.crt` and the endpoint.
+3. Paste what it printed and press **Get certificate**.
+4. **Save the certificate.** One block writes `tunnel.crt` and `relay-ca.crt` into the same
+   folder. Lake does not keep them to show again; while your access lasts you can ask for another
+   certificate.
+5. **Start the tunnel** with the next block, and leave it running. It needs the tunnel client,
+   `zetta-tunnel`. The command already holds your endpoint, and listens only on your machine, on a
+   port next to the target's (5433 for Postgres's 5432).
+6. **Connect** with the last block, in a second terminal: for Postgres,
+   `psql "postgresql://USER@127.0.0.1:5433/DATABASE"`. The tunnel does not replace the service's own
+   sign-in: its user, password and database are under Ship → Services, **Show connection**.
+
+The tunnel stops working when your access expires or is revoked, and your certificate lasts at
+most 12 hours.
 
 `POST /v1/issue_network_tunnel_certificate`
 

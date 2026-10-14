@@ -11,6 +11,15 @@ export const NETWORK_PATH = "/network";
 export const OVERVIEW_PATH = "/network/overview";
 export const CONNECTIONS_PATH = "/network/connections";
 export const ACCESS_PATH = "/network/access";
+
+/** Developer Access with Grant access already open for one service (lake#741): Ship → Services
+ * links here, so granting a tunnel is one flow wherever it starts. The port is the service
+ * address's own, when it ends in one. */
+export function serviceAccessHref(workspaceId: string, serviceId: string, endpoint: string): string {
+  const port = /:(\d{1,5})\/?$/.exec(endpoint.trim())?.[1];
+  const query = new URLSearchParams({ grant: serviceId, ...(port ? { port } : {}) });
+  return `/w/${encodeURIComponent(workspaceId)}${ACCESS_PATH}?${query}`;
+}
 export const PEERS_PATH = "/network/private-networks";
 export const EGRESS_PATH = "/network/egress";
 export const POLICIES_PATH = "/network/policies";
@@ -226,6 +235,63 @@ export function certificateFile(result: Row): string {
   const cert = str(result, "certificate_pem").trimEnd();
   const chain = str(result, "chain_pem").trimEnd();
   return chain ? `${cert}\n${chain}\n` : `${cert}\n`;
+}
+
+/** The local port a tunnel listens on: next to the target's own port, so it does not clash with a
+ * database already running on the developer's machine, and never a privileged port. */
+export function tunnelLocalPort(port: number): number {
+  const local = port < 1024 ? 10000 + port : port + 1;
+  return local > 65535 ? 15433 : local;
+}
+
+/** What a developer pastes, step by step, once Lake has signed their certificate (lake#745). Every
+ * command runs in the folder step 1 made, where tunnel.key already is. */
+export type TunnelInstructions = { folder: string; save: string; start: string; localPort: number; connect: string; connectNote: string };
+
+export function tunnelInstructions(args: {
+  grantId: string;
+  endpoint: string;
+  port: number;
+  targetKind: string;
+  serviceKind?: string;
+  certificate: string;
+  relayCa: string;
+}): TunnelInstructions {
+  const folder = `~/orama-tunnel/${args.grantId.slice(0, 8)}`;
+  const save = [
+    `cd ${folder}`,
+    "cat > tunnel.crt <<'END_OF_CERTIFICATE'",
+    args.certificate.trimEnd(),
+    "END_OF_CERTIFICATE",
+    "cat > relay-ca.crt <<'END_OF_CERTIFICATE'",
+    args.relayCa.trimEnd(),
+    "END_OF_CERTIFICATE",
+  ].join("\n");
+  const localPort = tunnelLocalPort(args.port);
+  const start = [
+    `cd ${folder}`,
+    "zetta-tunnel client --cert tunnel.crt --key tunnel.key --ca relay-ca.crt \\",
+    `  --relay ${args.endpoint} --listen 127.0.0.1:${localPort}`,
+  ].join("\n");
+  const local = `127.0.0.1:${localPort}`;
+  const credentials = "Its user, password and database are on Ship → Services, under Show connection. The tunnel does not replace them.";
+  if (args.targetKind === "app") {
+    return { folder, save, start, localPort, connect: `curl http://${local}/`, connectNote: `Or open http://${local}/ in your browser.` };
+  }
+  switch (args.serviceKind) {
+    case "postgres":
+      return { folder, save, start, localPort, connect: `psql "postgresql://USER@${local}/DATABASE"`, connectNote: credentials };
+    case "tidb":
+      return { folder, save, start, localPort, connect: `mysql -h 127.0.0.1 -P ${localPort} -u USER -p`, connectNote: credentials };
+    case "valkey":
+      return { folder, save, start, localPort, connect: `valkey-cli -h 127.0.0.1 -p ${localPort} --user USER --askpass`, connectNote: credentials };
+    case "cassandra":
+      return { folder, save, start, localPort, connect: `cqlsh 127.0.0.1 ${localPort} -u USER`, connectNote: credentials };
+    case "zetta":
+      return { folder, save, start, localPort, connect: `curl http://${local}/v1/server_info`, connectNote: "The workspace's API answers on that address; call it with a key for this workspace." };
+    default:
+      return { folder, save, start, localPort, connect: `${local}`, connectNote: `Point your client at ${local} instead of the service's address. ${credentials}` };
+  }
 }
 
 /** Names for ids: what the pages show instead of a UUID. */

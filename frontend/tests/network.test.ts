@@ -13,6 +13,9 @@ import {
   egressDestination,
   egressInput,
   expiresAt,
+  serviceAccessHref,
+  tunnelInstructions,
+  tunnelLocalPort,
   grantInput,
   grantReady,
   grantState,
@@ -204,4 +207,45 @@ test("history is hidden until asked for, and provider records read their common 
   assert.equal(present(rows, true).length, 2);
   assert.deepEqual(recordColumns({ at: "t", source: "a", target: "b", decision: "allowed" }), { when: "t", source: "a", destination: "b", outcome: "allowed" });
   assert.deepEqual(recordColumns({}), { when: "", source: "", destination: "", outcome: "" });
+});
+
+test("the credentials end in commands a developer pastes, with the endpoint and port filled in (lake#745)", () => {
+  const steps = tunnelInstructions({
+    grantId: "8a8636d3-9b18-41d6-8b9f-9aed08fbbb3b",
+    endpoint: "20.246.181.73:443",
+    port: 5432,
+    targetKind: "service",
+    serviceKind: "postgres",
+    certificate: "-----BEGIN CERTIFICATE-----\nAAA\n-----END CERTIFICATE-----\n",
+    relayCa: "-----BEGIN CERTIFICATE-----\nBBB\n-----END CERTIFICATE-----\n",
+  });
+  assert.equal(steps.folder, "~/orama-tunnel/8a8636d3");
+  assert.equal(steps.localPort, 5433);
+  // One paste writes both files, in the folder step 1 made, with the exact PEM text.
+  assert.ok(steps.save.startsWith("cd ~/orama-tunnel/8a8636d3\ncat > tunnel.crt <<'END_OF_CERTIFICATE'\n-----BEGIN CERTIFICATE-----\nAAA"));
+  assert.match(steps.save, /cat > relay-ca\.crt <<'END_OF_CERTIFICATE'\n-----BEGIN CERTIFICATE-----\nBBB\n-----END CERTIFICATE-----\nEND_OF_CERTIFICATE$/);
+  assert.match(steps.start, /--relay 20\.246\.181\.73:443 --listen 127\.0\.0\.1:5433$/);
+  assert.match(steps.start, /--cert tunnel\.crt --key tunnel\.key --ca relay-ca\.crt/);
+  assert.equal(steps.connect, 'psql "postgresql://USER@127.0.0.1:5433/DATABASE"');
+  assert.match(steps.connectNote, /Show connection/);
+  // An app is reached over HTTP; an unknown kind gets the address and the same reminder.
+  const app = tunnelInstructions({ grantId: "a", endpoint: "e:443", port: 80, targetKind: "app", certificate: "c", relayCa: "r" });
+  assert.equal(app.connect, "curl http://127.0.0.1:10080/");
+  const other = tunnelInstructions({ grantId: "a", endpoint: "e:443", port: 9000, targetKind: "service", serviceKind: "clickhouse", certificate: "c", relayCa: "r" });
+  assert.equal(other.connect, "127.0.0.1:9001");
+});
+
+test("the local port sits next to the target's and is never privileged", () => {
+  assert.equal(tunnelLocalPort(5432), 5433);
+  assert.equal(tunnelLocalPort(443), 10443);
+  assert.equal(tunnelLocalPort(65535), 15433);
+});
+
+test("a service's Developer access opens Grant access for it, with its own port (lake#741)", () => {
+  assert.equal(
+    serviceAccessHref("6bb777ba-498a", "5103dc69-b44c", "prod-svc-5103dc69b44c-rw.prod-ws-6bb777ba498a.svc.cluster.local:5432"),
+    "/w/6bb777ba-498a/network/access?grant=5103dc69-b44c&port=5432",
+  );
+  assert.equal(serviceAccessHref("w", "s", "http://prod-ws-x-zetta.prod-ws-x.svc.cluster.local:4800"), "/w/w/network/access?grant=s&port=4800");
+  assert.equal(serviceAccessHref("w", "s", ""), "/w/w/network/access?grant=s");
 });

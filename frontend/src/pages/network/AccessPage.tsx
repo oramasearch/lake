@@ -4,6 +4,7 @@
  * certificate for a key that never leaves their machine (`issue_network_tunnel_certificate`). Recent
  * sessions come from `list_network_tunnel_sessions`. A tunnel is named for what it reaches. */
 import { useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { KeyRound, Plus } from "lucide-react";
 import { act, type Row } from "@/lib/api";
 import { dateTime, relative } from "@/lib/format";
@@ -22,13 +23,17 @@ import {
   grantState,
   nameOf,
   recordColumns,
+  tunnelInstructions,
   type GrantForm,
   type Names,
 } from "./network";
 import { Endpoint, NetworkPage, NotRecorded, RecordState, useNames, useNetworkRead, useScope } from "./parts";
 
 export default function AccessPage() {
-  const [granting, setGranting] = useState(false);
+  // ?grant=<service id>&port=<port> (Ship → Services' Developer access) opens Grant access filled in.
+  const [params, setParams] = useSearchParams();
+  const prefill = params.get("grant") ? { targetKind: "service", targetId: params.get("grant") ?? "", port: params.get("port") ?? "" } : null;
+  const [granting, setGranting] = useState(Boolean(prefill));
   const [issuing, setIssuing] = useState<Row | null>(null);
   const [history, setHistory] = useState(false);
   const { viewer } = useSession();
@@ -125,8 +130,21 @@ export default function AccessPage() {
           />
         )}
       </Section>
-      {granting && <Grant names={names} apps={apps} services={services} people={people} onClose={() => setGranting(false)} />}
-      {issuing && <Issue grant={issuing} names={names} onClose={() => setIssuing(null)} />}
+      {granting && (
+        <Grant
+          names={names}
+          apps={apps}
+          services={services}
+          people={people}
+          initial={prefill ?? undefined}
+          you={viewer.user_id ? String(viewer.user_id) : undefined}
+          onClose={() => {
+            setGranting(false);
+            if (prefill) setParams({}, { replace: true });
+          }}
+        />
+      )}
+      {issuing && <Issue grant={issuing} names={names} services={services} onClose={() => setIssuing(null)} />}
     </NetworkPage>
   );
 }
@@ -154,11 +172,35 @@ function Revoke({ grant, names }: { grant: Row; names: Names }) {
 }
 
 /** "Grant access": a member, one port of a service or app, and how long. Only an account admin can. */
-function Grant({ names, apps, services, people, onClose }: { names: Names; apps: Row[]; services: Row[]; people: { id: string; label: string }[]; onClose: () => void }) {
+function Grant({
+  names,
+  apps,
+  services,
+  people,
+  initial,
+  you,
+  onClose,
+}: {
+  names: Names;
+  apps: Row[];
+  services: Row[];
+  people: { id: string; label: string }[];
+  initial?: Partial<GrantForm>;
+  you?: string;
+  onClose: () => void;
+}) {
   const scope = useScope();
   const toast = useToast();
   const save = useAsync();
-  const [form, setForm] = useState<GrantForm>({ userId: people[0]?.id ?? "", targetKind: "service", targetId: "", port: "", hours: 8 });
+  // From a service's Developer access, the grant is for the person asking, for an hour.
+  const [form, setForm] = useState<GrantForm>({
+    userId: initial ? (you ?? people[0]?.id ?? "") : (people[0]?.id ?? ""),
+    targetKind: "service",
+    targetId: "",
+    port: "",
+    hours: initial ? 1 : 8,
+    ...initial,
+  });
   const set = (patch: Partial<GrantForm>) => setForm((f) => ({ ...f, ...patch }));
   const targets = (form.targetKind === "app" ? apps : services).map((r) => ({ id: String(r.id), label: String(r.name || r.id) }));
   return (
@@ -235,13 +277,26 @@ function Grant({ names, apps, services, people, onClose }: { names: Names; apps:
 
 /** "Get credentials": the recipient makes a key and a request on their machine, pastes the request,
  * and Lake signs it. The key never reaches Lake; the answer is shown once and not kept. */
-function Issue({ grant, names, onClose }: { grant: Row; names: Names; onClose: () => void }) {
+function Issue({ grant, names, services, onClose }: { grant: Row; names: Names; services: Row[]; onClose: () => void }) {
   const scope = useScope();
   const sign = useAsync();
   const [csr, setCsr] = useState("");
   const [problem, setProblem] = useState<string | null>(null);
   const [result, setResult] = useState<Row | null>(null);
   const target = nameOf(names, String(grant.target_kind), String(grant.target_id));
+  const serviceKind = services.find((s) => String(s.id) === String(grant.target_id))?.kind;
+  const folder = `~/orama-tunnel/${String(grant.id).slice(0, 8)}`;
+  const steps = result
+    ? tunnelInstructions({
+        grantId: String(grant.id),
+        endpoint: String(result.endpoint ?? ""),
+        port: Number(grant.port),
+        targetKind: String(grant.target_kind),
+        serviceKind: serviceKind ? String(serviceKind) : undefined,
+        certificate: certificateFile(result),
+        relayCa: String(result.relay_ca_pem ?? ""),
+      })
+    : null;
   return (
     <Drawer
       title="Get Tunnel Credentials"
@@ -268,10 +323,25 @@ function Issue({ grant, names, onClose }: { grant: Row; names: Names; onClose: (
           <Notice tone="success" title="Certificate Issued">
             It is valid until {dateTime(result.expires_at)}. Lake does not keep a copy to show again; ask for another while your access lasts.
           </Notice>
-          <CopyBlock label="Tunnel endpoint" value={String(result.endpoint ?? "")} />
-          <CopyBlock label="tunnel.crt (certificate and chain)" value={certificateFile(result)} multiline />
-          <CopyBlock label="relay-ca.crt (the tunnel's own certificate authority)" value={String(result.relay_ca_pem ?? "")} multiline />
-          <p className="muted m-0 text-[12.5px]">Give the tunnel client tunnel.crt, your tunnel.key, relay-ca.crt and the endpoint. Docs → Network says how.</p>
+          {steps && (
+            <>
+              <CopyBlock label="3. Save the certificate files (paste this in the same terminal)" value={steps.save} multiline />
+              <CopyBlock label="4. Start the tunnel, and leave it running" value={steps.start} multiline />
+              <p className="muted m-0 text-[12.5px]">
+                This needs the tunnel client, <code>zetta-tunnel</code>. It listens only on your machine, at 127.0.0.1:{steps.localPort}, and stops working when your access ends or is revoked.
+              </p>
+              <CopyBlock label={`5. Connect to ${target}, in a second terminal`} value={steps.connect} />
+              <p className="muted m-0 text-[12.5px]">{steps.connectNote}</p>
+            </>
+          )}
+          <details>
+            <summary className="muted text-[12.5px]">The files and the endpoint on their own</summary>
+            <div className="stack mt-2">
+              <CopyBlock label="Tunnel endpoint" value={String(result.endpoint ?? "")} />
+              <CopyBlock label="tunnel.crt (certificate and chain)" value={certificateFile(result)} multiline />
+              <CopyBlock label="relay-ca.crt (the tunnel's own certificate authority)" value={String(result.relay_ca_pem ?? "")} multiline />
+            </div>
+          </details>
         </div>
       ) : (
         <Form
@@ -286,8 +356,8 @@ function Issue({ grant, names, onClose }: { grant: Row; names: Names; onClose: (
             });
           }}
         >
-          <CopyBlock label="1. Make a key and a request on your machine" value={CSR_COMMAND} multiline />
-          <Field label="2. Paste tunnel.csr" help="Only the request. tunnel.key stays on your machine." error={fieldError(sign.error, "csr_pem")}>
+          <CopyBlock label="1. In a terminal on your machine, make a key and a request" value={`mkdir -p ${folder} && cd ${folder}\n${CSR_COMMAND}\ncat tunnel.csr`} multiline />
+          <Field label="2. Paste what it printed (tunnel.csr)" help="Only the request. tunnel.key stays on your machine, in that folder." error={fieldError(sign.error, "csr_pem")}>
             <textarea rows={8} className="font-mono" placeholder="-----BEGIN CERTIFICATE REQUEST-----" value={csr} onChange={(e) => setCsr(e.target.value)} spellCheck={false} />
           </Field>
         </Form>
