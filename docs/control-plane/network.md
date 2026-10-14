@@ -39,6 +39,20 @@ the idempotent schema never restores a withdrawn connection or creates blanket p
 added after rollout. The guard and migration marker follow the backfill in the schema transaction.
 Migration-created rows have NULL `created_by`; they represent compatibility state, not a person.
 
+A customer-selected non-null `credential_scope` is valid only for an app-to-service connection.
+Lake never accepts or stores its credential bytes in the desired row. The operator writes the
+workspace-secret name to `network_connection_status.credential_secret`. Lake exposes that reference
+with the connection while the secret value remains sealed in the workspace Zetta and is projected
+only to the source app.
+
+Credential rotation is an ordinary desired-generation change with an unchanged connection spec.
+`rotate_network_connection_credential` reads the scoped connection and writes that same spec through
+`update_network_connection`, advancing `generation`; the older operator observation remains visible
+until `observed_generation` catches up. The operator replaces the per-connection role credential and
+rewrites the same workspace secret. Withdrawal advances generation with `desired = 'absent'`; the
+operator drops the role, revokes the delivered credential and then reports `Deleted`. The operator's
+native Postgres role and grant enforcement remains [orama-operator#469](https://github.com/oramasearch/orama-operator/issues/469).
+
 Every insert, update or delete of a desired table emits `NOTIFY lake_network, '<row UUID>'` in
 the same transaction. Rollbacks emit nothing. Status writes emit nothing. Polling remains the
 operator's fallback if a listener misses a notification. Customer/workspace/creation/id indexes
@@ -77,8 +91,9 @@ are absent for workspace-wide scope.
 
 Validation rejects invalid UUIDs, foreign or missing workloads, ports outside 1–65535, empty
 egress port lists, a CIDR with host bits, both/neither CIDR and DNS, and partially specified
-sources. Credential scopes are NULL or `{"access":"read"|"write","schema":"optional name"}`;
-credential bytes are never accepted as scope fields. Peer exports name local app/service targets
+sources. Credential scopes are NULL or `{"access":"read"|"write","schema":"optional name"}` and a
+non-null scope requires an app source and service target; credential bytes are never accepted as
+scope fields. Peer exports name local app/service targets
 and ports; imports name remote services and ports. Tunnel expiration input is UTC RFC 3339 with
 `Z`, optionally up to six fractional digits, and must be in the future. The grant user must exist.
 

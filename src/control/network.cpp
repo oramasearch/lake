@@ -187,6 +187,9 @@ validate(const Table& table,
         }
     }
     if (spec.contains("credential_scope") && !spec.at("credential_scope").is_null()) {
+        if (spec.at("source_kind") != "app" || spec.at("target_kind") != "service") {
+            return invalid("credential_scope requires an app source and a service target");
+        }
         const auto& scope = spec.at("credential_scope");
         if (!scope.is_object() || !scope.contains("access") ||
             (scope.at("access") != "read" && scope.at("access") != "write") ||

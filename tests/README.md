@@ -9,10 +9,12 @@ See [tunnel credentials](../docs/api/tunnel-grants.md) and [the proof](../docs/b
 `test_network.cpp` runs shared memory/PostgreSQL store cases for all four secure-networking
 records through the telemetry wrapper. PostgreSQL-only cases verify contract columns, defaults,
 foreign keys, backfill idempotency, notifications, expired grants, audit rollback and concurrent
-updates. See [network.md](../docs/control-plane/network.md#verify) for the proof command.
+updates. Shared validation rejects credentials outside app-to-service connections. See
+[network.md](../docs/control-plane/network.md#verify) for the proof command.
 
-`test_network_capabilities.cpp` covers desired-state lifecycle, effective rules, account
-permissions, OpenAPI and MCP registration, an MCP call, and the explicit workspace-record boundary.
+`test_network_capabilities.cpp` covers desired-state lifecycle, scoped credential rotation and
+refusal, effective rules, account permissions, OpenAPI and MCP registration, an MCP call, and the
+explicit workspace-record boundary.
 The schema-conformance case also calls every available network capability successfully and checks
 its required output with the independent validator. See [the capability
 contract](../docs/api/network.md#verify).

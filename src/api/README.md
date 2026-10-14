@@ -1,13 +1,15 @@
 # API implementation
 
-`network_capabilities.cpp` defines thirteen account-authorized secure-networking operations once for
+`network_capabilities.cpp` defines fourteen account-authorized secure-networking operations once for
 REST, OpenAPI and MCP. Desired state uses the network store; sessions and activity retain their
 workspace-record boundary. Its list handlers authorize their scoped candidates, and
-`agent_docs.cpp` places all thirteen in the Network group. Recipient-only CSR issuance uses the
+`agent_docs.cpp` places all fourteen in the Network group. App credential rotation advances the
+unchanged connection's desired generation and keeps the workspace-secret reference stable.
+Recipient-only CSR issuance uses the
 customer PKI, a current grant and ready relay trust; it is centrally audited and unmetered.
 `ServerOptions.network_records` supplies session/activity reads, defaulting to an explicit
-pending zetta#1281 response. See [tunnel credentials](../../docs/api/tunnel-grants.md) and [the API
-contract](../../docs/api/network.md).
+pending zetta#1281 response. See [scoped credentials](../../docs/api/scoped-credentials.md),
+[tunnel credentials](../../docs/api/tunnel-grants.md) and [the API contract](../../docs/api/network.md).
 
 **The console is the web app (lake#561).** The pages are `frontend/`, embedded in the binary and
 answered for every browser page request by the `web_app` middleware (`web_app.cpp`,

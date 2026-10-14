@@ -140,6 +140,7 @@ constexpr std::array group_rules{
               "activity are available once the workspace record provider is installed.",
               [](std::string_view n) {
                   return n == "create_network_connection" || n == "list_network_connections" ||
+                         n == "rotate_network_connection_credential" ||
                          n == "remove_network_connection" || n == "create_network_egress_rule" ||
                          n == "list_network_egress_rules" || n == "grant_network_tunnel" ||
                          n == "list_network_tunnel_grants" || n == "revoke_network_tunnel" ||

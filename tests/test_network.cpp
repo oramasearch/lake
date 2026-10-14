@@ -331,6 +331,13 @@ TEST_P(NetworkStore, InvalidAndForeignWritesLeaveRowsAndAuditAlone) {
     spec.ports.clear();
     spec.credential_scope = {{"access", "read"}, {"password", "not-a-scope"}};
     EXPECT_EQ(store->create_network_connection(scope, spec, actor).error().code, "invalid_input");
+    spec = connection_spec();
+    spec.source_kind = "service";
+    spec.source_id = target;
+    spec.target_kind = "app";
+    spec.target_id = source;
+    spec.credential_scope = {{"access", "read"}};
+    EXPECT_EQ(store->create_network_connection(scope, spec, actor).error().code, "invalid_input");
     EXPECT_EQ(
         store->create_network_connection({"bad", scope.workspace_id}, connection_spec(), actor)
             .error()

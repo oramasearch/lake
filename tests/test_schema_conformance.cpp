@@ -394,9 +394,13 @@ void check_network(HttpEvidence& http,
                              {"source_id", app.id},
                              {"target_kind", "service"},
                              {"target_id", workspace.zetta_service_id},
-                             {"ports", json::array({4800})}});
+                             {"ports", json::array({4800})},
+                             {"credential_scope", {{"access", "read"}}}});
     const auto connection = http.call("create_network_connection", connection_input);
     http.call("list_network_connections", scope);
+    auto rotate = scope;
+    rotate["connection_id"] = connection.at("id");
+    http.call("rotate_network_connection_credential", rotate);
 
     auto egress_input = scope;
     egress_input.update({{"dns_name", "schema.example.test"}, {"ports", json::array({443})}});

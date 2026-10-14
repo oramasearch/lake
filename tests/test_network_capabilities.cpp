@@ -174,6 +174,20 @@ TEST_F(NetworkCapabilities, DesiredRulesCanBeDeclaredListedEndedAndReadEffective
     EXPECT_EQ(connections.value.at("connections")[0].at("status").at("credential_secret"),
               "network-credential");
 
+    json rotate = scope();
+    rotate["connection_id"] = connection_id;
+    const auto rotated = call("rotate_network_connection_credential", rotate);
+    ASSERT_TRUE(rotated.ok) << rotated.error.message;
+    EXPECT_EQ(rotated.value.at("generation"), 2);
+    EXPECT_EQ(rotated.value.at("credential_scope"), connection.value.at("credential_scope"));
+    EXPECT_EQ(rotated.value.at("status").at("observed_generation"), 1);
+    EXPECT_EQ(rotated.value.at("status").at("credential_secret"), "network-credential");
+    ASSERT_TRUE(store.set_network_connection_status(connection_id,
+                                                    {.phase = "Ready",
+                                                     .message = "rotated",
+                                                     .observed_generation = 2,
+                                                     .credential_secret = "network-credential"}));
+
     const auto egress = call("create_network_egress_rule", egress_input());
     ASSERT_TRUE(egress.ok) << egress.error.message;
     EXPECT_EQ(egress.value.at("dns_name"), "api.example.test");
@@ -203,6 +217,9 @@ TEST_F(NetworkCapabilities, DesiredRulesCanBeDeclaredListedEndedAndReadEffective
     const auto effective = call("network_rules", scope());
     ASSERT_TRUE(effective.ok) << effective.error.message;
     EXPECT_EQ(effective.value.at("connections").size(), 1U);
+    EXPECT_EQ(effective.value.at("connections")[0].at("status").at("observed_generation"), 2);
+    EXPECT_EQ(effective.value.at("connections")[0].at("status").at("credential_secret"),
+              "network-credential");
     EXPECT_EQ(effective.value.at("egress_rules").size(), 1U);
     EXPECT_EQ(effective.value.at("tunnel_grants").size(), 1U);
     EXPECT_EQ(effective.value.at("peers").size(), 1U);
@@ -212,6 +229,11 @@ TEST_F(NetworkCapabilities, DesiredRulesCanBeDeclaredListedEndedAndReadEffective
     const auto removed = call("remove_network_connection", remove);
     ASSERT_TRUE(removed.ok) << removed.error.message;
     EXPECT_EQ(removed.value.at("desired"), "absent");
+    EXPECT_EQ(removed.value.at("generation"), 3);
+    const auto withdrawn_rotation = call("rotate_network_connection_credential", rotate);
+    EXPECT_FALSE(withdrawn_rotation.ok);
+    EXPECT_EQ(withdrawn_rotation.error.code, "conflict");
+    EXPECT_EQ(withdrawn_rotation.error.path, "/connection_id");
     json revoke = scope();
     revoke["tunnel_grant_id"] = tunnel_id;
     const auto revoked = call("revoke_network_tunnel", revoke);
@@ -231,6 +253,21 @@ TEST_F(NetworkCapabilities, DesiredRulesCanBeDeclaredListedEndedAndReadEffective
     EXPECT_EQ(call("list_network_connections", scope()).value.at("connections").size(), 1U);
     EXPECT_EQ(call("list_network_tunnel_grants", scope()).value.at("tunnel_grants").size(), 1U);
     EXPECT_EQ(call("list_network_peers", scope()).value.at("peers").size(), 1U);
+}
+
+TEST_F(NetworkCapabilities, OnlyScopedCredentialsCanBeRotated) {
+    json input = connection_input();
+    input["credential_scope"] = nullptr;
+    const auto connection = call("create_network_connection", input);
+    ASSERT_TRUE(connection.ok) << connection.error.message;
+    json rotate = scope();
+    rotate["connection_id"] = connection.value.at("id");
+    const auto refused = call("rotate_network_connection_credential", rotate);
+    EXPECT_FALSE(refused.ok);
+    EXPECT_EQ(refused.error.code, "conflict");
+    EXPECT_EQ(refused.error.path, "/connection_id");
+    EXPECT_EQ(call("list_network_connections", scope()).value.at("connections")[0].at("generation"),
+              1);
 }
 
 TEST_F(NetworkCapabilities, AccountPermissionsApplyBeforeEveryReadOrWrite) {
@@ -260,6 +297,7 @@ TEST_F(NetworkCapabilities, AccountPermissionsApplyBeforeEveryReadOrWrite) {
     revoke["tunnel_grant_id"] = tunnel.value.at("id");
     const std::vector<std::pair<std::string, json>> writes = {
         {"create_network_connection", connection_input()},
+        {"rotate_network_connection_credential", remove},
         {"remove_network_connection", remove},
         {"create_network_egress_rule", egress_input()},
         {"grant_network_tunnel", tunnel_input(owner_id)},
@@ -353,6 +391,7 @@ TEST_F(NetworkCapabilities, NetworkRecordProviderIsScopedBoundedAndPermissionChe
 TEST_F(NetworkCapabilities, OpenApiAndMcpRenderAndCallEveryNetworkCapability) {
     const std::vector<std::string> names = {"create_network_connection",
                                             "list_network_connections",
+                                            "rotate_network_connection_credential",
                                             "remove_network_connection",
                                             "create_network_egress_rule",
                                             "list_network_egress_rules",
