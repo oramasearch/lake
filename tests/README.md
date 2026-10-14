@@ -1,5 +1,10 @@
 # Tests
 
+`test_network.cpp` runs shared memory/PostgreSQL store cases for all four secure-networking
+records through the telemetry wrapper. PostgreSQL-only cases verify contract columns, defaults,
+foreign keys, backfill idempotency, notifications, expired grants, audit rollback and concurrent
+updates. See [network.md](../docs/control-plane/network.md#verify) for the proof command.
+
 `LAKE_TEST_SKIP_STALE_SWEEP=1` disables cleanup of previous runs' databases when a shared-host
 work order permits deleting only databases created by the current run. Current fixtures still
 clean up their own copies; see [testing.md](../docs/build/testing.md).

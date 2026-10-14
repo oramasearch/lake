@@ -368,6 +368,8 @@ target_compile_options(lake-object-http PRIVATE -Werror=return-type)
 add_library(lake-control-postgres STATIC
   src/control/apps_memory.cpp
   src/control/memory_store.cpp
+  src/control/network.cpp
+  src/control/network_memory.cpp
   src/control/postgres_store.cpp
 )
 target_link_libraries(lake-control-postgres PUBLIC lake-core PRIVATE pqxx OpenSSL::Crypto)

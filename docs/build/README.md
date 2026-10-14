@@ -1,5 +1,9 @@
 # Build and verification
 
+[testing.md](testing.md) documents `LAKE_TEST_SKIP_STALE_SWEEP=1` for shared hosts where a run
+must leave earlier runs' databases alone. [Network verification](../control-plane/network.md#verify)
+names the PostgreSQL-backed control-plane proof.
+
 [local.md](local.md) documents native configuration and execution. [testing.md](testing.md)
 describes isolated filesystem and PostgreSQL fixtures. [session-authentication.md](session-authentication.md)
 records the session lookup measurements, row-access regression and lifecycle proof.

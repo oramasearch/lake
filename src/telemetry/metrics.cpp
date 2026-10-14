@@ -187,6 +187,136 @@ public:
         return kind_;
     }
 
+    control::Result<control::NetworkConnection>
+    create_network_connection(const control::NetworkScope& scope,
+                              const control::NetworkConnectionSpec& spec,
+                              const control::NetworkActor& actor) override {
+        return call("create_network_connection",
+                    [&] { return store_->create_network_connection(scope, spec, actor); });
+    }
+    control::Result<control::NetworkConnection>
+    update_network_connection(const control::NetworkScope& scope,
+                              const std::string& id,
+                              const control::NetworkConnectionSpec& spec,
+                              const control::NetworkActor& actor) override {
+        return call("update_network_connection",
+                    [&] { return store_->update_network_connection(scope, id, spec, actor); });
+    }
+    control::Result<control::NetworkConnection>
+    withdraw_network_connection(const control::NetworkScope& scope,
+                                const std::string& id,
+                                const control::NetworkActor& actor) override {
+        return call("withdraw_network_connection",
+                    [&] { return store_->withdraw_network_connection(scope, id, actor); });
+    }
+    control::Result<control::NetworkConnection>
+    get_network_connection(const control::NetworkScope& scope, const std::string& id) override {
+        return call("get_network_connection",
+                    [&] { return store_->get_network_connection(scope, id); });
+    }
+    control::Result<std::vector<control::NetworkConnection>>
+    list_network_connections(const control::NetworkScope& scope) override {
+        return call("list_network_connections",
+                    [&] { return store_->list_network_connections(scope); });
+    }
+
+    control::Result<control::NetworkEgressRule>
+    create_network_egress_rule(const control::NetworkScope& scope,
+                               const control::NetworkEgressRuleSpec& spec,
+                               const control::NetworkActor& actor) override {
+        return call("create_network_egress_rule",
+                    [&] { return store_->create_network_egress_rule(scope, spec, actor); });
+    }
+    control::Result<control::NetworkEgressRule>
+    update_network_egress_rule(const control::NetworkScope& scope,
+                               const std::string& id,
+                               const control::NetworkEgressRuleSpec& spec,
+                               const control::NetworkActor& actor) override {
+        return call("update_network_egress_rule",
+                    [&] { return store_->update_network_egress_rule(scope, id, spec, actor); });
+    }
+    control::Result<control::NetworkEgressRule>
+    withdraw_network_egress_rule(const control::NetworkScope& scope,
+                                 const std::string& id,
+                                 const control::NetworkActor& actor) override {
+        return call("withdraw_network_egress_rule",
+                    [&] { return store_->withdraw_network_egress_rule(scope, id, actor); });
+    }
+    control::Result<control::NetworkEgressRule>
+    get_network_egress_rule(const control::NetworkScope& scope, const std::string& id) override {
+        return call("get_network_egress_rule",
+                    [&] { return store_->get_network_egress_rule(scope, id); });
+    }
+    control::Result<std::vector<control::NetworkEgressRule>>
+    list_network_egress_rules(const control::NetworkScope& scope) override {
+        return call("list_network_egress_rules",
+                    [&] { return store_->list_network_egress_rules(scope); });
+    }
+
+    control::Result<control::NetworkTunnelGrant>
+    create_network_tunnel_grant(const control::NetworkScope& scope,
+                                const control::NetworkTunnelGrantSpec& spec,
+                                const control::NetworkActor& actor) override {
+        return call("create_network_tunnel_grant",
+                    [&] { return store_->create_network_tunnel_grant(scope, spec, actor); });
+    }
+    control::Result<control::NetworkTunnelGrant>
+    update_network_tunnel_grant(const control::NetworkScope& scope,
+                                const std::string& id,
+                                const control::NetworkTunnelGrantSpec& spec,
+                                const control::NetworkActor& actor) override {
+        return call("update_network_tunnel_grant",
+                    [&] { return store_->update_network_tunnel_grant(scope, id, spec, actor); });
+    }
+    control::Result<control::NetworkTunnelGrant>
+    revoke_network_tunnel_grant(const control::NetworkScope& scope,
+                                const std::string& id,
+                                const control::NetworkActor& actor) override {
+        return call("revoke_network_tunnel_grant",
+                    [&] { return store_->revoke_network_tunnel_grant(scope, id, actor); });
+    }
+    control::Result<control::NetworkTunnelGrant>
+    get_network_tunnel_grant(const control::NetworkScope& scope, const std::string& id) override {
+        return call("get_network_tunnel_grant",
+                    [&] { return store_->get_network_tunnel_grant(scope, id); });
+    }
+    control::Result<std::vector<control::NetworkTunnelGrant>>
+    list_network_tunnel_grants(const control::NetworkScope& scope) override {
+        return call("list_network_tunnel_grants",
+                    [&] { return store_->list_network_tunnel_grants(scope); });
+    }
+
+    control::Result<control::NetworkPeer>
+    create_network_peer(const control::NetworkScope& scope,
+                        const control::NetworkPeerSpec& spec,
+                        const control::NetworkActor& actor) override {
+        return call("create_network_peer",
+                    [&] { return store_->create_network_peer(scope, spec, actor); });
+    }
+    control::Result<control::NetworkPeer>
+    update_network_peer(const control::NetworkScope& scope,
+                        const std::string& id,
+                        const control::NetworkPeerSpec& spec,
+                        const control::NetworkActor& actor) override {
+        return call("update_network_peer",
+                    [&] { return store_->update_network_peer(scope, id, spec, actor); });
+    }
+    control::Result<control::NetworkPeer>
+    withdraw_network_peer(const control::NetworkScope& scope,
+                          const std::string& id,
+                          const control::NetworkActor& actor) override {
+        return call("withdraw_network_peer",
+                    [&] { return store_->withdraw_network_peer(scope, id, actor); });
+    }
+    control::Result<control::NetworkPeer> get_network_peer(const control::NetworkScope& scope,
+                                                           const std::string& id) override {
+        return call("get_network_peer", [&] { return store_->get_network_peer(scope, id); });
+    }
+    control::Result<std::vector<control::NetworkPeer>>
+    list_network_peers(const control::NetworkScope& scope) override {
+        return call("list_network_peers", [&] { return store_->list_network_peers(scope); });
+    }
+
     control::Result<void> ping() override {
         return call("ping", [&] { return store_->ping(); });
     }

@@ -33,6 +33,7 @@ end-to-end runs of [orama-bridge#136](https://github.com/oramasearch/orama-bridg
 
 | Area | Implemented | Exercised locally | Deployed | Exercised in deployment | Capabilities | Contract |
 |---|---|---|---|---|---|---|
+| Secure-networking desired state (`0084_network`, lake#727) | Yes: scoped memory/PostgreSQL stores, operator status reads, atomic signed audit and compatibility backfill | Yes: 20 focused cases; full native static/shared suites each 1,023 passed, 19 skipped, one disabled | No; operator schema/guard adoption required | No | — (store only; public capabilities belong to lake#728) | [network](../control-plane/network.md) |
 | Serving and control plane | Yes | Yes | Yes | `server_info`, OpenAPI, MCP `tools/list` (2026-10-01) | `server_info`, `create_customer`, `list_customers` | [HTTP](../serving/http.md), [schema](../control-plane/schema.md) |
 | Indexed PostgreSQL session authentication (`0022_session_lookup`) | Yes | See [measurement proof](../build/session-authentication.md) | Yes; the deployed schema is past `0023` | Browser sessions after Clerk sign-in (2026-10-01 review) | `list_sessions`, `revoke_session` | [authentication](../api/auth.md) |
 | Identity and SSO | Yes | Yes, including Postgres cases | Yes | No | `sign_in_password`, `begin_passkey_sign_in`, `register_sso_provider`, `scim_list_users` | [identity](../api/identity.md), [SSO](../api/sso.md) |

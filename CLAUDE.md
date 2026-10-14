@@ -16,6 +16,11 @@ is also `oramasearch/lake:v0.1.0`, built from the tag (`2e6f6d7`) against liquid
 operator's schema is applied through `0083_methodology_deployments`. Its bus and workspace Zettas
 run `oramasearch/zetta:main-4015ef76` (zetta `v0.2.0`).
 
+Secure-networking desired state is implemented in the source tree (lake#727, `0084_network`):
+four desired/status pairs, scoped stores, signed atomic audit and app-to-service rollout rows.
+Tunnel grants end through revocation or expiry; internet egress stays implicit in the operator.
+Operator adoption and deployment are not claimed. See [`docs/control-plane/network.md`](docs/control-plane/network.md).
+
 The newest dated record, [`docs/deployment/dev-2026-10-01.md`](docs/deployment/dev-2026-10-01.md),
 and [`docs/design/status.md`](docs/design/status.md) still describe the 2026-10-01 deployment
 (`oramasearch/lake:20261001d`, `36679e1`); they have not been brought up to the release. Until they

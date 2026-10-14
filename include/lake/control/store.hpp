@@ -17,6 +17,7 @@
 #include "lake/audit/audit.hpp"
 #include "lake/control/apps.hpp"
 #include "lake/control/builds.hpp"
+#include "lake/control/network.hpp"
 #include "lake/control/offline_recovery.hpp"
 #include "lake/control/secrets.hpp"
 #include "lake/control/store_mounts.hpp"
@@ -1579,6 +1580,61 @@ public:
     // Managed services (docs/control-plane/services.md). Lists the customer's services, oldest
     // first, leaving out deleted ones the operator has finished with.
     virtual Result<std::vector<ManagedService>> list_services(const std::string& customer_id) = 0;
+    // Secure networking (docs/control-plane/network.md). Updates replace the mutable spec and
+    // advance generation. Withdrawn/revoked/expired rows cannot be revived. Reads include history
+    // and the operator's optional status; only the operator writes status in PostgreSQL.
+    virtual Result<NetworkConnection> create_network_connection(const NetworkScope&,
+                                                                const NetworkConnectionSpec&,
+                                                                const NetworkActor&) = 0;
+    virtual Result<NetworkConnection> update_network_connection(const NetworkScope&,
+                                                                const std::string& id,
+                                                                const NetworkConnectionSpec&,
+                                                                const NetworkActor&) = 0;
+    virtual Result<NetworkConnection> withdraw_network_connection(const NetworkScope&,
+                                                                  const std::string& id,
+                                                                  const NetworkActor&) = 0;
+    virtual Result<NetworkConnection> get_network_connection(const NetworkScope&,
+                                                             const std::string& id) = 0;
+    virtual Result<std::vector<NetworkConnection>>
+    list_network_connections(const NetworkScope&) = 0;
+    virtual Result<NetworkEgressRule> create_network_egress_rule(const NetworkScope&,
+                                                                 const NetworkEgressRuleSpec&,
+                                                                 const NetworkActor&) = 0;
+    virtual Result<NetworkEgressRule> update_network_egress_rule(const NetworkScope&,
+                                                                 const std::string& id,
+                                                                 const NetworkEgressRuleSpec&,
+                                                                 const NetworkActor&) = 0;
+    virtual Result<NetworkEgressRule> withdraw_network_egress_rule(const NetworkScope&,
+                                                                   const std::string& id,
+                                                                   const NetworkActor&) = 0;
+    virtual Result<NetworkEgressRule> get_network_egress_rule(const NetworkScope&,
+                                                              const std::string& id) = 0;
+    virtual Result<std::vector<NetworkEgressRule>>
+    list_network_egress_rules(const NetworkScope&) = 0;
+    virtual Result<NetworkTunnelGrant> create_network_tunnel_grant(const NetworkScope&,
+                                                                   const NetworkTunnelGrantSpec&,
+                                                                   const NetworkActor&) = 0;
+    virtual Result<NetworkTunnelGrant> update_network_tunnel_grant(const NetworkScope&,
+                                                                   const std::string& id,
+                                                                   const NetworkTunnelGrantSpec&,
+                                                                   const NetworkActor&) = 0;
+    virtual Result<NetworkTunnelGrant> revoke_network_tunnel_grant(const NetworkScope&,
+                                                                   const std::string& id,
+                                                                   const NetworkActor&) = 0;
+    virtual Result<NetworkTunnelGrant> get_network_tunnel_grant(const NetworkScope&,
+                                                                const std::string& id) = 0;
+    virtual Result<std::vector<NetworkTunnelGrant>>
+    list_network_tunnel_grants(const NetworkScope&) = 0;
+    virtual Result<NetworkPeer>
+    create_network_peer(const NetworkScope&, const NetworkPeerSpec&, const NetworkActor&) = 0;
+    virtual Result<NetworkPeer> update_network_peer(const NetworkScope&,
+                                                    const std::string& id,
+                                                    const NetworkPeerSpec&,
+                                                    const NetworkActor&) = 0;
+    virtual Result<NetworkPeer>
+    withdraw_network_peer(const NetworkScope&, const std::string& id, const NetworkActor&) = 0;
+    virtual Result<NetworkPeer> get_network_peer(const NetworkScope&, const std::string& id) = 0;
+    virtual Result<std::vector<NetworkPeer>> list_network_peers(const NetworkScope&) = 0;
     virtual Result<ManagedService> get_service(const std::string& id) = 0;
     // Creates a service. A default one that already exists is returned unchanged; a live name is a
     // conflict; a customer at max_per_customer live services is refused with quota_exceeded.
