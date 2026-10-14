@@ -5,6 +5,19 @@ section 11 of the operator's [secure-networking contract](https://github.com/ora
 Migration `0084_network` creates the eight contract tables and `network_guard`, column for column.
 This is source-tree support; operator adoption and deployment are separate.
 
+Migration `0085_network_tunnel_ca` follows section 11.1 without changing 0084: it adds
+`network_tunnel_grants.client_ca_pem text NOT NULL DEFAULT ''` (Lake-owned) and
+`network_tunnel_grant_status.relay_ca_pem text NOT NULL DEFAULT ''` (operator-owned), then the
+schema migration marker. It creates no guard, table, cluster ID or history schema. The operator
+must vendor and apply the new schema before selecting the new columns. Existing rows retain
+empty public trust fields and all prior lifecycle state; replay is idempotent.
+
+The grant capability pins the customer's existing PKI root, creating the customer authority if
+needed. The relay trusts the union of nonempty roots from live grants; the operator supplies its
+relay address and CA in status. Lake only signs a recipient's CSR when both trust directions and
+the current generation are ready. See [tunnel credentials](../api/tunnel-grants.md). Sessions and
+activity use a pending provider until zetta#1281; no session rows live in this schema.
+
 ## Ownership and Rollout
 
 Lake writes `network_connections`, `network_egress_rules`, `network_tunnel_grants` and
@@ -71,7 +84,7 @@ and ports; imports name remote services and ports. Tunnel expiration input is UT
 
 The store enforces ownership and input validity. Authorization is the caller's responsibility,
 as with other control-store operations. The
-[capability layer](../api/network.md#authorization-and-audit) applies account read/write policy to
+[capability layer](../api/network.md#authorization-and-audit) applies account read/write/admin policy to
 every REST and MCP operation (lake#728).
 
 ## Audit
@@ -126,12 +139,15 @@ case; the skip-sweep flag leaves earlier runs' databases alone.
 `tests/test_network_capabilities.cpp` covers capability lifecycle, effective filtering,
 permissions, OpenAPI and MCP. `tests/test_network.cpp` runs the same CRUD, scope, validation,
 status and signed-audit cases against both stores through the telemetry wrapper. PostgreSQL cases
-also check all 75 columns'
+also check all 77 columns'
 names/types/nullability, foreign keys and default values, invalid table constraints, backfill
 selection and reruns, notifications versus observations/rollback, audit failure atomicity,
 expiration and concurrent writers.
 
-### Native Proof — 2026-10-14
+### Native Proof for lake#728 — 2026-10-14
+
+The historical output below predates tunnel CSR issuance and migration 0085. The lake#730
+commands and results are recorded in [tunnel-grants-proof.md](../build/tunnel-grants-proof.md).
 
 Both native builds completed with Clang 22.1.8, `BUILD_SHARED_LIBS=OFF` in `build` and `ON` in
 `build-shared`, using the authorized Zetta checkout and sibling Liquid checkout. The commands

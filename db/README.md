@@ -1,5 +1,9 @@
 # Database schema
 
+Migration `0085_network_tunnel_ca` adds public `client_ca_pem` on tunnel grants and `relay_ca_pem`
+on their operator status, both non-null text defaulting to empty. Apply before running the new
+binary or operator readers; 0084 is unchanged. See [the contract](../docs/control-plane/network.md).
+
 Migration `0084_network` adds the four secure-networking desired/status pairs and
 `network_guard`. Desired changes notify `lake_network`; the one-time rollout preserves existing
 app-to-service paths and creates no internet-egress rows. Apply before the new binary and have

@@ -1,6 +1,6 @@
 // lake#728: secure-networking desired state is one permission-checked capability registry rendered
 // as REST, OpenAPI and MCP. Live tunnel sessions and activity explicitly await their workspace
-// record provider; their reads remain registered and authorize before answering not_supported.
+// record provider; their reads authorize before returning an explicit pending marker.
 
 #include <algorithm>
 #include <chrono>
@@ -14,6 +14,9 @@
 #include "lake/api/mcp.hpp"
 #include "lake/api/rest.hpp"
 #include "lake/control/memory_store.hpp"
+#include "lake/control/network_records.hpp"
+#include "lake/control/pki.hpp"
+#include <liquid/runtime.hpp>
 
 namespace {
 
@@ -75,12 +78,16 @@ protected:
                 {{{"target_kind", "service"}, {"target_id", target_id}, {"port", 4800}}}),
             .imports = json::array({{{"name", "reader"}, {"port", 4800}}})};
         const auto created_peer = store.create_network_peer(
-            {customer_id, workspace_id}, peer, {owner_id, owner_taap, "network-peer-setup"});
+            {customer_id, workspace_id},
+            peer,
+            {owner_id, owner_taap, "network-peer-setup", {.instance_kek = std::string(64, '7')}});
         ASSERT_TRUE(created_peer) << created_peer.error().message;
         peer_id = created_peer->id;
 
         context.store = &store;
         context.authorized = true;
+        context.pki = &pki;
+        context.instance_kek = std::string(64, '7');
     }
 
     json scope() const {
@@ -127,10 +134,11 @@ protected:
         context.audit_customer_id.clear();
         context.audit_object.clear();
         context.audit_details = json::object();
-        return registry.call(name, input, context);
+        return liquid::runtime::block_on(registry.call_async(name, input, context)).value();
     }
 
     lake::control::InMemoryStore store;
+    lake::control::pki::Service pki;
     lake::api::Registry registry;
     lake::api::ApiContext context;
     int request_number = 0;
@@ -210,7 +218,9 @@ TEST_F(NetworkCapabilities, DesiredRulesCanBeDeclaredListedEndedAndReadEffective
     ASSERT_TRUE(revoked.ok) << revoked.error.message;
     EXPECT_FALSE(revoked.value.at("active"));
     ASSERT_TRUE(store.withdraw_network_peer(
-        {customer_id, workspace_id}, peer_id, {owner_id, owner_taap, "withdraw-peer"}));
+        {customer_id, workspace_id},
+        peer_id,
+        {owner_id, owner_taap, "withdraw-peer", {.instance_kek = context.instance_kek}}));
 
     const auto after = call("network_rules", scope());
     ASSERT_TRUE(after.ok) << after.error.message;
@@ -261,11 +271,15 @@ TEST_F(NetworkCapabilities, AccountPermissionsApplyBeforeEveryReadOrWrite) {
     }
 
     const auto sessions = call("list_network_tunnel_sessions", scope());
-    EXPECT_FALSE(sessions.ok);
-    EXPECT_EQ(sessions.error.code, "not_supported");
+    ASSERT_TRUE(sessions.ok) << sessions.error.message;
+    EXPECT_TRUE(sessions.value.at("sessions").empty());
+    EXPECT_FALSE(sessions.value.at("available"));
+    EXPECT_EQ(sessions.value.at("pending"), "zetta#1281");
     const auto activity = call("network_activity", scope());
-    EXPECT_FALSE(activity.ok);
-    EXPECT_EQ(activity.error.code, "not_supported");
+    ASSERT_TRUE(activity.ok) << activity.error.message;
+    EXPECT_TRUE(activity.value.at("events").empty());
+    EXPECT_FALSE(activity.value.at("available"));
+    EXPECT_EQ(activity.value.at("pending"), "zetta#1281");
 
     const auto foreign_recipient = call("grant_network_tunnel", tunnel_input(outsider_id));
     EXPECT_FALSE(foreign_recipient.ok);
@@ -281,6 +295,61 @@ TEST_F(NetworkCapabilities, AccountPermissionsApplyBeforeEveryReadOrWrite) {
               "/customer_id");
 }
 
+class TestNetworkRecords final : public lake::control::NetworkRecords {
+public:
+    liquid::runtime::task<lake::control::ZettaControlResult<lake::control::NetworkRecordPage>>
+    sessions(lake::control::NetworkScope scope, std::size_t limit) override {
+        ++session_calls;
+        last_scope = scope;
+        last_limit = limit;
+        co_return page;
+    }
+
+    liquid::runtime::task<lake::control::ZettaControlResult<lake::control::NetworkRecordPage>>
+    activity(lake::control::NetworkScope scope, std::size_t limit) override {
+        ++activity_calls;
+        last_scope = scope;
+        last_limit = limit;
+        co_return page;
+    }
+
+    int session_calls = 0;
+    int activity_calls = 0;
+    lake::control::NetworkScope last_scope;
+    std::size_t last_limit = 0;
+    lake::control::NetworkRecordPage page{
+        .records = json::array({json::object()}), .available = true, .pending = ""};
+};
+
+TEST_F(NetworkCapabilities, NetworkRecordProviderIsScopedBoundedAndPermissionChecked) {
+    TestNetworkRecords provider;
+    context.network_records = &provider;
+    auto request = scope();
+    request["limit"] = 2;
+    EXPECT_FALSE(call("list_network_tunnel_sessions", request, outsider_taap, outsider_id).ok);
+    EXPECT_FALSE(call("network_activity", request, outsider_taap, outsider_id).ok);
+    EXPECT_EQ(provider.session_calls, 0);
+    EXPECT_EQ(provider.activity_calls, 0);
+    for (const auto& name : {"list_network_tunnel_sessions", "network_activity"}) {
+        const auto result = call(name, request, reader_taap, reader_id);
+        ASSERT_TRUE(result.ok) << result.error.message;
+        EXPECT_TRUE(result.value.at("available"));
+        EXPECT_EQ(result.value.at("pending"), "");
+        EXPECT_EQ(provider.last_scope.customer_id, customer_id);
+        EXPECT_EQ(provider.last_scope.workspace_id, workspace_id);
+        EXPECT_EQ(provider.last_limit, 2U);
+    }
+    provider.page.records = json::array({json::object(), json::object(), json::object()});
+    EXPECT_EQ(call("list_network_tunnel_sessions", request).error.code, "store_error");
+    provider.page.records = json::object();
+    EXPECT_EQ(call("network_activity", request).error.code, "store_error");
+    provider.page.records = json::array({1});
+    EXPECT_EQ(call("network_activity", request).error.code, "store_error");
+    provider.page.records = json::array();
+    provider.page.available = false;
+    EXPECT_EQ(call("network_activity", request).error.code, "store_error");
+}
+
 TEST_F(NetworkCapabilities, OpenApiAndMcpRenderAndCallEveryNetworkCapability) {
     const std::vector<std::string> names = {"create_network_connection",
                                             "list_network_connections",
@@ -288,6 +357,7 @@ TEST_F(NetworkCapabilities, OpenApiAndMcpRenderAndCallEveryNetworkCapability) {
                                             "create_network_egress_rule",
                                             "list_network_egress_rules",
                                             "grant_network_tunnel",
+                                            "issue_network_tunnel_certificate",
                                             "list_network_tunnel_grants",
                                             "revoke_network_tunnel",
                                             "list_network_tunnel_sessions",
@@ -295,6 +365,11 @@ TEST_F(NetworkCapabilities, OpenApiAndMcpRenderAndCallEveryNetworkCapability) {
                                             "network_rules",
                                             "network_activity"};
     const json openapi = lake::api::openapi_document(registry, "test");
+    const auto signer = registry.find("issue_network_tunnel_certificate");
+    ASSERT_NE(signer, nullptr);
+    EXPECT_TRUE(lake::api::capability_writes(*signer));
+    EXPECT_FALSE(lake::api::capability_idempotent(*signer));
+    EXPECT_FALSE(lake::api::capability_destroys(*signer));
     context.acting_identity = owner_taap;
     context.acting_user_id = owner_id;
     context.request_id = "network-mcp-list";
@@ -314,7 +389,7 @@ TEST_F(NetworkCapabilities, OpenApiAndMcpRenderAndCallEveryNetworkCapability) {
         ASSERT_NE(tool, tools.end()) << name;
         EXPECT_EQ(tool->at("inputSchema"), capability->input_schema) << name;
         EXPECT_EQ(tool->at("annotations").at("readOnlyHint"),
-                  capability->kind == lake::api::CapabilityKind::Read)
+                  !lake::api::capability_writes(*capability))
             << name;
     }
 

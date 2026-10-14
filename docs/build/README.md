@@ -1,5 +1,8 @@
 # Build and verification
 
+[tunnel-grants-proof.md](tunnel-grants-proof.md) records the native credential, migration,
+provider and transport proof for lake#730 and the coordinator's deferred relay checks.
+
 [testing.md](testing.md) documents `LAKE_TEST_SKIP_STALE_SWEEP=1` for shared hosts where a run
 must leave earlier runs' databases alone. [Network verification](../control-plane/network.md#verify)
 names the PostgreSQL-backed control-plane proof.

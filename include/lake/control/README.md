@@ -1,5 +1,10 @@
 # Public control types
 
+`network_records.hpp` defines the scoped session/activity provider and its explicit pending
+default. `pki::Service` can ensure a persisted customer authority and sign a tunnel CSR without
+handling the recipient's private key. `network.hpp` carries public client/relay CA fields and
+the shared grant-expiry parser. See [tunnel credentials](../../../docs/api/tunnel-grants.md).
+
 `network.hpp` defines the four network specifications, desired records, operator observations,
 workspace scope and write actor, including the API audit identity used by the memory store. `Store`
 exposes create, replacement update, withdrawal/revocation, get and list; both stores implement the

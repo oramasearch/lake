@@ -21,6 +21,7 @@ inputs.
 | `create_network_egress_rule` | action | Declares CIDR or DNS egress for one workload or the workspace. |
 | `list_network_egress_rules` | read | Returns present and withdrawn egress history. |
 | `grant_network_tunnel` | action | Grants one account member access to one target port until `expires_at`. |
+| `issue_network_tunnel_certificate` | action | Signs the recipient's CSR for a live grant; returns client certificate, chain, relay endpoint and relay CA. |
 | `list_network_tunnel_grants` | read | Returns active, expired and revoked grant history. |
 | `revoke_network_tunnel` | action | Sets `revoked_at` on an active grant. |
 | `list_network_tunnel_sessions` | read | Reads current and past sessions once the workspace-record provider is available. |
@@ -32,15 +33,18 @@ Reads use `GET /v1/<capability>` and actions use `POST /v1/<capability>`. Every 
 MCP tool of the same name and schema. `remove_network_connection` and
 `revoke_network_tunnel` carry MCP's destructive hint. All inputs are closed objects and require
 `customer_id` and `workspace_id`; the registry also verifies that the workspace belongs to that
-account and agrees with a workspace route when one is present. Agent Docs puts all twelve tools in
+account and agrees with a workspace route when one is present. Agent Docs puts all thirteen tools in
 the deliberate Network group.
 
 ## Authorization and Audit
 
 The account policy object is the authorization boundary. Lists and effective-rule reads require
-`read`; declarations, removal, grants and revocation require `write`. A tunnel's `user_id` must
+`read`; connection/egress declarations and removal require `write`; tunnel grants and revocation
+require `admin`. Certificate issuance requires account read plus the grant's recipient identity,
+never an operator or another admin. A tunnel's `user_id` must
 name a persisted user whose TAAP identity can read the same account. This prevents an authorized
-writer from granting an unrelated user access.
+admin from granting an unrelated user access. [Tunnel credentials](tunnel-grants.md) describes
+CSR validation, bounded certificates, public trust material and certificate audit.
 
 The five `list_*` entries declare that they authorize their candidates, as every list capability
 does; their handlers check account `read` before asking the network store for rows. The registry
@@ -64,7 +68,8 @@ Peer rows are read-only here because the peer creation exchange belongs to opera
 
 Every returned desired row carries `generation`, creator and timestamps. `status` is null until
 the operator observes it; afterward it carries phase, message, observed generation and update
-time, plus the connection secret name or tunnel endpoint where applicable. History lists retain
+time, plus the connection secret name or tunnel endpoint and relay CA where applicable. Grants
+also carry the public `client_ca_pem` pinned at creation (`0085_network_tunnel_ca`). History lists retain
 withdrawn, revoked and expired rows. `network_rules` filters that history to present connections,
 egress rules and peers, plus grants whose expiry is still in the future and which have not been
 revoked.
@@ -75,11 +80,10 @@ Decision D1 keeps tunnel sessions and network activity in the workspace Zetta, n
 `0084_network` tables. The producing and reading interface is tracked by
 [zetta#1281](https://github.com/oramasearch/zetta/issues/1281), and the live grant/connect/revoke
 flow by [lake#730](https://github.com/oramasearch/lake/issues/730). Until that provider is
-available, `list_network_tunnel_sessions` and `network_activity` authorize normally and answer
-`not_supported`. Registering them now fixes their REST, OpenAPI and MCP contract without inventing
-a second source of network history. Their advertised value objects name the eventual `sessions`
-and `events` arrays without requiring those fields on a successful response until that provider
-exists; their current response is the standard error envelope.
+available, `list_network_tunnel_sessions` and `network_activity` authorize normally and return
+empty `sessions`/`events` arrays with `available: false` and `pending: "zetta#1281"`. Their
+scoped provider interface does not invent a second source of network history. See
+[the provider contract](tunnel-grants.md#audit-and-session-history).
 
 ## Verify
 
@@ -90,7 +94,7 @@ native suites against a fresh local PostgreSQL administrative database:
 cmake --build build -j 6
 LAKE_TEST_SKIP_STALE_SWEEP=1 LAKE_INSTANCE_KEK="$LAKE_TEST_KEK" \
   LAKE_TEST_DB_URI="$NETWORK_TEST_DB_URI" \
-  ctest --test-dir build -R 'NetworkCapabilities|NetworkStore|PostgresNetwork' \
+  ctest --test-dir build -R 'NetworkCapabilities|NetworkStore|PostgresNetwork|TunnelCredentials' \
   --output-on-failure
 LAKE_TEST_SKIP_STALE_SWEEP=1 LAKE_INSTANCE_KEK="$LAKE_TEST_KEK" \
   LAKE_TEST_DB_URI="$NETWORK_TEST_DB_URI" \
@@ -107,7 +111,7 @@ prove the PostgreSQL/operator contract.
 ## Change and Handoff
 
 Add or rename a capability only in the registry, then update this page and every consumer in the
-same change. A desired-row change must first update the operator contract and `0084_network`
-coverage. A session or activity shape must follow zetta#1281 rather than adding those records to
+same change. A desired-row change must first update the operator contract and migration coverage
+(0085 adds trust without rewriting 0084). A session or activity shape must follow zetta#1281 rather than adding those records to
 Lake's control database. Deployment remains a separate observation in
 [`design/status.md`](../design/status.md).

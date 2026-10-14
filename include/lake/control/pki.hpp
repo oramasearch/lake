@@ -1,5 +1,6 @@
 #pragma once
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <expected>
@@ -13,6 +14,7 @@
 
 namespace lake::control {
 class Store;
+struct NetworkTunnelGrant;
 }
 
 namespace lake::control::pki {
@@ -35,6 +37,12 @@ struct X509Svid {
     std::string certificate_pem;
     std::string private_key_pem;
     std::string chain_pem;
+};
+
+struct SignedClientCertificate {
+    std::string certificate_pem;
+    std::string chain_pem;
+    std::chrono::system_clock::time_point expires_at;
 };
 
 struct JwtSvid {
@@ -129,6 +137,14 @@ public:
     Result<AuthorityPublic> create_authority(std::string_view customer_id);
     Result<AuthorityPublic>
     create_authority(Store& store, std::string_view customer_id, std::string_view instance_kek);
+    // Load the durable customer CA, creating it only when absent. Concurrent creation is safe.
+    Result<AuthorityPublic>
+    ensure_authority(Store& store, std::string_view customer_id, std::string_view instance_kek);
+    // Verify a PKCS#10 CSR and sign its public key only. Requested subject/extensions are ignored.
+    Result<SignedClientCertificate> sign_tunnel_certificate(Store& store,
+                                                            const NetworkTunnelGrant& grant,
+                                                            std::string_view csr_pem,
+                                                            std::string_view instance_kek);
     Result<X509Svid> issue_x509_svid(std::string_view customer_id,
                                      std::string_view spiffe_id,
                                      int lifetime_seconds = 3600);

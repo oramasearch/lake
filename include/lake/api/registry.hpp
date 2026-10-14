@@ -41,6 +41,7 @@ class Service;
 namespace lake::control {
 class PlatformService;
 class WorkspaceService;
+class NetworkRecords;
 class AgentCaller;
 class AgentTaskBus;
 } // namespace lake::control
@@ -82,7 +83,8 @@ const ErrorCode* find_error_code(std::string_view code);
 struct Capability;
 // What a capability does, as MCP's tool annotations and mcp_setup say it (lake#594), one rule for
 // both: it writes unless it is a read or authorized as one (`predict` scores without changing
-// anything); it destroys only when it deletes, destroys, removes, revokes or drops something; it
+// anything), except tunnel signing creates a new credential despite read authorization. It
+// destroys only when it deletes, destroys, removes, revokes or drops something; it
 // is idempotent when calling it again with the same input changes nothing more.
 bool capability_writes(const Capability& capability);
 bool capability_destroys(const Capability& capability);
@@ -415,6 +417,8 @@ struct ApiContext {
     nlohmann::json reauthorization_results = nlohmann::json::array();
     search::Service* search = nullptr;
     control::pki::Service* pki = nullptr;
+    // Null selects the explicit pending zetta#1281 implementation.
+    control::NetworkRecords* network_records = nullptr;
     control::callers::Service* callers = nullptr;
     control::agents::Service* agents = nullptr;
     control::PlatformService* platform = nullptr;

@@ -68,15 +68,14 @@ constexpr std::array group_rules{
                          n != "list_methodologies";
               }},
     // The workspace engine's capabilities by name (lake#650, docs/api/engine-capabilities.md).
-    GroupRule{"Projects and pipelines",
-              "A workspace's AI projects and their pipelines: create and delete projects, capture "
-              "what a project is for and compile it into a pipeline (compile_intent, or "
-              "import_n8n and compile_n8n, or compile_python), save, check, approve and deploy a "
-              "pipeline, and the methodologies the engine can run. get_pipeline, edit_pipeline, "
-              "create_pipeline and run_pipeline are the same jobs in fewer calls.",
-              [](std::string_view n) {
-                  return engine_capability_group(n) == "Projects and pipelines";
-              }},
+    GroupRule{
+        "Projects and pipelines",
+        "A workspace's AI projects and their pipelines: create and delete projects, capture "
+        "what a project is for and compile it into a pipeline (compile_intent, or "
+        "import_n8n and compile_n8n, or compile_python), save, check, approve and deploy a "
+        "pipeline, and the methodologies the engine can run. get_pipeline, edit_pipeline, "
+        "create_pipeline and run_pipeline are the same jobs in fewer calls.",
+        [](std::string_view n) { return engine_capability_group(n) == "Projects and pipelines"; }},
     GroupRule{"Training and runs",
               "Runs and what they produced: start a run of a checked pipeline with every runner "
               "setting (start_run), read a run, its report and its jobs. list_runs, "
@@ -136,7 +135,8 @@ constexpr std::array group_rules{
               }},
     GroupRule{"Network",
               "A workspace's declared connections, egress rules, tunnel grants and peer "
-              "connections, plus the rules currently effective. Tunnel sessions and recent "
+              "connections, recipient-only tunnel certificates, plus the rules currently "
+              "effective. Tunnel sessions and recent "
               "activity are available once the workspace record provider is installed.",
               [](std::string_view n) {
                   return n == "create_network_connection" || n == "list_network_connections" ||
@@ -144,7 +144,8 @@ constexpr std::array group_rules{
                          n == "list_network_egress_rules" || n == "grant_network_tunnel" ||
                          n == "list_network_tunnel_grants" || n == "revoke_network_tunnel" ||
                          n == "list_network_tunnel_sessions" || n == "list_network_peers" ||
-                         n == "network_rules" || n == "network_activity";
+                         n == "network_rules" || n == "network_activity" ||
+                         n == "issue_network_tunnel_certificate";
               }},
     GroupRule{"Solutions",
               "The AI solutions a workspace can start: Orama's catalogue (S-1, …, read-only) and "
@@ -194,34 +195,33 @@ constexpr std::array group_rules{
                   return n.find("stream") != std::string_view::npos &&
                          !n.ends_with("_agent_streams");
               }},
-    GroupRule{"Agents",
-              "The Agent Library of specialized agents Orama ships, Ask Orama, and the agents you "
-              "design in Design > Agents: create, change and delete them (create_agent, "
-              "update_agent, delete_agent; each change is kept as a revision, list_agent_revisions), "
-              "train the ones that learn in Train > Agents (agent_training_status, "
-              "set_training_schedule), talk to any of them with agent_turn or "
-              "chat_with_agent, run Python agents with launch_agent and give them cron schedules "
-              "with schedule_agent (each its own Kubernetes CronJob, at most once every five "
-              "minutes), or start them from workspace streams with set_agent_streams (one job per "
-              "new message, the message as its input; list_agent_streams). A Python agent's "
-              "definition is {source: zetta, instructions, entrypoint, files: [{path, contents}]}; "
-              "Lake refuses any other field. Runs, schedules and streams belong to the workspace "
-              "they were set in.",
-              [](std::string_view n) {
-                  return n == "list_agent_library" || n == "list_agent_revisions" ||
-                         n == "launch_agent" ||
-                         n == "list_agent_launches" || n == "stop_agent_launch" ||
-                         n == "schedule_agent" || n == "list_agent_schedules" ||
-                         n == "unschedule_agent" || n == "set_agent_streams" ||
-                         n == "list_agent_streams" || n == "agent_turn" ||
-                         n == "create_agent_from_proposal" ||
-                         n == "create_projects_from_opportunities" || n == "start_solution" ||
-                         n == "confirm_solution" || n == "get_ask_conversation" ||
-                         n == "send_ask_message" || n == "settle_ask_turn" ||
-                         n == "confirm_ask_proposal" || n == "approve_agent_proposal" ||
-                         n == "latest_agent_task" || n == "delete_ask_conversation" ||
-                         engine_capability_group(n) == "Agents";
-              }},
+    GroupRule{
+        "Agents",
+        "The Agent Library of specialized agents Orama ships, Ask Orama, and the agents you "
+        "design in Design > Agents: create, change and delete them (create_agent, "
+        "update_agent, delete_agent; each change is kept as a revision, list_agent_revisions), "
+        "train the ones that learn in Train > Agents (agent_training_status, "
+        "set_training_schedule), talk to any of them with agent_turn or "
+        "chat_with_agent, run Python agents with launch_agent and give them cron schedules "
+        "with schedule_agent (each its own Kubernetes CronJob, at most once every five "
+        "minutes), or start them from workspace streams with set_agent_streams (one job per "
+        "new message, the message as its input; list_agent_streams). A Python agent's "
+        "definition is {source: zetta, instructions, entrypoint, files: [{path, contents}]}; "
+        "Lake refuses any other field. Runs, schedules and streams belong to the workspace "
+        "they were set in.",
+        [](std::string_view n) {
+            return n == "list_agent_library" || n == "list_agent_revisions" ||
+                   n == "launch_agent" || n == "list_agent_launches" || n == "stop_agent_launch" ||
+                   n == "schedule_agent" || n == "list_agent_schedules" ||
+                   n == "unschedule_agent" || n == "set_agent_streams" ||
+                   n == "list_agent_streams" || n == "agent_turn" ||
+                   n == "create_agent_from_proposal" || n == "create_projects_from_opportunities" ||
+                   n == "start_solution" || n == "confirm_solution" ||
+                   n == "get_ask_conversation" || n == "send_ask_message" ||
+                   n == "settle_ask_turn" || n == "confirm_ask_proposal" ||
+                   n == "approve_agent_proposal" || n == "latest_agent_task" ||
+                   n == "delete_ask_conversation" || engine_capability_group(n) == "Agents";
+        }},
     GroupRule{"Workspace: Design, Train and Ship",
               "Your workspace: projects and pipelines, data, runs, models and search indexes, and "
               "publishing models (with traffic and monitoring) and indexes. delete_dataset, "

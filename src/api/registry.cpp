@@ -267,6 +267,10 @@ const ErrorCode* find_error_code(std::string_view code) {
 }
 
 bool capability_writes(const Capability& capability) {
+    // Signing creates a fresh credential even though only recipient read permission is needed.
+    if (capability.name == "issue_network_tunnel_certificate") {
+        return true;
+    }
     return capability.kind == CapabilityKind::Action && capability.action != "read" &&
            capability.name != "workspace_query";
 }

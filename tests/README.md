@@ -1,5 +1,11 @@
 # Tests
 
+`test_network_tunnel.cpp` exercises recipient-only CSR signing, trust, validity, refusal cases,
+admin grant/revoke and signed audit against memory and PostgreSQL. `tunnel_fixture.hpp` creates
+local keys and deliberately overprivileged CSRs. Transport evidence in `test_schema_conformance.cpp`
+covers REST/MCP issuance. Network tests also cover 0085 replay and pending/scoped history providers.
+See [tunnel credentials](../docs/api/tunnel-grants.md) and [the proof](../docs/build/tunnel-grants-proof.md).
+
 `test_network.cpp` runs shared memory/PostgreSQL store cases for all four secure-networking
 records through the telemetry wrapper. PostgreSQL-only cases verify contract columns, defaults,
 foreign keys, backfill idempotency, notifications, expired grants, audit rollback and concurrent

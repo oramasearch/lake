@@ -65,7 +65,7 @@ add_executable(lake-tests test_main.cpp test_web_ui.cpp test_web_app.cpp test_ma
   test_token_attenuation.cpp
   test_docs_status.cpp
   test_volumes.cpp)
-target_sources(lake-tests PRIVATE test_network_capabilities.cpp)
+target_sources(lake-tests PRIVATE test_network_capabilities.cpp test_network_tunnel.cpp)
 target_link_libraries(lake-tests PRIVATE lake-api lake-control-postgres pqxx OpenSSL::Crypto
   Boost::beast2 Boost::http Boost::corosio GTest::gtest
   # zetta-api for a fake Zetta HTTP transport under ZettaWorkspaceCaller (test_workspaces.cpp).

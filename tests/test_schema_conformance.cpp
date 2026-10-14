@@ -28,6 +28,7 @@
 #include "repository_test_support.hpp"
 #include "stream_fixture.hpp"
 #include "temporary_directory.hpp"
+#include "tunnel_fixture.hpp"
 #include "zetta_object_fixture.hpp"
 
 extern char** environ;
@@ -365,8 +366,15 @@ void check_network(HttpEvidence& http,
                    const lake::control::Customer& customer,
                    const lake::control::User& user,
                    const std::string& workspace_id) {
+    const auto session = checked(store.sign_up_password({"lake",
+                                                         "schema-tunnel@example.test",
+                                                         "correct horse battery staple",
+                                                         "Tunnel developer",
+                                                         "schema",
+                                                         "{}"}));
+    const auto developer = checked(store.get_user(session.session.user_id));
     const auto object = checked(store.find_policy_object("customer", customer.id));
-    checked(store.create_grant({user.taap_id,
+    checked(store.create_grant({developer.taap_id,
                                 object.id,
                                 "read",
                                 "schema-network-attestation",
@@ -397,16 +405,41 @@ void check_network(HttpEvidence& http,
 
     auto tunnel_input = scope;
     tunnel_input.update(
-        {{"user_id", user.id},
+        {{"user_id", developer.id},
          {"target_kind", "service"},
          {"target_id", workspace.zetta_service_id},
          {"port", 4800},
          {"expires_at",
           lake::control::iso8601_at(std::chrono::system_clock::now() + std::chrono::hours(1))}});
     const auto tunnel = http.call("grant_network_tunnel", tunnel_input);
+    auto& memory = dynamic_cast<lake::control::InMemoryStore&>(store);
+    const auto observed =
+        memory.set_network_tunnel_grant_status(tunnel.at("id"),
+                                               {.phase = "Ready",
+                                                .observed_generation = 1,
+                                                .endpoint = "relay.test:7443",
+                                                .relay_ca_pem = tunnel.at("client_ca_pem")});
+    ASSERT_TRUE(observed);
     http.call("list_network_tunnel_grants", scope);
     http.call("list_network_peers", scope);
     http.call("network_rules", scope);
+    http.call("list_network_tunnel_sessions", scope);
+    http.call("network_activity", scope);
+
+    auto credentials = scope;
+    credentials.update(
+        {{"tunnel_grant_id", tunnel.at("id")}, {"csr_pem", lake::test::tunnel_csr().pem}});
+    // Even the operator cannot obtain a recipient's certificate.
+    http.call("issue_network_tunnel_certificate", credentials, false);
+    const auto operator_bearer = http.bearer;
+    http.bearer = session.secret;
+    http.call("issue_network_tunnel_certificate", credentials);
+    const auto [status, body] =
+        http.request("POST", "/v1/issue_network_tunnel_certificate", credentials);
+    EXPECT_EQ(status, 200U) << body;
+    http.document["rest"].push_back(
+        {{"name", "issue_network_tunnel_certificate"}, {"status", status}, {"body", body}});
+    http.bearer = operator_bearer;
 
     auto remove = scope;
     remove["connection_id"] = connection.at("id");
@@ -414,6 +447,9 @@ void check_network(HttpEvidence& http,
     auto revoke = scope;
     revoke["tunnel_grant_id"] = tunnel.at("id");
     http.call("revoke_network_tunnel", revoke);
+    http.bearer = session.secret;
+    http.call("issue_network_tunnel_certificate", credentials, false);
+    http.bearer = operator_bearer;
 }
 
 void validate_evidence(const json& document) {

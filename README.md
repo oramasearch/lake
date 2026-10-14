@@ -6,6 +6,9 @@ accounts, agents, services, apps, Liquid repositories, search and identity aroun
 capability registry served as REST, OpenAPI and MCP, and a web application (`frontend/`, embedded
 in the binary) that calls only that API. Start at the homepage's Getting started (`/docs`).
 
+The [developer tunnel guide](docs/api/tunnel-grants.md) describes admin grant/revoke, recipient-only
+CSR signing, relay trust and the session-history provider contract.
+
 ## Build and get a first result
 
 Install CMake 3.28+, Ninja, Homebrew LLVM, OpenSSL 3, libpq, Node, and initialise submodules.

@@ -1,5 +1,9 @@
 # Control stores
 
+`pki.cpp` verifies tunnel CSRs, signs only the grant URI and bounds the client certificate's expiry.
+`network_records.cpp` supplies empty session/activity pages explicitly pending zetta#1281.
+See [tunnel credentials](../../docs/api/tunnel-grants.md) and migration 0085 in [network.md](../../docs/control-plane/network.md).
+
 `network.cpp` shares secure-networking validation and row codecs; `network_memory.cpp` and
 `postgres_store.cpp` implement scoped desired writes, joined status reads and atomic signed audit.
 The memory path uses the API actor's audit identity while PostgreSQL uses its configured KEK. The

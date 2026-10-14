@@ -35,6 +35,7 @@ struct NetworkStatus {
     std::string updated_at;
     std::string credential_secret; // connection status only
     std::string endpoint;          // tunnel grant status only
+    std::string relay_ca_pem;      // tunnel grant status only, operator-owned public trust
 };
 
 struct NetworkMetadata {
@@ -82,6 +83,7 @@ struct NetworkTunnelGrantSpec {
     std::string target_id;
     int port = 0;
     std::string expires_at;
+    std::string client_ca_pem; // pinned customer CA, supplied by Lake rather than the caller
 };
 
 struct NetworkTunnelGrant : NetworkMetadata {
@@ -106,5 +108,8 @@ struct NetworkPeer : NetworkMetadata {
 bool network_tunnel_grant_active(
     const NetworkTunnelGrant& grant,
     std::chrono::system_clock::time_point now = std::chrono::system_clock::now());
+
+std::optional<std::chrono::system_clock::time_point>
+network_tunnel_grant_expiry(const NetworkTunnelGrant& grant);
 
 } // namespace lake::control

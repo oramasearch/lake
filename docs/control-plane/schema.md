@@ -5,6 +5,12 @@ vendored copy at `internal/controller/assets/lake-schema.sql` and applies it to 
 Postgres. Change the schema here, then copy it into the operator in the same change; the
 operator's test checks the copy carries the source-of-truth header.
 
+`0085_network_tunnel_ca` adds public `client_ca_pem` (Lake-written) on `network_tunnel_grants`
+and `relay_ca_pem` (operator-written) on `network_tunnel_grant_status`, both non-null text with
+empty defaults. It leaves migration 0084 unchanged and adds no new guard. The operator must
+vendor/apply this version before using the columns; that cross-repository handoff is separate.
+See [network.md](network.md) and [tunnel credentials](../api/tunnel-grants.md).
+
 ## Tables (migration `0001_identity_and_customers`)
 
 `schema_migrations(version, applied_at)` records what has been applied.

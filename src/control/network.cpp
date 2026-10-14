@@ -33,7 +33,8 @@ NetworkMetadata metadata(const json& value) {
                                       .observed_generation = status.at("observed_generation"),
                                       .updated_at = status.at("updated_at"),
                                       .credential_secret = status.value("credential_secret", ""),
-                                      .endpoint = status.value("endpoint", "")};
+                                      .endpoint = status.value("endpoint", ""),
+                                      .relay_ca_pem = status.value("relay_ca_pem", "")};
     }
     return result;
 }
@@ -381,12 +382,13 @@ template <> NetworkEgressRule decode<NetworkEgressRule>(const json& value) {
 }
 
 template <> const Table& table<NetworkTunnelGrant>() {
-    static const Table value{"network_tunnel_grants",
-                             "network_tunnel_grant_status",
-                             "grant_id",
-                             "network_tunnel_grant",
-                             {"user_id", "target_kind", "target_id", "port", "expires_at"},
-                             true};
+    static const Table value{
+        "network_tunnel_grants",
+        "network_tunnel_grant_status",
+        "grant_id",
+        "network_tunnel_grant",
+        {"user_id", "target_kind", "target_id", "port", "expires_at", "client_ca_pem"},
+        true};
     return value;
 }
 
@@ -395,7 +397,8 @@ json encode(const NetworkTunnelGrantSpec& spec) {
             {"target_kind", spec.target_kind},
             {"target_id", spec.target_id},
             {"port", spec.port},
-            {"expires_at", spec.expires_at}};
+            {"expires_at", spec.expires_at},
+            {"client_ca_pem", spec.client_ca_pem}};
 }
 
 template <> NetworkTunnelGrant decode<NetworkTunnelGrant>(const json& value) {
@@ -406,6 +409,7 @@ template <> NetworkTunnelGrant decode<NetworkTunnelGrant>(const json& value) {
     result.spec.target_id = value.at("target_id").get<std::string>();
     result.spec.port = value.at("port").get<int>();
     result.spec.expires_at = value.at("expires_at").get<std::string>();
+    result.spec.client_ca_pem = value.value("client_ca_pem", "");
     result.revoked_at = optional_text(value, "revoked_at");
     return result;
 }
@@ -441,17 +445,27 @@ template <> NetworkPeer decode<NetworkPeer>(const json& value) {
 
 namespace lake::control {
 
+std::optional<std::chrono::system_clock::time_point>
+network_tunnel_grant_expiry(const NetworkTunnelGrant& grant) {
+    const auto expires = network_detail::instant(grant.spec.expires_at);
+    if (!expires) {
+        return std::nullopt;
+    }
+    return std::chrono::system_clock::time_point(
+        std::chrono::duration_cast<std::chrono::system_clock::duration>(
+            std::chrono::duration<double>(*expires)));
+}
+
 bool network_tunnel_grant_active(const NetworkTunnelGrant& grant,
                                  std::chrono::system_clock::time_point now) {
     if (grant.revoked_at) {
         return false;
     }
-    const auto expires = network_detail::instant(grant.spec.expires_at);
+    const auto expires = network_tunnel_grant_expiry(grant);
     if (!expires) {
         return false;
     }
-    const double current = std::chrono::duration<double>(now.time_since_epoch()).count();
-    return *expires > current;
+    return *expires > now;
 }
 
 } // namespace lake::control
