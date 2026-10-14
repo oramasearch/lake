@@ -1,5 +1,10 @@
 # Database schema
 
+Migration `0084_network` adds the four secure-networking desired/status pairs and
+`network_guard`. Desired changes notify `lake_network`; the one-time rollout preserves existing
+app-to-service paths and creates no internet-egress rows. Apply before the new binary and have
+the operator vendor the schema and select the guard. See [network.md](../docs/control-plane/network.md).
+
 `schema.sql` is the idempotent PostgreSQL source of truth. Migration `0022_session_lookup`
 adds a unique public session selector and revokes legacy sessions without a selector once.
 New session rows store SHA-256 of a random bearer. Apply it before the new binary. The operator
