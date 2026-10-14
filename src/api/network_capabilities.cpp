@@ -1,6 +1,7 @@
 // Secure-networking capabilities (lake#728, docs/api/network.md). The desired rows and operator
 // observations are the 0084/0085 control-plane contract. Tunnel credentials sign a recipient's
-// CSR; the network-record provider remains explicitly pending zetta#1281 (lake#730).
+// CSR; app connection credentials expose their workspace-secret reference and rotate by generation;
+// the network-record provider remains explicitly pending zetta#1281 (lake#730, lake#731).
 
 #include "lake/api/capabilities.hpp"
 
@@ -355,6 +356,26 @@ ApiResult list_connections(const json& input, ApiContext& context) {
     set_audit_target(context, scope, "network_connections/" + scope.workspace_id);
     return list_result(
         context.store->list_network_connections(scope), "connections", connection_json);
+}
+
+ApiResult rotate_connection_credential(const json& input, ApiContext& context) {
+    const control::NetworkScope scope = network_scope(input);
+    const std::string id = input.at("connection_id");
+    set_audit_target(context, scope, "network_connection/" + id);
+    const auto connection = context.store->get_network_connection(scope, id);
+    if (!connection) {
+        return store_failure(connection.error(), "/connection_id");
+    }
+    if (connection->spec.credential_scope.is_null()) {
+        return ApiResult::failure(
+            "conflict", "the connection has no scoped credential to rotate", "/connection_id");
+    }
+    const auto rotated = context.store->update_network_connection(
+        scope, id, connection->spec, network_actor(context));
+    if (!rotated) {
+        return store_failure(rotated.error(), "/connection_id");
+    }
+    return ApiResult::success(connection_json(*rotated));
 }
 
 ApiResult remove_connection(const json& input, ApiContext& context) {
@@ -712,6 +733,21 @@ void register_connection_capabilities(Registry& registry) {
         .resolve_object = customer_object,
         .authorizes_candidates = true,
         .handler = list_connections});
+    registry.add(Capability{
+        .name = "rotate_network_connection_credential",
+        .title = "Rotate a Network Connection Credential",
+        .description =
+            "Request a replacement for one app-to-service connection credential by advancing "
+            "its generation without changing its scope. The operator rewrites the workspace "
+            "secret named by credential_secret, so the app keeps one stable secret reference.",
+        .input_schema =
+            workspace_input({{"connection_id", string_schema()}}, json::array({"connection_id"})),
+        .output_schema = connection_schema(),
+        .kind = CapabilityKind::Action,
+        .object = "customer",
+        .action = "write",
+        .resolve_object = customer_object,
+        .handler = rotate_connection_credential});
     registry.add(Capability{
         .name = "remove_network_connection",
         .title = "Remove a Network Connection",

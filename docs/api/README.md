@@ -1,8 +1,10 @@
 # The `/v1` API and MCP
 
-lake#728/#730: [network.md](network.md) documents the thirteen secure-networking capabilities for
-connections, egress rules, tunnel grants, peers, effective rules, sessions and activity. One
-registry definition supplies their permission checks, REST/OpenAPI operations and MCP tools.
+lake#728/#730/#731: [network.md](network.md) documents the fourteen secure-networking capabilities
+for connections, scoped credential rotation, egress rules, tunnel grants, peers, effective rules,
+sessions and activity. One registry definition supplies their permission checks, REST/OpenAPI
+operations and MCP tools. [scoped-credentials.md](scoped-credentials.md) defines the app credential
+scope, workspace-secret reference, rotation and revocation.
 [tunnel-grants.md](tunnel-grants.md) covers recipient-only CSR signing, bounded certificates,
 public trust, admin revocation and pending session history.
 

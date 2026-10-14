@@ -8,6 +8,8 @@ in the binary) that calls only that API. Start at the homepage's Getting started
 
 The [developer tunnel guide](docs/api/tunnel-grants.md) describes admin grant/revoke, recipient-only
 CSR signing, relay trust and the session-history provider contract.
+[Scoped connection credentials](docs/api/scoped-credentials.md) describes an app's read/write and
+optional-schema scope, the operator's workspace-secret reference, rotation and revocation.
 
 ## Build and get a first result
 

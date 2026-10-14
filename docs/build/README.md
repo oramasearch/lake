@@ -2,6 +2,8 @@
 
 [tunnel-grants-proof.md](tunnel-grants-proof.md) records the native credential, migration,
 provider and transport proof for lake#730 and the coordinator's deferred relay checks.
+[scoped-credentials-proof.md](scoped-credentials-proof.md) records lake#731's native scope,
+rotation and removal contract checks and the outstanding operator integration acceptance.
 
 [testing.md](testing.md) documents `LAKE_TEST_SKIP_STALE_SWEEP=1` for shared hosts where a run
 must leave earlier runs' databases alone. [Network verification](../control-plane/network.md#verify)

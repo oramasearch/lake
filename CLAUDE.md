@@ -19,13 +19,15 @@ run `oramasearch/zetta:main-4015ef76` (zetta `v0.2.0`).
 Secure-networking desired state is implemented in the source tree (lake#727, `0084_network`):
 four desired/status pairs, scoped stores, signed atomic audit and app-to-service rollout rows.
 Tunnel grants end through revocation or expiry; internet egress stays implicit in the operator.
-Thirteen permission-checked capabilities expose connections, egress, tunnel grants, recipient-only
-CSR signing, peers and effective rules through REST, OpenAPI and MCP (lake#728, lake#730).
+Fourteen permission-checked capabilities expose connections, scoped credential rotation, egress,
+tunnel grants, recipient-only CSR signing, peers and effective rules through REST, OpenAPI and MCP
+(lake#728, lake#730, lake#731).
 Migration `0085_network_tunnel_ca` adds public client/relay CA fields without changing 0084.
 Session and activity reads return empty arrays with `pending: "zetta#1281"` through a provider
 interface. Operator adoption, live relay session termination and deployment are not claimed. See
 [`docs/control-plane/network.md`](docs/control-plane/network.md) and
-[`docs/api/network.md`](docs/api/network.md) and [tunnel credentials](docs/api/tunnel-grants.md).
+[`docs/api/network.md`](docs/api/network.md), [scoped credentials](docs/api/scoped-credentials.md)
+and [tunnel credentials](docs/api/tunnel-grants.md).
 
 The newest dated record, [`docs/deployment/dev-2026-10-01.md`](docs/deployment/dev-2026-10-01.md),
 and [`docs/design/status.md`](docs/design/status.md) still describe the 2026-10-01 deployment

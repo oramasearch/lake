@@ -17,6 +17,7 @@ inputs.
 |---|---|---|
 | `create_network_connection` | action | Declares a source-to-target path and returns its desired row. |
 | `list_network_connections` | read | Returns present and withdrawn connection history. |
+| `rotate_network_connection_credential` | action | Advances a scoped connection's generation so the operator replaces the credential in its workspace secret. |
 | `remove_network_connection` | action | Sets one connection to `desired: absent`. |
 | `create_network_egress_rule` | action | Declares CIDR or DNS egress for one workload or the workspace. |
 | `list_network_egress_rules` | read | Returns present and withdrawn egress history. |
@@ -33,15 +34,15 @@ Reads use `GET /v1/<capability>` and actions use `POST /v1/<capability>`. Every 
 MCP tool of the same name and schema. `remove_network_connection` and
 `revoke_network_tunnel` carry MCP's destructive hint. All inputs are closed objects and require
 `customer_id` and `workspace_id`; the registry also verifies that the workspace belongs to that
-account and agrees with a workspace route when one is present. Agent Docs puts all thirteen tools in
+account and agrees with a workspace route when one is present. Agent Docs puts all fourteen tools in
 the deliberate Network group.
 
 ## Authorization and Audit
 
 The account policy object is the authorization boundary. Lists and effective-rule reads require
-`read`; connection/egress declarations and removal require `write`; tunnel grants and revocation
-require `admin`. Certificate issuance requires account read plus the grant's recipient identity,
-never an operator or another admin. A tunnel's `user_id` must
+`read`; connection/egress declarations, credential rotation and removal require `write`; tunnel
+grants and revocation require `admin`. Certificate issuance requires account read plus the grant's
+recipient identity, never an operator or another admin. A tunnel's `user_id` must
 name a persisted user whose TAAP identity can read the same account. This prevents an authorized
 admin from granting an unrelated user access. [Tunnel credentials](tunnel-grants.md) describes
 CSR validation, bounded certificates, public trust material and certificate audit.
@@ -57,9 +58,19 @@ Successful desired-state mutations also retain the signed, atomic store audit de
 ## Desired Rows and Operator Status
 
 A connection names a source kind and ID, a target kind and ID, optional ports and an optional
-credential scope. Empty ports mean the target's service ports. `credential_scope` is null or
+credential scope. Empty ports mean the target's service ports. A non-null scope is valid only from
+an app to a service. `credential_scope` is null or
 `{"access":"read"|"write","schema":"optional name"}`. It contains no credential bytes; an
 operator observation may name the workspace secret in `status.credential_secret`.
+
+`rotate_network_connection_credential` keeps the scope and every endpoint field unchanged and
+advances `generation`. The operator reconciles that new generation by replacing the per-connection
+role credential and rewriting the same workspace secret. Until then, `status` continues to show
+the prior `observed_generation` and secret reference, which makes the pending rotation explicit.
+The action refuses a connection whose scope is null. Removing the connection advances generation
+again with `desired: absent`; the operator drops the role, revokes its delivered credential and
+reports `Deleted`. [Scoped connection credentials](scoped-credentials.md) carries the complete
+lifecycle and the operator boundary.
 
 An egress rule has exactly one of `cidr` and `dns_name`. `source_kind` and `source_id` are either
 both absent for every workload in the workspace or both present. Tunnel expiry is a future UTC
@@ -102,11 +113,11 @@ LAKE_TEST_SKIP_STALE_SWEEP=1 LAKE_INSTANCE_KEK="$LAKE_TEST_KEK" \
 ```
 
 Repeat the build and full suite in `build-shared` with `BUILD_SHARED_LIBS=ON`.
-`tests/test_network_capabilities.cpp` exercises desired-state lifecycle, effective filtering,
-account permissions, the unavailable-record boundary, OpenAPI operations, MCP tool schemas and an
-MCP call. The complete schema-conformance case also makes every available network capability
-succeed over MCP so each required output is independently validated. The store cases continue to
-prove the PostgreSQL/operator contract.
+`tests/test_network_capabilities.cpp` exercises desired-state and scoped-credential lifecycle,
+effective filtering, account permissions, the unavailable-record boundary, OpenAPI operations,
+MCP tool schemas and an MCP call. The complete schema-conformance case also makes every available
+network capability succeed over MCP so each required output is independently validated. The store
+cases continue to prove the PostgreSQL/operator contract.
 
 ## Change and Handoff
 

@@ -475,6 +475,7 @@ constexpr std::array workspace = std::to_array<std::string_view>({
     "rollback_app",
     "rotate_application_signing_key",
     "rotate_encryption_key",
+    "rotate_network_connection_credential",
     "run_methodology",
     "run_pipeline",
     "scale_app",

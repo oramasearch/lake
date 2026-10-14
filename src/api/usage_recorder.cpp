@@ -232,6 +232,7 @@ const std::vector<std::pair<std::string_view, std::string_view>>& calls_only_cap
         {"issue_network_tunnel_certificate", "a short-lived identity credential"},
         {"remove_network_connection", "a desired network-policy record"},
         {"revoke_network_tunnel", "a desired network-policy record"},
+        {"rotate_network_connection_credential", "a desired network-policy record"},
         {"duplicate_methodology", "as create_methodology"},
         {"draft_methodology", "drafted files, kept nowhere"},
         {"create_webhook", "a forge record"},

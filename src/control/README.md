@@ -6,10 +6,12 @@ See [tunnel credentials](../../docs/api/tunnel-grants.md) and migration 0085 in 
 
 `network.cpp` shares secure-networking validation and row codecs; `network_memory.cpp` and
 `postgres_store.cpp` implement scoped desired writes, joined status reads and atomic signed audit.
+Non-null credential scopes are restricted to app-to-service connections; rotation writes the
+unchanged spec to advance its desired generation.
 The memory path uses the API actor's audit identity while PostgreSQL uses its configured KEK. The
 shared code also derives active tunnel grants for `network_rules`. The rollout and operator handoff
 are in [network.md](../../docs/control-plane/network.md); public shapes are in
-[the API contract](../../docs/api/network.md).
+[the API contract](../../docs/api/network.md) and [scoped credentials](../../docs/api/scoped-credentials.md).
 
 `control::service_condition` derives the one status `list_services` and the Services page show,
 with the reason a service cannot progress on its own (unassigned, delete not yet observed). Both
