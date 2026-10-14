@@ -8986,6 +8986,7 @@ struct ApiServer::Impl {
         ctx.store = options.store.get();
         ctx.search = options.search.get();
         ctx.pki = &pki;
+        ctx.network_records = options.network_records.get();
         ctx.agents = &agents;
         ctx.platform = options.platform.get();
         ctx.workspaces = options.workspaces.get();

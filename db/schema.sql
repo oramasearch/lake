@@ -4438,3 +4438,10 @@ END $$;
 -- internetEgress is only in the Lake CR. Its implicit rule remains the operator's responsibility.
 CREATE TABLE IF NOT EXISTS network_guard (applied_at timestamptz NOT NULL DEFAULT now());
 INSERT INTO schema_migrations (version) VALUES ('0084_network') ON CONFLICT DO NOTHING;
+
+-- 0085_network_tunnel_ca (lake#730): public trust material for the developer tunnel.
+-- Lake pins the customer's client CA at grant creation; the operator reports relay trust.
+-- Section 11.1 of the operator's secure-networking contract. No private keys live here.
+ALTER TABLE network_tunnel_grants ADD COLUMN IF NOT EXISTS client_ca_pem text NOT NULL DEFAULT '';
+ALTER TABLE network_tunnel_grant_status ADD COLUMN IF NOT EXISTS relay_ca_pem text NOT NULL DEFAULT '';
+INSERT INTO schema_migrations (version) VALUES ('0085_network_tunnel_ca') ON CONFLICT DO NOTHING;

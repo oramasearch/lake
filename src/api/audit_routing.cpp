@@ -88,6 +88,7 @@ constexpr std::array central = std::to_array<std::string_view>({
     "issue_device_certificate",
     "issue_invoice",
     "issue_jwt_svid",
+    "issue_network_tunnel_certificate",
     "issue_offline_grant",
     "issue_ssh_host_certificate",
     "issue_ssh_user_certificate",

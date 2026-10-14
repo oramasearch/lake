@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <ctime>
 #include <format>
 #include <memory>
 #include <string>
@@ -299,6 +300,31 @@ Result<void> add_extension(X509* certificate, int nid, std::string_view value) {
     return {};
 }
 
+bool has_tunnel_identity(X509* certificate) {
+    int index = -1;
+    while ((index = X509_get_ext_by_NID(certificate, NID_subject_alt_name, index)) >= 0) {
+        auto* extension = X509_get_ext(certificate, index);
+        std::unique_ptr<GENERAL_NAMES, decltype(&GENERAL_NAMES_free)> names(
+            static_cast<GENERAL_NAMES*>(X509V3_EXT_d2i(extension)), GENERAL_NAMES_free);
+        if (!names) {
+            continue;
+        }
+        for (int item = 0; item < sk_GENERAL_NAME_num(names.get()); ++item) {
+            const auto* name = sk_GENERAL_NAME_value(names.get(), item);
+            if (name->type != GEN_URI) {
+                continue;
+            }
+            const auto* uri = name->d.uniformResourceIdentifier;
+            const std::string_view value(reinterpret_cast<const char*>(ASN1_STRING_get0_data(uri)),
+                                         static_cast<std::size_t>(ASN1_STRING_length(uri)));
+            if (value.starts_with("urn:orama:tunnel-grant:")) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 Result<Certificate> make_certificate(EVP_PKEY* subject_key,
                                      EVP_PKEY* issuer_key,
                                      X509* issuer_certificate,
@@ -306,7 +332,8 @@ Result<Certificate> make_certificate(EVP_PKEY* subject_key,
                                      int lifetime_seconds,
                                      bool is_authority,
                                      std::string_view uri_san = {},
-                                     std::string_view dns_san = {}) {
+                                     std::string_view dns_san = {},
+                                     bool tunnel_identity = false) {
     Certificate certificate(X509_new());
     if (!certificate) {
         return std::unexpected(crypto_error("could not allocate certificate"));
@@ -375,6 +402,13 @@ Result<Certificate> make_certificate(EVP_PKEY* subject_key,
         if (!extension) {
             return std::unexpected(extension.error());
         }
+    }
+    // The customer CA is shared by PKI profiles. Neither an agent identity nor another SAN
+    // profile may mint a grant identity outside the recipient-only tunnel signer. Inspect the
+    // encoded names, including extra names accepted by OpenSSL's extension configuration parser.
+    if (!tunnel_identity && has_tunnel_identity(certificate.get())) {
+        return std::unexpected(Error{
+            "invalid_input", "tunnel grant identities require the recipient-only CSR capability"});
     }
     if (X509_sign(certificate.get(), issuer_key ? issuer_key : subject_key, EVP_sha256()) <= 0) {
         return std::unexpected(crypto_error("could not sign certificate"));
@@ -1151,6 +1185,139 @@ Result<Authority> Service::load_authority(::lake::control::Store& store,
                      persisted->intermediate_chain_pem,
                      persisted->root_private_key_pem,
                      persisted->intermediate_private_key_pem};
+}
+
+Result<AuthorityPublic> Service::ensure_authority(::lake::control::Store& store,
+                                                  std::string_view customer_id,
+                                                  std::string_view instance_kek) {
+    auto authority = load_authority(store, customer_id, instance_kek);
+    if (!authority && authority.error().code == "not_found") {
+        auto created = create_authority(store, customer_id, instance_kek);
+        if (created || created.error().code != "conflict") {
+            return created;
+        }
+        authority = load_authority(store, customer_id, instance_kek);
+    }
+    if (!authority) {
+        return std::unexpected(authority.error());
+    }
+    return AuthorityPublic{authority->root_certificate_pem,
+                           authority->intermediate_certificate_pem};
+}
+
+namespace {
+
+Result<Pkey> verified_csr_key(std::string_view csr_pem) {
+    if (csr_pem.empty() || csr_pem.size() > 16384 ||
+        !csr_pem.starts_with("-----BEGIN CERTIFICATE REQUEST-----")) {
+        return std::unexpected(Error{"invalid_input", "send one PEM PKCS#10 CSR (at most 16 KiB)"});
+    }
+    Bio input(BIO_new_mem_buf(csr_pem.data(), static_cast<int>(csr_pem.size())));
+    Request request(input ? PEM_read_bio_X509_REQ(input.get(), nullptr, nullptr, nullptr)
+                          : nullptr);
+    if (!request || X509_REQ_get_version(request.get()) != 0) {
+        return std::unexpected(Error{"invalid_input", "invalid PKCS#10 CSR"});
+    }
+    char* remainder = nullptr;
+    const auto remaining = BIO_get_mem_data(input.get(), &remainder);
+    for (long i = 0; i < remaining; ++i) {
+        if (remainder[i] != ' ' && remainder[i] != '\r' && remainder[i] != '\n' &&
+            remainder[i] != '\t') {
+            return std::unexpected(Error{"invalid_input", "send exactly one CSR"});
+        }
+    }
+    Pkey key(X509_REQ_get_pubkey(request.get()));
+    if (!key || EVP_PKEY_get_security_bits(key.get()) < 112 ||
+        X509_REQ_verify(request.get(), key.get()) != 1) {
+        return std::unexpected(Error{"invalid_input", "CSR signature or public key is invalid"});
+    }
+    return key;
+}
+
+Result<SignedClientCertificate>
+sign_tunnel_csr(const Authority& authority, const NetworkTunnelGrant& grant, EVP_PKEY* key) {
+    auto issuer_key = private_key_from_pem(authority.intermediate_private_key_pem);
+    auto issuer = certificate_from_pem(authority.intermediate_certificate_pem);
+    auto root = certificate_from_pem(authority.root_certificate_pem);
+    if (!issuer_key || !issuer || !root ||
+        X509_check_private_key(issuer->get(), issuer_key->get()) != 1) {
+        return std::unexpected(Error{"crypto_error", "customer authority material is invalid"});
+    }
+    const auto now = std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
+    const auto expiry = network_tunnel_grant_expiry(grant);
+    if (!expiry || grant.revoked_at || *expiry <= now) {
+        return std::unexpected(Error{"conflict", "the tunnel grant has ended"});
+    }
+    const auto ends =
+        std::min(std::chrono::floor<std::chrono::seconds>(*expiry), now + std::chrono::hours(12));
+    if (ends <= now) {
+        return std::unexpected(
+            Error{"conflict", "the tunnel grant expires before a certificate can be used"});
+    }
+    const std::string uri = "urn:orama:tunnel-grant:" + grant.id;
+    auto certificate = make_certificate(
+        key, issuer_key->get(), issuer->get(), "Lake tunnel client", 1, false, uri, {}, true);
+    if (!certificate) {
+        return std::unexpected(certificate.error());
+    }
+    const auto start_time = std::chrono::system_clock::to_time_t(now);
+    const auto end_time = std::chrono::system_clock::to_time_t(ends);
+    if (!ASN1_TIME_set(X509_getm_notBefore(certificate->get()), start_time) ||
+        !ASN1_TIME_set(X509_getm_notAfter(certificate->get()), end_time)) {
+        return std::unexpected(crypto_error("could not set tunnel certificate validity"));
+    }
+    // A certificate cannot outlive either CA in its chain.
+    for (X509* ca : {issuer->get(), root->get()}) {
+        if (ASN1_TIME_compare(X509_get0_notBefore(ca), X509_get0_notBefore(certificate->get())) >
+                0 ||
+            ASN1_TIME_compare(X509_get0_notAfter(ca), X509_get0_notBefore(certificate->get())) <=
+                0) {
+            return std::unexpected(
+                Error{"conflict", "customer certificate authority is not valid"});
+        }
+        if (ASN1_TIME_compare(X509_get0_notAfter(ca), X509_get0_notAfter(certificate->get())) < 0 &&
+            X509_set1_notAfter(certificate->get(), X509_get0_notAfter(ca)) != 1) {
+            return std::unexpected(crypto_error("could not bound tunnel certificate validity"));
+        }
+    }
+    auto usage = add_extension(certificate->get(), NID_ext_key_usage, "critical,clientAuth");
+    if (!usage) {
+        return std::unexpected(usage.error());
+    }
+    if (X509_sign(certificate->get(), issuer_key->get(), EVP_sha256()) <= 0) {
+        return std::unexpected(crypto_error("could not sign tunnel certificate"));
+    }
+    auto pem = pem_of_certificate(certificate->get());
+    std::tm actual_expiry{};
+    if (!pem || ASN1_TIME_to_tm(X509_get0_notAfter(certificate->get()), &actual_expiry) != 1) {
+        return std::unexpected(crypto_error("could not encode tunnel certificate"));
+    }
+    return SignedClientCertificate{*pem,
+                                   authority.intermediate_certificate_pem +
+                                       authority.root_certificate_pem,
+                                   std::chrono::system_clock::from_time_t(timegm(&actual_expiry))};
+}
+
+} // namespace
+
+Result<SignedClientCertificate> Service::sign_tunnel_certificate(::lake::control::Store& store,
+                                                                 const NetworkTunnelGrant& grant,
+                                                                 std::string_view csr_pem,
+                                                                 std::string_view instance_kek) {
+    auto key = verified_csr_key(csr_pem);
+    if (!key) {
+        return std::unexpected(key.error());
+    }
+    auto authority = load_authority(store, grant.customer_id, instance_kek);
+    if (!authority) {
+        return std::unexpected(authority.error());
+    }
+    if (grant.spec.client_ca_pem.empty() ||
+        grant.spec.client_ca_pem != authority->root_certificate_pem) {
+        return std::unexpected(
+            Error{"conflict", "the grant's client CA does not match the customer authority"});
+    }
+    return sign_tunnel_csr(*authority, grant, key->get());
 }
 
 Result<X509Svid> Service::issue_x509_svid(std::string_view customer_id,

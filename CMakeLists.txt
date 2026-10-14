@@ -370,6 +370,7 @@ add_library(lake-control-postgres STATIC
   src/control/apps_memory.cpp
   src/control/memory_store.cpp
   src/control/network.cpp
+  src/control/network_records.cpp
   src/control/network_memory.cpp
   src/control/postgres_store.cpp
 )

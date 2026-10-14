@@ -3,6 +3,10 @@
 One folder per topic, one file per subject. The root README is the front door; this index points
 to the detailed contracts and records.
 
+[api/tunnel-grants.md](api/tunnel-grants.md) defines recipient-only tunnel CSR signing, trust,
+revocation and pending session history (lake#730); [build/tunnel-grants-proof.md](build/tunnel-grants-proof.md)
+records its native proof and coordinator handoff.
+
 [api/errors.md](api/errors.md) lists every error code a capability answers with its REST status,
 the 401 `missing`/`invalid`/`expired` contract and where `path` comes from;
 [api/naming.md](api/naming.md) gives the one name each concept has across capabilities and the

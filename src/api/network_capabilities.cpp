@@ -1,18 +1,22 @@
 // Secure-networking capabilities (lake#728, docs/api/network.md). The desired rows and operator
-// observations are the 0084_network control-plane contract. Tunnel sessions and activity remain
-// workspace records; until lake#730 and zetta#1281 provide them, their registered reads answer
-// not_supported after the ordinary account permission check.
+// observations are the 0084/0085 control-plane contract. Tunnel credentials sign a recipient's
+// CSR; the network-record provider remains explicitly pending zetta#1281 (lake#730).
 
 #include "lake/api/capabilities.hpp"
 
+#include <algorithm>
 #include <optional>
 #include <string>
 #include <utility>
 #include <vector>
 
+#include "lake/control/identity_crypto.hpp"
 #include "lake/control/network.hpp"
+#include "lake/control/network_records.hpp"
+#include "lake/control/pki.hpp"
 #include "lake/control/policy.hpp"
 #include "lake/control/store.hpp"
+#include "lake/control/workspace_records.hpp"
 
 namespace lake::api {
 namespace {
@@ -47,6 +51,10 @@ json status_schema(std::string_view extra = {}) {
     if (!extra.empty()) {
         properties[std::string(extra)] = string_schema();
         required.push_back(std::string(extra));
+    }
+    if (extra == "endpoint") {
+        properties["relay_ca_pem"] = string_schema();
+        required.push_back("relay_ca_pem");
     }
     return {{"type", json::array({"object", "null"})},
             {"properties", std::move(properties)},
@@ -123,17 +131,23 @@ json egress_schema() {
 }
 
 json tunnel_schema() {
-    return record_schema(
-        {{"user_id", string_schema()},
-         {"target_kind", {{"type", "string"}, {"enum", {"service", "app"}}}},
-         {"target_id", string_schema()},
-         {"port", {{"type", "integer"}, {"minimum", 1}, {"maximum", 65535}}},
-         {"expires_at", string_schema()},
-         {"revoked_at", nullable_schema("string")},
-         {"active", {{"type", "boolean"}}}},
-        json::array(
-            {"user_id", "target_kind", "target_id", "port", "expires_at", "revoked_at", "active"}),
-        "endpoint");
+    return record_schema({{"user_id", string_schema()},
+                          {"target_kind", {{"type", "string"}, {"enum", {"service", "app"}}}},
+                          {"target_id", string_schema()},
+                          {"port", {{"type", "integer"}, {"minimum", 1}, {"maximum", 65535}}},
+                          {"expires_at", string_schema()},
+                          {"client_ca_pem", string_schema()},
+                          {"revoked_at", nullable_schema("string")},
+                          {"active", {{"type", "boolean"}}}},
+                         json::array({"user_id",
+                                      "target_kind",
+                                      "target_id",
+                                      "port",
+                                      "expires_at",
+                                      "client_ca_pem",
+                                      "revoked_at",
+                                      "active"}),
+                         "endpoint");
 }
 
 json peer_export_schema() {
@@ -180,6 +194,7 @@ json status_json(const std::optional<control::NetworkStatus>& status, std::strin
         value["credential_secret"] = status->credential_secret;
     } else if (extra == "endpoint") {
         value["endpoint"] = status->endpoint;
+        value["relay_ca_pem"] = status->relay_ca_pem;
     }
     return value;
 }
@@ -225,6 +240,7 @@ json tunnel_json(const control::NetworkTunnelGrant& record) {
                   {"target_id", record.spec.target_id},
                   {"port", record.spec.port},
                   {"expires_at", record.spec.expires_at},
+                  {"client_ca_pem", record.spec.client_ca_pem},
                   {"revoked_at", optional_text(record.revoked_at)},
                   {"active", control::network_tunnel_grant_active(record)}});
     return value;
@@ -418,11 +434,20 @@ ApiResult grant_tunnel(const json& input, ApiContext& context) {
     if (auto problem = tunnel_user_problem(user_id, input, context)) {
         return *problem;
     }
+    if (!context.pki) {
+        return ApiResult::failure("not_supported", "customer PKI is not configured");
+    }
+    auto authority =
+        context.pki->ensure_authority(*context.store, scope.customer_id, context.instance_kek);
+    if (!authority) {
+        return ApiResult::failure(authority.error().code, authority.error().message);
+    }
     control::NetworkTunnelGrantSpec spec{.user_id = user_id,
                                          .target_kind = input.at("target_kind"),
                                          .target_id = input.at("target_id"),
                                          .port = input.at("port"),
-                                         .expires_at = input.at("expires_at")};
+                                         .expires_at = input.at("expires_at"),
+                                         .client_ca_pem = authority->root_certificate_pem};
     const auto granted =
         context.store->create_network_tunnel_grant(scope, spec, network_actor(context));
     if (!granted) {
@@ -452,6 +477,86 @@ ApiResult revoke_tunnel(const json& input, ApiContext& context) {
         return store_failure(revoked.error(), "/tunnel_grant_id");
     }
     return ApiResult::success(tunnel_json(*revoked));
+}
+
+std::optional<ApiResult> credential_problem(const control::NetworkTunnelGrant& grant,
+                                            ApiContext& context) {
+    if (context.operator_credential || context.acting_identity == "admin" ||
+        context.acting_user_id.empty() || context.acting_user_id != grant.spec.user_id) {
+        return ApiResult::failure("forbidden",
+                                  "only the grant's recipient may request its certificate");
+    }
+    const auto user = context.store->get_user(context.acting_user_id);
+    if (!user || user->taap_id != context.acting_identity) {
+        return ApiResult::failure("forbidden", "the caller must be the grant's recipient");
+    }
+    if (!control::network_tunnel_grant_active(grant)) {
+        return ApiResult::failure("conflict", "the tunnel grant has expired or been revoked");
+    }
+    if (!grant.status || grant.status->phase != "Ready" ||
+        grant.status->observed_generation != grant.generation || grant.status->endpoint.empty() ||
+        grant.status->relay_ca_pem.empty()) {
+        return ApiResult::failure(
+            "conflict", "the operator has not reported this tunnel ready with relay trust");
+    }
+    return std::nullopt;
+}
+
+ApiResult issue_tunnel_certificate(const json& input, ApiContext& context) {
+    const auto scope = network_scope(input);
+    const std::string id = input.at("tunnel_grant_id");
+    set_audit_target(context, scope, "network_tunnel_grant/" + id);
+    context.audit_kind = "certificate";
+    const auto grant = context.store->get_network_tunnel_grant(scope, id);
+    if (!grant) {
+        return store_failure(grant.error(), "/tunnel_grant_id");
+    }
+    if (auto problem = credential_problem(*grant, context)) {
+        return *problem;
+    }
+    if (!context.pki) {
+        return ApiResult::failure("not_supported", "customer PKI is not configured");
+    }
+    auto certificate = context.pki->sign_tunnel_certificate(
+        *context.store, *grant, input.at("csr_pem").get<std::string>(), context.instance_kek);
+    if (!certificate) {
+        return ApiResult::failure(certificate.error().code,
+                                  certificate.error().message,
+                                  certificate.error().code == "invalid_input" ? "/csr_pem" : "");
+    }
+    // Refuse a revocation or desired/status change that completed while the CSR was signed.
+    // The relay still checks current desired state on every connection and during live sessions.
+    const auto current = context.store->get_network_tunnel_grant(scope, id);
+    if (!current) {
+        return store_failure(current.error(), "/tunnel_grant_id");
+    }
+    if (auto problem = credential_problem(*current, context)) {
+        return *problem;
+    }
+    if (current->generation != grant->generation ||
+        current->status->endpoint != grant->status->endpoint ||
+        current->status->relay_ca_pem != grant->status->relay_ca_pem) {
+        return ApiResult::failure("conflict", "the tunnel changed while signing; request again");
+    }
+    const auto expires_at =
+        control::record_instant(std::chrono::duration_cast<std::chrono::microseconds>(
+                                    certificate->expires_at.time_since_epoch())
+                                    .count());
+    context.audit_details.update(
+        {{"grant_id", id},
+         {"user_id", grant->spec.user_id},
+         {"target_kind", grant->spec.target_kind},
+         {"target_id", grant->spec.target_id},
+         {"port", grant->spec.port},
+         {"generation", grant->generation},
+         {"expires_at", expires_at},
+         {"certificate_sha256",
+          control::identity_crypto::sha256_hex(certificate->certificate_pem)}});
+    return ApiResult::success({{"certificate_pem", certificate->certificate_pem},
+                               {"chain_pem", certificate->chain_pem},
+                               {"expires_at", expires_at},
+                               {"endpoint", current->status->endpoint},
+                               {"relay_ca_pem", current->status->relay_ca_pem}});
 }
 
 ApiResult list_peers(const json& input, ApiContext& context) {
@@ -512,24 +617,41 @@ ApiResult effective_rules(const json& input, ApiContext& context) {
                                {"peers", std::move(peer_values)}});
 }
 
-ApiResult unsupported_records(std::string kind) {
-    return ApiResult::failure(
-        "not_supported", "workspace network " + kind + " records are not available on this Lake");
-}
-
-ApiResult list_tunnel_sessions(const json& input, ApiContext& context) {
+liquid::runtime::task<ApiResult>
+read_network_records(const json& input, ApiContext& context, bool sessions) {
     if (const auto refusal = authorize_list(input, context)) {
-        return *refusal;
+        co_return *refusal;
     }
     const control::NetworkScope scope = network_scope(input);
-    set_audit_target(context, scope, "network_tunnel_sessions/" + scope.workspace_id);
-    return unsupported_records("tunnel session");
+    set_audit_target(context,
+                     scope,
+                     (sessions ? "network_tunnel_sessions/" : "network_activity/") +
+                         scope.workspace_id);
+    control::PendingNetworkRecords pending;
+    auto& provider = context.network_records ? *context.network_records : pending;
+    const auto limit = input.value("limit", std::size_t{50});
+    auto page = control::settled(
+        co_await (sessions ? provider.sessions(scope, limit) : provider.activity(scope, limit)));
+    if (!page) {
+        co_return ApiResult::failure(page.error().code, page.error().message);
+    }
+    if (!page->records.is_array() || page->records.size() > limit ||
+        !std::ranges::all_of(page->records, &json::is_object) ||
+        (!page->available && (!page->records.empty() || page->pending.empty())) ||
+        (page->available && !page->pending.empty())) {
+        co_return ApiResult::failure("store_error", "invalid network-record provider response");
+    }
+    co_return ApiResult::success({{sessions ? "sessions" : "events", std::move(page->records)},
+                                  {"available", page->available},
+                                  {"pending", page->pending}});
 }
 
-ApiResult recent_activity(const json& input, ApiContext& context) {
-    const control::NetworkScope scope = network_scope(input);
-    set_audit_target(context, scope, "network_activity/" + scope.workspace_id);
-    return unsupported_records("activity");
+liquid::runtime::task<ApiResult> list_tunnel_sessions(const json& input, ApiContext& context) {
+    return read_network_records(input, context, true);
+}
+
+liquid::runtime::task<ApiResult> recent_activity(const json& input, ApiContext& context) {
+    return read_network_records(input, context, false);
 }
 
 json array_output(std::string_view field, json item) {
@@ -540,9 +662,12 @@ json array_output(std::string_view field, json item) {
             {"additionalProperties", false}};
 }
 
-json unavailable_array_output(std::string_view field) {
+json network_records_output(std::string_view field) {
     json schema = array_output(field, {{"type", "object"}});
-    schema.erase("required");
+    schema["properties"]["available"] = {{"type", "boolean"}};
+    schema["properties"]["pending"] = string_schema();
+    schema["required"].push_back("available");
+    schema["required"].push_back("pending");
     return schema;
 }
 
@@ -648,8 +773,9 @@ void register_tunnel_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "grant_network_tunnel",
         .title = "Grant a Network Tunnel",
-        .description = "Grant one account member access to one app or service port until a future "
-                       "UTC RFC 3339 instant. The grant names no tunnel provider.",
+        .description =
+            "Grant one account member access to one app or service port until a future "
+            "UTC RFC 3339 instant. Requires account admin; pins the customer's client CA.",
         .input_schema = workspace_input(
             {{"user_id", string_schema()},
              {"target_kind", target_kind},
@@ -660,9 +786,37 @@ void register_tunnel_capabilities(Registry& registry) {
         .output_schema = tunnel_schema(),
         .kind = CapabilityKind::Action,
         .object = "customer",
-        .action = "write",
+        .action = "admin",
         .resolve_object = customer_object,
         .handler = grant_tunnel});
+    registry.add(Capability{
+        .name = "issue_network_tunnel_certificate",
+        .title = "Issue a Network Tunnel Certificate",
+        .description = "Only the grant's recipient can submit a PEM PKCS#10 CSR for a live, ready "
+                       "tunnel. Returns a client certificate valid until the earlier of grant "
+                       "expiry or twelve hours, its chain, relay endpoint and relay CA. The "
+                       "private key stays on the developer's machine; operators cannot request it.",
+        .input_schema = workspace_input(
+            {{"tunnel_grant_id", string_schema()},
+             {"csr_pem", {{"type", "string"}, {"minLength", 1}, {"maxLength", 16384}}}},
+            json::array({"tunnel_grant_id", "csr_pem"})),
+        .output_schema =
+            {{"type", "object"},
+             {"properties",
+              {{"certificate_pem", string_schema()},
+               {"chain_pem", string_schema()},
+               {"expires_at", string_schema()},
+               {"endpoint", string_schema()},
+               {"relay_ca_pem", string_schema()}}},
+             {"required",
+              json::array(
+                  {"certificate_pem", "chain_pem", "expires_at", "endpoint", "relay_ca_pem"})},
+             {"additionalProperties", false}},
+        .kind = CapabilityKind::Action,
+        .object = "customer",
+        .action = "read",
+        .resolve_object = customer_object,
+        .handler = issue_tunnel_certificate});
     registry.add(Capability{
         .name = "list_network_tunnel_grants",
         .title = "List Network Tunnel Grants",
@@ -680,30 +834,31 @@ void register_tunnel_capabilities(Registry& registry) {
         .name = "revoke_network_tunnel",
         .title = "Revoke a Network Tunnel",
         .description = "Revoke a tunnel grant. A repeated revocation or an already expired grant "
-                       "is a conflict; ending live sessions belongs to the tunnel flow.",
+                       "is a conflict. Requires account admin; the operator removes this grant "
+                       "from the relay to end live sessions.",
         .input_schema = workspace_input({{"tunnel_grant_id", string_schema()}},
                                         json::array({"tunnel_grant_id"})),
         .output_schema = tunnel_schema(),
         .kind = CapabilityKind::Action,
         .object = "customer",
-        .action = "write",
+        .action = "admin",
         .resolve_object = customer_object,
         .handler = revoke_tunnel});
     registry.add(Capability{
         .name = "list_network_tunnel_sessions",
         .title = "List Network Tunnel Sessions",
         .description = "List the workspace's current and past tunnel sessions. Until the "
-                       "workspace network-record contract is available, this read answers "
-                       "not_supported after permission checks.",
+                       "workspace network-record provider is available, returns an empty array "
+                       "with available=false and pending=zetta#1281.",
         .input_schema = workspace_input(
             {{"limit", {{"type", "integer"}, {"minimum", 1}, {"maximum", 100}}}}, json::array()),
-        .output_schema = unavailable_array_output("sessions"),
+        .output_schema = network_records_output("sessions"),
         .kind = CapabilityKind::Read,
         .object = "customer",
         .action = "read",
         .resolve_object = customer_object,
         .authorizes_candidates = true,
-        .handler = list_tunnel_sessions});
+        .async_handler = list_tunnel_sessions});
 }
 
 void register_network_read_capabilities(Registry& registry) {
@@ -747,16 +902,16 @@ void register_network_read_capabilities(Registry& registry) {
         .name = "network_activity",
         .title = "Network Activity",
         .description = "The workspace's recent network decisions. Until the workspace "
-                       "network-record contract is available, this read answers not_supported "
-                       "after permission checks.",
+                       "network-record provider is available, returns an empty array with "
+                       "available=false and pending=zetta#1281 after permission checks.",
         .input_schema = workspace_input(
             {{"limit", {{"type", "integer"}, {"minimum", 1}, {"maximum", 100}}}}, json::array()),
-        .output_schema = unavailable_array_output("events"),
+        .output_schema = network_records_output("events"),
         .kind = CapabilityKind::Read,
         .object = "customer",
         .action = "read",
         .resolve_object = customer_object,
-        .handler = recent_activity});
+        .async_handler = recent_activity});
 }
 
 } // namespace

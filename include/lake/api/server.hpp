@@ -106,6 +106,7 @@ struct ServerOptions {
     // Customer Zetta workspaces (docs/api/workspaces.md); null leaves Design, Train and Ship
     // unavailable.
     std::shared_ptr<control::WorkspaceService> workspaces;
+    std::shared_ptr<control::NetworkRecords> network_records;
     // Raw HTTP to each workspace Zetta's object routes, where a switched workspace's liquid store
     // lives (lake#380, docs/architecture/workspace-store.md). Null with `workspaces` set uses
     // Zetta's installed HTTP client; tests inject a fake object server.

@@ -1,8 +1,10 @@
 # The `/v1` API and MCP
 
-lake#728: [network.md](network.md) documents the twelve secure-networking capabilities for
+lake#728/#730: [network.md](network.md) documents the thirteen secure-networking capabilities for
 connections, egress rules, tunnel grants, peers, effective rules, sessions and activity. One
 registry definition supplies their permission checks, REST/OpenAPI operations and MCP tools.
+[tunnel-grants.md](tunnel-grants.md) covers recipient-only CSR signing, bounded certificates,
+public trust, admin revocation and pending session history.
 
 lake#650: [engine-capabilities.md](engine-capabilities.md) documents every capability of a
 workspace's engine as a named Lake capability (its own route, OpenAPI operation and MCP tool, with

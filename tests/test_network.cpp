@@ -92,7 +92,8 @@ protected:
                 .target_kind = "service",
                 .target_id = target,
                 .port = 4800,
-                .expires_at = future_time()};
+                .expires_at = future_time(),
+                .client_ca_pem = "client-ca"};
     }
 
     NetworkPeerSpec peer_spec() const {
@@ -109,6 +110,7 @@ protected:
             status.credential_secret = "connection-credential";
         } else if (kind == "tunnel_grant") {
             status.endpoint = "relay.test:7443";
+            status.relay_ca_pem = "relay-ca";
         }
         if (auto* memory = dynamic_cast<InMemoryStore*>(backing.get())) {
             if (kind == "connection") {
@@ -138,10 +140,11 @@ protected:
                            status.credential_secret,
                            id);
         } else if (kind == "tunnel_grant") {
-            tx.exec_params(
-                "UPDATE network_tunnel_grant_status SET endpoint = $1 WHERE grant_id = $2::uuid",
-                status.endpoint,
-                id);
+            tx.exec_params("UPDATE network_tunnel_grant_status SET endpoint = $1, relay_ca_pem = "
+                           "$3 WHERE grant_id = $2::uuid",
+                           status.endpoint,
+                           id,
+                           status.relay_ca_pem);
         }
         tx.commit();
     }
@@ -266,6 +269,8 @@ TEST_P(NetworkStore, GrantsRevokeWithoutAUnifyingDesiredColumn) {
     EXPECT_EQ(updated->spec.expires_at, spec.expires_at);
     ASSERT_TRUE(updated->status);
     EXPECT_EQ(updated->status->endpoint, "relay.test:7443");
+    EXPECT_EQ(updated->status->relay_ca_pem, "relay-ca");
+    EXPECT_EQ(updated->spec.client_ca_pem, "client-ca");
     EXPECT_EQ(store->get_network_tunnel_grant(other_scope, created->id).error().code, "not_found");
     EXPECT_EQ(store->revoke_network_tunnel_grant(foreign_scope, created->id, actor).error().code,
               "not_found");
@@ -429,6 +434,38 @@ protected:
     }
 };
 
+TEST_F(PostgresNetwork, TunnelTrustMigrationKeepsExistingGrantsAndIsIdempotent) {
+    const auto created = store->create_network_tunnel_grant(scope, tunnel_spec(), actor);
+    ASSERT_TRUE(created);
+    observe("tunnel_grant", created->id);
+    pqxx::connection connection(uri);
+    pqxx::work tx(connection);
+    tx.exec("ALTER TABLE network_tunnel_grants DROP COLUMN client_ca_pem");
+    tx.exec("ALTER TABLE network_tunnel_grant_status DROP COLUMN relay_ca_pem");
+    tx.exec("DELETE FROM schema_migrations WHERE version = '0085_network_tunnel_ca'");
+    const auto sql = schema_sql();
+    const auto start = sql.find("-- 0085_network_tunnel_ca");
+    ASSERT_NE(start, std::string::npos);
+    tx.exec(sql.substr(start));
+    tx.exec(sql.substr(start));
+    const auto row =
+        tx.exec_params("SELECT g.generation, g.client_ca_pem, s.relay_ca_pem, s.endpoint "
+                       "FROM network_tunnel_grants g JOIN network_tunnel_grant_status s "
+                       "ON s.grant_id=g.id WHERE g.id=$1::uuid",
+                       created->id);
+    ASSERT_EQ(row.size(), 1U);
+    EXPECT_EQ(row[0][0].as<int>(), 1);
+    EXPECT_EQ(row[0][1].as<std::string>(), "");
+    EXPECT_EQ(row[0][2].as<std::string>(), "");
+    EXPECT_EQ(row[0][3].as<std::string>(), "relay.test:7443");
+    EXPECT_EQ(
+        tx.exec(
+              "SELECT count(*) FROM schema_migrations WHERE version='0085_network_tunnel_ca'")[0][0]
+            .as<int>(),
+        1);
+    tx.commit();
+}
+
 TEST_F(PostgresNetwork, ColumnsConstraintsAndDefaultsMatchTheOperatorContract) {
     pqxx::connection connection(uri);
     pqxx::work tx(connection);
@@ -484,12 +521,14 @@ TEST_F(PostgresNetwork, ColumnsConstraintsAndDefaultsMatchTheOperatorContract) {
         {"network_tunnel_grants", "created_by", "uuid", "YES"},
         {"network_tunnel_grants", "created_at", "timestamptz", "NO"},
         {"network_tunnel_grants", "updated_at", "timestamptz", "NO"},
+        {"network_tunnel_grants", "client_ca_pem", "text", "NO"},
         {"network_tunnel_grant_status", "grant_id", "uuid", "NO"},
         {"network_tunnel_grant_status", "phase", "text", "NO"},
         {"network_tunnel_grant_status", "message", "text", "NO"},
         {"network_tunnel_grant_status", "endpoint", "text", "NO"},
         {"network_tunnel_grant_status", "observed_generation", "int8", "NO"},
         {"network_tunnel_grant_status", "updated_at", "timestamptz", "NO"},
+        {"network_tunnel_grant_status", "relay_ca_pem", "text", "NO"},
         {"network_peers", "id", "uuid", "NO"},
         {"network_peers", "customer_id", "uuid", "NO"},
         {"network_peers", "workspace_id", "uuid", "NO"},
@@ -525,6 +564,11 @@ TEST_F(PostgresNetwork, ColumnsConstraintsAndDefaultsMatchTheOperatorContract) {
     EXPECT_EQ(tx.exec("SELECT count(*) FROM schema_migrations WHERE version = '0084_network'")[0][0]
                   .as<int>(),
               1);
+    EXPECT_EQ(
+        tx.exec("SELECT count(*) FROM schema_migrations WHERE version = '0085_network_tunnel_ca'")
+            [0][0]
+                .as<int>(),
+        1);
     const auto foreign_keys =
         tx.exec("SELECT count(*), count(*) FILTER (WHERE confdeltype = 'c') FROM pg_constraint "
                 "WHERE contype = 'f' AND conrelid IN (SELECT oid FROM pg_class WHERE relname LIKE "

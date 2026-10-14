@@ -1,5 +1,9 @@
 # Public API types
 
+`ApiContext.network_records` and `ServerOptions.network_records` inject the scoped tunnel
+session/activity provider; null chooses the pending implementation. The recipient-only CSR
+capability reuses `ApiContext.pki`. See [tunnel credentials](../../../docs/api/tunnel-grants.md).
+
 `web_ui.hpp` declares what lake still renders on the server since the console became the web app
 (lake#561, [web-app.md](../../../docs/ui/web-app.md)): an identity application's hosted sign-in
 pages, the stylesheet and fonts they link, the Docs guides `list_docs` and `get_doc` read, a handler
