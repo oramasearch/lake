@@ -76,6 +76,9 @@ void register_experiment_capabilities(Registry& registry);
 // The operator's volumes (migration 0069, docs/api/volumes.md): set_workspace_storage,
 // request_volume_snapshot, volume_snapshots.
 void register_volume_capabilities(Registry& registry);
+// Secure-networking desired state (lake#728, docs/api/network.md): connections, egress rules,
+// tunnel grants, peers, effective rules, and reads waiting on lake#730's workspace records.
+void register_network_capabilities(Registry& registry);
 // The reads lake's web app needs (lake#561, docs/api/web-app.md): viewer, my_permissions,
 // list_packages, list_docs, get_doc, mcp_setup.
 void register_console_capabilities(Registry& registry, std::string_view version);

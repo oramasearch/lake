@@ -1,7 +1,8 @@
 # Control-plane contracts
 
 [network.md](network.md) defines migration `0084_network`, secure-networking desired and status
-rows, generation and revocation rules, scoped stores, atomic audit, notifications and rollout.
+rows, generation and revocation rules, scoped stores, atomic audit, notifications, rollout and the
+public capability handoff in [the API contract](../api/network.md).
 
 [streams.md](streams.md) describes creator ownership bound to a workspace incarnation (kept in
 the topic's workspace Zetta since lake#379), server-side shared-bus isolation, migration

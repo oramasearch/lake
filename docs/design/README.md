@@ -1,7 +1,8 @@
 # Design and status
 
-Secure-networking store support and its separate operator rollout are tracked in [status.md](status.md)
-and specified in the [network contract](../control-plane/network.md).
+Secure-networking store and capability support and its separate operator rollout are tracked in
+[status.md](status.md) and specified in the [control-plane](../control-plane/network.md) and
+[API](../api/network.md) contracts.
 
 Agent-task lease recovery is tracked separately from deployment in [status.md](status.md).
 The cascading workspace deletion (lake#514) has its own row in [status.md](status.md).

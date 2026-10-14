@@ -134,6 +134,18 @@ constexpr std::array group_rules{
                   return n.find("mcp_connection") != std::string_view::npos ||
                          n.find("mcp_tool") != std::string_view::npos;
               }},
+    GroupRule{"Network",
+              "A workspace's declared connections, egress rules, tunnel grants and peer "
+              "connections, plus the rules currently effective. Tunnel sessions and recent "
+              "activity are available once the workspace record provider is installed.",
+              [](std::string_view n) {
+                  return n == "create_network_connection" || n == "list_network_connections" ||
+                         n == "remove_network_connection" || n == "create_network_egress_rule" ||
+                         n == "list_network_egress_rules" || n == "grant_network_tunnel" ||
+                         n == "list_network_tunnel_grants" || n == "revoke_network_tunnel" ||
+                         n == "list_network_tunnel_sessions" || n == "list_network_peers" ||
+                         n == "network_rules" || n == "network_activity";
+              }},
     GroupRule{"Solutions",
               "The AI solutions a workspace can start: Orama's catalogue (S-1, …, read-only) and "
               "the workspace's own, kept in the workspace. list_solutions and get_solution "
@@ -352,7 +364,7 @@ constexpr std::array group_rules{
 };
 
 // The order groups are shown in.
-constexpr std::array<std::string_view, 29> group_order{"Workspace: Design, Train and Ship",
+constexpr std::array<std::string_view, 30> group_order{"Workspace: Design, Train and Ship",
                                                        "Projects and pipelines",
                                                        "Training and runs",
                                                        "Experiments",
@@ -368,6 +380,7 @@ constexpr std::array<std::string_view, 29> group_order{"Workspace: Design, Train
                                                        "Drives",
                                                        "Transcripts",
                                                        "MCP Connections",
+                                                       "Network",
                                                        "Search",
                                                        "Apps and packages",
                                                        "Services",

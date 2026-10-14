@@ -2,7 +2,10 @@
 
 `network.cpp` shares secure-networking validation and row codecs; `network_memory.cpp` and
 `postgres_store.cpp` implement scoped desired writes, joined status reads and atomic signed audit.
-The rollout and operator handoff are in [network.md](../../docs/control-plane/network.md).
+The memory path uses the API actor's audit identity while PostgreSQL uses its configured KEK. The
+shared code also derives active tunnel grants for `network_rules`. The rollout and operator handoff
+are in [network.md](../../docs/control-plane/network.md); public shapes are in
+[the API contract](../../docs/api/network.md).
 
 `control::service_condition` derives the one status `list_services` and the Services page show,
 with the reason a service cannot progress on its own (unassigned, delete not yet observed). Both

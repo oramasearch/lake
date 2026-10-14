@@ -19,7 +19,11 @@ run `oramasearch/zetta:main-4015ef76` (zetta `v0.2.0`).
 Secure-networking desired state is implemented in the source tree (lake#727, `0084_network`):
 four desired/status pairs, scoped stores, signed atomic audit and app-to-service rollout rows.
 Tunnel grants end through revocation or expiry; internet egress stays implicit in the operator.
-Operator adoption and deployment are not claimed. See [`docs/control-plane/network.md`](docs/control-plane/network.md).
+Twelve permission-checked capabilities expose connections, egress, tunnel grants, peers and
+effective rules through REST, OpenAPI and MCP (lake#728). Session and activity reads are registered
+and await their workspace-record provider. Operator adoption and deployment are not claimed. See
+[`docs/control-plane/network.md`](docs/control-plane/network.md) and
+[`docs/api/network.md`](docs/api/network.md).
 
 The newest dated record, [`docs/deployment/dev-2026-10-01.md`](docs/deployment/dev-2026-10-01.md),
 and [`docs/design/status.md`](docs/design/status.md) still describe the 2026-10-01 deployment

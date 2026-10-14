@@ -70,13 +70,17 @@ and ports; imports name remote services and ports. Tunnel expiration input is UT
 `Z`, optionally up to six fractional digits, and must be in the future. The grant user must exist.
 
 The store enforces ownership and input validity. Authorization is the caller's responsibility,
-as with other control-store operations; REST/MCP policy checks belong to lake#728.
+as with other control-store operations. The
+[capability layer](../api/network.md#authorization-and-audit) applies account read/write policy to
+every REST and MCP operation (lake#728).
 
 ## Audit
 
 Every successful store mutation requires `NetworkActor`: the principal, request ID, and, for a
 person, their persisted user ID. A person's principal must match that user's TAAP ID. System or
-operator callers leave `user_id` empty and supply their principal and request ID.
+operator callers leave `user_id` empty and supply their principal and request ID. An API actor
+also carries the server's audit identity options so the memory implementation signs with the same
+configured identity as the registry; PostgreSQL continues to use the KEK owned by its store.
 
 The store uses Lake's existing identity, signing and central `audit_events` chain. The event
 identifies the customer, workspace, actor, row, operation and new generation. `created_by` keeps
@@ -92,9 +96,10 @@ or audit-insert failure rolls the desired state and its notification back. Concu
 retain every generation and a verifiable audit chain. Memory applies both changes under one lock.
 The telemetry wrapper forwards the actor and scope and counts each operation normally.
 
-The future capability layer should use these already-audited writes and account for its ordinary
-registry outcome event. Workspace network activity and tunnel sessions remain workspace-Zetta
-records in zetta#1281; they are not stored in these tables.
+The capability layer uses these already-audited writes and also records its ordinary registry
+outcome event. Workspace network activity and tunnel sessions remain workspace-Zetta records in
+zetta#1281; they are not stored in these tables. Their registered reads authorize before answering
+`not_supported` until that provider is available.
 
 ## Verify
 
@@ -105,7 +110,8 @@ jobs and suites run one at a time:
 ```sh
 cmake --build build -j 6
 LAKE_TEST_SKIP_STALE_SWEEP=1 LAKE_TEST_DB_URI="$NETWORK_TEST_DB_URI" \
-  ctest --test-dir build -R 'NetworkStore|PostgresNetwork' --output-on-failure
+  ctest --test-dir build -R 'NetworkCapabilities|NetworkStore|PostgresNetwork' \
+  --output-on-failure
 LAKE_TEST_SKIP_STALE_SWEEP=1 LAKE_TEST_DB_URI="$NETWORK_TEST_DB_URI" \
   ctest --test-dir build --output-on-failure
 cmake --build build-shared -j 6
@@ -117,8 +123,10 @@ Set `LAKE_INSTANCE_KEK` for the full suite and point `NETWORK_TEST_DB_URI` at a 
 local administrative database. The fixture creates an isolated database for each PostgreSQL
 case; the skip-sweep flag leaves earlier runs' databases alone.
 
-`tests/test_network.cpp` runs the same CRUD, scope, validation, status and signed-audit cases
-against both stores through the telemetry wrapper. PostgreSQL cases also check all 75 columns'
+`tests/test_network_capabilities.cpp` covers capability lifecycle, effective filtering,
+permissions, OpenAPI and MCP. `tests/test_network.cpp` runs the same CRUD, scope, validation,
+status and signed-audit cases against both stores through the telemetry wrapper. PostgreSQL cases
+also check all 75 columns'
 names/types/nullability, foreign keys and default values, invalid table constraints, backfill
 selection and reruns, notifications versus observations/rollback, audit failure atomicity,
 expiration and concurrent writers.
@@ -131,18 +139,18 @@ above used a fresh local PostgreSQL administrative database, `LAKE_INSTANCE_KEK`
 the stale-database sweep. No container was used.
 
 ```text
-ctest --test-dir build -R 'NetworkStore|PostgresNetwork' --output-on-failure
-100% tests passed, 0 tests failed out of 20
+ctest --test-dir build -R 'NetworkCapabilities|NetworkStore|PostgresNetwork' --output-on-failure
+100% tests passed, 0 tests failed out of 23
 
 ctest --test-dir build --output-on-failure
-100% tests passed, 0 tests failed out of 1042
+100% tests passed, 0 tests failed out of 1045
 
-ctest --test-dir build-shared --output-on-failure -j 6
-100% tests passed, 0 tests failed out of 1042
+ctest --test-dir build-shared --output-on-failure
+100% tests passed, 0 tests failed out of 1045
 ```
 
-Each full configuration registers 1,043 tests: 1,023 passed, 19 skipped and one disabled.
-The focused run passed all 20 cases, including 13 PostgreSQL cases; no network test skipped.
+Each full configuration registers 1,046 tests: 1,026 passed, 19 skipped and one disabled.
+The focused run passed all 23 cases, including 13 PostgreSQL cases; no network test skipped.
 The 19 skips are eleven opt-in integration cases (Liquid CLI, Python Hugging Face client, MCP
 runner and real Zetta) and eight PostgreSQL variants whose existing fixtures explicitly require
 memory-only operator status setters. `SearchBenchmark.BuildAndQueryTenThousandFiles` remains
@@ -159,7 +167,7 @@ the source of truth, reserve a unique migration number against both the integrat
 open PRs, update the contract test and this page, and have the operator vendor the resulting
 schema and select the guard after Lake merges. Do not run migrations in Lake pods.
 
-Deferred by scope: REST/MCP capabilities (#728), Network UI (#729), developer tunnel grant flow
-(#730), credential issuance (#731), workspace records (zetta#1281), and operator reconciliation
+Deferred by scope: Network UI (#729), developer tunnel grant flow (#730), credential issuance
+(#731), workspace records (zetta#1281), and operator reconciliation
 (operator#468, #470, #471, #472). Native tests prove the persistence and operator SQL contract;
 they do not claim deployed network enforcement.

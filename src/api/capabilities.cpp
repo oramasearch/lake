@@ -6138,6 +6138,7 @@ void register_core_capabilities(Registry& registry, std::string_view version) {
     register_stream_capabilities(registry);
     register_experiment_capabilities(registry);
     register_volume_capabilities(registry);
+    register_network_capabilities(registry);
     register_workspace_capabilities(registry);
     register_workspace_record_capabilities(registry);
     register_workspace_store_capabilities(registry);

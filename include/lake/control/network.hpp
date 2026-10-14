@@ -1,11 +1,14 @@
 #pragma once
 
+#include <chrono>
 #include <cstdint>
 #include <optional>
 #include <string>
 #include <vector>
 
 #include <nlohmann/json.hpp>
+
+#include "lake/audit/audit.hpp"
 
 namespace lake::control {
 
@@ -21,6 +24,8 @@ struct NetworkActor {
     std::string user_id;
     std::string principal;
     std::string request_id;
+    // The API server's audit identity for memory-store parity. PostgreSQL owns its configured KEK.
+    audit::IdentityOptions identity_options;
 };
 
 struct NetworkStatus {
@@ -95,5 +100,11 @@ struct NetworkPeer : NetworkMetadata {
     NetworkPeerSpec spec;
     std::string desired = "present";
 };
+
+// A grant is effective until it is revoked or its UTC expiry passes. Operator status can lag,
+// so callers decide this from desired state rather than the observed phase.
+bool network_tunnel_grant_active(
+    const NetworkTunnelGrant& grant,
+    std::chrono::system_clock::time_point now = std::chrono::system_clock::now());
 
 } // namespace lake::control
