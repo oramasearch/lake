@@ -45,7 +45,7 @@ export const NETWORK_PAGES: { path: string; label: string; capabilities: string[
   { path: ACTIVITY_PATH, label: "Activity", capabilities: ["network_activity"] },
 ];
 
-function str(row: Row | null | undefined, key: string): string {
+export function str(row: Row | null | undefined, key: string): string {
   const value = row?.[key];
   return value === null || value === undefined ? "" : String(value);
 }
@@ -262,7 +262,24 @@ export function tunnelLocalPort(port: number): number {
 
 /** What a developer pastes, step by step, once Lake has signed their certificate (lake#745). Every
  * command runs in the folder step 1 made, where tunnel.key already is. */
-export type TunnelInstructions = { folder: string; save: string; start: string; localPort: number; connect: string; connectNote: string };
+export type TunnelInstructions = {
+  folder: string;
+  save: string;
+  start: string;
+  localPort: number;
+  /** The connect command as copied: with the service's password when it is known. */
+  connect: string;
+  /** The same command as shown: the password masked until the person reveals it. */
+  connectShown: string;
+  connectNote: string;
+  /** Whether connect holds a real password, so the page offers Reveal. */
+  hasSecret: boolean;
+};
+
+/** The service's own sign-in, from `service_connection` (an account admin may read it). */
+export type ServiceCredentials = { user?: string; password?: string; database?: string };
+
+export const MASKED_PASSWORD = "••••••••";
 
 export function tunnelInstructions(args: {
   grantId: string;
@@ -272,6 +289,7 @@ export function tunnelInstructions(args: {
   serviceKind?: string;
   certificate: string;
   relayCa: string;
+  credentials?: ServiceCredentials | null;
 }): TunnelInstructions {
   const folder = `~/orama-tunnel/${args.grantId.slice(0, 8)}`;
   const save = [
@@ -290,23 +308,40 @@ export function tunnelInstructions(args: {
     `  --relay ${args.endpoint} --listen 127.0.0.1:${localPort}`,
   ].join("\n");
   const local = `127.0.0.1:${localPort}`;
-  const credentials = "Its user, password and database are on Ship → Services, under Show connection. The tunnel does not replace them.";
+  const known = args.credentials ?? null;
+  const user = known?.user || "USER";
+  const database = known?.database || "DATABASE";
+  const password = known?.password ?? "";
+  const hasSecret = password !== "";
+  const base = { folder, save, start, localPort, hasSecret };
+  const filled = hasSecret
+    ? "Filled in with the service's own sign-in. The password is hidden until you reveal it; Copy copies it."
+    : "Its user, password and database are on Ship → Services, under Show connection. The tunnel does not replace them.";
+  // Build a command twice: once with the password, once with it masked.
+  const both = (make: (secret: string) => string, note = filled) => ({
+    ...base,
+    connect: make(password),
+    connectShown: make(hasSecret ? MASKED_PASSWORD : ""),
+    connectNote: note,
+  });
   if (args.targetKind === "app") {
-    return { folder, save, start, localPort, connect: `curl http://${local}/`, connectNote: `Or open http://${local}/ in your browser.` };
+    return { ...base, hasSecret: false, connect: `curl http://${local}/`, connectShown: `curl http://${local}/`, connectNote: `Or open http://${local}/ in your browser.` };
   }
   switch (args.serviceKind) {
     case "postgres":
-      return { folder, save, start, localPort, connect: `psql "postgresql://USER@${local}/DATABASE"`, connectNote: credentials };
+      return both((secret) =>
+        secret ? `psql "postgresql://${encodeURIComponent(user)}:${secret === MASKED_PASSWORD ? secret : encodeURIComponent(secret)}@${local}/${encodeURIComponent(database)}"` : `psql "postgresql://${user}@${local}/${database}"`,
+      );
     case "tidb":
-      return { folder, save, start, localPort, connect: `mysql -h 127.0.0.1 -P ${localPort} -u USER -p`, connectNote: credentials };
+      return both((secret) => (secret ? `mysql -h 127.0.0.1 -P ${localPort} -u ${user} --password='${secret}'` : `mysql -h 127.0.0.1 -P ${localPort} -u ${user} -p`));
     case "valkey":
-      return { folder, save, start, localPort, connect: `valkey-cli -h 127.0.0.1 -p ${localPort} --user USER --askpass`, connectNote: credentials };
+      return both((secret) => (secret ? `valkey-cli -h 127.0.0.1 -p ${localPort} --user ${user} --pass '${secret}'` : `valkey-cli -h 127.0.0.1 -p ${localPort} --user ${user} --askpass`));
     case "cassandra":
-      return { folder, save, start, localPort, connect: `cqlsh 127.0.0.1 ${localPort} -u USER`, connectNote: credentials };
+      return both((secret) => (secret ? `cqlsh 127.0.0.1 ${localPort} -u ${user} -p '${secret}'` : `cqlsh 127.0.0.1 ${localPort} -u ${user}`));
     case "zetta":
-      return { folder, save, start, localPort, connect: `curl http://${local}/v1/server_info`, connectNote: "The workspace's API answers on that address; call it with a key for this workspace." };
+      return { ...base, hasSecret: false, connect: `curl http://${local}/v1/server_info`, connectShown: `curl http://${local}/v1/server_info`, connectNote: "The workspace's API answers on that address; call it with a key for this workspace." };
     default:
-      return { folder, save, start, localPort, connect: `${local}`, connectNote: `Point your client at ${local} instead of the service's address. ${credentials}` };
+      return both(() => local, `Point your client at ${local} instead of the service's address. ${filled}`);
   }
 }
 
