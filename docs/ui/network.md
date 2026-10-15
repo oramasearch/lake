@@ -42,6 +42,10 @@ A desired row's Status comes from its `status` and `generation` (`recordState` i
 | applied and `desired: absent` | Removed |
 
 A grant's Access is its own (`revoked_at`, `expires_at`, `active`), never the cluster's phase.
+
+Every Network page reads again every 3 seconds while any row it shows is Waiting, Updating or Removing,
+and stops once every row has settled (`pendingPoll` in `network.ts`): a grant goes Ready seconds after it
+is made, and the page shows it without a reload.
 **Get credentials** is enabled only when the grant is active and the cluster reports it Ready at the
 grant's generation with an endpoint and relay trust (`grantReady`), which is what
 `issue_network_tunnel_certificate` requires.
