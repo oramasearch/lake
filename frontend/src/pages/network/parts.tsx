@@ -9,7 +9,7 @@ import { useSession } from "@/lib/session";
 import { useTrail } from "@/lib/trail";
 import { Notice, Page, Status, Tabs } from "@/lib/ui";
 import { useWorkspace, useWsPath } from "@/pages/train/workspace";
-import { NETWORK_PAGES, OVERVIEW_PATH, nameOf, recordState, type Names } from "./network";
+import { pendingPoll, NETWORK_PAGES, OVERVIEW_PATH, nameOf, recordState, type Names } from "./network";
 
 export function useScope() {
   const { customerId, workspaceId } = useWorkspace();
@@ -19,7 +19,12 @@ export function useScope() {
 /** A network read for this workspace (`list_network_*`, `network_rules`, `network_activity`). */
 export function useNetworkRead<T = Row>(name: string, extra: Record<string, string | number> = {}, options: { refetchInterval?: number } = {}) {
   const scope = useScope();
-  return useRead<T>(name, { ...scope.input, ...extra }, { enabled: !!scope.customerId && !!scope.workspaceId, ...options });
+  return useRead<T>(name, { ...scope.input, ...extra }, {
+    enabled: !!scope.customerId && !!scope.workspaceId,
+    // Read again while a row waits for the cluster, so Waiting turns to Ready without a reload.
+    refetchInterval: (query) => pendingPoll(query.state.data),
+    ...options,
+  });
 }
 
 /** A Network page: eyebrow, title, the section's tabs and the content. */

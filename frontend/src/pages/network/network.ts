@@ -78,6 +78,22 @@ export function recordState(record: Row): { label: string; tone: Tone; detail: s
   return { label: phase ? phase.charAt(0).toUpperCase() + phase.slice(1).toLowerCase() : "Waiting", tone: "warning", detail: message };
 }
 
+/** How often a Network page reads again: every 3 seconds while any row the answer holds is
+ * waiting for the cluster (Waiting, Updating, Removing), and not at all once every row has settled.
+ * A grant goes Ready seconds after it is made; without this the page showed Waiting until reloaded. */
+export const PENDING_POLL_MS = 3_000;
+
+export function pendingPoll(data: unknown): number | false {
+  if (!data || typeof data !== "object") return false;
+  for (const value of Object.values(data as Row)) {
+    if (!Array.isArray(value)) continue;
+    for (const row of value) {
+      if (row && typeof row === "object" && "desired" in row && recordState(row as Row).tone === "warning") return PENDING_POLL_MS;
+    }
+  }
+  return false;
+}
+
 /** A tunnel grant's own state: revoked, expired or active, from its fields, not the cluster's. */
 export function grantState(grant: Row, now = Date.now()): { label: "Active" | "Revoked" | "Expired"; tone: Tone } {
   if (grant.revoked_at) return { label: "Revoked", tone: "neutral" };

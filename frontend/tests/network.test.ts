@@ -15,6 +15,8 @@ import {
   expiresAt,
   serviceAccessHref,
   tunnelInstructions,
+  pendingPoll,
+  PENDING_POLL_MS,
   tunnelLocalPort,
   grantInput,
   grantReady,
@@ -248,4 +250,15 @@ test("a service's Developer access opens Grant access for it, with its own port 
   );
   assert.equal(serviceAccessHref("w", "s", "http://prod-ws-x-zetta.prod-ws-x.svc.cluster.local:4800"), "/w/w/network/access?grant=s&port=4800");
   assert.equal(serviceAccessHref("w", "s", ""), "/w/w/network/access?grant=s");
+});
+
+test("a Network page reads again while a row waits for the cluster, and stops once all are settled", () => {
+  const waiting = { tunnel_grants: [{ id: "g", desired: "present", generation: 1, status: null }] };
+  const ready = { tunnel_grants: [{ id: "g", desired: "present", generation: 1, status: { phase: "Ready", observed_generation: 1 } }] };
+  const updating = { connections: [{ id: "c", desired: "present", generation: 2, status: { phase: "Ready", observed_generation: 1 } }] };
+  assert.equal(pendingPoll(waiting), PENDING_POLL_MS);
+  assert.equal(pendingPoll(updating), PENDING_POLL_MS);
+  assert.equal(pendingPoll(ready), false);
+  assert.equal(pendingPoll({ tunnel_grants: [] }), false);
+  assert.equal(pendingPoll(undefined), false);
 });
