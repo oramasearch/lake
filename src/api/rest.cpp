@@ -404,6 +404,39 @@ openapi_document(const Registry& registry, std::string_view version, SchemaAudie
                   {"drive_id", true},
                   {"id", true},
                   {"inline", false}});
+    // A tunnel client (lake#745): the signed link tunnel_client_downloads answers is the
+    // credential, so it needs no session.
+    nlohmann::json tunnel_client{
+        {"operationId", "tunnel_client_download"},
+        {"summary", "Download a tunnel client"},
+        {"description",
+         "Streams one tunnel client binary for a link tunnel_client_downloads signed. The link "
+         "works for 15 minutes and for the clients' version it was made for; no credential "
+         "besides it is needed."},
+        {"tags", nlohmann::json::array({"download"})},
+        {"security", nlohmann::json::array()},
+        {"parameters",
+         nlohmann::json::array(
+             {{{"name", "platform"},
+               {"in", "path"},
+               {"required", true},
+               {"schema",
+                {{"type", "string"}, {"enum", nlohmann::json::array({"darwin-arm64", "linux-amd64"})}}}},
+              {{"name", "expires"}, {"in", "query"}, {"required", true}, {"schema", {{"type", "string"}}}},
+              {{"name", "signature"},
+               {"in", "query"},
+               {"required", true},
+               {"schema", {{"type", "string"}}}}})},
+        {"responses",
+         {{"200",
+           {{"description",
+             "the binary, with Content-Disposition naming the file and an ETag of its SHA-256"},
+            {"content",
+             {{"application/octet-stream",
+               {{"schema", {{"type", "string"}, {"format", "binary"}}}}}}}}},
+          {"401", error_response("the link is not valid or has expired (`reason`)")},
+          {"404", error_response("no such platform, or this Lake has no tunnel clients")}}}};
+    paths["/tunnel-clients/{platform}"]["get"] = std::move(tunnel_client);
     document["paths"] = std::move(paths);
     return document;
 }

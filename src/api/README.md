@@ -1,9 +1,16 @@
 # API implementation
 
+`tunnel_clients.cpp` reads the tunnel client folder (allow-listed `zetta-tunnel-<platform>` files
+with a `SHA256SUMS` line, and `VERSION`) and signs and checks their 15-minute links with
+`signed_link_signature`, the HMAC the Hub's LFS upload links also use (lake#745).
+`tunnel_client_capabilities.cpp` registers `tunnel_client_downloads` for any signed-in person, and
+`http_server.cpp`'s `serve_tunnel_client` serves `GET /tunnel-clients/<platform>`. See
+[tunnel-clients.md](../../docs/api/tunnel-clients.md).
+
 `network_capabilities.cpp` defines fourteen account-authorized secure-networking operations once for
 REST, OpenAPI and MCP. Desired state uses the network store; sessions and activity retain their
 workspace-record boundary. Its list handlers authorize their scoped candidates, and
-`agent_docs.cpp` places all fourteen in the Network group. App credential rotation advances the
+`agent_docs.cpp` places all fourteen in the Network group, and `tunnel_client_downloads` beside them. App credential rotation advances the
 unchanged connection's desired generation and keeps the workspace-secret reference stable.
 Recipient-only CSR issuance uses the
 customer PKI, a current grant and ready relay trust; it is centrally audited and unmetered.

@@ -6,6 +6,9 @@ to the detailed contracts and records.
 [api/tunnel-grants.md](api/tunnel-grants.md) defines recipient-only tunnel CSR signing, trust,
 revocation and pending session history (lake#730); [build/tunnel-grants-proof.md](build/tunnel-grants-proof.md)
 records its native proof and coordinator handoff.
+[api/tunnel-clients.md](api/tunnel-clients.md) defines the tunnel client downloads: the binaries
+copied into the image, `tunnel_client_downloads` and its signed short-lived links, and
+`GET /tunnel-clients/<platform>` (lake#745).
 [api/scoped-credentials.md](api/scoped-credentials.md) defines an app connection's credential
 scope, workspace-secret reference, rotation and revocation (lake#731);
 [build/scoped-credentials-proof.md](build/scoped-credentials-proof.md) records its native proof

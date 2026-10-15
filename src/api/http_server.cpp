@@ -106,6 +106,7 @@
 #include "lake/api/store_owner.hpp"
 #include "lake/api/sync_store.hpp"
 #include "lake/api/transcription.hpp"
+#include "lake/api/tunnel_clients.hpp"
 #include "lake/api/web_app.hpp"
 #include "lake/api/web_ui.hpp"
 #include "lake/api/workspace_deletion.hpp"
@@ -9001,6 +9002,7 @@ struct ApiServer::Impl {
         ctx.apps_runtime_image = options.apps_runtime_image;
         ctx.methodology_runtime_image = options.methodology_runtime_image;
         ctx.mcp_runner_image = options.mcp_runner_image;
+        ctx.tunnel_clients_dir = options.tunnel_clients_dir;
         // Build registry targets use the in-cluster authority (LAKE_INTERNAL_URL).
         ctx.internal_url = options.internal_url;
         ctx.apps_reserved_names = options.apps_reserved_names;
@@ -10522,6 +10524,71 @@ struct ApiServer::Impl {
                                           : std::string("application/octet-stream"),
                                       context.sync_response,
                                       "\"" + json_string(result.value, "blob") + "\"");
+    }
+
+    // GET /tunnel-clients/<platform>?expires=&signature= (lake#745, docs/api/tunnel-clients.md):
+    // one tunnel client, for a link tunnel_client_downloads signed. The link is the credential, so
+    // a plain curl follows it without a session. The platform is checked against the allow-list
+    // before anything is read, so it never names a path.
+    boost::http::route_task serve_tunnel_client(boost::http::route_params& route) {
+        const auto refuse = [&route](ApiResult refused) -> boost::http::route_task {
+            return send_text(route,
+                             boost::http::int_to_status(static_cast<unsigned>(rest_status(refused))),
+                             refused.envelope().dump(),
+                             "application/json; charset=utf-8",
+                             "no-store");
+        };
+        const std::string platform = route_value(route, "platform");
+        if (find_tunnel_client_platform(platform) == nullptr) {
+            co_return co_await refuse(
+                ApiResult::failure("not_found", "no tunnel client for platform " + platform));
+        }
+        const auto clients = read_tunnel_clients(options.tunnel_clients_dir);
+        if (!clients) {
+            co_return co_await refuse(
+                ApiResult::failure("not_found", "this Lake has no tunnel clients"));
+        }
+        const std::int64_t now = std::chrono::duration_cast<std::chrono::seconds>(
+                                     std::chrono::system_clock::now().time_since_epoch())
+                                     .count();
+        const TunnelClientLinkCheck check = check_tunnel_client_link(options.instance_kek,
+                                                                     platform,
+                                                                     clients->version,
+                                                                     query_value(route, "expires"),
+                                                                     query_value(route, "signature"),
+                                                                     now);
+        if (check != TunnelClientLinkCheck::valid) {
+            ApiResult refused = ApiResult::failure(
+                "unauthenticated",
+                check == TunnelClientLinkCheck::expired
+                    ? "this download link has expired; open Get credentials again for a new one"
+                    : "this download link is not valid; open Get credentials again for a new one");
+            refused.error.reason = check == TunnelClientLinkCheck::expired ? "expired" : "invalid";
+            co_return co_await refuse(std::move(refused));
+        }
+        const auto client = std::ranges::find(clients->clients, platform, &TunnelClient::platform);
+        if (client == clients->clients.end()) {
+            co_return co_await refuse(
+                ApiResult::failure("not_found", "no tunnel client for platform " + platform));
+        }
+        auto read = co_await run_blocking([path = client->path, size = client->size] {
+            std::vector<std::byte> bytes(static_cast<std::size_t>(size));
+            std::ifstream in(path, std::ios::binary);
+            if (!in || !in.read(reinterpret_cast<char*>(bytes.data()),
+                                static_cast<std::streamsize>(bytes.size()))) {
+                bytes.clear();
+            }
+            return bytes;
+        });
+        if (!read || read->empty()) {
+            co_return co_await refuse(
+                ApiResult::failure("store_error", "the tunnel client could not be read"));
+        }
+        route.res.set("content-disposition", "attachment; filename=\"" + client->file_name + "\"");
+        route.res.set("x-content-type-options", "nosniff");
+        co_return co_await send_bytes(
+            route, boost::http::status::ok, "application/octet-stream", *read,
+            "\"" + client->sha256 + "\"");
     }
 
     // GET /drive/files/download?customer_id=&workspace_id=&drive_id=&id=[&inline=1]: a workspace
@@ -12377,19 +12444,7 @@ struct ApiServer::Impl {
                                      std::uint64_t expires) const {
         const std::string payload = std::string(repository_id) + "\n" + std::string(oid) + "\n" +
                                     std::to_string(size) + "\n" + std::to_string(expires);
-        std::array<unsigned char, EVP_MAX_MD_SIZE> digest{};
-        unsigned int digest_size = 0;
-        if (HMAC(EVP_sha256(),
-                 options.instance_kek.data(),
-                 static_cast<int>(options.instance_kek.size()),
-                 reinterpret_cast<const unsigned char*>(payload.data()),
-                 payload.size(),
-                 digest.data(),
-                 &digest_size) == nullptr) {
-            return {};
-        }
-        return control::identity_crypto::base64url_encode(
-            std::string_view(reinterpret_cast<const char*>(digest.data()), digest_size));
+        return signed_link_signature(options.instance_kek, payload);
     }
 
     boost::http::route_task serve_hub_lfs_batch(boost::http::route_params& route) {
@@ -14290,6 +14345,12 @@ bool ApiServer::start() {
               [&impl](http::route_params& route) -> http::route_task {
                   return impl.observe_request(
                       route, "/drive/files/download", impl.serve_workspace_file_download(route));
+              });
+    add_route(http::method::get,
+              "/tunnel-clients/:platform",
+              [&impl](http::route_params& route) -> http::route_task {
+                  return impl.observe_request(
+                      route, "/tunnel-clients/:platform", impl.serve_tunnel_client(route));
               });
     add_route(http::method::get, "/share/:token/download", [&impl](http::route_params& route) {
         return impl.observe_request(

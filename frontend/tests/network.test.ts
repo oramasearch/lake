@@ -17,7 +17,12 @@ import {
   tunnelInstructions,
   MASKED_PASSWORD,
   pendingPoll,
+  CLIENT_PATH,
   PENDING_POLL_MS,
+  defaultClient,
+  detectClientPlatform,
+  installCommand,
+  tunnelClients,
   tunnelLocalPort,
   grantInput,
   grantReady,
@@ -49,6 +54,8 @@ const CAPABILITIES = [
   "list_network_peers",
   "network_rules",
   "network_activity",
+  // The tunnel client a recipient installs (lake#745, docs/api/tunnel-clients.md).
+  "tunnel_client_downloads",
 ];
 
 test("every network capability is reachable from a page of the section", () => {
@@ -288,4 +295,66 @@ test("with the service's own sign-in, step 5 is a working command whose password
   assert.equal(unknown.connect, 'psql "postgresql://USER@127.0.0.1:5433/DATABASE"');
   assert.equal(unknown.connectShown, unknown.connect);
   assert.match(unknown.connectNote, /Show connection/);
+});
+
+const SHA_DARWIN = "a".repeat(64);
+const SHA_LINUX = "b".repeat(64);
+const DOWNLOADS = {
+  available: true,
+  version: "0.0.1",
+  expires_at: "2026-10-15T12:15:00Z",
+  clients: [
+    { platform: "darwin-arm64", os: "darwin", arch: "arm64", file_name: "zetta-tunnel-darwin-arm64", sha256: SHA_DARWIN, size: 9, download_url: "https://lake.example.test/tunnel-clients/darwin-arm64?expires=1&signature=s1" },
+    { platform: "linux-amd64", os: "linux", arch: "amd64", file_name: "zetta-tunnel-linux-amd64", sha256: SHA_LINUX, size: 8, download_url: "/tunnel-clients/linux-amd64?expires=1&signature=s2" },
+  ],
+};
+
+test("the tunnel client downloads read as clients, with relative links made absolute (lake#745)", () => {
+  const clients = tunnelClients(DOWNLOADS, "https://lake.example.test");
+  assert.ok(clients);
+  assert.equal(clients.version, "0.0.1");
+  assert.deepEqual(clients.clients.map((c) => [c.platform, c.label]), [["darwin-arm64", "macOS (Apple silicon)"], ["linux-amd64", "Linux (x86-64)"]]);
+  assert.equal(clients.clients[1].url, "https://lake.example.test/tunnel-clients/linux-amd64?expires=1&signature=s2");
+  // Unavailable, empty, an unknown platform or a malformed digest: nothing is offered.
+  assert.equal(tunnelClients({ available: false, version: null, expires_at: null, clients: [] }, "https://x"), null);
+  assert.equal(tunnelClients(undefined, "https://x"), null);
+  assert.equal(tunnelClients({ ...DOWNLOADS, clients: [{ ...DOWNLOADS.clients[0], platform: "windows-amd64" }] }, "https://x"), null);
+  assert.equal(tunnelClients({ ...DOWNLOADS, clients: [{ ...DOWNLOADS.clients[0], sha256: "nope" }] }, "https://x"), null);
+});
+
+test("the browser names the machine, and anything Lake has no client for is not guessed", () => {
+  assert.equal(detectClientPlatform({ userAgentData: { platform: "macOS" } }), "darwin-arm64");
+  assert.equal(detectClientPlatform({ platform: "MacIntel", userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)" }), "darwin-arm64");
+  assert.equal(detectClientPlatform({ userAgentData: { platform: "Linux" }, platform: "Linux x86_64" }), "linux-amd64");
+  assert.equal(detectClientPlatform({ platform: "Linux aarch64" }), null);
+  assert.equal(detectClientPlatform({ platform: "Linux armv81", userAgent: "Mozilla/5.0 (Linux; Android 14)" }), null);
+  assert.equal(detectClientPlatform({ userAgentData: { platform: "Windows" }, platform: "Win32" }), null);
+  assert.equal(detectClientPlatform({ userAgentData: { platform: "Chrome OS" }, userAgent: "Mozilla/5.0 (X11; CrOS x86_64 14541.0.0)" }), null);
+  assert.equal(detectClientPlatform({}), null);
+  // The chooser starts on this machine's client, else the first offered.
+  const clients = tunnelClients(DOWNLOADS, "https://lake.example.test")!.clients;
+  assert.equal(defaultClient(clients, "linux-amd64")?.platform, "linux-amd64");
+  assert.equal(defaultClient(clients, null)?.platform, "darwin-arm64");
+  assert.equal(defaultClient([], "linux-amd64"), undefined);
+});
+
+test("installing the client is one paste that checks its SHA-256 before it can run, and the start uses it", () => {
+  const [mac, linux] = tunnelClients(DOWNLOADS, "https://lake.example.test")!.clients;
+  const macInstall = installCommand(mac);
+  assert.equal(
+    macInstall,
+    [
+      "mkdir -p ~/.local/bin && \\",
+      '  curl -fsSL "https://lake.example.test/tunnel-clients/darwin-arm64?expires=1&signature=s1" -o ~/.local/bin/zetta-tunnel && \\',
+      `  echo "${SHA_DARWIN}  $HOME/.local/bin/zetta-tunnel" | shasum -a 256 -c && \\`,
+      "  chmod +x ~/.local/bin/zetta-tunnel",
+    ].join("\n"),
+  );
+  assert.match(installCommand(linux), new RegExp(`echo "${SHA_LINUX}  \\$HOME/\\.local/bin/zetta-tunnel" \\| sha256sum -c && `));
+  assert.ok(!/sudo/.test(macInstall));
+  const steps = tunnelInstructions({ grantId: "a", endpoint: "e:443", port: 5432, targetKind: "service", serviceKind: "postgres", certificate: "c", relayCa: "r", client: CLIENT_PATH });
+  assert.match(steps.start, /^cd ~\/orama-tunnel\/a\n~\/\.local\/bin\/zetta-tunnel client --cert/);
+  // Without an installed client the start command finds it on the PATH, as before.
+  const plain = tunnelInstructions({ grantId: "a", endpoint: "e:443", port: 5432, targetKind: "service", certificate: "c", relayCa: "r" });
+  assert.match(plain.start, /\nzetta-tunnel client --cert/);
 });

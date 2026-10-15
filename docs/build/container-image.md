@@ -78,6 +78,12 @@ is defined for `src/version.cpp` alone, so a new revision invalidates one object
 --show-stats` at the end of the build step shows the hit rate. To start cold, run `buildctl prune --all`
 against the BuildKit pod; it clears every cache, this one included.
 
+The tunnel client binaries Developer Access hands out (lake#745) come from the private scratch image
+`oramasearch/zetta-tunnel-clients`, named in a `FROM ... AS tunnel-clients` stage by tag and digest;
+the runtime stage copies its `/clients/` to `/usr/share/lake/tunnel-clients/`
+([tunnel-clients.md](../api/tunnel-clients.md)). BuildKit pulls it with the same registry credential
+as the base images (`DOCKER_CONFIG` in `build-lake.sh`). A new client version is a new digest here.
+
 The web app is built in its own Node 22 stage (`frontend`) and embedded with
 `-DLAKE_FRONTEND_DIST`; see [docs/ui/web-app.md](../ui/web-app.md). The stage copies `frontend/` and also
 `assets/catalogue-icons/`, because the frontend's test suite (run by `npm run build`) checks that the

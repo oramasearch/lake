@@ -12,6 +12,10 @@ foreign keys, backfill idempotency, notifications, expired grants, audit rollbac
 updates. Shared validation rejects credentials outside app-to-service connections. See
 [network.md](../docs/control-plane/network.md#verify) for the proof command.
 
+`test_tunnel_clients.cpp` covers the tunnel client downloads (lake#745): the folder, the platform
+allow-list, links bound to platform, version, expiry and key, `tunnel_client_downloads` and
+`GET /tunnel-clients/<platform>` over a live server, refusing expired, tampered and unknown links.
+
 `test_network_capabilities.cpp` covers desired-state lifecycle, scoped credential rotation and
 refusal, effective rules, account permissions, OpenAPI and MCP registration, an MCP call, and the
 explicit workspace-record boundary.

@@ -35,7 +35,12 @@ MCP tool of the same name and schema. `remove_network_connection` and
 `revoke_network_tunnel` carry MCP's destructive hint. All inputs are closed objects and require
 `customer_id` and `workspace_id`; the registry also verifies that the workspace belongs to that
 account and agrees with a workspace route when one is present. Agent Docs puts all fourteen tools in
-the deliberate Network group.
+the deliberate Network group, with `tunnel_client_downloads` beside them.
+
+The tunnel client a grant's recipient installs is offered by `tunnel_client_downloads`, a
+separate read any signed-in person may call: signed 15-minute download links per platform
+([tunnel-clients.md](tunnel-clients.md), lake#745). It takes no account or workspace and is not one
+of the fourteen.
 
 ## Authorization and Audit
 

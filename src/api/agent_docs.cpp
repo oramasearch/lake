@@ -135,8 +135,8 @@ constexpr std::array group_rules{
               }},
     GroupRule{"Network",
               "A workspace's declared connections, egress rules, tunnel grants and peer "
-              "connections, recipient-only tunnel certificates, plus the rules currently "
-              "effective. Tunnel sessions and recent "
+              "connections, recipient-only tunnel certificates and the tunnel client's signed "
+              "download links, plus the rules currently effective. Tunnel sessions and recent "
               "activity are available once the workspace record provider is installed.",
               [](std::string_view n) {
                   return n == "create_network_connection" || n == "list_network_connections" ||
@@ -146,7 +146,9 @@ constexpr std::array group_rules{
                          n == "list_network_tunnel_grants" || n == "revoke_network_tunnel" ||
                          n == "list_network_tunnel_sessions" || n == "list_network_peers" ||
                          n == "network_rules" || n == "network_activity" ||
-                         n == "issue_network_tunnel_certificate";
+                         n == "issue_network_tunnel_certificate" ||
+                         // The tunnel client a grant's recipient installs (lake#745).
+                         n == "tunnel_client_downloads";
               }},
     GroupRule{"Solutions",
               "The AI solutions a workspace can start: Orama's catalogue (S-1, …, read-only) and "

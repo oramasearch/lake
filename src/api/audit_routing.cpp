@@ -203,6 +203,8 @@ constexpr std::array central = std::to_array<std::string_view>({
     "transparency_proof_bundle",
     "transparency_tile",
     "tuf_metadata",
+    // Links to Orama's own tunnel client, for any signed-in person: no workspace's data (lake#745).
+    "tunnel_client_downloads",
     // Removing a wrong image route is control plane: the route is multitenancy (lake#383).
     "unroute_image_repository",
     "update_workspace",

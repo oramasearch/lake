@@ -17,6 +17,7 @@
 
 #include "lake/api/billing.hpp"
 #include "lake/api/server.hpp"
+#include "lake/api/tunnel_clients.hpp"
 #include "lake/control/agent_bus.hpp"
 #include "lake/control/agent_library.hpp"
 #include "lake/control/agent_runs.hpp"
@@ -57,7 +58,8 @@ int usage() {
     std::println("  lake [--listen HOST:PORT] [--node NAME] [--control-db URI] "
                  "[--store-root PATH] [--external-origin ORIGIN]");
     std::println("       [--admin-token TOKEN] [--identity-seed BASE64] "
-                 "[--instance-kek VALUE] [--tsa-url URL] [--memory-store]");
+                 "[--instance-kek VALUE] [--tsa-url URL] [--tunnel-clients-dir PATH] "
+                 "[--memory-store]");
     std::println("  lake version");
     std::println("");
     std::println("  --control-db   Postgres URI of the control plane (default "
@@ -147,6 +149,8 @@ int usage() {
                  "LAKE_HTTP_MAX_LONG_REQUESTS_PER_CALLER per caller (default 64)");
     std::println("  LAKE_WORKSPACE_STORE_PREOPEN=false opens workspace stores on first use only "
                  "(default true: opened in the background from start)");
+    std::println("  --tunnel-clients-dir the tunnel client downloads (default "
+                 "$LAKE_TUNNEL_CLIENTS_DIR, then /usr/share/lake/tunnel-clients)");
     std::println("  --memory-store an in-memory control plane for local demos and tests");
     return 2;
 }
@@ -221,6 +225,9 @@ int main(int argc, char** argv) {
     opts.apps_runtime_image = env_or("LAKE_APPS_RUNTIME_IMAGE", "");
     opts.methodology_runtime_image = env_or("LAKE_METHODOLOGY_RUNTIME_IMAGE", "");
     opts.mcp_runner_image = env_or("LAKE_MCP_RUNNER_IMAGE", "");
+    // The tunnel client downloads (lake#745): where the image puts them unless told otherwise.
+    opts.tunnel_clients_dir = env_or("LAKE_TUNNEL_CLIENTS_DIR",
+                                     std::string(lake::api::default_tunnel_clients_dir));
     opts.apps_reserved_names = env_or("LAKE_APPS_RESERVED_NAMES", "");
     opts.apps_per_customer = env_u64("LAKE_APPS_PER_CUSTOMER");
     opts.app_replicas_per_customer = env_u64("LAKE_APP_REPLICAS_PER_CUSTOMER");
@@ -314,6 +321,10 @@ int main(int argc, char** argv) {
         }
         if (arg == "--instance-kek") {
             opts.instance_kek = value("--instance-kek");
+            continue;
+        }
+        if (arg == "--tunnel-clients-dir") {
+            opts.tunnel_clients_dir = value("--tunnel-clients-dir");
             continue;
         }
         if (arg == "--tsa-url") {

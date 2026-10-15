@@ -25,7 +25,7 @@ bool web_app_serves(std::string_view method,
     }
     // Server routes a browser may open directly: the API and its documents, protocol routes,
     // assets, downloads and the hosted application pages.
-    static constexpr std::array<std::string_view, 25> server_owned{
+    static constexpr std::array<std::string_view, 26> server_owned{
         "/v1",
         "/mcp",
         "/ui",
@@ -51,6 +51,7 @@ bool web_app_serves(std::string_view method,
         "/exports/download",
         "/developer/mcp/skill",
         "/datasets",
+        "/tunnel-clients",
     };
     for (const std::string_view prefix : server_owned) {
         if (under(path, prefix)) {
