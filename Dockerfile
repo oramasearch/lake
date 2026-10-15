@@ -25,7 +25,7 @@ FROM liquid_source AS liquid-source
 # docs/api/tunnel-clients.md): a private scratch image holding /clients/ (zetta-tunnel's
 # docs/image.md, "Tunnel clients for developers"), pinned by digest. The build pulls it with the
 # same registry credential as the base images.
-FROM docker.io/oramasearch/zetta-tunnel-clients:0.0.1-f6706c5@sha256:03a28702981b6873888d1a9da6f2b61d0336028887a01ce403b5070bad0a0a9f AS tunnel-clients
+FROM docker.io/oramasearch/zetta-tunnel-clients:v0.1.0@sha256:a9f609689ed5536d0dbafb1b7e165c3389e1053bf3dc2c44aa9e74a7cf2a7f00 AS tunnel-clients
 
 # ---------- web app ----------
 # The web app (frontend/, docs/ui/web-app.md) is built with Node 22 and embedded into the binary

@@ -8,7 +8,7 @@ drawer can give a working install line instead of assuming the client is install
 ## Where the Clients Come From
 
 The clients are built by `oramasearch/zetta-tunnel`'s `tools/build-clients.sh` and published as the
-private scratch image `oramasearch/zetta-tunnel-clients:<version>-<sha>` (zetta-tunnel's
+private scratch image `oramasearch/zetta-tunnel-clients` (pinned: `v0.1.0`) (zetta-tunnel's
 `docs/image.md`, *Tunnel clients for developers*). Lake's `Dockerfile` copies its `/clients/` into
 the runtime image, pinned by digest, at `/usr/share/lake/tunnel-clients/`:
 
@@ -17,7 +17,7 @@ the runtime image, pinned by digest, at `/usr/share/lake/tunnel-clients/`:
 | `zetta-tunnel-darwin-arm64` | macOS on Apple silicon; OpenSSL and nghttp2 linked statically |
 | `zetta-tunnel-linux-amd64` | Linux on x86-64; fully static |
 | `SHA256SUMS` | `<sha256>  <file>` per client, as `sha256sum` writes it |
-| `VERSION` | the clients' version, `0.0.1` in the first image |
+| `VERSION` | the clients' version, `0.1.0` in the pinned image (zetta-tunnel `v0.1.0`) |
 
 `LAKE_TUNNEL_CLIENTS_DIR` or `--tunnel-clients-dir` names another folder
 ([configuration](../serving/configuration.md)). A Lake whose folder is missing (a local build) runs
@@ -40,7 +40,7 @@ Windows are not built yet.
 ```json
 {
   "available": true,
-  "version": "0.0.1",
+  "version": "0.1.0",
   "expires_at": "2026-10-15T12:15:00Z",
   "clients": [
     {
