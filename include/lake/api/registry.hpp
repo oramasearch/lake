@@ -441,6 +441,9 @@ struct ApiContext {
     // The oramasearch/lake-mcp-runner image a stdio MCP connection's App runs
     // (LAKE_MCP_RUNNER_IMAGE, lake#659); empty: this Lake runs no stdio servers.
     std::string mcp_runner_image;
+    // The folder holding the tunnel client downloads (LAKE_TUNNEL_CLIENTS_DIR, lake#745,
+    // docs/api/tunnel-clients.md); empty or missing: tunnel_client_downloads answers unavailable.
+    std::string tunnel_clients_dir;
     std::string apps_reserved_names;
     std::size_t apps_per_customer = 0;
     std::size_t app_replicas_per_customer = 0;

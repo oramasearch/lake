@@ -32,6 +32,13 @@ Each workspace has a Network section in the console after Ship (lake#729): Overv
 Developer Access, Private Networks, Egress and DNS, Policies and Activity, which together call all
 fourteen capabilities. Data → Connections (datasets) stays separate and each links the other. Not
 deployed. See [`docs/ui/network.md`](docs/ui/network.md) and the [Network guide](docs/guide/network.md).
+Lake serves the tunnel client itself (lake#745 part 2, no migration): the image copies the
+`zetta-tunnel` binaries (macOS arm64, Linux amd64) from the private `oramasearch/zetta-tunnel-clients`
+image pinned by digest to `LAKE_TUNNEL_CLIENTS_DIR` (default `/usr/share/lake/tunnel-clients`);
+`tunnel_client_downloads` answers, to any signed-in person, the version and per platform the SHA-256,
+size and a 15-minute link signed with the Hub upload links' HMAC under `LAKE_INSTANCE_KEK`, which
+`GET /tunnel-clients/<platform>` serves without a session; Get credentials makes installing it step 4.
+Not deployed. See [`docs/api/tunnel-clients.md`](docs/api/tunnel-clients.md).
 
 The newest dated record, [`docs/deployment/dev-2026-10-01.md`](docs/deployment/dev-2026-10-01.md),
 and [`docs/design/status.md`](docs/design/status.md) still describe the 2026-10-01 deployment

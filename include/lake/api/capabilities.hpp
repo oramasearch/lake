@@ -79,6 +79,9 @@ void register_volume_capabilities(Registry& registry);
 // Secure-networking desired state (lake#728, docs/api/network.md): connections, egress rules,
 // tunnel grants, peers, effective rules, and reads waiting on lake#730's workspace records.
 void register_network_capabilities(Registry& registry);
+// The tunnel client a Developer Access recipient installs (lake#745, docs/api/tunnel-clients.md):
+// tunnel_client_downloads, signed short-lived links served by GET /tunnel-clients/<platform>.
+void register_tunnel_client_capabilities(Registry& registry);
 // The reads lake's web app needs (lake#561, docs/api/web-app.md): viewer, my_permissions,
 // list_packages, list_docs, get_doc, mcp_setup.
 void register_console_capabilities(Registry& registry, std::string_view version);

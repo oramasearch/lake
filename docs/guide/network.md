@@ -124,10 +124,21 @@ access for it, for you, for an hour.
 4. **Save the certificate.** One block writes `tunnel.crt` and `relay-ca.crt` into the same
    folder. Lake does not keep them to show again; while your access lasts you can ask for another
    certificate.
-5. **Start the tunnel** with the next block, and leave it running. It needs the tunnel client,
-   `zetta-tunnel`. The command already holds your endpoint, and listens only on your machine, on a
-   port next to the target's (5433 for Postgres's 5432).
-6. **Connect** with the last block, in a second terminal. If you administer the account, the block
+5. **Install the tunnel client.** The page picks your machine (macOS on Apple silicon, or Linux
+   on x86-64; change it under **Your machine**) and gives one block that downloads the client into
+   `~/.local/bin`, checks its SHA-256 and only then makes it runnable. It needs no sudo and no key:
+   the download link in it is signed for you and works for 15 minutes, and the page renews it while
+   it stays open. The block runs `curl -fsSL` on that link into `~/.local/bin/zetta-tunnel`, then
+   `shasum -a 256 -c` on macOS or `sha256sum -c` on Linux with the SHA-256 shown under it, then
+   `chmod +x`. If the check fails, the file is never made runnable.
+
+   If your Lake has no client to offer, or none for your machine (macOS on Intel, Linux on ARM and
+   Windows are not offered yet), this step is not shown and the next one runs `zetta-tunnel` from
+   your PATH: build it from its source and install it there first.
+6. **Start the tunnel** with the next block, and leave it running. The command already holds your
+   endpoint and the client's path, and listens only on your machine, on a port next to the target's
+   (5433 for Postgres's 5432).
+7. **Connect** with the last block, in a second terminal. If you administer the account, the block
    already holds the service's own user, password and database: the password is hidden until you press
    **Reveal**, and **Copy** copies the whole working command. Otherwise it reads, for Postgres,
    `psql "postgresql://USER@127.0.0.1:5433/DATABASE"`, and the user, password and database are under
@@ -143,6 +154,10 @@ most 12 hours.
 ```
 
 A certificate lasts at most twelve hours, and never beyond the grant.
+
+The client's links come from `GET /v1/tunnel_client_downloads`, which any signed-in person may call.
+It answers the version and, per platform, the SHA-256, size and a `download_url` that works for 15
+minutes without a key.
 
 ### Revoke Access
 
@@ -229,6 +244,10 @@ A refused change says what was missing in the drawer or the confirmation.
   reported its endpoint. Wait, or ask your Lake operator.
 - **"the caller must be the grant's recipient".** Only the person granted can get credentials,
   even an admin who made the grant.
+- **The install block says the link has expired or is not valid.** The link worked for 15
+  minutes. Open **Get credentials** again, or leave the drawer open: the page renews it.
+- **`shasum` or `sha256sum` says FAILED.** The file is not the one Lake offered; it was not made
+  runnable. Download it again from a fresh link.
 - **A rule stays Waiting.** The cluster has not applied it. Hover the status for its message.
 - **"user_id must be a member of the workspace's account".** Grant access only to a member who can
   read the account.

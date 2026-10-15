@@ -21,6 +21,12 @@ FROM zetta_source AS zetta-source
 # named context too rather than being vendored under modules/.
 FROM liquid_source AS liquid-source
 
+# The tunnel client binaries Lake hands to Developer Access recipients (lake#745,
+# docs/api/tunnel-clients.md): a private scratch image holding /clients/ (zetta-tunnel's
+# docs/image.md, "Tunnel clients for developers"), pinned by digest. The build pulls it with the
+# same registry credential as the base images.
+FROM docker.io/oramasearch/zetta-tunnel-clients:0.0.1-f6706c5@sha256:03a28702981b6873888d1a9da6f2b61d0336028887a01ce403b5070bad0a0a9f AS tunnel-clients
+
 # ---------- web app ----------
 # The web app (frontend/, docs/ui/web-app.md) is built with Node 22 and embedded into the binary
 # by the build stage below.
@@ -123,6 +129,8 @@ COPY --from=build /opt/openssl/lib64/libcrypto.so.3 /opt/openssl/lib64/
 COPY --from=build /opt/openssl/lib64/libssl.so.3 /opt/openssl/lib64/
 COPY --from=build /opt/openssl/lib64/ossl-modules /opt/openssl/lib64/ossl-modules
 COPY --from=build /src/build/lake /usr/local/bin/lake
+# Served by GET /tunnel-clients/<platform> (LAKE_TUNNEL_CLIENTS_DIR's default).
+COPY --from=tunnel-clients /clients/ /usr/share/lake/tunnel-clients/
 ENV LD_LIBRARY_PATH=/opt/openssl/lib64
 ENV OPENSSL_MODULES=/opt/openssl/lib64/ossl-modules
 

@@ -132,6 +132,10 @@ struct ServerOptions {
     // The oramasearch/lake-mcp-runner image a stdio MCP connection's App runs
     // (LAKE_MCP_RUNNER_IMAGE, lake#659, docs/api/mcp-connections.md).
     std::string mcp_runner_image;
+    // The folder of tunnel client downloads (LAKE_TUNNEL_CLIENTS_DIR, lake#745,
+    // docs/api/tunnel-clients.md). The executable defaults it to /usr/share/lake/tunnel-clients,
+    // where the image puts them; empty or missing, the clients are reported unavailable.
+    std::string tunnel_clients_dir;
     std::string apps_reserved_names;
     std::size_t apps_per_customer = 0;
     std::size_t app_replicas_per_customer = 0;

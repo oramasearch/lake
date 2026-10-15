@@ -6,7 +6,7 @@
 import { useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { Eye, EyeOff, KeyRound, Plus } from "lucide-react";
-import { act, type Row } from "@/lib/api";
+import { act, useRead, type Row } from "@/lib/api";
 import { dateTime, relative } from "@/lib/format";
 import { ConfirmButton, Drawer } from "@/lib/overlay";
 import { useSession } from "@/lib/session";
@@ -14,16 +14,21 @@ import { useToast } from "@/lib/toast";
 import { Actions, Button, CopyBlock, DataTable, Empty, Field, Form, Notice, Section, Status, Toolbar, fieldError } from "@/lib/ui";
 import { useAsync } from "@/pages/train/workspace";
 import {
+  CLIENT_PATH,
   CSR_COMMAND,
   GRANT_DURATIONS,
   certificateFile,
   csrProblem,
+  defaultClient,
+  detectClientPlatform,
   grantInput,
   grantReady,
   grantState,
   nameOf,
+  installCommand,
   recordColumns,
   str,
+  tunnelClients,
   tunnelInstructions,
   type GrantForm,
   type ServiceCredentials,
@@ -289,6 +294,12 @@ function Issue({ grant, names, services, onClose }: { grant: Row; names: Names; 
   // `service_connection` answers an account admin; anyone else keeps the placeholders.
   const [credentials, setCredentials] = useState<ServiceCredentials | null>(null);
   const [revealed, setRevealed] = useState(false);
+  // The tunnel client for this machine (lake#745): signed links that work for 15 minutes, read
+  // again every ten while the drawer is open so the install line never holds a dead one.
+  const downloads = useRead<Row>(result ? "tunnel_client_downloads" : null, undefined, { refetchInterval: 10 * 60_000 });
+  const clients = tunnelClients(downloads.data, window.location.origin);
+  const [platform, setPlatform] = useState<string | null>(null);
+  const client = clients ? (clients.clients.find((c) => c.platform === platform) ?? defaultClient(clients.clients, detectClientPlatform(navigator))) : undefined;
   const target = nameOf(names, String(grant.target_kind), String(grant.target_id));
   const serviceKind = services.find((s) => String(s.id) === String(grant.target_id))?.kind;
   const folder = `~/orama-tunnel/${String(grant.id).slice(0, 8)}`;
@@ -302,8 +313,11 @@ function Issue({ grant, names, services, onClose }: { grant: Row; names: Names; 
         certificate: certificateFile(result),
         relayCa: String(result.relay_ca_pem ?? ""),
         credentials,
+        client: client ? CLIENT_PATH : undefined,
       })
     : null;
+  // With the client offered, installing it is step 4 and the rest move down one.
+  const n = (step: number) => (client ? step + 1 : step);
   return (
     <Drawer
       title="Get Tunnel Credentials"
@@ -333,12 +347,29 @@ function Issue({ grant, names, services, onClose }: { grant: Row; names: Names; 
           {steps && (
             <>
               <CopyBlock label="3. Save the certificate files (paste this in the same terminal)" value={steps.save} multiline />
-              <CopyBlock label="4. Start the tunnel, and leave it running" value={steps.start} multiline />
+              {client && clients && (
+                <>
+                  <Field label="Your machine" help={`Version ${clients.version}. The command checks the file's SHA-256 before it makes it runnable, and needs no sudo.`}>
+                    <select value={client.platform} onChange={(e) => setPlatform(e.target.value)}>
+                      {clients.clients.map((c) => (
+                        <option key={c.platform} value={c.platform}>
+                          {c.label}
+                        </option>
+                      ))}
+                    </select>
+                  </Field>
+                  <CopyBlock label="4. Install the tunnel client" value={installCommand(client)} multiline />
+                  <p className="muted m-0 text-[12.5px]">
+                    The download link in it works for 15 minutes; this page keeps it fresh while it is open. SHA-256 <code className="break-all">{client.sha256}</code>.
+                  </p>
+                </>
+              )}
+              <CopyBlock label={`${n(4)}. Start the tunnel, and leave it running`} value={steps.start} multiline />
               <p className="muted m-0 text-[12.5px]">
-                This needs the tunnel client, <code>zetta-tunnel</code>. It listens only on your machine, at 127.0.0.1:{steps.localPort}, and stops working when your access ends or is revoked.
+                {client ? "It" : <>This needs the tunnel client, <code>zetta-tunnel</code>. It</>} listens only on your machine, at 127.0.0.1:{steps.localPort}, and stops working when your access ends or is revoked.
               </p>
               <CopyBlock
-                label={`5. Connect to ${target}, in a second terminal`}
+                label={`${n(5)}. Connect to ${target}, in a second terminal`}
                 value={steps.connect}
                 shown={revealed ? steps.connect : steps.connectShown}
                 extra={

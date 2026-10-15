@@ -1,5 +1,10 @@
 # Public API types
 
+`tunnel_clients.hpp` declares the tunnel client downloads (lake#745): the platform allow-list,
+`read_tunnel_clients`, the signed-link helpers (`signed_link_signature`, `signed_link_matches`) and
+the link check. `ApiContext.tunnel_clients_dir` and `ServerOptions.tunnel_clients_dir` name the folder
+(`LAKE_TUNNEL_CLIENTS_DIR`). See [tunnel-clients.md](../../../docs/api/tunnel-clients.md).
+
 `ApiContext.network_records` and `ServerOptions.network_records` inject the scoped tunnel
 session/activity provider; null chooses the pending implementation. The recipient-only CSR
 capability reuses `ApiContext.pki`. See [tunnel credentials](../../../docs/api/tunnel-grants.md).

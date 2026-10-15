@@ -38,6 +38,7 @@ tick.
 | `GET /file/raw`, `/file/download`, `/drive/download`, `/exports/download`, `/share/<token>/download` | the bytes of a repository file, a Drive file, a signed export or a shared file; without a credential a protected download redirects to `/sign-in` |
 | `GET /drive/files/download?customer_id=&workspace_id=&drive_id=&id=[&inline=1]` | a workspace file ([drives.md](../api/drives.md#uploads)): authorized and audited through `get_drive_entry`, then streamed from the workspace Zetta's `lake_files` bucket 1 MiB at a time (the image-pull streamer, its slots and idle timeout), `nosniff`, a sandboxing CSP, and `inline` only for media types a browser shows as data; always `Content-Disposition` with the file's name |
 | (both drive downloads) | described in `GET /v1/openapi.json` as `drive_download` and `drive_files_download` (lake#587; `openapi_document` in `src/api/rest.cpp`), although they answer bytes rather than a capability's JSON. `/drive/download` sends a file's own media type (from its extension) when a browser shows that type as data, else `application/octet-stream` (`displayable_media_type`) |
+| `GET /tunnel-clients/<platform>?expires=&signature=` | a tunnel client binary for Developer Access ([tunnel-clients.md](../api/tunnel-clients.md), lake#745): no session, the [signed link](#signed-links) `tunnel_client_downloads` answered is the credential; `<platform>` is allow-listed (`darwin-arm64`, `linux-amd64`) before anything is read; `application/octet-stream` attachment with `Content-Length`, `no-store` and an `ETag` of its SHA-256; an invalid or expired link is `401 unauthenticated` (`reason`), an unknown platform or a Lake without clients `404 not_found`. In OpenAPI as `tunnel_client_download` |
 | `GET /llms.txt`, `/llms-full.txt`, `/developer/mcp/skill`, `/skills/lake/SKILL.md` | the agents' guide and the Claude skill, public text |
 | `GET /apps/<id>/sign-up`, `/sign-in`, `/mfa`, `/passkey-sign-in`; the same four paths on an application's custom sign-in host | themed application identity pages, server-rendered ([`../api/apps.md`](../api/apps.md)); on lake's own host those paths are the web app's |
 | `POST /apps/<id>/identity/*` | application-pool identity form adapters |
@@ -398,6 +399,18 @@ answers 403.
 
 **Change.** The middleware is `refuse_cross_site` in `src/api/http_server.cpp`. A new route that a
 browser must post to from another origin is a bearer route, never an exemption here.
+
+## Signed links
+
+Two routes take a link instead of a credential, for clients that cannot hold a session: the Hub's
+basic-LFS upload `href` (`PUT /api/lfs/<repository>/<oid>`, [models](../api/models.md)) and a
+tunnel client download (`GET /tunnel-clients/<platform>`, lake#745). Both sign their fields with
+HMAC-SHA-256 under `LAKE_INSTANCE_KEK`, base64url without padding, carry `expires` (Unix seconds,
+15 minutes ahead) and `signature` in the query, and are checked in constant time
+(`signed_link_signature` and `signed_link_matches`, `src/api/tunnel_clients.cpp`). No new key and no
+new primitive: a new kind of link names itself on its payload's first line, as the tunnel client's
+`lake-tunnel-client` does, so one kind's signature never verifies as another's. The signature and
+expiry are never logged: the request log names the route pattern only.
 
 ## Bearer-link recipient delivery
 

@@ -22,7 +22,7 @@ opens the overview. Breadcrumbs: Network › **page**.
 |---|---|---|---|---|
 | Overview | `/network/overview` | `network_rules`, `list_network_tunnel_sessions` (`limit: 10`), `network_activity` (`limit: 10`) | none | Figures, each a link to its page: Connections, Developer access (active grants), Private networks, Egress. One line: how many rules the cluster has applied, and a link to Policies. Two cards: Recent Tunnel Sessions and Recent Network Activity. A line pointing to Data → Connections for the databases the workspace reads |
 | Connections | `/network/connections` | `list_network_connections`, `list_apps`, `list_services` | `create_network_connection`, `rotate_network_connection_credential`, `remove_network_connection` | The table: From and To (kind and name, linked to the app or service), Ports (none means every port the target serves), Credential (its scope in words and the workspace secret's name once issued, never its value), Status, Created, and Rotate credential (scoped only) and Remove. Removed connections are hidden behind *Show n removed*. **Connect an app** (header) opens the drawer: From (app or service), To (service or app), Ports, and, only from an app to a service, Credential (none, read only, read and write) and Schema |
-| Developer Access | `/network/access` | `list_network_tunnel_grants`, `list_network_tunnel_sessions` (`limit: 50`), `get_customer`, `list_memberships` | `grant_network_tunnel`, `revoke_network_tunnel`, `issue_network_tunnel_certificate` | The grants: Who (You, or the member's identity), Reaches, Port, Until, Access (Active, Expired, Revoked), Tunnel (the cluster's state, while active), and Get credentials (the recipient only) and Revoke. Expired and revoked grants are behind *Show n expired or revoked*. Recent Sessions below. **Grant access** (header): Who (you and the members of the account's organization), Reaches (service or app), Port, For (1 hour to 30 days) |
+| Developer Access | `/network/access` | `list_network_tunnel_grants`, `list_network_tunnel_sessions` (`limit: 50`), `get_customer`, `list_memberships`, `tunnel_client_downloads` (in Get credentials) | `grant_network_tunnel`, `revoke_network_tunnel`, `issue_network_tunnel_certificate` | The grants: Who (You, or the member's identity), Reaches, Port, Until, Access (Active, Expired, Revoked), Tunnel (the cluster's state, while active), and Get credentials (the recipient only) and Revoke. Expired and revoked grants are behind *Show n expired or revoked*. Recent Sessions below. **Grant access** (header): Who (you and the members of the account's organization), Reaches (service or app), Port, For (1 hour to 30 days) |
 | Private Networks | `/network/private-networks` | `list_network_peers` | none | Name, Other side, Offers (this workspace's exports), Reaches (the other side's imports), Status, Updated. Read-only: a peer is made through the operator's exchange with the other side |
 | Egress and DNS | `/network/egress` | `list_network_egress_rules` | `create_network_egress_rule` | All, DNS names and Address ranges, with counts. The table: Destination (with its kind), Ports, For (the whole workspace or one workload), Status, Added. **Allow a destination** (header): a DNS name or address range, Ports (443 filled in), and the whole workspace or one app or service |
 | Policies | `/network/policies` | `network_rules` | none | *What This Workspace May Reach*: the rules in effect as sentences ("App reporting may reach service orders on TCP 5432, with its own read only credential."), ending with "Lake asks for no other path into or out of this workspace." Then Each Rule: kind (linked to its page), the rule and whether the cluster applied it |
@@ -59,9 +59,20 @@ The drawer is a set of numbered copy-and-paste steps (lake#745), all run in one 
 2. paste the request. The page refuses an empty paste, one over 16 KiB, anything that is not a PEM
    certificate request, and a paste that contains a private key, before sending it;
 3. one paste that writes `tunnel.crt` (the certificate followed by its chain) and `relay-ca.crt`;
-4. the `zetta-tunnel client` command with the grant's endpoint and a local port filled in. The local
-   port is the target's port plus one, or 10000 plus a port below 1024 (`tunnelLocalPort`);
-5. how to connect through it, by the target's kind (`tunnelInstructions` in `network.ts`):
+4. install the tunnel client (lake#745), when `tunnel_client_downloads` offers one. The page picks
+   the client for this browser's machine (`detectClientPlatform`: `navigator.userAgentData.platform`,
+   then `navigator.platform` and the user agent; any Mac is taken as Apple silicon, since browsers
+   report `MacIntel` on both) and offers a **Your machine** chooser of the clients Lake has. One
+   block (`installCommand`) downloads the signed link with `curl -fsSL` into
+   `~/.local/bin/zetta-tunnel` (no sudo), checks the SHA-256 (`shasum -a 256 -c` on macOS,
+   `sha256sum -c` on Linux) and only then runs `chmod +x`. The links work for 15 minutes; the drawer
+   reads them again every ten minutes while it is open. When Lake offers no client, this step is
+   not shown, the steps keep their old numbers, and the start command runs `zetta-tunnel` from the
+   PATH;
+5. the `zetta-tunnel client` command (`~/.local/bin/zetta-tunnel` after step 4) with the grant's
+   endpoint and a local port filled in. The local port is the target's port plus one, or 10000 plus
+   a port below 1024 (`tunnelLocalPort`);
+6. how to connect through it, by the target's kind (`tunnelInstructions` in `network.ts`):
    - `psql` for Postgres, `mysql` for TiDB, `valkey-cli` and `cqlsh`;
    - `curl` for an app or the workspace's API;
    - the local address for any other kind;
@@ -104,7 +115,8 @@ pages in the rail. Go to (⌘K) lists every page by its rail label.
 - `frontend/tests/network.test.ts`: every network capability is called from a page; the rail's
   order and labels; each page marks only its own rail item current and Data → Connections stays
   Data's; row and grant states; ports, scopes and the three forms' inputs; the request check; names
-  instead of ids; the policy sentences, with no vendor named.
+  instead of ids; the policy sentences, with no vendor named; the tunnel client downloads read as
+  clients, the machine detected from the browser, and the install paste (lake#745).
 - `npm run build` (the tests, `tsc`, Vite and both source checks).
 - In a browser at 1316 px, against a local Lake (this branch's binary, a fresh PostgreSQL control
   database with `db/schema.sql`, a password account). Walked 2026-10-14: every page; Connect an app

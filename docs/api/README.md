@@ -7,6 +7,9 @@ operations and MCP tools. [scoped-credentials.md](scoped-credentials.md) defines
 scope, workspace-secret reference, rotation and revocation.
 [tunnel-grants.md](tunnel-grants.md) covers recipient-only CSR signing, bounded certificates,
 public trust, admin revocation and pending session history.
+[tunnel-clients.md](tunnel-clients.md) covers `tunnel_client_downloads` and
+`GET /tunnel-clients/<platform>`: the tunnel client binaries, offered per platform as signed
+15-minute links a plain `curl` follows (lake#745).
 
 lake#650: [engine-capabilities.md](engine-capabilities.md) documents every capability of a
 workspace's engine as a named Lake capability (its own route, OpenAPI operation and MCP tool, with

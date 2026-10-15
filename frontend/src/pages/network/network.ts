@@ -37,7 +37,7 @@ export const NETWORK_PAGES: { path: string; label: string; capabilities: string[
   {
     path: ACCESS_PATH,
     label: "Developer Access",
-    capabilities: ["list_network_tunnel_grants", "grant_network_tunnel", "issue_network_tunnel_certificate", "revoke_network_tunnel", "list_network_tunnel_sessions"],
+    capabilities: ["list_network_tunnel_grants", "grant_network_tunnel", "issue_network_tunnel_certificate", "revoke_network_tunnel", "list_network_tunnel_sessions", "tunnel_client_downloads"],
   },
   { path: PEERS_PATH, label: "Private Networks", capabilities: ["list_network_peers"] },
   { path: EGRESS_PATH, label: "Egress and DNS", capabilities: ["list_network_egress_rules", "create_network_egress_rule"] },
@@ -290,6 +290,8 @@ export function tunnelInstructions(args: {
   certificate: string;
   relayCa: string;
   credentials?: ServiceCredentials | null;
+  /** The client as the start command runs it: where the install step put it, else on the PATH. */
+  client?: string;
 }): TunnelInstructions {
   const folder = `~/orama-tunnel/${args.grantId.slice(0, 8)}`;
   const save = [
@@ -304,7 +306,7 @@ export function tunnelInstructions(args: {
   const localPort = tunnelLocalPort(args.port);
   const start = [
     `cd ${folder}`,
-    "zetta-tunnel client --cert tunnel.crt --key tunnel.key --ca relay-ca.crt \\",
+    `${args.client ?? "zetta-tunnel"} client --cert tunnel.crt --key tunnel.key --ca relay-ca.crt \\`,
     `  --relay ${args.endpoint} --listen 127.0.0.1:${localPort}`,
   ].join("\n");
   const local = `127.0.0.1:${localPort}`;
@@ -343,6 +345,68 @@ export function tunnelInstructions(args: {
     default:
       return both(() => local, `Point your client at ${local} instead of the service's address. ${filled}`);
   }
+}
+
+/** The tunnel client Lake hands out (lake#745, docs/api/tunnel-clients.md), one per platform. Mac
+ * on Intel, Linux on ARM and Windows are not built yet. */
+export type ClientPlatform = "darwin-arm64" | "linux-amd64";
+export const CLIENT_PLATFORMS: { platform: ClientPlatform; label: string }[] = [
+  { platform: "darwin-arm64", label: "macOS (Apple silicon)" },
+  { platform: "linux-amd64", label: "Linux (x86-64)" },
+];
+
+/** Where the install step puts the client: in the person's own folder, so it needs no sudo. */
+export const CLIENT_PATH = "~/.local/bin/zetta-tunnel";
+
+export type TunnelClient = { platform: ClientPlatform; label: string; sha256: string; size: number; url: string };
+export type TunnelClients = { version: string; expiresAt: string; clients: TunnelClient[] };
+
+/** `tunnel_client_downloads`' answer, or null when this Lake has no clients to offer. A relative
+ * link is made absolute against the page's own origin, since it is pasted into a terminal. */
+export function tunnelClients(value: unknown, origin: string): TunnelClients | null {
+  const answer = (value ?? {}) as Row;
+  if (answer.available !== true || !Array.isArray(answer.clients)) return null;
+  const clients: TunnelClient[] = [];
+  for (const raw of answer.clients as Row[]) {
+    const known = CLIENT_PLATFORMS.find((p) => p.platform === raw.platform);
+    const url = str(raw, "download_url");
+    const sha256 = str(raw, "sha256");
+    if (!known || !url || !/^[0-9a-f]{64}$/.test(sha256)) continue;
+    clients.push({ platform: known.platform, label: known.label, sha256, size: Number(raw.size) || 0, url: new URL(url, origin).toString() });
+  }
+  return clients.length ? { version: str(answer, "version"), expiresAt: str(answer, "expires_at"), clients } : null;
+}
+
+/** What a browser says about its machine; navigator's fields, all optional. */
+export type BrowserMachine = { userAgentData?: { platform?: string } | null; platform?: string; userAgent?: string };
+
+/** The client for the machine this browser runs on, or null when Lake has none for it. A Mac is
+ * taken to be Apple silicon: browsers report "MacIntel" on both, and only that client is built. */
+export function detectClientPlatform(machine: BrowserMachine): ClientPlatform | null {
+  const platform = `${machine.userAgentData?.platform ?? ""} ${machine.platform ?? ""}`.toLowerCase();
+  const agent = (machine.userAgent ?? "").toLowerCase();
+  const said = `${platform} ${agent}`;
+  if (/android|cros|iphone|ipad/.test(said)) return null;
+  if (/mac/.test(platform) || /macintosh|mac os x/.test(agent)) return "darwin-arm64";
+  if (/linux/.test(said)) return /aarch64|arm/.test(said) ? null : "linux-amd64";
+  return null;
+}
+
+/** The client the chooser starts on: this machine's when Lake has it, else the first offered. */
+export function defaultClient(clients: TunnelClient[], detected: ClientPlatform | null): TunnelClient | undefined {
+  return clients.find((c) => c.platform === detected) ?? clients[0];
+}
+
+/** One paste that downloads the client into ~/.local/bin, checks its SHA-256 and only then makes it
+ * runnable. The link is signed and short-lived, so curl needs no key. */
+export function installCommand(client: TunnelClient): string {
+  const check = client.platform.startsWith("darwin") ? "shasum -a 256 -c" : "sha256sum -c";
+  return [
+    "mkdir -p ~/.local/bin && \\",
+    `  curl -fsSL "${client.url}" -o ${CLIENT_PATH} && \\`,
+    `  echo "${client.sha256}  $HOME/.local/bin/zetta-tunnel" | ${check} && \\`,
+    `  chmod +x ${CLIENT_PATH}`,
+  ].join("\n");
 }
 
 /** Names for ids: what the pages show instead of a UUID. */
