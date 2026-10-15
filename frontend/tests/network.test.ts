@@ -15,6 +15,7 @@ import {
   expiresAt,
   serviceAccessHref,
   tunnelInstructions,
+  MASKED_PASSWORD,
   pendingPoll,
   PENDING_POLL_MS,
   tunnelLocalPort,
@@ -261,4 +262,30 @@ test("a Network page reads again while a row waits for the cluster, and stops on
   assert.equal(pendingPoll(ready), false);
   assert.equal(pendingPoll({ tunnel_grants: [] }), false);
   assert.equal(pendingPoll(undefined), false);
+});
+
+test("with the service's own sign-in, step 5 is a working command whose password is shown masked", () => {
+  const args = {
+    grantId: "81f6d8fb-8cb5-4922-af63-1ea561adda36",
+    endpoint: "52.224.36.126:443",
+    port: 5432,
+    targetKind: "service",
+    serviceKind: "postgres",
+    certificate: "c",
+    relayCa: "r",
+  };
+  const filled = tunnelInstructions({ ...args, credentials: { user: "app", password: "p@ss/word", database: "app" } });
+  assert.equal(filled.hasSecret, true);
+  assert.equal(filled.connect, 'psql "postgresql://app:p%40ss%2Fword@127.0.0.1:5433/app"');
+  assert.equal(filled.connectShown, `psql "postgresql://app:${MASKED_PASSWORD}@127.0.0.1:5433/app"`);
+  assert.ok(!filled.connectShown.includes("p@ss"), "the password never shows unless revealed");
+  assert.match(filled.connectNote, /hidden until you reveal it/);
+  // TiDB fills its user too; without credentials (not an admin) the placeholders and the pointer stay.
+  const tidb = tunnelInstructions({ ...args, port: 4000, serviceKind: "tidb", credentials: { user: "root", password: "x" } });
+  assert.equal(tidb.connect, "mysql -h 127.0.0.1 -P 4001 -u root --password='x'");
+  const unknown = tunnelInstructions({ ...args, credentials: null });
+  assert.equal(unknown.hasSecret, false);
+  assert.equal(unknown.connect, 'psql "postgresql://USER@127.0.0.1:5433/DATABASE"');
+  assert.equal(unknown.connectShown, unknown.connect);
+  assert.match(unknown.connectNote, /Show connection/);
 });

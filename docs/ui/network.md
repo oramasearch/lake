@@ -65,7 +65,10 @@ The drawer is a set of numbered copy-and-paste steps (lake#745), all run in one 
    - `psql` for Postgres, `mysql` for TiDB, `valkey-cli` and `cqlsh`;
    - `curl` for an app or the workspace's API;
    - the local address for any other kind;
-   - with a reminder that the service's own user and password come from Ship → Services, Show connection.
+   - filled in with the service's own user, password and database, read with `service_connection` once the
+     certificate is issued. The password is masked (`MASKED_PASSWORD`) until **Reveal**, and **Copy** copies
+     the working command. `service_connection` answers an account admin only; for anyone else the command
+     keeps `USER`/`DATABASE` placeholders and points to Ship → Services, Show connection.
 
 The endpoint and the two files on their own are under a disclosure. The answer is shown once and is
 not kept: closing the drawer forgets it. The key never reaches Lake.

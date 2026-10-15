@@ -5,7 +5,7 @@
  * sessions come from `list_network_tunnel_sessions`. A tunnel is named for what it reaches. */
 import { useState } from "react";
 import { useSearchParams } from "react-router-dom";
-import { KeyRound, Plus } from "lucide-react";
+import { Eye, EyeOff, KeyRound, Plus } from "lucide-react";
 import { act, type Row } from "@/lib/api";
 import { dateTime, relative } from "@/lib/format";
 import { ConfirmButton, Drawer } from "@/lib/overlay";
@@ -23,8 +23,10 @@ import {
   grantState,
   nameOf,
   recordColumns,
+  str,
   tunnelInstructions,
   type GrantForm,
+  type ServiceCredentials,
   type Names,
 } from "./network";
 import { Endpoint, NetworkPage, NotRecorded, RecordState, useNames, useNetworkRead, useScope } from "./parts";
@@ -283,6 +285,10 @@ function Issue({ grant, names, services, onClose }: { grant: Row; names: Names; 
   const [csr, setCsr] = useState("");
   const [problem, setProblem] = useState<string | null>(null);
   const [result, setResult] = useState<Row | null>(null);
+  // The service's own sign-in, read once the certificate is issued so step 5 is a working command.
+  // `service_connection` answers an account admin; anyone else keeps the placeholders.
+  const [credentials, setCredentials] = useState<ServiceCredentials | null>(null);
+  const [revealed, setRevealed] = useState(false);
   const target = nameOf(names, String(grant.target_kind), String(grant.target_id));
   const serviceKind = services.find((s) => String(s.id) === String(grant.target_id))?.kind;
   const folder = `~/orama-tunnel/${String(grant.id).slice(0, 8)}`;
@@ -295,6 +301,7 @@ function Issue({ grant, names, services, onClose }: { grant: Row; names: Names; 
         serviceKind: serviceKind ? String(serviceKind) : undefined,
         certificate: certificateFile(result),
         relayCa: String(result.relay_ca_pem ?? ""),
+        credentials,
       })
     : null;
   return (
@@ -330,7 +337,18 @@ function Issue({ grant, names, services, onClose }: { grant: Row; names: Names; 
               <p className="muted m-0 text-[12.5px]">
                 This needs the tunnel client, <code>zetta-tunnel</code>. It listens only on your machine, at 127.0.0.1:{steps.localPort}, and stops working when your access ends or is revoked.
               </p>
-              <CopyBlock label={`5. Connect to ${target}, in a second terminal`} value={steps.connect} />
+              <CopyBlock
+                label={`5. Connect to ${target}, in a second terminal`}
+                value={steps.connect}
+                shown={revealed ? steps.connect : steps.connectShown}
+                extra={
+                  steps.hasSecret ? (
+                    <button type="button" onClick={() => setRevealed((r) => !r)} aria-pressed={revealed}>
+                      {revealed ? <EyeOff size={14} aria-hidden /> : <Eye size={14} aria-hidden />} {revealed ? "Hide" : "Reveal"}
+                    </button>
+                  ) : undefined
+                }
+              />
               <p className="muted m-0 text-[12.5px]">{steps.connectNote}</p>
             </>
           )}
@@ -353,6 +371,15 @@ function Issue({ grant, names, services, onClose }: { grant: Row; names: Names; 
             if (found) return;
             return sign.run(async () => {
               setResult(await act<Row>("issue_network_tunnel_certificate", { ...scope.input, tunnel_grant_id: String(grant.id), csr_pem: csr.trim() + "\n" }));
+              if (String(grant.target_kind) === "service" && serviceKind && serviceKind !== "zetta") {
+                try {
+                  // An action, so the password never rides a URL; as Show connection reads it.
+                  const connection = await act<Row>("service_connection", { customer_id: scope.customerId, service_id: String(grant.target_id) });
+                  setCredentials({ user: str(connection, "user"), password: str(connection, "password"), database: str(connection, "database") });
+                } catch {
+                  setCredentials(null);
+                }
+              }
             });
           }}
         >

@@ -662,8 +662,9 @@ export function DataTable<T>({
 
 /* ------------------------------------------------------------------ text */
 
-/** A value with a Copy button (a command, a URL, a key shown once). */
-export function CopyBlock({ value, label, multiline }: { value: string; label?: ReactNode; multiline?: boolean }) {
+/** A value with a Copy button (a command, a URL, a key shown once). `shown`, when given, is what
+ * the block displays instead of `value` (a command with its password masked); Copy copies `value`. */
+export function CopyBlock({ value, label, multiline, shown, extra }: { value: string; label?: ReactNode; multiline?: boolean; shown?: string; extra?: ReactNode }) {
   const [copied, setCopied] = useState(false);
   const copy = async () => {
     try {
@@ -678,12 +679,13 @@ export function CopyBlock({ value, label, multiline }: { value: string; label?: 
     <div className="copy-block">
       <div className="copy-head">
         {label ? <h3>{label}</h3> : <span />}
+        {extra}
         <button type="button" onClick={copy} aria-label={copied ? "Copied" : "Copy"}>
           {copied ? <Check size={14} aria-hidden /> : <Copy size={14} aria-hidden />} {copied ? "Copied" : "Copy"}
         </button>
       </div>
       <pre className={cx(multiline && "whitespace-pre-wrap")}>
-        <code>{value}</code>
+        <code>{shown ?? value}</code>
       </pre>
     </div>
   );

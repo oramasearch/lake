@@ -127,9 +127,11 @@ access for it, for you, for an hour.
 5. **Start the tunnel** with the next block, and leave it running. It needs the tunnel client,
    `zetta-tunnel`. The command already holds your endpoint, and listens only on your machine, on a
    port next to the target's (5433 for Postgres's 5432).
-6. **Connect** with the last block, in a second terminal: for Postgres,
-   `psql "postgresql://USER@127.0.0.1:5433/DATABASE"`. The tunnel does not replace the service's own
-   sign-in: its user, password and database are under Ship → Services, **Show connection**.
+6. **Connect** with the last block, in a second terminal. If you administer the account, the block
+   already holds the service's own user, password and database: the password is hidden until you press
+   **Reveal**, and **Copy** copies the whole working command. Otherwise it reads, for Postgres,
+   `psql "postgresql://USER@127.0.0.1:5433/DATABASE"`, and the user, password and database are under
+   Ship → Services, **Show connection**. The tunnel does not replace the service's own sign-in.
 
 The tunnel stops working when your access expires or is revoked, and your certificate lasts at
 most 12 hours.
