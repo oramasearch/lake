@@ -8,7 +8,8 @@ does not, what is knowingly still broken, and how it was verified.
   every new account with an optional own identity, Clerk webhooks, one name per agent with all
   nine agents offered, and Ask Orama's home. Note its known issues, above all the open
   `sign_in_sso` security defect and the credential and account-enumeration defects found by the
-  end-to-end suite.
+  end-to-end suite. Image: `oramasearch/lake:v0.2.0` (the same digest as `main-508f9540`,
+  `sha256:e41273a7…`).
 - [v0.1.0](v0.1.0.md) — 2026-10-12. The first tagged release, so the page is the full inventory:
   every feature by area, all 554 deployed capabilities by name, every page of the web app and
   every guide. Note its known issues, above all the open `sign_in_sso` security defect. Image:
