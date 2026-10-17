@@ -149,6 +149,8 @@ test("the home says what Lake does, grouped as the rail is, claiming only what t
   // Deployments off in server_info, and the Auto-Suggest Agent not running: neither is claimed.
   const fewer = lakeMap(items, { deployments: false, runningAgents: new Set() });
   assert.deepEqual(fewer.find((g) => g.key === "design")!.things.map((t) => t.path), ["/design/projects"]);
+  // Design is about AI (Steve, 2026-10-17): the home names its pages as AI.
+  assert.equal(fewer.find((g) => g.key === "design")!.things[0].label, "AI Projects");
   assert.deepEqual(fewer.find((g) => g.key === "ship")!.things.map((t) => t.path), ["/ship/apps"]);
   // Billing shows only when the rail shows it (navFor drops it where LAKE_BILLING is off).
   assert.equal(lakeMap(items.filter((i) => i.path !== "/billing"), { runningAgents: new Set() }).find((g) => g.key === "organization"), undefined);

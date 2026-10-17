@@ -26,13 +26,18 @@ agent does the job better.
 ## Open Ask Orama
 
 - **Home → Ask Orama** (`/`) is where you land when you sign in or open Lake: the conversation
-  across the page, in your current workspace. While it is empty it explains what you can do:
+  across the page, in your current workspace. It opens with what Lake is for: **AI sovereignty**.
+  When you're tired of renting someone else's AI, Orama Lake is where you own your AI. While the
+  conversation is empty it explains what you can do:
   - **Suggested questions**: up to four from what the workspace holds (a run that failed, a dataset,
     a project, the latest run's findings, or the first steps when the workspace is new).
   - **Agents you can talk to**: each agent this Lake runs, with what it does. Press one to start a
     conversation with it.
-  - **What you can do with Lake**: the pages of Data, Design, Train, Ship, Network, Organization
-    and Developer, each with what it is for and a question to ask about it. Only what this Lake
+  - **Design, train and ship production-grade AI** (self-serve, real AI, trained on your own data):
+    the pages of Data, Design, Train, Ship, Network, Organization and Developer, each with what it
+    is for and a question to ask about it. Design is about AI: AI Projects (many models, pipelines
+    and agents working together on one business question), AI Solutions, AI Methodologies and AI
+    Agents. Only what this Lake
     runs is listed: Billing only where Lake bills, Deployments only where they are set up,
     Opportunities only while the Auto-Suggest Agent runs.
 

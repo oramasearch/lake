@@ -663,7 +663,18 @@ html[data-resizing-ask] .ask-panel {
   margin: 0;
 }
 .ask-home-section {
-  margin-top: var(--lake-space-6, 24px);
+  margin-top: 56px;
+}
+.ask-home-section h2 {
+  margin-bottom: var(--lake-space-1, 4px);
+}
+.ask-home-section-line {
+  margin: 0 0 var(--lake-space-6, 24px);
+}
+.ask-home-lead {
+  margin: 0 0 var(--lake-space-2, 8px);
+  font-size: 17px;
+  line-height: 1.5;
 }
 .ask-map-grid {
   display: grid;
@@ -691,11 +702,13 @@ html[data-resizing-ask] .ask-panel {
 .ask-map {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(min(100%, 380px), 1fr));
-  gap: var(--lake-space-4, 16px) var(--lake-space-6, 24px);
+  gap: 40px var(--lake-space-6, 24px);
 }
 .ask-map-group h3 {
-  margin: 0 0 var(--lake-space-2, 8px);
-  font-size: 15px;
+  display: grid;
+  gap: 2px;
+  margin: 0 0 var(--lake-space-3, 12px);
+  font-size: 16px;
 }
 .ask-map-group h3 .muted {
   font-weight: var(--lake-weight-regular);
