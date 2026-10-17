@@ -2676,6 +2676,7 @@ public:
                 .kind = item.kind == liquid::sync_item_kind::reference ? SyncPushItemKind::Reference
                                                                        : SyncPushItemKind::Change,
                 .change_id = liquid::to_string(item.reference.value),
+                .author = item.author.taap_id,
             };
             auto result = authorize(input, reference_updates);
             if (!result) {

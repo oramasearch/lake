@@ -45,6 +45,9 @@ enum class SyncPushItemKind { Change, Reference };
 struct SyncPushItem {
     SyncPushItemKind kind = SyncPushItemKind::Change;
     std::string change_id;
+    // The TAAP identity that signed the item (lake#762): the push audit names the account it
+    // acts for, so a change signed by a person's own linked key is attributed to their account.
+    std::string author;
 };
 
 using SyncPushAuthorizer = std::function<SyncStoreResult<std::vector<SyncRefVerdict>>(

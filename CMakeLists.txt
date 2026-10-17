@@ -338,6 +338,7 @@ add_library(lake-core STATIC
   src/api/agent_task_records_api.cpp
   src/api/offline_recovery_capabilities.cpp
   src/control/handles.cpp
+  src/control/own_identity.cpp
   src/control/policy.cpp
   src/search/index.cpp
   src/transparency/checkpoint.cpp

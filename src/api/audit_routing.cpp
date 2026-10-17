@@ -15,6 +15,8 @@ namespace {
 // whole instance: their events stay in the central log (decision 52). Sorted.
 constexpr std::array central = std::to_array<std::string_view>({
     "accept_invitation",
+    // Which key an account signs with is identity (lake#762).
+    "account_identity",
     // ACME (RFC 8555): lake's certificate authority for workload identity.
     "acme_authorization",
     "acme_certificate",
@@ -31,6 +33,7 @@ constexpr std::array central = std::to_array<std::string_view>({
     // An application's sign-in flow is identity: who signed in, before any workspace is chosen.
     "begin_application_authorization",
     "begin_email_recovery",
+    "begin_own_identity",
     "begin_passkey_registration",
     "begin_passkey_sign_in",
     "begin_root_recovery",
@@ -213,6 +216,7 @@ constexpr std::array central = std::to_array<std::string_view>({
     // A reading of usage across an account's workspaces (lake#564).
     "usage_limits",
     "usage_over_time",
+    "use_own_identity",
     "verify_agent_session_drip",
     "verify_audit",
     "verify_mfa",

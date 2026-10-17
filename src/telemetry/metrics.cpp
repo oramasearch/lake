@@ -1281,6 +1281,31 @@ public:
     sign_in_clerk(const control::ClerkIdentity& value) override {
         return call("sign_in_clerk", [&] { return store_->sign_in_clerk(value); });
     }
+    control::Result<control::AccountIdentity>
+    account_identity(const std::string& user_id) override {
+        return call("account_identity", [&] { return store_->account_identity(user_id); });
+    }
+    control::Result<control::ManagedKey> managed_key(const std::string& user_id) override {
+        return call("managed_key", [&] { return store_->managed_key(user_id); });
+    }
+    control::Result<void>
+    create_identity_link_challenge(const control::IdentityLinkChallenge& value) override {
+        return call("create_identity_link_challenge",
+                    [&] { return store_->create_identity_link_challenge(value); });
+    }
+    control::Result<control::IdentityLinkChallenge>
+    consume_identity_link_challenge(const std::string& user_id,
+                                    const std::string& challenge) override {
+        return call("consume_identity_link_challenge",
+                    [&] { return store_->consume_identity_link_challenge(user_id, challenge); });
+    }
+    control::Result<control::AccountIdentity>
+    link_own_identity(const control::IdentityLink& value) override {
+        return call("link_own_identity", [&] { return store_->link_own_identity(value); });
+    }
+    control::Result<std::string> account_for_identity(const std::string& taap_id) override {
+        return call("account_for_identity", [&] { return store_->account_for_identity(taap_id); });
+    }
     control::Result<void> register_oauth_provider(const control::OAuthProvider& value) override {
         return call("register_oauth_provider",
                     [&] { return store_->register_oauth_provider(value); });

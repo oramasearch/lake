@@ -130,6 +130,22 @@ Result<Identity> identity(control::Store& store, const IdentityOptions& options)
 // stored here; the caller persists the result.
 Result<Identity> mint_custodial_identity(std::string_view instance_kek);
 
+// Signs `TAAP/1 <artifact_type> || 0x00 || canonical CBOR(body)` with an identity lake holds
+// for a person (a managed key, docs/api/identity.md#your-own-identity): its seed is unwrapped
+// under `instance_kek` for this one signature. Returns the base64 Ed25519 signature.
+Result<std::string> sign_with_managed_key(std::string_view wrapped_seed,
+                                          std::string_view instance_kek,
+                                          std::string_view artifact_type,
+                                          const nlohmann::json& body);
+// Verifies a signature from sign_with_managed_key against the key's base64 public half.
+Result<void> verify_managed_signature(std::string_view public_key,
+                                      std::string_view artifact_type,
+                                      const nlohmann::json& body,
+                                      std::string_view signature);
+// The instance key a store's held identities are wrapped under: `instance_kek`, or the memory
+// store's fixed development key when it is empty.
+std::string effective_instance_kek(control::Store& store, std::string_view instance_kek);
+
 // Creates a dual-signed TAAP rotation document and makes the new identity
 // current.
 Result<Identity> rotate_identity(control::Store& store, const IdentityOptions& options);

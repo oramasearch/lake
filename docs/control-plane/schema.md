@@ -5,6 +5,15 @@ vendored copy at `internal/controller/assets/lake-schema.sql` and applies it to 
 Postgres. Change the schema here, then copy it into the operator in the same change; the
 operator's test checks the copy carries the source-of-truth header.
 
+`0086_identity_links` (lake#762, decision 65) lets an account replace its managed key with the
+person's own identity: `custodial_identities.wrapped_seed` becomes nullable and gains
+`seed_destroyed_at` (the seed is wiped, the public key kept, when the link commits);
+`identity_link_challenges` holds a pending link (the verified own document, the statement to sign,
+ten-minute expiry, one use); `identity_links` holds the committed link, one per account and one per
+own identity, with both keys' signatures in `link_document`. Its guard is `identity_links_guard`.
+The operator must vendor this schema byte-for-byte and select that guard before a binary with
+`use_own_identity` serves; that handoff is separate. See [identity.md](../api/identity.md#your-own-identity).
+
 `0085_network_tunnel_ca` adds public `client_ca_pem` (Lake-written) on `network_tunnel_grants`
 and `relay_ca_pem` (operator-written) on `network_tunnel_grant_status`, both non-null text with
 empty defaults. It leaves migration 0084 unchanged and adds no new guard. The operator must

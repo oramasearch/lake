@@ -36,6 +36,7 @@
 #include "lake/control/agent_library.hpp"
 #include "lake/control/handles.hpp"
 #include "lake/control/identity_crypto.hpp"
+#include "lake/control/own_identity.hpp"
 #include "lake/control/pki.hpp"
 #include "lake/control/saml.hpp"
 #include "lake/control/store.hpp"
@@ -332,7 +333,7 @@ json repository_artifact_schema() {
               {"started_at", {{"type", "string"}}},
               {"finished_at", {{"type", "string"}}},
               {"attestations", {{"type", "array"}}},
-              {"trace", {{"type", {"object", "null"}}}},
+              {"trace", {{"type", json::array({"object", "null"})}}},
               {"members", {{"type", "array"}}}}}};
 }
 
@@ -1241,7 +1242,7 @@ json device_schema() {
               {"user_id", {{"type", "string"}}},
               {"name", {{"type", "string"}}},
               {"passkey_credential_id", {{"type", {"string", "null"}}}},
-              {"passkey_binding_attestation", {{"type", {"object", "null"}}}},
+              {"passkey_binding_attestation", {{"type", json::array({"object", "null"})}}},
               {"revoked_at", {{"type", {"string", "null"}}}},
               {"created_at", {{"type", "string"}}}}}};
 }
@@ -1581,6 +1582,14 @@ sync_change_authorizer(ApiContext& context, const control::Repository& repositor
         }
 
         const std::string& change_id = item.change_id;
+        // Who signed the change, and the account that identity acts for: the caller's own
+        // identifier, or the own identity linked to it (lake#762).
+        std::string author_account;
+        if (!item.author.empty()) {
+            if (const auto account = context.store->account_for_identity(item.author)) {
+                author_account = *account;
+            }
+        }
         std::string denial_code;
         std::string denial_reason;
         if (!context.offline_grant_id.empty()) {
@@ -1647,6 +1656,10 @@ sync_change_authorizer(ApiContext& context, const control::Repository& repositor
             .method = context.authentication_method,
             .device = context.device,
             .details = {{"change", change_id},
+                        {"author", item.author},
+                        {"author_account", author_account},
+                        {"author_is_caller",
+                         !author_account.empty() && author_account == context.acting_identity},
                         {"error_code", error_code},
                         {"offline_grant_id", context.offline_grant_id},
                         {"reason", reason}},
@@ -2156,6 +2169,243 @@ void register_server_info(Registry& registry, std::string_view version) {
         }});
 }
 
+// Using your own identity (lake#762, liquid-bridge decision 65,
+// docs/api/identity.md#your-own-identity).
+json account_identity_json(const control::AccountIdentity& identity) {
+    json linked = nullptr;
+    if (!identity.own_taap_id.empty()) {
+        linked = {{"own_taap_id", identity.own_taap_id},
+                  {"own_document_hash", identity.own_document_hash},
+                  {"linked_at", identity.linked_at},
+                  {"link_document", identity.link_document}};
+    }
+    return {{"taap_id", identity.taap_id},
+            {"key", identity.key},
+            {"signs_as", identity.own_taap_id.empty() ? identity.taap_id : identity.own_taap_id},
+            {"managed_key",
+             identity.managed_public_key.empty()
+                 ? json(nullptr)
+                 : json{{"public_key", identity.managed_public_key},
+                        {"held", identity.managed_seed_held},
+                        {"destroyed_at",
+                         identity.managed_seed_destroyed_at.empty()
+                             ? json(nullptr)
+                             : json(identity.managed_seed_destroyed_at)}}},
+            {"linked", linked}};
+}
+
+json account_identity_schema() {
+    return {{"type", "object"},
+            {"properties",
+             {{"taap_id", {{"type", "string"}}},
+              {"key", {{"type", "string"}, {"enum", json::array({"managed", "own"})}}},
+              {"signs_as", {{"type", "string"}}},
+              {"managed_key", {{"type", json::array({"object", "null"})}}},
+              {"linked", {{"type", json::array({"object", "null"})}}}}}};
+}
+
+// Only the person, signed in: never an API token, an agent or the operator.
+std::optional<ApiResult> refuse_unless_signed_in_person(const ApiContext& context) {
+    if (!context.store) {
+        return no_store();
+    }
+    if (context.operator_credential || !context.session_credential ||
+        context.acting_user_id.empty() ||
+        (context.credential_kind != "browser" && context.credential_kind != "taap") ||
+        context.pool_id != "lake") {
+        return ApiResult::failure("unauthorized",
+                                  "Only the signed-in person can change which key their account "
+                                  "signs with.");
+    }
+    return std::nullopt;
+}
+
+std::string utc_after(int seconds) {
+    const auto at = std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now()) +
+                    std::chrono::seconds(seconds);
+    return std::format("{:%FT%TZ}", at);
+}
+
+void register_own_identity_capabilities(Registry& registry) {
+    registry.add(Capability{
+        .name = "account_identity",
+        .title = "Account identity",
+        .description = "Which key the signed-in account signs with: a managed key Lake holds, or "
+                       "the person's own liquid identity, with the signed link when it replaced "
+                       "the managed key.",
+        .input_schema = {{"type", "object"},
+                         {"properties", json::object()},
+                         {"additionalProperties", false}},
+        .output_schema = account_identity_schema(),
+        .kind = CapabilityKind::Read,
+        .object = "principal",
+        .action = "read",
+        .resolve_object = self_object,
+        .handler = [](const json&, ApiContext& context) {
+            if (!context.store)
+                return no_store();
+            if (context.acting_user_id.empty()) {
+                return ApiResult::failure("unauthorized", "sign in to read your identity");
+            }
+            auto identity = context.store->account_identity(context.acting_user_id);
+            return identity ? ApiResult::success(account_identity_json(*identity))
+                            : from_store_error(identity.error());
+        }});
+    registry.add(Capability{
+        .name = "begin_own_identity",
+        .title = "Begin using your own identity",
+        .description =
+            "Step 1 of replacing the account's managed key with your own liquid identity. Takes "
+            "the output of `liquid identity show --document` and answers a challenge, valid for "
+            "ten minutes, to sign with `liquid sign artifact <challenge>`.",
+        .input_schema = {{"type", "object"},
+                         {"properties", {{"identity_document", {{"type", "string"}}}}},
+                         {"required", json::array({"identity_document"})},
+                         {"additionalProperties", false}},
+        .output_schema = {{"type", "object"},
+                          {"properties",
+                           {{"challenge", {{"type", "string"}}},
+                            {"command", {{"type", "string"}}},
+                            {"own_taap_id", {{"type", "string"}}},
+                            {"expires_at", {{"type", "string"}}},
+                            {"statement", {{"type", "object"}}}}}},
+        .kind = CapabilityKind::Action,
+        .object = "principal",
+        .action = "write",
+        .resolve_object = self_object,
+        .handler = [](const json& input, ApiContext& context) {
+            if (auto refused = refuse_unless_signed_in_person(context)) {
+                return *refused;
+            }
+            auto account = context.store->account_identity(context.acting_user_id);
+            if (!account) {
+                return from_store_error(account.error());
+            }
+            if (account->key != "managed") {
+                return ApiResult::failure("conflict",
+                                          "This account already signs with your own identity.");
+            }
+            auto own = control::own_identity::verify_document(
+                input.at("identity_document").get<std::string>());
+            if (!own) {
+                return ApiResult::failure(
+                    own.error().code, own.error().message, "/identity_document");
+            }
+            const std::string nonce = control::identity_crypto::random_secret();
+            if (nonce.empty()) {
+                return ApiResult::failure("store_error", "could not create a challenge");
+            }
+            const std::string expires_at =
+                utc_after(control::own_identity::challenge_lifetime_seconds);
+            const json statement = control::own_identity::statement(
+                context.acting_user_id, account->taap_id, *own, nonce, expires_at);
+            const std::string challenge = control::own_identity::challenge(statement);
+            if (challenge.empty()) {
+                return ApiResult::failure("store_error", "could not create a challenge");
+            }
+            auto created = context.store->create_identity_link_challenge({challenge,
+                                                                          context.acting_user_id,
+                                                                          account->taap_id,
+                                                                          own->taap_id,
+                                                                          own->encoded,
+                                                                          own->hash,
+                                                                          statement,
+                                                                          expires_at});
+            if (!created) {
+                return from_store_error(created.error());
+            }
+            context.audit_details = {{"previous", account->taap_id}, {"next", own->taap_id}};
+            return ApiResult::success({{"challenge", challenge},
+                                       {"command", "liquid sign artifact " + challenge},
+                                       {"own_taap_id", own->taap_id},
+                                       {"expires_at", expires_at},
+                                       {"statement", statement}});
+        }});
+    registry.add(Capability{
+        .name = "use_own_identity",
+        .title = "Use your own identity",
+        .description =
+            "Step 2: takes the challenge and the output of `liquid sign artifact <challenge>`. "
+            "When the signature verifies with your identity's key, the account's managed key "
+            "signs the link, the account signs with your own identity from then on (its grants, "
+            "audit and repositories stay), and the managed key's seed is destroyed in the same "
+            "transaction.",
+        .input_schema = {{"type", "object"},
+                         {"properties",
+                          {{"challenge", {{"type", "string"}}},
+                           {"signature", {{"type", "string"}}}}},
+                         {"required", json::array({"challenge", "signature"})},
+                         {"additionalProperties", false}},
+        .output_schema = account_identity_schema(),
+        .kind = CapabilityKind::Action,
+        .object = "principal",
+        .action = "write",
+        .resolve_object = self_object,
+        .handler = [](const json& input, ApiContext& context) {
+            if (auto refused = refuse_unless_signed_in_person(context)) {
+                return *refused;
+            }
+            auto pending = context.store->consume_identity_link_challenge(
+                context.acting_user_id, input.at("challenge").get<std::string>());
+            if (!pending) {
+                return ApiResult::failure(
+                    pending.error().code, pending.error().message, "/challenge");
+            }
+            context.audit_details = {{"previous", pending->account_taap_id},
+                                     {"next", pending->own_taap_id}};
+            if (control::own_identity::challenge(pending->statement) != pending->challenge) {
+                return ApiResult::failure("unauthorized", "the challenge does not match");
+            }
+            auto own_signature = control::own_identity::verify_challenge_signature(
+                pending->own_document,
+                pending->challenge,
+                input.at("signature").get<std::string>());
+            if (!own_signature) {
+                return ApiResult::failure(
+                    own_signature.error().code, own_signature.error().message, "/signature");
+            }
+            auto managed = context.store->managed_key(context.acting_user_id);
+            if (!managed) {
+                return ApiResult::failure("conflict",
+                                          "This account already signs with your own identity.");
+            }
+            if (managed->taap_id != pending->account_taap_id) {
+                return ApiResult::failure("conflict", "the account identity changed");
+            }
+            const json body = control::own_identity::link_body(
+                *pending,
+                std::format(
+                    "{:%FT%TZ}",
+                    std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now())));
+            auto managed_signature = audit::sign_with_managed_key(
+                managed->wrapped_seed,
+                audit::effective_instance_kek(*context.store, context.instance_kek),
+                control::own_identity::link_artifact,
+                body);
+            if (!managed_signature) {
+                return ApiResult::failure("store_error",
+                                          "the managed key could not sign the link: " +
+                                              managed_signature.error().message);
+            }
+            const json link_document = {{"body", body},
+                                        {"previous_signature", *managed_signature},
+                                        {"previous_public_key", managed->public_key},
+                                        {"next_signature", *own_signature}};
+            auto linked = context.store->link_own_identity({context.acting_user_id,
+                                                            pending->account_taap_id,
+                                                            pending->own_taap_id,
+                                                            pending->own_document,
+                                                            pending->own_document_hash,
+                                                            link_document});
+            if (!linked) {
+                return from_store_error(linked.error());
+            }
+            context.audit_details["managed_seed_destroyed"] = true;
+            context.audit_details["own_document_hash"] = pending->own_document_hash;
+            return ApiResult::success(account_identity_json(*linked));
+        }});
+}
+
 void register_identity_capabilities(Registry& registry) {
     // ---- users ----
     registry.add(Capability{
@@ -2418,7 +2668,10 @@ void register_identity_capabilities(Registry& registry) {
                        "credential and issue a browser session. In the Lake pool, atomically "
                        "provision one personal customer with an inherited admin ownership grant, "
                        "a generated immutable handle, and the configured default storage quota. "
-                       "Duplicate email or identity returns conflict; sign in to resume.",
+                       "Duplicate email or identity returns conflict; sign in to resume. In the "
+                       "Lake pool identity_document is optional: without it Lake creates a "
+                       "managed key for the account, which the person can later replace with "
+                       "their own identity (use_own_identity).",
         .input_schema = {{"type", "object"},
                          {"properties",
                           {{"pool_id", {{"type", "string"}}},
@@ -2427,7 +2680,7 @@ void register_identity_capabilities(Registry& registry) {
                            {"display_name", {{"type", "string"}}},
                            {"device_name", {{"type", "string"}}},
                            {"identity_document", {{"type", "string"}}}}},
-                         {"required", json::array({"email", "password", "identity_document"})},
+                         {"required", json::array({"email", "password"})},
                          {"additionalProperties", false}},
         .output_schema = session_issue_schema,
         .kind = CapabilityKind::Action,
@@ -2445,14 +2698,32 @@ void register_identity_capabilities(Registry& registry) {
                 !origin.ok) {
                 co_return origin;
             }
-            co_return session_answer(
-                co_await sign_up_password_session({pool_id,
-                                                   input.value("email", ""),
-                                                   input.value("password", ""),
-                                                   input.value("display_name", ""),
-                                                   input.value("device_name", "browser"),
-                                                   input.value("identity_document", "")},
-                                                  context));
+            control::NewPasswordUser user{pool_id,
+                                          input.value("email", ""),
+                                          input.value("password", ""),
+                                          input.value("display_name", ""),
+                                          input.value("device_name", "browser"),
+                                          input.value("identity_document", "")};
+            // Lake's own sign-up without a document gets a managed key (lake#762, decision 65).
+            if (pool_id == "lake" &&
+                user.identity_document.find_first_not_of(" \t\r\n") == std::string::npos) {
+                user.identity_document.clear();
+                const auto minted = audit::mint_custodial_identity(
+                    audit::effective_instance_kek(*context.store, context.instance_kek));
+                if (!minted) {
+                    co_return ApiResult::failure("store_unavailable",
+                                                 "Lake cannot create a managed key: " +
+                                                     minted.error().message);
+                }
+                user.custodial_taap_id = minted->taap_id;
+                user.custodial_public_key = minted->public_key;
+                user.custodial_wrapped_seed = minted->wrapped_seed;
+                context.audit_details = {{"key", "managed"}, {"taap_id", minted->taap_id}};
+            } else if (user.identity_document.empty()) {
+                co_return ApiResult::failure(
+                    "invalid_input", "identity_document is required", "/identity_document");
+            }
+            co_return session_answer(co_await sign_up_password_session(std::move(user), context));
         }});
     registry.add(
         Capability{.name = "sign_in_password",
@@ -3134,6 +3405,7 @@ void register_identity_capabilities(Registry& registry) {
             return result ? ApiResult::success({{"revoked", true}})
                           : from_store_error(result.error());
         }});
+    register_own_identity_capabilities(registry);
 }
 
 void register_sso_capabilities(Registry& registry) {

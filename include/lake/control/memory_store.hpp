@@ -483,6 +483,14 @@ public:
     Result<IssuedSession> sign_in_passkey(const PasskeyAssertion&) override;
     Result<IssuedSession> sign_in_oauth(const OAuthIdentity&) override;
     Result<IssuedSession> sign_in_clerk(const ClerkIdentity&) override;
+    Result<AccountIdentity> account_identity(const std::string& user_id) override;
+    Result<ManagedKey> managed_key(const std::string& user_id) override;
+    Result<void> create_identity_link_challenge(const IdentityLinkChallenge&) override;
+    Result<IdentityLinkChallenge>
+    consume_identity_link_challenge(const std::string& user_id,
+                                    const std::string& challenge) override;
+    Result<AccountIdentity> link_own_identity(const IdentityLink&) override;
+    Result<std::string> account_for_identity(const std::string& taap_id) override;
     Result<void> register_oauth_provider(const OAuthProvider&) override;
     Result<OAuthProvider> get_oauth_provider(const std::string& pool_id,
                                              const std::string& provider) override;
@@ -699,6 +707,17 @@ private:
     std::vector<OAuthCredential> oauth_credentials_;
     // user id -> the TAAP identity lake minted for a Clerk sign-in (custodial_identities).
     std::map<std::string, ClerkIdentity> custodial_identities_;
+    // user id -> when its managed seed was destroyed by using its own identity (lake#762).
+    std::map<std::string, std::string> managed_seed_destroyed_at_;
+    struct IdentityLinkChallengeRecord {
+        IdentityLinkChallenge challenge;
+        std::chrono::system_clock::time_point expires_at;
+        bool used = false;
+    };
+    std::vector<IdentityLinkChallengeRecord> identity_link_challenges_;
+    // user id -> its own identity, linked as the managed key's successor.
+    std::map<std::string, IdentityLink> identity_links_;
+    std::map<std::string, std::string> identity_linked_at_;
     std::vector<WebAuthnChallengeRecord> webauthn_challenges_;
     std::vector<OAuthProvider> oauth_providers_;
     struct OAuthFlowRecord {

@@ -45,8 +45,13 @@ member only from that confirmation.
 
 ## Personal settings
 
-`/settings` has five tabs; an unknown `tab` shows Notifications. The breadcrumb is Account › the
-tab. Profile shows the person's TAAP identity (from `viewer`); Sessions and devices reads
+`/settings` has six tabs; an unknown `tab` shows Notifications. The breadcrumb is Account › the
+tab. Profile shows the person's TAAP identity (from `viewer`), linking to Identity; Identity
+(`IdentityPanel.tsx`, lake#762) reads `account_identity` (managed key or own key, the account
+identity and what it signs as) and, for a managed key, offers **Use my own identity**: paste
+`liquid identity show --document` (`begin_own_identity`), run the `liquid sign artifact` command it
+shows and paste the output (`use_own_identity`); a refused signature starts again from the document
+([identity.md](../api/identity.md#your-own-identity)); Sessions and devices reads
 `list_sessions` and `list_devices`; Passkeys and Tokens link to `/passkeys` and `/tokens`, where the capability forms
 are ([identity.md](identity.md)); Notifications says no delivery preferences are configured.
 

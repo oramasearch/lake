@@ -54,7 +54,7 @@ The credential is `credentials(kind = 'oauth', pool_id = 'lake', subject = 'cler
 |---|---|
 | The Clerk subject is already linked | Signs in that user |
 | Not linked, and a lake-pool user has the same email | Links the subject to that user. Clerk verified the address, so it is the same person |
-| Neither | Creates the user with a **custodial TAAP identity**, provisions their personal customer with an `admin` grant (as password sign-up does, decision 40), and links the subject |
+| Neither | Creates the user with a **managed key** (a TAAP identity Lake holds), provisions their personal customer with an `admin` grant (as password sign-up does, decision 40), and links the subject |
 
 Policy is keyed on TAAP identities, and a Clerk user arrives without one. So on first sign-in lake
 mints one: `audit::mint_custodial_identity` generates an Ed25519 seed, derives
@@ -62,8 +62,11 @@ mints one: `audit::mint_custodial_identity` generates an Ed25519 seed, derives
 under `LAKE_INSTANCE_KEK`. The seed, public key and identifier are stored in
 `custodial_identities` (migration `0023_custodial_identities`, see
 [`../control-plane/schema.md`](../control-plane/schema.md)). Work done in the browser does not need
-the seed; lake commits drive changes itself. It is held so the identity can later sign as the
-person, or be rotated to a key the person holds.
+the seed; lake commits drive changes itself. It is held so the managed key can sign its own
+replacement: in Account → Identity, *Use my own identity* rotates the account to the person's own
+liquid identity as a linked successor and destroys the seed ([identity.md](identity.md#your-own-identity),
+lake#762, decision 65). Lake's own sign-up without Clerk gives the same managed key when no
+identity document is sent.
 
 ## Configuration
 
@@ -104,7 +107,7 @@ curl -s https://<host>/sign-in | grep data-clerk-publishable-key
 ```
 
 `Clerk.*` covers the key parsing, template-token verification (wrong audience, issuer, signer,
-expiry and tampering are refused), custodial minting, and the sign-in contract on both stores
+expiry and tampering are refused), managed-key minting, and the sign-in contract on both stores
 (create, repeat, link by email, refuse without an identity). `HttpServer.Clerk*` covers the pages,
 a refused token, logout, and the exchange being absent without Clerk. The browser flow itself
 needs a real Clerk instance: sign in at `/sign-in` with an invited address and confirm you land on

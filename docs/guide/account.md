@@ -26,19 +26,21 @@ administrator adds people.
 
 **With Lake's own sign-up** (`/sign-up`):
 
-1. Install liquid and run `liquid identity show --document`. liquid creates your identity on first
-   use (or exports your existing one) and prints its public document. The private key stays on your
-   computer.
-2. Fill in **Email**, **Display name** (optional), **Password**, **Device name** and **TAAP/1
-   identity document** (the printed document).
-3. Press **Create account**. You land on **Data → Repositories**, signed in.
+1. Fill in **Email**, **Display name** (optional), **Password** and **Device name**.
+2. Press **Create account**. You land on **Data → Repositories**, signed in.
+
+Either way, Lake gives your account a **managed key**: a temporary signing identity Lake holds for
+you, so you need nothing installed to start. You can replace it with your own key later ([Your
+Identity](#your-identity)).
 
 - REST: `POST /v1/sign_up_password` with this body:
 
 ```json
-{"email": "you@example.com", "password": "<password>", "display_name": "Your Name", "device_name": "laptop", "identity_document": "<identity document>"}
+{"email": "you@example.com", "password": "<password>", "display_name": "Your Name", "device_name": "laptop"}
 ```
 
+  Add `"identity_document": "<output of liquid identity show --document>"` to sign up with your own
+  identity from the start instead.
 - MCP: `sign_up_password` with the same input.
 
 ## Sign In
@@ -98,12 +100,41 @@ Open the account menu in the top bar and choose **Settings** (`/settings`). Its 
 | Tab | What it shows |
 |---|---|
 | **Profile** | Your name, handle and identity, and whether multi-factor authentication is enabled |
+| **Identity** | Which key your account signs with, and **Use my own identity** ([Your Identity](#your-identity)) |
 | **Sessions and devices** | How many sessions and devices you have, linking to **Sessions** |
 | **Passkeys** | Signing in with a passkey, linking to **Passkeys** (hidden when your Lake uses Clerk) |
 | **Tokens** | Your API tokens, linking to **Tokens** |
 | **Notifications** | No delivery preferences are configured |
 
 The same menu has **Sessions**, **Passkeys**, **Tokens** and **Sign out**.
+
+## Your Identity
+
+Open **Settings → Identity** (`/settings?tab=identity`). It shows your **account identity** (the
+identifier your access, activity and repositories belong to), which key it signs with, and what it
+signs as.
+
+- **Managed key**: Lake holds a temporary key for you. Every new account starts this way.
+- **Your own key**: your account signs with the liquid identity on your computer, and Lake holds no
+  key for you.
+
+**Use my own identity** (optional, and permanent):
+
+1. Install liquid and run `liquid identity show --document`. Paste its output into **Your identity
+   document** and press **Continue**.
+2. Lake shows a command, `liquid sign artifact sha256:…`. Run it within ten minutes and paste
+   everything it prints into **What liquid sign printed**.
+3. Press **Use my own identity**. Lake checks the signature, links your own identity to your
+   account, and destroys the managed key. Your access, activity and repositories stay as they were.
+
+Afterwards, changes you push with liquid are recorded as yours, and you can sign in with your key.
+An identity can belong to one account only, and an identity you have already rotated with
+`liquid identity rotate` cannot be linked yet.
+
+- REST: `GET /v1/account_identity`; `POST /v1/begin_own_identity` with
+  `{"identity_document": "<document>"}`; `POST /v1/use_own_identity` with
+  `{"challenge": "sha256:…", "signature": "<what liquid sign printed>"}`.
+- MCP: `account_identity`, `begin_own_identity`, `use_own_identity`.
 
 ## Multi-Factor Authentication
 

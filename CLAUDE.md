@@ -40,6 +40,19 @@ size and a 15-minute link signed with the Hub upload links' HMAC under `LAKE_INS
 `GET /tunnel-clients/<platform>` serves without a session; Get credentials makes installing it step 4.
 Not deployed. See [`docs/api/tunnel-clients.md`](docs/api/tunnel-clients.md).
 
+Every new account starts with a managed key, and a person may use their own identity instead
+(lake#762, liquid-bridge decision 65, migration `0086_identity_links`): Lake's own password sign-up
+no longer needs an identity document and mints a managed key as a first Clerk sign-in does;
+Account → Identity (`/settings?tab=identity`) reads `account_identity` and runs *Use my own
+identity*: `begin_own_identity` verifies the `liquid identity show --document` output (an initial
+document only) and issues a ten-minute challenge, `use_own_identity` verifies the
+`liquid sign artifact <challenge>` signature with libliquid, has the managed key sign the link, and
+in one transaction records it and destroys the managed seed. The account keeps its identifier, so
+grants, audit and repositories stay; `sign_in_taap` with the own key reaches it, and a push's
+`push_change` audit names the signer and the account it acts for. Not deployed; the operator must
+vendor the schema and select `identity_links_guard`. See
+[`docs/api/identity.md#your-own-identity`](docs/api/identity.md#your-own-identity).
+
 The newest dated record, [`docs/deployment/dev-2026-10-01.md`](docs/deployment/dev-2026-10-01.md),
 and [`docs/design/status.md`](docs/design/status.md) still describe the 2026-10-01 deployment
 (`oramasearch/lake:20261001d`, `36679e1`); they have not been brought up to the release. Until they
