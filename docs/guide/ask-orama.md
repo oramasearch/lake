@@ -99,8 +99,10 @@ Through MCP the tools have the same names and inputs: `send_ask_message`, `get_a
 ## Talk to Another Agent
 
 The **Talk to** selector under the message box picks who answers: Ask Orama first, then the Agent
-Library's other running chat agents, then the chat agents your workspace built. Internal tooling
-agents are never offered. An agent of your workspace answers at once; a library agent answers in
+Library's other running chat agents, then the chat agents your workspace built. Every one of
+Orama's agents is there when your Lake runs it, including the Eval Generator Agent, which creates
+an eval for you, and the Auto-Suggest Corpus Agent and Project Corpus Agent, which build a training
+corpus for you. An agent of your workspace answers at once; a library agent answers in
 the background, as above.
 
 Through the API, send `agent` with the agent's id in `send_ask_message`, or start a turn directly
@@ -180,7 +182,7 @@ tasks those agents asked for in turn. Only you can delete your conversations.
 | You see | What to do |
 |---|---|
 | *Ask Orama works in a workspace, and you have none selected* (the panel) | Choose a workspace in the top bar, or start one on **Ship → Workspaces**. On the home, press **Start a workspace**. |
-| An agent is not offered in **Talk to** | It is not deployed on your Lake, is internal tooling, or does not chat. **Design → Agents** says which of Orama's agents run. |
+| An agent is not offered in **Talk to** | It is not deployed on your Lake, or it does not chat. Every one of Orama's agents is offered when it runs; **Design → Agents** says which of them run. |
 | *That proposal is not in this conversation* (`not_found`) | Only proposals Lake stored in your conversation can be confirmed. |
 | `workspace_not_ready` | The workspace is not ready; conversations live in it. |
 | `invalid_input` at `/workspace_id` | The workspace id is unknown or not one of the account's. |

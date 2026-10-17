@@ -59,7 +59,7 @@ workspace record (lake#375). See [agent leases](../../docs/api/agent-bus.md).
 A delegated `agent_turn` from a task credential names its asking task (`parent_task_id`), and
 `publish_agent_event` reports the delegated task's progress on that asking task (lake#451). The Ask
 page renders the running turn it already reads (agent, latest message, attempts, elapsed time) and
-builds *Talk to* with `control::talk_to_agents`, which leaves out internal library agents. See
+builds *Talk to* with `control::talk_to_agents`, which offers every library chat agent (lake#788). See
 [ask-orama.md](../../docs/api/ask-orama.md) and [delegated turns](../../docs/api/agent-bus.md#delegated-turns).
 
 What was written for an agent task lives in its workspace (lake#374, lake#375,

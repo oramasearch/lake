@@ -1,8 +1,8 @@
 /** Design → Agents (lake#653, renamed from Agent Library): where agents are designed. It works as
  * Design → Solutions does (lake#597): Orama's agents (the Agent Library, read-only, "By Orama",
  * with Duplicate on their page) beside the workspace's own (editable, "Yours"), a filter by who an
- * agent is from and a search. All nine of Orama's are listed (lake#763): the ones a person uses,
- * then Orama's testing agents in their own section, each saying whether this Lake runs it. New
+ * agent is from and a search. All nine of Orama's are listed in one list (lake#763, lake#788),
+ * each saying whether this Lake runs it. New
  * agent designs one in a drawer; the Agent Factory, where
  * Agent Creator Agent drafts one from a description, is the other way in. Running and training an agent
  * are on Train → Agent, linked from each agent. */
@@ -12,7 +12,7 @@ import type { Row } from "@/lib/api";
 import { useRead } from "@/lib/api";
 import { Badge, Button, Card, Chip, Empty, ErrorBlock, FilterChips, Grid, Page, SearchInput, Section, Skeleton, Stat, StatRow, Status, Toolbar } from "@/lib/ui";
 import { WorkspaceGate, useWorkspaceStatus } from "@/components/WorkspaceGate";
-import { agentForm, agentSource, filterAgents, libraryState, modelLabel, ownAgents, skillLabels, sourceLabel, splitLibrary, text, type AgentForm, type AgentSource } from "@/lib/agents";
+import { agentForm, agentSource, filterAgents, libraryState, modelLabel, ownAgents, skillLabels, sourceLabel, text, type AgentForm, type AgentSource } from "@/lib/agents";
 import { useEngineRead } from "@/pages/train/agents";
 import { qs, useWsPath } from "./api";
 import { useDesignTrail } from "./parts";
@@ -53,29 +53,18 @@ export default function AgentsPage() {
  * not the workspace's. */
 function OramaAgentsOnly() {
   const library = useLibrary();
-  const { used, testing } = splitLibrary(library.data?.agents ?? []);
   return (
     <div className="mt-8">
       <Section title="By Orama" sub="Agents Orama provides, each for one job. Start your workspace to design your own or duplicate one of these.">
-        {library.isLoading ? <Skeleton /> : library.isError ? <ErrorBlock error={library.error} what="Orama's agents" /> : <AgentCards agents={used} />}
+        {library.isLoading ? <Skeleton /> : library.isError ? <ErrorBlock error={library.error} what="Orama's agents" /> : <AgentCards agents={library.data?.agents ?? []} />}
       </Section>
-      {testing.length > 0 && <TestingAgents agents={testing} />}
     </div>
   );
 }
 
-/** Every agent in Orama's library, Orama's testing agents included (lake#763). */
+/** Every agent in Orama's library, all of them ordinary agents (lake#763, lake#788). */
 function useLibrary() {
-  return useRead<{ agents?: Row[] }>("list_agent_library", { include_internal: true }, { staleTime: 300_000 });
-}
-
-/** Orama's testing agents (lake#451): listed with what they do, never offered in Talk to. */
-function TestingAgents({ agents }: { agents: Row[] }) {
-  return (
-    <Section title="Orama's Testing Agents" sub="Orama uses these to test its own agents. They are listed so you can see everything this Lake runs; they are not offered in Ask Orama's Talk to.">
-      <AgentCards agents={agents} />
-    </Section>
-  );
+  return useRead<{ agents?: Row[] }>("list_agent_library", {}, { staleTime: 300_000 });
 }
 
 function Agents({ onNew }: { onNew: (form: AgentForm) => void }) {
@@ -98,7 +87,7 @@ function Agents({ onNew }: { onNew: (form: AgentForm) => void }) {
   const orama: Row[] = library.isError ? [] : library.data?.agents ?? [];
   const shown = filterAgents([...yours, ...orama], { source, search });
   const shownYours = shown.filter((a) => agentSource(a) === "workspace");
-  const { used: shownOrama, testing: shownTesting } = splitLibrary(shown.filter((a) => agentSource(a) === "orama"));
+  const shownOrama = shown.filter((a) => agentSource(a) === "orama");
   const unattended = yours.filter((a) => text(a, "trigger")).length;
   const filtering = !!search.trim() || !!source;
   return (
@@ -153,7 +142,6 @@ function Agents({ onNew }: { onNew: (form: AgentForm) => void }) {
           <AgentCards agents={shownOrama} />
         </Section>
       )}
-      {source !== "workspace" && shownTesting.length > 0 && <TestingAgents agents={shownTesting} />}
       {source !== "workspace" && library.isError && <ErrorBlock error={library.error} what="Orama's agents" retry={() => void library.refetch()} />}
     </>
   );
@@ -215,7 +203,6 @@ function AgentCards({ agents }: { agents: Row[] }) {
                 {/* Whether this Lake runs it, for every one of Orama's agents (lake#763). */}
                 <div className="mt-3 flex flex-wrap items-center gap-1.5">
                   <Status value={state.label} tone={state.running ? "success" : "neutral"} />
-                  {state.testing && <Badge title="Orama's own agent tests; never offered in Talk to">Testing agent</Badge>}
                 </div>
               </>
             )}

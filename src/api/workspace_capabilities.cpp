@@ -5856,8 +5856,9 @@ void register_agent_run_capabilities(Registry& registry) {
         .description =
             "Send one message to any agent: a specialized agent of the Agent Library by its key "
             "(agent-ask-orama, agent-project, agent-application, agent-experiments, "
-            "agent-autosuggest, agent-creator) or an agent of "
-            "this account by its id. A library agent's turn runs in the background: the answer is "
+            "agent-autosuggest, agent-creator, agent-eval-generator for an eval, "
+            "agent-autosuggest-corpus or agent-project-corpus for a training corpus) or an agent "
+            "of this account by its id. A library agent's turn runs in the background: the answer is "
             "{task_id, status} at once, and get_agent_task follows it to its answer. A native "
             "agent answers from the workspace; a Python agent from its running service (started "
             "on first use).",
@@ -7223,16 +7224,16 @@ void register_workspace_capabilities(Registry& registry) {
         .description =
             "Every specialized agent Orama ships for you to use (Ask Orama, the Project Agent, "
             "the Application Agent, the Auto-Suggest Agent, the Agent Creator Agent, ...): what "
-            "each does, where you meet it, and whether this Lake runs it. Orama's testing agents "
-            "(the Eval Generator Agent and the two corpus agents) are listed only with "
-            "`include_internal: true`.",
+            "each does, where you meet it, and whether this Lake runs it. All nine are listed, "
+            "including the Eval Generator Agent, which creates evals, and the two corpus agents, "
+            "which build training corpora.",
         .input_schema = {{"type", "object"},
                          {"properties",
                           {{"include_internal",
                             {{"type", "boolean"},
                              {"description",
-                              "also list Orama's internal agents, marked `internal: true` "
-                              "(default false)"}}}}},
+                              "accepted for compatibility and ignored: every agent is listed "
+                              "(lake#788)"}}}}},
                          {"additionalProperties", false}},
         .output_schema = {{"type", "object"}},
         .kind = CapabilityKind::Read,
@@ -7245,16 +7246,11 @@ void register_workspace_capabilities(Registry& registry) {
         // The library is the same for everyone signed in.
         .authorizes_candidates = true,
         .handler =
-            [](const json& input, ApiContext& context) {
+            [](const json&, ApiContext& context) {
+                // Every agent, whatever `include_internal` says: none is internal (lake#788).
                 const std::map<std::string, std::string> none;
-                json library = control::agent_library_json(
-                    context.workspaces ? context.workspaces->config().agent_endpoints : none);
-                // Internal tooling only when asked (lake#594).
-                if (!input.value("include_internal", false) && library.contains("agents")) {
-                    std::erase_if(library["agents"].get_ref<json::array_t&>(),
-                                  [](const json& agent) { return agent.value("internal", false); });
-                }
-                return ApiResult::success(std::move(library));
+                return ApiResult::success(control::agent_library_json(
+                    context.workspaces ? context.workspaces->config().agent_endpoints : none));
             }});
     registry.add(Capability{
         .name = "list_agent_revisions",
