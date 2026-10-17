@@ -151,6 +151,10 @@ test("the home says what Lake does, grouped as the rail is, claiming only what t
   assert.deepEqual(fewer.find((g) => g.key === "design")!.things.map((t) => t.path), ["/design/projects"]);
   // MCP's Worked Flows follow Developer → MCP, and only where the rail offers it (lake#789).
   assert.deepEqual(all.find((g) => g.key === "developer")!.things.map((t) => t.path), ["/developer/mcp", "/developer/mcp?tab=tools", "/developer/mcp?tab=flows"]);
+  // Every Network page the rail offers is on the home (lake#791).
+  const network = ["/network/overview", "/network/connections", "/network/access", "/network/private-networks", "/network/egress", "/network/policies", "/network/activity"];
+  const withNetwork = lakeMap(network.map((path) => ({ section: "network", path, label: path })), { runningAgents: new Set() });
+  assert.deepEqual(withNetwork.find((g) => g.key === "network")!.things.map((t) => t.path), network);
   // Design is about AI (Steve, 2026-10-17): the home names its pages as AI.
   assert.equal(fewer.find((g) => g.key === "design")!.things[0].label, "AI Projects");
   assert.deepEqual(fewer.find((g) => g.key === "ship")!.things.map((t) => t.path), ["/ship/apps"]);
