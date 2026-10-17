@@ -565,7 +565,7 @@ TEST(WebApps, OperatorHashesRestrictEveryPurposeAndRotationRevokesOldTokens) {
 
 TEST(WebApps, ServiceBindingsAcceptAUniqueServiceName) {
     // Agents and people name the service; lake stores its id (live 2026-09-30: the
-    // ApplicationAgent bound `e2e-notes-db` by name and create_app answered not_found).
+    // Application Agent bound `e2e-notes-db` by name and create_app answered not_found).
     WebApps apps;
     const auto created = apps.create();
     ASSERT_TRUE(created.ok) << created.error.message;

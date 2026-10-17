@@ -108,7 +108,7 @@ bool valid_name(std::string_view name) {
     });
 }
 
-// Whether the calling ApplicationAgent turn was confirmed by a person who acknowledged that the
+// Whether the calling Application Agent turn was confirmed by a person who acknowledged that the
 // proposed app is public: lake's confirmation form sets context.confirm_public (lake#452).
 // The confirmation is in the turn's request, a record in its workspace (lake#374); a workspace
 // that cannot answer acknowledges nothing.
@@ -715,7 +715,7 @@ void register_web_app_capabilities(Registry& registry) {
                 co_return ApiResult::failure("invalid_input", name + " is reserved", "/name");
             }
             // A public app is acknowledged as public, as set_app_auth requires (lake#452): by the
-            // caller's confirm_public, or, for an ApplicationAgent turn, by the person who
+            // caller's confirm_public, or, for an Application Agent turn, by the person who
             // confirmed the proposal (its task context's confirm_public).
             const std::string requested_auth = input.value("auth", std::string("lake"));
             const bool public_auth = requested_auth == "none" || requested_auth == "public";

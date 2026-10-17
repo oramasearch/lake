@@ -344,9 +344,9 @@ lake Zetta.
   until then (cutover, done on dev before migration `0070_drop_moved_tables` dropped the tables:
   [workspace-records.md](../architecture/workspace-records.md#cutover-runbook-application-keys-and-webhooks-dev-cluster)).
 
-## ApplicationAgent and Ship Apps
+## Application Agent and Ship Apps
 
-ApplicationAgent builds customer-hosted **Ship Apps**; it does not register the identity
+Application Agent builds customer-hosted **Ship Apps**; it does not register the identity
 applications described above. It is the `agent-application` Agent Library service, runs on the
 agent bus topic `agent-tasks.agent-application`, and authenticates its bus calls with the
 `lake-<name>-agent-bus` Secret key for that agent.
@@ -367,13 +367,13 @@ rather than trusting the caller's copy (lake#561):
 
 `proposal_task_id` must be a finished `agent-application` `app` turn of this workspace that the
 caller may follow, and its answer a proposal with `confirm: true`, `files` and `app`
-(`That task has no ApplicationAgent proposal to confirm.`, 400). `proposal_sha256` must be the
+(`That task has no Application Agent proposal to confirm.`, 400). `proposal_sha256` must be the
 digest of that stored proposal, which `get_agent_task` returns beside it, and `confirmed_proposal`
-must equal it (`The ApplicationAgent proposal changed before confirmation.`, 409). A public app
+must equal it (`The Application Agent proposal changed before confirmation.`, 409). A public app
 (`auth` `none` or `public`) also needs `context.confirm_public: true` (`This app will be public.
 Tick the box to confirm that anyone with its address can open it.`, 400).
 
-ApplicationAgent's App shape maps `auth: public` to Ship App `auth: none`, accepts a missing or null
+Application Agent's App shape maps `auth: public` to Ship App `auth: none`, accepts a missing or null
 host as the generated wildcard host, and represents an operator-managed environment credential as
 `{"NAME":{"secret":"reference"}}`. `deploy_app` accepts the service's `app` key as an alias for
 `app_id`. It must propose a non-reserved App name: Lake protects the platform names and prefixes

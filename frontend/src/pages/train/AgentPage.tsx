@@ -2,7 +2,7 @@
  * behaviour comes from a model, a pipeline or a training schedule) opens on Training: its
  * performance over time (held-out scores, task success rate, latency, cost), its trained
  * versions and the data each learned from, its training schedule, Launch experiment through
- * ExperimentsAgent, and promote and roll back. Every agent has its unattended runs (Run now) and,
+ * Experiments Agent, and promote and roll back. Every agent has its unattended runs (Run now) and,
  * for a frontier-model agent, its schedules. Designing it is Design → Agent, linked from here. */
 import { useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
@@ -350,7 +350,7 @@ function TrainingSchedule({ agent }: { agent: Row }) {
   );
 }
 
-/** The experiments run for this agent, and Launch experiment: ExperimentsAgent turns what to
+/** The experiments run for this agent, and Launch experiment: Experiments Agent turns what to
  * compare (versions, prompts or models) into an editable proposal on Train → Experiments, and
  * nothing starts until it is confirmed there. */
 function Experiments({ agent, versions }: { agent: Row; versions: TrainedVersion[] }) {
@@ -372,7 +372,7 @@ function Experiments({ agent, versions }: { agent: Row; versions: TrainedVersion
         </Button>
       }
     >
-      <p className="muted mt-0 text-[12.5px]">An experiment compares its versions, prompts or models on held-out data and proposes which to promote. ExperimentsAgent designs it; you confirm it before it starts.</p>
+      <p className="muted mt-0 text-[12.5px]">An experiment compares its versions, prompts or models on held-out data and proposes which to promote. The Experiments Agent designs it; you confirm it before it starts.</p>
       {listed.isError ? (
         <ErrorBlock error={listed.error} retry={() => void listed.refetch()} what="the experiments" />
       ) : mine.length ? (
@@ -413,7 +413,7 @@ function LaunchExperiment({ agent, versions, onClose }: { agent: Row; versions: 
         <>
           <Button onClick={onClose}>Cancel</Button>
           <Button variant="primary" type="submit" form="launch-experiment" loading={send.busy}>
-            Ask ExperimentsAgent
+            Ask the Experiments Agent
           </Button>
         </>
       }
@@ -446,7 +446,7 @@ function LaunchExperiment({ agent, versions, onClose }: { agent: Row; versions: 
         <Field label="What it should improve" help="Optional. Its goal is used when this is empty.">
           <textarea name="goal" rows={2} value={goal} onChange={(e) => setGoal(e.target.value)} />
         </Field>
-        <Field label="ExperimentsAgent is asked">
+        <Field label="Experiments Agent is asked">
           <p className="m-0 rounded-[6px] border border-hairline bg-raised/40 p-2 text-[12.5px] text-ink-2">{message}</p>
         </Field>
         <p className="muted m-0 text-[12.5px]">It answers with an editable proposal on Train → Experiments. Nothing starts until you confirm it there.</p>

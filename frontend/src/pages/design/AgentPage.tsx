@@ -59,7 +59,12 @@ function OramaAgentPage({ agentKey }: { agentKey: string }) {
             <Badge tone="info" title="Orama's: read-only, duplicate it to edit">
               By Orama
             </Badge>
-            {state && <Status value={state.label} tone={state.available ? "success" : "neutral"} />}
+            {state?.testing && (
+              <Badge tone="neutral" title="Orama's own agent tests; never offered in Talk to">
+                Testing agent
+              </Badge>
+            )}
+            {state && <Status value={state.label} tone={state.running ? "success" : "neutral"} />}
           </span>
         ) : (
           agentKey
@@ -69,7 +74,7 @@ function OramaAgentPage({ agentKey }: { agentKey: string }) {
       actions={
         agent ? (
           <>
-            {state?.available && agent.chat === true && (
+            {state?.talkable && (
               <Button to={`/?${qs({ agent: agentKey })}`}>
                 <MessageSquare size={14} aria-hidden /> Talk in Ask Orama
               </Button>
@@ -122,8 +127,8 @@ function OramaAgentPage({ agentKey }: { agentKey: string }) {
               rows={[
                 ["What it does for you", text(agent, "purpose")],
                 ["Where you meet it", text(agent, "used_in")],
-                ["Takes a conversation", agent.chat === true ? "Yes" : "No"],
-                ["Here", state?.label],
+                ["Talk to it in Ask Orama", state?.testing ? "No: one of Orama's testing agents" : state?.talkable ? "Yes" : agent.chat === true ? "Not while it is not running on this Lake" : "No"],
+                ["On this Lake", state?.label],
               ]}
             />
           </Panel>

@@ -22,7 +22,7 @@ The pages follow the console's rich layout (`docs/ui/web-app.md`, *The look*):
 - **Apps** opens with figures from `list_apps` (Apps, Ready, Failed, With Zetta), then a search and a
   phase filter over a card grid: each card shows the app's name, phase chip, URL, revision, bindings
   and when it was last updated (`updated_at`). **New app** opens a drawer with *From a repository* and
-  *From an image*. **Build with ApplicationAgent** opens a drawer for the description. A task named
+  *From an image*. **Build with the Application Agent** opens a drawer for the description. A task named
   by `?task=` is shown above the grid.
 - **App** is a Split. The main column has tabs in `?tab=` (Overview, Builds, Logs, Events, Settings,
   Services), and every other query parameter is kept. Overview holds the deploy history with
@@ -75,10 +75,10 @@ Builds come from `list_builds`. Each build shows its retained `build_logs` and t
 App event panels link to the `app-events.<app-id>` topic and builds to `build-events.<build-id>` in
 Train → Streams.
 
-## ApplicationAgent
+## Application Agent
 
 The Apps list checks the Agent Library (`list_agent_library`) for a deployed `agent-application`.
-When it is available, **Build an App With the ApplicationAgent** starts an `agent_turn` with
+When it is available, **Build an App With the Application Agent** starts an `agent_turn` with
 `agent: agent-application` and `kind: app`, puts the task id in the URL (`?task=`), and follows the
 task with `get_agent_task` every two seconds. The first turn has read tools only: workspace queries
 and SQL, datasets, services, the account's repositories (`list_repositories`, `get_repository`, tree
@@ -90,7 +90,7 @@ task again, checks that it still asks something in a conversation, and starts an
 `conversation_id`.
 
 A successful proposal shows the agent's reply, the App settings and every proposed file. **Confirm**
-reads the task again and checks, in the browser, that it is still a succeeded ApplicationAgent `app`
+reads the task again and checks, in the browser, that it is still a succeeded Application Agent `app`
 proposal asking for confirmation and that it is the same proposal that was shown (its JSON with
 sorted keys compared to what is on screen); otherwise nothing starts. It then starts a second turn
 with the proposal at `context.confirmed_proposal`. Only a turn carrying a well-formed confirmed
@@ -111,7 +111,7 @@ a public app for the agent.
 
 ## Verification
 
-In a workspace with ApplicationAgent deployed: build an app with the agent, reply to a question,
+In a workspace with the Application Agent deployed: build an app with the agent, reply to a question,
 confirm the proposal (and a public one with and without the checkbox), then on the app page
 restart, scale, set and unset a Secret-referenced variable (it shows as `••••••`), attach and
 detach Zetta and a service, change authentication, follow a build's live log, reload the page and

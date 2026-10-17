@@ -285,7 +285,7 @@ void check_web_app(HttpEvidence& http,
                     {"message_id", sent.at("reply_id")},
                     {"index", 0}}));
 
-    // Background turns: the Project Agent's build of a project, and an AgentCreator proposal.
+    // Background turns: the Project Agent's build of a project, and an Agent Creator Agent proposal.
     const auto task = [&](std::string agent, std::string kind, std::string conversation) {
         return checked(store.create_agent_task({.id = lake::control::new_uuid_v4(),
                                                 .customer_id = customer.id,

@@ -87,20 +87,31 @@ nlohmann::json agent_library_json(const std::map<std::string, std::string>& endp
 }
 
 nlohmann::json talk_to_agents(const nlohmann::json& library) {
-    nlohmann::json agents =
-        nlohmann::json::array({{{"id", "agent-ask-orama"}, {"name", "Ask Orama"}}});
+    // Each entry as the selector shows it: the catalogue's name and purpose, where a person meets
+    // the agent, and whether this Lake runs it (an agent that is not running is listed, marked,
+    // and cannot be picked; lake#763).
+    const auto entry = [](const LibraryAgent& agent, bool running) {
+        return nlohmann::json{{"id", std::string(agent.key)},
+                              {"name", std::string(agent.name)},
+                              {"purpose", std::string(agent.purpose)},
+                              {"used_in", std::string(agent.used_in)},
+                              {"running", running}};
+    };
+    const LibraryAgent& ask = *library_agent("agent-ask-orama");
+    nlohmann::json agents = nlohmann::json::array({entry(ask, true)});
     if (!library.is_object()) {
         return agents;
     }
-    for (const nlohmann::json& agent : library.value("agents", nlohmann::json::array())) {
-        const std::string key = agent.value("key", std::string());
-        // The row's own flag, and the library's, so an older answer cannot list internal tooling.
+    for (const nlohmann::json& row : library.value("agents", nlohmann::json::array())) {
+        const std::string key = row.value("key", std::string());
+        // The catalogue's own flags as well as the row's, so an older answer cannot list
+        // Orama's testing agents.
         const LibraryAgent* known = library_agent(key);
-        if (key != "agent-ask-orama" && agent.value("chat", false) &&
-            agent.value("deployed", false) && !agent.value("internal", false) &&
-            !(known != nullptr && known->internal)) {
-            agents.push_back({{"id", key}, {"name", agent.value("name", key)}});
+        if (known == nullptr || key == ask.key || !known->chat || known->internal ||
+            !row.value("chat", false) || row.value("internal", false)) {
+            continue;
         }
+        agents.push_back(entry(*known, row.value("deployed", false)));
     }
     return agents;
 }

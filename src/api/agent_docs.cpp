@@ -156,7 +156,7 @@ constexpr std::array group_rules{
               "answer both, each with `source` (orama or workspace) and `editable`. "
               "create_solution, update_solution and delete_solution change only the workspace's "
               "own and answer `forbidden` for Orama's; duplicate_solution copies either kind into "
-              "a new editable one. Auto-Suggest's opportunities become projects.",
+              "a new editable one. Auto-Suggest Agent's opportunities become projects.",
               [](std::string_view n) {
                   return n == "list_solutions" || n == "get_solution" || n == "create_solution" ||
                          n == "update_solution" || n == "delete_solution" ||
@@ -190,7 +190,7 @@ constexpr std::array group_rules{
                          n == "set_storage_quota";
               }},
     GroupRule{"Streams",
-              "Ask Orama and ApplicationAgent may freely read list_streams, get_stream and "
+              "Ask Orama and the Application Agent may freely read list_streams, get_stream and "
               "browse_stream. Stream writes require the person's confirmation; deletes require "
               "admin on the account. System streams are browse-only. browse_stream never "
               "consumes messages; use wait_ms for bounded live reads over REST or MCP.",

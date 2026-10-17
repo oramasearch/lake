@@ -1849,9 +1849,9 @@ TEST(Workspaces, TheAgentLibraryListsEverySpecializedAgentAndWhatRuns) {
                                         "agent-project-corpus"}));
     EXPECT_EQ(agents[0].at("name"), "Ask Orama");
     EXPECT_EQ(agents[0].at("status"), "Available");
-    EXPECT_EQ(agents[2].at("name"), "ApplicationAgent");
+    EXPECT_EQ(agents[2].at("name"), "Application Agent");
     EXPECT_EQ(agents[2].at("status"), "Available");
-    EXPECT_EQ(agents[3].at("name"), "ExperimentsAgent");
+    EXPECT_EQ(agents[3].at("name"), "Experiments Agent");
     EXPECT_EQ(agents[3].at("status"), "Available");
     EXPECT_EQ(agents[4].at("status"), "Not running on this Lake");
     // Every library agent takes a conversation (lake#263), but the generators are Orama's own
@@ -1869,25 +1869,44 @@ TEST(Workspaces, TheAgentLibraryListsEverySpecializedAgentAndWhatRuns) {
     }
 }
 
-TEST(Workspaces, TalkToOffersOnlyRunningAgentsAPersonUses) {
+TEST(Workspaces, TalkToOffersEveryAgentAPersonUsesAndMarksTheOnesNotRunning) {
     const json library = lake::control::agent_library_json({{"agent-ask-orama", "http://ask"},
                                                             {"agent-experiments", "http://x"},
                                                             {"agent-eval-generator", "http://e"},
                                                             {"agent-autosuggest-corpus", "http://a"},
                                                             {"agent-project-corpus", "http://p"}});
     const json offered = lake::control::talk_to_agents(library);
-    EXPECT_EQ(offered,
-              json::array({{{"id", "agent-ask-orama"}, {"name", "Ask Orama"}},
-                           {{"id", "agent-experiments"}, {"name", "ExperimentsAgent"}}}));
-    // An older answer without the flag still never lists internal tooling.
+    // Ask Orama first, then the five other agents a person uses, in catalogue order; Orama's
+    // testing agents never (lake#451), even when they run.
+    std::vector<std::string> ids;
+    for (const json& agent : offered) {
+        ids.push_back(agent.at("id"));
+        const auto* known = lake::control::library_agent(agent.at("id").get<std::string>());
+        ASSERT_NE(known, nullptr);
+        EXPECT_EQ(agent.at("name"), std::string(known->name));
+        EXPECT_EQ(agent.at("purpose"), std::string(known->purpose));
+        EXPECT_EQ(agent.at("used_in"), std::string(known->used_in));
+    }
+    EXPECT_EQ(ids, (std::vector<std::string>{"agent-ask-orama", "agent-project",
+                                             "agent-application", "agent-experiments",
+                                             "agent-autosuggest", "agent-creator"}));
+    EXPECT_EQ(offered[0].at("name"), "Ask Orama");
+    EXPECT_EQ(offered[3].at("name"), "Experiments Agent");
+    EXPECT_TRUE(offered[3].at("running").get<bool>());
+    // Not running on this Lake: listed and marked, not left out (lake#763).
+    EXPECT_FALSE(offered[1].at("running").get<bool>());
+    EXPECT_FALSE(offered[5].at("running").get<bool>());
+    // An older answer without the flag still never lists Orama's testing agents.
     json unflagged = library;
     for (json& agent : unflagged["agents"]) {
         agent.erase("internal");
     }
     EXPECT_EQ(lake::control::talk_to_agents(unflagged), offered);
-    EXPECT_EQ(lake::control::talk_to_agents(json()), json::array({{{"id", "agent-ask-orama"},
-                                                                  {"name", "Ask Orama"}}}));
-    EXPECT_EQ(lake::control::agent_display_name("agent-experiments"), "ExperimentsAgent");
+    const json alone = lake::control::talk_to_agents(json());
+    ASSERT_EQ(alone.size(), 1U);
+    EXPECT_EQ(alone[0].at("id"), "agent-ask-orama");
+    EXPECT_EQ(lake::control::agent_display_name("agent-experiments"), "Experiments Agent");
+    EXPECT_EQ(lake::control::agent_display_name("agent-creator"), "Agent Creator Agent");
     EXPECT_EQ(lake::control::agent_display_name("a-1"), "a-1");
 }
 
@@ -3142,7 +3161,7 @@ TEST(AgentRuns, AgentTurnReachesLibraryNativeAndPythonAgents) {
               "/design/pipeline?customer_id=" + r.w.customer_id +
                   "&project=retention&graph=churn&task=" + proposal_task);
 
-    // Auto-Suggest builds the workspace profile itself, with the task's read-only credential.
+    // Auto-Suggest Agent builds the workspace profile itself, with the task's read-only credential.
     const auto suggested = r.call("agent_turn", {{"agent", "agent-autosuggest"}, {"message", "?"}});
     ASSERT_TRUE(suggested.ok) << suggested.error.message;
     const auto suggest_task = r.task(suggested.value["task_id"]);
@@ -3479,7 +3498,7 @@ TEST(AgentRuns, ExperimentsAgentGrantsEachTurnOnlyItsExperimentOperations) {
     ASSERT_TRUE(status.ok) << status.error.message;
     const auto status_task = r.task(status.value["task_id"]);
     ASSERT_TRUE(status_task);
-    // A lake caller names the experiment; ExperimentsAgent reads the engine's `study` (lake#561).
+    // A lake caller names the experiment; Experiments Agent reads the engine's `study` (lake#561).
     EXPECT_EQ(status_task->body["context"]["study"], "study-one");
     EXPECT_NE(std::ranges::find(status_task->scopes, "stop_trial"),
               status_task->scopes.end());

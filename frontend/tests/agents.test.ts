@@ -27,6 +27,9 @@ import {
     experimentAsk,
     filterAgents,
     formProblem,
+    libraryState,
+    splitLibrary,
+    talkToAgents,
     ownAgents,
     revisionChanges,
     streamsToSet,
@@ -281,4 +284,30 @@ test("saving sends the streams only when they change, and none for an agent off 
     assert.deepEqual(streamsToSet({...form, model: "base"}, ["orders"]), [], "a native agent loses its streams");
     assert.equal(streamsToSet({...form, model: "base"}), null);
     assert.deepEqual(agentForm({name: "x", runtime: "python"}).streams, [], "streams are not on the engine's record");
+});
+
+test("Talk to lists every agent a person uses by its library name, marks the ones not running, and never Orama's testing agents (lake#763)", () => {
+    const rows = [
+        {key: "agent-ask-orama", name: "Ask Orama", purpose: "Answers questions.", used_in: "Everywhere", chat: true, deployed: true},
+        {key: "agent-project", name: "Project Agent", purpose: "Builds pipelines.", used_in: "Design", chat: true, deployed: true},
+        {key: "agent-creator", name: "Agent Creator Agent", purpose: "Designs agents.", used_in: "Design → Agents", chat: true, deployed: false},
+        {key: "agent-eval-generator", name: "Eval Generator Agent", purpose: "Writes test cases.", chat: true, deployed: true, internal: true},
+    ];
+    const own = [{id: "a-1", name: "Renewal watcher", kind: "custom", purpose: "Watches renewals."}, {id: "a-0", kind: "orama", name: "Seeded"}];
+    const agents = talkToAgents(rows, own, "");
+    assert.deepEqual(agents.map((a) => a.id), ["agent-ask-orama", "agent-project", "agent-creator", "a-1"]);
+    assert.deepEqual(agents[2], {id: "agent-creator", name: "Agent Creator Agent", purpose: "Designs agents.", usedIn: "Design → Agents", running: false});
+    assert.equal(agents[1].purpose, "Builds pipelines.");
+    assert.equal(agents[3].purpose, "Watches renewals.", "your own agent shows its own description");
+    assert.equal(talkToAgents(undefined, undefined, "")[0].name, "Loading…", "no name is written down while the library loads");
+    assert.deepEqual(talkToAgents(rows, undefined, "a-9").map((a) => a.id).at(-1), "a-9", "the agent in the URL stays listed");
+});
+
+test("Design → Agents shows whether this Lake runs each of Orama's agents, testing agents in their own section (lake#763)", () => {
+    assert.deepEqual(libraryState({status: "Available", chat: true}), {label: "Available", running: true, talkable: true, testing: false});
+    assert.deepEqual(libraryState({status: "Not running on this Lake", chat: true}), {label: "Not running on this Lake", running: false, talkable: false, testing: false});
+    assert.deepEqual(libraryState({status: "Available", chat: true, internal: true}), {label: "Running", running: true, talkable: false, testing: true});
+    const {used, testing} = splitLibrary([{key: "agent-project"}, {key: "agent-eval-generator", internal: true}]);
+    assert.deepEqual(used.map((a) => a.key), ["agent-project"]);
+    assert.deepEqual(testing.map((a) => a.key), ["agent-eval-generator"]);
 });

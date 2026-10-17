@@ -510,7 +510,7 @@ struct TwoSpaces {
         return *completed;
     }
 
-    // A Discover scan Auto-Suggest finished in a workspace: one suggestion and one decline.
+    // A Discover scan Auto-Suggest Agent finished in a workspace: one suggestion and one decline.
     std::string scan(const Space& space, const std::string& workspace_id, const std::string& intent) {
         const auto task = store->create_agent_task({.customer_id = space.customer_id,
                                                     .agent = "agent-autosuggest",

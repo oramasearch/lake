@@ -985,7 +985,7 @@ struct StreamOwner {
     std::string customer_id, workspace_id, topic, created_by;
 };
 
-// One Opportunity Auto-Suggest recommended (or declined, status not_yet), kept across scans. It
+// One Opportunity Auto-Suggest Agent recommended (or declined, status not_yet), kept across scans. It
 // lives in the workspace Zetta of the workspace its scan ran in (lake#376,
 // control/opportunities.hpp); the control store only reads the retired opportunities table for
 // the one-shot copy.

@@ -45,7 +45,7 @@ client.chat.completions.create(model="gpt-5.5", messages=[...])
 
 | Credential | Who holds it | Counted in |
 |---|---|---|
-| task, `lat.<task>.<secret>` | a library agent, for one turn: the `lake_token` in the claimed task's body (Ask Orama, the Project Agent, ApplicationAgent, ExperimentsAgent, Auto-Suggest, AgentCreator, the Eval Generator and the two corpus generators) | the task's workspace, labelled with the agent and the task id |
+| task, `lat.<task>.<secret>` | a library agent, for one turn: the `lake_token` in the claimed task's body (Ask Orama, the Project Agent, Application Agent, Experiments Agent, Auto-Suggest Agent, Agent Creator Agent, the Eval Generator Agent and the two corpus generators) | the task's workspace, labelled with the agent and the task id |
 | launch, `lal.<launch>.<secret>` | an agent launched on agent-runtime (`LAKE_TOKEN`) | the launch's workspace, labelled with the agent's name and the launch id |
 | schedule, `las.<schedule>.<secret>` | a scheduled agent's runs | the schedule's workspace, labelled with the agent's name and the schedule id |
 

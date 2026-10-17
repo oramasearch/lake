@@ -81,7 +81,7 @@ configured `LAKE_PUBLIC_HOST` and immutable digest:
 <LAKE_PUBLIC_HOST>/<customer handle>/<name>@<digest>
 ```
 
-The stored `target` remains the tagged in-cluster push reference. ApplicationAgent and Ship → Apps
+The stored `target` remains the tagged in-cluster push reference. Application Agent and Ship → Apps
 deploy the returned `image`, so Kubernetes nodes pull through the public Lake host.
 
 Builders push blobs and the registry cache over the in-cluster Service named by

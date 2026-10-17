@@ -9,8 +9,8 @@
 Agent Factory, Discover and pipeline tests in `tests/test_http_server.cpp`
 
 **No lake page or capability waits on a library agent inside an HTTP request.** Lake and the
-library agents (Ask Orama, the Project Agent, ApplicationAgent, ExperimentsAgent, Auto-Suggest,
-AgentCreator) talk over
+library agents (Ask Orama, the Project Agent, Application Agent, Experiments Agent, Auto-Suggest Agent,
+Agent Creator Agent) talk over
 [Zetta's pub/sub](https://github.com/oramasearch/zetta/tree/dev/docs/pubsub). Dispatch uses Lake's
 `spec.zetta` cluster (`LAKE_DATA_PLANE_URL` and `LAKE_DATA_PLANE_TOKEN`); events use the task's
 explicit workspace Zetta. See the [workspace data-plane design](../architecture/workspace-data-plane.md).
@@ -86,7 +86,7 @@ lake (`LAKE_AGENT_BUS_DIR`, one file per agent) and only that agent's token into
 (`AGENT_BUS_TOKEN`, with `LAKE_URL`). A bus credential reaches only the first three capabilities,
 and only with its own agent's name.
 
-ApplicationAgent receives only tasks from `agent-tasks.agent-application` and only its
+Application Agent receives only tasks from `agent-tasks.agent-application` and only its
 `agent-application` bus credential can claim or answer them. The task itself has kind `app`; its
 short-lived task credential carries read tools initially and gains repository/App writes only on a
 later task with the person's reviewed proposal. Task credentials also derive the workspace for
@@ -99,7 +99,7 @@ target_kind?}`. Its credential is Ask Orama's usual one (every read, no action);
 `result` is the draft's files, which `draft_methodology {task_id}` checks before anything is offered
 ([methodologies.md](methodologies.md#drafts)).
 
-ExperimentsAgent has the independent topic and credential `agent-tasks.agent-experiments` /
+Experiments Agent has the independent topic and credential `agent-tasks.agent-experiments` /
 `agent-experiments`. Its task kinds are `experiment`, `experiment_status` and
 `experiment_explain`. The bus still carries only the task id. Experiment definitions, trials and
 analysis remain in the selected workspace Zetta, reached with the claimed task credential. An
@@ -120,11 +120,11 @@ Lake then records the asking task's ID as `parent_task_id` in the delegated task
 the delegated turn on the asking turn (lake#451), so whoever follows the asking turn sees which
 agent is working without following a second task:
 
-- at dispatch, the asking task's message becomes *Ask Orama asked ExperimentsAgent: <request>*;
-- each accepted `progress` event of the delegated task becomes *ExperimentsAgent: <message>* on the
-  asking task (*ExperimentsAgent is working.* for an empty message or the generic *Working on it*);
-- its `result` becomes *ExperimentsAgent finished; writing the answer.*, and `failed`
-  *ExperimentsAgent did not finish: <message>*.
+- at dispatch, the asking task's message becomes *Ask Orama asked Experiments Agent: <request>*;
+- each accepted `progress` event of the delegated task becomes *Experiments Agent: <message>* on the
+  asking task (*Experiments Agent is working.* for an empty message or the generic *Working on it*);
+- its `result` becomes *Experiments Agent finished; writing the answer.*, and `failed`
+  *Experiments Agent did not finish: <message>*.
 
 Each report is applied to the asking task with `record_agent_task_event` (it stays `Running`; this
 renews its lease), written as the asking task's message in its workspace record, and published on
@@ -244,8 +244,8 @@ and attempt numbers, and `get_agent_task` includes `attempts`, `lease_until` and
 
 ### Re-delivery and the shared-credential limitation
 
-Agents must remain idempotent under re-delivery. Confirmed ApplicationAgent deploy, Project Agent
-confirmation and ExperimentsAgent start turns must reuse the same named objects and avoid
+Agents must remain idempotent under re-delivery. Confirmed Application Agent deploy, Project Agent
+confirmation and Experiments Agent start turns must reuse the same named objects and avoid
 duplicating effects when an earlier attempt already wrote them. Lease recovery retries the same
 task body, scopes, workspace and confirmation; it does not grant additional authority.
 
@@ -309,8 +309,8 @@ exercises Ask Orama and the Ship App proposal flow without echoing workspace IDs
 suite: each library agent over the bus, as the person whose key it holds, with a pass condition per
 scenario. T1–T10 are the scenarios tracked at https://github.com/oramasearch/lake/issues/276
 through https://github.com/oramasearch/lake/issues/285. T11 builds a data App with
-ApplicationAgent, confirms the exact proposal, waits for deployment, and requests its URL. It
-prints one line per scenario and exits 1 when one fails. T12 gives ExperimentsAgent a goal,
+Application Agent, confirms the exact proposal, waits for deployment, and requests its URL. It
+prints one line per scenario and exits 1 when one fails. T12 gives Experiments Agent a goal,
 confirms its exact experiment, waits for trials and requests the explanation. Run the relevant scenario
 after a roll of lake, Zetta or an agent.
 

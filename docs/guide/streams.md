@@ -144,7 +144,7 @@ choose **Delete topic**. This removes all held messages and closes subscriptions
 | Delete a topic | `admin`, and being its creator |
 
 The page shows only the controls you may use; every capability checks again. System topics refuse
-every write, over REST and MCP as on the page. Ask Orama and ApplicationAgent read topics freely and
+every write, over REST and MCP as on the page. Ask Orama and the Application Agent read topics freely and
 ask you to confirm any write.
 
 ## Limits

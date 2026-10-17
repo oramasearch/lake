@@ -152,7 +152,7 @@ pointer errors. See [`docs/api/README.md`](../../../docs/api/README.md) for the 
 and HTTP conformance proof.
 
 `agent_proposal_digest` (`capabilities.hpp`) is the digest of an agent's proposal as lake stored
-it: `approve_agent_proposal` and `agent_turn`'s confirmed ApplicationAgent and ExperimentsAgent
+it: `approve_agent_proposal` and `agent_turn`'s confirmed Application Agent and Experiments Agent
 turns compare it with the one the person reviewed (lake#561).
 
 `datasets.hpp` is pure: workspace dataset naming, CSV checks, the `<database>/<name>` id and the

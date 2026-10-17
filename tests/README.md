@@ -74,7 +74,12 @@ The Streams task-credential fixture takes a real claim before making calls. See
 `HttpResponseIsolation.AskOramaSaysWhoIsWorkingOnALongTurn` (lake#451) runs a real Ask Orama
 claim, a delegation with its turn key, and the subagent's progress and result, and follows the turn
 through `settle_ask_turn`'s task message and the asking turn's `agent-events`.
-`Workspaces.TalkToOffersOnlyRunningAgentsAPersonUses` checks which agents *Talk to* offers.
+`Workspaces.TalkToOffersEveryAgentAPersonUsesAndMarksTheOnesNotRunning` checks which agents *Talk to* offers.
+`AgentNames.*` (`test_agent_names.cpp`, lake#763) keeps the Agent Library the one source of agent
+names: every name follows the scheme (title-case words, "Agent" last but for Ask Orama), no old or
+run-together spelling appears in the code, the web app, the guide, the docs, the tests or the tools
+(release notes and dated records excepted), `docs/api/train-agents.md`'s table is the catalogue, and
+no code pairs an agent key with its name outside the catalogue.
 
 Lease regressions also cover delayed notice acknowledgements and stale waiting-deadline
 observations: neither may discard the final failure notice or fail a fresh retry.
@@ -317,7 +322,7 @@ repository reads, and cross-app, cache and write refusal.
 Authorization assertions use well-formed input; malformed authenticated calls separately assert
 `invalid_input`. Postgres registry contexts supply the fixture's audit encryption key.
 `HttpServer/HttpResponseIsolation.ShipAppsCreatesOperatesAndFollowsAnApp/*` starts an
-ApplicationAgent turn through `agent_turn`, replies to its question in the same conversation,
+Application Agent turn through `agent_turn`, replies to its question in the same conversation,
 refuses a confirmation without `proposal_task_id`, for a turn that proposed nothing, with another or
 a changed `proposal_sha256`, and for an unacknowledged public app, confirms the stored proposal and
 reads its deployed URL, then creates a repository app, queues an app build from the runtime image

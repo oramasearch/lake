@@ -82,7 +82,7 @@ function Projects({ onNew }: { onNew: () => void }) {
         </Button>
       }
     >
-      Not sure where to start? Auto-Suggest recommends what your data could be used for.
+      Not sure where to start? The Auto-Suggest Agent recommends what your data could be used for.
     </Banner>
   );
 
@@ -105,7 +105,7 @@ function Projects({ onNew }: { onNew: () => void }) {
               </>
             }
           >
-            A project starts from the decision it should improve. Or let Auto-Suggest recommend one from your data.
+            A project starts from the decision it should improve. Or let the Auto-Suggest Agent recommend one from your data.
           </Empty>
         </>
       }

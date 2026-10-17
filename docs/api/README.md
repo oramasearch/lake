@@ -108,7 +108,7 @@ the storage fields a workspace row gains.
 
 [experiments.md](experiments.md) documents eleven training experiment, trial, run-metric,
 comparison and bounded-live-read capabilities, with identical REST POST/MCP schemas and confirmed
-actions, plus the `agent_turn` contract used for ExperimentsAgent proposals. Lake says experiment
+actions, plus the `agent_turn` contract used for Experiments Agent proposals. Lake says experiment
 and `experiment_id` where the engine says study (lake#561, [names](experiments.md#names)); lake's
 `get_experiment` is distinct from the solutions holdout `get_experiment` that `workspace_query`
 reads. `start_experiment` leaves a missing objective and budgets to Zetta under `from_defaults`,
@@ -373,7 +373,7 @@ and `Experiments.CompareRunsAnswersItsGetFormWithRepeatedKeysOrACommaList`
 | `list_runs` | read | customer, optional project/solution and limit | newest matching runs with status, reached stage and final error line | [workspaces.md](workspaces.md) |
 | `launch_agent`, `list_agent_launches`, `stop_agent_launch`, `schedule_agent`, `list_agent_schedules`, `unschedule_agent` | action / read | customer, agent, mode, input, cron or trigger | run, follow and stop Python agents on agent-runtime, and give them cron schedules (each a CronJob) | [agent-launches.md](agent-launches.md) |
 | `set_agent_streams`, `list_agent_streams` | action / read | customer, workspace, agent, streams | the workspace streams whose new messages each start a job of a Python agent, as the person who set them (lake#677) | [agent-launches.md](agent-launches.md#stream-triggers) |
-| `agent_turn` | action | customer, agent, message, optional conversation/kind/context | one conversation turn with any agent: library, native or Python; a reused library-agent conversation includes its preceding same-agent, same-kind turn; ExperimentsAgent uses proposal, status and explanation kinds | [agent-launches.md](agent-launches.md) |
+| `agent_turn` | action | customer, agent, message, optional conversation/kind/context | one conversation turn with any agent: library, native or Python; a reused library-agent conversation includes its preceding same-agent, same-kind turn; Experiments Agent uses proposal, status and explanation kinds | [agent-launches.md](agent-launches.md) |
 | `receive_agent_tasks`, `claim_agent_task`, `publish_agent_event`, `receive_agent_events` | read / action | agent, task, sequence | renewable claims, bounded reclaim/retry, progress and first-terminal-write-wins results over workspace Zetta pub/sub; delegated turns reported on the asking turn | [agent-bus.md](agent-bus.md) |
 | `mint_agent_session_key` | action | customer, durable and dispatcher identities, scopes, lifetime | response-only private seed plus logged durable-identity delegation | [agents.md](agents.md) |
 | `verify_agent_session_drip` | action | customer, session, canonical body and TAAP signature | verified durable attribution, scopes and log commitment | [agents.md](agents.md) |

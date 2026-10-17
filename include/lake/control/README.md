@@ -67,7 +67,7 @@ expiry cleanup; memory and PostgreSQL implementations preserve the same contract
 `builds.hpp` exposes build JSON with a null image before success and a public-host digest reference
 after success. App token purposes include the hash-only, exact-repository registry pull credential.
 
-`agent_library.hpp` registers ApplicationAgent as `agent-application` and ExperimentsAgent as
+`agent_library.hpp` registers the Application Agent as `agent-application` and the Experiments Agent as
 `agent-experiments`, chat-capable services used from their Ship/Train pages and Ask Orama. Each bus
 identity is independent from every other library agent. A library agent's `internal` flag marks
 Orama's own tooling (the eval and corpus generators); `talk_to_agents` builds Ask Orama's *Talk to*
