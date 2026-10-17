@@ -15,7 +15,7 @@ agent does the job better.
   press **Confirm**; Lake then runs it as you, with your permissions, and records it in the audit.
   Only a proposal Lake stored in your own conversation can be confirmed.
 - **It delegates.** Ask Orama hands work to the right agent: the Project Agent for pipelines,
-  ApplicationAgent for apps, ExperimentsAgent for training experiments, Auto-Suggest for ideas, or an
+  Application Agent for apps, Experiments Agent for training experiments, Auto-Suggest Agent for ideas, or an
   agent you built. Their proposals are reviewed the same way before anything is written.
 - **Conversations live in the workspace.** Every message is kept in the workspace you asked
   in, sealed with its key. Another workspace never shows it, and only you can
@@ -54,7 +54,7 @@ Ask Orama needs a workspace. With none selected it says so and links to **Ship �
 
 While the turn runs, the conversation says *Waiting for Ask Orama to start…* and then *Ask Orama is
 working…*, how long it has worked, its latest progress, and *Attempt 2 of 3* when Lake retried it.
-When it brings in another agent you see that too (*Ask Orama asked ExperimentsAgent: …*), then that
+When it brings in another agent you see that too (*Ask Orama asked Experiments Agent: …*), then that
 agent's progress. **View this turn in Streams** opens the turn's events in **Train → Streams**.
 
 Through the API, a turn is a few calls. Send the message with `POST /v1/send_ask_message`:
@@ -108,8 +108,8 @@ and a **Confirm** button.
 
 A change to an existing pipeline goes to the Project Agent instead, and the answer shows **Review
 the proposed change**, which opens the pipeline page where you apply or discard it
-([AI Projects and Pipelines](/docs/design)). An app goes to ApplicationAgent, whose full proposal you
-review before **Confirm and deploy** ([Apps](/docs/apps)); a training experiment goes to ExperimentsAgent,
+([AI Projects and Pipelines](/docs/design)). An app goes to the Application Agent, whose full proposal you
+review before **Confirm and deploy** ([Apps](/docs/apps)); a training experiment goes to the Experiments Agent,
 whose experiment you edit and confirm before it starts ([Experiments](/docs/experiments)).
 
 Through the API, confirm with `POST /v1/confirm_ask_proposal`, naming the stored message and the

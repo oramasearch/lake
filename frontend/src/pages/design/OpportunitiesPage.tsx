@@ -1,4 +1,4 @@
-/** Design → Opportunities, also at /design/discover (lake's discover_content): what Auto-Suggest
+/** Design → Opportunities, also at /design/discover (lake's discover_content): what Auto-Suggest Agent
  * recommended for the workspace's data, a scan that runs in the background (`task=`, polled every 3
  * seconds while it works), project drafts made only on confirmation, and dismissal. */
 import { type ReactNode, useState } from "react";
@@ -23,7 +23,7 @@ export default function OpportunitiesPage() {
     <Page
       eyebrow="Design"
       title="Opportunities"
-      sub="What your data could be used for. Auto-Suggest reads the data your workspace can reach and recommends what to build from Orama's solutions catalogue; it never changes your data."
+      sub="What your data could be used for. The Auto-Suggest Agent reads the data your workspace can reach and recommends what to build from Orama's solutions catalogue; it never changes your data."
     >
       <WorkspaceGate>
         <Opportunities />
@@ -61,13 +61,13 @@ function Opportunities() {
     <div className="space-y-4">
       {scanning ? (
         <Banner title="Scanning your workspace…">
-          Auto-Suggest is reading your datasets and matching them to the solutions catalogue. You can leave this page; the Opportunities are kept when it finishes. This page
+          The Auto-Suggest Agent is reading your datasets and matching them to the solutions catalogue. You can leave this page; the Opportunities are kept when it finishes. This page
           checks again every 3 seconds.
         </Banner>
       ) : library.isError ? (
         <ErrorBlock error={library.error} retry={() => void library.refetch()} what="the Agent Library" />
       ) : !running ? (
-        <Banner tone="quiet">Auto-Suggest is not running on this Lake, so a new scan is not available.</Banner>
+        <Banner tone="quiet">The Auto-Suggest Agent is not running on this Lake, so a new scan is not available.</Banner>
       ) : (
         <Banner
           title={groups.lastScan ? `Last scanned ${relative(groups.lastScan)}` : "Scan your workspace"}
@@ -76,7 +76,7 @@ function Opportunities() {
           {groups.lastScan ? (
             <span title={`${groups.lastScan.slice(0, 16)} UTC`}>Scan again after your data changes; earlier Opportunities stay.</span>
           ) : (
-            "Auto-Suggest reads your workspace's datasets and their columns and recommends what to build. It runs in the background and changes nothing."
+            "The Auto-Suggest Agent reads your workspace's datasets and their columns and recommends what to build. It runs in the background and changes nothing."
           )}
         </Banner>
       )}
@@ -282,7 +282,7 @@ function OpportunityCard({
           )}
         </div>
       )}
-      {/* Auto-Suggest writes inline Markdown (`table` names). */}
+      {/* Auto-Suggest Agent writes inline Markdown (`table` names). */}
       <div className="text-[13px] text-ink-2">
         {text(row, "why") && <Markdown>{text(row, "why")}</Markdown>}
         {text(detail, "business_action") && <Markdown>{`**What it changes:** ${text(detail, "business_action")}`}</Markdown>}

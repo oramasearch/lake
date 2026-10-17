@@ -74,15 +74,15 @@ may wrap across source lines.
   this README included, and every `docs/api/*.md` page (lake#669).
 - Speak of **experiments**, as an AI experiment tracker does. The guides never say "study" to a
   reader; it is the engine's name, which only code spans may quote (`study-events.*`,
-  ExperimentsAgent's `study` field). An experiment's attempts are **trials**, each a training
+  Experiments Agent's `study` field). An experiment's attempts are **trials**, each a training
   **run**. `Docs.GuidesSpeakOfExperiments` checks the prose (lake#561).
 - Call the product **Lake**, with a capital L (decision 59, lake#642), and the web app the **Lake
   Console**. Technical names keep their form: hostnames (`lake.live`, `lake.oramadev.net`), the MCP
   server name, CLI commands, `LAKE_*` variables, identifiers and paths, in code spans where they
   stand alone. `Docs.GuidesCallTheProductLake` checks the prose.
 - Headings are Title Case (Lake's rule, `docs/ui/design-system.md` → *Capitalization*).
-- Keep Ship's ApplicationAgent steps explicit about reviewing the exact proposal before any write.
-- Keep Train's ExperimentsAgent steps explicit about editing and confirming the exact experiment
+- Keep Ship's Application Agent steps explicit about reviewing the exact proposal before any write.
+- Keep Train's Experiments Agent steps explicit about editing and confirming the exact experiment
   before it starts.
 - Name held-out metrics as the run report does (`held_out_auc`, …), and lead a run's report with
   its held-out score.

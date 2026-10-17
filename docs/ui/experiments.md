@@ -4,7 +4,7 @@ Experiments follows Runs in Train. The pages are in `frontend/src/pages/experime
 
 | Route | File | What |
 |---|---|---|
-| `/w/<id>/train/experiments` | `ExperimentsPage.tsx` | Run an Experiment (ExperimentsAgent), the filter, Start an Experiment, the experiments, tracked runs outside experiments |
+| `/w/<id>/train/experiments` | `ExperimentsPage.tsx` | Run an Experiment (Experiments Agent), the filter, Start an Experiment, the experiments, tracked runs outside experiments |
 | `/w/<id>/train/experiment?experiment=` | `ExperimentPage.tsx` | one experiment: status, Stop, optimization history, parallel coordinates, parameter importance, the leaderboard, the latest eight trials' curves. An address from before lake#561 (`?study=`) still opens it |
 | `/w/<id>/train/experiment/run?run=` | `RunPage.tsx` | one run's curves, parameters and artifacts |
 | `/w/<id>/train/experiments/compare?runs=run-a,run-b` | `ComparePage.tsx` | two to eight runs on shared charts with their parameter differences |
@@ -48,7 +48,7 @@ never see the engine's word except in its own field names.
 So "trial" stays where the experiment's choice of settings is the subject, and "run" where the
 recorded training is. The check is `frontend/tests/wording.test.ts`: it fails when a string or JSX
 text in `frontend/src` says study or studies; code may still name the engine's `list_studies`,
-`study_id`, `study-events.*`, the `study.id` run parameter and ExperimentsAgent's `study` field. The
+`study_id`, `study-events.*`, the `study.id` run parameter and the Experiments Agent's `study` field. The
 guides have the same check in `Docs.GuidesSpeakOfExperiments`.
 
 ## Layout (lake#561)
@@ -59,7 +59,7 @@ guides have the same check in `Docs.GuidesSpeakOfExperiments`.
   chip, the best value with its direction, trials against the budget with complete/pruned/failed
   counts, cost against the cap, and Stop. Tracked runs have a compare checkbox and
   **Compare selected runs** in the card header.
-- **Ask ExperimentsAgent** and **Start experiment** open drawers from the header (**Start an
+- **Ask the Experiments Agent** and **Start experiment** open drawers from the header (**Start an
   Experiment**). The form still confirms its parameters in a dialog.
 - **Experiment** has the name and state in its header, figures (best objective, trials, running, cost),
   and a Split. The charts and the leaderboard (state chips as filters, Compare in its toolbar) are
@@ -83,11 +83,11 @@ shows the agent's explanation and, as **Proposed Experiment**, the complete expe
 `study` object) as JSON in an editable text area.
 
 If the completed turn asks a question or returns no proposal, its answer is followed by a
-**Reply** box, which starts another `experiment` turn in the same conversation, so ExperimentsAgent
+**Reply** box, which starts another `experiment` turn in the same conversation, so Experiments Agent
 can use the answer without the person restating the goal.
 
 **Confirm and start experiment** reads the task again and checks, in the browser, that it is still a
-succeeded ExperimentsAgent `experiment` proposal and that it is the proposal that was shown (its
+succeeded Experiments Agent `experiment` proposal and that it is the proposal that was shown (its
 JSON with sorted keys); then it parses the edited experiment and starts a second `agent_turn`
 carrying it as `context.confirmed_proposal` (at the agent's `study`). Malformed JSON or a changed
 proposal starts nothing. The first task has no experiment action. Only a turn carrying a confirmed
@@ -100,7 +100,7 @@ for the same person and account before starting the turn. That check now runs in
 fresh read; `agent_turn` grants the experiment tools to a turn whose `confirmed_proposal` has an
 experiment, as it does for a REST or MCP caller.
 
-ExperimentsAgent must be deployed (the Agent Library says so). Otherwise the box stays visible,
+Experiments Agent must be deployed (the Agent Library says so). Otherwise the box stays visible,
 explains that it is unavailable, and disables submission. Ask Orama and the Project Agent can
 delegate the same goal through `agent_turn`; there is no page-only experiment operation.
 

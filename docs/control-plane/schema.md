@@ -602,7 +602,7 @@ Contract and capabilities: [`../api/agent-launches.md`](../api/agent-launches.md
 background, with its body, scopes, deadline and when it was last published on the agent bus),
 `agent_task_status` (written by lake when an agent claims the task and as it reports: phase, message,
 answer and the **SHA-256** of the task's credential, cleared when the task finishes) and `opportunities` (Design → Opportunities:
-what Auto-Suggest recommended, kept across scans, with what the person did with each; retired by
+what Auto-Suggest Agent recommended, kept across scans, with what the person did with each; retired by
 `0046`, below, when Opportunities moved into workspace Zettas). Idempotent;
 guard `agent_tasks_guard`. Contract: [`../api/agent-bus.md`](../api/agent-bus.md). Since `0062`
 (below) the body, message and answer live in the task's workspace Zetta, and both tables are

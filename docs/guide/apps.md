@@ -3,7 +3,7 @@
 **Ship → Apps** runs your own web applications on Lake: a dashboard over a dataset, an internal
 tool, a small API. An app runs from a Lake repository or from a container image, gets its own
 address, and by default asks people to sign in to Lake before they reach it. You can build one
-yourself, or describe it to ApplicationAgent, review exactly what it proposes, and confirm.
+yourself, or describe it to the Application Agent, review exactly what it proposes, and confirm.
 
 Every call on this page names `customer_id`, the id of the account that owns your workspaces (yours,
 or your organization's), and `workspace_id`, the workspace the app belongs to. An app never moves
@@ -68,20 +68,20 @@ bindings and when it last changed. **Open** on a card opens the app.
 
 An image you built in Lake is named on [Packages, Builds and the Registry](/docs/registry).
 
-## Build an App with ApplicationAgent
+## Build an App with the Application Agent
 
-ApplicationAgent writes the app for you: it reads what it needs, proposes the repository files and
+Application Agent writes the app for you: it reads what it needs, proposes the repository files and
 the app settings, and changes nothing until you confirm.
 
-1. Open **Ship → Apps** and press **Build with ApplicationAgent**.
+1. Open **Ship → Apps** and press **Build with the Application Agent**.
 2. Under **Description**, say what the app should do, for example *a page listing the accounts most
-   at risk this week from the churn_scores dataset*. Press **Start ApplicationAgent**.
-3. The page shows **ApplicationAgent Is Working** and checks again every 2 seconds. You can leave;
+   at risk this week from the churn_scores dataset*. Press **Start the Application Agent**.
+3. The page shows **Application Agent Is Working** and checks again every 2 seconds. You can leave;
    the turn keeps running and the page address (`?task=`) brings you back to it.
 4. **The first turn cannot write anything.** It may only read: your datasets and their schemas,
    read-only SQL results, your services, your repositories and your existing apps.
 5. When it asks a question instead of proposing, answer in **Reply** and press **Reply to
-   ApplicationAgent**; the conversation continues.
+   Application Agent**; the conversation continues.
 6. When it proposes, the **Proposed App** card shows the agent's explanation, the app settings
    (**Mode**, **Framework**, **Access**, **Repository**, **Path**) and **every file** it would commit,
    in full. Review all of it.
@@ -114,13 +114,13 @@ The same through REST and MCP is two `agent_turn` calls.
 - MCP: the `agent_turn` tool, with the same inputs.
 
 Lake compares `proposal_task_id`, `proposal_sha256` and `confirmed_proposal` with the proposal it
-stored; a different proposal is refused (*The ApplicationAgent proposal changed before
-confirmation.*). You can also choose ApplicationAgent in **Ask Orama → Talk to**, or ask Ask Orama to
+stored; a different proposal is refused (*The Application Agent proposal changed before
+confirmation.*). You can also choose the Application Agent in **Ask Orama → Talk to**, or ask Ask Orama to
 hand an app request to it; the review and confirmation happen the same way before anything is
 written.
 
-If ApplicationAgent is not running on your Lake, the drawer says *ApplicationAgent is not registered
-on this Lake yet.* and cannot start.
+If the Application Agent is not running on your Lake, the drawer says *The Application Agent is not
+running on this Lake.* and cannot start.
 
 ## Operate an App
 
@@ -329,7 +329,7 @@ In **Delete App**, type the app's name under **App name** and press **Delete app
 | See apps, logs and events | `read` on the account that owns the workspace |
 | Create, deploy, roll back, restart, stop, start, scale, set environment, authentication, bindings, build, delete | `write` on the account |
 | Reach a Lake Sign-In app | membership of the app's workspace |
-| Confirm an ApplicationAgent proposal | the person following the proposing turn |
+| Confirm an Application Agent proposal | the person following the proposing turn |
 
 ## Troubleshooting
 
@@ -340,8 +340,8 @@ In **Delete App**, type the app's name under **App name** and press **Delete app
 | `secret_required` | A plain environment value looks like a credential. | Put it in a secret mount of the workspace ([Secrets and Encryption Keys](/docs/secrets)) and set the variable from that secret's field. |
 | `conflict` | An app with that name already exists. | Choose another name. |
 | `invalid_input` at `/workspace_id` | The workspace is missing, unknown, or not one of the account's. | Use the workspace in the page address. |
-| *That task has no ApplicationAgent proposal to confirm.* | The turn asked a question or failed, or is not an app turn. | Reply, or start a new turn. |
-| *The ApplicationAgent proposal changed before confirmation.* | What you confirmed is not what the turn proposed. | Review the proposal shown now and confirm that. |
+| *That task has no Application Agent proposal to confirm.* | The turn asked a question or failed, or is not an app turn. | Reply, or start a new turn. |
+| *The Application Agent proposal changed before confirmation.* | What you confirmed is not what the turn proposed. | Review the proposal shown now and confirm that. |
 | The phase stays *Failed* | The operator could not run it; **Rollout** shows its message. | Read **Logs** and **Events**, fix the source or image, and **Deploy** again. |
 | *Logs are not available on this Lake yet.* | This Lake has no log source configured. | Use **Events**, or ask the Lake's operator. |
 
@@ -351,6 +351,6 @@ In **Delete App**, type the app's name under **App name** and press **Delete app
 - [Services and Storage](/docs/services): the databases an app binds.
 - [Streams](/docs/streams): an app's events as a topic.
 - [Ask Orama](/docs/ask-orama): asking for an app in conversation.
-- [Agents](/docs/agents): ApplicationAgent in the Agent Library.
+- [Agents](/docs/agents): Application Agent in the Agent Library.
 - [Repositories](/docs/repositories): where a runtime app's source lives.
 - [Secrets and Encryption Keys](/docs/secrets): references for credentials.

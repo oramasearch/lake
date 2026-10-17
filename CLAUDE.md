@@ -51,7 +51,7 @@ calls a capability undeployed that the newest snapshot in `docs/deployment/obser
 a deployment, record a new snapshot and update the page.
 
 Train → Experiments is implemented in the source tree with eleven registered REST/MCP operations,
-live charts, confirmed promotion, and ExperimentsAgent's editable proposal and confirmed start,
+live charts, confirmed promotion, and the Experiments Agent's editable proposal and confirmed start,
 against workspace Zetta `dev-a1d74b21`. The build's authorized bridge transport source is
 unchanged. Deletion has no engine contract; deployed experiment/training acceptance is not claimed.
 Lake says experiment (`get_experiment`, `start_experiment`, `stop_experiment`, `experiment_id`) where
@@ -62,7 +62,7 @@ The console is the web app in `frontend/` (lake#561), embedded in the binary and
 browser page request; it calls only `/v1`. The server-rendered console pages, their deferred panels
 and HTML form handlers, the `lake_workspace` cookie and the experiment chart assets are retired in
 the source tree; an identity application's hosted sign-in pages and the apex host's region picker
-(lake#757, `docs/api/regions.md`) are the server-rendered surfaces. `agent_turn` checks a confirmed ApplicationAgent or ExperimentsAgent proposal against the
+(lake#757, `docs/api/regions.md`) are the server-rendered surfaces. `agent_turn` checks a confirmed Application Agent or Experiments Agent proposal against the
 stored one (`proposal_task_id`, `proposal_sha256`). Not deployed yet. See `docs/ui/web-app.md` and
 `docs/serving/http.md`.
 
@@ -677,7 +677,7 @@ forward-auth and `/apps/authorize` for the Lake-session handoff. The app cookie 
 expires after 12 hours, and rechecks workspace membership on every request. Migration
 `0041_app_forward_auth` stores only short-lived one-use code hashes.
 The Ship → Apps pages use those capabilities for creation and all controls, mask Secret references,
-follow retained app/build events, and start ApplicationAgent app turns with exact proposal
+follow retained app/build events, and start Application Agent app turns with exact proposal
 confirmation before repository or App writes. Their contract is `docs/ui/apps.md`.
 
 In-cluster image builds add migration `0036_builds`, customer-scoped REST/MCP capabilities,

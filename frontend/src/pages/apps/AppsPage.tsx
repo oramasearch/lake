@@ -1,6 +1,6 @@
 /** Ship → Apps (web_ui.cpp web_ui_apps; handlers serve_apps_page and serve_app_form create,
  * agent and agent_confirm): the space's apps as a card grid with their figures, New app (from a
- * repository or an image) in a drawer, and an ApplicationAgent turn with its proposal confirmed
+ * repository or an image) in a drawer, and an Application Agent turn with its proposal confirmed
  * against a fresh read of the task. */
 import { type FormEvent, type ReactNode, useMemo, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
@@ -154,7 +154,7 @@ export default function AppsPage() {
       actions={
         <>
           <Button onClick={() => setOpen("agent")}>
-            <Bot size={14} aria-hidden /> Build with ApplicationAgent
+            <Bot size={14} aria-hidden /> Build with the Application Agent
           </Button>
           <Button variant="primary" onClick={() => setOpen("create")}>
             <Plus size={14} aria-hidden /> New app
@@ -323,14 +323,14 @@ export default function AppsPage() {
 
       {open === "agent" && (
         <Drawer
-          title="Build an App With the ApplicationAgent"
+          title="Build an App With the Application Agent"
           subtitle="Describe the app. The agent proposes files and app settings for you to confirm."
           onClose={close}
           footer={
             <>
               <Button onClick={close}>Cancel</Button>
               <Button variant="primary" type="submit" form="agent-turn" disabled={!agent.deployed} loading={runner.busy === "agent"}>
-                Start ApplicationAgent
+                Start the Application Agent
               </Button>
             </>
           }
@@ -357,7 +357,7 @@ export default function AppsPage() {
               <textarea name="description" rows={6} placeholder="What should the app do?" disabled={!agent.deployed} />
             </label>
           </form>
-          {!agent.deployed && !agent.loading && <Notice tone="warning">ApplicationAgent is not registered on this Lake yet.</Notice>}
+          {!agent.deployed && !agent.loading && <Notice tone="warning">The Application Agent is not running on this Lake.</Notice>}
         </Drawer>
       )}
     </Page>
@@ -388,7 +388,7 @@ function TaskPanels({
   if (task.agent !== "agent-application" || task.kind !== "app") {
     return (
       <p className="error" role="alert">
-        That is not an ApplicationAgent app task.
+        That is not an Application Agent app task.
       </p>
     );
   }
@@ -399,7 +399,7 @@ function TaskPanels({
 
   if (taskWorking(task)) {
     return wrap(
-      <Card tone="active" label="ApplicationAgent" title="ApplicationAgent Is Working" actions={<Loader2 size={16} className="animate-spin text-action" aria-hidden />}>
+      <Card tone="active" label="Application Agent" title="Application Agent Is Working" actions={<Loader2 size={16} className="animate-spin text-action" aria-hidden />}>
         <div aria-live="polite">
           <p className="muted m-0">It keeps working if you leave; this page checks again every 2 seconds.</p>
           <p role="status" className="mb-0">
@@ -424,10 +424,10 @@ function TaskPanels({
       const fresh = await fetchAgentTask(taskId, customerId, workspaceId);
       const proposal = taskResult(fresh);
       if (fresh.agent !== "agent-application" || fresh.kind !== "app" || fresh.status !== "succeeded" || proposal.kind !== "proposal" || proposal.confirm !== true) {
-        throw new ApiError(400, "invalid_input", "That task has no ApplicationAgent proposal to confirm.");
+        throw new ApiError(400, "invalid_input", "That task has no Application Agent proposal to confirm.");
       }
       if (canonicalJson(proposal) !== canonicalJson(shown)) {
-        throw new ApiError(409, "conflict", "The ApplicationAgent proposal changed before confirmation.");
+        throw new ApiError(409, "conflict", "The Application Agent proposal changed before confirmation.");
       }
       if (publicApp && !acknowledged) {
         throw new ApiError(400, "invalid_input", "This app will be public. Tick the box to confirm that anyone with its address can open it.");
@@ -449,7 +449,7 @@ function TaskPanels({
     };
     return wrap(
       <div id="proposal">
-        <Card tone="active" label="ApplicationAgent proposal" title={`Proposed App: ${String(app.name ?? "")}`} footer={link}>
+        <Card tone="active" label="Application Agent proposal" title={`Proposed App: ${String(app.name ?? "")}`} footer={link}>
           <div className="ask-reply">
             <Markdown>{reply}</Markdown>
           </div>
@@ -498,8 +498,8 @@ function TaskPanels({
   const url = (typeof app.url === "string" && app.url) || (typeof rollout.url === "string" && rollout.url) || (typeof app.host === "string" && app.host ? `https://${app.host}` : "");
   return wrap(
     <Card
-      label="ApplicationAgent"
-      title="ApplicationAgent Result"
+      label="Application Agent"
+      title="Application Agent Result"
       actions={
         url ? (
           <Button href={url}>
@@ -522,7 +522,7 @@ function TaskPanels({
               // The reply form's precondition: the task still asks something, in a conversation.
               const fresh = await fetchAgentTask(taskId, customerId, workspaceId);
               if (fresh.agent !== "agent-application" || fresh.kind !== "app" || !needsReply(fresh, "agent-application") || !fresh.conversation_id) {
-                throw new ApiError(400, "invalid_input", "That task has no ApplicationAgent question to answer.");
+                throw new ApiError(400, "invalid_input", "That task has no Application Agent question to answer.");
               }
               await startTurn(form.reply ?? "", fresh.conversation_id);
             });
@@ -534,7 +534,7 @@ function TaskPanels({
           </label>
           <div>
             <Button variant="primary" type="submit" loading={runner.busy === "reply"}>
-              Reply to ApplicationAgent
+              Reply to the Application Agent
             </Button>
           </div>
         </form>

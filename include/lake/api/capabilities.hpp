@@ -181,8 +181,8 @@ control::Result<control::Repository> find_hub_repository(control::Store& store,
 // The spaces the caller may read, newest first, as list_customers answers them ({items}); the
 // web app's `viewer` lists the same spaces without a second audited call (lake#561).
 ApiResult readable_customers(ApiContext& context, int limit);
-// AgentCreator's structured answer, a question or a proposal: its `result` (agent-creator#1), or,
-// from an AgentCreator that answered before it had one, the JSON in its reply.
+// Agent Creator Agent's structured answer, a question or a proposal: its `result` (agent-creator#1), or,
+// from an Agent Creator Agent that answered before it had one, the JSON in its reply.
 nlohmann::json agent_creator_answer(const nlohmann::json& turn);
 // The digest a proposal is approved by: SHA-256 of its compact JSON as lake serializes it. Stored
 // with each Agent Factory proposal message, and checked by approve_agent_proposal (lake#561).

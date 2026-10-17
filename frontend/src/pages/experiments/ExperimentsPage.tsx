@@ -1,5 +1,5 @@
 /** Train → Experiments (formerly web_ui_experiments.cpp list mode, serve_experiments_agent_form and
- * the start and compare scripts): the figures, ExperimentsAgent's turn (asked from a drawer) with
+ * the start and compare scripts): the figures, Experiments Agent's turn (asked from a drawer) with
  * its editable proposal and confirmed start, the filter, Start an Experiment in a drawer, the
  * experiments as rich rows with Stop, and the tracked runs to compare. An experiment is the
  * engine's study; lake's capabilities say experiment (lake#561). */
@@ -93,7 +93,7 @@ export default function ExperimentsPage() {
     }
   };
 
-  /** An ExperimentsAgent turn, then this page showing its task. */
+  /** An Experiments Agent turn, then this page showing its task. */
   const turn = async (message: string, extra: Row = {}) => {
     const result = await client.act<Row>("agent_turn", { agent: "agent-experiments", kind: "experiment", message, ...extra });
     navigate(url("/train/experiments", { task: String(result.task_id ?? "") }));
@@ -293,7 +293,7 @@ export default function ExperimentsPage() {
       actions={
         <>
           <Button onClick={() => setOpen("agent")}>
-            <Bot size={14} aria-hidden /> Ask ExperimentsAgent
+            <Bot size={14} aria-hidden /> Ask the Experiments Agent
           </Button>
           {canWrite && (
             <Button variant="primary" onClick={() => setOpen("experiment")}>
@@ -356,7 +356,7 @@ export default function ExperimentsPage() {
                         ) : undefined
                       }
                     >
-                      {experiments.length ? "Clear the search to see more." : "Start an experiment, or ask ExperimentsAgent to propose one."}
+                      {experiments.length ? "Clear the search to see more." : "Start an experiment, or ask the Experiments Agent to propose one."}
                     </Empty>
                   </div>
                 }
@@ -389,13 +389,13 @@ export default function ExperimentsPage() {
       {open === "agent" && (
         <Drawer
           title="Run an Experiment"
-          subtitle="Describe the training or tuning goal. ExperimentsAgent proposes a complete experiment for you to edit and confirm before it starts."
+          subtitle="Describe the training or tuning goal. The Experiments Agent proposes a complete experiment for you to edit and confirm before it starts."
           onClose={() => setOpen(null)}
           footer={
             <>
               <Button onClick={() => setOpen(null)}>Cancel</Button>
               <Button variant="primary" type="submit" form="experiment-goal" disabled={!agent.deployed} loading={busy === "goal"}>
-                Ask ExperimentsAgent
+                Ask the Experiments Agent
               </Button>
             </>
           }
@@ -418,7 +418,7 @@ export default function ExperimentsPage() {
               <textarea name="goal" rows={5} placeholder="Tune a churn model for validation AUC with a bounded trial budget." required disabled={!agent.deployed} />
             </label>
           </form>
-          {!agent.deployed && !agent.loading && <Notice tone="warning">ExperimentsAgent is not registered on this Lake yet.</Notice>}
+          {!agent.deployed && !agent.loading && <Notice tone="warning">The Experiments Agent is not running on this Lake.</Notice>}
         </Drawer>
       )}
 
@@ -592,7 +592,7 @@ export default function ExperimentsPage() {
   );
 }
 
-/** The ExperimentsAgent task named in the URL: working, its proposal to edit and confirm, or its
+/** The Experiments Agent task named in the URL: working, its proposal to edit and confirm, or its
  * result with a reply. */
 function TaskPanels({
   taskId,
@@ -610,13 +610,13 @@ function TaskPanels({
   const client = useExperimentClient();
   const url = useExperimentUrl();
   if (q.isLoading) return <Skeleton lines={2} />;
-  if (q.isError) return <ErrorBlock error={q.error} retry={() => void q.refetch()} what="the ExperimentsAgent task" />;
+  if (q.isError) return <ErrorBlock error={q.error} retry={() => void q.refetch()} what="the Experiments Agent task" />;
   const task = q.data as AgentTask | undefined;
   if (!task) return null;
   if (task.agent !== "agent-experiments" || task.kind !== "experiment") {
     return (
       <p className="error" role="alert">
-        That is not an ExperimentsAgent experiment task.
+        That is not an Experiments Agent experiment task.
       </p>
     );
   }
@@ -626,7 +626,7 @@ function TaskPanels({
   if (taskWorking(task)) {
     return (
       <div className="mb-5">
-        <Card tone="active" label="ExperimentsAgent" title="ExperimentsAgent Is Working" actions={<Loader2 size={16} className="animate-spin text-action" aria-hidden />} footer={link}>
+        <Card tone="active" label="Experiments Agent" title="Experiments Agent Is Working" actions={<Loader2 size={16} className="animate-spin text-action" aria-hidden />} footer={link}>
           <div aria-live="polite">
             <p className="muted m-0">It keeps working if you leave; this page checks again every 2 seconds.</p>
             <p role="status" className="mb-0">
@@ -637,7 +637,7 @@ function TaskPanels({
       </div>
     );
   }
-  // ExperimentsAgent's answer carries the experiment it proposes as the engine's `study`.
+  // Experiments Agent's answer carries the experiment it proposes as the engine's `study`.
   const proposed = result.study && typeof result.study === "object" && !Array.isArray(result.study);
   if (result.kind === "proposal" && result.confirm === true && proposed) {
     const shown = result;
@@ -650,9 +650,9 @@ function TaskPanels({
         const proposal = taskResult(fresh);
         const freshProposed = proposal.study && typeof proposal.study === "object" && !Array.isArray(proposal.study);
         if (fresh.agent !== "agent-experiments" || fresh.kind !== "experiment" || fresh.status !== "succeeded" || proposal.kind !== "proposal" || proposal.confirm !== true || !freshProposed) {
-          throw new ApiError(400, "invalid_input", "That task has no ExperimentsAgent proposal to confirm.");
+          throw new ApiError(400, "invalid_input", "That task has no Experiments Agent proposal to confirm.");
         }
-        if (canonicalJson(proposal) !== canonicalJson(shown)) throw new ApiError(409, "conflict", "The ExperimentsAgent proposal changed before confirmation.");
+        if (canonicalJson(proposal) !== canonicalJson(shown)) throw new ApiError(409, "conflict", "The Experiments Agent proposal changed before confirmation.");
         let experiment: unknown;
         try {
           experiment = JSON.parse(edited);
@@ -670,7 +670,7 @@ function TaskPanels({
     };
     return (
       <div className="mb-5" id="experiment-proposal">
-        <Card tone="active" label="ExperimentsAgent proposal" title="Proposed Experiment" footer={link}>
+        <Card tone="active" label="Experiments Agent proposal" title="Proposed Experiment" footer={link}>
           <div className="ask-reply">
             <Markdown>{reply}</Markdown>
           </div>
@@ -698,8 +698,8 @@ function TaskPanels({
   return (
     <div className="mb-5">
       <Card
-        label="ExperimentsAgent"
-        title="ExperimentsAgent Result"
+        label="Experiments Agent"
+        title="Experiments Agent Result"
         actions={
           result.kind === "running" && experiment.id ? (
             <Button to={url("/train/experiment", { experiment: String(experiment.id) })}>Open the running experiment</Button>
@@ -719,7 +719,7 @@ function TaskPanels({
               void run("reply", async () => {
                 const fresh = await fetchAgentTask(taskId, client.customerId, client.workspaceId);
                 if (fresh.agent !== "agent-experiments" || fresh.kind !== "experiment" || !needsReply(fresh, "agent-experiments") || !fresh.conversation_id) {
-                  throw new ApiError(400, "invalid_input", "That task has no ExperimentsAgent question to answer.");
+                  throw new ApiError(400, "invalid_input", "That task has no Experiments Agent question to answer.");
                 }
                 await turn(message, { conversation_id: fresh.conversation_id });
               });
@@ -731,7 +731,7 @@ function TaskPanels({
             </label>
             <div>
               <Button variant="primary" type="submit" loading={busy === "reply"}>
-                Reply to ExperimentsAgent
+                Reply to the Experiments Agent
               </Button>
             </div>
           </form>

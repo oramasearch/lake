@@ -13,7 +13,7 @@
 
 namespace lake::control {
 
-// Design → Opportunities (docs/api/discover.md, lake#376): what Auto-Suggest recommended and what
+// Design → Opportunities (docs/api/discover.md, lake#376): what Auto-Suggest Agent recommended and what
 // the person decided, a mutable collection on WorkspaceRecords. An Opportunity lives in the
 // workspace Zetta of the workspace its scan ran in, found by its space, so another workspace of
 // the same space never sees it. Its key is derived from its scan and rank, so a scan is saved once

@@ -41,7 +41,7 @@ Decision card.
 
 **Design → Projects** lists every project with its pipelines, how many are approved and its status,
 under three figures (Projects, With pipelines, Runs active). Search filters the list. When the
-workspace has no project yet, the page points you to **Design → Opportunities**, where Auto-Suggest
+workspace has no project yet, the page points you to **Design → Opportunities**, where Auto-Suggest Agent
 recommends projects from your data.
 
 ## The Project Page

@@ -9,13 +9,17 @@ shows it and keeps it honest.
 
 - **Ask Orama** in the top bar of every signed-in page. It opens `/ask?from=<the page>`, so the
   conversation knows where it started.
-- `/ask`: the conversation, a **Talk to** selector (Ask Orama first, then the library's other running
-  chat agents a person uses, then the account's own chat-capable agents), and a message box. The
-  library's internal tooling (Eval Generator and the two corpus generators, `internal: true` in
-  `list_agent_library`) is never offered, even where it runs (lake#451); `control::talk_to_agents`
-  builds the list. The account's own agents come from Zetta's `list_agents`, which took 380–690 ms on
-  the dev site, so the web app adds them to the selector once that read answers, and the agent a
-  conversation talks to stays selected meanwhile (lake#446).
+- `/ask`: the conversation, a **Talk to** selector, and a message box. *Talk to* lists Ask Orama
+  first, then every other library chat agent a person uses, then the account's own chat-capable
+  agents. Each library agent shows its catalogue name, and under the selector the chosen agent's
+  one-sentence purpose with *Where you meet it* to expand (lake#763). A library agent this Lake does
+  not run stays in the list, marked *not running on this Lake* and not selectable, rather than
+  vanishing. Orama's testing agents (the Eval Generator Agent, the Auto-Suggest Corpus Agent and the
+  Project Corpus Agent, `internal: true` in `list_agent_library`) are never offered, even where they
+  run (lake#451); Design → Agents lists them in their own section. `control::talk_to_agents` builds
+  the same list on the server. The account's own agents come from Zetta's `list_agents`, which took
+  380–690 ms on the dev site, so the web app adds them to the selector once that read answers, and
+  the agent a conversation talks to stays selected meanwhile (lake#446).
   *Start a new
   conversation* begins another. An agent's reply is rendered as markdown (tables, lists, code) through
   lake's one renderer, which escapes every character first, so a reply cannot inject HTML; what the
@@ -23,11 +27,11 @@ shows it and keeps it honest.
 - **While a turn runs** the conversation says which agent is working (*Ask Orama is working…*, or
   *Waiting for Ask Orama to start…* before an agent claims it), for how long, the turn's latest
   progress message, and the attempt when lake retried it. When Ask Orama brings in another agent,
-  lake reports that on the person's turn: *Ask Orama asked ExperimentsAgent: …*, then each of the
-  subagent's progress messages (*ExperimentsAgent: …*) and *ExperimentsAgent finished; writing the
+  lake reports that on the person's turn: *Ask Orama asked Experiments Agent: …*, then each of the
+  subagent's progress messages (*Experiments Agent: …*) and *Experiments Agent finished; writing the
   answer.* (lake#451, see [the agent bus](agent-bus.md#delegated-turns)). The page reads this from
   the `get_agent_task` call it already makes; it adds no workspace call. Replies and delegations
-  name agents as people call them (*ExperimentsAgent*, not `agent-experiments`).
+  name agents as people call them (*Experiments Agent*, not `agent-experiments`).
 - Each of Ask Orama's **proposals** (a change it wants to make) is shown with its capability and its
   impact, and a **Confirm** button. A confirmed proposal shows *Confirmed* and is never offered again.
 
@@ -44,10 +48,10 @@ shows it and keeps it honest.
 - **A change to an existing pipeline** goes to the Project Agent with `{project, graph}`; its answer is a
   proposal and the conversation shows *Review the proposed change*, a link to the pipeline page where
   it is applied (lake#249).
-- **It delegates to any agent** (`delegate` → `agent_turn`): the Project Agent, ApplicationAgent,
-  ExperimentsAgent, Auto-Suggest, and any agent the person built; an unattended agent is started by proposing
-  `launch_agent`. An ApplicationAgent delegation creates an `app` task, whose proposal is reviewed
-  and confirmed before that agent receives App writes. An ExperimentsAgent delegation creates an
+- **It delegates to any agent** (`delegate` → `agent_turn`): the Project Agent, Application Agent,
+  Experiments Agent, Auto-Suggest Agent, and any agent the person built; an unattended agent is started by proposing
+  `launch_agent`. An Application Agent delegation creates an `app` task, whose proposal is reviewed
+  and confirmed before that agent receives App writes. An Experiments Agent delegation creates an
   `experiment` task, whose editable experiment is reviewed before that agent receives the engine's
   `create_study`.
 - **Conversations live in the workspace** (lake#370). Every message is a sealed record in the
@@ -85,7 +89,7 @@ conversation) and is audited in that workspace's log.
   turn is `pending` or `running`, `settled` is false and nothing is written. Once it finished, the
   agent's message is stored exactly once, under an id derived from the task, so two calls (or the
   page and the web app together) store one message. Ask Orama's message is `answer.reply` with
-  `{task_id, agent, proposals, reads, delegations, trace_id}`; AgentCreator's is its question,
+  `{task_id, agent, proposals, reads, delegations, trace_id}`; Agent Creator Agent's is its question,
   *Here is the agent I propose. Review it below.* or its reply, with `{task_id, agent, answer,
   proposal_sha256?}`; a failed turn is *That did not finish: …*. A task of another conversation is
   `invalid_input` at `/task_id`. The web app polls `get_agent_task` every 2 s and calls this once
@@ -113,7 +117,7 @@ id and its person; another person's id finds nothing (`not_found` at `/conversat
 
 The agent tasks the conversation started go with it (lake#673): the person's turns in it (kind
 `ask` or `factory`, any agent) and every task those turns' agents asked for in turn
-(`parent_task_id`, lake#451), such as Auto-Suggest working for Ask Orama. Each task's record in
+(`parent_task_id`, lake#451), such as Auto-Suggest Agent working for Ask Orama. Each task's record in
 `lake_agent_tasks` (its request, which repeats the person's message, and the agent's answer) is
 removed from the workspace Zetta, then its content-free dispatch row (`agent_tasks`, with its
 `agent_task_status`) from PostgreSQL, so `get_agent_task` answers `not_found` for it afterwards.
@@ -143,10 +147,10 @@ refused; a deleted workspace's conversations go with it; the operator copy moves
 earlier rows.
 
 `HttpResponseIsolation.AskOramaSaysWhoIsWorkingOnALongTurn` (lake#451): `settle_ask_turn`'s task
-is pending, then running with Ask Orama's message; Ask Orama's turn key delegates to Auto-Suggest,
+is pending, then running with Ask Orama's message; Ask Orama's turn key delegates to the Auto-Suggest Agent,
 and the person's turn carries the delegation, the subagent's progress (also published on the
 workspace's `agent-events` for the asking turn) and its finish as the task's message, until the
-turn settles with the answer. `Workspaces.TalkToOffersOnlyRunningAgentsAPersonUses` covers which
+turn settles with the answer. `Workspaces.TalkToOffersEveryAgentAPersonUsesAndMarksTheOnesNotRunning` covers which
 agents *Talk to* offers.
 
 `HttpServer/HttpResponseIsolation.TheWebAppTalksToAskOramaThroughCapabilities` (lake#561): the same

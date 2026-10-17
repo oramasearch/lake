@@ -158,7 +158,7 @@ the page is sent `Cache-Control: private, no-store`. Three more things keep late
 
 | What | How |
 |---|---|
-| An agent task (Ask Orama, Agent Factory, ApplicationAgent, ExperimentsAgent, Project Agent) | `get_agent_task` every 2 s while it works (3 s for the Project Agent's pipeline turns and the Opportunities scan) |
+| An agent task (Ask Orama, Agent Factory, Application Agent, Experiments Agent, Project Agent) | `get_agent_task` every 2 s while it works (3 s for the Project Agent's pipeline turns and the Opportunities scan) |
 | A project with a running build, proposal or run; a run page | every read again every 3 s; a run every 15 s while it runs |
 | A workspace being prepared | `workspace_status` every 15 s (`components/WorkspaceGate.tsx`) |
 | App events, build logs | `receive_app_events`, `receive_build_events` long polls, resuming from a cursor kept in `localStorage` |

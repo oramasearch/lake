@@ -186,7 +186,7 @@ the agent's Design page lists them under Where It Is Used ([train-agents](train-
 ## Background turns (lake#269)
 
 **No lake page or capability waits on a library agent inside an HTTP request.** `agent_turn` to
-Ask Orama, the Project Agent, ApplicationAgent, ExperimentsAgent, Auto-Suggest or AgentCreator writes a task to `agent_tasks`
+Ask Orama, the Project Agent, Application Agent, Experiments Agent, Auto-Suggest Agent or Agent Creator Agent writes a task to `agent_tasks`
 (migration `0032_agent_tasks`: agent, kind, conversation, the body, scopes, deadline, who asked),
 publishes it on the agent bus, and answers `{task_id, status: pending}` at once. The agent claims
 it, is handed the body with a `lat.` credential lake never stores, and publishes its progress and
@@ -205,13 +205,13 @@ once and follow the task:
 - Ask Orama and the Agent Factory show *Thinking…* / *Working on it…* and record the answer in the
   conversation once;
 - the pipeline page shows *The Project Agent is working on it…*;
-- Ship → Apps shows ApplicationAgent working, then a reply form for a question or the exact
+- Ship → Apps shows Application Agent working, then a reply form for a question or the exact
   proposal and its confirmation;
-- Train → Experiments shows ExperimentsAgent working, then a reply form for a question or an
+- Train → Experiments shows Experiments Agent working, then a reply form for a question or an
   editable experiment proposal and its confirmation;
 - Design → Opportunities shows *Scanning your workspace…*.
 
-Auto-Suggest builds the workspace profile itself with its read-only credential. Your own Python and
+Auto-Suggest Agent builds the workspace profile itself with its read-only credential. Your own Python and
 native agents still answer within the call (a follow-up).
 
 ## Turns
@@ -222,10 +222,10 @@ native agents still answer within the call (a follow-up).
 |---|---|---|
 | **Ask Orama** (`agent-ask-orama`) | its service, `LAKE_AGENT_ENDPOINTS` | a key for this turn derived from the person's credential, carrying **every read capability and `agent_turn`, never an action**, and `lake_url` |
 | **Project Agent** (`agent-project`) | its service | a turn key limited to `workspace_query` / `workspace_openapi`, and `zetta_base_url` = lake's agent path for the workspace. A `context` naming `project` and `graph` is a **change request**: lake adds the graph as it is (`pipeline`), the agent answers with a proposal (agent-project edit mode), and lake keeps it as an Ask Orama message and returns `review_url` (the pipeline page with `&proposal=`), where the person applies it (lake#249) |
-| **ApplicationAgent** (`agent-application`) | its service | an `app` task with read-only workspace, dataset, Service, repository and App tools. A completed proposal returns a Ship → Apps `review_url`. A later task carrying the reviewed object at `context.confirmed_proposal`, with `proposal_task_id` and `proposal_sha256` naming the stored proposal it confirms (checked by `agent_turn`), also receives `create_repository`, `commit_repository_files`, `create_app`, and `deploy_app` |
-| **ExperimentsAgent** (`agent-experiments`) | its service | an `experiment`, `experiment_status` or `experiment_explain` task and a credential for the selected workspace adapter. Proposal turns can read planning inputs (including `validate_study`, the no-side-effect preflight of `create_study`) but cannot write. A later `experiment` task carrying `context.confirmed_proposal`, with `proposal_task_id` and `proposal_sha256` naming the stored proposal it confirms (checked by `agent_turn`; only the experiment, the agent's `study`, may be edited), receives workspace `create_study` and backing `start_experiment`; status receives trial monitoring/stop tools, and explanation receives promotion only with its own confirmation. Experiment data remains in workspace Zetta |
-| **Auto-Suggest** (`agent-autosuggest`) | its service | the workspace's profile, which lake builds (`list_datasets`, then `get_dataset` for up to twelve); no key: it reads nothing itself |
-| **AgentCreator** (`agent-creator`) | its service | a turn key limited to `workspace_query` / `workspace_openapi` |
+| **Application Agent** (`agent-application`) | its service | an `app` task with read-only workspace, dataset, Service, repository and App tools. A completed proposal returns a Ship → Apps `review_url`. A later task carrying the reviewed object at `context.confirmed_proposal`, with `proposal_task_id` and `proposal_sha256` naming the stored proposal it confirms (checked by `agent_turn`), also receives `create_repository`, `commit_repository_files`, `create_app`, and `deploy_app` |
+| **Experiments Agent** (`agent-experiments`) | its service | an `experiment`, `experiment_status` or `experiment_explain` task and a credential for the selected workspace adapter. Proposal turns can read planning inputs (including `validate_study`, the no-side-effect preflight of `create_study`) but cannot write. A later `experiment` task carrying `context.confirmed_proposal`, with `proposal_task_id` and `proposal_sha256` naming the stored proposal it confirms (checked by `agent_turn`; only the experiment, the agent's `study`, may be edited), receives workspace `create_study` and backing `start_experiment`; status receives trial monitoring/stop tools, and explanation receives promotion only with its own confirmation. Experiment data remains in workspace Zetta |
+| **Auto-Suggest Agent** (`agent-autosuggest`) | its service | the workspace's profile, which lake builds (`list_datasets`, then `get_dataset` for up to twelve); no key: it reads nothing itself |
+| **Agent Creator Agent** (`agent-creator`) | its service | a turn key limited to `workspace_query` / `workspace_openapi` |
 | a **native** agent of the account | the workspace's `chat` (`GET`) | the message |
 | a **Python** agent of the account | its running `service` launch | the message and conversation id; with no running service lake starts one and answers `status: starting` |
 
@@ -245,7 +245,7 @@ service.
 | `unschedule_agent` | action | `write` | `{schedule_id}`; the operator deletes its CronJob |
 | `set_agent_streams` | action | `write` | `{agent_id, streams}`; the whole set of workspace streams whose new messages each start a job, as the caller; Python agents only ([stream triggers](#stream-triggers)) |
 | `list_agent_streams` | read | `read` | `{agent_id?}`, the workspace's stream triggers (or one agent's), oldest first |
-| `agent_turn` | action | `write` | `{agent, message, conversation_id?, context?, page?, kind?}`; Lake creates the conversation ID when omitted and uses it to attach the preceding same-kind turn; ExperimentsAgent accepts `experiment`, `experiment_status`, or `experiment_explain` |
+| `agent_turn` | action | `write` | `{agent, message, conversation_id?, context?, page?, kind?}`; Lake creates the conversation ID when omitted and uses it to attach the preceding same-kind turn; Experiments Agent accepts `experiment`, `experiment_status`, or `experiment_explain` |
 
 Audit kinds: `agent.launch`, `agent.stop`, `agent.schedule`, `agent.unschedule`, `agent.streams`,
 `agent.turn`.
