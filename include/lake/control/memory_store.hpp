@@ -483,6 +483,15 @@ public:
     Result<IssuedSession> sign_in_passkey(const PasskeyAssertion&) override;
     Result<IssuedSession> sign_in_oauth(const OAuthIdentity&) override;
     Result<IssuedSession> sign_in_clerk(const ClerkIdentity&) override;
+    Result<ClerkUserProvisioned> provision_clerk_user(const ClerkIdentity&) override;
+    Result<std::string> update_clerk_user(const ClerkIdentity&) override;
+    Result<std::string> disable_clerk_user(const std::string& subject) override;
+    Result<bool> clerk_webhook_applied(const std::string& delivery_id) override;
+    Result<void> record_clerk_webhook(const std::string& delivery_id,
+                                      const std::string& event_type,
+                                      const std::string& subject) override;
+    // provision_clerk_user under the lock.
+    Result<ClerkUserProvisioned> clerk_user_locked(const ClerkIdentity&);
     Result<AccountIdentity> account_identity(const std::string& user_id) override;
     Result<ManagedKey> managed_key(const std::string& user_id) override;
     Result<void> create_identity_link_challenge(const IdentityLinkChallenge&) override;
@@ -707,6 +716,9 @@ private:
     std::vector<OAuthCredential> oauth_credentials_;
     // user id -> the TAAP identity lake minted for a Clerk sign-in (custodial_identities).
     std::map<std::string, ClerkIdentity> custodial_identities_;
+    // Accounts disabled by a Clerk user.deleted (lake#765), and the deliveries applied.
+    std::set<std::string> disabled_users_;
+    std::set<std::string> clerk_webhook_deliveries_;
     // user id -> when its managed seed was destroyed by using its own identity (lake#762).
     std::map<std::string, std::string> managed_seed_destroyed_at_;
     struct IdentityLinkChallengeRecord {

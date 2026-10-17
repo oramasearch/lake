@@ -161,6 +161,10 @@ struct ServerOptions {
     // and sign-up are Clerk's and lake's own identity pages leave the navigation; empty or `xxx`
     // keeps lake's own sign-in, as an on-prem install uses. See docs/api/clerk.md.
     std::string clerk_publishable_key;
+    // Clerk webhook signing secret (LAKE_CLERK_WEBHOOK_SECRET, `whsec_…`), an Orama platform key
+    // the operator injects from the instance's Clerk configuration. Empty: POST
+    // /identity/clerk-webhook answers 404. See docs/api/clerk.md#webhooks (lake#765).
+    std::string clerk_webhook_secret;
     // The cluster's sealed-secret delivery key (LAKE_SEALING_PUBLIC_KEY, unpadded base64url X25519,
     // set by the operator from Lake status.sealing). When set, mint_sealed_secret seals only to it
     // (lake#625, docs/api/secrets.md#projections).

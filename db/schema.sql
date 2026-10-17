@@ -4485,3 +4485,20 @@ CREATE TABLE IF NOT EXISTS identity_links (
 
 CREATE TABLE IF NOT EXISTS identity_links_guard (applied_at timestamptz NOT NULL DEFAULT now());
 INSERT INTO schema_migrations (version) VALUES ('0086_identity_links') ON CONFLICT DO NOTHING;
+
+-- ---------------------------------------------------------------------------------------------
+-- 0087_clerk_webhooks (lake#765): Clerk's user events reach Lake. A user.deleted disables the
+-- account (users.disabled_at) and revokes its sessions; nothing is erased. Each delivery (its
+-- svix-id) is applied once. See docs/api/clerk.md#webhooks.
+-- ---------------------------------------------------------------------------------------------
+ALTER TABLE users ADD COLUMN IF NOT EXISTS disabled_at timestamptz;
+
+CREATE TABLE IF NOT EXISTS clerk_webhook_deliveries (
+    svix_id       text        PRIMARY KEY,
+    event_type    text        NOT NULL,
+    clerk_subject text        NOT NULL DEFAULT '',
+    received_at   timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS clerk_webhooks_guard (applied_at timestamptz NOT NULL DEFAULT now());
+INSERT INTO schema_migrations (version) VALUES ('0087_clerk_webhooks') ON CONFLICT DO NOTHING;

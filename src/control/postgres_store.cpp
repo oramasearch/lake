@@ -7642,60 +7642,155 @@ public:
             return issued;
         });
     }
-    Result<IssuedSession> sign_in_clerk(const ClerkIdentity& in) override {
+    Result<ClerkUserProvisioned> clerk_user_tx(pqxx::work& tx, const ClerkIdentity& in) {
         if (in.subject.empty()) {
             return std::unexpected(StoreError{"invalid_input", "a Clerk subject is required"});
         }
-        return with_tx<IssuedSession>([&](pqxx::work& tx) -> Result<IssuedSession> {
-            const std::string subject = "clerk:" + in.subject;
-            pqxx::result rows =
-                tx.exec_params("SELECT user_id::text FROM credentials WHERE pool_id = 'lake' "
-                               "AND kind = 'oauth' AND subject = $1 AND revoked_at IS NULL",
-                               subject);
-            std::string user_id;
-            if (!rows.empty()) {
-                user_id = rows[0][0].as<std::string>();
-            } else {
-                // Clerk verified this address, so an existing lake account with it is the same
-                // person: link it rather than create a second account.
-                if (!in.email.empty()) {
-                    rows = tx.exec_params("SELECT id::text FROM users WHERE pool_id = 'lake' "
-                                          "AND lower(email) = lower($1)",
-                                          in.email);
-                }
-                if (!rows.empty()) {
-                    user_id = rows[0][0].as<std::string>();
-                } else {
-                    if (in.custodial_taap_id.empty() || in.custodial_public_key.empty() ||
-                        in.custodial_wrapped_seed.empty()) {
-                        return std::unexpected(StoreError{
-                            "invalid_input", "a custodial identity is required to create a user"});
-                    }
-                    rows = tx.exec_params("INSERT INTO users (taap_id, email, display_name, "
-                                          "pool_id) VALUES ($1, $2, $3, 'lake') RETURNING id::text",
-                                          in.custodial_taap_id,
-                                          nullable(in.email),
-                                          in.display_name);
-                    user_id = rows[0][0].as<std::string>();
-                    tx.exec_params("INSERT INTO custodial_identities (user_id, taap_id, "
-                                   "public_key, wrapped_seed) VALUES ($1::uuid, $2, $3, $4)",
-                                   user_id,
-                                   in.custodial_taap_id,
-                                   in.custodial_public_key,
-                                   in.custodial_wrapped_seed);
-                    const auto customer =
-                        provision_personal_customer(tx, user_id, in.custodial_taap_id, subject);
-                    if (!customer) {
-                        return std::unexpected(customer.error());
-                    }
-                }
-                tx.exec_params("INSERT INTO credentials (user_id, pool_id, kind, subject) "
-                               "VALUES ($1::uuid, 'lake', 'oauth', $2)",
-                               user_id,
-                               subject);
+        const std::string subject = "clerk:" + in.subject;
+        ClerkUserProvisioned result;
+        pqxx::result rows =
+            tx.exec_params("SELECT user_id::text FROM credentials WHERE pool_id = 'lake' "
+                           "AND kind = 'oauth' AND subject = $1 AND revoked_at IS NULL",
+                           subject);
+        if (!rows.empty()) {
+            result.user_id = rows[0][0].as<std::string>();
+        } else {
+            // Clerk verified this address, so an existing lake account with it is the same
+            // person: link it rather than create a second account.
+            if (!in.email.empty()) {
+                rows = tx.exec_params("SELECT id::text FROM users WHERE pool_id = 'lake' "
+                                      "AND lower(email) = lower($1)",
+                                      in.email);
             }
-            return issue_session(
-                tx, user_id, "lake", in.device_name, "browser", "", {"*"}, "", 60 * 60 * 24 * 30);
+            if (!rows.empty()) {
+                result.user_id = rows[0][0].as<std::string>();
+                result.linked = true;
+            } else {
+                if (in.custodial_taap_id.empty() || in.custodial_public_key.empty() ||
+                    in.custodial_wrapped_seed.empty()) {
+                    return std::unexpected(StoreError{
+                        "invalid_input", "a custodial identity is required to create a user"});
+                }
+                rows = tx.exec_params("INSERT INTO users (taap_id, email, display_name, "
+                                      "pool_id) VALUES ($1, $2, $3, 'lake') RETURNING id::text",
+                                      in.custodial_taap_id,
+                                      nullable(in.email),
+                                      in.display_name);
+                result.user_id = rows[0][0].as<std::string>();
+                result.created = true;
+                tx.exec_params("INSERT INTO custodial_identities (user_id, taap_id, "
+                               "public_key, wrapped_seed) VALUES ($1::uuid, $2, $3, $4)",
+                               result.user_id,
+                               in.custodial_taap_id,
+                               in.custodial_public_key,
+                               in.custodial_wrapped_seed);
+                const auto customer =
+                    provision_personal_customer(tx, result.user_id, in.custodial_taap_id, subject);
+                if (!customer) {
+                    return std::unexpected(customer.error());
+                }
+            }
+            tx.exec_params("INSERT INTO credentials (user_id, pool_id, kind, subject) "
+                           "VALUES ($1::uuid, 'lake', 'oauth', $2)",
+                           result.user_id,
+                           subject);
+        }
+        result.taap_id =
+            tx.exec_params("SELECT coalesce(taap_id, '') FROM users WHERE id = $1::uuid",
+                           result.user_id)[0][0]
+                .as<std::string>();
+        return result;
+    }
+    Result<IssuedSession> sign_in_clerk(const ClerkIdentity& in) override {
+        return with_tx<IssuedSession>([&](pqxx::work& tx) -> Result<IssuedSession> {
+            const auto found = clerk_user_tx(tx, in);
+            if (!found) {
+                return std::unexpected(found.error());
+            }
+            return issue_session(tx,
+                                 found->user_id,
+                                 "lake",
+                                 in.device_name,
+                                 "browser",
+                                 "",
+                                 {"*"},
+                                 "",
+                                 60 * 60 * 24 * 30);
+        });
+    }
+    Result<ClerkUserProvisioned> provision_clerk_user(const ClerkIdentity& in) override {
+        return with_tx<ClerkUserProvisioned>(
+            [&](pqxx::work& tx) -> Result<ClerkUserProvisioned> { return clerk_user_tx(tx, in); });
+    }
+    std::optional<std::string> clerk_user_id(pqxx::work& tx, const std::string& clerk_subject) {
+        const pqxx::result rows =
+            tx.exec_params("SELECT user_id::text FROM credentials WHERE pool_id = 'lake' "
+                           "AND kind = 'oauth' AND subject = $1 AND revoked_at IS NULL",
+                           "clerk:" + clerk_subject);
+        if (clerk_subject.empty() || rows.empty()) {
+            return std::nullopt;
+        }
+        return rows[0][0].as<std::string>();
+    }
+    Result<std::string> update_clerk_user(const ClerkIdentity& in) override {
+        return with_tx<std::string>([&](pqxx::work& tx) -> Result<std::string> {
+            const auto user_id = clerk_user_id(tx, in.subject);
+            if (!user_id) {
+                return std::unexpected(
+                    StoreError{"not_found", "no Lake account is linked to this user"});
+            }
+            if (!in.email.empty() &&
+                !tx.exec_params("SELECT 1 FROM users WHERE lower(email) = lower($1) "
+                                "AND id <> $2::uuid",
+                                in.email,
+                                *user_id)
+                     .empty()) {
+                return std::unexpected(StoreError{"conflict", "another account has this email"});
+            }
+            tx.exec_params("UPDATE users SET email = COALESCE(NULLIF($2, ''), email), "
+                           "display_name = $3 WHERE id = $1::uuid",
+                           *user_id,
+                           in.email,
+                           in.display_name);
+            return *user_id;
+        });
+    }
+    Result<std::string> disable_clerk_user(const std::string& clerk_subject) override {
+        return with_tx<std::string>([&](pqxx::work& tx) -> Result<std::string> {
+            const auto user_id = clerk_user_id(tx, clerk_subject);
+            if (!user_id) {
+                return std::unexpected(
+                    StoreError{"not_found", "no Lake account is linked to this user"});
+            }
+            tx.exec_params("UPDATE users SET disabled_at = coalesce(disabled_at, now()) "
+                           "WHERE id = $1::uuid",
+                           *user_id);
+            tx.exec_params("UPDATE sessions SET revoked_at = now() WHERE user_id = $1::uuid "
+                           "AND revoked_at IS NULL",
+                           *user_id);
+            tx.exec_params("UPDATE devices SET revoked_at = now() WHERE user_id = $1::uuid "
+                           "AND revoked_at IS NULL",
+                           *user_id);
+            return *user_id;
+        });
+    }
+    Result<bool> clerk_webhook_applied(const std::string& delivery_id) override {
+        return with_tx<bool>([&](pqxx::work& tx) -> Result<bool> {
+            return !tx.exec_params("SELECT 1 FROM clerk_webhook_deliveries WHERE svix_id = $1",
+                                   delivery_id)
+                        .empty();
+        });
+    }
+    Result<void> record_clerk_webhook(const std::string& delivery_id,
+                                      const std::string& event_type,
+                                      const std::string& subject) override {
+        return with_tx<void>([&](pqxx::work& tx) -> Result<void> {
+            tx.exec_params("INSERT INTO clerk_webhook_deliveries (svix_id, event_type, "
+                           "clerk_subject) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
+                           delivery_id,
+                           event_type,
+                           subject);
+            return {};
         });
     }
     Result<AccountIdentity> account_identity(const std::string& user_id) override {
@@ -8188,7 +8283,9 @@ public:
                     // An application user's status lives in the application's workspace
                     // (lake#353): suspension and deletion revoke the pool's sessions, and every
                     // session issued in a pool is checked there before it is returned.
-                    "AND (devices.id IS NULL OR devices.revoked_at IS NULL)",
+                    "AND (devices.id IS NULL OR devices.revoked_at IS NULL) "
+                    // A disabled account's credentials no longer work (lake#765).
+                    "AND (users.id IS NULL OR users.disabled_at IS NULL)",
                 *lookup_id);
             if (rows.empty()) {
                 return std::unexpected(StoreError{"not_found", "session is not active"});
@@ -10575,6 +10672,12 @@ private:
         const std::string random = identity_crypto::random_secret();
         if (random.empty()) {
             return std::unexpected(StoreError{"store_error", "could not create session secret"});
+        }
+        // A disabled account (a Clerk user.deleted, lake#765) is issued nothing.
+        if (!tx.exec_params("SELECT 1 FROM users WHERE id = $1::uuid AND disabled_at IS NOT NULL",
+                            user_id)
+                 .empty()) {
+            return std::unexpected(StoreError{"unauthorized", "this account is disabled"});
         }
         const std::string lookup_id = new_uuid_v4();
         const std::string secret = "ls1." + lookup_id + "." + random;

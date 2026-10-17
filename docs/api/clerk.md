@@ -44,7 +44,8 @@ every page and API call is resolved by `context_for` as before.
    which signs the browser out of Clerk as well. Without that, the next visit would sign the person
    straight back in.
 
-lake holds **no Clerk secret**. Verification needs only the public JWKS.
+lake holds **no Clerk secret key**. Verification of sign-in needs only the public JWKS; the one
+Clerk secret Lake may hold is the webhook signing secret ([Webhooks](#webhooks)).
 
 ## Who a Clerk sign-in becomes
 
@@ -68,11 +69,66 @@ liquid identity as a linked successor and destroys the seed ([identity.md](ident
 lake#762, decision 65). Lake's own sign-up without Clerk gives the same managed key when no
 identity document is sent.
 
+## Webhooks
+
+**Status: implemented 2026-10-17 (lake#765, migration `0087_clerk_webhooks`), not deployed.**
+
+Without webhooks a Lake account exists only from a person's first sign-in. With them, Clerk's user
+events reach Lake as they happen: a user made in Clerk (an invitation, a waitlist approval, the
+dashboard) has a Lake account at once, a change of email or name follows, and a deleted user's
+account is disabled.
+
+**`POST /identity/clerk-webhook`**, as Clerk (through Svix) sends it:
+
+- **Verified with Lake's own HMAC, no SDK** (`src/api/clerk_webhooks.cpp`). The signed content is
+  `<svix-id>.<svix-timestamp>.<raw body>`; the key is the base64 after `whsec_` in
+  `LAKE_CLERK_WEBHOOK_SECRET`; the signature is HMAC-SHA256 in base64, and `svix-signature` lists
+  one or more `v1,<signature>` (any one matching, compared in constant time, is enough, so a rotated
+  secret works during the overlap). `svix-timestamp` must be within five minutes of Lake's clock.
+  A refusal answers `401`.
+- **Each delivery applies once.** A `svix-id` already applied is acknowledged (`200`,
+  `{"applied": false, "duplicate": true}`) and not applied again; its ids are kept in
+  `clerk_webhook_deliveries`. Every event is also idempotent on its own.
+- **`user.created`** does what a first sign-in does, without a session: the account with a
+  **managed key** (decision 65), its personal customer with an `admin` grant (decision 40), and the
+  Clerk subject linked (`Store::provision_clerk_user`, the same code `sign_in_clerk` runs). An
+  account that already has the subject is found again; one with the same **verified** primary email
+  is linked. An unverified primary email is never used: the account is created without an email,
+  and a later `user.updated` sets it once Clerk has verified it.
+- **`user.updated`** sets the verified primary email and the display name (first and last name, else
+  the username) of the account linked to the subject. It never links or relinks an account. An
+  email another account has is refused.
+- **`user.deleted`** disables the linked account (`users.disabled_at`) and revokes every session,
+  token and device of it in one transaction. **Nothing is erased**: the account, its workspaces and its
+  audit stay; deleting data is a separate, confirmed step. A disabled account is issued no session
+  (`issue_session`) and its credentials no longer resolve (`context_for`), so Clerk sign-in, TAAP
+  sign-in and tokens all stop.
+- Other event types are acknowledged and ignored. `session.revoked` is not acted on: a Lake session
+  is Lake's own, not tied to a Clerk session id.
+- **Audit:** every delivery is one central event, object `clerk`, method `clerk_webhook`, action
+  `webhook.<type>` (`webhook` for a refused or replayed delivery), outcome `success`, `failure` or
+  `denied`, with the `svix_id`, the Clerk user and the Lake user in its details.
+- **Answers:** `200` when applied, acknowledged or refused for good (no account linked, an email
+  conflict), so Clerk stops retrying; `503` when the store fails, so Clerk retries; `400` for a body
+  that is not a Clerk event.
+
+**Configure the Clerk instance:** add an endpoint `https://<lake host>/identity/clerk-webhook`
+subscribed to `user.created`, `user.updated` and `user.deleted`, and give its signing secret to the
+Lake as `LAKE_CLERK_WEBHOOK_SECRET` (orama-operator#541 does both per instance).
+
+**Verify:** `ctest --test-dir build -R 'ClerkWebhook'` (with `LAKE_TEST_DB_URI` set). It covers
+Svix's documented signature vector, a wrong secret, a tampered body, a changed id, old and future
+timestamps and a replayed `svix-id`; on both stores, `user.created` giving the same account as a
+first sign-in (and a later sign-in reaching it), linking by verified email only, `user.updated`,
+and `user.deleted` disabling the account with its session no longer working; and the route's `404`
+without the secret, `401` to a forged delivery and `200` creating the account.
+
 ## Configuration
 
 | Setting | Where | Value |
 |---|---|---|
 | `LAKE_CLERK_PUBLISHABLE_KEY` / `--clerk-publishable-key` | lake runtime | The instance's `pk_test_…` or `pk_live_…`. Public. Empty or `xxx` turns Clerk off |
+| `LAKE_CLERK_WEBHOOK_SECRET` / `--clerk-webhook-secret` | lake runtime, an Orama platform key | The webhook endpoint's `whsec_…` signing secret. Empty: no webhook route ([Webhooks](#webhooks)) |
 
 Everything else is derived from the key: the publishable key is `pk_test_` or `pk_live_` followed
 by base64 of the Frontend API host and a trailing `$`, so the issuer is `https://<host>` and the

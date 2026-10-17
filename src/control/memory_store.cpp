@@ -3812,29 +3812,29 @@ Result<IssuedSession> InMemoryStore::sign_in_oauth(const OAuthIdentity& input) {
     return issued;
 }
 
-Result<IssuedSession> InMemoryStore::sign_in_clerk(const ClerkIdentity& input) {
+Result<ClerkUserProvisioned> InMemoryStore::clerk_user_locked(const ClerkIdentity& input) {
     if (input.subject.empty()) {
         return std::unexpected(StoreError{"invalid_input", "a Clerk subject is required"});
     }
-    std::lock_guard lock(mutex_);
     const std::string subject = "clerk:" + input.subject;
-    std::string user_id;
+    ClerkUserProvisioned result;
     for (const auto& credential : oauth_credentials_) {
         if (credential.pool_id == "lake" && credential.subject == subject) {
-            user_id = credential.user_id;
+            result.user_id = credential.user_id;
         }
     }
-    if (user_id.empty() && !input.email.empty()) {
+    if (result.user_id.empty() && !input.email.empty()) {
         for (const auto& user : users_) {
             if (lower(user.email) == lower(input.email)) {
-                user_id = user.id;
+                result.user_id = user.id;
             }
         }
-        if (!user_id.empty()) {
-            oauth_credentials_.push_back(OAuthCredential{user_id, "lake", subject});
+        if (!result.user_id.empty()) {
+            oauth_credentials_.push_back(OAuthCredential{result.user_id, "lake", subject});
+            result.linked = true;
         }
     }
-    if (user_id.empty()) {
+    if (result.user_id.empty()) {
         if (input.custodial_taap_id.empty() || input.custodial_public_key.empty() ||
             input.custodial_wrapped_seed.empty()) {
             return std::unexpected(
@@ -3843,15 +3843,17 @@ Result<IssuedSession> InMemoryStore::sign_in_clerk(const ClerkIdentity& input) {
         const std::string now = now_iso8601();
         users_.push_back(User{
             new_uuid_v4(), input.custodial_taap_id, input.email, input.display_name, now, now});
-        user_id = users_.back().id;
-        custodial_identities_[user_id] = input;
-        oauth_credentials_.push_back(OAuthCredential{user_id, "lake", subject});
+        result.user_id = users_.back().id;
+        result.created = true;
+        custodial_identities_[result.user_id] = input;
+        oauth_credentials_.push_back(OAuthCredential{result.user_id, "lake", subject});
         std::string handle;
         do {
             handle = generate_handle();
         } while (std::ranges::any_of(
             customers_, [&](const Customer& customer) { return customer.name == handle; }));
-        customers_.push_back(Customer{new_uuid_v4(), "individual", user_id, "", handle, now, now});
+        customers_.push_back(
+            Customer{new_uuid_v4(), "individual", result.user_id, "", handle, now, now});
         policy_objects_.push_back(
             PolicyObject{new_uuid_v4(), "customer", customers_.back().id, "", now, now, true});
         grants_.push_back(Grant{new_uuid_v4(),
@@ -3863,13 +3865,104 @@ Result<IssuedSession> InMemoryStore::sign_in_clerk(const ClerkIdentity& input) {
                                 now,
                                 now});
     }
-    Device& device = add_device(devices_, user_id, input.device_name);
+    for (const auto& user : users_) {
+        if (user.id == result.user_id) {
+            result.taap_id = user.taap_id;
+        }
+    }
+    return result;
+}
+
+Result<IssuedSession> InMemoryStore::sign_in_clerk(const ClerkIdentity& input) {
+    std::lock_guard lock(mutex_);
+    const auto found = clerk_user_locked(input);
+    if (!found) {
+        return std::unexpected(found.error());
+    }
+    if (disabled_users_.contains(found->user_id)) {
+        return std::unexpected(StoreError{"unauthorized", "this account is disabled"});
+    }
+    Device& device = add_device(devices_, found->user_id, input.device_name);
     IssuedSession issued =
-        add_session(sessions_, user_id, "lake", device.id, "browser", "", {"*"}, "", 86400);
+        add_session(sessions_, found->user_id, "lake", device.id, "browser", "", {"*"}, "", 86400);
     if (issued.secret.empty())
         return std::unexpected(StoreError{"store_error", "could not issue session"});
     issued.session.reason.clear();
     return issued;
+}
+
+Result<ClerkUserProvisioned> InMemoryStore::provision_clerk_user(const ClerkIdentity& input) {
+    std::lock_guard lock(mutex_);
+    return clerk_user_locked(input);
+}
+
+Result<std::string> InMemoryStore::update_clerk_user(const ClerkIdentity& input) {
+    std::lock_guard lock(mutex_);
+    const std::string subject = "clerk:" + input.subject;
+    std::string user_id;
+    for (const auto& credential : oauth_credentials_) {
+        if (credential.pool_id == "lake" && credential.subject == subject) {
+            user_id = credential.user_id;
+        }
+    }
+    if (input.subject.empty() || user_id.empty()) {
+        return std::unexpected(StoreError{"not_found", "no Lake account is linked to this user"});
+    }
+    if (!input.email.empty() && std::ranges::any_of(users_, [&](const User& user) {
+            return user.id != user_id && lower(user.email) == lower(input.email);
+        })) {
+        return std::unexpected(StoreError{"conflict", "another account has this email"});
+    }
+    for (auto& user : users_) {
+        if (user.id == user_id) {
+            if (!input.email.empty()) {
+                user.email = input.email;
+            }
+            user.display_name = input.display_name;
+            user.updated_at = now_iso8601();
+        }
+    }
+    return user_id;
+}
+
+Result<std::string> InMemoryStore::disable_clerk_user(const std::string& clerk_subject) {
+    std::lock_guard lock(mutex_);
+    const std::string subject = "clerk:" + clerk_subject;
+    std::string user_id;
+    for (const auto& credential : oauth_credentials_) {
+        if (credential.pool_id == "lake" && credential.subject == subject) {
+            user_id = credential.user_id;
+        }
+    }
+    if (clerk_subject.empty() || user_id.empty()) {
+        return std::unexpected(StoreError{"not_found", "no Lake account is linked to this user"});
+    }
+    disabled_users_.insert(user_id);
+    const std::string now = now_iso8601();
+    for (auto& session : sessions_) {
+        if (session.user_id == user_id && session.revoked_at.empty()) {
+            session.revoked_at = now;
+        }
+    }
+    for (auto& device : devices_) {
+        if (device.user_id == user_id && device.revoked_at.empty()) {
+            device.revoked_at = now;
+        }
+    }
+    return user_id;
+}
+
+Result<bool> InMemoryStore::clerk_webhook_applied(const std::string& delivery_id) {
+    std::lock_guard lock(mutex_);
+    return clerk_webhook_deliveries_.contains(delivery_id);
+}
+
+Result<void> InMemoryStore::record_clerk_webhook(const std::string& delivery_id,
+                                                 const std::string&,
+                                                 const std::string&) {
+    std::lock_guard lock(mutex_);
+    clerk_webhook_deliveries_.insert(delivery_id);
+    return {};
 }
 
 Result<AccountIdentity> InMemoryStore::account_identity(const std::string& user_id) {
@@ -4358,6 +4451,9 @@ Result<Principal> InMemoryStore::context_for(const std::string& secret) {
             users_, [&](const User& row) { return row.id == session.user_id; });
         if (user == users_.end() || user->taap_id.empty())
             return std::unexpected(StoreError{"unauthorized", "session identity is unavailable"});
+        if (disabled_users_.contains(user->id)) {
+            continue; // a disabled account's credentials no longer work (lake#765)
+        }
         session.last_used_at = now_iso8601();
         return Principal{session.user_id,
                          user->taap_id,

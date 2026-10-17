@@ -53,6 +53,14 @@ grants, audit and repositories stay; `sign_in_taap` with the own key reaches it,
 vendor the schema and select `identity_links_guard`. See
 [`docs/api/identity.md#your-own-identity`](docs/api/identity.md#your-own-identity).
 
+Clerk webhooks follow (lake#765, migration `0087_clerk_webhooks`): `POST /identity/clerk-webhook`,
+verified with Lake's own Svix HMAC and `LAKE_CLERK_WEBHOOK_SECRET` (404 without it), applies each
+`svix-id` once: `user.created` provisions the account as a first Clerk sign-in does, `user.updated`
+sets its verified email and name, `user.deleted` disables it (`users.disabled_at`) and revokes its
+sessions without erasing anything; every delivery is audited centrally. Not deployed; the operator
+must vendor the schema, select `clerk_webhooks_guard` and configure the endpoint and secret
+(orama-operator#541). See [`docs/api/clerk.md#webhooks`](docs/api/clerk.md#webhooks).
+
 The newest dated record, [`docs/deployment/dev-2026-10-01.md`](docs/deployment/dev-2026-10-01.md),
 and [`docs/design/status.md`](docs/design/status.md) still describe the 2026-10-01 deployment
 (`oramasearch/lake:20261001d`, `36679e1`); they have not been brought up to the release. Until they

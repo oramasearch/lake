@@ -47,6 +47,7 @@
 
 #include "api/route_guard.hpp"
 #include "lake/api/capabilities.hpp"
+#include "lake/api/clerk_webhooks.hpp"
 #include "lake/api/oauth.hpp"
 #include "lake/api/server.hpp"
 #include "lake/audit/audit.hpp"
@@ -3335,6 +3336,75 @@ TEST(HttpServer, ClerkSessionExchangeIsAbsentWithoutClerk) {
     EXPECT_TRUE(connection.request("POST", "/identity/clerk-session", "token=x")
                     .starts_with("HTTP/1.1 404"));
     EXPECT_EQ(response_header(connection.request("POST", "/logout"), "location"), "/");
+}
+
+// Clerk's user events (lake#765): the route exists only with LAKE_CLERK_WEBHOOK_SECRET, takes
+// Svix's headers and answers 401 to a forged delivery.
+TEST(HttpServer, ClerkWebhookIsSignedAndAbsentWithoutItsSecret) {
+    const std::string secret = "whsec_bGFrZSBjbGVyayB3ZWJob29rIHRlc3Qgc2VjcmV0ISE=";
+    const std::string body =
+        R"({"type":"user.created","object":"event","data":{"id":"user_http","first_name":"H",)"
+        R"("primary_email_address_id":"idn_1","email_addresses":[{"id":"idn_1",)"
+        R"("email_address":"http-hook@example.test","verification":{"status":"verified"}}]}})";
+    const std::string timestamp =
+        std::to_string(std::chrono::duration_cast<std::chrono::seconds>(
+                           std::chrono::system_clock::now().time_since_epoch())
+                           .count());
+    lake::api::clerk_webhooks::Delivery delivery{"msg_http", timestamp, "", body};
+    const std::vector<std::pair<std::string, std::string>> headers = {
+        {"svix-id", "msg_http"},
+        {"svix-timestamp", timestamp},
+        {"svix-signature", "v1," + lake::api::clerk_webhooks::sign(secret, delivery)}};
+    {
+        lake::api::ServerOptions options;
+        options.port = 0;
+        options.worker_coroutines = 1;
+        options.instance_kek = "clerk-webhook-off-kek";
+        options.store = std::make_shared<lake::control::InMemoryStore>();
+        lake::api::ApiServer server(options);
+        ASSERT_TRUE(server.start()) << server.reason();
+        HttpConnection connection(server.port());
+        EXPECT_TRUE(connection
+                        .request("POST",
+                                 "/identity/clerk-webhook",
+                                 body,
+                                 {},
+                                 "HTTP/1.1",
+                                 {},
+                                 "application/json",
+                                 headers)
+                        .starts_with("HTTP/1.1 404"));
+    }
+    lake::api::ServerOptions options;
+    options.port = 0;
+    options.worker_coroutines = 1;
+    options.instance_kek = "clerk-webhook-on-kek";
+    options.clerk_webhook_secret = secret;
+    auto store = std::make_shared<lake::control::InMemoryStore>();
+    options.store = store;
+    lake::api::ApiServer server(options);
+    ASSERT_TRUE(server.start()) << server.reason();
+    HttpConnection connection(server.port());
+    auto forged = headers;
+    forged[2].second = "v1,AAAA";
+    EXPECT_TRUE(connection
+                    .request("POST",
+                             "/identity/clerk-webhook",
+                             body,
+                             {},
+                             "HTTP/1.1",
+                             {},
+                             "application/json",
+                             forged)
+                    .starts_with("HTTP/1.1 401"));
+    const std::string accepted = connection.request(
+        "POST", "/identity/clerk-webhook", body, {}, "HTTP/1.1", {}, "application/json", headers);
+    ASSERT_TRUE(accepted.starts_with("HTTP/1.1 200")) << accepted;
+    EXPECT_EQ(nlohmann::json::parse(response_body(accepted)).at("created"), true);
+    const auto users = store->list_users(10);
+    ASSERT_TRUE(users);
+    EXPECT_TRUE(std::ranges::any_of(
+        *users, [](const auto& row) { return row.email == "http-hook@example.test"; }));
 }
 
 TEST(HttpServer, IdleKeepAliveCloseWritesNothingToStderr) {

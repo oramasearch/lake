@@ -7,17 +7,18 @@
 
 #include "forge_records_api.hpp"
 #include "http_connections.hpp"
+#include "lake/api/agent_stream_triggers.hpp"
 #include "lake/api/audit_recorder.hpp"
 #include "lake/api/billing.hpp"
+#include "lake/api/clerk_webhooks.hpp"
 #include "lake/api/mcp_client.hpp"
-#include "lake/api/agent_stream_triggers.hpp"
-#include "lake/control/store_buckets.hpp"
 #include "lake/api/mcp_connections.hpp"
 #include "lake/api/metering_recorder.hpp"
 #include "lake/api/request_recorder.hpp"
 #include "lake/api/server.hpp"
 #include "lake/api/stripe.hpp"
 #include "lake/api/usage_recorder.hpp"
+#include "lake/control/store_buckets.hpp"
 #include "lake/thread.hpp"
 
 #include "lake/control/agents.hpp"
@@ -8891,6 +8892,7 @@ struct ApiServer::Impl {
             "/identity/sign-up",
             "/identity/sign-in",
             "/identity/clerk-session",
+            "/identity/clerk-webhook",
             "/billing/stripe/webhook",
             "/identity/mfa/verify",
             "/identity/mfa/enroll",
@@ -10115,6 +10117,47 @@ struct ApiServer::Impl {
         co_return co_await send_text(route,
                                      static_cast<http::status>(outcome->status),
                                      outcome->body.dump(),
+                                     "application/json; charset=utf-8",
+                                     "no-store");
+    }
+
+    // POST /identity/clerk-webhook (docs/api/clerk.md#webhooks, lake#765): Clerk's user events,
+    // delivered by Svix. Unauthenticated: the svix-signature HMAC with LAKE_CLERK_WEBHOOK_SECRET is
+    // the credential. 404 without the secret.
+    boost::http::route_task serve_clerk_webhook(boost::http::route_params& route) {
+        namespace http = boost::http;
+        if (options.clerk_webhook_secret.empty() || !options.store) {
+            co_return co_await send_text(
+                route,
+                http::status::not_found,
+                error_body("not_found", "Clerk webhooks are not configured"),
+                "application/json; charset=utf-8",
+                "no-store");
+        }
+        auto [read_error, body] = co_await read_string_body(route, std::size_t{1024} * 1024);
+        if (read_error) {
+            if (body_is_too_large(read_error)) {
+                co_return co_await send_text(
+                    route,
+                    http::status::payload_too_large,
+                    error_body("size_invalid", "an event is at most 1 MiB"),
+                    "application/json; charset=utf-8",
+                    "no-store");
+            }
+            co_return http::route_error(read_error);
+        }
+        const auto header = [&](std::string_view name) {
+            return route.req.count(name) == 0 ? std::string() : std::string(route.req.at(name));
+        };
+        ApiContext context = context_for(route);
+        context.authentication_method = "clerk_webhook";
+        const auto outcome = clerk_webhooks::receive(
+            context,
+            options.clerk_webhook_secret,
+            {header("svix-id"), header("svix-timestamp"), header("svix-signature"), body});
+        co_return co_await send_text(route,
+                                     static_cast<http::status>(outcome.status),
+                                     outcome.body.dump(),
                                      "application/json; charset=utf-8",
                                      "no-store");
     }
@@ -14384,6 +14427,12 @@ bool ApiServer::start() {
               [&impl](http::route_params& route) -> http::route_task {
                   return impl.observe_request(
                       route, "/billing/stripe/webhook", impl.serve_payment_notice(route));
+              });
+    add_route(http::method::post,
+              "/identity/clerk-webhook",
+              [&impl](http::route_params& route) -> http::route_task {
+                  return impl.observe_request(
+                      route, "/identity/clerk-webhook", impl.serve_clerk_webhook(route));
               });
     add_route(http::method::post,
               "/identity/clerk-session",

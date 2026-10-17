@@ -1,5 +1,9 @@
 # Database schema
 
+Migration `0087_clerk_webhooks` (lake#765) adds `users.disabled_at`, `clerk_webhook_deliveries`
+and the guard `clerk_webhooks_guard`. Additive; apply before the new binary, and have the operator
+vendor the schema and select the guard. See [clerk.md](../docs/api/clerk.md#webhooks).
+
 Migration `0086_identity_links` (lake#762) makes the managed key's wrapped seed nullable with
 `seed_destroyed_at`, and adds `identity_link_challenges`, `identity_links` and the guard
 `identity_links_guard`. Additive; apply before the new binary, and have the operator vendor the
