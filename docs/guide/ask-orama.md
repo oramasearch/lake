@@ -26,9 +26,20 @@ agent does the job better.
 ## Open Ask Orama
 
 - **Home → Ask Orama** (`/`) is where you land when you sign in or open Lake: the conversation
-  across the page, in your current workspace. While it is empty it greets you and suggests up to
-  four questions from what the workspace holds: a run that failed, a dataset, a project, the latest
-  run's findings, or the first steps when the workspace is new. Press one to ask it. **Home →
+  across the page, in your current workspace. While it is empty it explains what you can do:
+  - **Suggested questions**: up to four from what the workspace holds (a run that failed, a dataset,
+    a project, the latest run's findings, or the first steps when the workspace is new).
+  - **Agents you can talk to**: each agent this Lake runs, with what it does. Press one to start a
+    conversation with it.
+  - **What you can do with Lake**: the pages of Data, Design, Train, Ship, Network, Organization
+    and Developer, each with what it is for and a question to ask about it. Only what this Lake
+    runs is listed: Billing only where Lake bills, Deployments only where they are set up,
+    Opportunities only while the Auto-Suggest Agent runs.
+
+  Pressing a question puts it in the message box, so you can change it before you press **Send**.
+  With no workspace, the home starts with **Start a workspace**: one click makes your first one,
+  because everything in Lake (your data, projects, models and conversations) lives in a workspace.
+  If you have workspaces but none is chosen, **Choose a workspace** opens Workspaces. **Home →
   Dashboard** (`/dashboard`) is the platform at a glance.
 - On any other page, press **Ask Orama** in the top bar. It opens beside the page, in the current
   workspace, and knows which page you asked from. Drag its edge to resize it (or use the arrow keys
@@ -163,7 +174,7 @@ tasks those agents asked for in turn. Only you can delete your conversations.
 
 | You see | What to do |
 |---|---|
-| *Ask Orama works in a workspace, and you have none selected* | Choose a workspace in the top bar, or start one on **Ship → Workspaces**. |
+| *Ask Orama works in a workspace, and you have none selected* (the panel) | Choose a workspace in the top bar, or start one on **Ship → Workspaces**. On the home, press **Start a workspace**. |
 | An agent is not offered in **Talk to** | It is not deployed on your Lake, is internal tooling, or does not chat. **Design → Agents** says which of Orama's agents run. |
 | *That proposal is not in this conversation* (`not_found`) | Only proposals Lake stored in your conversation can be confirmed. |
 | `workspace_not_ready` | The workspace is not ready; conversations live in it. |

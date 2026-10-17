@@ -102,9 +102,20 @@ operator sign-in, passkey sign-in and the public share pages).
 - **The Ask Orama home** (`/`, `pages/ask/AskHome.tsx`, lake#600) is where a signed-in person
   lands. It is the panel's conversation (`pages/ask/thread.ts`, the same `sessionStorage` entry)
   across the page's width, in one centred 880px column like the expanded panel, with the message box
-  at the foot. Empty, it greets the person and offers up to four starting questions drawn from the
-  workspace's datasets, projects and runs (`list_datasets`, `list_projects`, `list_runs`;
-  `starterQuestions` in `pages/ask/home.ts`); pressing one asks it. While it is open the top bar's
+  at the foot. Empty, it greets the person, says what Lake is for, and explains what they can do
+  (lake#764): up to four suggested questions drawn from the workspace's datasets, projects and runs
+  (`list_datasets`, `list_projects`, `list_runs`; `starterQuestions` in `pages/ask/home.ts`); the
+  agents they can talk to with each one's purpose (the running library agents from `useTalkTo`, as
+  *Talk to* lists them; pressing one starts a conversation with it); and **What you can do with
+  Lake**, the rail's groups Data, Design, Train, Ship, Network, Organization and Developer, each
+  page linked with one line and one example question (`lakeMap` in `pages/ask/lakeMap.ts`, from
+  `navFor`, so Billing shows only where `viewer.billing`; Deployments hidden when `server_info`
+  says `deployments: false`; Opportunities only while `agent-autosuggest` runs). A suggested or
+  example question goes into the message box (`AskComposer`'s `draft`/`draftKey`) to edit or send.
+  With no workspace the first step is **Start a workspace**, the workspace gate's own
+  `start_workspace` (`useStartWorkspace`, `components/WorkspaceGate.tsx`), or **Choose a
+  workspace** when the account has some; the agents and the map follow, without questions. On a
+  phone every list is one column and each question button is 44 px tall. While it is open the top bar's
   **Ask Orama** opens no panel: it puts the cursor in the message box, and a panel that was open
   closes. A link's `conversation`, `task` and `agent` go into the shared conversation and leave the
   address; `from` stays, shown as *About the page …* until dismissed. The operator and visitors

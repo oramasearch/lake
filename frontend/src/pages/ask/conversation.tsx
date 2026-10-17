@@ -347,6 +347,7 @@ export function AskComposer({
   placeholder = "What should I look at first?",
   compact,
   draft,
+  draftKey,
   context,
 }: {
   agent?: string;
@@ -358,8 +359,10 @@ export function AskComposer({
   label?: string;
   placeholder?: string;
   compact?: boolean;
-  /** Put in the box when it changes (Ask Orama opened about a transcript). */
+  /** Put in the box when it changes (Ask Orama opened about a transcript), or when `draftKey`
+   * changes (the home's example questions, which may put the same question twice). */
   draft?: string;
+  draftKey?: number;
   /** Shown above the box: what the next message is about. */
   context?: ReactNode;
 }) {
@@ -379,7 +382,7 @@ export function AskComposer({
       setText(draft);
       box.current?.focus();
     }
-  }, [draft]);
+  }, [draft, draftKey]);
   const submit = async () => {
     const message = text.trim();
     if (!message || busy || rec.state !== "idle") return;
