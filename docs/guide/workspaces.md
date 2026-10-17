@@ -18,6 +18,10 @@ page works in exactly one of them.
   asked for. The Orama operator then provisions or removes the workspace's engine and reports its phase
   (for example `Ready` or `Failed`). A workspace is *ready* when the operator reports it ready and
   Lake can reach it.
+- **A workspace is in one region.** Where Lake runs in regions (Europe at `eu.lake.live`, the United
+  States at `us.lake.live`), a workspace belongs to the region of the Lake it was created on, and
+  stays there: moving it to another region is not supported. **Workspaces** shows the region beside
+  each workspace and in **New workspace** ([Your Account and Sign-In](/docs/account)).
 - **What stays outside a workspace.** Repositories, organizations, your account pages, Services,
   Deployments and Workspaces itself are outside `/w/`. A repository still belongs to one workspace,
   chosen when it is created, and its page names it.

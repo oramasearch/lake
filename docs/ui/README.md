@@ -25,6 +25,9 @@ can do nothing the API cannot.
 - Network, a workspace's connections, developer access (tunnels), private networks, egress and DNS,
   policies and activity (lake#729): [network.md](network.md). Not Data → Connections.
 - The Organization, Administration and Account pages: [organization.md](organization.md).
+- Regions: the top bar's region and its links to the other regions, the region on sign-in and
+  sign-up, and on Workspaces (lake#757): [regions.md](regions.md). The apex host's region picker is
+  server-rendered: [../api/regions.md](../api/regions.md#the-apex-picker).
 - Deleting and revoking (organizations, invitations, grants, secret mounts, datasets, models,
   runs, search indexes, Ask Orama conversations): one typed confirmation that first lists what
   goes, [deletion.md](deletion.md).

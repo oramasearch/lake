@@ -8,6 +8,7 @@ import { Button, Field, fieldError, Form, Notice, Page } from "@/lib/ui";
 import { useSession } from "@/lib/session";
 import { AuthFrame, useSignedInRedirect } from "./AuthFrame";
 import { ClerkSignIn } from "./ClerkSignIn";
+import { AccountRegionNote } from "@/components/Region";
 import { landingAfterSignIn, leaveFor, messageOf, NO_WORKSPACE, returnQuery, returnTarget } from "./signIn";
 
 const INSTALL = `git clone --recurse-submodules git@github.com:oramasearch/liquid.git
@@ -60,6 +61,7 @@ function NativeSignUp() {
   return (
     <AuthFrame title="sign up">
       <Page eyebrow="identity" title="Create an Account" sub="Get a personal customer you own, then create your first repository.">
+        <AccountRegionNote mode="sign-up" />
         {error ? <Notice tone="danger">{messageOf(error)}</Notice> : null}
         <section className="panel">
           <h2>Get Your Public Identity Document</h2>

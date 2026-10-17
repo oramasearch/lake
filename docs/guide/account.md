@@ -72,6 +72,25 @@ Through MCP, the tools are `sign_in_password` and `verify_mfa`, with the same in
 
 Scripts and AI agents do not sign in this way; they use a token ([Tokens and Keys](/docs/tokens)).
 
+## Regions
+
+Lake on Orama Cloud runs in more than one region, for example Europe (`eu.lake.live`) and the
+United States (`us.lake.live`). Each region is a separate Lake with its own accounts:
+
+- **Your account is in one region.** The sign-in and sign-up pages say which region the account is
+  in or is created in, with links to the other regions. An account in Europe does not sign in to
+  the United States; create one there if you need it.
+- **The top bar shows your region.** Its label (for example **Europe**) opens a menu with a link to
+  each other region's Lake.
+- **The front door picks for you.** Opening `lake.live` shows a page that preselects the region
+  closest to you, or the one you chose there before. Press **Continue** to go to that region at the
+  same address; Lake remembers the choice in a cookie that holds only the region's name.
+- Where Lake has no regions (an installation on your own servers, or a development Lake), none of
+  this is shown.
+
+Through the API, `server_info` answers `region` (`{name, label}`, or `null`) and `regions`
+(`[{name, label, host}]`): `GET /v1/server_info`, or the MCP tool `server_info`, with no sign-in.
+
 ## Your Settings
 
 Open the account menu in the top bar and choose **Settings** (`/settings`). Its tabs:

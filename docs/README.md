@@ -9,6 +9,10 @@ records its native proof and coordinator handoff.
 [api/tunnel-clients.md](api/tunnel-clients.md) defines the tunnel client downloads: the binaries
 copied into the image, `tunnel_client_downloads` and its signed short-lived links, and
 `GET /tunnel-clients/<platform>` (lake#745).
+[api/regions.md](api/regions.md) defines regions (lake#757, decision 64): `LAKE_REGION`,
+`LAKE_REGION_LABEL`, `LAKE_REGIONS` and `LAKE_APEX_HOST`, `server_info`'s `region` and `regions`, and
+the apex host's region picker with its closest-region choice and preference cookie;
+[ui/regions.md](ui/regions.md) is where the web app shows the region.
 [api/scoped-credentials.md](api/scoped-credentials.md) defines an app connection's credential
 scope, workspace-secret reference, rotation and revocation (lake#731);
 [build/scoped-credentials-proof.md](build/scoped-credentials-proof.md) records its native proof
