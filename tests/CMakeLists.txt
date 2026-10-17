@@ -73,6 +73,8 @@ target_sources(lake-tests PRIVATE test_network_capabilities.cpp test_network_tun
 target_sources(lake-tests PRIVATE test_tunnel_clients.cpp)
 # Regions and the apex region picker (lake#757).
 target_sources(lake-tests PRIVATE test_regions.cpp)
+# The version and its release page (root CLAUDE.md, *Cutting a release*).
+target_sources(lake-tests PRIVATE test_release_version.cpp)
 target_link_libraries(lake-tests PRIVATE lake-api lake-control-postgres pqxx OpenSSL::Crypto
   Boost::beast2 Boost::http Boost::corosio GTest::gtest
   # zetta-api for a fake Zetta HTTP transport under ZettaWorkspaceCaller (test_workspaces.cpp).
@@ -84,7 +86,8 @@ target_compile_definitions(lake-tests PRIVATE
   LAKE_TEST_NODE="${LAKE_NODE_EXECUTABLE}"
   LAKE_TEST_CMAKE_COMMAND="${CMAKE_COMMAND}"
   LAKE_TEST_SERVER_PATH="$<TARGET_FILE:lake>"
-  LAKE_TEST_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
+  LAKE_TEST_SOURCE_DIR="${PROJECT_SOURCE_DIR}"
+  LAKE_TEST_PROJECT_VERSION="${PROJECT_VERSION}")
 add_dependencies(lake-tests lake)
 include(GoogleTest)
 gtest_discover_tests(lake-tests)

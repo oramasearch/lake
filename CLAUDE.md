@@ -8,8 +8,12 @@ document rules, confidentiality, and the decisions not to drift past. Read both.
 
 ## Status
 
-Status: 2026-10-12. The current release is **v0.1.0**, the first tagged release
-([`docs/releases/v0.1.0.md`](docs/releases/v0.1.0.md) lists everything in it). `Lake/prod` on the
+Status: 2026-10-17. The current release is **v0.2.0**
+([`docs/releases/v0.2.0.md`](docs/releases/v0.2.0.md): secure networking, regions, the managed key
+and own identity, Clerk webhooks, the agents' names and Ask Orama's home, with its known issues).
+`server_info` of a v0.2.0 build reports version `0.2.0`. The paragraph below describes v0.1.0, the
+first tagged release ([`docs/releases/v0.1.0.md`](docs/releases/v0.1.0.md) lists everything in it),
+and what ran on 2026-10-12. `Lake/prod` on the
 dev AKS cluster (there is no production environment yet) serves `oramasearch/lake:20261012a`, which
 is also `oramasearch/lake:v0.1.0`, built from the tag (`2e6f6d7`) against liquid `v0.1.0`
 (`f669726`). `GET /v1/server_info` reports version `0.1.0`; the OpenAPI lists 554 paths and the
@@ -913,9 +917,12 @@ are in [`docs/releases/`](docs/releases/README.md); read its `README.md` first. 
 
 1. **Confirm what is deployed is `main`.** `GET /v1/server_info` reports the running `revision`;
    it must be an ancestor of `origin/main`. Steve names the version.
-2. **On a branch `docs/release-vX.Y.Z`**, move the version in both places: `version_string()` in
-   `src/version.cpp` and `project(lake VERSION ...)` in `CMakeLists.txt`. Tests read the version
-   from `lake::version_string()`; never write the number into a test.
+2. **On a branch `docs/release-vX.Y.Z`**, move the version in all three places: `version_string()`
+   in `src/version.cpp`, `current_version()` in `include/lake/version.hpp` and
+   `project(lake VERSION ...)` in `CMakeLists.txt`. Tests read the version from
+   `lake::version_string()`; never write the number into a test. `ReleaseVersion.*`
+   (`tests/test_release_version.cpp`) fails when the three disagree or when the version has no
+   page in `docs/releases/` indexed in its `README.md`.
 3. **Write `docs/releases/vX.Y.Z.md`** and add it to `docs/releases/README.md`: what the release
    includes, what it does not, known issues with their tracking issues (a security defect first),
    and verification. Claims follow `docs/design/status.md`; every number is measured.
