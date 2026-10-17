@@ -354,4 +354,46 @@ std::string web_ui_application_passkey_sign_in(const control::Application& appli
     return application_shell(application, application.name + " — passkey", content);
 }
 
+std::string web_ui_region_picker(const Regions& regions,
+                                 const Region& selected,
+                                 std::string_view target,
+                                 std::string_view error) {
+    std::string choices;
+    for (const Region& region : regions.list) {
+        const bool chosen = region.name == selected.name;
+        choices += std::format(
+            "<label class=\"region-choice\"><input type=\"radio\" name=\"region\" value=\"{}\"{}>"
+            "<span><strong>{}</strong> <span class=\"muted\">{}</span></span></label>",
+            web_ui_escape(region.name),
+            chosen ? " checked" : "",
+            web_ui_escape(region.label),
+            web_ui_escape(region.host));
+    }
+    const std::string action = web_ui_escape(target.empty() ? std::string_view("/") : target);
+    return std::format(
+        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
+        "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+        "<meta name=\"color-scheme\" content=\"light dark\"><title>Lake — Choose a Region</title>"
+        "{}{}<style>:root{{--app-accent:var(--lake-action);--app-background:var(--lake-canvas)}}"
+        "</style></head><body class=\"hosted-shell\">"
+        "<a class=\"skip-link\" href=\"#main-content\">Skip to content</a>"
+        "<header class=\"hosted-header\"><span class=\"hosted-brand\"><span "
+        "class=\"hosted-brand-mark\" aria-hidden=\"true\"></span>Lake</span></header>"
+        "<main class=\"hosted-main\" id=\"main-content\" tabindex=\"-1\"><div "
+        "class=\"hosted-card\">"
+        "<p class=\"eyebrow\">Lake by Orama</p><h1>Choose a Region</h1>"
+        "<p class=\"sub\">Each region is a separate Lake with its own accounts. Your workspaces "
+        "stay "
+        "in the region you create them in.</p>{}"
+        "<form class=\"stack\" method=\"post\" action=\"{}\"><fieldset class=\"region-choices\">"
+        "<legend>Region</legend>{}</fieldset>"
+        "<button class=\"primary\" type=\"submit\">Continue</button></form></div></main>"
+        "</body></html>",
+        theme_preference_script,
+        stylesheet_link(),
+        error_markup(error),
+        action,
+        choices);
+}
+
 } // namespace lake::api

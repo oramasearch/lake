@@ -9003,6 +9003,7 @@ struct ApiServer::Impl {
         ctx.methodology_runtime_image = options.methodology_runtime_image;
         ctx.mcp_runner_image = options.mcp_runner_image;
         ctx.tunnel_clients_dir = options.tunnel_clients_dir;
+        ctx.regions = &options.regions;
         // Build registry targets use the in-cluster authority (LAKE_INTERNAL_URL).
         ctx.internal_url = options.internal_url;
         ctx.apps_reserved_names = options.apps_reserved_names;
@@ -12545,6 +12546,65 @@ struct ApiServer::Impl {
         co_return co_await send_hub_result(route, result);
     }
 
+    // Whether the request is for the apex host (LAKE_APEX_HOST, lake#757): every path there is the
+    // region picker, apart from the stylesheet and fonts the picker links and the probes.
+    bool region_picker_serves(const boost::http::route_params& route) const {
+        if (options.regions.apex_host.empty()) {
+            return false;
+        }
+        std::string host = request_host(route);
+        std::ranges::transform(
+            host, host.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        if (host != options.regions.apex_host) {
+            return false;
+        }
+        const std::string_view path = route.url.encoded_path();
+        if (route.req.method() == boost::http::method::get &&
+            (path == web_ui_stylesheet_url() || path == "/style.css" ||
+             path.starts_with("/fonts/") || path == "/healthz" || path == "/readyz")) {
+            return false;
+        }
+        return true;
+    }
+
+    // The region picker (docs/ui/regions.md). GET (any method but POST): the page, preselecting
+    // the region chosen before (the `lake_region` cookie), else the closest to Cloudflare's
+    // CF-IPCountry, else the first. POST with `region`: remember it and continue to the same path
+    // and query on that region's host.
+    boost::http::route_task serve_region_picker(boost::http::route_params& route) {
+        namespace http = boost::http;
+        const Regions& regions = options.regions;
+        std::string target(route.url.encoded_path());
+        if (target.empty()) {
+            target = "/";
+        }
+        if (route.url.has_query()) {
+            target += "?" + std::string(route.url.encoded_query());
+        }
+        std::string error;
+        if (route.req.method() == http::method::post) {
+            auto [read_error, body] = co_await read_string_body(route);
+            if (read_error) {
+                co_return http::route_error(read_error);
+            }
+            if (const Region* chosen = regions.find(form_field(body, "region"))) {
+                co_return co_await redirect(
+                    route,
+                    region_continue_url(*chosen, target),
+                    region_preference_cookie(chosen->name, request_is_https(route)));
+            }
+            error = "Choose one of the regions below.";
+        }
+        const std::string country(route.req.value_or("cf-ipcountry", ""));
+        const Region* selected =
+            preselected_region(regions, cookie_value(route, region_cookie_name), country);
+        co_return co_await send_text(route,
+                                     error.empty() ? http::status::ok : http::status::bad_request,
+                                     web_ui_region_picker(regions, *selected, target, error),
+                                     "text/html; charset=utf-8",
+                                     "no-store");
+    }
+
     // A file of the embedded web app (docs/ui/web-app.md); 404 when the build has no such file.
     // The app's index.html with the `viewer` answer for this request embedded in it
     // (docs/ui/web-app.md#the-first-paint): the same capability the app would call first, so the
@@ -14076,6 +14136,19 @@ bool ApiServer::start() {
         }
         co_return result;
     });
+    // The apex host's region picker (lake#757, docs/ui/regions.md): before everything else that
+    // could answer, so no path on the apex reaches the app or the API.
+    router.use(guarded("region_picker", [&impl](http::route_params& route) -> http::route_task {
+        if (!impl.region_picker_serves(route)) {
+            co_return http::route_next;
+        }
+        const auto timing = request_timing(route);
+        const auto start = timing ? timing->started : std::chrono::steady_clock::now();
+        const RequestTimingScope timing_scope(route, start);
+        auto result = co_await impl.serve_region_picker(route);
+        impl.record_request(route, "region_picker", start);
+        co_return result;
+    }));
     // A cookie-authenticated unsafe request from another origin is refused before any route.
     router.use(guarded("cross_site", [&impl](http::route_params& route) -> http::route_task {
         auto result = co_await impl.refuse_cross_site(route);

@@ -151,6 +151,10 @@ int usage() {
                  "(default true: opened in the background from start)");
     std::println("  --tunnel-clients-dir the tunnel client downloads (default "
                  "$LAKE_TUNNEL_CLIENTS_DIR, then /usr/share/lake/tunnel-clients)");
+    std::println(
+        "  LAKE_REGION, LAKE_REGION_LABEL this Lake's region; LAKE_REGIONS the deployment's "
+        "regions as JSON [{{name,label,host,latitude,longitude}}]");
+    std::println("  LAKE_APEX_HOST the host whose every request gets the region picker");
     std::println("  --memory-store an in-memory control plane for local demos and tests");
     return 2;
 }
@@ -228,6 +232,19 @@ int main(int argc, char** argv) {
     // The tunnel client downloads (lake#745): where the image puts them unless told otherwise.
     opts.tunnel_clients_dir = env_or("LAKE_TUNNEL_CLIENTS_DIR",
                                      std::string(lake::api::default_tunnel_clients_dir));
+    // Regions (lake#757, docs/api/regions.md): the operator sets these only where a region is
+    // configured; unset, Lake has no region and serves no picker. Invalid values stop startup.
+    {
+        auto regions = lake::api::regions_from_environment(env_or("LAKE_REGION", ""),
+                                                           env_or("LAKE_REGION_LABEL", ""),
+                                                           env_or("LAKE_REGIONS", ""),
+                                                           env_or("LAKE_APEX_HOST", ""));
+        if (!regions) {
+            std::println(stderr, "lake: {}", regions.error());
+            return 2;
+        }
+        opts.regions = std::move(*regions);
+    }
     opts.apps_reserved_names = env_or("LAKE_APPS_RESERVED_NAMES", "");
     opts.apps_per_customer = env_u64("LAKE_APPS_PER_CUSTOMER");
     opts.app_replicas_per_customer = env_u64("LAKE_APP_REPLICAS_PER_CUSTOMER");
@@ -503,6 +520,12 @@ int main(int argc, char** argv) {
             {"replication_token_set", opts.replication_token.empty() ? "no" : "yes"},
             {"operator_zetta_configured", operator_zetta_url.empty() ? "no" : "yes"},
             {"logs_configured", logs_url.empty() ? "no" : "yes"},
+            {"region",
+             opts.regions.name.empty() ? nlohmann::json(nullptr)
+                                       : nlohmann::json(opts.regions.name)},
+            {"apex_host",
+             opts.regions.apex_host.empty() ? nlohmann::json(nullptr)
+                                            : nlohmann::json(opts.regions.apex_host)},
             {"agent_bus", opts.agent_bus ? (bus_url.empty() ? "memory" : "zetta") : "no"},
             {"api", "/v1/openapi.json"},
             {"mcp", "POST /mcp"}}
