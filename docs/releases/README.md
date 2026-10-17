@@ -3,6 +3,12 @@
 One page per tagged release, newest first. A page states what the release includes, what it
 does not, what is knowingly still broken, and how it was verified.
 
+- [v0.2.0](v0.2.0.md) — 2026-10-17. Secure networking (connections, scoped credentials, egress,
+  developer tunnels and the Network section), regions and the apex picker, a managed key for
+  every new account with an optional own identity, Clerk webhooks, one name per agent with all
+  nine agents offered, and Ask Orama's home. Note its known issues, above all the open
+  `sign_in_sso` security defect and the credential and account-enumeration defects found by the
+  end-to-end suite.
 - [v0.1.0](v0.1.0.md) — 2026-10-12. The first tagged release, so the page is the full inventory:
   every feature by area, all 554 deployed capabilities by name, every page of the web app and
   every guide. Note its known issues, above all the open `sign_in_sso` security defect. Image:
@@ -11,8 +17,9 @@ does not, what is knowingly still broken, and how it was verified.
 ## Conventions
 
 - **Cut a release from `main`**, which is what the deployment runs. The version is
-  `version_string()` in `src/version.cpp` and `project(lake VERSION ...)` in `CMakeLists.txt`;
-  move both in the pull request that adds the release page. Tests read the version from
+  `version_string()` in `src/version.cpp`, `current_version()` in `include/lake/version.hpp` and
+  `project(lake VERSION ...)` in `CMakeLists.txt`; move all three in the pull request that adds
+  the release page. `ReleaseVersion.*` fails when they disagree or the page is missing. Tests read the version from
   `lake::version_string()`. The steps are in the root `CLAUDE.md`, under *Cutting a release*.
 - **Tag the merge commit** of that pull request `vX.Y.Z` and publish the GitHub release from the
   page.
