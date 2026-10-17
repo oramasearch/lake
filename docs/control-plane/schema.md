@@ -5,6 +5,11 @@ vendored copy at `internal/controller/assets/lake-schema.sql` and applies it to 
 Postgres. Change the schema here, then copy it into the operator in the same change; the
 operator's test checks the copy carries the source-of-truth header.
 
+`0087_clerk_webhooks` (lake#765) adds `users.disabled_at` (set by a Clerk `user.deleted`; a disabled
+account is issued no session and its sessions no longer resolve) and `clerk_webhook_deliveries`
+(each applied `svix-id`, its event type and Clerk user). Its guard is `clerk_webhooks_guard`. The
+operator must vendor this schema and select that guard. See [clerk.md](../api/clerk.md#webhooks).
+
 `0086_identity_links` (lake#762, decision 65) lets an account replace its managed key with the
 person's own identity: `custodial_identities.wrapped_seed` becomes nullable and gains
 `seed_destroyed_at` (the seed is wiped, the public key kept, when the link commits);

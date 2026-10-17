@@ -1281,6 +1281,26 @@ public:
     sign_in_clerk(const control::ClerkIdentity& value) override {
         return call("sign_in_clerk", [&] { return store_->sign_in_clerk(value); });
     }
+    control::Result<control::ClerkUserProvisioned>
+    provision_clerk_user(const control::ClerkIdentity& value) override {
+        return call("provision_clerk_user", [&] { return store_->provision_clerk_user(value); });
+    }
+    control::Result<std::string> update_clerk_user(const control::ClerkIdentity& value) override {
+        return call("update_clerk_user", [&] { return store_->update_clerk_user(value); });
+    }
+    control::Result<std::string> disable_clerk_user(const std::string& subject) override {
+        return call("disable_clerk_user", [&] { return store_->disable_clerk_user(subject); });
+    }
+    control::Result<bool> clerk_webhook_applied(const std::string& delivery_id) override {
+        return call("clerk_webhook_applied",
+                    [&] { return store_->clerk_webhook_applied(delivery_id); });
+    }
+    control::Result<void> record_clerk_webhook(const std::string& delivery_id,
+                                               const std::string& event_type,
+                                               const std::string& subject) override {
+        return call("record_clerk_webhook",
+                    [&] { return store_->record_clerk_webhook(delivery_id, event_type, subject); });
+    }
     control::Result<control::AccountIdentity>
     account_identity(const std::string& user_id) override {
         return call("account_identity", [&] { return store_->account_identity(user_id); });

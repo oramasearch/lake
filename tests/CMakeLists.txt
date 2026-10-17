@@ -21,6 +21,7 @@ add_executable(lake-tests test_main.cpp test_web_ui.cpp test_web_app.cpp test_ma
   test_oauth.cpp
   test_clerk.cpp
   test_own_identity.cpp
+  test_clerk_webhooks.cpp
   test_workspaces.cpp
   test_agent_names.cpp
   test_workspace_records.cpp

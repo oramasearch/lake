@@ -297,6 +297,12 @@ struct ClerkIdentity {
     std::string subject, email, display_name, device_name;
     std::string custodial_taap_id, custodial_public_key, custodial_wrapped_seed;
 };
+// What a Clerk user event did to Lake (lake#765, docs/api/clerk.md#webhooks).
+struct ClerkUserProvisioned {
+    std::string user_id, taap_id;
+    bool created = false; // a new account, with a managed key and a personal customer
+    bool linked = false;  // the subject was linked to an account found by its verified email
+};
 // Which key an account signs with (lake#762, docs/api/identity.md#your-own-identity). `managed`:
 // lake minted and holds the key. `own`: the person's own liquid identity, either registered at
 // sign-up (no managed key ever existed) or linked later as the managed key's successor.
@@ -2025,6 +2031,21 @@ public:
     // user with the same email; with neither, it creates the user with the custodial identity
     // and provisions their personal customer, as password sign-up does.
     virtual Result<IssuedSession> sign_in_clerk(const ClerkIdentity&) = 0;
+    // Clerk webhooks (lake#765, docs/api/clerk.md#webhooks).
+    // user.created: what a first sign_in_clerk does to the account, without a session. Repeating
+    // it finds the same account.
+    virtual Result<ClerkUserProvisioned> provision_clerk_user(const ClerkIdentity&) = 0;
+    // user.updated: the email (when non-empty) and display name of the account linked to the
+    // subject; not_found when none is linked, conflict when another account has the email.
+    virtual Result<std::string> update_clerk_user(const ClerkIdentity&) = 0;
+    // user.deleted: disables the account linked to the subject and revokes every session, token
+    // and device of it. Nothing is erased. Answers the account's user id.
+    virtual Result<std::string> disable_clerk_user(const std::string& subject) = 0;
+    // Whether a webhook delivery (its svix-id) was already applied, and recording that it was.
+    virtual Result<bool> clerk_webhook_applied(const std::string& delivery_id) = 0;
+    virtual Result<void> record_clerk_webhook(const std::string& delivery_id,
+                                              const std::string& event_type,
+                                              const std::string& subject) = 0;
     // Using your own identity (lake#762, docs/api/identity.md#your-own-identity).
     // Which key the account signs with.
     virtual Result<AccountIdentity> account_identity(const std::string& user_id) = 0;

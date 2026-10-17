@@ -78,6 +78,8 @@ int usage() {
                  "(default $LAKE_INSTANCE_KEK)");
     std::println("  --clerk-publishable-key Clerk key; browser sign-in goes through Clerk "
                  "(default $LAKE_CLERK_PUBLISHABLE_KEY)");
+    std::println("  --clerk-webhook-secret Clerk webhook signing secret (whsec_...); enables "
+                 "POST /identity/clerk-webhook (default $LAKE_CLERK_WEBHOOK_SECRET)");
     std::println("  LAKE_OPENAI_API_KEY OpenAI key for speech-to-text and the model gateway "
                  "(/openai/v1); LAKE_TRANSCRIBE_MODEL the speech model "
                  "(default gpt-4o-transcribe)");
@@ -171,6 +173,7 @@ int main(int argc, char** argv) {
     opts.identity_seed = env_or("LAKE_IDENTITY_SEED", "");
     opts.instance_kek = env_or("LAKE_INSTANCE_KEK", "");
     opts.clerk_publishable_key = env_or("LAKE_CLERK_PUBLISHABLE_KEY", "");
+    opts.clerk_webhook_secret = env_or("LAKE_CLERK_WEBHOOK_SECRET", "");
     // The cluster delivery key the operator publishes (a public key, not a secret): the only one
     // mint_sealed_secret seals a user's secret to (lake#625).
     opts.sealing_public_key = env_or("LAKE_SEALING_PUBLIC_KEY", "");
@@ -330,6 +333,10 @@ int main(int argc, char** argv) {
         }
         if (arg == "--identity-seed") {
             opts.identity_seed = value("--identity-seed");
+            continue;
+        }
+        if (arg == "--clerk-webhook-secret") {
+            opts.clerk_webhook_secret = value("--clerk-webhook-secret");
             continue;
         }
         if (arg == "--clerk-publishable-key") {

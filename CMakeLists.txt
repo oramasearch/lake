@@ -296,6 +296,7 @@ add_library(lake-core STATIC
   src/api/mcp.cpp
   src/api/agent_docs.cpp
   src/api/capabilities.cpp
+  src/api/clerk_webhooks.cpp
   src/api/console_capabilities.cpp
   src/api/forge_capabilities.cpp
   src/api/repository_people.cpp
