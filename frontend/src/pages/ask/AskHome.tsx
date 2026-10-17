@@ -60,10 +60,13 @@ function Welcome({ name }: { name?: string }) {
         <Sparkles size={13} aria-hidden /> Ask Orama
       </p>
       <h1>{greeting(name)}</h1>
+      {/* The positioning (Steve, 2026-10-17): AI sovereignty, said without telling anyone what to do. */}
+      <p className="ask-home-lead">
+        <strong>AI sovereignty.</strong> When you're tired of renting someone else's AI, Orama Lake is where you own your AI.
+      </p>
       <p className="sub">
-        Lake keeps your data and everything you build from it in a workspace of your own: bring in your data, decide what it should improve, train on it, and put it to
-        work. Ask about anything in your workspace. Ask Orama reads what you may read, proposes every change for you to confirm, and brings in the right agent when
-        another does it better.
+        Your data and everything built from it stay in a workspace of your own. Ask Orama answers questions about anything in it, reads only what you may read,
+        proposes every change for you to confirm, and brings in the right agent when another does it better.
       </p>
     </header>
   );
@@ -141,7 +144,8 @@ function WhatLakeDoes({ onAsk }: { onAsk?: (question: string) => void }) {
   }, [session, info.data, library.data]);
   return (
     <section className="ask-home-section" aria-labelledby="ask-lake-map">
-      <h2 id="ask-lake-map">What you can do with Lake</h2>
+      <h2 id="ask-lake-map">Design, train and ship production-grade AI</h2>
+      <p className="sub ask-home-section-line">Self-serve, real AI, trained on your own data.</p>
       <div className="ask-map">
         {groups.map((group) => (
           <section key={group.key} className="ask-map-group" aria-label={group.title}>

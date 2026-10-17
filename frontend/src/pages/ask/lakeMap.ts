@@ -14,28 +14,30 @@ export type LakeGroup = { key: string; title: string; line: string; things: Lake
 
 /** The groups, in the rail's order, and the one line that says what each is. */
 export const LAKE_GROUPS: { key: string; title: string; line: string }[] = [
-  { key: "data", title: "Data", line: "Bring in what you have." },
-  { key: "design", title: "Design", line: "Decide what to build from it." },
-  { key: "train", title: "Train", line: "Train on your own data." },
-  { key: "ship", title: "Ship", line: "Put it to work." },
-  { key: "network", title: "Network", line: "Control what reaches your workspace." },
-  { key: "organization", title: "Organization", line: "Work as a team." },
-  { key: "developer", title: "Developer", line: "Everything here is also an API." },
+  { key: "data", title: "Data", line: "Your data, kept in your own workspace." },
+  { key: "design", title: "Design", line: "AI solutions, designed around your business questions." },
+  { key: "train", title: "Train", line: "Real AI, trained on your own data." },
+  { key: "ship", title: "Ship", line: "Production-grade AI, put to work." },
+  { key: "network", title: "Network", line: "What reaches your workspace, and what it reaches." },
+  { key: "organization", title: "Organization", line: "Your team, its keys and its usage." },
+  { key: "developer", title: "Developer", line: "Every page is also an API." },
 ];
 
 /** Each page: what it is for, the question to ask, and the library agent it needs to be useful. */
-const THINGS: Record<string, { does: string; ask: string; needs?: string }> = {
+// `label`, where set, is the home's name for the page; otherwise the rail's (Steve, 2026-10-17:
+// "the design part is all about AI").
+const THINGS: Record<string, { does: string; ask: string; needs?: string; label?: string }> = {
   "/repositories": { does: "Code and files, with their full history.", ask: "Which of my repositories changed this week?" },
   "/drives": { does: "Folders of files to keep and share.", ask: "What is in my drives?" },
   "/train/data": { does: "Tables to explore, query and train on.", ask: "How do I load my first dataset?" },
   "/connections": { does: "The databases your workspace reads.", ask: "How do I connect a Postgres database?" },
   "/transcripts": { does: "Recordings and notes, made searchable.", ask: "Summarize my latest transcript." },
   "/mcp-connections": { does: "Remote tools your agents may call.", ask: "Which tools can my agents call?" },
-  "/design/projects": { does: "Start from a business question and the decision it should improve.", ask: "Help me turn a business question into a project." },
+  "/design/projects": { label: "AI Projects", does: "Many models, pipelines and agents working together on one business question.", ask: "Help me turn a business question into an AI project." },
   "/design/opportunities": { does: "What your data could be used for, best first.", ask: "What is worth building from my data?", needs: "agent-autosuggest" },
-  "/design/solutions": { does: "Ready-made solutions to start a project from.", ask: "Which solution fits predicting customer churn?" },
-  "/design/methodologies": { does: "The methods a pipeline trains with.", ask: "Which methodologies suit a sales forecast?" },
-  "/design/agents": { does: "Agents that each do one job for you.", ask: "Help me design an agent that watches new orders." },
+  "/design/solutions": { label: "AI Solutions", does: "Proven AI solutions to start a project from.", ask: "Which AI solution fits predicting customer churn?" },
+  "/design/methodologies": { label: "AI Methodologies", does: "The methods your models train with, Orama's and your own.", ask: "Which AI methodologies suit a sales forecast?" },
+  "/design/agents": { label: "AI Agents", does: "Agents that each do one job, on your own data.", ask: "Help me design an AI agent that watches new orders." },
   "/train/runs": { does: "Every training run and what it produced.", ask: "How did my latest run go?" },
   "/train/experiments": { does: "Compare versions, prompts or models, then promote the best.", ask: "Propose an experiment to improve my model." },
   "/train/models": { does: "The models trained on your data.", ask: "Which of my models performs best?" },
@@ -76,7 +78,7 @@ export function lakeMap(items: Item[], runs: LakeRuns): LakeGroup[] {
       if (item.path === "/deployments" && runs.deployments === false) continue;
       if (thing.needs && !runs.runningAgents.has(thing.needs)) continue;
       seen.add(item.path);
-      things.push({ path: item.path, label: item.label, does: thing.does, ask: thing.ask });
+      things.push({ path: item.path, label: thing.label ?? item.label, does: thing.does, ask: thing.ask });
     }
     if (things.length) groups.push({ key: group.key, title: group.title, line: group.line, things });
   }
