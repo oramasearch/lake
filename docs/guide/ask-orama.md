@@ -35,7 +35,8 @@ agent does the job better.
     conversation with it.
   - **Design, train and ship production-grade AI** (self-serve, real AI, trained on your own data):
     the pages of Data, Design, Train, Ship, Network, Organization and Developer, each with what it
-    is for and a question to ask about it. Design is about AI: AI Projects (many models, pipelines
+    is for and a question to ask about it. Developer also links **MCP Tools**, every tool Lake offers
+    an AI assistant, and **MCP Worked Flows**, the tools an agent calls for the jobs people ask most. Design is about AI: AI Projects (many models, pipelines
     and agents working together on one business question), AI Solutions, AI Methodologies and AI
     Agents. Only what this Lake
     runs is listed: Billing only where Lake bills, Deployments only where they are set up,
