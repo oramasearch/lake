@@ -197,6 +197,59 @@ json nullable_text(const std::string& value) {
     return value.empty() ? json(nullptr) : json(value);
 }
 
+bool is_hex_digit(char character) {
+    return std::isxdigit(static_cast<unsigned char>(character)) != 0;
+}
+
+std::string lowercase(std::string_view value) {
+    std::string output(value);
+    std::ranges::transform(output, output.begin(), [](unsigned char character) {
+        return static_cast<char>(std::tolower(character));
+    });
+    return output;
+}
+
+// Lake's repository ids are UUIDs, lowercase as PostgreSQL prints them.
+bool is_uuid(std::string_view value) {
+    if (value.size() != 36) {
+        return false;
+    }
+    for (std::size_t index = 0; index < value.size(); ++index) {
+        const bool dash = index == 8 || index == 13 || index == 18 || index == 23;
+        if (dash ? value[index] != '-' : !is_hex_digit(value[index])) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// A liquid repository id as `liquid deploy` sends it: the 16 bytes as 32 hex digits.
+std::optional<std::string> liquid_id_of(std::string_view value) {
+    if (value.size() != 32 || !std::ranges::all_of(value, is_hex_digit)) {
+        return std::nullopt;
+    }
+    return lowercase(value);
+}
+
+std::string uuid_of_liquid_id(const std::string& hex) {
+    return hex.substr(0, 8) + "-" + hex.substr(8, 4) + "-" + hex.substr(12, 4) + "-" +
+           hex.substr(16, 4) + "-" + hex.substr(20);
+}
+
+// The row as the repository's workspace keeps it: `repository` is lake's id, and the value the
+// operator keys the row by, when it is another (liquid's id), is kept as `operator_repository`
+// so lake's own rows for the environment are written under the same key (lake#805).
+json mirror_value(const json& row, const std::string& repository_id) {
+    const std::string named = text_of(row, "repository");
+    if (named == repository_id) {
+        return row;
+    }
+    json output = row;
+    output["repository"] = repository_id;
+    output["operator_repository"] = named;
+    return output;
+}
+
 } // namespace
 
 struct LokiHttpSource::Impl {
@@ -377,7 +430,14 @@ PlatformService::ensure_environment(WorkspaceRecords& records, const Repository&
     co_return PlatformResult<PlatformEnvironment>(std::move(*written));
 }
 
-liquid::runtime::task<PlatformResult<void>> PlatformService::sync(PlatformRecordsOpener open) {
+std::map<std::string, PlatformService::UnresolvedRepository>
+PlatformService::unresolved_repositories() const {
+    std::lock_guard lock(state_mutex_);
+    return unresolved_;
+}
+
+liquid::runtime::task<PlatformResult<void>>
+PlatformService::sync(PlatformRecordsOpener open, PlatformLiquidIdReader read_liquid_id) {
     if (!store_ || !control_ || config_.lake.empty() || !open) {
         mark_failed();
         co_return platform_failure<void>(
@@ -433,8 +493,100 @@ liquid::runtime::task<PlatformResult<void>> PlatformService::sync(PlatformRecord
     // The operator control plane answered: the service is healthy whatever a workspace says.
     mark_succeeded();
 
+    // Which lake repository each row names (lake#805, docs/api/platform.md#which-repository-a-row-
+    // names): lake's own id, or the id liquid gave the repository, which is what `liquid deploy`
+    // sends. A value that names no single repository is reported below, never dropped quietly.
+    struct Resolution {
+        std::optional<Repository> repository;
+        std::string problem;    // why it names no repository (an unresolved row)
+        std::string unreadable; // the control store did not answer (retried next poll)
+        bool unknown_liquid_id = false; // a liquid id no repository has recorded (yet)
+    };
+    const auto resolve = [&](const std::string& named) -> Resolution {
+        if (is_uuid(named)) {
+            auto found = store_->get_repository(lowercase(named));
+            if (found) {
+                return {std::move(*found), {}, {}};
+            }
+            if (found.error().code != "not_found" && found.error().code != "invalid_input") {
+                return {std::nullopt, {}, found.error().message};
+            }
+            return {std::nullopt, "no repository has this id", {}};
+        }
+        const auto liquid_id = liquid_id_of(named);
+        if (!liquid_id) {
+            return {std::nullopt, "not a lake or liquid repository id", {}};
+        }
+        // The same 16 bytes as lake's UUID, should liquid ever be given lake's id.
+        if (auto found = store_->get_repository(uuid_of_liquid_id(*liquid_id))) {
+            return {std::move(*found), {}, {}};
+        }
+        auto named_by = store_->repositories_by_liquid_id(*liquid_id);
+        if (!named_by) {
+            return {std::nullopt, {}, named_by.error().message};
+        }
+        if (named_by->size() == 1) {
+            return {std::move(named_by->front()), {}, {}};
+        }
+        if (named_by->empty()) {
+            return {std::nullopt, "no repository has this liquid id", {}, true};
+        }
+        std::string problem = "the liquid id of " + std::to_string(named_by->size()) +
+                              " repositories (";
+        for (std::size_t index = 0; index < named_by->size(); ++index) {
+            problem += (index == 0 ? "" : ", ") + (*named_by)[index].id;
+        }
+        return {std::nullopt, problem + "); deploy from a checkout of one of them", {}};
+    };
+    std::set<std::string> named_values;
+    for (const auto* rows : {&*latest_deployments, &*latest_environment_env, &*latest_domains}) {
+        for (const auto& [key, row] : *rows) {
+            named_values.insert(text_of(row, "repository"));
+        }
+    }
+    for (const json& row : *deployments) { // older rows of a deployment may name it otherwise
+        named_values.insert(text_of(row, "repository"));
+    }
+    std::map<std::string, Resolution> resolved;
+    bool unknown = false;
+    for (const std::string& named : named_values) {
+        resolved[named] = resolve(named);
+        unknown = unknown || resolved[named].unknown_liquid_id;
+    }
+    // Lake reads the liquid ids it does not have yet only when a row needs one: at most once every
+    // `full_sync_every` polls, so a row that stays unknown costs no repository opens in between.
+    bool read_ids = false;
+    {
+        std::lock_guard lock(state_mutex_);
+        if (syncs_since_liquid_ids_ >= 0) {
+            ++syncs_since_liquid_ids_;
+        }
+        if (unknown && read_liquid_id &&
+            (syncs_since_liquid_ids_ < 0 ||
+             syncs_since_liquid_ids_ >= std::max(config_.full_sync_every, 1))) {
+            syncs_since_liquid_ids_ = 0;
+            read_ids = true;
+        }
+    }
+    if (read_ids) {
+        if (auto unread = store_->repositories_without_liquid_id(10000)) {
+            for (const Repository& repository : *unread) {
+                const auto liquid_id = read_liquid_id(repository);
+                if (liquid_id && !liquid_id->empty()) {
+                    static_cast<void>(store_->set_repository_liquid_id(repository.id, *liquid_id));
+                }
+            }
+        }
+        for (auto& [named, resolution] : resolved) {
+            if (resolution.unknown_liquid_id) {
+                resolution = resolve(named);
+            }
+        }
+    }
+
     // Every row goes to its repository's workspace, so the work is grouped by repository.
     struct RepositoryRows {
+        Repository repository;
         std::map<std::string, std::map<std::string, json>> latest; // kind -> key -> row
         ZettaRows deployments;                                     // every deployment row
         std::set<std::string> environments;
@@ -442,8 +594,13 @@ liquid::runtime::task<PlatformResult<void>> PlatformService::sync(PlatformRecord
     std::map<std::string, RepositoryRows> by_repository;
     const auto group = [&](std::string_view kind, const std::map<std::string, json>& rows) {
         for (const auto& [key, row] : rows) {
-            RepositoryRows& rows_of = by_repository[text_of(row, "repository")];
-            rows_of.latest[std::string(kind)][key] = row;
+            const Resolution& resolution = resolved[text_of(row, "repository")];
+            if (!resolution.repository) {
+                continue; // reported below
+            }
+            RepositoryRows& rows_of = by_repository[resolution.repository->id];
+            rows_of.repository = *resolution.repository;
+            rows_of.latest[std::string(kind)][key] = mirror_value(row, resolution.repository->id);
             rows_of.environments.insert(text_of(row, "environment"));
         }
     };
@@ -451,7 +608,11 @@ liquid::runtime::task<PlatformResult<void>> PlatformService::sync(PlatformRecord
     group("environment_env", *latest_environment_env);
     group("domain", *latest_domains);
     for (const json& row : *deployments) {
-        by_repository[text_of(row, "repository")].deployments.push_back(row);
+        const auto found = resolved.find(text_of(row, "repository"));
+        if (found != resolved.end() && found->second.repository) {
+            const std::string& id = found->second.repository->id;
+            by_repository[id].deployments.push_back(mirror_value(row, id));
+        }
     }
     {
         std::lock_guard lock(state_mutex_);
@@ -462,6 +623,26 @@ liquid::runtime::task<PlatformResult<void>> PlatformService::sync(PlatformRecord
     }
 
     std::vector<std::string> failures;
+    std::vector<std::string> unresolved;
+    {
+        std::map<std::string, UnresolvedRepository> still;
+        const std::string now = now_iso8601();
+        for (const auto& [named, resolution] : resolved) {
+            if (resolution.repository) {
+                continue;
+            }
+            if (!resolution.unreadable.empty()) {
+                failures.push_back(named + ": " + resolution.unreadable);
+                continue;
+            }
+            unresolved.push_back("'" + named + "': " + resolution.problem);
+            std::lock_guard lock(state_mutex_);
+            const auto known = unresolved_.find(named);
+            still[named] = {resolution.problem, known == unresolved_.end() ? now : known->second.since};
+        }
+        std::lock_guard lock(state_mutex_);
+        unresolved_ = std::move(still);
+    }
     for (const auto& [repository_id, rows] : by_repository) {
         const std::string fingerprint = json(rows.latest).dump();
         {
@@ -475,14 +656,7 @@ liquid::runtime::task<PlatformResult<void>> PlatformService::sync(PlatformRecord
             mark_repository(repository_id, false);
             failures.push_back(repository_id + ": " + reason);
         };
-        const auto repository = store_->get_repository(repository_id);
-        if (!repository) {
-            if (repository.error().code != "not_found" &&
-                repository.error().code != "invalid_input") {
-                failed(repository.error().message);
-            }
-            continue; // a row for a repository lake does not have belongs to no workspace
-        }
+        const Repository* repository = &rows.repository;
         if (repository->workspace_id.empty()) {
             failed("the repository has no workspace");
             continue;
@@ -599,13 +773,25 @@ liquid::runtime::task<PlatformResult<void>> PlatformService::sync(PlatformRecord
         std::lock_guard lock(state_mutex_);
         mirrored_[repository_id] = fingerprint;
     }
+    std::string message;
     if (!failures.empty()) {
-        std::string message = std::to_string(failures.size()) +
-                              " repositories were not mirrored into their workspace: ";
+        message = std::to_string(failures.size()) +
+                  " repositories were not mirrored into their workspace: ";
         for (std::size_t index = 0; index < failures.size(); ++index) {
             message += (index == 0 ? "" : "; ") + failures[index];
         }
-        co_return platform_failure<void>({"workspace_not_ready", message});
+    }
+    if (!unresolved.empty()) {
+        message += std::string(message.empty() ? "" : ". ") + std::to_string(unresolved.size()) +
+                   " repository values in the operator's rows name no lake repository, so their "
+                   "rows are not shown: ";
+        for (std::size_t index = 0; index < unresolved.size(); ++index) {
+            message += (index == 0 ? "" : "; ") + unresolved[index];
+        }
+    }
+    if (!message.empty()) {
+        co_return platform_failure<void>(
+            {failures.empty() ? "unresolved_repository" : "workspace_not_ready", message});
     }
     co_return PlatformResult<void>{};
 }
@@ -813,6 +999,18 @@ PlatformResult<void> PlatformService::require_writable() const {
     return {};
 }
 
+namespace {
+
+// The `repository` the operator keys an environment by: what its current deployment row named
+// (liquid's id, for a deployment made with `liquid deploy`), else lake's id. Lake writes the
+// environment's values and domains under it, so the operator applies them (lake#805).
+std::string operator_repository(const json& deployment, const std::string& repository_id) {
+    const std::string named = text_of(deployment, "operator_repository");
+    return named.empty() ? repository_id : named;
+}
+
+} // namespace
+
 liquid::runtime::task<PlatformResult<void>>
 PlatformService::set_environment_env(WorkspaceRecords& records,
                                      std::string repository_id,
@@ -832,9 +1030,15 @@ PlatformService::set_environment_env(WorkspaceRecords& records,
     if (!*local) {
         co_return platform_failure<void>({"not_found", "no environment " + environment});
     }
+    auto rows = settled(co_await list_platform_mirror_records(records, repository_id));
+    if (!rows) {
+        co_return platform_failure<void>(platform_error(rows.error()));
+    }
     const std::string updated_at = now_iso8601();
     json row{{"lake", config_.lake},
-             {"repository", repository_id},
+             {"repository",
+              operator_repository(environment_output(**local, *rows).at("deployment"),
+                                  repository_id)},
              {"environment", environment},
              {"key", key},
              {"value", value},
@@ -853,7 +1057,8 @@ PlatformService::set_environment_env(WorkspaceRecords& records,
         co_return platform_failure<void>(platform_error(appended.error()));
     }
     auto mirrored = settled(co_await put_platform_mirror_record(
-        records, repository_id, {"environment_env", environment_env_key(row), row, updated_at}));
+        records, repository_id,
+        {"environment_env", environment_env_key(row), mirror_value(row, repository_id), updated_at}));
     if (!mirrored) {
         co_return platform_failure<void>(platform_error(mirrored.error()));
     }
@@ -889,7 +1094,7 @@ PlatformService::change_domain(WorkspaceRecords& records,
     }
     const std::string updated_at = now_iso8601();
     json row{{"lake", config_.lake},
-             {"repository", repository_id},
+             {"repository", operator_repository(document->at("deployment"), repository_id)},
              {"environment", environment},
              {"host", host},
              {"tls", tls},
@@ -910,7 +1115,8 @@ PlatformService::change_domain(WorkspaceRecords& records,
         co_return platform_failure<void>(platform_error(appended.error()));
     }
     auto mirrored = settled(co_await put_platform_mirror_record(
-        records, repository_id, {"domain", domain_key(row), row, updated_at}));
+        records, repository_id,
+        {"domain", domain_key(row), mirror_value(row, repository_id), updated_at}));
     if (!mirrored) {
         co_return platform_failure<void>(platform_error(mirrored.error()));
     }

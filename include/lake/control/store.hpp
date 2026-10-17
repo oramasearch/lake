@@ -54,6 +54,11 @@ struct Repository {
     // The workspace the repository belongs to (migration 0051, lake#315): set on create and never
     // changed. Empty only for a repository the migration recorded as needs_selection.
     std::string workspace_id;
+    // The id liquid gave the repository (`repository::id()`, 32 lowercase hex digits), which a
+    // checkout cloned from it shares and `liquid deploy` sends as the deployment's `repository`
+    // (migration 0088, lake#805). Empty until lake has read it: the platform sync fills it in
+    // when a row names an id it does not know, and every push records it again.
+    std::string liquid_id;
 };
 // A repository's settings record (lake#315 part 2, control/repository_records.hpp): its
 // description, and later settings, in the workspace Zetta of the repository's workspace.
@@ -1455,6 +1460,14 @@ public:
                                                          const std::string& visibility) = 0;
     virtual Result<Repository> delete_repository(const std::string& id,
                                                  const RepositoryDeletion& deletion) = 0;
+    // Liquid repository ids (lake#805, docs/api/platform.md#which-repository-a-row-names). The
+    // live repositories whose recorded liquid id is `liquid_id` (more than one when a repository
+    // was pushed from another's clone); records one (`not_found` for an unknown repository); and
+    // the live repositories with a workspace whose id lake has not read yet, oldest first.
+    virtual Result<std::vector<Repository>> repositories_by_liquid_id(const std::string& liquid_id) = 0;
+    virtual Result<void> set_repository_liquid_id(const std::string& id,
+                                                  const std::string& liquid_id) = 0;
+    virtual Result<std::vector<Repository>> repositories_without_liquid_id(int limit) = 0;
     // The central audit events about a workspace's data (decision 52, lake#317), for the
     // one-shot copy into workspace Zettas only. Assigning records the workspace of each event
     // whose action is one of `workspace_actions` and that was not refused for want of authority,

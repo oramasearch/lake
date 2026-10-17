@@ -170,7 +170,10 @@ sync writes each repository's environments and rows into that repository's works
 environment's policy object (external id `platform_environment_id`) on first sight, skipping a
 repository whose rows have not changed since its last write, and marking only that repository
 stale when its workspace cannot be written. The stores no longer write or read either retired
-table (migration `0060_platform_workspaces`), which `0070` drops.
+table (migration `0060_platform_workspaces`), which `0070` drops. The sync places a row by lake's
+repository id or the liquid id `liquid deploy` sends (`repositories.liquid_id`, migration
+`0088_repository_liquid_ids`, lake#805), reading the ids it lacks through an injected reader, and
+reports a row it cannot place (`unresolved_repositories()`) instead of skipping it.
 `application_webhook_records.cpp` is the next: an application's lifecycle events and its webhook
 delivery attempts in the application's workspace (lake#356, lake#357), each attempt claimed with
 `if_absent` before it is sent and settled with `if_revision`. The stores no longer write or read

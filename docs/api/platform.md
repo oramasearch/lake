@@ -31,7 +31,9 @@ repository and the name.
 
 Reads cost one `list_records` per collection: the environments page two, an environment page
 three (the environment record, then the rows for the document and for the history). The
-Deployments overview reads only the repositories with an environment the caller may read.
+Deployments overview reads only the repositories with an environment the caller may read. Setting
+an environment value reads the environment's mirror rows once more, to find the key the operator
+uses for it ([below](#which-repository-a-row-names)).
 
 ## Capabilities
 
@@ -60,7 +62,7 @@ one code source in `include/lake/control/zetta_control.hpp`.
 
 | Table | Columns | Writer |
 |---|---|---|
-| `orama_control.deployments` | `operator, lake, repository, environment, kind, change, image, deployment_id, requested_by, requested_at, phase, namespace, url, message, updated_at, ordering_token` | desired rows by liquid; status rows by the operator |
+| `orama_control.deployments` | `operator, lake, repository, environment, kind, change, image, deployment_id, requested_by, requested_at, phase, namespace, url, message, updated_at, ordering_token` | desired rows by liquid; status rows by the operator. `repository` is lake's id or liquid's ([which repository a row names](#which-repository-a-row-names)) |
 | `orama_control.environment_env` | `lake, repository, environment, key, value, deleted, set_by, updated_at, ordering_token` | Lake; operator reads |
 | `orama_control.domains` | `lake, repository, environment, host, tls, status, message, deleted, requested_by, updated_at, ordering_token` | requests by Lake; operator materializes status |
 
@@ -102,7 +104,61 @@ reports `platform: degraded`, `/readyz` remains governed by the local control st
 writes fail `store_unavailable`. A successful sync clears the stale marker. A repository whose
 workspace cannot be written (not ready, or the repository has no workspace) is marked stale on its
 own: its reads carry `stale_since` until a later sync writes it, and the service stays healthy. A
-row naming a repository Lake does not have belongs to no workspace and is skipped.
+row whose `repository` names no single lake repository belongs to no workspace: it is not mirrored,
+and it is reported ([below](#which-repository-a-row-names)), never skipped quietly.
+
+## Which repository a row names
+
+`liquid deploy` runs in a checkout and sends, as the row's `repository`, the id liquid gave the
+repository (`repository::id()`, 16 bytes as 32 hex digits; liquid `src/deploy.cpp`), not lake's
+UUID. A checkout made with `liquid clone` takes the identity of the lake repository it was cloned
+from, and a repository lake created empty takes the identity of the first push it receives, so a
+lake repository and its checkouts share one liquid id (lake#805). The operator copies the value into
+its rows unchanged, and lake places each row with it:
+
+1. A UUID is lake's own repository id (`get_repository`).
+2. 32 hex digits, in either case, are a liquid id: first the UUID with the same 16 bytes, should
+   liquid ever be given lake's id, then `repositories.liquid_id` (migration
+   `0088_repository_liquid_ids`, indexed). Exactly one live repository must have it.
+
+Lake records `repositories.liquid_id` after every push (a push never fails because of it; a read
+error is put in the push's audit details) and, for repositories it has not read yet, during the
+sync: when a row names a liquid id no repository has, the sync reads the liquid id of every live
+repository that has a workspace and none recorded (opening its store), then places the row again.
+It does so at most once every `full_sync_every` polls (20, about five minutes) while such a row
+remains, so an unknown id does not reopen repositories on every poll.
+
+The workspace keeps the row with `repository` set to lake's id, so the pages and the record
+checks find it, and with the operator's value in `operator_repository` when it was another one. The
+operator matches environment values and domains to a deployment by its exact `repository` value, so
+`set_environment_env`, `unset_environment_env`, `create_domain` and `delete_domain` write their rows
+under the `operator_repository` of the environment's current deployment, or lake's id when it has
+none.
+
+A value that names no single repository is reported, with the reason:
+
+| Reason | When |
+|---|---|
+| `no repository has this id` | a UUID that is not a lake repository |
+| `no repository has this liquid id` | a liquid id no live repository has, after lake has read the ids it lacked |
+| `the liquid id of N repositories (…); deploy from a checkout of one of them` | two repositories share the liquid id (one was pushed from a clone of the other); lake does not guess |
+| `not a lake or liquid repository id` | anything else |
+
+The report is the poll's answer `unresolved_repository` (or `workspace_not_ready`, which then names
+both), naming each value and reason; `PlatformService::unresolved_repositories()` with the reason
+and since when; `platform_unresolved_repositories` (a count) on `GET /healthz`; the gauge
+`lake_platform_unresolved_repositories`; and one `platform_sync_incomplete` log line on standard
+error each time the poll's problem changes. The operator control plane answered, so `platform`
+stays `ready`; the other repositories' rows are mirrored as usual.
+
+Verify with `GET /healthz` (no `platform_unresolved_repositories`) and with `list_deployments` on
+the repository a checkout was cloned from after `liquid deploy`. `LiquidIdFixture.*` in
+`tests/test_platform.cpp` covers the three cases (liquid's id shown, lake's id shown, an unknown or
+shared id reported), `*.RecordsAndFindsLiquidIds` the store on both stores, and
+`SyncHttp.PushRecordsTheRepositorysLiquidId` (`tests/test_api.cpp`) the push.
+
+To change how a value is placed, change `PlatformService::sync` (`src/control/platform.cpp`) and this
+section together.
 
 The retired PostgreSQL tables `platform_environments` and `platform_mirror` (migration
 `0019_platform`) were read only by the one-shot copy; migration `0060_platform_workspaces` records

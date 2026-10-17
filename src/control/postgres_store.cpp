@@ -1286,7 +1286,8 @@ constexpr const char* customer_columns = "id::text, customer_type, coalesce(user
 constexpr const char* repository_columns =
     "id::text, customer_id::text, name, ''::text, visibility, "
     "coalesce(deleted_at::text,''), coalesce(retention_until::text,''), "
-    "created_at::text, updated_at::text, coalesce(workspace_id::text,'')";
+    "created_at::text, updated_at::text, coalesce(workspace_id::text,''), "
+    "coalesce(liquid_id,'')";
 constexpr const char* team_columns =
     "id::text, organization_id::text, name, display_name, created_at::text, "
     "updated_at::text";
@@ -1332,7 +1333,8 @@ Repository repository_of(const pqxx::row& r) {
                       r[6].as<std::string>(),
                       r[7].as<std::string>(),
                       r[8].as<std::string>(),
-                      r[9].as<std::string>()};
+                      r[9].as<std::string>(),
+                      r[10].as<std::string>()};
 }
 
 Result<void> require_live_repository(pqxx::work& tx, const std::string& repository_id) {
@@ -2018,6 +2020,52 @@ public:
                 return std::unexpected(StoreError{"not_found", "no repository " + id});
             return repository_of(rows[0]);
         });
+    }
+
+    Result<std::vector<Repository>> repositories_by_liquid_id(const std::string& liquid_id) override {
+        return with_tx<std::vector<Repository>>(
+            [&](pqxx::work& tx) -> Result<std::vector<Repository>> {
+                const pqxx::result rows = tx.exec_params(
+                    std::string("SELECT ") + repository_columns +
+                        " FROM repositories WHERE liquid_id = $1 AND deleted_at IS NULL "
+                        "ORDER BY created_at",
+                    liquid_id);
+                std::vector<Repository> out;
+                for (const auto& r : rows)
+                    out.push_back(repository_of(r));
+                return out;
+            });
+    }
+
+    Result<void> set_repository_liquid_id(const std::string& id,
+                                          const std::string& liquid_id) override {
+        return with_tx<void>([&](pqxx::work& tx) -> Result<void> {
+            // Written only when it changed, so the updated_at trigger moves only then.
+            const pqxx::result rows = tx.exec_params(
+                "UPDATE repositories SET liquid_id = NULLIF($2, '') WHERE id = $1::uuid AND "
+                "liquid_id IS DISTINCT FROM NULLIF($2, '') RETURNING 1",
+                id,
+                liquid_id);
+            if (rows.empty() &&
+                tx.exec_params("SELECT 1 FROM repositories WHERE id = $1::uuid", id).empty())
+                return std::unexpected(StoreError{"not_found", "no repository " + id});
+            return {};
+        });
+    }
+
+    Result<std::vector<Repository>> repositories_without_liquid_id(int limit) override {
+        return with_tx<std::vector<Repository>>(
+            [&](pqxx::work& tx) -> Result<std::vector<Repository>> {
+                const pqxx::result rows = tx.exec_params(
+                    std::string("SELECT ") + repository_columns +
+                        " FROM repositories WHERE liquid_id IS NULL AND deleted_at IS NULL AND "
+                        "workspace_id IS NOT NULL ORDER BY created_at LIMIT $1",
+                    limit);
+                std::vector<Repository> out;
+                for (const auto& r : rows)
+                    out.push_back(repository_of(r));
+                return out;
+            });
     }
 
     Result<Repository> rename_repository(const std::string& id, const std::string& name) override {

@@ -1,5 +1,10 @@
 # Tests
 
+`test_platform.cpp`'s `LiquidIdFixture` covers deployment rows that name a repository by the liquid
+id `liquid deploy` sends, by lake's UUID, by an unknown id (reported, not skipped) and by a liquid
+id two repositories share (lake#805); `*.RecordsAndFindsLiquidIds` runs the store contract on
+memory and PostgreSQL, and `test_api.cpp`'s `SyncHttp.PushRecordsTheRepositorysLiquidId` the push.
+
 `test_network_tunnel.cpp` exercises recipient-only CSR signing, trust, validity, refusal cases,
 admin grant/revoke and signed audit against memory and PostgreSQL. `tunnel_fixture.hpp` creates
 local keys and deliberately overprivileged CSRs. Transport evidence in `test_schema_conformance.cpp`

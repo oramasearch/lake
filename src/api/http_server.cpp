@@ -2610,6 +2610,28 @@ public:
         return unique_stored_bytes_locked(customer_id, true);
     }
 
+    SyncStoreResult<std::string> repository_liquid_id(const std::string& customer_id,
+                                                      const std::string& repository_id) override {
+        auto entered_repository = enter_repository(customer_id, repository_id);
+        auto& state = entered_repository.state;
+        if (!state) {
+            return std::unexpected(state.error());
+        }
+        const auto id = (*state)->subject->id();
+        if (!id) {
+            return std::unexpected(error_of(id.error()));
+        }
+        static constexpr std::string_view digits = "0123456789abcdef";
+        std::string output;
+        output.reserve(id->size() * 2);
+        for (const std::byte octet : *id) {
+            const auto value = std::to_integer<unsigned char>(octet);
+            output += digits[value >> 4U];
+            output += digits[value & 0x0fU];
+        }
+        return output;
+    }
+
     SyncStoreResult<std::vector<std::pair<std::string, std::string>>>
     refs(const std::string& customer_id, const std::string& repository_id) override {
                 auto entered_repository = enter_repository(customer_id, repository_id);        auto& state = entered_repository.state;
@@ -7497,6 +7519,8 @@ struct ApiServer::Impl {
     std::chrono::steady_clock::time_point last_usage_sample{};
     UsageRecorder::Totals reported_usage;
     mutable LiquidCustomerStores sync_store;
+    // The last platform poll's problem as logged, so an unchanged one is not logged every poll.
+    std::string last_platform_sync_problem;
     ArtifactRegistry artifacts;
     // The instance registry's tenant images, for the workspace deletion cascade (lake#514).
     WorkspaceContent workspace_content{
@@ -12735,6 +12759,11 @@ struct ApiServer::Impl {
         nlohmann::json body{{"ok", true}};
         if (options.platform) {
             body["platform"] = options.platform->degraded() ? "degraded" : "ready";
+            // Rows naming no lake repository are not shown; the count says so (lake#805).
+            if (const auto unresolved = options.platform->unresolved_repositories().size();
+                unresolved != 0) {
+                body["platform_unresolved_repositories"] = unresolved;
+            }
         }
         return send_text(route,
                          boost::http::status::ok,
@@ -15229,7 +15258,8 @@ void ApiServer::drain() {
         // The mirror lives in each repository's workspace (lake#358, lake#359).
         control::WorkspaceService* workspaces = impl_->options.workspaces.get();
         const std::string kek = impl_->options.instance_kek;
-        static_cast<void>(liquid::runtime::block_on(impl_->options.platform->sync(
+        Impl* impl = impl_.get();
+        const auto synced = liquid::runtime::block_on(impl_->options.platform->sync(
             [workspaces, kek](const std::string& customer_id, const std::string& workspace_id)
                 -> control::ZettaControlResult<control::WorkspaceRecords> {
                 if (!workspaces) {
@@ -15243,7 +15273,33 @@ void ApiServer::drain() {
                                                 read, std::move(input));
                     },
                     workspace_id, kek);
-            })));
+            },
+            // The id liquid gave a repository, which `liquid deploy` sends (lake#805).
+            [impl](const control::Repository& repository) -> control::PlatformResult<std::string> {
+                auto id = impl->sync_store.repository_liquid_id(repository.customer_id, repository.id);
+                if (!id) {
+                    return std::unexpected(control::PlatformError{id.error().code, id.error().message});
+                }
+                return std::move(*id);
+            }));
+        // A poll that left rows out says so once per change, with the reason (lake#805): a row
+        // whose repository lake cannot place is never dropped quietly.
+        const std::string outcome =
+            !synced ? synced.error().message : (*synced ? std::string() : synced->error().message);
+        if (outcome != impl_->last_platform_sync_problem) {
+            impl_->last_platform_sync_problem = outcome;
+            if (!outcome.empty()) {
+                std::cerr << nlohmann::json{{"event", "platform_sync_incomplete"},
+                                            {"code", synced && !*synced ? synced->error().code
+                                                                        : std::string("store_unavailable")},
+                                            {"message", outcome}}
+                                 .dump()
+                          << '\n';
+            }
+        }
+        impl_->metrics.set_gauge(
+            "lake_platform_unresolved_repositories", {},
+            static_cast<double>(impl_->options.platform->unresolved_repositories().size()));
     }
 }
 

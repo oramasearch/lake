@@ -5265,6 +5265,40 @@ Result<Repository> InMemoryStore::get_repository(const std::string& id) {
     return std::unexpected(StoreError{"not_found", "no repository " + id});
 }
 
+Result<std::vector<Repository>>
+InMemoryStore::repositories_by_liquid_id(const std::string& liquid_id) {
+    std::lock_guard lock(mutex_);
+    std::vector<Repository> out;
+    for (const auto& r : repositories_)
+        if (!liquid_id.empty() && r.liquid_id == liquid_id && r.deleted_at.empty())
+            out.push_back(r);
+    return out;
+}
+
+Result<void> InMemoryStore::set_repository_liquid_id(const std::string& id,
+                                                     const std::string& liquid_id) {
+    std::lock_guard lock(mutex_);
+    for (auto& r : repositories_) {
+        if (r.id == id) {
+            r.liquid_id = liquid_id;
+            return {};
+        }
+    }
+    return std::unexpected(StoreError{"not_found", "no repository " + id});
+}
+
+Result<std::vector<Repository>> InMemoryStore::repositories_without_liquid_id(int limit) {
+    std::lock_guard lock(mutex_);
+    std::vector<Repository> out;
+    for (const auto& r : repositories_) {
+        if (limit > 0 && out.size() >= static_cast<std::size_t>(limit))
+            break;
+        if (r.liquid_id.empty() && r.deleted_at.empty() && !r.workspace_id.empty())
+            out.push_back(r);
+    }
+    return out;
+}
+
 namespace {
 
 std::vector<Repository>::iterator repository_by_id(std::vector<Repository>& repositories,
