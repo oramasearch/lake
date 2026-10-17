@@ -149,6 +149,8 @@ test("the home says what Lake does, grouped as the rail is, claiming only what t
   // Deployments off in server_info, and the Auto-Suggest Agent not running: neither is claimed.
   const fewer = lakeMap(items, { deployments: false, runningAgents: new Set() });
   assert.deepEqual(fewer.find((g) => g.key === "design")!.things.map((t) => t.path), ["/design/projects"]);
+  // MCP's Worked Flows follow Developer → MCP, and only where the rail offers it (lake#789).
+  assert.deepEqual(all.find((g) => g.key === "developer")!.things.map((t) => t.path), ["/developer/mcp", "/developer/mcp?tab=tools", "/developer/mcp?tab=flows"]);
   // Design is about AI (Steve, 2026-10-17): the home names its pages as AI.
   assert.equal(fewer.find((g) => g.key === "design")!.things[0].label, "AI Projects");
   assert.deepEqual(fewer.find((g) => g.key === "ship")!.things.map((t) => t.path), ["/ship/apps"]);

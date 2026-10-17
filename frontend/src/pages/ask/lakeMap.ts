@@ -59,6 +59,24 @@ const THINGS: Record<string, { does: string; ask: string; needs?: string; label?
   "/developer/mcp": { does: "Connect your own AI assistant to Lake.", ask: "How do I connect my AI assistant to Lake over MCP?" },
 };
 
+/** Entries that follow a rail page in its group and show only where that page does (lake#789). */
+const FOLLOWS: Record<string, { path: string; label: string; does: string; ask: string }[]> = {
+  "/developer/mcp": [
+    {
+      path: "/developer/mcp?tab=tools",
+      label: "MCP Tools",
+      does: "Every tool Lake offers an AI assistant, grouped by what it works on.",
+      ask: "Which MCP tools can my AI assistant use with Lake?",
+    },
+    {
+      path: "/developer/mcp?tab=flows",
+      label: "MCP Worked Flows",
+      does: "The tools an agent calls, in order, for the jobs people ask of Lake most.",
+      ask: "Which MCP tools does an agent call to train a model from a dataset?",
+    },
+  ],
+};
+
 /** What this Lake runs, as the home reads it: `server_info.deployments` (false: not set up) and
  * the library agents that run (`list_agent_library`, `deployed`). */
 export type LakeRuns = { deployments?: boolean | null; runningAgents: ReadonlySet<string> };
@@ -79,6 +97,7 @@ export function lakeMap(items: Item[], runs: LakeRuns): LakeGroup[] {
       if (thing.needs && !runs.runningAgents.has(thing.needs)) continue;
       seen.add(item.path);
       things.push({ path: item.path, label: thing.label ?? item.label, does: thing.does, ask: thing.ask });
+      for (const follow of FOLLOWS[item.path] ?? []) things.push(follow);
     }
     if (things.length) groups.push({ key: group.key, title: group.title, line: group.line, things });
   }
