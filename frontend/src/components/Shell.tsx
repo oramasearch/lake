@@ -16,22 +16,15 @@ import { Link, useLocation, useNavigate } from "react-router-dom";
 import {
   BookMarked,
   BookOpen,
-  Building2,
   ChevronsLeft,
   ChevronsRight,
-  Code2,
   Compass,
-  Database,
-  FlaskConical,
   Home,
   type LucideIcon,
   Menu,
   Moon,
-  Network,
-  Rocket,
   Search,
   Share2,
-  ShieldCheck,
   Sparkles,
   Sun,
   X,
@@ -51,6 +44,7 @@ import { resizingAsk, useAskWidth } from "@/lib/askWidth";
 import { focusAsk, onOpenAsk, type AskRequest } from "@/lib/ask";
 import { isAskHome } from "@/pages/ask/home";
 import { PHONE_QUERY } from "@/lib/phoneSheet";
+import { SECTION_ICONS } from "@/lib/sectionIcons";
 
 // Ask Orama loads the first time it is opened, so the shell carries no Markdown or conversation code.
 const AskPanel = lazy(() => import("./AskPanel").then((m) => ({ default: m.AskPanel })));
@@ -59,17 +53,7 @@ const AskPanel = lazy(() => import("./AskPanel").then((m) => ({ default: m.AskPa
 const JUMPS: Record<string, SectionKey> = { r: "data", d: "design", t: "train", s: "ship", n: "network", o: "organization", a: "administration" };
 
 /** Each group's icon, and the icons of the ungrouped items at the top. */
-const SECTION_ICONS: Partial<Record<SectionKey, LucideIcon>> = {
-  home: Home,
-  data: Database,
-  design: Compass,
-  train: FlaskConical,
-  ship: Rocket,
-  network: Network,
-  organization: Building2,
-  administration: ShieldCheck,
-  developer: Code2,
-};
+// Each section's icon lives in @/lib/sectionIcons, shared with Ask Orama's home (lake#786).
 const TOP_ICONS: Record<string, LucideIcon> = {
   "/": Home,
   "/repositories": BookMarked,

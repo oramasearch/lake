@@ -752,3 +752,61 @@ html[data-resizing-ask] .ask-panel {
     align-items: center;
   }
 }
+
+/* Icons and cards on Ask Orama's home (lake#786): each group a card with its rail icon in a tinted
+   tile, each agent with its own icon, and the AI sovereignty badge. Light and dark come from the
+   tokens. */
+.ask-home-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 var(--lake-space-2, 8px);
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 12.5px;
+  font-weight: var(--lake-weight-medium, 500);
+  color: var(--lake-action, currentColor);
+  background: color-mix(in srgb, var(--lake-action, currentColor) 12%, transparent);
+}
+.ask-icon-tile {
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  width: 36px;
+  height: 36px;
+  border-radius: 8px;
+  color: var(--lake-action, currentColor);
+  background: color-mix(in srgb, var(--lake-action, currentColor) 12%, transparent);
+}
+.ask-icon-tile-sm {
+  width: 26px;
+  height: 26px;
+  border-radius: 6px;
+}
+.ask-map-group {
+  border: var(--lake-border-width) solid var(--lake-border-subtle);
+  border-radius: 10px;
+  padding: var(--lake-space-4, 16px);
+  background: var(--lake-surface);
+  transition: border-color var(--lake-motion-standard, 150ms) var(--lake-motion-ease, ease);
+}
+.ask-map-group:hover,
+.ask-map-group:focus-within {
+  border-color: color-mix(in srgb, var(--lake-action, currentColor) 45%, var(--lake-border-subtle));
+}
+.ask-map-head {
+  display: flex;
+  align-items: center;
+  gap: var(--lake-space-3, 12px);
+  margin-bottom: var(--lake-space-3, 12px);
+}
+.ask-map-head h3 {
+  margin: 0;
+}
+.ask-map-group li:first-child {
+  border-top: 0;
+  padding-top: 0;
+}
+.ask-agent-name .ask-icon-tile-sm {
+  margin-right: 2px;
+}

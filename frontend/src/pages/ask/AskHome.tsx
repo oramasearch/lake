@@ -14,7 +14,8 @@
  * from the workspace after a typed confirmation (`delete_ask_conversation`, docs/ui/deletion.md). */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
-import { Bot, Plus, Rocket, Sparkles, Trash2, X } from "lucide-react";
+import { AppWindow, Bot, Crown, FlaskConical, FolderKanban, Lightbulb, type LucideIcon, Plus, Rocket, Sparkles, Trash2, WandSparkles, X } from "lucide-react";
+import { SECTION_ICONS } from "@/lib/sectionIcons";
 import { useRead } from "@/lib/api";
 import { onFocusAsk } from "@/lib/ask";
 import { conversationLines, DELETE_WORD } from "@/lib/deletion";
@@ -61,9 +62,10 @@ function Welcome({ name }: { name?: string }) {
       </p>
       <h1>{greeting(name)}</h1>
       {/* The positioning (Steve, 2026-10-17): AI sovereignty, said without telling anyone what to do. */}
-      <p className="ask-home-lead">
-        <strong>AI sovereignty.</strong> When you're tired of renting someone else's AI, Orama Lake is where you own your AI.
+      <p className="ask-home-badge">
+        <Crown size={14} aria-hidden /> AI sovereignty
       </p>
+      <p className="ask-home-lead">When you're tired of renting someone else's AI, Orama Lake is where you own your AI.</p>
       <p className="sub">
         Your data and everything built from it stay in a workspace of your own. Ask Orama answers questions about anything in it, reads only what you may read,
         proposes every change for you to confirm, and brings in the right agent when another does it better.
@@ -100,6 +102,25 @@ function FirstStep({ customerId, hasWorkspaces }: { customerId: string; hasWorks
   );
 }
 
+/** Each library agent's icon on the home (lake#786); a person's own agents use Bot. */
+const AGENT_ICONS: Record<string, LucideIcon> = {
+  "agent-ask-orama": Sparkles,
+  "agent-project": FolderKanban,
+  "agent-application": AppWindow,
+  "agent-experiments": FlaskConical,
+  "agent-autosuggest": Lightbulb,
+  "agent-creator": WandSparkles,
+};
+
+function AgentIcon({ id }: { id: string }) {
+  const Icon = AGENT_ICONS[id] ?? Bot;
+  return (
+    <span className="ask-icon-tile ask-icon-tile-sm" aria-hidden>
+      <Icon size={15} />
+    </span>
+  );
+}
+
 /** The agents a person can talk to, with what each does (the Agent Library, as Talk to lists them,
  * lake#763). With `onPick`, choosing one starts a conversation with it. */
 function AgentsToTalkTo({ selected = "", onPick }: { selected?: string; onPick?: (agent: string) => void }) {
@@ -113,14 +134,14 @@ function AgentsToTalkTo({ selected = "", onPick }: { selected?: string; onPick?:
           onPick ? (
             <button key={agent.id} type="button" className="ask-starter ask-agent" aria-pressed={agent.id === selected} onClick={() => onPick(agent.id)}>
               <span className="ask-agent-name">
-                <Bot size={14} aria-hidden /> {agent.name}
+                <AgentIcon id={agent.id} /> {agent.name}
               </span>
               <span className="ask-agent-purpose">{agent.purpose}</span>
             </button>
           ) : (
             <div key={agent.id} className="ask-starter ask-agent">
               <span className="ask-agent-name">
-                <Bot size={14} aria-hidden /> {agent.name}
+                <AgentIcon id={agent.id} /> {agent.name}
               </span>
               <span className="ask-agent-purpose">{agent.purpose}</span>
             </div>
@@ -128,6 +149,15 @@ function AgentsToTalkTo({ selected = "", onPick }: { selected?: string; onPick?:
         )}
       </div>
     </section>
+  );
+}
+
+function GroupIcon({ section }: { section: string }) {
+  const Icon = SECTION_ICONS[section] ?? Sparkles;
+  return (
+    <span className="ask-icon-tile" aria-hidden>
+      <Icon size={18} />
+    </span>
   );
 }
 
@@ -149,9 +179,12 @@ function WhatLakeDoes({ onAsk }: { onAsk?: (question: string) => void }) {
       <div className="ask-map">
         {groups.map((group) => (
           <section key={group.key} className="ask-map-group" aria-label={group.title}>
-            <h3>
-              {group.title} <span className="muted">{group.line}</span>
-            </h3>
+            <header className="ask-map-head">
+              <GroupIcon section={group.key} />
+              <h3>
+                {group.title} <span className="muted">{group.line}</span>
+              </h3>
+            </header>
             <ul>
               {group.things.map((thing) => (
                 <li key={thing.path}>
