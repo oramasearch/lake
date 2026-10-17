@@ -1,17 +1,19 @@
-/** Personal settings (`/settings?tab=`): Profile, Sessions and devices, Passkeys, Tokens and
- * Notifications, each a tab of cards. An unknown tab shows Notifications, as the server page did. */
-import { useSearchParams } from "react-router-dom";
+/** Personal settings (`/settings?tab=`): Profile, Identity, Sessions and devices, Passkeys, Tokens
+ * and Notifications, each a tab of cards. Identity is which key the account signs with (lake#762). An unknown tab shows Notifications, as the server page did. */
+import { Link, useSearchParams } from "react-router-dom";
 import { Bell, Fingerprint, KeyRound, MonitorSmartphone, ShieldCheck } from "lucide-react";
 import { useList } from "@/lib/api";
 import { useSession } from "@/lib/session";
 import { useTrail } from "@/lib/trail";
 import { Button, Card, Empty, ErrorBlock, KeyValue, Page, Skeleton, Stat, StatRow, Status } from "@/lib/ui";
 import { QueryTabs } from "@/pages/organizations/shared";
+import { IdentityPanel } from "./IdentityPanel";
 import { NO_WORKSPACE } from "./signIn";
 import type { DeviceRow, SessionRow } from "./labels";
 
 const TABS = [
   { key: "profile", label: "Profile" },
+  { key: "identity", label: "Identity" },
   { key: "sessions", label: "Sessions and devices" },
   { key: "passkeys", label: "Passkeys" },
   { key: "tokens", label: "Tokens" },
@@ -44,7 +46,7 @@ function Panel({ selected }: { selected: string }) {
           <Card label="Profile" title={viewer.display_name || viewer.handle || "Your account"}>
             <KeyValue
               rows={[
-                ["Identity", viewer.taap_id ? <code>{viewer.taap_id}</code> : "—"],
+                ["Identity", viewer.taap_id ? <Link to="/settings?tab=identity"><code>{viewer.taap_id}</code></Link> : "—"],
                 ["Handle", viewer.handle ? <code>{viewer.handle}</code> : null],
                 ["Email", viewer.email],
               ]}
@@ -58,6 +60,8 @@ function Panel({ selected }: { selected: string }) {
           </Card>
         </div>
       );
+    case "identity":
+      return <IdentityPanel />;
     case "sessions":
       return <SessionsSummary />;
     case "passkeys":

@@ -256,6 +256,9 @@ struct NewPasswordUser {
     // The new user's id, chosen by the caller so that an application's workspace can record the
     // user before lake's own row exists (lake#353); empty: the store chooses one.
     std::string user_id;
+    // The managed key lake minted for a lake-pool sign-up without an identity document (lake#762,
+    // decision 65); empty when the person brought their own document.
+    std::string custodial_taap_id, custodial_public_key, custodial_wrapped_seed;
 };
 struct PasswordSignIn {
     std::string pool_id, email, password, totp_code, device_name;
@@ -293,6 +296,38 @@ struct OAuthIdentity {
 struct ClerkIdentity {
     std::string subject, email, display_name, device_name;
     std::string custodial_taap_id, custodial_public_key, custodial_wrapped_seed;
+};
+// Which key an account signs with (lake#762, docs/api/identity.md#your-own-identity). `managed`:
+// lake minted and holds the key. `own`: the person's own liquid identity, either registered at
+// sign-up (no managed key ever existed) or linked later as the managed key's successor.
+struct AccountIdentity {
+    std::string user_id;
+    std::string taap_id; // the account's identifier, which grants and audit are keyed on
+    std::string key;     // "managed" or "own"
+    std::string own_taap_id;
+    std::string own_document_hash;
+    std::string linked_at;
+    // The managed key's public half, kept after its seed is destroyed so the link verifies.
+    std::string managed_public_key;
+    bool managed_seed_held = false;
+    std::string managed_seed_destroyed_at;
+    nlohmann::json link_document; // null unless linked
+};
+// The account's managed key with its wrapped seed, read only to sign the link.
+struct ManagedKey {
+    std::string user_id, taap_id, public_key, wrapped_seed;
+};
+// A pending "use my own identity": the person's verified public document and the statement
+// they must sign with that key, bound to one account and expiring (identity_link_challenges).
+struct IdentityLinkChallenge {
+    std::string challenge, user_id, account_taap_id, own_taap_id, own_document, own_document_hash;
+    nlohmann::json statement;
+    std::string expires_at;
+};
+// The committed rotation: both signatures are in `link_document`.
+struct IdentityLink {
+    std::string user_id, account_taap_id, own_taap_id, own_document, own_document_hash;
+    nlohmann::json link_document;
 };
 // A service a customer runs on the Lake's cluster (docs/control-plane/services.md): lake writes
 // the desired fields, the operator the status fields.
@@ -1990,6 +2025,22 @@ public:
     // user with the same email; with neither, it creates the user with the custodial identity
     // and provisions their personal customer, as password sign-up does.
     virtual Result<IssuedSession> sign_in_clerk(const ClerkIdentity&) = 0;
+    // Using your own identity (lake#762, docs/api/identity.md#your-own-identity).
+    // Which key the account signs with.
+    virtual Result<AccountIdentity> account_identity(const std::string& user_id) = 0;
+    // The managed key with its wrapped seed; not_found once it is destroyed or if there was none.
+    virtual Result<ManagedKey> managed_key(const std::string& user_id) = 0;
+    // Records a pending link. conflict when the own identity already belongs to an account.
+    virtual Result<void> create_identity_link_challenge(const IdentityLinkChallenge&) = 0;
+    // Consumes the user's unexpired, unused challenge once.
+    virtual Result<IdentityLinkChallenge>
+    consume_identity_link_challenge(const std::string& user_id, const std::string& challenge) = 0;
+    // In one transaction: records the link and destroys the managed seed. conflict when the
+    // account already uses its own identity or the own identity belongs to another account.
+    virtual Result<AccountIdentity> link_own_identity(const IdentityLink&) = 0;
+    // The account identifier a TAAP identity acts for: itself for an account's own identifier,
+    // the account's identifier for a linked own identity; not_found otherwise.
+    virtual Result<std::string> account_for_identity(const std::string& taap_id) = 0;
     virtual Result<void> register_oauth_provider(const OAuthProvider&) = 0;
     virtual Result<OAuthProvider> get_oauth_provider(const std::string& pool_id,
                                                      const std::string& provider) = 0;

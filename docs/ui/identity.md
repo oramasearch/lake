@@ -8,7 +8,7 @@ belong to no workspace and always go unprefixed. Files are under `frontend/src/p
 
 | Page | Route | File | Capabilities |
 |---|---|---|---|
-| Sign up | `/sign-up` | `SignUpPage.tsx` | `sign_up_password` |
+| Sign up | `/sign-up` | `SignUpPage.tsx` | `sign_up_password` (no identity document: the account gets a managed key, lake#762) |
 | Sign in | `/sign-in` | `SignInPage.tsx` | `sign_in_password` (then `verify_mfa` when it answers `mfa_required`), `start_oauth` |
 | Sign in under Clerk | `/sign-in`, `/sign-up` | `ClerkSignIn.tsx` | none; Clerk's token is posted to `POST /identity/clerk-session` |
 | MFA challenge (signed out) | `/mfa` | `MfaPage.tsx` | `verify_mfa` with a TOTP or one-use recovery code |
@@ -16,6 +16,7 @@ belong to no workspace and always go unprefixed. Files are under `frontend/src/p
 | Passkey sign-in | `/passkey-sign-in` | `PasskeySignInPage.tsx`, `webauthn.ts` | `begin_passkey_sign_in`, `sign_in_passkey` |
 | Passkey registration | `/passkeys` | `PasskeysPage.tsx`, `webauthn.ts` | `begin_passkey_registration`, `register_passkey` |
 | Sessions and devices | `/sessions` | `SessionsPage.tsx` | `list_sessions`, `revoke_session`, `list_devices`, `revoke_device` |
+| Identity | `/settings?tab=identity` | `IdentityPanel.tsx` | `account_identity`, `begin_own_identity`, `use_own_identity` |
 | Tokens | `/tokens` | `TokensPage.tsx` | `list_sessions`, `create_token`, `revoke_session` |
 | Operator sign in | `/login` | `LoginPage.tsx` | none; an ordinary form posted to `POST /session` |
 

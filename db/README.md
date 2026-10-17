@@ -1,5 +1,10 @@
 # Database schema
 
+Migration `0086_identity_links` (lake#762) makes the managed key's wrapped seed nullable with
+`seed_destroyed_at`, and adds `identity_link_challenges`, `identity_links` and the guard
+`identity_links_guard`. Additive; apply before the new binary, and have the operator vendor the
+schema and select the guard. See [schema.md](../docs/control-plane/schema.md).
+
 Migration `0085_network_tunnel_ca` adds public `client_ca_pem` on tunnel grants and `relay_ca_pem`
 on their operator status, both non-null text defaulting to empty. Apply before running the new
 binary or operator readers; 0084 is unchanged. See [the contract](../docs/control-plane/network.md).

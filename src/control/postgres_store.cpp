@@ -7169,10 +7169,23 @@ public:
             return std::unexpected(StoreError{
                 "invalid_input", "pool, email, and a password of 12 characters are required"});
         }
-        const Result<VerifiedIdentityDocument> identity =
-            verify_identity_document(in.identity_document);
+        // Lake's own sign-up no longer needs a document (lake#762, decision 65): without one,
+        // the caller minted a managed key, which this account signs with until the person uses
+        // their own identity. Application pools still register the person's document.
+        const bool managed = in.identity_document.empty() && !in.custodial_taap_id.empty();
+        if (managed && (in.pool_id != "lake" || in.custodial_public_key.empty() ||
+                        in.custodial_wrapped_seed.empty())) {
+            return std::unexpected(StoreError{
+                "invalid_input", "a managed key is only for lake's own accounts, and complete"});
+        }
+        Result<VerifiedIdentityDocument> identity =
+            managed ? Result<VerifiedIdentityDocument>{VerifiedIdentityDocument{}}
+                    : verify_identity_document(in.identity_document);
         if (!identity) {
             return std::unexpected(identity.error());
+        }
+        if (managed) {
+            identity->identifier = in.custodial_taap_id;
         }
         const std::string password_hash = identity_crypto::hash_secret(in.password);
         if (password_hash.empty()) {
@@ -7198,11 +7211,20 @@ public:
                 in.pool_id,
                 in.user_id);
             const std::string user_id = user_rows[0][0].as<std::string>();
-            tx.exec_params("INSERT INTO identity_documents (user_id, document, "
-                           "document_hash) VALUES ($1::uuid, to_jsonb($2::text), $3)",
-                           user_id,
-                           identity->document,
-                           identity->hash);
+            if (managed) {
+                tx.exec_params("INSERT INTO custodial_identities (user_id, taap_id, "
+                               "public_key, wrapped_seed) VALUES ($1::uuid, $2, $3, $4)",
+                               user_id,
+                               in.custodial_taap_id,
+                               in.custodial_public_key,
+                               in.custodial_wrapped_seed);
+            } else {
+                tx.exec_params("INSERT INTO identity_documents (user_id, document, "
+                               "document_hash) VALUES ($1::uuid, to_jsonb($2::text), $3)",
+                               user_id,
+                               identity->document,
+                               identity->hash);
+            }
             tx.exec_params("INSERT INTO credentials (user_id, pool_id, kind, "
                            "subject, secret_hash) "
                            "VALUES ($1::uuid, $2, 'password', lower($3), $4)",
@@ -7211,7 +7233,12 @@ public:
                            in.email,
                            password_hash);
             if (in.pool_id == "lake") {
-                const auto customer = provision_personal_customer(tx, user_id, *identity);
+                const auto customer =
+                    managed ? provision_personal_customer(tx,
+                                                          user_id,
+                                                          in.custodial_taap_id,
+                                                          "sign_up_password/managed/" + user_id)
+                            : provision_personal_customer(tx, user_id, *identity);
                 if (!customer) {
                     return std::unexpected(customer.error());
                 }
@@ -7270,10 +7297,12 @@ public:
 
     Result<IssuedSession> sign_in_taap(const TaapSignIn& input) override {
         return with_tx<IssuedSession>([&](pqxx::work& tx) -> Result<IssuedSession> {
-            const pqxx::result users =
-                tx.exec_params("SELECT id::text FROM users WHERE pool_id = $1 AND taap_id = $2",
-                               input.pool_id,
-                               input.taap_id);
+            // A linked own identity signs in to the account it was linked to (lake#762).
+            const pqxx::result users = tx.exec_params(
+                "SELECT id::text FROM users WHERE pool_id = $1 AND (taap_id = $2 OR id = "
+                "(SELECT user_id FROM identity_links WHERE own_taap_id = $2))",
+                input.pool_id,
+                input.taap_id);
             if (users.empty()) {
                 return std::unexpected(
                     StoreError{"unauthorized", "TAAP identity is not registered"});
@@ -7667,6 +7696,168 @@ public:
             }
             return issue_session(
                 tx, user_id, "lake", in.device_name, "browser", "", {"*"}, "", 60 * 60 * 24 * 30);
+        });
+    }
+    Result<AccountIdentity> account_identity(const std::string& user_id) override {
+        return with_tx<AccountIdentity>([&](pqxx::work& tx) -> Result<AccountIdentity> {
+            return account_identity_tx(tx, user_id);
+        });
+    }
+    Result<AccountIdentity> account_identity_tx(pqxx::work& tx, const std::string& user_id) {
+        const pqxx::result rows = tx.exec_params(
+            "SELECT u.id::text, coalesce(u.taap_id, ''), coalesce(c.public_key, ''), "
+            "c.wrapped_seed IS NOT NULL AND c.user_id IS NOT NULL, "
+            "coalesce(to_char(c.seed_destroyed_at AT TIME ZONE 'UTC', "
+            "'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), ''), coalesce(l.own_taap_id, ''), "
+            "coalesce(l.own_document_hash, ''), coalesce(to_char(l.linked_at AT TIME ZONE 'UTC', "
+            "'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), ''), coalesce(l.link_document::text, 'null') "
+            "FROM users u LEFT JOIN custodial_identities c ON c.user_id = u.id "
+            "LEFT JOIN identity_links l ON l.user_id = u.id WHERE u.id = $1::uuid",
+            user_id);
+        if (rows.empty()) {
+            return std::unexpected(StoreError{"not_found", "user not found"});
+        }
+        const auto& row = rows[0];
+        AccountIdentity identity;
+        identity.user_id = row[0].as<std::string>();
+        identity.taap_id = row[1].as<std::string>();
+        identity.managed_public_key = row[2].as<std::string>();
+        identity.managed_seed_held = row[3].as<bool>();
+        identity.managed_seed_destroyed_at = row[4].as<std::string>();
+        identity.own_taap_id = row[5].as<std::string>();
+        identity.own_document_hash = row[6].as<std::string>();
+        identity.linked_at = row[7].as<std::string>();
+        identity.link_document = nlohmann::json::parse(row[8].as<std::string>());
+        identity.key = identity.managed_seed_held ? "managed" : "own";
+        return identity;
+    }
+    Result<ManagedKey> managed_key(const std::string& user_id) override {
+        return with_tx<ManagedKey>([&](pqxx::work& tx) -> Result<ManagedKey> {
+            const pqxx::result rows =
+                tx.exec_params("SELECT taap_id, public_key, wrapped_seed FROM custodial_identities "
+                               "WHERE user_id = $1::uuid AND wrapped_seed IS NOT NULL",
+                               user_id);
+            if (rows.empty()) {
+                return std::unexpected(
+                    StoreError{"not_found", "this account holds no managed key"});
+            }
+            return ManagedKey{user_id,
+                              rows[0][0].as<std::string>(),
+                              rows[0][1].as<std::string>(),
+                              rows[0][2].as<std::string>()};
+        });
+    }
+    Result<void> create_identity_link_challenge(const IdentityLinkChallenge& in) override {
+        if (in.challenge.empty() || in.user_id.empty() || in.own_taap_id.empty()) {
+            return std::unexpected(StoreError{"invalid_input", "the link challenge is incomplete"});
+        }
+        return with_tx<void>([&](pqxx::work& tx) -> Result<void> {
+            if (!tx.exec_params("SELECT 1 FROM users WHERE taap_id = $1 AND id <> $2::uuid "
+                                "UNION ALL SELECT 1 FROM identity_links WHERE own_taap_id = $1",
+                                in.own_taap_id,
+                                in.user_id)
+                     .empty()) {
+                return std::unexpected(
+                    StoreError{"conflict", "this identity already belongs to a Lake account"});
+            }
+            tx.exec_params("INSERT INTO identity_link_challenges (challenge, user_id, "
+                           "account_taap_id, own_taap_id, own_document, own_document_hash, "
+                           "statement, expires_at) VALUES ($1, $2::uuid, $3, $4, $5, $6, "
+                           "$7::jsonb, now() + interval '10 minutes')",
+                           in.challenge,
+                           in.user_id,
+                           in.account_taap_id,
+                           in.own_taap_id,
+                           in.own_document,
+                           in.own_document_hash,
+                           in.statement.dump());
+            return {};
+        });
+    }
+    Result<IdentityLinkChallenge>
+    consume_identity_link_challenge(const std::string& user_id,
+                                    const std::string& challenge) override {
+        return with_tx<IdentityLinkChallenge>([&](pqxx::work& tx) -> Result<IdentityLinkChallenge> {
+            const pqxx::result rows = tx.exec_params(
+                "UPDATE identity_link_challenges SET used_at = now() WHERE challenge = $1 "
+                "AND user_id = $2::uuid AND used_at IS NULL AND expires_at > now() "
+                "RETURNING account_taap_id, own_taap_id, own_document, own_document_hash, "
+                "statement::text, to_char(expires_at AT TIME ZONE 'UTC', "
+                "'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')",
+                challenge,
+                user_id);
+            if (rows.empty()) {
+                return std::unexpected(
+                    StoreError{"unauthorized", "the link challenge is unknown, used or expired"});
+            }
+            return IdentityLinkChallenge{challenge,
+                                         user_id,
+                                         rows[0][0].as<std::string>(),
+                                         rows[0][1].as<std::string>(),
+                                         rows[0][2].as<std::string>(),
+                                         rows[0][3].as<std::string>(),
+                                         nlohmann::json::parse(rows[0][4].as<std::string>()),
+                                         rows[0][5].as<std::string>()};
+        });
+    }
+    Result<AccountIdentity> link_own_identity(const IdentityLink& in) override {
+        return with_tx<AccountIdentity>([&](pqxx::work& tx) -> Result<AccountIdentity> {
+            // The managed key is locked for the rest of the transaction, so two links of one
+            // account cannot both commit.
+            const pqxx::result managed = tx.exec_params(
+                "SELECT taap_id FROM custodial_identities WHERE user_id = $1::uuid AND "
+                "wrapped_seed IS NOT NULL FOR UPDATE",
+                in.user_id);
+            if (managed.empty() ||
+                !tx.exec_params("SELECT 1 FROM identity_links WHERE user_id = $1::uuid", in.user_id)
+                     .empty()) {
+                return std::unexpected(
+                    StoreError{"conflict", "this account already uses its own identity"});
+            }
+            if (managed[0][0].as<std::string>() != in.account_taap_id) {
+                return std::unexpected(
+                    StoreError{"conflict", "the account identity changed during the link"});
+            }
+            if (!tx.exec_params("SELECT 1 FROM users WHERE taap_id = $1 UNION ALL "
+                                "SELECT 1 FROM identity_links WHERE own_taap_id = $1",
+                                in.own_taap_id)
+                     .empty()) {
+                return std::unexpected(
+                    StoreError{"conflict", "this identity already belongs to a Lake account"});
+            }
+            try {
+                tx.exec_params("INSERT INTO identity_links (user_id, account_taap_id, "
+                               "own_taap_id, own_document, own_document_hash, link_document) "
+                               "VALUES ($1::uuid, $2, $3, $4, $5, $6::jsonb)",
+                               in.user_id,
+                               in.account_taap_id,
+                               in.own_taap_id,
+                               in.own_document,
+                               in.own_document_hash,
+                               in.link_document.dump());
+            } catch (const pqxx::unique_violation&) {
+                return std::unexpected(
+                    StoreError{"conflict", "this identity already belongs to a Lake account"});
+            }
+            // The link and the destruction commit together: the seed is never kept after the
+            // rotation and never destroyed without it.
+            tx.exec_params("UPDATE custodial_identities SET wrapped_seed = NULL, "
+                           "seed_destroyed_at = now() WHERE user_id = $1::uuid",
+                           in.user_id);
+            return account_identity_tx(tx, in.user_id);
+        });
+    }
+    Result<std::string> account_for_identity(const std::string& taap_id) override {
+        return with_tx<std::string>([&](pqxx::work& tx) -> Result<std::string> {
+            const pqxx::result rows =
+                tx.exec_params("SELECT account_taap_id FROM identity_links WHERE own_taap_id = $1 "
+                               "UNION ALL SELECT taap_id FROM users WHERE taap_id = $1 LIMIT 1",
+                               taap_id);
+            if (rows.empty()) {
+                return std::unexpected(
+                    StoreError{"not_found", "no account acts for this identity"});
+            }
+            return rows[0][0].as<std::string>();
         });
     }
     Result<void> register_oauth_provider(const OAuthProvider& in) override {

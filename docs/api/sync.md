@@ -91,6 +91,13 @@ or as its full-history archive. Import opens a candidate from the full archive b
 peer messages. A retry can therefore name a dependency older than the active checkpoint heads
 without contradicting the shallow document's retained actor sequence.
 
+Each change is authorized against the pushing credential and recorded as a `push_change` audit
+event. Its details name the change's signer (`author`, the TAAP identity in the change), the
+account that identity acts for (`author_account`: an account's own identifier, or the account an
+own identity is linked to, [identity.md](identity.md#your-own-identity)) and whether that is the
+pushing account (`author_is_caller`). A change signed by someone else is still accepted when policy
+allows the pusher to write; the event says so (lake#762).
+
 Before import changes state, the receiver parses every frame, verifies each actor identifier and
 TAAP signature, checks each change digest and referenced object, applies every selected directory
 message to candidate documents through the checked patch-returning path, and validates accepted
