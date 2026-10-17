@@ -93,12 +93,36 @@ export function WorkspaceGate({
   );
 }
 
-function GatePanel({ state, customerId, returnTo }: { state: WorkspaceState; customerId: string; returnTo?: string }) {
-  const { workspaceId, refresh } = useSession();
-  const location = useLocation();
-  const navigate = useNavigate();
+/** Start your workspace, the one action behind the gate's button and Ask Orama's home with no
+ * workspace (lake#764): `start_workspace` makes sure the account has its first workspace, and the
+ * session is read again so the new workspace is the current one. Answers the workspace's id (empty
+ * when lake did not say it), or undefined when it failed. */
+export function useStartWorkspace(customerId: string) {
+  const { refresh } = useSession();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const start = async (): Promise<string | undefined> => {
+    setBusy(true);
+    setError(null);
+    try {
+      const answer = await act<WorkspaceState>("start_workspace", { customer_id: customerId });
+      refresh();
+      return answer.workspace_id ?? "";
+    } catch (e) {
+      setError((e as Error).message);
+      return undefined;
+    } finally {
+      setBusy(false);
+    }
+  };
+  return { start, busy, error };
+}
+
+function GatePanel({ state, customerId, returnTo }: { state: WorkspaceState; customerId: string; returnTo?: string }) {
+  const { workspaceId } = useSession();
+  const location = useLocation();
+  const navigate = useNavigate();
+  const { start: startWorkspace, busy, error } = useStartWorkspace(customerId);
 
   if (state.requested) {
     if (state.phase === "Failed") {
@@ -134,20 +158,11 @@ function GatePanel({ state, customerId, returnTo }: { state: WorkspaceState; cus
   }
 
   const start = async () => {
-    setBusy(true);
-    setError(null);
-    try {
-      await act("start_workspace", { customer_id: customerId });
-      refresh();
-      // Lake landed on the section's list page when it was one of these, else on Projects.
-      const destination = returnTo && START_RETURNS.includes(returnTo) ? returnTo : startReturn(localPath(location.pathname));
-      const target = workspaceId ? `/w/${encodeURIComponent(workspaceId)}${destination}` : destination;
-      if (target !== location.pathname) navigate(target);
-    } catch (e) {
-      setError((e as Error).message);
-    } finally {
-      setBusy(false);
-    }
+    if ((await startWorkspace()) === undefined) return;
+    // Lake landed on the section's list page when it was one of these, else on Projects.
+    const destination = returnTo && START_RETURNS.includes(returnTo) ? returnTo : startReturn(localPath(location.pathname));
+    const target = workspaceId ? `/w/${encodeURIComponent(workspaceId)}${destination}` : destination;
+    if (target !== location.pathname) navigate(target);
   };
 
   return (
