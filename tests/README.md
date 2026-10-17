@@ -74,7 +74,7 @@ The Streams task-credential fixture takes a real claim before making calls. See
 `HttpResponseIsolation.AskOramaSaysWhoIsWorkingOnALongTurn` (lake#451) runs a real Ask Orama
 claim, a delegation with its turn key, and the subagent's progress and result, and follows the turn
 through `settle_ask_turn`'s task message and the asking turn's `agent-events`.
-`Workspaces.TalkToOffersEveryAgentAPersonUsesAndMarksTheOnesNotRunning` checks which agents *Talk to* offers.
+`Workspaces.TalkToOffersEveryAgentAndMarksTheOnesNotRunning` checks which agents *Talk to* offers, `Workspaces.EveryCatalogueAgentIsInTalkToWhenItRuns` that none of the catalogue is left out, and `Workspaces.ListAgentLibraryListsEveryAgentWhateverIncludeInternalSays` that `include_internal` no longer filters (lake#788).
 `AgentNames.*` (`test_agent_names.cpp`, lake#763) keeps the Agent Library the one source of agent
 names: every name follows the scheme (title-case words, "Agent" last but for Ask Orama), no old or
 run-together spelling appears in the code, the web app, the guide, the docs, the tests or the tools

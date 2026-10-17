@@ -47,20 +47,13 @@ export function ownAgents(agents: unknown): J[] {
   return (Array.isArray(agents) ? agents : []).filter((a): a is J => !!a && typeof a === "object" && agentSource(a) === "workspace");
 }
 
-/** What a library agent's badge says, and whether a person may talk to it (lake#451, lake#763):
- * whether this Lake runs it is always shown, also for Orama's testing agents, which are listed but
- * never offered to talk to. */
-export function libraryState(agent: J): { label: string; running: boolean; talkable: boolean; testing: boolean } {
+/** What a library agent's badge says, and whether a person may talk to it (lake#763): whether this
+ * Lake runs it is always shown. Every library agent is an ordinary agent (lake#788): an `internal`
+ * flag from an older Lake changes nothing. */
+export function libraryState(agent: J): { label: string; running: boolean; talkable: boolean } {
   const running = text(agent, "status") === "Available" || agent.deployed === true;
-  const testing = agent.internal === true;
-  const label = running ? (testing ? "Running" : "Available") : text(agent, "runs_as") === "offline" ? "Offline tool" : "Not running on this Lake";
-  return { label, running, talkable: running && !testing && agent.chat !== false, testing };
-}
-
-/** Orama's agents as Design → Agents shows them (lake#763): the ones a person uses, then Orama's
- * testing agents in their own section. */
-export function splitLibrary(agents: J[]): { used: J[]; testing: J[] } {
-  return { used: agents.filter((a) => a.internal !== true), testing: agents.filter((a) => a.internal === true) };
+  const label = running ? "Available" : text(agent, "runs_as") === "offline" ? "Offline tool" : "Not running on this Lake";
+  return { label, running, talkable: running && agent.chat !== false };
 }
 
 /** The Design → Agents filter: who it is from, and a search over its name and purpose. */
@@ -535,10 +528,10 @@ export type TalkToAgent = { id: string; name: string; purpose: string; usedIn: s
 
 export const ASK_ORAMA_KEY = "agent-ask-orama";
 
-/** Who Ask Orama can talk to: Ask Orama first, then every other library chat agent a person uses
- * (one this Lake does not run is listed with `running: false` rather than left out), then the
- * space's own agents that take a conversation. Orama's testing agents (`internal`) are never
- * offered. The agent in the URL stays listed while the lists load. */
+/** Who Ask Orama can talk to: Ask Orama first, then every other library chat agent (one this Lake
+ * does not run is listed with `running: false` rather than left out), then the space's own agents
+ * that take a conversation. No library agent is left out (lake#788). The agent in the URL stays
+ * listed while the lists load. */
 export function talkToAgents(library: J[] | undefined, own: J[] | undefined, selected: string): TalkToAgent[] {
   const entry = (agent: J | undefined, key: string): TalkToAgent => ({
     id: key,
@@ -554,7 +547,7 @@ export function talkToAgents(library: J[] | undefined, own: J[] | undefined, sel
   for (const agent of rows) {
     const key = text(agent, "key");
     keys.add(key);
-    if (key && key !== ASK_ORAMA_KEY && agent.chat === true && agent.internal !== true) agents.push(entry(agent, key));
+    if (key && key !== ASK_ORAMA_KEY && agent.chat === true) agents.push(entry(agent, key));
   }
   for (const agent of own ?? []) {
     const id = text(agent, "id");

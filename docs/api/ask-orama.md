@@ -14,9 +14,11 @@ shows it and keeps it honest.
   agents. Each library agent shows its catalogue name, and under the selector the chosen agent's
   one-sentence purpose with *Where you meet it* to expand (lake#763). A library agent this Lake does
   not run stays in the list, marked *not running on this Lake* and not selectable, rather than
-  vanishing. Orama's testing agents (the Eval Generator Agent, the Auto-Suggest Corpus Agent and the
-  Project Corpus Agent, `internal: true` in `list_agent_library`) are never offered, even where they
-  run (lake#451); Design → Agents lists them in their own section. `control::talk_to_agents` builds
+  vanishing. No agent is internal (lake#788): the Eval Generator Agent, the Auto-Suggest Corpus
+  Agent and the Project Corpus Agent are offered like the others, and lake accepts Ask Orama's
+  `agent_turn` to each of them, so a request for an eval or a training corpus can be handed on.
+  Whether Ask Orama does so is decided by its own instructions in `oramasearch/agent-ask-orama`.
+  `control::talk_to_agents` builds
   the same list on the server. The account's own agents come from Zetta's `list_agents`, which took
   380–690 ms on the dev site, so the web app adds them to the selector once that read answers, and
   the agent a conversation talks to stays selected meanwhile (lake#446).

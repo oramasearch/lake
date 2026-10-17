@@ -14,7 +14,7 @@
  * from the workspace after a typed confirmation (`delete_ask_conversation`, docs/ui/deletion.md). */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
-import { AppWindow, Bot, Crown, FlaskConical, FolderKanban, Lightbulb, type LucideIcon, Plus, Rocket, Sparkles, Trash2, WandSparkles, X } from "lucide-react";
+import { AppWindow, BookOpen, Bot, ClipboardCheck, Crown, FlaskConical, FolderKanban, Library, Lightbulb, type LucideIcon, Plus, Rocket, Sparkles, Trash2, WandSparkles, X } from "lucide-react";
 import { SECTION_ICONS } from "@/lib/sectionIcons";
 import { useRead } from "@/lib/api";
 import { onFocusAsk } from "@/lib/ask";
@@ -102,7 +102,8 @@ function FirstStep({ customerId, hasWorkspaces }: { customerId: string; hasWorks
   );
 }
 
-/** Each library agent's icon on the home (lake#786); a person's own agents use Bot. */
+/** Each library agent's icon on the home (lake#786, all nine since lake#788); a person's own agents
+ * use Bot. */
 const AGENT_ICONS: Record<string, LucideIcon> = {
   "agent-ask-orama": Sparkles,
   "agent-project": FolderKanban,
@@ -110,6 +111,9 @@ const AGENT_ICONS: Record<string, LucideIcon> = {
   "agent-experiments": FlaskConical,
   "agent-autosuggest": Lightbulb,
   "agent-creator": WandSparkles,
+  "agent-eval-generator": ClipboardCheck,
+  "agent-autosuggest-corpus": Library,
+  "agent-project-corpus": BookOpen,
 };
 
 function AgentIcon({ id }: { id: string }) {

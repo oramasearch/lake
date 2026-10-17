@@ -23,10 +23,8 @@ struct LibraryAgent {
     std::string_view used_in; // where a person meets it in lake
     std::string_view runs_as; // service | agent-runtime | offline
     bool chat = false;        // takes a conversation
-    // Orama's testing agents (the Eval Generator Agent and the two corpus agents, lake#451): listed
-    // on Design → Agents in their own section, but never offered in Ask Orama's *Talk to* list,
-    // which holds only agents a person uses (lake#763).
-    bool internal = false;
+    // Every agent here is an ordinary agent, offered everywhere a person picks one (lake#788):
+    // there is no internal or testing-only agent.
 };
 
 inline constexpr std::array<LibraryAgent, 9> agent_library{{
@@ -73,27 +71,25 @@ inline constexpr std::array<LibraryAgent, 9> agent_library{{
      true},
     {"agent-eval-generator",
      "Eval Generator Agent",
-     "Writes a realistic test case on request: a role, the problem they face and real-looking "
-     "data for it, the way Orama tests its own agents. It publishes nothing.",
-     "Orama's own agent tests; not offered in Ask Orama",
+     "Creates an eval for you: realistic test cases, each a role, the problem they face and "
+     "real-looking data for it, to measure how well an agent does. It publishes nothing.",
+     "Ask Orama, when you ask for an eval; Train → Agents, where evals measure an agent",
      "service",
-     true,
      true},
     {"agent-autosuggest-corpus",
      "Auto-Suggest Corpus Agent",
-     "Writes one example of what is worth building for a business situation you describe, "
-     "checked against the test cases so it never repeats one.",
-     "Orama's own agent tests; not offered in Ask Orama",
+     "Builds a training corpus for you: worked examples of what is worth building for the "
+     "business situations you describe, each checked so it never repeats a test case.",
+     "Ask Orama, when you ask for a training corpus; Train → Agents, where it trains an agent",
      "service",
-     true,
      true},
     {"agent-project-corpus",
      "Project Corpus Agent",
-     "Records a worked example of building (or changing) a pipeline on your own data, every "
-     "step checked against what your workspace really returns. It changes nothing.",
-     "Orama's own agent tests; not offered in Ask Orama",
+     "Builds a training corpus for you: worked examples of building (or changing) a pipeline on "
+     "your own data, every step checked against what your workspace really returns. It changes "
+     "nothing.",
+     "Ask Orama, when you ask for a training corpus; Train → Agents, where it trains an agent",
      "service",
-     true,
      true},
 }};
 
@@ -106,14 +102,13 @@ std::map<std::string, std::string> parse_agent_endpoints(std::string_view text);
 // LAKE_AGENT_LEASE_SECONDS: key=seconds pairs, bounded to 60..3600; omitted keys use 600.
 std::expected<std::map<std::string, int>, std::string> parse_agent_leases(std::string_view text);
 
-// The library as the API and the pages show it: each agent with `deployed`, `internal` and its
-// status.
+// The library as the API and the pages show it: each agent with `deployed` and its status.
 nlohmann::json agent_library_json(const std::map<std::string, std::string>& endpoints);
 
 // Ask Orama's *Talk to* entries from that library (lake#451, lake#763): Ask Orama first, then
 // every other chat agent a person uses, as {id, name, purpose, used_in, running}. One this Lake
-// does not run is listed with `running: false` rather than left out. Orama's testing agents
-// (`internal`) are never offered.
+// does not run is listed with `running: false` rather than left out. Every chat agent in the
+// catalogue is offered; none is internal (lake#788).
 nlohmann::json talk_to_agents(const nlohmann::json& library);
 
 // What people call an agent, by its library key; any other id (an agent of the space) as given.

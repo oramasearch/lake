@@ -32,24 +32,19 @@ whether this Lake runs it (*Available*, or *Not running on this Lake*). Open one
 | **Experiments Agent** | Proposes editable training experiments, follows their trials and explains results | **Train → Experiments** |
 | **Auto-Suggest Agent** | Suggests projects worth building from your data | **Design → Opportunities** |
 | **Agent Creator Agent** | Designs a new agent with you | **Design → Agents → Describe it to the Agent Factory** |
+| **Eval Generator Agent** | Creates an eval for you: realistic test cases, each a role, the problem they face and real-looking data for it, to measure how well an agent does | **Ask Orama**, when you ask for an eval; evals are used in **Train → Agents** |
+| **Auto-Suggest Corpus Agent** | Builds a training corpus for you: worked examples of what is worth building for the business situations you describe | **Ask Orama**, when you ask for a training corpus; it trains an agent in **Train → Agents** |
+| **Project Corpus Agent** | Builds a training corpus for you: worked examples of building or changing a pipeline on your own data, each step checked against your workspace | **Ask Orama**, when you ask for a training corpus; it trains an agent in **Train → Agents** |
 
-Below them, **Orama's Testing Agents** lists the three agents Orama uses to test its own agents.
-They are shown so you can see everything this Lake runs, marked *Testing agent*, and are never
-offered to talk to:
-
-| Agent | What it does |
-|---|---|
-| **Eval Generator Agent** | Writes a realistic test case: a role, the problem they face, and real-looking data for it |
-| **Auto-Suggest Corpus Agent** | Writes one example of what is worth building for a business situation |
-| **Project Corpus Agent** | Records a worked example of building or changing a pipeline, checked against your workspace |
+All nine are ordinary agents: each is in Ask Orama's **Talk to** when this Lake runs it.
 
 In **Ask Orama → Talk to**, each agent shows what it does under its name, and **Where you meet it**
 expands to say where else it appears. An agent this Lake does not run stays in the list, marked
 *not running on this Lake*, and cannot be picked.
 
 - REST: `GET /v1/list_agent_library`
-- MCP: `list_agent_library`. It answers each agent with `deployed` and `status`;
-  `include_internal: true` adds Orama's testing agents.
+- MCP: `list_agent_library`. It answers all nine of Orama's agents, each with `deployed` and
+  `status`.
 
 The library agents that propose changes never make them on their own: the Project Agent's edits wait
 for **Apply**, the Application Agent's app for **Confirm and deploy**, and the Experiments Agent's experiment

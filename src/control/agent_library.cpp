@@ -79,7 +79,6 @@ nlohmann::json agent_library_json(const std::map<std::string, std::string>& endp
                           {"used_in", std::string(agent.used_in)},
                           {"runs_as", std::string(agent.runs_as)},
                           {"chat", agent.chat},
-                          {"internal", agent.internal},
                           {"deployed", deployed},
                           {"status", status}});
     }
@@ -104,11 +103,10 @@ nlohmann::json talk_to_agents(const nlohmann::json& library) {
     }
     for (const nlohmann::json& row : library.value("agents", nlohmann::json::array())) {
         const std::string key = row.value("key", std::string());
-        // The catalogue's own flags as well as the row's, so an older answer cannot list
-        // Orama's testing agents.
+        // The catalogue's own entry, so only agents lake knows are listed. An `internal` field
+        // from an older answer is ignored: no agent is internal (lake#788).
         const LibraryAgent* known = library_agent(key);
-        if (known == nullptr || key == ask.key || !known->chat || known->internal ||
-            !row.value("chat", false) || row.value("internal", false)) {
+        if (known == nullptr || key == ask.key || !known->chat || !row.value("chat", false)) {
             continue;
         }
         agents.push_back(entry(*known, row.value("deployed", false)));

@@ -1854,30 +1854,51 @@ TEST(Workspaces, TheAgentLibraryListsEverySpecializedAgentAndWhatRuns) {
     EXPECT_EQ(agents[3].at("name"), "Experiments Agent");
     EXPECT_EQ(agents[3].at("status"), "Available");
     EXPECT_EQ(agents[4].at("status"), "Not running on this Lake");
-    // Every library agent takes a conversation (lake#263), but the generators are Orama's own
-    // tooling (lake#451): listed here, never offered in Ask Orama's Talk to.
+    // Every library agent takes a conversation (lake#263) and is an ordinary agent a person uses
+    // (lake#788): no `internal` flag, and each says where a person meets it.
     EXPECT_EQ(agents[6].at("status"), "Not running on this Lake");
     EXPECT_EQ(agents[6].at("runs_as"), "service");
     for (const auto& agent : agents) {
         EXPECT_TRUE(agent.at("chat").get<bool>()) << agent.at("key");
-        const bool internal = agent.at("key") == "agent-eval-generator" ||
-                              agent.at("key") == "agent-autosuggest-corpus" ||
-                              agent.at("key") == "agent-project-corpus";
-        EXPECT_EQ(agent.at("internal").get<bool>(), internal) << agent.at("key");
-        EXPECT_EQ(agent.at("used_in").get<std::string>().find("Talk to"), std::string::npos)
-            << agent.at("key");
+        EXPECT_FALSE(agent.contains("internal")) << agent.at("key");
+        const std::string used_in = agent.at("used_in");
+        EXPECT_EQ(used_in.find("Talk to"), std::string::npos) << agent.at("key");
+        EXPECT_EQ(used_in.find("not offered"), std::string::npos) << agent.at("key");
+        EXPECT_EQ(used_in.find("Orama's own"), std::string::npos) << agent.at("key");
+    }
+    // The Eval Generator Agent creates evals and the corpus agents build training corpora, for
+    // the person (lake#788).
+    EXPECT_NE(agents[6].at("purpose").get<std::string>().find("eval"), std::string::npos);
+    EXPECT_NE(agents[7].at("purpose").get<std::string>().find("training corpus"),
+              std::string::npos);
+    EXPECT_NE(agents[8].at("purpose").get<std::string>().find("training corpus"),
+              std::string::npos);
+}
+
+TEST(Workspaces, ListAgentLibraryListsEveryAgentWhateverIncludeInternalSays) {
+    // include_internal is accepted for compatibility and changes nothing (lake#788).
+    lake::api::Registry registry;
+    lake::api::register_core_capabilities(registry, "test");
+    const auto capability = registry.find("list_agent_library");
+    ASSERT_NE(capability, nullptr);
+    lake::api::ApiContext context;
+    for (const json& input : {json::object(), json{{"include_internal", false}},
+                              json{{"include_internal", true}}}) {
+        const lake::api::ApiResult answer = capability->handler(input, context);
+        ASSERT_TRUE(answer.ok) << input.dump();
+        EXPECT_EQ(answer.value.at("agents").size(), lake::control::agent_library.size())
+            << input.dump();
     }
 }
 
-TEST(Workspaces, TalkToOffersEveryAgentAPersonUsesAndMarksTheOnesNotRunning) {
+TEST(Workspaces, TalkToOffersEveryAgentAndMarksTheOnesNotRunning) {
     const json library = lake::control::agent_library_json({{"agent-ask-orama", "http://ask"},
                                                             {"agent-experiments", "http://x"},
                                                             {"agent-eval-generator", "http://e"},
                                                             {"agent-autosuggest-corpus", "http://a"},
                                                             {"agent-project-corpus", "http://p"}});
     const json offered = lake::control::talk_to_agents(library);
-    // Ask Orama first, then the five other agents a person uses, in catalogue order; Orama's
-    // testing agents never (lake#451), even when they run.
+    // Ask Orama first, then every other agent of the catalogue, in catalogue order (lake#788).
     std::vector<std::string> ids;
     for (const json& agent : offered) {
         ids.push_back(agent.at("id"));
@@ -1889,25 +1910,52 @@ TEST(Workspaces, TalkToOffersEveryAgentAPersonUsesAndMarksTheOnesNotRunning) {
     }
     EXPECT_EQ(ids, (std::vector<std::string>{"agent-ask-orama", "agent-project",
                                              "agent-application", "agent-experiments",
-                                             "agent-autosuggest", "agent-creator"}));
+                                             "agent-autosuggest", "agent-creator",
+                                             "agent-eval-generator", "agent-autosuggest-corpus",
+                                             "agent-project-corpus"}));
     EXPECT_EQ(offered[0].at("name"), "Ask Orama");
     EXPECT_EQ(offered[3].at("name"), "Experiments Agent");
     EXPECT_TRUE(offered[3].at("running").get<bool>());
+    EXPECT_EQ(offered[6].at("name"), "Eval Generator Agent");
+    EXPECT_TRUE(offered[6].at("running").get<bool>());
+    EXPECT_TRUE(offered[7].at("running").get<bool>());
+    EXPECT_TRUE(offered[8].at("running").get<bool>());
     // Not running on this Lake: listed and marked, not left out (lake#763).
     EXPECT_FALSE(offered[1].at("running").get<bool>());
     EXPECT_FALSE(offered[5].at("running").get<bool>());
-    // An older answer without the flag still never lists Orama's testing agents.
-    json unflagged = library;
-    for (json& agent : unflagged["agents"]) {
-        agent.erase("internal");
+    // An older answer that still flags the three `internal` lists them all the same.
+    json flagged = library;
+    for (json& agent : flagged["agents"]) {
+        agent["internal"] = agent.at("key") == "agent-eval-generator" ||
+                            agent.at("key") == "agent-autosuggest-corpus" ||
+                            agent.at("key") == "agent-project-corpus";
     }
-    EXPECT_EQ(lake::control::talk_to_agents(unflagged), offered);
+    EXPECT_EQ(lake::control::talk_to_agents(flagged), offered);
     const json alone = lake::control::talk_to_agents(json());
     ASSERT_EQ(alone.size(), 1U);
     EXPECT_EQ(alone[0].at("id"), "agent-ask-orama");
     EXPECT_EQ(lake::control::agent_display_name("agent-experiments"), "Experiments Agent");
     EXPECT_EQ(lake::control::agent_display_name("agent-creator"), "Agent Creator Agent");
     EXPECT_EQ(lake::control::agent_display_name("a-1"), "a-1");
+}
+
+TEST(Workspaces, EveryCatalogueAgentIsInTalkToWhenItRuns) {
+    // Each agent of the catalogue, running on this Lake, is offered in Talk to and can be picked
+    // (lake#788): none is left out.
+    std::map<std::string, std::string> endpoints;
+    for (const lake::control::LibraryAgent& agent : lake::control::agent_library) {
+        endpoints[std::string(agent.key)] = "http://" + std::string(agent.key);
+    }
+    const json offered =
+        lake::control::talk_to_agents(lake::control::agent_library_json(endpoints));
+    ASSERT_EQ(offered.size(), lake::control::agent_library.size());
+    for (const lake::control::LibraryAgent& agent : lake::control::agent_library) {
+        const auto found = std::ranges::find_if(offered, [&](const json& row) {
+            return row.at("id") == std::string(agent.key);
+        });
+        ASSERT_NE(found, offered.end()) << agent.key;
+        EXPECT_TRUE(found->at("running").get<bool>()) << agent.key;
+    }
 }
 
 // ---- Agent launches, schedules and turns (docs/api/agent-launches.md, lake#231) ----

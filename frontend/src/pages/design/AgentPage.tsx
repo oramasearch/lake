@@ -43,7 +43,7 @@ export default function AgentPage() {
 
 function OramaAgentPage({ agentKey }: { agentKey: string }) {
   const ready = useWorkspaceStatus().q.data?.ready === true;
-  const library = useRead<{ agents?: Row[] }>("list_agent_library", { include_internal: true }, { staleTime: 300_000 });
+  const library = useRead<{ agents?: Row[] }>("list_agent_library", {}, { staleTime: 300_000 });
   const agent = (library.data?.agents ?? []).find((a) => text(a, "key") === agentKey) ?? null;
   const name = agent ? text(agent, "name") : agentKey;
   useDesignTrail({ label: "Agents", path: "/design/agents" }, [entityCrumb(name)], `Agent: ${name}`);
@@ -59,11 +59,6 @@ function OramaAgentPage({ agentKey }: { agentKey: string }) {
             <Badge tone="info" title="Orama's: read-only, duplicate it to edit">
               By Orama
             </Badge>
-            {state?.testing && (
-              <Badge tone="neutral" title="Orama's own agent tests; never offered in Talk to">
-                Testing agent
-              </Badge>
-            )}
             {state && <Status value={state.label} tone={state.running ? "success" : "neutral"} />}
           </span>
         ) : (
@@ -127,7 +122,7 @@ function OramaAgentPage({ agentKey }: { agentKey: string }) {
               rows={[
                 ["What it does for you", text(agent, "purpose")],
                 ["Where you meet it", text(agent, "used_in")],
-                ["Talk to it in Ask Orama", state?.testing ? "No: one of Orama's testing agents" : state?.talkable ? "Yes" : agent.chat === true ? "Not while it is not running on this Lake" : "No"],
+                ["Talk to it in Ask Orama", state?.talkable ? "Yes" : agent.chat === true ? "Not while it is not running on this Lake" : "No"],
                 ["On this Lake", state?.label],
               ]}
             />
