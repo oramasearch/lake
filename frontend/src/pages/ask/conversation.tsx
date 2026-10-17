@@ -15,6 +15,7 @@ import { ApiError, act, useRead, type Row } from "@/lib/api";
 import { useSession } from "@/lib/session";
 import { Badge, Button, ErrorBlock, Skeleton, cx } from "@/lib/ui";
 import { isWorkspacePath } from "@/routes";
+import { talkToAgents, type TalkToAgent } from "@/lib/agents";
 import { Markdown, qs, secondsSince, spokenDuration, useWorkspace, useWq } from "@/pages/train/workspace";
 
 export type AskKind = "ask" | "factory";
@@ -54,30 +55,12 @@ export function useAgentNames() {
   }, [library]);
 }
 
-/** Who Ask Orama can talk to (control::talk_to_agents, then the deferred /ask/agents list): Ask
- * Orama first, the library's running chat agents a person uses, then the space's own agents that
- * take a conversation. The agent in the URL stays listed while they load. */
-export function useTalkTo(selected: string) {
+/** Who Ask Orama can talk to (lib/agents talkToAgents, control::talk_to_agents, lake#763), from
+ * the Agent Library and the deferred /ask/agents list. */
+export function useTalkTo(selected: string): TalkToAgent[] {
   const { library } = useAgentNames();
   const own = useWq<{ agents?: Row[] }>("list_agents", {}, { staleTime: 60_000 });
-  return useMemo(() => {
-    const agents: { id: string; name: string }[] = [{ id: "agent-ask-orama", name: "Ask Orama" }];
-    const keys = new Set<string>();
-    for (const agent of library.data?.agents ?? []) {
-      const key = String(agent.key ?? "");
-      keys.add(key);
-      if (key && key !== "agent-ask-orama" && agent.chat && agent.deployed && !agent.internal) agents.push({ id: key, name: String(agent.name ?? key) });
-    }
-    for (const agent of own.data?.agents ?? []) {
-      const id = String(agent.id ?? "");
-      if (!id || (agent.kind ?? "custom") === "orama" || agent.chat_capable === false || keys.has(id)) continue;
-      const known = agents.find((a) => a.id === id);
-      if (known) known.name = String(agent.name || id);
-      else agents.push({ id, name: String(agent.name || id) });
-    }
-    if (selected && !agents.some((a) => a.id === selected)) agents.push({ id: selected, name: selected });
-    return agents;
-  }, [library.data, own.data, selected]);
+  return useMemo(() => talkToAgents(library.data?.agents, own.data?.agents, selected), [library.data, own.data, selected]);
 }
 
 /** The messages of a conversation, and the turn being followed. `onSettled` is called once the
@@ -318,6 +301,38 @@ export function AskMessages({
   );
 }
 
+/** *Talk to* (lake#763): every agent a person may talk to by its library name, the chosen one's
+ * one-sentence purpose under the box, and where you meet it on expand. A library agent this Lake
+ * does not run is listed and marked, and cannot be picked. */
+function TalkToSelect({ agent, agents, onAgent }: { agent?: string; agents: TalkToAgent[]; onAgent: (agent: string) => void }) {
+  const chosen = agents.find((a) => a.id === agent) ?? agents[0];
+  return (
+    <div className="talk-to stack gap-1">
+      <label>
+        Talk to
+        <select name="agent" value={agent} onChange={(e) => onAgent(e.target.value)} aria-describedby={chosen?.purpose ? "talk-to-purpose" : undefined}>
+          {agents.map((a) => (
+            <option key={a.id} value={a.id} disabled={!a.running && a.id !== agent} title={a.purpose || undefined}>
+              {a.running ? a.name : `${a.name} (not running on this Lake)`}
+            </option>
+          ))}
+        </select>
+      </label>
+      {chosen?.purpose && (
+        <p id="talk-to-purpose" className="muted m-0 text-[12.5px]">
+          {chosen.purpose}
+        </p>
+      )}
+      {chosen?.usedIn && (
+        <details className="text-[12.5px] text-ink-3">
+          <summary>Where you meet it</summary>
+          {chosen.usedIn}
+        </details>
+      )}
+    </div>
+  );
+}
+
 /** The message box: who to talk to, the message, the microphone and Send. On a keyboard Enter
  * sends and Shift+Enter is a new line; on a touch screen Return makes a new line and Send sends, as
  * in messaging apps. Dictated text goes into the box to edit or send (components/dictation). */
@@ -332,19 +347,22 @@ export function AskComposer({
   placeholder = "What should I look at first?",
   compact,
   draft,
+  draftKey,
   context,
 }: {
   agent?: string;
   onAgent?: (agent: string) => void;
-  agents?: { id: string; name: string }[];
+  agents?: TalkToAgent[];
   busy: boolean;
   error: unknown;
   onSend: (message: string) => Promise<boolean>;
   label?: string;
   placeholder?: string;
   compact?: boolean;
-  /** Put in the box when it changes (Ask Orama opened about a transcript). */
+  /** Put in the box when it changes (Ask Orama opened about a transcript), or when `draftKey`
+   * changes (the home's example questions, which may put the same question twice). */
   draft?: string;
+  draftKey?: number;
   /** Shown above the box: what the next message is about. */
   context?: ReactNode;
 }) {
@@ -364,7 +382,7 @@ export function AskComposer({
       setText(draft);
       box.current?.focus();
     }
-  }, [draft]);
+  }, [draft, draftKey]);
   const submit = async () => {
     const message = text.trim();
     if (!message || busy || rec.state !== "idle") return;
@@ -380,18 +398,7 @@ export function AskComposer({
     >
       {error ? <ErrorBlock error={error} /> : null}
       {context}
-      {agents && onAgent && (
-        <label>
-          Talk to
-          <select name="agent" value={agent} onChange={(e) => onAgent(e.target.value)}>
-            {agents.map((a) => (
-              <option key={a.id} value={a.id}>
-                {a.name}
-              </option>
-            ))}
-          </select>
-        </label>
-      )}
+      {agents && onAgent && <TalkToSelect agent={agent} agents={agents} onAgent={onAgent} />}
       <label>
         {label}
         <textarea

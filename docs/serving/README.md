@@ -5,6 +5,9 @@ with the connection cap, idle and header timeouts (lake#534), route inventory, r
 limits, and the `500` answer and `handler_exception` log line for a handler that throws. OCI blob uploads stream to storage under the configurable registry limit; all other body
 readers retain the 64 MiB ceiling or a smaller route-specific bound.
 
+The [signed links](http.md#signed-links) section covers the two routes a link authorizes instead of
+a session: the Hub's LFS upload and the tunnel client download (lake#745).
+
 [configuration.md](configuration.md) lists every command-line flag and environment variable with
 its default and owning contract. [telemetry.md](telemetry.md) covers probes, metrics, and request
 logs, including the dynamic-lease expiry pass's counters (lake#362) and the workspace deletion

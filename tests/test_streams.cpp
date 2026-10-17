@@ -365,7 +365,7 @@ TEST_F(Streams, AgentDocumentationIncludesEveryStreamToolAndConfirmationGuidance
     }
     const auto docs = lake::api::agent_docs::llms_full_txt(registry, "http://127.0.0.1");
     EXPECT_NE(docs.find("browse_stream"), std::string::npos);
-    EXPECT_NE(docs.find("ApplicationAgent"), std::string::npos);
+    EXPECT_NE(docs.find("Application Agent"), std::string::npos);
 }
 
 TEST_F(Streams, ValidationPurgeConfirmationAndExistingTopicsFailClosed) {

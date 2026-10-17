@@ -6,6 +6,11 @@ accounts, agents, services, apps, Liquid repositories, search and identity aroun
 capability registry served as REST, OpenAPI and MCP, and a web application (`frontend/`, embedded
 in the binary) that calls only that API. Start at the homepage's Getting started (`/docs`).
 
+The [developer tunnel guide](docs/api/tunnel-grants.md) describes admin grant/revoke, recipient-only
+CSR signing, relay trust and the session-history provider contract.
+[Scoped connection credentials](docs/api/scoped-credentials.md) describes an app's read/write and
+optional-schema scope, the operator's workspace-secret reference, rotation and revocation.
+
 ## Build and get a first result
 
 Install CMake 3.28+, Ninja, Homebrew LLVM, OpenSSL 3, libpq, Node, and initialise submodules.
@@ -54,7 +59,7 @@ protocol route. The full route table is [`docs/serving/http.md`](docs/serving/ht
 | `GET /v1/openapi.json`, `POST /mcp`; the same below `/w/<workspace_id>` | the registry as OpenAPI 3.1 and as MCP tools |
 | `POST /session`, `POST /logout`, `POST /identity/clerk-session`, `GET /v1/oauth/<provider>/callback` | the sign-in routes that set or clear the HttpOnly `lake_session` cookie |
 | `GET /file/raw`, `/file/download`, `/drive/download`, `/exports/download`, `/share/<token>/download` | file bytes; a protected download without a credential redirects to `/sign-in` |
-| `GET /apps/<id>/sign-up`, `/sign-in`, `/mfa`, `/passkey-sign-in` (also on a custom sign-in host), `/apps/authorize`, `/v1/apps/auth` | an identity application's hosted sign-in pages, the one server-rendered surface, and the Ship app handoff ([`docs/api/apps.md`](docs/api/apps.md), [`docs/api/web-apps.md`](docs/api/web-apps.md)) |
+| `GET /apps/<id>/sign-up`, `/sign-in`, `/mfa`, `/passkey-sign-in` (also on a custom sign-in host), `/apps/authorize`, `/v1/apps/auth` | an identity application's hosted sign-in pages, a server-rendered surface, and the Ship app handoff ([`docs/api/apps.md`](docs/api/apps.md), [`docs/api/web-apps.md`](docs/api/web-apps.md)) |
 | `GET /healthz`, `/readyz`, `/metrics` | probes and Prometheus metrics |
 | `/v1/repositories/<id>/sync/*`, `/v2/*`, npm, Python and debuginfod paths, `/api/models/*`, `/scim/v2/*`, `/acme/*` | liquid sync, the package registries, the Hugging Face subset, SCIM and ACME |
 | `GET /llms.txt`, `/llms-full.txt`, `/skills/lake/SKILL.md` | the agents' guide and skill |
@@ -145,9 +150,11 @@ For the full PostgreSQL-backed suite, local database setup, and every run option
 
 ## Releases
 
-The current release is **v0.1.0** (2026-10-12), the first tagged release.
-[`docs/releases/v0.1.0.md`](docs/releases/v0.1.0.md) lists every feature, capability, web app page
-and guide in it, what it does not include, and its known issues.
+The current release is **v0.2.0** (2026-10-17).
+[`docs/releases/v0.2.0.md`](docs/releases/v0.2.0.md) lists what it adds (secure networking, regions,
+the managed key and own identity, Clerk webhooks, the agents' names and Ask Orama's home), what it
+does not include, and its known issues. [`docs/releases/v0.1.0.md`](docs/releases/v0.1.0.md), the
+first tagged release, lists every feature, capability, web app page and guide.
 [`docs/releases/README.md`](docs/releases/README.md) is the index, and `CLAUDE.md` has the steps for
 cutting one.
 
@@ -169,6 +176,11 @@ when it calls a capability undeployed that the observed OpenAPI lists.
 [`docs/ui/front-door.md`](docs/ui/front-door.md) for the customer journey.
 [`docs/api/auth.md`](docs/api/auth.md) describes bearer credentials and the session migration;
 its [measurement proof](docs/build/session-authentication.md) records the regression coverage.
+[`docs/control-plane/network.md`](docs/control-plane/network.md) describes secure-networking
+desired state, audit, rollout and the operator handoff; [`docs/api/network.md`](docs/api/network.md)
+defines its permission-checked REST and MCP capabilities; [`docs/ui/network.md`](docs/ui/network.md)
+describes the Network section each workspace has in the console (lake#729), and the
+[Network guide](docs/guide/network.md) is what a customer reads.
 
 ## Repository rules
 

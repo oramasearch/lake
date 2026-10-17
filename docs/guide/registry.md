@@ -72,7 +72,7 @@ the Lake's public host:
 <lake host>/<handle>/<name>@sha256:<digest>
 ```
 
-That is the reference to deploy: an app's **Deploy build** button and ApplicationAgent use it.
+That is the reference to deploy: an app's **Deploy build** button and the Application Agent use it.
 Until the build succeeds, `image` is null.
 
 ## Follow and Cancel a Build

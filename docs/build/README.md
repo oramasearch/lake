@@ -1,5 +1,14 @@
 # Build and verification
 
+[tunnel-grants-proof.md](tunnel-grants-proof.md) records the native credential, migration,
+provider and transport proof for lake#730 and the coordinator's deferred relay checks.
+[scoped-credentials-proof.md](scoped-credentials-proof.md) records lake#731's native scope,
+rotation and removal contract checks and the outstanding operator integration acceptance.
+
+[testing.md](testing.md) documents `LAKE_TEST_SKIP_STALE_SWEEP=1` for shared hosts where a run
+must leave earlier runs' databases alone. [Network verification](../control-plane/network.md#verify)
+names the PostgreSQL-backed control-plane proof.
+
 [local.md](local.md) documents native configuration and execution. [testing.md](testing.md)
 describes isolated filesystem and PostgreSQL fixtures. [session-authentication.md](session-authentication.md)
 records the session lookup measurements, row-access regression and lifecycle proof.

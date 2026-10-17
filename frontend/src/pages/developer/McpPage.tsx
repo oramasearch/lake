@@ -79,8 +79,8 @@ export default function McpPage() {
 
   // The former tabs' addresses open their step.
   useEffect(() => {
-    if (asked !== "keys" && asked !== "tools") return;
-    const at = document.getElementById(asked === "keys" ? "keys" : "tools");
+    if (asked !== "keys" && asked !== "tools" && asked !== "flows") return;
+    const at = document.getElementById(asked);
     at?.scrollIntoView({ block: "start" });
   }, [asked, setup.isSuccess]);
 
@@ -176,7 +176,7 @@ export default function McpPage() {
           </Query>
         </Step>
 
-        <Step n={5} title="Worked Flows" aside="The tools an agent calls, in order, for the jobs people ask of Lake most.">
+        <Step n={5} id="flows" title="Worked Flows" aside="The tools an agent calls, in order, for the jobs people ask of Lake most.">
           <Query q={setup} what="the worked flows" lines={4}>
             {(value) => <Flows setup={value} />}
           </Query>

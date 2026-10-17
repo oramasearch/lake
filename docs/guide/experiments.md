@@ -5,7 +5,7 @@ It runs many **trials** of one pipeline, each a training run with its own settin
 trial on held-out rows, and ranks them. You follow the trials as their curves arrive, compare runs,
 and promote the best trial's model.
 
-Open **Train → Experiments**. You can describe a goal to **ExperimentsAgent** and review the
+Open **Train → Experiments**. You can describe a goal to **Experiments Agent** and review the
 experiment it proposes, or fill in an experiment yourself with **Start experiment**. Every
 experiment and trial lives in your workspace.
 
@@ -57,17 +57,17 @@ Experiments** lists runs with metrics that belong to no experiment.
 - MCP: `list_experiments`. `project` and `state` are optional. The answer lists `experiments` and
   `runs`.
 
-## Run an Experiment with ExperimentsAgent
+## Run an Experiment with the Experiments Agent
 
-ExperimentsAgent turns a goal into a complete experiment you review before anything starts.
+Experiments Agent turns a goal into a complete experiment you review before anything starts.
 
-1. Open **Train → Experiments** and choose **Ask ExperimentsAgent**.
+1. Open **Train → Experiments** and choose **Ask the Experiments Agent**.
 2. Under **Run an Experiment**, describe the goal, for example *Tune a churn model for validation AUC
-   with a bounded trial budget*, and choose **Ask ExperimentsAgent**.
-3. The page shows **ExperimentsAgent Is Working** while the turn runs in the background. You can
+   with a bounded trial budget*, and choose **Ask the Experiments Agent**.
+3. The page shows **Experiments Agent Is Working** while the turn runs in the background. You can
    leave and come back; the task stays in the address.
-4. If it asks a question, answer it with **Reply to ExperimentsAgent**; it keeps the conversation.
-5. A finished turn shows **ExperimentsAgent Result**: its explanation (**Why these choices**) and the
+4. If it asks a question, answer it with **Reply to the Experiments Agent**; it keeps the conversation.
+5. A finished turn shows **Experiments Agent Result**: its explanation (**Why these choices**) and the
    **Proposed Experiment**, the complete experiment JSON in an editable box: name, project, pipeline,
    dataset, methodology, objective, parameter ranges and budgets.
 6. **Review and edit the experiment JSON.** Change anything you want before it starts: the
@@ -80,8 +80,8 @@ ExperimentsAgent turns a goal into a complete experiment you review before anyth
 The first turn can only read: it has no way to create or start an experiment. Only the confirmed
 turn may start one, and only the experiment you confirmed.
 
-ExperimentsAgent must be running on this Lake. If it is not, the box stays visible and says
-*ExperimentsAgent is not registered on this Lake yet.*
+Experiments Agent must be running on this Lake. If it is not, the box stays visible and says
+*The Experiments Agent is not running on this Lake.*
 
 ### The Same Steps Through REST and MCP
 
@@ -97,7 +97,7 @@ The answer is `task_id` and `status: pending` at once. Follow the task until it 
 - MCP: `get_agent_task`.
 
 A finished proposal carries `kind: proposal`, `confirm: true`, the editable experiment (under
-ExperimentsAgent's field `study`), its explanations, and the proposal's digest, `proposal_sha256`.
+Experiments Agent's field `study`), its explanations, and the proposal's digest, `proposal_sha256`.
 
 Confirm: send the reviewed proposal back in a second `agent_turn`, at `context.confirmed_proposal`,
 naming the turn that proposed it as `proposal_task_id` and the digest from `get_agent_task` as
@@ -109,9 +109,9 @@ naming the turn that proposed it as `proposal_task_id` and the digest from `get_
 
 Lake checks the confirmation itself. It refuses, and nothing starts, when:
 
-- `proposal_task_id` is not a finished ExperimentsAgent proposal of this workspace that you may
-  follow: *That task has no ExperimentsAgent proposal to confirm.* (`invalid_input`);
-- the digest or anything but the experiment differs: *The ExperimentsAgent proposal changed before
+- `proposal_task_id` is not a finished Experiments Agent proposal of this workspace that you may
+  follow: *That task has no Experiments Agent proposal to confirm.* (`invalid_input`);
+- the digest or anything but the experiment differs: *The Experiments Agent proposal changed before
   confirmation.* (`conflict`);
 - the edited experiment is not a JSON object: *The edited experiment proposal must be a JSON
   object.*
@@ -236,7 +236,7 @@ Each of these asks first, in words, with the exact input shown; **Cancel** or Es
 | What | Needs |
 |---|---|
 | See experiments, trials, charts and comparisons | `read` on the account that owns the workspace |
-| Ask ExperimentsAgent, start and stop experiments and trials | `write` on that account |
+| Ask the Experiments Agent, start and stop experiments and trials | `write` on that account |
 | Promote a trial | `admin` on that account |
 
 The page shows **Stop** only to writers and **Promote** only to administrators; every capability
@@ -256,7 +256,7 @@ checks again. A scoped key must name each tool it calls. Starting, stopping and 
 
 | What you see | What to do |
 |---|---|
-| *ExperimentsAgent is not registered on this Lake yet.* | Start an experiment yourself, or ask whoever runs this Lake to deploy ExperimentsAgent. |
+| *The Experiments Agent is not running on this Lake.* | Start an experiment yourself, or ask whoever runs this Lake to deploy the Experiments Agent. |
 | `invalid_input` at `/objective` or `/budgets` | Fill them in, or send `from_defaults: true`. |
 | `invalid_input` naming a field | The path to the field at fault; correct it and start again. |
 | `conflict` on the confirmed `agent_turn` | The proposal changed since you reviewed it; read the task again and confirm the new one. |

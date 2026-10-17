@@ -8,7 +8,7 @@ Three Design pages help you decide what to build before you build it:
 - **Design → Methodologies**: the modelling methods your workspace can run: Orama's, built into the
   engine and read-only, and your own, written in Python. What each needs and makes, and whether it
   runs there today. Solutions compose them.
-- **Design → Opportunities**: what your data could be used for. Auto-Suggest reads your datasets and
+- **Design → Opportunities**: what your data could be used for. Auto-Suggest Agent reads your datasets and
   recommends AI projects to build from the solutions catalogue.
 
 Every REST and MCP call on this page names `customer_id` (the id of the account that owns your
@@ -25,7 +25,7 @@ to find them.
 | **Foundation** | What a solution project is built on: the snapshot date, the entity, the dataset and its label and feature columns, the methodology roles, the exclusion predicates, delivery and economics. |
 | **Exclusion predicate** | A column that rules an entity out of an action, such as an open complaint. A missing one is called out and blocks Run; it is never assumed to be false. |
 | **A1 decision** | A decision that needs a person's approval before its action may go ahead. |
-| **Opportunity** | A recommendation from Auto-Suggest: an intent your data supports, matched to the catalogue. |
+| **Opportunity** | A recommendation from the Auto-Suggest Agent: an intent your data supports, matched to the catalogue. |
 
 ## Browse the Solutions
 
@@ -332,10 +332,10 @@ Lake. Each run's CPU, memory and GPU time is metered on **Usage**.
 
 ## Opportunities
 
-**Design → Opportunities** keeps the recommendations Auto-Suggest makes from your data until you
+**Design → Opportunities** keeps the recommendations Auto-Suggest Agent makes from your data until you
 act on them.
 
-1. Press **Scan my workspace** (or **Scan again** after a scan). Auto-Suggest reads your workspace's
+1. Press **Scan my workspace** (or **Scan again** after a scan). Auto-Suggest Agent reads your workspace's
    datasets and their columns and matches them to the solutions catalogue. It runs in the
    background and changes nothing; you can leave the page. While it works the page says *Scanning
    your workspace…* and checks again every 3 seconds.
@@ -348,7 +348,7 @@ act on them.
    project drafts**. Nothing runs until you approve a plan.
 4. Press **Dismiss** on a card you do not want.
 
-The scan is an Auto-Suggest turn:
+The scan is an Auto-Suggest Agent turn:
 
 `POST /v1/agent_turn`
 
@@ -372,7 +372,7 @@ Then list, create and dismiss:
 {"customer_id": "<customer id>", "workspace_id": "<workspace id>", "opportunity_id": "<opportunity id>"}
 ```
 
-When Auto-Suggest is not running on this Lake, the page says *a new scan is not available*;
+When Auto-Suggest Agent is not running on this Lake, the page says *a new scan is not available*;
 earlier Opportunities stay listed. **Design → Agents** shows which of Orama's agents run
 ([Agents](/docs/agents)).
 
@@ -412,7 +412,7 @@ Only the person who started a solution (or the operator) can confirm its foundat
 | *Run is blocked because an exclusion predicate is missing* | Add the missing column to the dataset, or map it in the foundation, and confirm again. |
 | *ROI cannot be claimed yet* | The readout gives the reason under it. Keep running and recording outcomes. |
 | `not_approved` (409) | Approve the plan or the decision first. |
-| *The scan did not finish* | Auto-Suggest failed; the message says why. Scan again. |
+| *The scan did not finish* | Auto-Suggest Agent failed; the message says why. Scan again. |
 | `unknown_capability` from `list_methodologies` | The workspace engine predates the registry; it runs churn classification only. |
 | `forbidden` when you edit or delete a solution | It is one of Orama's, which are read-only. Open it and press **Duplicate to edit**. |
 | `invalid_input` at `/measurement/metric`, `/problem` or `/decision` | A solution of your own needs its problem, its decision and the metric its return is measured by. |

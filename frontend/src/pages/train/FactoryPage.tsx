@@ -1,5 +1,5 @@
 /** Design → Agents → Agent Factory, one of the two ways an agent is designed (lake#653; web_ui.cpp web_ui_factory, docs/api/agent-factory.md): a
- * conversation with AgentCreator beside its proposal, and Approve and create. Nothing is created
+ * conversation with the Agent Creator Agent beside its proposal, and Approve and create. Nothing is created
  * until the person approves; Approve sends the SHA-256 of the proposal they saw, which the server
  * checks against the proposal stored in the conversation. */
 import { useCallback, useEffect, useMemo, useRef } from "react";
@@ -43,7 +43,7 @@ export default function FactoryPage() {
   const send = useAsync();
   const approve = useAsync();
 
-  // AgentCreator's latest structured answer: the last agent message that carries one.
+  // Agent Creator Agent's latest structured answer: the last agent message that carries one.
   const latest = useMemo(() => {
     let found: { answer: Row; messageId: string; digest?: string } | null = null;
     for (const message of conversation.list) {
@@ -72,7 +72,7 @@ export default function FactoryPage() {
     <Page
       eyebrow="Design"
       title="Agent Factory"
-      sub="Tell AgentCreator what you want an agent for. It asks what it must, then proposes the agent. Nothing is created until you approve the proposal."
+      sub="Tell the Agent Creator Agent what you want an agent for. It asks what it must, then proposes the agent. Nothing is created until you approve the proposal."
       actions={
         <Button to={ws(`/design/agents?${query}`)}>
           <ArrowLeft size={14} aria-hidden /> Back to agents
@@ -108,17 +108,17 @@ export default function FactoryPage() {
             <Card label="How It Works">
               <ol className="m-0 space-y-2 pl-5 text-[13px] text-ink-2">
                 <li>Describe the agent: what it is for, what it may touch, and what done looks like.</li>
-                <li>AgentCreator asks what it must, then proposes the agent here.</li>
+                <li>The Agent Creator Agent asks what it must, then proposes the agent here.</li>
                 <li>Read the proposal and approve it. Nothing is created before you do.</li>
               </ol>
             </Card>
           )
         }
       >
-        <section aria-label="Conversation with AgentCreator" className="flex min-h-[520px] flex-col rounded-[6px] border border-hairline bg-surface max-md:min-h-[420px]">
+        <section aria-label="Conversation with the Agent Creator Agent" className="flex min-h-[520px] flex-col rounded-[6px] border border-hairline bg-surface max-md:min-h-[420px]">
           <div className="flex flex-wrap items-center gap-2 border-b border-hairline px-4 py-2.5">
             <Sparkles size={15} className="text-ai" aria-hidden />
-            <span className="label m-0">AgentCreator</span>
+            <span className="label m-0">Agent Creator Agent</span>
             <span className="ml-auto">
               {conversation.working ? <Status value="working" tone="ai" /> : proposing ? <Status value="proposal ready" tone="success" /> : conversationId ? <Status value="waiting for you" tone="neutral" /> : null}
             </span>
@@ -178,11 +178,11 @@ export default function FactoryPage() {
   );
 }
 
-/** One message: the person's on the right, AgentCreator's (Markdown) on the left. */
+/** One message: the person's on the right, Agent Creator Agent's (Markdown) on the left. */
 function Bubble({ person, content }: { person: boolean; content: string }) {
   return (
     <div className={cx("flex flex-col", person ? "items-end" : "items-start")}>
-      <div className="mb-1 font-mono text-[10.5px] tracking-[0.08em] text-ink-3 uppercase">{person ? "You" : "AgentCreator"}</div>
+      <div className="mb-1 font-mono text-[10.5px] tracking-[0.08em] text-ink-3 uppercase">{person ? "You" : "Agent Creator Agent"}</div>
       {person ? (
         <div className="max-w-[85%] rounded-[10px] rounded-br-[3px] bg-action-filled px-3.5 py-2 text-[13.5px] break-words whitespace-pre-wrap text-on-action">{content}</div>
       ) : (
@@ -194,7 +194,7 @@ function Bubble({ person, content }: { person: boolean; content: string }) {
   );
 }
 
-/** AgentCreator's proposal (the page's #proposal panel), with Approve and create. */
+/** Agent Creator Agent's proposal (the page's #proposal panel), with Approve and create. */
 function Proposal({ answer, busy, error, onApprove }: { answer: Row; busy: boolean; error: unknown; onApprove: () => void }) {
   const proposal = (answer.proposal && typeof answer.proposal === "object" ? answer.proposal : {}) as Row;
   const agent = (proposal.agent && typeof proposal.agent === "object" ? proposal.agent : {}) as Row;
@@ -257,7 +257,7 @@ function Proposal({ answer, busy, error, onApprove }: { answer: Row; busy: boole
                   <li key={i}>{typeof defect === "string" ? defect : JSON.stringify(defect)}</li>
                 ))}
               </ul>
-              Tell AgentCreator what to change.
+              Tell the Agent Creator Agent what to change.
             </Banner>
           </div>
         ) : null}

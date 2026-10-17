@@ -771,7 +771,7 @@ liquid::runtime::task<ApiResult> workspace_call(bool read, json input, ApiContex
         const auto agent_task = calling_agent_task(context);
         // An agent turn acts only through the workspace actions its credential names
         // (lake#438): `workspace_act` alone never opens the whole allow-list to an agent. The
-        // ExperimentsAgent's reads are named per turn as well.
+        // Experiments Agent's reads are named per turn as well.
         // A turn's credential may name the capability by the engine's name or by Lake's
         // (engine_capability_name, lake#650).
         if (agent_task && (!read || agent_task->agent == "agent-experiments") &&
@@ -3060,7 +3060,7 @@ void register_sql_capability(Registry& registry) {
         }});
 }
 
-// ApplicationAgent reads the workspace catalogue as a first-class Lake tool. The ordinary
+// Application Agent reads the workspace catalogue as a first-class Lake tool. The ordinary
 // workspace_query surface remains available to every other caller.
 void register_dataset_catalog_capability(Registry& registry) {
     registry.add(Capability{
@@ -3294,7 +3294,7 @@ liquid::runtime::task<void> report_on_asking_turn(ApiContext& context,
 }
 
 // A finished Discover scan's Opportunities become records, once (lake#269), in the workspace Zetta
-// of the workspace the scan ran in (lake#376): what Auto-Suggest suggested (new) and what it
+// of the workspace the scan ran in (lake#376): what Auto-Suggest Agent suggested (new) and what it
 // declined (not_yet), in its order. A task that names no workspace has nowhere to keep them.
 liquid::runtime::task<ApiResult> settle_discover(ApiContext& context, control::AgentTask task) {
     if (task.kind != "discover" || task.phase != "Succeeded" || !task.result.is_object() ||
@@ -3431,17 +3431,17 @@ ApiResult called(std::expected<ApiResult, liquid::error> completed) {
                      : ApiResult::failure("store_error", completed.error().message);
 }
 
-// A confirmed proposal hands an ApplicationAgent or ExperimentsAgent turn its write tools, so lake
+// A confirmed proposal hands an Application Agent or Experiments Agent turn its write tools, so lake
 // checks it here rather than trusting the caller's copy (lake#561): it must be the proposal in the
 // answer of `proposal_task_id`, a finished turn of the same agent and kind that the caller may
 // follow, and `proposal_sha256` must be that proposal's digest (get_agent_task returns it), so a
-// proposal that changed since the person saw it is refused. ExperimentsAgent's `study` (the
+// proposal that changed since the person saw it is refused. Experiments Agent's `study` (the
 // experiment) is the one part the person may edit; everything else is the stored proposal. A public
 // app also needs `context.confirm_public`. Answers the proposal the turn carries.
 liquid::runtime::task<ApiResult>
 verified_confirmed_proposal(const json& input, ApiContext& context, std::string_view agent) {
     const bool experiments = agent == "agent-experiments";
-    const std::string who = experiments ? "ExperimentsAgent" : "ApplicationAgent";
+    const std::string who = control::agent_display_name(agent);
     const json context_input = input.value("context", json::object());
     const json offered = context_input.value("confirmed_proposal", json());
     const std::string task_id = input.value("proposal_task_id", std::string());
@@ -3561,7 +3561,7 @@ std::string slug_of(std::string_view text, std::size_t limit) {
     return out;
 }
 
-// The files an AgentCreator proposal carries, with instructions.md written from the agent when it
+// The files an Agent Creator Agent proposal carries, with instructions.md written from the agent when it
 // is missing.
 json proposal_files(const json& proposal) {
     const json agent = proposal.value("agent", json::object());
@@ -3589,7 +3589,7 @@ json proposal_files(const json& proposal) {
 } // namespace
 
 // The agent capabilities that were page-only (UX review 2026-09-27): creating an agent from an
-// approved AgentCreator proposal, turning chosen Opportunities into projects, and reading an Ask
+// approved Agent Creator Agent proposal, turning chosen Opportunities into projects, and reading an Ask
 // Orama conversation back. The pages call these, so REST, MCP and the site do the same thing.
 namespace {
 
@@ -4296,9 +4296,9 @@ void register_agent_flow_capabilities(Registry& registry) {
         }});
     registry.add(Capability{
         .name = "create_agent_from_proposal",
-        .title = "Create an agent from an AgentCreator proposal",
+        .title = "Create an agent from an Agent Creator Agent proposal",
         .description =
-            "Create the agent an AgentCreator proposal describes (agent_turn with agent-creator "
+            "Create the agent an Agent Creator Agent proposal describes (agent_turn with agent-creator "
             "answers `proposal`): a native agent, or a Python agent whose code goes into a new "
             "private Lake repository (`storage: lake`) or into the workspace (`storage: zetta`). A "
             "Python agent with a trigger is scheduled, and its first check run starts. Refused "
@@ -4552,7 +4552,7 @@ void register_agent_flow_capabilities(Registry& registry) {
                 const std::string name = (slug.empty() ? std::string("opportunity") : slug) + "-" +
                                          control::new_uuid_v4().substr(0, 4);
                 const std::string description =
-                    intent + "\n\nSource Opportunity (Auto-Suggest): " +
+                    intent + "\n\nSource Opportunity (Auto-Suggest Agent): " +
                     item.value("solution", std::string()) + ", " +
                     item.value("methodology", std::string()) + ". " +
                     item.value("why_this_data_supports_it", std::string());
@@ -4753,7 +4753,7 @@ std::string error_text(const json& error) {
 }
 
 // The assistant message an agent's finished answer becomes, the same text and payload the pages
-// stored: Ask Orama's reply with its proposals, reads and delegations; AgentCreator's question,
+// stored: Ask Orama's reply with its proposals, reads and delegations; Agent Creator Agent's question,
 // proposal or reply; a failure as "That did not finish: …". `task_id` is empty for an answer the
 // agent gave at once.
 std::pair<std::string, json> answer_message(bool factory,
@@ -4780,7 +4780,7 @@ std::pair<std::string, json> answer_message(bool factory,
         std::string text = kind == "question" ? creator.value("question", std::string())
                            : kind == "proposal"
                                ? std::string("Here is the agent I propose. Review it below.")
-                               : answer.value("reply", std::string("AgentCreator did not answer."));
+                               : answer.value("reply", std::string("Agent Creator Agent did not answer."));
         // The digest approve_agent_proposal checks, so a browser sends back exactly this one.
         if (const json proposal = creator.value("proposal", json()); proposal.is_object()) {
             payload["proposal_sha256"] = agent_proposal_digest(proposal);
@@ -5216,7 +5216,7 @@ void register_conversation_capabilities(Registry& registry) {
         .description =
             "Say something in one of your conversations with Ask Orama (`kind` ask, the "
             "default; `agent` picks another chat agent) or the Agent Factory (`kind` factory, "
-            "AgentCreator): Lake stores your message in the workspace's conversation, then asks "
+            "Agent Creator Agent): Lake stores your message in the workspace's conversation, then asks "
             "the agent. A library agent answers in the background: follow `task_id` with "
             "get_agent_task, then call settle_ask_turn {conversation_id, task_id, kind} once it "
             "finished, because the answer is saved in the conversation only by that call (the "
@@ -5295,7 +5295,7 @@ void register_conversation_capabilities(Registry& registry) {
         .name = "approve_agent_proposal",
         .title = "Approve an Agent Factory proposal",
         .description =
-            "Create the agent AgentCreator proposed in message `message_id` of your Agent "
+            "Create the agent Agent Creator Agent proposed in message `message_id` of your Agent "
             "Factory conversation, only when `proposal_sha256` is the digest stored with that "
             "proposal (the one you reviewed) and it has no defects, through "
             "create_agent_from_proposal. The outcome is stored in the conversation.",
@@ -5751,10 +5751,10 @@ void register_agent_run_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "list_opportunities",
         .title = "List Opportunities",
-        .description = "What Auto-Suggest recommended for the account's data in this workspace, kept "
+        .description = "What Auto-Suggest Agent recommended for the account's data in this workspace, kept "
                        "across scans, newest scan first: each Opportunity's intent, catalogue "
                        "solution, methodology, why the data supports it, and its status (new, "
-                       "project, dismissed, or not_yet when Auto-Suggest declined it). "
+                       "project, dismissed, or not_yet when Auto-Suggest Agent declined it). "
                        "Opportunities live in the workspace Zetta of the workspace their scan ran "
                        "in; another workspace of the account never lists them. `task_id` settles a "
                        "scan of this workspace that just finished.",
@@ -5856,8 +5856,9 @@ void register_agent_run_capabilities(Registry& registry) {
         .description =
             "Send one message to any agent: a specialized agent of the Agent Library by its key "
             "(agent-ask-orama, agent-project, agent-application, agent-experiments, "
-            "agent-autosuggest, agent-creator) or an agent of "
-            "this account by its id. A library agent's turn runs in the background: the answer is "
+            "agent-autosuggest, agent-creator, agent-eval-generator for an eval, "
+            "agent-autosuggest-corpus or agent-project-corpus for a training corpus) or an agent "
+            "of this account by its id. A library agent's turn runs in the background: the answer is "
             "{task_id, status} at once, and get_agent_task follows it to its answer. A native "
             "agent answers from the workspace; a Python agent from its running service (started "
             "on first use).",
@@ -5997,13 +5998,13 @@ void register_agent_run_capabilities(Registry& registry) {
                         task_kind != "experiment_explain") {
                         co_return ApiResult::failure(
                             "invalid_input",
-                            "an ExperimentsAgent turn kind is experiment, experiment_status or "
+                            "an Experiments Agent turn kind is experiment, experiment_status or "
                             "experiment_explain",
                             "/kind");
                     }
                     body["kind"] = task_kind;
                     body["context"] = input.value("context", json::object());
-                    // A lake caller names the experiment `experiment_id`; ExperimentsAgent reads
+                    // A lake caller names the experiment `experiment_id`; Experiments Agent reads
                     // the engine's `study` (lake#561).
                     if (body["context"].is_object() && body["context"].contains("experiment_id") &&
                         !body["context"].contains("study")) {
@@ -6119,7 +6120,7 @@ void register_agent_run_capabilities(Registry& registry) {
                            agent == "agent-project-corpus") {
                     body["request"] = message;
                 } else if (agent == "agent-autosuggest") {
-                    // Auto-Suggest builds the workspace profile itself, with the task's
+                    // Auto-Suggest Agent builds the workspace profile itself, with the task's
                     // read-only credential; lake reads nothing inside the request.
                     if (const json profile =
                             input.value("context", json::object()).value("profile", json());
@@ -7222,16 +7223,17 @@ void register_workspace_capabilities(Registry& registry) {
         .title = "The Agent Library",
         .description =
             "Every specialized agent Orama ships for you to use (Ask Orama, the Project Agent, "
-            "ApplicationAgent, Auto-Suggest, AgentCreator, ...): what each does, where you meet "
-            "it, and whether this Lake runs it. Orama's internal tooling (the corpus and "
-            "evaluation generators) is listed only with `include_internal: true`.",
+            "the Application Agent, the Auto-Suggest Agent, the Agent Creator Agent, ...): what "
+            "each does, where you meet it, and whether this Lake runs it. All nine are listed, "
+            "including the Eval Generator Agent, which creates evals, and the two corpus agents, "
+            "which build training corpora.",
         .input_schema = {{"type", "object"},
                          {"properties",
                           {{"include_internal",
                             {{"type", "boolean"},
                              {"description",
-                              "also list Orama's internal agents, marked `internal: true` "
-                              "(default false)"}}}}},
+                              "accepted for compatibility and ignored: every agent is listed "
+                              "(lake#788)"}}}}},
                          {"additionalProperties", false}},
         .output_schema = {{"type", "object"}},
         .kind = CapabilityKind::Read,
@@ -7244,16 +7246,11 @@ void register_workspace_capabilities(Registry& registry) {
         // The library is the same for everyone signed in.
         .authorizes_candidates = true,
         .handler =
-            [](const json& input, ApiContext& context) {
+            [](const json&, ApiContext& context) {
+                // Every agent, whatever `include_internal` says: none is internal (lake#788).
                 const std::map<std::string, std::string> none;
-                json library = control::agent_library_json(
-                    context.workspaces ? context.workspaces->config().agent_endpoints : none);
-                // Internal tooling only when asked (lake#594).
-                if (!input.value("include_internal", false) && library.contains("agents")) {
-                    std::erase_if(library["agents"].get_ref<json::array_t&>(),
-                                  [](const json& agent) { return agent.value("internal", false); });
-                }
-                return ApiResult::success(std::move(library));
+                return ApiResult::success(control::agent_library_json(
+                    context.workspaces ? context.workspaces->config().agent_endpoints : none));
             }});
     registry.add(Capability{
         .name = "list_agent_revisions",

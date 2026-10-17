@@ -8,13 +8,62 @@ document rules, confidentiality, and the decisions not to drift past. Read both.
 
 ## Status
 
-Status: 2026-10-12. The current release is **v0.1.0**, the first tagged release
-([`docs/releases/v0.1.0.md`](docs/releases/v0.1.0.md) lists everything in it). `Lake/prod` on the
+Status: 2026-10-17. The current release is **v0.2.0**
+([`docs/releases/v0.2.0.md`](docs/releases/v0.2.0.md): secure networking, regions, the managed key
+and own identity, Clerk webhooks, the agents' names and Ask Orama's home, with its known issues).
+`server_info` of a v0.2.0 build reports version `0.2.0`. The paragraph below describes v0.1.0, the
+first tagged release ([`docs/releases/v0.1.0.md`](docs/releases/v0.1.0.md) lists everything in it),
+and what ran on 2026-10-12. `Lake/prod` on the
 dev AKS cluster (there is no production environment yet) serves `oramasearch/lake:20261012a`, which
 is also `oramasearch/lake:v0.1.0`, built from the tag (`2e6f6d7`) against liquid `v0.1.0`
 (`f669726`). `GET /v1/server_info` reports version `0.1.0`; the OpenAPI lists 554 paths and the
 operator's schema is applied through `0083_methodology_deployments`. Its bus and workspace Zettas
 run `oramasearch/zetta:main-4015ef76` (zetta `v0.2.0`).
+
+Secure-networking desired state is implemented in the source tree (lake#727, `0084_network`):
+four desired/status pairs, scoped stores, signed atomic audit and app-to-service rollout rows.
+Tunnel grants end through revocation or expiry; internet egress stays implicit in the operator.
+Fourteen permission-checked capabilities expose connections, scoped credential rotation, egress,
+tunnel grants, recipient-only CSR signing, peers and effective rules through REST, OpenAPI and MCP
+(lake#728, lake#730, lake#731).
+Migration `0085_network_tunnel_ca` adds public client/relay CA fields without changing 0084.
+Session and activity reads return empty arrays with `pending: "zetta#1281"` through a provider
+interface. Operator adoption, live relay session termination and deployment are not claimed. See
+[`docs/control-plane/network.md`](docs/control-plane/network.md) and
+[`docs/api/network.md`](docs/api/network.md), [scoped credentials](docs/api/scoped-credentials.md)
+and [tunnel credentials](docs/api/tunnel-grants.md).
+Each workspace has a Network section in the console after Ship (lake#729): Overview, Connections,
+Developer Access, Private Networks, Egress and DNS, Policies and Activity, which together call all
+fourteen capabilities. Data → Connections (datasets) stays separate and each links the other. Not
+deployed. See [`docs/ui/network.md`](docs/ui/network.md) and the [Network guide](docs/guide/network.md).
+Lake serves the tunnel client itself (lake#745 part 2, no migration): the image copies the
+`zetta-tunnel` binaries (macOS arm64, Linux amd64) from the private `oramasearch/zetta-tunnel-clients`
+image pinned by digest to `LAKE_TUNNEL_CLIENTS_DIR` (default `/usr/share/lake/tunnel-clients`);
+`tunnel_client_downloads` answers, to any signed-in person, the version and per platform the SHA-256,
+size and a 15-minute link signed with the Hub upload links' HMAC under `LAKE_INSTANCE_KEK`, which
+`GET /tunnel-clients/<platform>` serves without a session; Get credentials makes installing it step 4.
+Not deployed. See [`docs/api/tunnel-clients.md`](docs/api/tunnel-clients.md).
+
+Every new account starts with a managed key, and a person may use their own identity instead
+(lake#762, liquid-bridge decision 65, migration `0086_identity_links`): Lake's own password sign-up
+no longer needs an identity document and mints a managed key as a first Clerk sign-in does;
+Account → Identity (`/settings?tab=identity`) reads `account_identity` and runs *Use my own
+identity*: `begin_own_identity` verifies the `liquid identity show --document` output (an initial
+document only) and issues a ten-minute challenge, `use_own_identity` verifies the
+`liquid sign artifact <challenge>` signature with libliquid, has the managed key sign the link, and
+in one transaction records it and destroys the managed seed. The account keeps its identifier, so
+grants, audit and repositories stay; `sign_in_taap` with the own key reaches it, and a push's
+`push_change` audit names the signer and the account it acts for. Not deployed; the operator must
+vendor the schema and select `identity_links_guard`. See
+[`docs/api/identity.md#your-own-identity`](docs/api/identity.md#your-own-identity).
+
+Clerk webhooks follow (lake#765, migration `0087_clerk_webhooks`): `POST /identity/clerk-webhook`,
+verified with Lake's own Svix HMAC and `LAKE_CLERK_WEBHOOK_SECRET` (404 without it), applies each
+`svix-id` once: `user.created` provisions the account as a first Clerk sign-in does, `user.updated`
+sets its verified email and name, `user.deleted` disables it (`users.disabled_at`) and revokes its
+sessions without erasing anything; every delivery is audited centrally. Not deployed; the operator
+must vendor the schema, select `clerk_webhooks_guard` and configure the endpoint and secret
+(orama-operator#541). See [`docs/api/clerk.md#webhooks`](docs/api/clerk.md#webhooks).
 
 The newest dated record, [`docs/deployment/dev-2026-10-01.md`](docs/deployment/dev-2026-10-01.md),
 and [`docs/design/status.md`](docs/design/status.md) still describe the 2026-10-01 deployment
@@ -27,7 +76,7 @@ calls a capability undeployed that the newest snapshot in `docs/deployment/obser
 a deployment, record a new snapshot and update the page.
 
 Train → Experiments is implemented in the source tree with eleven registered REST/MCP operations,
-live charts, confirmed promotion, and ExperimentsAgent's editable proposal and confirmed start,
+live charts, confirmed promotion, and the Experiments Agent's editable proposal and confirmed start,
 against workspace Zetta `dev-a1d74b21`. The build's authorized bridge transport source is
 unchanged. Deletion has no engine contract; deployed experiment/training acceptance is not claimed.
 Lake says experiment (`get_experiment`, `start_experiment`, `stop_experiment`, `experiment_id`) where
@@ -37,8 +86,8 @@ never say study. See `docs/api/experiments.md` and `docs/ui/experiments.md`.
 The console is the web app in `frontend/` (lake#561), embedded in the binary and answered for every
 browser page request; it calls only `/v1`. The server-rendered console pages, their deferred panels
 and HTML form handlers, the `lake_workspace` cookie and the experiment chart assets are retired in
-the source tree; an identity application's hosted sign-in pages are the one server-rendered
-surface. `agent_turn` checks a confirmed ApplicationAgent or ExperimentsAgent proposal against the
+the source tree; an identity application's hosted sign-in pages and the apex host's region picker
+(lake#757, `docs/api/regions.md`) are the server-rendered surfaces. `agent_turn` checks a confirmed Application Agent or Experiments Agent proposal against the
 stored one (`proposal_task_id`, `proposal_sha256`). Not deployed yet. See `docs/ui/web-app.md` and
 `docs/serving/http.md`.
 
@@ -653,7 +702,7 @@ forward-auth and `/apps/authorize` for the Lake-session handoff. The app cookie 
 expires after 12 hours, and rechecks workspace membership on every request. Migration
 `0041_app_forward_auth` stores only short-lived one-use code hashes.
 The Ship → Apps pages use those capabilities for creation and all controls, mask Secret references,
-follow retained app/build events, and start ApplicationAgent app turns with exact proposal
+follow retained app/build events, and start Application Agent app turns with exact proposal
 confirmation before repository or App writes. Their contract is `docs/ui/apps.md`.
 
 In-cluster image builds add migration `0036_builds`, customer-scoped REST/MCP capabilities,
@@ -742,10 +791,12 @@ one adapter TU) and the pure renderers in `include/zetta/api/web_ui.hpp`.
   a server page or an HTML form handler. Build, page rules and checks: `docs/ui/web-app.md`. The
   server routes the app relies on (the cookie-setting sign-in routes and the download routes) are
   listed there and in `docs/serving/http.md`.
-- **Hosted application pages are the one server-rendered surface**: an identity application's
-  sign-in pages (`/apps/<id>/*` and its custom sign-in host), rendered by the pure functions in
-  `web_ui.cpp` in the application's colours, with the theme scripts and, on the passkey page, one
-  script for `navigator.credentials`. They work without JavaScript otherwise.
+- **Hosted application pages and the region picker are the server-rendered surfaces**: an identity
+  application's sign-in pages (`/apps/<id>/*` and its custom sign-in host), rendered by the pure
+  functions in `web_ui.cpp` in the application's colours, with the theme scripts and, on the passkey
+  page, one script for `navigator.credentials`; and the region picker every path of
+  `LAKE_APEX_HOST` answers (`web_ui_region_picker`, lake#757, `docs/api/regions.md`). They work
+  without JavaScript otherwise.
 - **Nav items and headings are Title Case** — "Search Indexes", not "Search indexes": every
   rail item and section label, page and section title, and `<h1>`–`<h4>` in the web app and the
   hosted pages.
@@ -794,7 +845,7 @@ one adapter TU) and the pure renderers in `include/zetta/api/web_ui.hpp`.
 - **Schema.** `db/schema.sql` is the source of truth; the operator carries a byte-identical
   vendored copy at `internal/controller/assets/lake-schema.sql` and applies it per Lake as an
   owned `PostgresSchema` (one transaction, guarded on the table the **newest** migration creates,
-  `metered_jobs_guard` in the source tree, versioned by content hash).
+  `network_guard` in the source tree, versioned by content hash).
   Change the schema HERE, then copy it into the operator in the same change; the operator's test
   checks the copy carries the source-of-truth header. Migrations are single-shot today
   (incremental migrations are the PostgresSchema follow-up), so until then a schema change means
@@ -841,6 +892,23 @@ that licence boundary.
   `oramasearch/lake:<tag>` images, never `latest`. The Docker Hub repo is private; the `Lake` CR
   needs `spec.pullSecretName` and the Secret in `spec.namespace`.
 
+## Branches: feature branches and pull requests always target `dev`
+
+Steve, 2026-10-12: *"shouldn't you be merging into dev branch? we're not cutting a release yet"*, and
+*"feature branches / prs always target dev branch"*.
+
+- **Branch from `origin/dev`**, never from `main`.
+- **Open every pull request with `--base dev`**, written out. This repository's default branch on
+  GitHub is `main`, so `gh pr create` without `--base` targets `main`.
+- **Before merging, read the base back**: `gh pr view <n> --json baseRefName` must say `dev`.
+- **Never push, merge or fast-forward to `main`** in ordinary work. `main` is the last release and
+  moves only by the release pull request that promotes `dev` to `main`, when Steve names a version
+  (*Cutting a release* below).
+- Images built for the dev cluster come from `dev`.
+
+The org-wide rule is in the umbrella bridge's `CLAUDE.md`
+(https://github.com/oramasearch/orama-bridge/blob/main/CLAUDE.md).
+
 ## Cutting a release
 
 A release is a tag on `main`, which is what the deployment runs. The pages and their conventions
@@ -849,9 +917,12 @@ are in [`docs/releases/`](docs/releases/README.md); read its `README.md` first. 
 
 1. **Confirm what is deployed is `main`.** `GET /v1/server_info` reports the running `revision`;
    it must be an ancestor of `origin/main`. Steve names the version.
-2. **On a branch `docs/release-vX.Y.Z`**, move the version in both places: `version_string()` in
-   `src/version.cpp` and `project(lake VERSION ...)` in `CMakeLists.txt`. Tests read the version
-   from `lake::version_string()`; never write the number into a test.
+2. **On a branch `docs/release-vX.Y.Z`**, move the version in all three places: `version_string()`
+   in `src/version.cpp`, `current_version()` in `include/lake/version.hpp` and
+   `project(lake VERSION ...)` in `CMakeLists.txt`. Tests read the version from
+   `lake::version_string()`; never write the number into a test. `ReleaseVersion.*`
+   (`tests/test_release_version.cpp`) fails when the three disagree or when the version has no
+   page in `docs/releases/` indexed in its `README.md`.
 3. **Write `docs/releases/vX.Y.Z.md`** and add it to `docs/releases/README.md`: what the release
    includes, what it does not, known issues with their tracking issues (a security defect first),
    and verification. Claims follow `docs/design/status.md`; every number is measured.

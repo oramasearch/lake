@@ -76,6 +76,12 @@ void register_experiment_capabilities(Registry& registry);
 // The operator's volumes (migration 0069, docs/api/volumes.md): set_workspace_storage,
 // request_volume_snapshot, volume_snapshots.
 void register_volume_capabilities(Registry& registry);
+// Secure-networking desired state (lake#728, docs/api/network.md): connections, egress rules,
+// tunnel grants, peers, effective rules, and reads waiting on lake#730's workspace records.
+void register_network_capabilities(Registry& registry);
+// The tunnel client a Developer Access recipient installs (lake#745, docs/api/tunnel-clients.md):
+// tunnel_client_downloads, signed short-lived links served by GET /tunnel-clients/<platform>.
+void register_tunnel_client_capabilities(Registry& registry);
 // The reads lake's web app needs (lake#561, docs/api/web-app.md): viewer, my_permissions,
 // list_packages, list_docs, get_doc, mcp_setup.
 void register_console_capabilities(Registry& registry, std::string_view version);
@@ -175,8 +181,8 @@ control::Result<control::Repository> find_hub_repository(control::Store& store,
 // The spaces the caller may read, newest first, as list_customers answers them ({items}); the
 // web app's `viewer` lists the same spaces without a second audited call (lake#561).
 ApiResult readable_customers(ApiContext& context, int limit);
-// AgentCreator's structured answer, a question or a proposal: its `result` (agent-creator#1), or,
-// from an AgentCreator that answered before it had one, the JSON in its reply.
+// Agent Creator Agent's structured answer, a question or a proposal: its `result` (agent-creator#1), or,
+// from an Agent Creator Agent that answered before it had one, the JSON in its reply.
 nlohmann::json agent_creator_answer(const nlohmann::json& turn);
 // The digest a proposal is approved by: SHA-256 of its compact JSON as lake serializes it. Stored
 // with each Agent Factory proposal message, and checked by approve_agent_proposal (lake#561).

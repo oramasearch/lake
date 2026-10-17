@@ -19,7 +19,7 @@ REST and MCP expose the same registry, customer policy and signed audit records.
 |---|---|---|
 | `list_apps`, `get_app` | `app_id` for get | desired and observed state, and `stores` (what it mounts, lake#666) |
 | `create_app` | name, mode, source or image, framework, port; optional replicas/host/auth/bindings/env/stores; public also requires `confirm_public` | generation 1 and create event |
-| `deploy_app`, `rollback_app` | `app_id` (ApplicationAgent may use `app` for deploy), source or image | new desired deployment and generation |
+| `deploy_app`, `rollback_app` | `app_id` (Application Agent may use `app` for deploy), source or image | new desired deployment and generation |
 | `delete_app` | `app_id`, `confirm` equal to name | `desired = deleted` |
 | `set_app_env`, `unset_app_env` | `app_id`, key; set takes `value`, `secret` (`{mount_id, name, field}`) or `secret_ref` (`lake-secret://…`) | scanned environment update; a secret is checked, never read back |
 | `set_app_auth` | `app_id`, auth; public also requires `confirm_public` | lake sign-in or public access |
@@ -52,7 +52,7 @@ image input. The old `source` mode value is rejected.
 `bindings.zetta` accepts `true`, `["read"]`, or `{"scopes":["read"]}` to bind; false/null/omitted
 means no binding. Writes normalize to the quoted contract. Service IDs stay strings. Lake never
 adds a workspace token or an opaque token Secret reference to bindings, code, or environment.
-`auth` defaults to `lake`; `public` on ApplicationAgent input is normalized to stored `none`.
+`auth` defaults to `lake`; `public` on Application Agent input is normalized to stored `none`.
 Names are DNS labels and hosts must be one label beneath
 `LAKE_APPS_WILDCARD`. `LAKE_APPS_PER_CUSTOMER` and `LAKE_APP_REPLICAS_PER_CUSTOMER` enforce quotas;
 zero means no configured limit.
@@ -66,7 +66,7 @@ names with the comma-separated `LAKE_APPS_RESERVED_NAMES`; surrounding whitespac
 state. An omitted, null, or empty `host` remains the default `<name>.<LAKE_APPS_WILDCARD>`, so
 `reports` with `LAKE_APPS_WILDCARD=oramadev.net` becomes `reports.oramadev.net`.
 
-ApplicationAgent must propose a non-reserved name and should leave `host` unset unless the person
+Application Agent must propose a non-reserved name and should leave `host` unset unless the person
 asked for a specific address. Its `create_app` tool description identifies platform-host names as
 reserved, and the confirmed turn receives the same validation as every other caller.
 
@@ -76,7 +76,7 @@ behavior belongs to the [`LakeApp` controller](https://github.com/oramasearch/or
 Lake does not probe or replace DNS records.
 
 Changing `auth` to `none` requires `confirm_public: true`, and so does creating an app with `auth`
-`none` or `public` (lake#452): otherwise `invalid_input` at `/confirm_public`. An ApplicationAgent
+`none` or `public` (lake#452): otherwise `invalid_input` at `/confirm_public`. An Application Agent
 turn has no `confirm_public` of its own; its `create_app` is accepted when the person who
 confirmed the proposal acknowledged that it is public, which lake records as the turn's
 `context.confirm_public: true`. Attaching Zetta grants only its fixed
@@ -198,7 +198,7 @@ Secret is only the projection the operator writes at deploy (lake#625,
   last `#` and must be a Kubernetes Secret key, `[-._a-zA-Z0-9]+`). Exactly one of `value`, `secret`
   and `secret_ref`.
 - `create_app` takes the same in `env`: `{"KEY": {"secret": {"mount_id": "…", "name": "…", "field":
-  "…"}}}` or `{"KEY": {"secret": "lake-secret://…"}}` (ApplicationAgent's form).
+  "…"}}}` or `{"KEY": {"secret": "lake-secret://…"}}` (Application Agent's form).
 - Lake stores the reference string in `secret_env_refs` and answers it there; the value is never
   read back or answered.
 - Before it writes, lake checks with the caller's own credential that the mount exists and the
@@ -213,7 +213,7 @@ The operator's half (a `LakeSealedSecret` per lake secret, delivered by `mint_se
 refreshed every five minutes, the field copied into the app and the pods rolled on a new version) is
 orama-operator `docs/lake/apps.md#lake-secret-references-lake625`.
 
-## ApplicationAgent confirmation
+## Application Agent confirmation
 
 `agent-application` is read-only on its first `app` task. A later task receives repository writes,
 `create_app`, and `deploy_app` only when its body contains the exact reviewed proposal at

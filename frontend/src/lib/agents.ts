@@ -47,13 +47,13 @@ export function ownAgents(agents: unknown): J[] {
   return (Array.isArray(agents) ? agents : []).filter((a): a is J => !!a && typeof a === "object" && agentSource(a) === "workspace");
 }
 
-/** What a library agent's badge says (lake#451: Orama's own tooling is listed for the record, not
- * offered to talk to). */
-export function libraryState(agent: J): { label: string; available: boolean } {
-  const available = text(agent, "status") === "Available";
-  const internal = agent.internal === true;
-  const label = internal ? "Orama internal" : available ? "Available" : text(agent, "runs_as") === "offline" ? "Not yet available to chat" : "Not available here";
-  return { label, available: available && !internal };
+/** What a library agent's badge says, and whether a person may talk to it (lake#763): whether this
+ * Lake runs it is always shown. Every library agent is an ordinary agent (lake#788): an `internal`
+ * flag from an older Lake changes nothing. */
+export function libraryState(agent: J): { label: string; running: boolean; talkable: boolean } {
+  const running = text(agent, "status") === "Available" || agent.deployed === true;
+  const label = running ? "Available" : text(agent, "runs_as") === "offline" ? "Offline tool" : "Not running on this Lake";
+  return { label, running, talkable: running && agent.chat !== false };
 }
 
 /** The Design → Agents filter: who it is from, and a search over its name and purpose. */
@@ -500,10 +500,10 @@ export function trainingInput(form: { cadence: string; corpus: string; base_chec
   return training;
 }
 
-/** What an experiment compares, as ExperimentsAgent is asked it. */
+/** What an experiment compares, as Experiments Agent is asked it. */
 export type ExperimentAxis = "versions" | "prompts" | "models";
 
-/** The ask ExperimentsAgent turns into an editable experiment proposal for an agent: which agent,
+/** The ask the Experiments Agent turns into an editable experiment proposal for an agent: which agent,
  * what it compares, what it should improve, and what to measure. */
 export function experimentAsk(agent: J, axis: ExperimentAxis, goal: string, versions: TrainedVersion[]): string {
   const name = text(agent, "name") || text(agent, "id");
@@ -518,4 +518,46 @@ export function experimentAsk(agent: J, axis: ExperimentAxis, goal: string, vers
   else if (text(agent, "goal")) ask += ` Its goal: ${text(agent, "goal")}.`;
   ask += " Measure the held-out score, the task success rate, latency and cost per run, and propose which to promote.";
   return ask;
+}
+
+/* ------------------------------------------------------------------ Ask Orama's Talk to */
+
+/** One entry of Ask Orama's *Talk to* (control::talk_to_agents, lake#763): the name and purpose come
+ * from the Agent Library, never written here; `running` false is listed, marked and not selectable. */
+export type TalkToAgent = { id: string; name: string; purpose: string; usedIn: string; running: boolean };
+
+export const ASK_ORAMA_KEY = "agent-ask-orama";
+
+/** Who Ask Orama can talk to: Ask Orama first, then every other library chat agent (one this Lake
+ * does not run is listed with `running: false` rather than left out), then the space's own agents
+ * that take a conversation. No library agent is left out (lake#788). The agent in the URL stays
+ * listed while the lists load. */
+export function talkToAgents(library: J[] | undefined, own: J[] | undefined, selected: string): TalkToAgent[] {
+  const entry = (agent: J | undefined, key: string): TalkToAgent => ({
+    id: key,
+    // Until the library answers, a library agent is not named at all rather than named twice.
+    name: text(agent, "name") || (library ? key : "Loading…"),
+    purpose: text(agent, "purpose"),
+    usedIn: text(agent, "used_in"),
+    running: !agent || agent.deployed === true || key === ASK_ORAMA_KEY,
+  });
+  const rows = library ?? [];
+  const agents: TalkToAgent[] = [entry(rows.find((a) => text(a, "key") === ASK_ORAMA_KEY), ASK_ORAMA_KEY)];
+  const keys = new Set<string>();
+  for (const agent of rows) {
+    const key = text(agent, "key");
+    keys.add(key);
+    if (key && key !== ASK_ORAMA_KEY && agent.chat === true) agents.push(entry(agent, key));
+  }
+  for (const agent of own ?? []) {
+    const id = text(agent, "id");
+    if (!id || (text(agent, "kind") || "custom") === "orama" || agent.chat_capable === false || keys.has(id)) continue;
+    const name = text(agent, "name") || id;
+    const purpose = text(agent, "purpose") || text(agent, "description");
+    const known = agents.find((a) => a.id === id);
+    if (known) Object.assign(known, { name, purpose });
+    else agents.push({ id, name, purpose, usedIn: "", running: true });
+  }
+  if (selected && !agents.some((a) => a.id === selected)) agents.push({ id: selected, name: selected, purpose: "", usedIn: "", running: true });
+  return agents;
 }

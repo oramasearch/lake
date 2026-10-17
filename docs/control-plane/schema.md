@@ -5,6 +5,26 @@ vendored copy at `internal/controller/assets/lake-schema.sql` and applies it to 
 Postgres. Change the schema here, then copy it into the operator in the same change; the
 operator's test checks the copy carries the source-of-truth header.
 
+`0087_clerk_webhooks` (lake#765) adds `users.disabled_at` (set by a Clerk `user.deleted`; a disabled
+account is issued no session and its sessions no longer resolve) and `clerk_webhook_deliveries`
+(each applied `svix-id`, its event type and Clerk user). Its guard is `clerk_webhooks_guard`. The
+operator must vendor this schema and select that guard. See [clerk.md](../api/clerk.md#webhooks).
+
+`0086_identity_links` (lake#762, decision 65) lets an account replace its managed key with the
+person's own identity: `custodial_identities.wrapped_seed` becomes nullable and gains
+`seed_destroyed_at` (the seed is wiped, the public key kept, when the link commits);
+`identity_link_challenges` holds a pending link (the verified own document, the statement to sign,
+ten-minute expiry, one use); `identity_links` holds the committed link, one per account and one per
+own identity, with both keys' signatures in `link_document`. Its guard is `identity_links_guard`.
+The operator must vendor this schema byte-for-byte and select that guard before a binary with
+`use_own_identity` serves; that handoff is separate. See [identity.md](../api/identity.md#your-own-identity).
+
+`0085_network_tunnel_ca` adds public `client_ca_pem` (Lake-written) on `network_tunnel_grants`
+and `relay_ca_pem` (operator-written) on `network_tunnel_grant_status`, both non-null text with
+empty defaults. It leaves migration 0084 unchanged and adds no new guard. The operator must
+vendor/apply this version before using the columns; that cross-repository handoff is separate.
+See [network.md](network.md) and [tunnel credentials](../api/tunnel-grants.md).
+
 ## Tables (migration `0001_identity_and_customers`)
 
 `schema_migrations(version, applied_at)` records what has been applied.
@@ -596,7 +616,7 @@ Contract and capabilities: [`../api/agent-launches.md`](../api/agent-launches.md
 background, with its body, scopes, deadline and when it was last published on the agent bus),
 `agent_task_status` (written by lake when an agent claims the task and as it reports: phase, message,
 answer and the **SHA-256** of the task's credential, cleared when the task finishes) and `opportunities` (Design → Opportunities:
-what Auto-Suggest recommended, kept across scans, with what the person did with each; retired by
+what Auto-Suggest Agent recommended, kept across scans, with what the person did with each; retired by
 `0046`, below, when Opportunities moved into workspace Zettas). Idempotent;
 guard `agent_tasks_guard`. Contract: [`../api/agent-bus.md`](../api/agent-bus.md). Since `0062`
 (below) the body, message and answer live in the task's workspace Zetta, and both tables are

@@ -15,7 +15,7 @@ agent does the job better.
   press **Confirm**; Lake then runs it as you, with your permissions, and records it in the audit.
   Only a proposal Lake stored in your own conversation can be confirmed.
 - **It delegates.** Ask Orama hands work to the right agent: the Project Agent for pipelines,
-  ApplicationAgent for apps, ExperimentsAgent for training experiments, Auto-Suggest for ideas, or an
+  Application Agent for apps, Experiments Agent for training experiments, Auto-Suggest Agent for ideas, or an
   agent you built. Their proposals are reviewed the same way before anything is written.
 - **Conversations live in the workspace.** Every message is kept in the workspace you asked
   in, sealed with its key. Another workspace never shows it, and only you can
@@ -26,9 +26,26 @@ agent does the job better.
 ## Open Ask Orama
 
 - **Home → Ask Orama** (`/`) is where you land when you sign in or open Lake: the conversation
-  across the page, in your current workspace. While it is empty it greets you and suggests up to
-  four questions from what the workspace holds: a run that failed, a dataset, a project, the latest
-  run's findings, or the first steps when the workspace is new. Press one to ask it. **Home →
+  across the page, in your current workspace. It opens with what Lake is for: **AI sovereignty**.
+  When you're tired of renting someone else's AI, Orama Lake is where you own your AI. While the
+  conversation is empty it explains what you can do:
+  - **Suggested questions**: up to four from what the workspace holds (a run that failed, a dataset,
+    a project, the latest run's findings, or the first steps when the workspace is new).
+  - **Agents you can talk to**: each agent this Lake runs, with what it does. Press one to start a
+    conversation with it.
+  - **Design, train and ship production-grade AI** (self-serve, real AI, trained on your own data):
+    the pages of Data, Design, Train, Ship, Network, Organization and Developer, each with what it
+    is for and a question to ask about it. Developer also links **MCP Tools**, every tool Lake offers
+    an AI assistant, and **MCP Worked Flows**, the tools an agent calls for the jobs people ask most. Design is about AI: AI Projects (many models, pipelines
+    and agents working together on one business question), AI Solutions, AI Methodologies and AI
+    Agents. Only what this Lake
+    runs is listed: Billing only where Lake bills, Deployments only where they are set up,
+    Opportunities only while the Auto-Suggest Agent runs.
+
+  Pressing a question puts it in the message box, so you can change it before you press **Send**.
+  With no workspace, the home starts with **Start a workspace**: one click makes your first one,
+  because everything in Lake (your data, projects, models and conversations) lives in a workspace.
+  If you have workspaces but none is chosen, **Choose a workspace** opens Workspaces. **Home →
   Dashboard** (`/dashboard`) is the platform at a glance.
 - On any other page, press **Ask Orama** in the top bar. It opens beside the page, in the current
   workspace, and knows which page you asked from. Drag its edge to resize it (or use the arrow keys
@@ -54,7 +71,7 @@ Ask Orama needs a workspace. With none selected it says so and links to **Ship �
 
 While the turn runs, the conversation says *Waiting for Ask Orama to start…* and then *Ask Orama is
 working…*, how long it has worked, its latest progress, and *Attempt 2 of 3* when Lake retried it.
-When it brings in another agent you see that too (*Ask Orama asked ExperimentsAgent: …*), then that
+When it brings in another agent you see that too (*Ask Orama asked Experiments Agent: …*), then that
 agent's progress. **View this turn in Streams** opens the turn's events in **Train → Streams**.
 
 Through the API, a turn is a few calls. Send the message with `POST /v1/send_ask_message`:
@@ -83,8 +100,10 @@ Through MCP the tools have the same names and inputs: `send_ask_message`, `get_a
 ## Talk to Another Agent
 
 The **Talk to** selector under the message box picks who answers: Ask Orama first, then the Agent
-Library's other running chat agents, then the chat agents your workspace built. Internal tooling
-agents are never offered. An agent of your workspace answers at once; a library agent answers in
+Library's other running chat agents, then the chat agents your workspace built. Every one of
+Orama's agents is there when your Lake runs it, including the Eval Generator Agent, which creates
+an eval for you, and the Auto-Suggest Corpus Agent and Project Corpus Agent, which build a training
+corpus for you. An agent of your workspace answers at once; a library agent answers in
 the background, as above.
 
 Through the API, send `agent` with the agent's id in `send_ask_message`, or start a turn directly
@@ -108,8 +127,8 @@ and a **Confirm** button.
 
 A change to an existing pipeline goes to the Project Agent instead, and the answer shows **Review
 the proposed change**, which opens the pipeline page where you apply or discard it
-([AI Projects and Pipelines](/docs/design)). An app goes to ApplicationAgent, whose full proposal you
-review before **Confirm and deploy** ([Apps](/docs/apps)); a training experiment goes to ExperimentsAgent,
+([AI Projects and Pipelines](/docs/design)). An app goes to the Application Agent, whose full proposal you
+review before **Confirm and deploy** ([Apps](/docs/apps)); a training experiment goes to the Experiments Agent,
 whose experiment you edit and confirm before it starts ([Experiments](/docs/experiments)).
 
 Through the API, confirm with `POST /v1/confirm_ask_proposal`, naming the stored message and the
@@ -163,8 +182,8 @@ tasks those agents asked for in turn. Only you can delete your conversations.
 
 | You see | What to do |
 |---|---|
-| *Ask Orama works in a workspace, and you have none selected* | Choose a workspace in the top bar, or start one on **Ship → Workspaces**. |
-| An agent is not offered in **Talk to** | It is not deployed on your Lake, is internal tooling, or does not chat. **Design → Agents** says which of Orama's agents run. |
+| *Ask Orama works in a workspace, and you have none selected* (the panel) | Choose a workspace in the top bar, or start one on **Ship → Workspaces**. On the home, press **Start a workspace**. |
+| An agent is not offered in **Talk to** | It is not deployed on your Lake, or it does not chat. Every one of Orama's agents is offered when it runs; **Design → Agents** says which of them run. |
 | *That proposal is not in this conversation* (`not_found`) | Only proposals Lake stored in your conversation can be confirmed. |
 | `workspace_not_ready` | The workspace is not ready; conversations live in it. |
 | `invalid_input` at `/workspace_id` | The workspace id is unknown or not one of the account's. |

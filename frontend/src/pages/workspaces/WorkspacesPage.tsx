@@ -1,7 +1,9 @@
 /** Ship → Workspaces: every workspace the person can reach, grouped by owner as the top bar's
  * picker groups them (lake#638), with their phase and storage, New Workspace in a dialog that asks
  * the owner, Rename, and the typed-name deletion (`?delete=<id>`, a dialog) that first lists what
- * goes with counts from `delete_workspace {dry_run: true}`. Not a workspace page: it is never under
+ * goes with counts from `delete_workspace {dry_run: true}`. Where Lake runs in regions, each
+ * workspace shows its region: the region of this Lake, where it was created (lake#757). Not a
+ * workspace page: it is never under
  * `/w/<id>/`, so every call here goes unprefixed with the customer named. */
 import { type ReactNode, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
@@ -17,6 +19,8 @@ import { Button, type Column, cx, DataTable, Empty, ErrorBlock, Field, FilterChi
 import { dateTime, relative } from "@/lib/format";
 import { postRead } from "@/pages/design/api";
 import { FormError } from "@/pages/design/parts";
+import { useServerRegions } from "@/components/Region";
+import { workspaceRegionLabel } from "@/lib/regions";
 import "@/styles/design.css";
 
 type Workspace = {
@@ -64,6 +68,8 @@ export default function WorkspacesPage() {
   const [renaming, setRenaming] = useState<{ owner: string; row: Workspace } | null>(null);
   const [search, setSearch] = useState("");
   const [phase, setPhase] = useState<string | null>(null);
+  // The region every workspace here belongs to; null on a Lake without regions (lake#757).
+  const region = workspaceRegionLabel(useServerRegions());
 
   useTrail([{ label: "Ship", to: "/ship/models" }, { label: "Workspaces", to: back }], "Workspaces");
 
@@ -107,6 +113,7 @@ export default function WorkspacesPage() {
                     </Link>
                     <div className="text-[12px] text-ink-3">
                       {row.environment || "—"}
+                      {region ? <span data-workspace-region>{` · ${region}`}</span> : null}
                       {row.namespace ? (
                         <>
                           {" · "}
@@ -175,7 +182,7 @@ export default function WorkspacesPage() {
     <Page
       eyebrow="Ship"
       title="Workspaces"
-      sub="Isolated environments, each keeping its own projects, data and models apart from every other."
+      sub={`Isolated environments, each keeping its own projects, data and models apart from every other.${region ? ` Workspaces here are in ${region}.` : ""}`}
       actions={
         customerId ? (
           <Button variant="primary" onClick={() => setCreating(customerId)}>
@@ -350,10 +357,15 @@ function NewWorkspace({ customerId, onDone, onClose }: { customerId: string; onD
     }
   };
   const generic = error && !fieldError(error, "name") && !fieldError(error, "environment") ? error : null;
+  const region = workspaceRegionLabel(useServerRegions());
   return (
     <Modal
       title="New Workspace"
-      subtitle="Lake prepares it for you; preparing it takes a minute or two."
+      subtitle={
+        region
+          ? `Lake prepares it in ${region}, where it stays; preparing it takes a minute or two.`
+          : "Lake prepares it for you; preparing it takes a minute or two."
+      }
       onClose={onClose}
       width={480}
       footer={

@@ -123,3 +123,44 @@ test("signing in lands a person on the home and the operator on Repositories", (
   assert.equal(landingAfterSignIn(false), "/");
   assert.equal(landingAfterSignIn(true), "/repositories");
 });
+
+test("the home says what Lake does, grouped as the rail is, claiming only what this Lake runs (lake#764)", async () => {
+  const { lakeMap, LAKE_GROUPS, MAPPED_PATHS } = await import("../src/pages/ask/lakeMap.ts");
+  const { readFileSync } = await import("node:fs");
+  const routes = readFileSync(new URL("../src/routes.tsx", import.meta.url), "utf8") + readFileSync(new URL("../src/routes/nav.ts", import.meta.url), "utf8");
+  // Every page the map describes is a rail page, so every link goes to a page that exists.
+  for (const path of MAPPED_PATHS) assert.ok(routes.includes(`path: "${path}"`), `${path} is not a rail page`);
+  assert.deepEqual(LAKE_GROUPS.map((g) => g.title), ["Data", "Design", "Train", "Ship", "Network", "Organization", "Developer"]);
+  const items = [
+    { section: "data", path: "/repositories", label: "Repositories" },
+    { section: "data", path: "/train/data", label: "Datasets" },
+    { section: "data", path: "/search", label: "Search" },
+    { section: "design", path: "/design/opportunities", label: "Opportunities" },
+    { section: "design", path: "/design/projects", label: "Projects" },
+    { section: "ship", path: "/deployments", label: "Deployments" },
+    { section: "ship", path: "/ship/apps", label: "Apps" },
+    { section: "organization", path: "/billing", label: "Billing" },
+    { section: "developer", path: "/developer/mcp", label: "MCP" },
+  ];
+  const all = lakeMap(items, { deployments: true, runningAgents: new Set(["agent-autosuggest"]) });
+  assert.deepEqual(all.map((g) => g.key), ["data", "design", "ship", "organization", "developer"]);
+  assert.deepEqual(all[0].things.map((t) => t.label), ["Repositories", "Datasets"], "a page the map does not describe is left out");
+  for (const group of all) for (const thing of group.things) assert.ok(thing.ask.endsWith("?") || thing.ask.endsWith("."), thing.ask);
+  // Deployments off in server_info, and the Auto-Suggest Agent not running: neither is claimed.
+  const fewer = lakeMap(items, { deployments: false, runningAgents: new Set() });
+  assert.deepEqual(fewer.find((g) => g.key === "design")!.things.map((t) => t.path), ["/design/projects"]);
+  // MCP's Worked Flows follow Developer → MCP, and only where the rail offers it (lake#789).
+  assert.deepEqual(all.find((g) => g.key === "developer")!.things.map((t) => t.path), ["/developer/mcp", "/developer/mcp?tab=tools", "/developer/mcp?tab=flows"]);
+  // Every Network page the rail offers is on the home (lake#791).
+  const network = ["/network/overview", "/network/connections", "/network/access", "/network/private-networks", "/network/egress", "/network/policies", "/network/activity"];
+  const withNetwork = lakeMap(network.map((path) => ({ section: "network", path, label: path })), { runningAgents: new Set() });
+  assert.deepEqual(withNetwork.find((g) => g.key === "network")!.things.map((t) => t.path), network);
+  // Design is about AI (Steve, 2026-10-17): the home names its pages as AI.
+  assert.equal(fewer.find((g) => g.key === "design")!.things[0].label, "AI Projects");
+  assert.deepEqual(fewer.find((g) => g.key === "ship")!.things.map((t) => t.path), ["/ship/apps"]);
+  // Billing shows only when the rail shows it (navFor drops it where LAKE_BILLING is off).
+  assert.equal(lakeMap(items.filter((i) => i.path !== "/billing"), { runningAgents: new Set() }).find((g) => g.key === "organization"), undefined);
+  // An older Lake that does not say whether deployments are set up keeps the page.
+  assert.ok(lakeMap(items, { runningAgents: new Set() }).find((g) => g.key === "ship")!.things.some((t) => t.path === "/deployments"));
+  for (const group of all) for (const thing of group.things) assert.doesNotMatch(`${thing.does} ${thing.ask}`, /\b(space|study|Zetta)\b/);
+});

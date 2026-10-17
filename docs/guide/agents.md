@@ -3,7 +3,7 @@
 An agent is an AI helper that works in your workspace. Lake has two kinds:
 
 - **Orama's agents** (the Agent Library): the specialized agents Orama provides, such as the
-  Project Agent and ExperimentsAgent. They are read-only: you use them where they appear in the
+  Project Agent and the Experiments Agent. They are read-only: you use them where they appear in the
   product, or duplicate one to make an agent of your own from it.
 - **Your agents**: agents you design in **Design → Agents** for a job of your own. They answer when
   you talk to them, and the ones with a trigger also run on their own.
@@ -21,25 +21,33 @@ your organization's), and `workspace_id`, the workspace in the page address
 
 Open **Design → Agents** (it was *Agent Library*). Orama's agents are marked **By Orama**; filter by
 **By Orama** to see only them. Each card says what the agent does for you, where to use it, and
-whether this Lake runs it (*Available*, or *Not available here*). Open one to see it, and choose
+whether this Lake runs it (*Available*, or *Not running on this Lake*). Open one to see it, and choose
 **Duplicate to edit** to design an agent of your own from it.
 
 | Agent | What it does | Where you meet it |
 |---|---|---|
 | **Ask Orama** | Answers from what you can read and proposes changes for you to confirm; hands work to the other agents | **Ask Orama** in the top bar of every page |
 | **Project Agent** | Builds pipelines and proposes changes to them | **Ask the Project Agent** on a pipeline; a solution's foundation |
-| **ApplicationAgent** | Proposes and builds data apps | **Ship → Apps** |
-| **ExperimentsAgent** | Proposes editable training experiments, follows their trials and explains results | **Train → Experiments** |
-| **Auto-Suggest** | Suggests projects worth building from your data | **Design → Opportunities** |
-| **AgentCreator** | Designs a new agent with you | **Design → Agents → Describe it to the Agent Factory** |
+| **Application Agent** | Proposes and builds data apps | **Ship → Apps** |
+| **Experiments Agent** | Proposes editable training experiments, follows their trials and explains results | **Train → Experiments** |
+| **Auto-Suggest Agent** | Suggests projects worth building from your data | **Design → Opportunities** |
+| **Agent Creator Agent** | Designs a new agent with you | **Design → Agents → Describe it to the Agent Factory** |
+| **Eval Generator Agent** | Creates an eval for you: realistic test cases, each a role, the problem they face and real-looking data for it, to measure how well an agent does | **Ask Orama**, when you ask for an eval; evals are used in **Train → Agents** |
+| **Auto-Suggest Corpus Agent** | Builds a training corpus for you: worked examples of what is worth building for the business situations you describe | **Ask Orama**, when you ask for a training corpus; it trains an agent in **Train → Agents** |
+| **Project Corpus Agent** | Builds a training corpus for you: worked examples of building or changing a pipeline on your own data, each step checked against your workspace | **Ask Orama**, when you ask for a training corpus; it trains an agent in **Train → Agents** |
 
-Agents marked *Orama internal* are Orama's own test tooling and are never offered to talk to.
+All nine are ordinary agents: each is in Ask Orama's **Talk to** when this Lake runs it.
+
+In **Ask Orama → Talk to**, each agent shows what it does under its name, and **Where you meet it**
+expands to say where else it appears. An agent this Lake does not run stays in the list, marked
+*not running on this Lake*, and cannot be picked.
 
 - REST: `GET /v1/list_agent_library`
-- MCP: `list_agent_library`. It takes no input and answers each agent with `deployed` and `status`.
+- MCP: `list_agent_library`. It answers all nine of Orama's agents, each with `deployed` and
+  `status`.
 
 The library agents that propose changes never make them on their own: the Project Agent's edits wait
-for **Apply**, ApplicationAgent's app for **Confirm and deploy**, and ExperimentsAgent's experiment
+for **Apply**, the Application Agent's app for **Confirm and deploy**, and the Experiments Agent's experiment
 for **Confirm and start experiment**.
 
 ## Concepts
@@ -108,14 +116,14 @@ Lake refuses any other field in it with `invalid_input` and the field's path.
 
 ## Describe It to the Agent Factory
 
-The Agent Factory designs the agent with you in a conversation with **AgentCreator**.
+The Agent Factory designs the agent with you in a conversation with **Agent Creator Agent**.
 
 1. Open **Design → Agents** and choose **Describe it to the Agent Factory**.
-2. Under **Ask it**, say what the agent should do. AgentCreator asks what it must, then shows a
+2. Under **Ask it**, say what the agent should do. Agent Creator Agent asks what it must, then shows a
    **Proposal**: what kind of agent and why, where it is stored, its work area, instructions, goal,
    skills, trigger, pipelines and every file.
 3. A proposal with defects lists them under *This proposal has defects and cannot be created yet*
-   and cannot be approved: tell AgentCreator what to change.
+   and cannot be approved: tell the Agent Creator Agent what to change.
 4. Choose **Approve and create**. Lake creates exactly the proposal you reviewed. A frontier agent
    with a trigger is scheduled, and a first check run starts so its first run is one you can read.
 
@@ -241,7 +249,7 @@ An agent's **Training** tab shows:
 - **Versions and the data they learned from**, with **Promote** for a newer version and **Roll
   back** for an older one. Each is confirmed, and is kept as a revision of its design.
 - **Launch experiment**: compare its trained versions, variations of its instructions or the
-  models it could run on. ExperimentsAgent turns this into an experiment you review and confirm on
+  models it could run on. Experiments Agent turns this into an experiment you review and confirm on
   **Train → Experiments**; nothing starts before you confirm.
 - **Training schedule**: when it retrains (only when you start it, when its tools or goals change,
   daily, weekly or monthly), its training data, what it starts from and how many steps.
@@ -303,7 +311,7 @@ credential is generated for the run and is never stored in Lake.
 | `invalid_input` on `set_agent_streams` | The agent is not on a frontier model, or a stream is a system stream. |
 | `not_found` on `set_agent_streams` at `/streams/<n>` | The workspace has no stream of that name; create it in **Train → Streams** first. |
 | A stream's messages start no run | The person who chose the stream can no longer act in the workspace, or the workspace is stopped. Choose the stream again as someone who can. |
-| `invalid_input` on `approve_agent_proposal` | *This proposal still has defects*: ask AgentCreator to fix them. |
+| `invalid_input` on `approve_agent_proposal` | *This proposal still has defects*: ask the Agent Creator Agent to fix them. |
 | `conflict` on `approve_agent_proposal` | The proposal changed; review it again and approve the new one. |
 | A run stays *Pending* | Lake is waiting for the platform to start it; after five minutes it fails with a reason. |
 

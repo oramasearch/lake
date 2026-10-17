@@ -7,6 +7,7 @@
 #include <ranges>
 #include <string_view>
 
+#include <openssl/crypto.h>
 #include <openssl/evp.h>
 #include <openssl/rand.h>
 
@@ -475,6 +476,54 @@ IdentityOptions options_for_store(control::Store& store, IdentityOptions options
 }
 
 } // namespace
+
+namespace {
+std::vector<std::uint8_t> domain_signed_bytes(std::string_view artifact_type,
+                                              const nlohmann::json& body) {
+    const std::string domain = "TAAP/1 " + std::string(artifact_type);
+    std::vector<std::uint8_t> output(domain.begin(), domain.end());
+    output.push_back(0);
+    const auto encoded = cbor(body);
+    output.insert(output.end(), encoded.begin(), encoded.end());
+    return output;
+}
+} // namespace
+
+Result<std::string> sign_with_managed_key(std::string_view wrapped_seed,
+                                          std::string_view instance_kek,
+                                          std::string_view artifact_type,
+                                          const nlohmann::json& body) {
+    if (wrapped_seed.empty() || artifact_type.empty()) {
+        return std::unexpected(Error{"invalid_input", "a managed key and artifact are required"});
+    }
+    auto seed = unwrap_seed(std::string(wrapped_seed), std::string(instance_kek));
+    if (!seed) {
+        return std::unexpected(seed.error());
+    }
+    auto key = pkey_from_seed(*seed);
+    OPENSSL_cleanse(seed->data(), seed->size());
+    if (!key) {
+        return std::unexpected(key.error());
+    }
+    return sign(key->get(), domain_signed_bytes(artifact_type, body));
+}
+
+Result<void> verify_managed_signature(std::string_view public_key,
+                                      std::string_view artifact_type,
+                                      const nlohmann::json& body,
+                                      std::string_view signature) {
+    auto key = base64_decode(std::string(public_key));
+    if (!key) {
+        return std::unexpected(key.error());
+    }
+    return verify_signature(*key, domain_signed_bytes(artifact_type, body), std::string(signature));
+}
+
+std::string effective_instance_kek(control::Store& store, std::string_view instance_kek) {
+    IdentityOptions options;
+    options.instance_kek = std::string(instance_kek);
+    return options_for_store(store, options).instance_kek;
+}
 
 Result<Identity> mint_custodial_identity(std::string_view instance_kek) {
     if (instance_kek.empty()) {

@@ -1,0 +1,137 @@
+# Network
+
+**Status: implemented 2026-10-14 in the source tree (lake#729); not deployed.** Each workspace has a
+Network section in the rail, after Ship: what the workspace's apps, services and developers may
+reach, and what may reach them. Its pages call the fourteen network capabilities of
+[`docs/api/network.md`](../api/network.md) (lake#728, lake#730, lake#731) and nothing else that
+writes. The section follows the research's navigation proposal (orama-operator
+`docs/research/secure-networking/perplexity-report-2026-10-13.md`, section F, §26) and the design's
+Lake part (orama-operator `docs/infrastructure/secure-networking.md`, §6).
+
+The rows are Lake's control-plane desired state and the operator's observation of it (decision D1),
+so the pages do not wait for the workspace to be prepared: they use the plain page frame, not the
+workspace gate. A tunnel is named for what it reaches; no page names the software that carries it.
+
+## Pages
+
+Every page is a workspace page under `/w/<id>/network/` and carries the section's tabs (Overview,
+Connections, Developer Access, Private Networks, Egress and DNS, Policies, Activity). `/network`
+opens the overview. Breadcrumbs: Network › **page**.
+
+| Page | Path | Reads | Writes | Layout |
+|---|---|---|---|---|
+| Overview | `/network/overview` | `network_rules`, `list_network_tunnel_sessions` (`limit: 10`), `network_activity` (`limit: 10`) | none | Figures, each a link to its page: Connections, Developer access (active grants), Private networks, Egress. One line: how many rules the cluster has applied, and a link to Policies. Two cards: Recent Tunnel Sessions and Recent Network Activity. A line pointing to Data → Connections for the databases the workspace reads |
+| Connections | `/network/connections` | `list_network_connections`, `list_apps`, `list_services` | `create_network_connection`, `rotate_network_connection_credential`, `remove_network_connection` | The table: From and To (kind and name, linked to the app or service), Ports (none means every port the target serves), Credential (its scope in words and the workspace secret's name once issued, never its value), Status, Created, and Rotate credential (scoped only) and Remove. Removed connections are hidden behind *Show n removed*. **Connect an app** (header) opens the drawer: From (app or service), To (service or app), Ports, and, only from an app to a service, Credential (none, read only, read and write) and Schema |
+| Developer Access | `/network/access` | `list_network_tunnel_grants`, `list_network_tunnel_sessions` (`limit: 50`), `get_customer`, `list_memberships`, `tunnel_client_downloads` (in Get credentials) | `grant_network_tunnel`, `revoke_network_tunnel`, `issue_network_tunnel_certificate` | The grants: Who (You, or the member's identity), Reaches, Port, Until, Access (Active, Expired, Revoked), Tunnel (the cluster's state, while active), and Get credentials (the recipient only) and Revoke. Expired and revoked grants are behind *Show n expired or revoked*. Recent Sessions below. **Grant access** (header): Who (you and the members of the account's organization), Reaches (service or app), Port, For (1 hour to 30 days) |
+| Private Networks | `/network/private-networks` | `list_network_peers` | none | Name, Other side, Offers (this workspace's exports), Reaches (the other side's imports), Status, Updated. Read-only: a peer is made through the operator's exchange with the other side |
+| Egress and DNS | `/network/egress` | `list_network_egress_rules` | `create_network_egress_rule` | All, DNS names and Address ranges, with counts. The table: Destination (with its kind), Ports, For (the whole workspace or one workload), Status, Added. **Allow a destination** (header): a DNS name or address range, Ports (443 filled in), and the whole workspace or one app or service |
+| Policies | `/network/policies` | `network_rules` | none | *What This Workspace May Reach*: the rules in effect as sentences ("App reporting may reach service orders on TCP 5432, with its own read only credential."), ending with "Lake asks for no other path into or out of this workspace." Then Each Rule: kind (linked to its page), the rule and whether the cluster applied it |
+| Activity | `/network/activity` | `network_activity` (`limit` 50 or 100) | none | When, From, To, Outcome. Who changed a rule is in Organization → Activity |
+
+### A row's state
+
+A desired row's Status comes from its `status` and `generation` (`recordState` in
+`network/network.ts`), the word in the badge and the cluster's message as its title:
+
+| Row | Shown |
+|---|---|
+| `status` null | Waiting (Removing when `desired: absent`) |
+| `observed_generation` below `generation` | Updating (Removing when absent): a rotation or change not yet applied |
+| applied, `phase` Ready | Ready |
+| applied, `phase` Failed (or Error, Denied, Rejected) | Failed |
+| applied and `desired: absent` | Removed |
+
+A grant's Access is its own (`revoked_at`, `expires_at`, `active`), never the cluster's phase.
+
+Every Network page reads again every 3 seconds while any row it shows is Waiting, Updating or Removing,
+and stops once every row has settled (`pendingPoll` in `network.ts`): a grant goes Ready seconds after it
+is made, and the page shows it without a reload.
+**Get credentials** is enabled only when the grant is active and the cluster reports it Ready at the
+grant's generation with an endpoint and relay trust (`grantReady`), which is what
+`issue_network_tunnel_certificate` requires.
+
+### Get credentials
+
+The drawer is a set of numbered copy-and-paste steps (lake#745), all run in one folder,
+`~/orama-tunnel/<first 8 characters of the grant id>`:
+
+1. make the folder, then the `openssl` command that makes `tunnel.key` and `tunnel.csr`, then `cat tunnel.csr`;
+2. paste the request. The page refuses an empty paste, one over 16 KiB, anything that is not a PEM
+   certificate request, and a paste that contains a private key, before sending it;
+3. one paste that writes `tunnel.crt` (the certificate followed by its chain) and `relay-ca.crt`;
+4. install the tunnel client (lake#745), when `tunnel_client_downloads` offers one. The page picks
+   the client for this browser's machine (`detectClientPlatform`: `navigator.userAgentData.platform`,
+   then `navigator.platform` and the user agent; any Mac is taken as Apple silicon, since browsers
+   report `MacIntel` on both) and offers a **Your machine** chooser of the clients Lake has. One
+   block (`installCommand`) downloads the signed link with `curl -fsSL` into
+   `~/.local/bin/zetta-tunnel` (no sudo), checks the SHA-256 (`shasum -a 256 -c` on macOS,
+   `sha256sum -c` on Linux) and only then runs `chmod +x`. The links work for 15 minutes; the drawer
+   reads them again every ten minutes while it is open. When Lake offers no client, this step is
+   not shown, the steps keep their old numbers, and the start command runs `zetta-tunnel` from the
+   PATH;
+5. the `zetta-tunnel client` command (`~/.local/bin/zetta-tunnel` after step 4) with the grant's
+   endpoint and a local port filled in. The local port is the target's port plus one, or 10000 plus
+   a port below 1024 (`tunnelLocalPort`);
+6. how to connect through it, by the target's kind (`tunnelInstructions` in `network.ts`):
+   - `psql` for Postgres, `mysql` for TiDB, `valkey-cli` and `cqlsh`;
+   - `curl` for an app or the workspace's API;
+   - the local address for any other kind;
+   - filled in with the service's own user, password and database, read with `service_connection` once the
+     certificate is issued. The password is masked (`MASKED_PASSWORD`) until **Reveal**, and **Copy** copies
+     the working command. `service_connection` answers an account admin only; for anyone else the command
+     keeps `USER`/`DATABASE` placeholders and points to Ship → Services, Show connection.
+
+The endpoint and the two files on their own are under a disclosure. The answer is shown once and is
+not kept: closing the drawer forgets it. The key never reaches Lake.
+
+Ship → Services links here: a Ready service in a workspace has **Developer access**, which opens
+this page with Grant access filled in (lake#741): that service, the port of its address, you, for one hour
+(`?grant=<service id>&port=<port>`, built by `serviceAccessHref`).
+
+### Sessions and activity not recorded yet
+
+Until the workspace-record provider is available (zetta#1281), `list_network_tunnel_sessions` and
+`network_activity` answer `available: false`. The pages then show *Tunnel Sessions Are Not Recorded
+Yet* or *Network Activity Is Not Recorded Yet* instead of an empty table, so the missing history
+never reads as "nothing happened". A failed read shows its error, as everywhere.
+
+## Data → Connections Is Different
+
+Data → Connections ([connections.md](connections.md), lake#651) lists the databases a workspace
+reads for datasets, kept by the workspace engine. Network → Connections lists which apps may reach
+which services, kept by Lake's control plane for the cluster to enforce. Both rail items are named
+Connections, in different groups; each page's description says what it is and links the other.
+
+## Navigation and Search
+
+`NETWORK_NAV` in `routes/nav.ts` lists the rail items, and `NETWORK_PAGES` in
+`network/network.ts` lists the pages with the capabilities each calls, in the same order (the test
+checks both). The section's key is `network` (`SectionKey`), its icon lucide's Network, and `g n`
+jumps to it. Overview is `/network/overview`, not `/network`, so it does not own the section's other
+pages in the rail. Go to (⌘K) lists every page by its rail label.
+
+## Verify
+
+- `frontend/tests/network.test.ts`: every network capability is called from a page; the rail's
+  order and labels; each page marks only its own rail item current and Data → Connections stays
+  Data's; row and grant states; ports, scopes and the three forms' inputs; the request check; names
+  instead of ids; the policy sentences, with no vendor named; the tunnel client downloads read as
+  clients, the machine detected from the browser, and the install paste (lake#745).
+- `npm run build` (the tests, `tsc`, Vite and both source checks).
+- In a browser at 1316 px, against a local Lake (this branch's binary, a fresh PostgreSQL control
+  database with `db/schema.sql`, a password account). Walked 2026-10-14: every page; Connect an app
+  (service to service) and Remove with *Show removed* reading Removing; Grant access, then Get
+  credentials with a real `openssl` request and the certificate, chain, relay CA and endpoint
+  returned, then Revoke; Allow a destination by DNS name; Policies' sentences; Private Networks with
+  a peer row; Activity and Recent Sessions saying *Not Recorded Yet*; the Network guide under Docs;
+  Data → Connections' link. The operator's observations (Ready, Failed, a relay endpoint) and the
+  peer row were written into that local database by hand, standing in for the operator. Not walked:
+  an app as the source (no app can be created without a prepared workspace locally), so Rotate
+  credential and the Credential column were exercised only by the tests.
+
+## Change It
+
+- A new network capability: its page's `capabilities` in `NETWORK_PAGES`, the call on the page,
+  this table, and the capability list in `tests/network.test.ts`.
+- A peer is created or removed here only once Lake has a capability for it; the page is read-only
+  until then. So is removing an egress rule: there is no capability for it yet.

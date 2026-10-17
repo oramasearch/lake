@@ -1,5 +1,9 @@
 # Telemetry implementation
 
+The network Store wrapper forwards all twenty connection, egress-rule, tunnel-grant and peer
+operations with per-operation labels, preserving actors, scope, records and errors. See
+[network.md](../../docs/control-plane/network.md).
+
 Agent claim duration, credential-checked lease renewal, and retry-notice acknowledgement pass
 through the Store wrapper with their original results and errors. See
 [agent leases](../../docs/api/agent-bus.md).

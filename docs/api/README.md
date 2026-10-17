@@ -1,5 +1,20 @@
 # The `/v1` API and MCP
 
+lake#728/#730/#731: [network.md](network.md) documents the fourteen secure-networking capabilities
+for connections, scoped credential rotation, egress rules, tunnel grants, peers, effective rules,
+sessions and activity. One registry definition supplies their permission checks, REST/OpenAPI
+operations and MCP tools. [scoped-credentials.md](scoped-credentials.md) defines the app credential
+scope, workspace-secret reference, rotation and revocation.
+[tunnel-grants.md](tunnel-grants.md) covers recipient-only CSR signing, bounded certificates,
+public trust, admin revocation and pending session history.
+[tunnel-clients.md](tunnel-clients.md) covers `tunnel_client_downloads` and
+`GET /tunnel-clients/<platform>`: the tunnel client binaries, offered per platform as signed
+15-minute links a plain `curl` follows (lake#745).
+
+lake#757: [regions.md](regions.md) documents regions: the four variables the operator sets,
+`server_info`'s `region` and `regions`, and the apex host's region picker (closest region from
+`CF-IPCountry`, the `lake_region` preference cookie, the path and query kept).
+
 lake#650: [engine-capabilities.md](engine-capabilities.md) documents every capability of a
 workspace's engine as a named Lake capability (its own route, OpenAPI operation and MCP tool, with
 the engine's input schema vendored in `src/api/engine_openapi.json`), the names Lake gives the
@@ -93,7 +108,7 @@ the storage fields a workspace row gains.
 
 [experiments.md](experiments.md) documents eleven training experiment, trial, run-metric,
 comparison and bounded-live-read capabilities, with identical REST POST/MCP schemas and confirmed
-actions, plus the `agent_turn` contract used for ExperimentsAgent proposals. Lake says experiment
+actions, plus the `agent_turn` contract used for Experiments Agent proposals. Lake says experiment
 and `experiment_id` where the engine says study (lake#561, [names](experiments.md#names)); lake's
 `get_experiment` is distinct from the solutions holdout `get_experiment` that `workspace_query`
 reads. `start_experiment` leaves a missing objective and budgets to Zetta under `from_defaults`,
@@ -260,7 +275,7 @@ and `Experiments.CompareRunsAnswersItsGetFormWithRepeatedKeysOrACommaList`
 
 | Capability | Kind | Input | Value | Page |
 |---|---|---|---|---|
-| `server_info` | read, **no auth** | — | `{name, node, version, revision, api, store, deployments}`; `revision` is the embedded full source commit or `unknown`; `deployments` says whether the platform mirror is configured ([platform.md](platform.md#a-lake-without-the-platform-mirror), lake#605) | [../deployment/production-2026-09-08.md](../deployment/production-2026-09-08.md) |
+| `server_info` | read, **no auth** | — | `{name, node, version, revision, api, store, deployments, region, regions}`; `revision` is the embedded full source commit or `unknown`; `deployments` says whether the platform mirror is configured ([platform.md](platform.md#a-lake-without-the-platform-mirror), lake#605); `region` (`{name, label}` or `null`) and `regions` (`[{name, label, host}]` or `[]`) are this Lake's region and the deployment's regions ([regions.md](regions.md), lake#757) | [../deployment/production-2026-09-08.md](../deployment/production-2026-09-08.md) |
 | `viewer` | read, **no auth** | `workspace_id?`, `customer_id?` | who is signed in, their accounts and current workspace, Clerk, sign-up, origin, agent models, version | [web-app.md](web-app.md) |
 | `my_permissions`, `list_packages`, `list_docs`, `get_doc`, `mcp_setup`, `resolve_model` | read (`list_docs`, `get_doc` and a public `resolve_model` need no credential) | see the page | permission flags, the Packages catalog, the Docs guides, Developer → MCP, a model's repository by name | [web-app.md](web-app.md) |
 | `latest_agent_task`, `render_pipeline` / `compile_pipeline` | read / action | `customer_id`, `workspace_id`, then `subject`, or `project` and `graph`, or `project` and `intent` | a project's background task, a pipeline drawn as SVG, a pipeline compiled from a description | [web-app.md](web-app.md) |
@@ -352,13 +367,13 @@ and `Experiments.CompareRunsAnswersItsGetFormWithRepeatedKeysOrACommaList`
 | `transparency_proof_bundle` | public read | leaf index | identity, trust configuration, current checkpoint, all committed tiles, and one inclusion proof for offline verification | [transparency.md](transparency.md) |
 | `transparency_consistency_proof` | public read | old and new checkpoint tree sizes | compact append-only audit path bound to the complete new checkpoint record | [transparency.md](transparency.md) |
 | `transparency_identity_scan` | public read | TAAP identity | checkpoint-verified matching attestations and scan measurements | [transparency.md](transparency.md) |
-| `list_agent_library` | read | none | the Agent Library: every specialized agent Orama ships, whether this lake runs it, and, only with `include_internal: true`, Orama's own tooling marked `internal` (never offered in Ask Orama) | [train-agents.md](train-agents.md) |
+| `list_agent_library` | read | none | the Agent Library: every specialized agent Orama ships, whether this lake runs it; all nine always, and `include_internal` is accepted and ignored (lake#788) | [train-agents.md](train-agents.md) |
 | `list_agent_revisions` | read | customer, workspace, agent, optional limit | every revision of an agent's definition, newest first: its number, who made it and when, `create` or `update`, and the definition it set (lake#653); restore one with `update_agent` | [train-agents.md](train-agents.md#definition-revisions) |
 | `list_datasets` | read | customer | The workspace dataset catalogue with stable `<database>/<name>` ids (the form `get_dataset` takes) and `kind` (`data` or engine `result`) | [workspaces.md](workspaces.md) |
 | `list_runs` | read | customer, optional project/solution and limit | newest matching runs with status, reached stage and final error line | [workspaces.md](workspaces.md) |
 | `launch_agent`, `list_agent_launches`, `stop_agent_launch`, `schedule_agent`, `list_agent_schedules`, `unschedule_agent` | action / read | customer, agent, mode, input, cron or trigger | run, follow and stop Python agents on agent-runtime, and give them cron schedules (each a CronJob) | [agent-launches.md](agent-launches.md) |
 | `set_agent_streams`, `list_agent_streams` | action / read | customer, workspace, agent, streams | the workspace streams whose new messages each start a job of a Python agent, as the person who set them (lake#677) | [agent-launches.md](agent-launches.md#stream-triggers) |
-| `agent_turn` | action | customer, agent, message, optional conversation/kind/context | one conversation turn with any agent: library, native or Python; a reused library-agent conversation includes its preceding same-agent, same-kind turn; ExperimentsAgent uses proposal, status and explanation kinds | [agent-launches.md](agent-launches.md) |
+| `agent_turn` | action | customer, agent, message, optional conversation/kind/context | one conversation turn with any agent: library, native or Python; a reused library-agent conversation includes its preceding same-agent, same-kind turn; Experiments Agent uses proposal, status and explanation kinds | [agent-launches.md](agent-launches.md) |
 | `receive_agent_tasks`, `claim_agent_task`, `publish_agent_event`, `receive_agent_events` | read / action | agent, task, sequence | renewable claims, bounded reclaim/retry, progress and first-terminal-write-wins results over workspace Zetta pub/sub; delegated turns reported on the asking turn | [agent-bus.md](agent-bus.md) |
 | `mint_agent_session_key` | action | customer, durable and dispatcher identities, scopes, lifetime | response-only private seed plus logged durable-identity delegation | [agents.md](agents.md) |
 | `verify_agent_session_drip` | action | customer, session, canonical body and TAAP signature | verified durable attribution, scopes and log commitment | [agents.md](agents.md) |
@@ -370,7 +385,7 @@ and `Experiments.CompareRunsAnswersItsGetFormWithRepeatedKeysOrACommaList`
 | `export_transparency_replication_batch` | action | source tree-size cursor | verified log suffix with base/head commitments and current checkpoint | [replication.md](replication.md) |
 | `replicate_transparency_log` | action | source Lake URL | applied tree size, root, checkpoint sequence, and catch-up state | [replication.md](replication.md) |
 | `replicate_repository` | action | repository, source instance, source Lake URL | durable liquid cursor, transfer totals, and ref count | [replication.md](replication.md) |
-| `sign_up_password`, `sign_in_password`, `sign_in_taap`, `verify_mfa` | action, public entry | password, one-use TAAP assertion, or MFA proof | browser session + secret | [identity.md](identity.md) |
+| `sign_up_password`, `sign_in_password`, `sign_in_taap`, `verify_mfa` | action, public entry | password (an identity document optional in Lake's pool), one-use TAAP assertion, or MFA proof | browser session + secret | [identity.md](identity.md) |
 | `register_application`, `list_applications`, `get_application`, `update_application_theme`, `rotate_application_signing_key` | action/read | customer, application registration, theme, or application id | isolated pool registration and key metadata | [apps.md](apps.md) |
 | `application_jwks`, `issue_application_jwt` | public read / protected action | application, its `workspace_id` (JWT) and active user ids | Ed25519 JWKS or short-lived audience-bound JWT | [apps.md](apps.md) |
 | `begin_application_authorization`, `exchange_application_authorization_code` | protected/public action | application, exact redirect, state, nonce, PKCE challenge; then code and verifier | one-use authorization result, then access and ID tokens | [apps.md](apps.md) |
@@ -384,6 +399,7 @@ and `Experiments.CompareRunsAnswersItsGetFormWithRepeatedKeysOrACommaList`
 | `start_oauth` | action, public entry | pool, provider, device name, identity document for a new user | authorization URL | [identity.md](identity.md) |
 | `create_token`, `list_sessions`, `revoke_session` | action/read | name/scopes or session id | tokens bounded by issuer scopes and expiry, with parent revocation | [identity.md](identity.md) |
 | `list_devices`, `revoke_device` | read/action | device id for revocation | device data, including passkey credential IDs and signed bindings | [identity.md](identity.md) |
+| `account_identity`, `begin_own_identity`, `use_own_identity` | read/action, signed-in person | identity document; challenge and `liquid sign artifact` output | which key the account signs with; the challenge; the linked account identity | [identity.md](identity.md#your-own-identity) |
 | `issue_offline_grant`, `list_offline_grants`, `revoke_offline_grant`, `check_cached_read` | action/read | device, repository-read scopes, duration, or signed credential | bounded cached-read grant or verification | [offline.md](offline.md) |
 | `recover_with_code`, `begin_email_recovery`, `begin_admin_recovery`, `approve_admin_recovery`, `complete_recovery` | action | recovery proof, organization/user, or one-use token | recovery state or fresh browser session | [recovery.md](recovery.md) |
 | `claim_recovery_deliveries`, `list_recovery_notifications` | action/read | operator limit or authenticated user | queued mail work or per-device notices | [recovery.md](recovery.md) |

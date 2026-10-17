@@ -17,6 +17,7 @@
 #include "lake/audit/audit.hpp"
 #include "lake/control/apps.hpp"
 #include "lake/control/builds.hpp"
+#include "lake/control/network.hpp"
 #include "lake/control/offline_recovery.hpp"
 #include "lake/control/secrets.hpp"
 #include "lake/control/store_mounts.hpp"
@@ -255,6 +256,9 @@ struct NewPasswordUser {
     // The new user's id, chosen by the caller so that an application's workspace can record the
     // user before lake's own row exists (lake#353); empty: the store chooses one.
     std::string user_id;
+    // The managed key lake minted for a lake-pool sign-up without an identity document (lake#762,
+    // decision 65); empty when the person brought their own document.
+    std::string custodial_taap_id, custodial_public_key, custodial_wrapped_seed;
 };
 struct PasswordSignIn {
     std::string pool_id, email, password, totp_code, device_name;
@@ -292,6 +296,44 @@ struct OAuthIdentity {
 struct ClerkIdentity {
     std::string subject, email, display_name, device_name;
     std::string custodial_taap_id, custodial_public_key, custodial_wrapped_seed;
+};
+// What a Clerk user event did to Lake (lake#765, docs/api/clerk.md#webhooks).
+struct ClerkUserProvisioned {
+    std::string user_id, taap_id;
+    bool created = false; // a new account, with a managed key and a personal customer
+    bool linked = false;  // the subject was linked to an account found by its verified email
+};
+// Which key an account signs with (lake#762, docs/api/identity.md#your-own-identity). `managed`:
+// lake minted and holds the key. `own`: the person's own liquid identity, either registered at
+// sign-up (no managed key ever existed) or linked later as the managed key's successor.
+struct AccountIdentity {
+    std::string user_id;
+    std::string taap_id; // the account's identifier, which grants and audit are keyed on
+    std::string key;     // "managed" or "own"
+    std::string own_taap_id;
+    std::string own_document_hash;
+    std::string linked_at;
+    // The managed key's public half, kept after its seed is destroyed so the link verifies.
+    std::string managed_public_key;
+    bool managed_seed_held = false;
+    std::string managed_seed_destroyed_at;
+    nlohmann::json link_document; // null unless linked
+};
+// The account's managed key with its wrapped seed, read only to sign the link.
+struct ManagedKey {
+    std::string user_id, taap_id, public_key, wrapped_seed;
+};
+// A pending "use my own identity": the person's verified public document and the statement
+// they must sign with that key, bound to one account and expiring (identity_link_challenges).
+struct IdentityLinkChallenge {
+    std::string challenge, user_id, account_taap_id, own_taap_id, own_document, own_document_hash;
+    nlohmann::json statement;
+    std::string expires_at;
+};
+// The committed rotation: both signatures are in `link_document`.
+struct IdentityLink {
+    std::string user_id, account_taap_id, own_taap_id, own_document, own_document_hash;
+    nlohmann::json link_document;
 };
 // A service a customer runs on the Lake's cluster (docs/control-plane/services.md): lake writes
 // the desired fields, the operator the status fields.
@@ -984,7 +1026,7 @@ struct StreamOwner {
     std::string customer_id, workspace_id, topic, created_by;
 };
 
-// One Opportunity Auto-Suggest recommended (or declined, status not_yet), kept across scans. It
+// One Opportunity Auto-Suggest Agent recommended (or declined, status not_yet), kept across scans. It
 // lives in the workspace Zetta of the workspace its scan ran in (lake#376,
 // control/opportunities.hpp); the control store only reads the retired opportunities table for
 // the one-shot copy.
@@ -1579,6 +1621,61 @@ public:
     // Managed services (docs/control-plane/services.md). Lists the customer's services, oldest
     // first, leaving out deleted ones the operator has finished with.
     virtual Result<std::vector<ManagedService>> list_services(const std::string& customer_id) = 0;
+    // Secure networking (docs/control-plane/network.md). Updates replace the mutable spec and
+    // advance generation. Withdrawn/revoked/expired rows cannot be revived. Reads include history
+    // and the operator's optional status; only the operator writes status in PostgreSQL.
+    virtual Result<NetworkConnection> create_network_connection(const NetworkScope&,
+                                                                const NetworkConnectionSpec&,
+                                                                const NetworkActor&) = 0;
+    virtual Result<NetworkConnection> update_network_connection(const NetworkScope&,
+                                                                const std::string& id,
+                                                                const NetworkConnectionSpec&,
+                                                                const NetworkActor&) = 0;
+    virtual Result<NetworkConnection> withdraw_network_connection(const NetworkScope&,
+                                                                  const std::string& id,
+                                                                  const NetworkActor&) = 0;
+    virtual Result<NetworkConnection> get_network_connection(const NetworkScope&,
+                                                             const std::string& id) = 0;
+    virtual Result<std::vector<NetworkConnection>>
+    list_network_connections(const NetworkScope&) = 0;
+    virtual Result<NetworkEgressRule> create_network_egress_rule(const NetworkScope&,
+                                                                 const NetworkEgressRuleSpec&,
+                                                                 const NetworkActor&) = 0;
+    virtual Result<NetworkEgressRule> update_network_egress_rule(const NetworkScope&,
+                                                                 const std::string& id,
+                                                                 const NetworkEgressRuleSpec&,
+                                                                 const NetworkActor&) = 0;
+    virtual Result<NetworkEgressRule> withdraw_network_egress_rule(const NetworkScope&,
+                                                                   const std::string& id,
+                                                                   const NetworkActor&) = 0;
+    virtual Result<NetworkEgressRule> get_network_egress_rule(const NetworkScope&,
+                                                              const std::string& id) = 0;
+    virtual Result<std::vector<NetworkEgressRule>>
+    list_network_egress_rules(const NetworkScope&) = 0;
+    virtual Result<NetworkTunnelGrant> create_network_tunnel_grant(const NetworkScope&,
+                                                                   const NetworkTunnelGrantSpec&,
+                                                                   const NetworkActor&) = 0;
+    virtual Result<NetworkTunnelGrant> update_network_tunnel_grant(const NetworkScope&,
+                                                                   const std::string& id,
+                                                                   const NetworkTunnelGrantSpec&,
+                                                                   const NetworkActor&) = 0;
+    virtual Result<NetworkTunnelGrant> revoke_network_tunnel_grant(const NetworkScope&,
+                                                                   const std::string& id,
+                                                                   const NetworkActor&) = 0;
+    virtual Result<NetworkTunnelGrant> get_network_tunnel_grant(const NetworkScope&,
+                                                                const std::string& id) = 0;
+    virtual Result<std::vector<NetworkTunnelGrant>>
+    list_network_tunnel_grants(const NetworkScope&) = 0;
+    virtual Result<NetworkPeer>
+    create_network_peer(const NetworkScope&, const NetworkPeerSpec&, const NetworkActor&) = 0;
+    virtual Result<NetworkPeer> update_network_peer(const NetworkScope&,
+                                                    const std::string& id,
+                                                    const NetworkPeerSpec&,
+                                                    const NetworkActor&) = 0;
+    virtual Result<NetworkPeer>
+    withdraw_network_peer(const NetworkScope&, const std::string& id, const NetworkActor&) = 0;
+    virtual Result<NetworkPeer> get_network_peer(const NetworkScope&, const std::string& id) = 0;
+    virtual Result<std::vector<NetworkPeer>> list_network_peers(const NetworkScope&) = 0;
     virtual Result<ManagedService> get_service(const std::string& id) = 0;
     // Creates a service. A default one that already exists is returned unchanged; a live name is a
     // conflict; a customer at max_per_customer live services is refused with quota_exceeded.
@@ -1934,6 +2031,37 @@ public:
     // user with the same email; with neither, it creates the user with the custodial identity
     // and provisions their personal customer, as password sign-up does.
     virtual Result<IssuedSession> sign_in_clerk(const ClerkIdentity&) = 0;
+    // Clerk webhooks (lake#765, docs/api/clerk.md#webhooks).
+    // user.created: what a first sign_in_clerk does to the account, without a session. Repeating
+    // it finds the same account.
+    virtual Result<ClerkUserProvisioned> provision_clerk_user(const ClerkIdentity&) = 0;
+    // user.updated: the email (when non-empty) and display name of the account linked to the
+    // subject; not_found when none is linked, conflict when another account has the email.
+    virtual Result<std::string> update_clerk_user(const ClerkIdentity&) = 0;
+    // user.deleted: disables the account linked to the subject and revokes every session, token
+    // and device of it. Nothing is erased. Answers the account's user id.
+    virtual Result<std::string> disable_clerk_user(const std::string& subject) = 0;
+    // Whether a webhook delivery (its svix-id) was already applied, and recording that it was.
+    virtual Result<bool> clerk_webhook_applied(const std::string& delivery_id) = 0;
+    virtual Result<void> record_clerk_webhook(const std::string& delivery_id,
+                                              const std::string& event_type,
+                                              const std::string& subject) = 0;
+    // Using your own identity (lake#762, docs/api/identity.md#your-own-identity).
+    // Which key the account signs with.
+    virtual Result<AccountIdentity> account_identity(const std::string& user_id) = 0;
+    // The managed key with its wrapped seed; not_found once it is destroyed or if there was none.
+    virtual Result<ManagedKey> managed_key(const std::string& user_id) = 0;
+    // Records a pending link. conflict when the own identity already belongs to an account.
+    virtual Result<void> create_identity_link_challenge(const IdentityLinkChallenge&) = 0;
+    // Consumes the user's unexpired, unused challenge once.
+    virtual Result<IdentityLinkChallenge>
+    consume_identity_link_challenge(const std::string& user_id, const std::string& challenge) = 0;
+    // In one transaction: records the link and destroys the managed seed. conflict when the
+    // account already uses its own identity or the own identity belongs to another account.
+    virtual Result<AccountIdentity> link_own_identity(const IdentityLink&) = 0;
+    // The account identifier a TAAP identity acts for: itself for an account's own identifier,
+    // the account's identifier for a linked own identity; not_found otherwise.
+    virtual Result<std::string> account_for_identity(const std::string& taap_id) = 0;
     virtual Result<void> register_oauth_provider(const OAuthProvider&) = 0;
     virtual Result<OAuthProvider> get_oauth_provider(const std::string& pool_id,
                                                      const std::string& provider) = 0;

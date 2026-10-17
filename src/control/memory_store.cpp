@@ -3373,10 +3373,19 @@ Result<IssuedSession> InMemoryStore::sign_up_password(const NewPasswordUser& inp
         if (credential.pool_id == pool && lower(credential.email) == lower(input.email))
             return std::unexpected(StoreError{"conflict", "email already exists"});
     }
+    const bool managed = !input.custodial_taap_id.empty();
+    if (managed && (input.custodial_public_key.empty() || input.custodial_wrapped_seed.empty())) {
+        return std::unexpected(StoreError{"invalid_input", "a managed key is incomplete"});
+    }
+    if (managed && pool != "lake") {
+        return std::unexpected(
+            StoreError{"invalid_input", "a managed key is only for lake's own accounts"});
+    }
     const std::string identity_secret = identity_crypto::random_secret();
     if (identity_secret.empty())
         return std::unexpected(StoreError{"store_error", "could not create identity"});
-    const std::string identity = "taap:1:ed25519:" + identity_secret;
+    const std::string identity =
+        managed ? input.custodial_taap_id : "taap:1:ed25519:" + identity_secret;
     const std::string now = now_iso8601();
     if (!input.user_id.empty() &&
         std::ranges::any_of(users_, [&](const User& value) { return value.id == input.user_id; })) {
@@ -3407,6 +3416,15 @@ Result<IssuedSession> InMemoryStore::sign_up_password(const NewPasswordUser& inp
             customers_, [&](const Customer& customer) { return customer.name == handle; }));
     }
     users_.push_back(user);
+    if (managed) {
+        custodial_identities_[user.id] = ClerkIdentity{"",
+                                                       input.email,
+                                                       input.display_name,
+                                                       input.device_name,
+                                                       input.custodial_taap_id,
+                                                       input.custodial_public_key,
+                                                       input.custodial_wrapped_seed};
+    }
     passwords_.push_back(
         PasswordCredential{users_.back().id, pool, input.email, password_hash, ""});
     if (pool == "lake") {
@@ -3458,8 +3476,15 @@ Result<IssuedSession> InMemoryStore::sign_in_taap(const TaapSignIn& input) {
     if (!taap_assertions_.insert(input.assertion_id).second) {
         return std::unexpected(StoreError{"unauthorized", "TAAP assertion was already used"});
     }
+    // A linked own identity signs in to the account it was linked to (lake#762).
+    std::string account_taap_id = input.taap_id;
+    for (const auto& [linked_user, link] : identity_links_) {
+        if (link.own_taap_id == input.taap_id) {
+            account_taap_id = link.account_taap_id;
+        }
+    }
     const auto user = std::ranges::find_if(
-        users_, [&](const User& value) { return value.taap_id == input.taap_id; });
+        users_, [&](const User& value) { return value.taap_id == account_taap_id; });
     const auto credential = std::ranges::find_if(passwords_, [&](const PasswordCredential& value) {
         return user != users_.end() && value.user_id == user->id && value.pool_id == input.pool_id;
     });
@@ -3787,29 +3812,29 @@ Result<IssuedSession> InMemoryStore::sign_in_oauth(const OAuthIdentity& input) {
     return issued;
 }
 
-Result<IssuedSession> InMemoryStore::sign_in_clerk(const ClerkIdentity& input) {
+Result<ClerkUserProvisioned> InMemoryStore::clerk_user_locked(const ClerkIdentity& input) {
     if (input.subject.empty()) {
         return std::unexpected(StoreError{"invalid_input", "a Clerk subject is required"});
     }
-    std::lock_guard lock(mutex_);
     const std::string subject = "clerk:" + input.subject;
-    std::string user_id;
+    ClerkUserProvisioned result;
     for (const auto& credential : oauth_credentials_) {
         if (credential.pool_id == "lake" && credential.subject == subject) {
-            user_id = credential.user_id;
+            result.user_id = credential.user_id;
         }
     }
-    if (user_id.empty() && !input.email.empty()) {
+    if (result.user_id.empty() && !input.email.empty()) {
         for (const auto& user : users_) {
             if (lower(user.email) == lower(input.email)) {
-                user_id = user.id;
+                result.user_id = user.id;
             }
         }
-        if (!user_id.empty()) {
-            oauth_credentials_.push_back(OAuthCredential{user_id, "lake", subject});
+        if (!result.user_id.empty()) {
+            oauth_credentials_.push_back(OAuthCredential{result.user_id, "lake", subject});
+            result.linked = true;
         }
     }
-    if (user_id.empty()) {
+    if (result.user_id.empty()) {
         if (input.custodial_taap_id.empty() || input.custodial_public_key.empty() ||
             input.custodial_wrapped_seed.empty()) {
             return std::unexpected(
@@ -3818,15 +3843,17 @@ Result<IssuedSession> InMemoryStore::sign_in_clerk(const ClerkIdentity& input) {
         const std::string now = now_iso8601();
         users_.push_back(User{
             new_uuid_v4(), input.custodial_taap_id, input.email, input.display_name, now, now});
-        user_id = users_.back().id;
-        custodial_identities_[user_id] = input;
-        oauth_credentials_.push_back(OAuthCredential{user_id, "lake", subject});
+        result.user_id = users_.back().id;
+        result.created = true;
+        custodial_identities_[result.user_id] = input;
+        oauth_credentials_.push_back(OAuthCredential{result.user_id, "lake", subject});
         std::string handle;
         do {
             handle = generate_handle();
         } while (std::ranges::any_of(
             customers_, [&](const Customer& customer) { return customer.name == handle; }));
-        customers_.push_back(Customer{new_uuid_v4(), "individual", user_id, "", handle, now, now});
+        customers_.push_back(
+            Customer{new_uuid_v4(), "individual", result.user_id, "", handle, now, now});
         policy_objects_.push_back(
             PolicyObject{new_uuid_v4(), "customer", customers_.back().id, "", now, now, true});
         grants_.push_back(Grant{new_uuid_v4(),
@@ -3838,13 +3865,236 @@ Result<IssuedSession> InMemoryStore::sign_in_clerk(const ClerkIdentity& input) {
                                 now,
                                 now});
     }
-    Device& device = add_device(devices_, user_id, input.device_name);
+    for (const auto& user : users_) {
+        if (user.id == result.user_id) {
+            result.taap_id = user.taap_id;
+        }
+    }
+    return result;
+}
+
+Result<IssuedSession> InMemoryStore::sign_in_clerk(const ClerkIdentity& input) {
+    std::lock_guard lock(mutex_);
+    const auto found = clerk_user_locked(input);
+    if (!found) {
+        return std::unexpected(found.error());
+    }
+    if (disabled_users_.contains(found->user_id)) {
+        return std::unexpected(StoreError{"unauthorized", "this account is disabled"});
+    }
+    Device& device = add_device(devices_, found->user_id, input.device_name);
     IssuedSession issued =
-        add_session(sessions_, user_id, "lake", device.id, "browser", "", {"*"}, "", 86400);
+        add_session(sessions_, found->user_id, "lake", device.id, "browser", "", {"*"}, "", 86400);
     if (issued.secret.empty())
         return std::unexpected(StoreError{"store_error", "could not issue session"});
     issued.session.reason.clear();
     return issued;
+}
+
+Result<ClerkUserProvisioned> InMemoryStore::provision_clerk_user(const ClerkIdentity& input) {
+    std::lock_guard lock(mutex_);
+    return clerk_user_locked(input);
+}
+
+Result<std::string> InMemoryStore::update_clerk_user(const ClerkIdentity& input) {
+    std::lock_guard lock(mutex_);
+    const std::string subject = "clerk:" + input.subject;
+    std::string user_id;
+    for (const auto& credential : oauth_credentials_) {
+        if (credential.pool_id == "lake" && credential.subject == subject) {
+            user_id = credential.user_id;
+        }
+    }
+    if (input.subject.empty() || user_id.empty()) {
+        return std::unexpected(StoreError{"not_found", "no Lake account is linked to this user"});
+    }
+    if (!input.email.empty() && std::ranges::any_of(users_, [&](const User& user) {
+            return user.id != user_id && lower(user.email) == lower(input.email);
+        })) {
+        return std::unexpected(StoreError{"conflict", "another account has this email"});
+    }
+    for (auto& user : users_) {
+        if (user.id == user_id) {
+            if (!input.email.empty()) {
+                user.email = input.email;
+            }
+            user.display_name = input.display_name;
+            user.updated_at = now_iso8601();
+        }
+    }
+    return user_id;
+}
+
+Result<std::string> InMemoryStore::disable_clerk_user(const std::string& clerk_subject) {
+    std::lock_guard lock(mutex_);
+    const std::string subject = "clerk:" + clerk_subject;
+    std::string user_id;
+    for (const auto& credential : oauth_credentials_) {
+        if (credential.pool_id == "lake" && credential.subject == subject) {
+            user_id = credential.user_id;
+        }
+    }
+    if (clerk_subject.empty() || user_id.empty()) {
+        return std::unexpected(StoreError{"not_found", "no Lake account is linked to this user"});
+    }
+    disabled_users_.insert(user_id);
+    const std::string now = now_iso8601();
+    for (auto& session : sessions_) {
+        if (session.user_id == user_id && session.revoked_at.empty()) {
+            session.revoked_at = now;
+        }
+    }
+    for (auto& device : devices_) {
+        if (device.user_id == user_id && device.revoked_at.empty()) {
+            device.revoked_at = now;
+        }
+    }
+    return user_id;
+}
+
+Result<bool> InMemoryStore::clerk_webhook_applied(const std::string& delivery_id) {
+    std::lock_guard lock(mutex_);
+    return clerk_webhook_deliveries_.contains(delivery_id);
+}
+
+Result<void> InMemoryStore::record_clerk_webhook(const std::string& delivery_id,
+                                                 const std::string&,
+                                                 const std::string&) {
+    std::lock_guard lock(mutex_);
+    clerk_webhook_deliveries_.insert(delivery_id);
+    return {};
+}
+
+Result<AccountIdentity> InMemoryStore::account_identity(const std::string& user_id) {
+    std::lock_guard lock(mutex_);
+    const auto user =
+        std::ranges::find_if(users_, [&](const User& value) { return value.id == user_id; });
+    if (user == users_.end()) {
+        return std::unexpected(StoreError{"not_found", "user not found"});
+    }
+    AccountIdentity identity;
+    identity.user_id = user->id;
+    identity.taap_id = user->taap_id;
+    identity.key = "own";
+    identity.link_document = nullptr;
+    if (const auto custodial = custodial_identities_.find(user_id);
+        custodial != custodial_identities_.end()) {
+        identity.managed_public_key = custodial->second.custodial_public_key;
+        identity.managed_seed_held = !custodial->second.custodial_wrapped_seed.empty();
+        if (const auto destroyed = managed_seed_destroyed_at_.find(user_id);
+            destroyed != managed_seed_destroyed_at_.end()) {
+            identity.managed_seed_destroyed_at = destroyed->second;
+        }
+        identity.key = identity.managed_seed_held ? "managed" : "own";
+    }
+    if (const auto link = identity_links_.find(user_id); link != identity_links_.end()) {
+        identity.key = "own";
+        identity.own_taap_id = link->second.own_taap_id;
+        identity.own_document_hash = link->second.own_document_hash;
+        identity.link_document = link->second.link_document;
+        identity.linked_at = identity_linked_at_[user_id];
+    }
+    return identity;
+}
+
+Result<ManagedKey> InMemoryStore::managed_key(const std::string& user_id) {
+    std::lock_guard lock(mutex_);
+    const auto custodial = custodial_identities_.find(user_id);
+    if (custodial == custodial_identities_.end() ||
+        custodial->second.custodial_wrapped_seed.empty()) {
+        return std::unexpected(StoreError{"not_found", "this account holds no managed key"});
+    }
+    return ManagedKey{user_id,
+                      custodial->second.custodial_taap_id,
+                      custodial->second.custodial_public_key,
+                      custodial->second.custodial_wrapped_seed};
+}
+
+Result<void> InMemoryStore::create_identity_link_challenge(const IdentityLinkChallenge& input) {
+    if (input.challenge.empty() || input.user_id.empty() || input.own_taap_id.empty()) {
+        return std::unexpected(StoreError{"invalid_input", "the link challenge is incomplete"});
+    }
+    std::lock_guard lock(mutex_);
+    const bool taken = std::ranges::any_of(users_,
+                                           [&](const User& value) {
+                                               return value.taap_id == input.own_taap_id &&
+                                                      value.id != input.user_id;
+                                           }) ||
+                       std::ranges::any_of(identity_links_, [&](const auto& entry) {
+                           return entry.second.own_taap_id == input.own_taap_id;
+                       });
+    if (taken) {
+        return std::unexpected(
+            StoreError{"conflict", "this identity already belongs to a Lake account"});
+    }
+    identity_link_challenges_.push_back(
+        {input, std::chrono::system_clock::now() + std::chrono::minutes(10), false});
+    return {};
+}
+
+Result<IdentityLinkChallenge>
+InMemoryStore::consume_identity_link_challenge(const std::string& user_id,
+                                               const std::string& challenge) {
+    std::lock_guard lock(mutex_);
+    for (auto& record : identity_link_challenges_) {
+        if (record.challenge.challenge != challenge || record.challenge.user_id != user_id) {
+            continue;
+        }
+        if (record.used || record.expires_at <= std::chrono::system_clock::now()) {
+            break;
+        }
+        record.used = true;
+        return record.challenge;
+    }
+    return std::unexpected(
+        StoreError{"unauthorized", "the link challenge is unknown, used or expired"});
+}
+
+Result<AccountIdentity> InMemoryStore::link_own_identity(const IdentityLink& input) {
+    {
+        std::lock_guard lock(mutex_);
+        const auto custodial = custodial_identities_.find(input.user_id);
+        if (custodial == custodial_identities_.end() ||
+            custodial->second.custodial_wrapped_seed.empty() ||
+            identity_links_.contains(input.user_id)) {
+            return std::unexpected(
+                StoreError{"conflict", "this account already uses its own identity"});
+        }
+        if (custodial->second.custodial_taap_id != input.account_taap_id) {
+            return std::unexpected(
+                StoreError{"conflict", "the account identity changed during the link"});
+        }
+        const bool taken =
+            std::ranges::any_of(
+                users_, [&](const User& value) { return value.taap_id == input.own_taap_id; }) ||
+            std::ranges::any_of(identity_links_, [&](const auto& entry) {
+                return entry.second.own_taap_id == input.own_taap_id;
+            });
+        if (taken) {
+            return std::unexpected(
+                StoreError{"conflict", "this identity already belongs to a Lake account"});
+        }
+        identity_links_[input.user_id] = input;
+        identity_linked_at_[input.user_id] = now_iso8601();
+        // The link and the destruction are one step: the seed is never kept after the rotation
+        // and never destroyed without it.
+        custodial->second.custodial_wrapped_seed.clear();
+        managed_seed_destroyed_at_[input.user_id] = identity_linked_at_[input.user_id];
+    }
+    return account_identity(input.user_id);
+}
+
+Result<std::string> InMemoryStore::account_for_identity(const std::string& taap_id) {
+    std::lock_guard lock(mutex_);
+    for (const auto& [user_id, link] : identity_links_) {
+        if (link.own_taap_id == taap_id) {
+            return link.account_taap_id;
+        }
+    }
+    if (std::ranges::any_of(users_, [&](const User& value) { return value.taap_id == taap_id; })) {
+        return taap_id;
+    }
+    return std::unexpected(StoreError{"not_found", "no account acts for this identity"});
 }
 
 Result<void> InMemoryStore::register_oauth_provider(const OAuthProvider& input) {
@@ -4201,6 +4451,9 @@ Result<Principal> InMemoryStore::context_for(const std::string& secret) {
             users_, [&](const User& row) { return row.id == session.user_id; });
         if (user == users_.end() || user->taap_id.empty())
             return std::unexpected(StoreError{"unauthorized", "session identity is unavailable"});
+        if (disabled_users_.contains(user->id)) {
+            continue; // a disabled account's credentials no longer work (lake#765)
+        }
         session.last_used_at = now_iso8601();
         return Principal{session.user_id,
                          user->taap_id,

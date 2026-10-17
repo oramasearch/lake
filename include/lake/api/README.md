@@ -1,5 +1,14 @@
 # Public API types
 
+`tunnel_clients.hpp` declares the tunnel client downloads (lake#745): the platform allow-list,
+`read_tunnel_clients`, the signed-link helpers (`signed_link_signature`, `signed_link_matches`) and
+the link check. `ApiContext.tunnel_clients_dir` and `ServerOptions.tunnel_clients_dir` name the folder
+(`LAKE_TUNNEL_CLIENTS_DIR`). See [tunnel-clients.md](../../../docs/api/tunnel-clients.md).
+
+`ApiContext.network_records` and `ServerOptions.network_records` inject the scoped tunnel
+session/activity provider; null chooses the pending implementation. The recipient-only CSR
+capability reuses `ApiContext.pki`. See [tunnel credentials](../../../docs/api/tunnel-grants.md).
+
 `web_ui.hpp` declares what lake still renders on the server since the console became the web app
 (lake#561, [web-app.md](../../../docs/ui/web-app.md)): an identity application's hosted sign-in
 pages, the stylesheet and fonts they link, the Docs guides `list_docs` and `get_doc` read, a handler
@@ -9,6 +18,10 @@ failure's page, and the pure helpers capabilities share (`web_ui_escape`, `web_u
 `Capability::post_alias` gives read capabilities a JSON POST route as well as GET, preserving
 read policy and identical OpenAPI/MCP schemas. See `docs/api/streams.md` and `docs/ui/streams.md`
 for the Streams contracts and `docs/api/experiments.md` for the Experiments operations.
+
+`capabilities.hpp` declares the secure-networking registry entry point. Its connection, egress,
+tunnel, peer, effective-rule, session and activity contract is in
+[`docs/api/network.md`](../../../docs/api/network.md).
 
 `transcription.hpp` declares speech-to-text's pure helpers (audio decoding, caption cleaning,
 OpenAI's request and answer) and `openai_transcriber`. `registry.hpp` declares the `Transcriber`
@@ -139,7 +152,7 @@ pointer errors. See [`docs/api/README.md`](../../../docs/api/README.md) for the 
 and HTTP conformance proof.
 
 `agent_proposal_digest` (`capabilities.hpp`) is the digest of an agent's proposal as lake stored
-it: `approve_agent_proposal` and `agent_turn`'s confirmed ApplicationAgent and ExperimentsAgent
+it: `approve_agent_proposal` and `agent_turn`'s confirmed Application Agent and Experiments Agent
 turns compare it with the one the person reviewed (lake#561).
 
 `datasets.hpp` is pure: workspace dataset naming, CSV checks, the `<database>/<name>` id and the

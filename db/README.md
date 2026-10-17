@@ -1,5 +1,23 @@
 # Database schema
 
+Migration `0087_clerk_webhooks` (lake#765) adds `users.disabled_at`, `clerk_webhook_deliveries`
+and the guard `clerk_webhooks_guard`. Additive; apply before the new binary, and have the operator
+vendor the schema and select the guard. See [clerk.md](../docs/api/clerk.md#webhooks).
+
+Migration `0086_identity_links` (lake#762) makes the managed key's wrapped seed nullable with
+`seed_destroyed_at`, and adds `identity_link_challenges`, `identity_links` and the guard
+`identity_links_guard`. Additive; apply before the new binary, and have the operator vendor the
+schema and select the guard. See [schema.md](../docs/control-plane/schema.md).
+
+Migration `0085_network_tunnel_ca` adds public `client_ca_pem` on tunnel grants and `relay_ca_pem`
+on their operator status, both non-null text defaulting to empty. Apply before running the new
+binary or operator readers; 0084 is unchanged. See [the contract](../docs/control-plane/network.md).
+
+Migration `0084_network` adds the four secure-networking desired/status pairs and
+`network_guard`. Desired changes notify `lake_network`; the one-time rollout preserves existing
+app-to-service paths and creates no internet-egress rows. Apply before the new binary and have
+the operator vendor the schema and select the guard. See [network.md](../docs/control-plane/network.md).
+
 `schema.sql` is the idempotent PostgreSQL source of truth. Migration `0022_session_lookup`
 adds a unique public session selector and revokes legacy sessions without a selector once.
 New session rows store SHA-256 of a random bearer. Apply it before the new binary. The operator

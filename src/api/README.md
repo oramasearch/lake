@@ -1,5 +1,23 @@
 # API implementation
 
+`tunnel_clients.cpp` reads the tunnel client folder (allow-listed `zetta-tunnel-<platform>` files
+with a `SHA256SUMS` line, and `VERSION`) and signs and checks their 15-minute links with
+`signed_link_signature`, the HMAC the Hub's LFS upload links also use (lake#745).
+`tunnel_client_capabilities.cpp` registers `tunnel_client_downloads` for any signed-in person, and
+`http_server.cpp`'s `serve_tunnel_client` serves `GET /tunnel-clients/<platform>`. See
+[tunnel-clients.md](../../docs/api/tunnel-clients.md).
+
+`network_capabilities.cpp` defines fourteen account-authorized secure-networking operations once for
+REST, OpenAPI and MCP. Desired state uses the network store; sessions and activity retain their
+workspace-record boundary. Its list handlers authorize their scoped candidates, and
+`agent_docs.cpp` places all fourteen in the Network group, and `tunnel_client_downloads` beside them. App credential rotation advances the
+unchanged connection's desired generation and keeps the workspace-secret reference stable.
+Recipient-only CSR issuance uses the
+customer PKI, a current grant and ready relay trust; it is centrally audited and unmetered.
+`ServerOptions.network_records` supplies session/activity reads, defaulting to an explicit
+pending zetta#1281 response. See [scoped credentials](../../docs/api/scoped-credentials.md),
+[tunnel credentials](../../docs/api/tunnel-grants.md) and [the API contract](../../docs/api/network.md).
+
 **The console is the web app (lake#561).** The pages are `frontend/`, embedded in the binary and
 answered for every browser page request by the `web_app` middleware (`web_app.cpp`,
 [web-app.md](../../docs/ui/web-app.md)); they call only `/v1`. lake#561 retired the
@@ -9,7 +27,7 @@ the `lake_workspace` cookie and the experiment chart assets. Where a paragraph b
 renders or posts something, the web app now does it through the capability named. `web_ui.cpp`
 keeps the hosted identity-application pages, the stylesheet and fonts they link, a handler
 failure's page, and the pure helpers capabilities use (`web_ui_escape`, `web_ui_space_label`,
-`web_ui_source_units`). `agent_turn` checks a confirmed ApplicationAgent or ExperimentsAgent
+`web_ui_source_units`). `agent_turn` checks a confirmed Application Agent or Experiments Agent
 proposal against the stored one (`proposal_task_id`, `proposal_sha256`), which the form handlers did.
 
 `store_owner.cpp` holds the exclusive owner lock on `LAKE_STORE_ROOT`, with a bounded wait for a
@@ -28,7 +46,7 @@ of one stopped, deleted or unswitched meanwhile, releasing its lease at once (la
 lake#452: the `viewer` read labels the viewer's own space *Your workspaces* and workspaces by
 name; `workspace_act create_project` says whether a name is missing or taken;
 `create_app` requires `confirm_public` (or a person's acknowledgement on the confirmed
-ApplicationAgent turn) for a public app; `list_services` answers the page's `status` and
+Application Agent turn) for a public app; `list_services` answers the page's `status` and
 `status_reason`. See [workspace selection](../../docs/ui/workspace-selection.md),
 [web apps](../../docs/api/web-apps.md) and [services](../../docs/api/services.md).
 
@@ -41,7 +59,7 @@ workspace record (lake#375). See [agent leases](../../docs/api/agent-bus.md).
 A delegated `agent_turn` from a task credential names its asking task (`parent_task_id`), and
 `publish_agent_event` reports the delegated task's progress on that asking task (lake#451). The Ask
 page renders the running turn it already reads (agent, latest message, attempts, elapsed time) and
-builds *Talk to* with `control::talk_to_agents`, which leaves out internal library agents. See
+builds *Talk to* with `control::talk_to_agents`, which offers every library chat agent (lake#788). See
 [ask-orama.md](../../docs/api/ask-orama.md) and [delegated turns](../../docs/api/agent-bus.md#delegated-turns).
 
 What was written for an agent task lives in its workspace (lake#374, lake#375,
@@ -177,7 +195,7 @@ as a revision in the agent's workspace (`agent_revision_step`, lake#653) and ans
 `experiment_capabilities.cpp` registers eleven space-scoped experiment/run operations using the
 closed contracts in `experiment_schemas.hpp`, and translates lake's experiment names to the engine's
 study names and back (lake#561); the web app's Experiments pages call only them. The
-ExperimentsAgent box uses `agent_turn`; a confirmed turn names the proposing task and the stored
+Experiments Agent box uses `agent_turn`; a confirmed turn names the proposing task and the stored
 proposal's digest, which `agent_turn` checks, and only the experiment may be edited. Questions and absent proposals get a reply form that reuses the task conversation;
 Apps and Design pipeline questions use the same follow-up contract. Workspace action aliases retain
 the same confirmation, scope and promotion checks. Their failures keep Zetta's `error.path`;
@@ -361,10 +379,10 @@ one-use code or verifies the host-only app session. The workspace-prefixed form 
 workspace lookup and uses the store's single-query app authorization path. See
 `docs/api/web-apps.md` and `docs/serving/http.md`.
 
-ApplicationAgent app turns are assembled in `workspace_capabilities.cpp`: read tools on the first
+Application Agent app turns are assembled in `workspace_capabilities.cpp`: read tools on the first
 turn, repository/App writes only when the confirmed turn names the proposing task and the stored
 proposal's digest and carries that exact proposal (`verified_confirmed_proposal`).
-ExperimentsAgent turns use the workspace adapter and grant the engine's raw study operations by turn kind;
+Experiments Agent turns use the workspace adapter and grant the engine's raw study operations by turn kind;
 `create_study` and `promote_trial` appear only with their reviewed confirmation. The adapter sends
 those actions through the canonical experiment capabilities.
 Project Agent pipeline change and build turns also carry `workspace_act` and `compile_intent`;

@@ -1,5 +1,17 @@
 # Public control types
 
+`network_records.hpp` defines the scoped session/activity provider and its explicit pending
+default. `pki::Service` can ensure a persisted customer authority and sign a tunnel CSR without
+handling the recipient's private key. `network.hpp` carries public client/relay CA fields and
+the shared grant-expiry parser. See [tunnel credentials](../../../docs/api/tunnel-grants.md).
+
+`network.hpp` defines the four network specifications, desired records, operator observations,
+workspace scope and write actor, including the API audit identity used by the memory store. `Store`
+exposes create, replacement update, withdrawal/revocation, get and list; both stores implement the
+same contract. It also derives whether a tunnel grant is active from expiry and revocation for the
+[public rules API](../../../docs/api/network.md). See
+[network.md](../../../docs/control-plane/network.md).
+
 `ServiceCondition` / `service_condition` (`zetta_workspace.hpp`) are the shared service status and
 its reason; `service_json` now includes `updated_at`. `InMemoryStore::set_workspace_status` writes
 the operator's workspace observation in tests (lake#452).
@@ -55,11 +67,12 @@ expiry cleanup; memory and PostgreSQL implementations preserve the same contract
 `builds.hpp` exposes build JSON with a null image before success and a public-host digest reference
 after success. App token purposes include the hash-only, exact-repository registry pull credential.
 
-`agent_library.hpp` registers ApplicationAgent as `agent-application` and ExperimentsAgent as
+`agent_library.hpp` registers the Application Agent as `agent-application` and the Experiments Agent as
 `agent-experiments`, chat-capable services used from their Ship/Train pages and Ask Orama. Each bus
-identity is independent from every other library agent. A library agent's `internal` flag marks
-Orama's own tooling (the eval and corpus generators); `talk_to_agents` builds Ask Orama's *Talk to*
-list without them and `agent_display_name` names an agent as people call it (lake#451).
+identity is independent from every other library agent. No library agent is internal (lake#788):
+`talk_to_agents` builds Ask Orama's *Talk to* list from every chat agent of the catalogue, the Eval
+Generator Agent and the two corpus agents included, and `agent_display_name` names an agent as
+people call it (lake#451).
 
 Agent claims carry a renewable lease and up to three attempts. The Store interface exposes
 credential-checked renewal and acknowledgement of durable retry notices; the bus pump receives

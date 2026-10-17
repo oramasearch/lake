@@ -9,8 +9,8 @@ key it holds, and never waits inside a request: every turn is followed with rece
 
 <token-file> holds a lake API key with every tool (Developer → MCP). The token is never printed. The
 workspace needs the UX-review datasets (datasets.ux_review_churn and churn_results.at_risk_*).
-Scenarios that only propose change nothing. T11 confirms its exact ApplicationAgent proposal,
-deploys that App, and requests its URL. T12 confirms an ExperimentsAgent experiment, observes its
+Scenarios that only propose change nothing. T11 confirms its exact Application Agent proposal,
+deploys that App, and requests its URL. T12 confirms an Experiments Agent experiment, observes its
 trials, and asks for the explanation. Prints one line per scenario and exits 1 when any failed.
 docs/api/agent-bus.md describes the bus.
 """
@@ -291,7 +291,7 @@ def t12_experiments_agent():
     seconds += confirm_seconds
     running = (confirmed.get("answer") or {}).get("result") or {}
     problems += base_checks(confirmed, confirm_request, 420)
-    # ExperimentsAgent answers with the engine's word for the experiment, `study`.
+    # Experiments Agent answers with the engine's word for the experiment, `study`.
     experiment = running.get("study") or {}
     experiment_id = experiment.get("id")
     if running.get("kind") != "running" or not experiment_id:
@@ -344,9 +344,9 @@ SCENARIOS = {
     "T8": ("The Agent Factory asks or proposes", t8_factory),
     "T9": ("A person cannot reach the agents' side of the bus", t9_bus_refuses_people),
     "T10": ("A workspace's pub/sub works through lake's API", t10_workspace_pubsub),
-    "T11": ("ApplicationAgent builds, confirms, deploys, and answers", t11_application_agent),
+    "T11": ("Application Agent builds, confirms, deploys, and answers", t11_application_agent),
     "T12": (
-        "ExperimentsAgent proposes, confirms, observes trials, and explains",
+        "Experiments Agent proposes, confirms, observes trials, and explains",
         t12_experiments_agent),
 }
 

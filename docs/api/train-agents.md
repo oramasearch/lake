@@ -32,7 +32,7 @@ It works the way Design → Solutions does ([solutions](solutions.md), lake#597)
   purposes and where an agent is used.
 - **New agent** designs one in a drawer; **Describe it to the Agent Factory**
   (`/design/agents/new`, [agent-factory](agent-factory.md); `/train/agents/new` redirects) is the
-  other way in, where AgentCreator drafts it from a description.
+  other way in, where Agent Creator Agent drafts it from a description.
 
 The definition a person designs, in New agent and Edit:
 
@@ -96,7 +96,7 @@ An agent's training page (`/train/agent?id=`, the **Training** tab) shows:
   with `model` set to the version's checkpoint and `model_version` to when it was trained.
 - **The pipelines it calls**, each linked to its pipeline and runs.
 - **Launch experiment:** what to compare (its trained versions, variations of its instructions, or
-  the models it could run on) and what it should improve, sent to ExperimentsAgent as an
+  the models it could run on) and what it should improve, sent to the Experiments Agent as an
   `agent_turn` of kind `experiment` with `context.agent_id`. The proposal opens on Train →
   Experiments, where nothing starts until it is confirmed ([experiments](experiments.md)). The
   experiments that name the agent are listed.
@@ -114,39 +114,51 @@ Design-time editing is not on this page; **Edit its design** opens Design → Ag
 |---|---|---|---|
 | `agent-ask-orama` | Ask Orama | The Ask Orama panel on every page; delegates to any agent | its own service |
 | `agent-project` | Project Agent | Design: Create a Solution and revised plans; Ask Orama's subagent | its own service |
-| `agent-application` | ApplicationAgent | Ship → Apps: Build an App; Ask Orama's app delegate | its own service |
-| `agent-experiments` | ExperimentsAgent | Train → Experiments: Run an Experiment; Ask Orama and Project Agent training delegates | its own service |
-| `agent-autosuggest` | Auto-Suggest | Design: Discover Opportunities; Ask Orama's subagent | its own service |
-| `agent-creator` | AgentCreator | Design → Agents: Describe it to the Agent Factory | `agent-runtime` |
-| `agent-eval-generator` | Eval Generator | Internal: Orama's own agent tests. A realistic test case on request (a role, their problem, real-looking data), with its own invented tables; publishes nothing (lake#263) | service |
-| `agent-autosuggest-corpus` | Auto-Suggest Corpus Generator | Internal: Orama's own agent tests. One example of what is worth building for a situation you describe, checked against the test cases; writes nothing to the corpus (lake#263) | service |
-| `agent-project-corpus` | Project Corpus Generator | Internal: Orama's own agent tests. A worked example of building or changing a pipeline on your own data, replayed against your workspace; changes nothing (lake#263) | service |
+| `agent-application` | Application Agent | Ship → Apps: Build an App; Ask Orama's app delegate | its own service |
+| `agent-experiments` | Experiments Agent | Train → Experiments: Run an Experiment; Ask Orama and Project Agent training delegates | its own service |
+| `agent-autosuggest` | Auto-Suggest Agent | Design: Discover Opportunities; Ask Orama's subagent | its own service |
+| `agent-creator` | Agent Creator Agent | Design → Agents: Describe it to the Agent Factory | `agent-runtime` |
+| `agent-eval-generator` | Eval Generator Agent | Ask Orama, when a person asks for an eval: it creates one, realistic test cases (a role, their problem, real-looking data) to measure how well an agent does; evals are used in Train → Agents. Publishes nothing (lake#263, lake#788) | its own service |
+| `agent-autosuggest-corpus` | Auto-Suggest Corpus Agent | Ask Orama, when a person asks for a training corpus: it builds one, worked examples of what is worth building for the situations they describe, checked against the test cases; the corpus trains an agent in Train → Agents (lake#263, lake#788) | its own service |
+| `agent-project-corpus` | Project Corpus Agent | Ask Orama, when a person asks for a training corpus: it builds one, worked examples of building or changing a pipeline on their own data, replayed against their workspace; changes nothing (lake#263, lake#788) | its own service |
 
-The three generators carry `internal: true` (lake#451), and `list_agent_library` leaves them out
-unless asked with `include_internal: true` (lake#594), so neither the Design → Agents page, nor an API or
-MCP caller, nor Ask Orama's *Talk to* offers them by default: they are tooling for Orama's
-evaluations, not agents a customer uses. With `include_internal`, Design → Agents badges them
-*Orama internal*. `agent_turn` still reaches them by key for that tooling.
+**Names (lake#763).** The catalogue is the one source of agent names. Every name is title-case
+words with one blank between them, with "Agent" last for every agent but Ask Orama (Steve,
+2026-10-17; the Agent Creator Agent keeps "Agent" twice on purpose). The API, *Talk to*, the
+Agents pages and every server message read the name from the catalogue; the web app, the in-app
+guide and these docs write it out, and `tests/test_agent_names.cpp` fails when a name breaks the
+scheme, when an old spelling or a name run together into one word appears anywhere in lake (release
+notes and dated records keep the names of their day), when this table differs from the catalogue,
+or when code pairs an agent key with a name outside the catalogue.
 
-Status is *Available* when the operator lists the agent in `LAKE_AGENT_ENDPOINTS`, *Not running on
-this lake* otherwise, and *Offline tool* for the three agents that produce evaluations and
-training data rather than serving people. People do not create or delete library agents.
+**No agent is internal (lake#788).** All nine are ordinary agents, offered everywhere a person
+picks one: `list_agent_library`, Ask Orama's *Talk to*, the home's *Agents you can talk to*, and
+Design → Agents, which lists them in one *By Orama* list with what each does, where it is used and
+whether this Lake runs it. The Eval Generator Agent creates an eval for the person, and the two
+corpus agents build a training corpus for them; lake accepts Ask Orama's `agent_turn` to each of
+them, and Ask Orama's own instructions (`oramasearch/agent-ask-orama`) decide when it hands one on. `list_agent_library` still accepts `include_internal` from older callers (lake#594)
+and ignores it, and no agent carries an `internal` field. Until lake#788, the three were marked
+`internal` (lake#451) and left out of *Talk to*.
 
-ExperimentsAgent is deployed from `oramasearch/agent-experiments:f5be471`. Lake gives it the
+Status is *Available* when the operator lists the agent in `LAKE_AGENT_ENDPOINTS` and *Not running
+on this Lake* otherwise (*Offline tool* is kept for an agent with `runs_as: offline`; none has it
+today). People do not create or delete library agents.
+
+The Experiments Agent is deployed from `oramasearch/agent-experiments:f5be471`. Lake gives it the
 independent `agent-experiments` bus topic and credential. It runs as a chat-capable service; its
 experiment records and trial data stay in the selected workspace Zetta.
 
-Each of Orama's agents on Design → Agents says what it does for the person and where to use it,
-in plain words, with a badge (*Available*, *Not available here*). Every library agent takes a
-conversation (lake#263: the three generators were offline tools until 2026-09-27); the three
-internal generators are not offered in Ask Orama (lake#451). The definition form's fields are in
-[Design → Agents](#design--agents).
+Each of Orama's agents on Design → Agents says what it does for the person and where it is used,
+in plain words, with a badge: *Available* or *Not running on this Lake*. Every library agent takes a
+conversation (lake#263: the three generators were offline tools until 2026-09-27), and every one is
+offered in Ask Orama (lake#788).
+The definition form's fields are in [Design → Agents](#design--agents).
 
 ## Capabilities
 
 | Capability | Kind | Authorization | What it does |
 |---|---|---|---|
-| `list_agent_library` | read | any signed-in principal | The catalog above with `deployed` and `status` per agent; the internal generators only with `include_internal: true` |
+| `list_agent_library` | read | any signed-in principal | The catalog above with `deployed` and `status` per agent, all nine always; `include_internal` is accepted and ignored (lake#788) |
 | `list_agents`, `get_agent`, `agent_training_status` (also through `workspace_query`) | read | `read` on the customer | The workspace's agents and how each one's training stands |
 | `create_agent`, `update_agent`, `delete_agent`, `set_training_schedule`, `agent_run`, `chat_with_agent` (also through `workspace_act`, `chat` there) | action | `write` on the customer | Design, change, train, run and talk to agents; `create_agent` and `update_agent` answer `definition_revision` |
 | `list_agent_revisions` | read | `read` on the customer | `{customer_id, workspace_id, agent_id, limit?}`: an agent's [definition revisions](#definition-revisions), newest first |

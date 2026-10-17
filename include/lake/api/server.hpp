@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "lake/api/billing.hpp"
+#include "lake/api/regions.hpp"
 #include "lake/api/registry.hpp"
 #include "lake/transparency/checkpoint.hpp"
 
@@ -106,6 +107,7 @@ struct ServerOptions {
     // Customer Zetta workspaces (docs/api/workspaces.md); null leaves Design, Train and Ship
     // unavailable.
     std::shared_ptr<control::WorkspaceService> workspaces;
+    std::shared_ptr<control::NetworkRecords> network_records;
     // Raw HTTP to each workspace Zetta's object routes, where a switched workspace's liquid store
     // lives (lake#380, docs/architecture/workspace-store.md). Null with `workspaces` set uses
     // Zetta's installed HTTP client; tests inject a fake object server.
@@ -131,6 +133,14 @@ struct ServerOptions {
     // The oramasearch/lake-mcp-runner image a stdio MCP connection's App runs
     // (LAKE_MCP_RUNNER_IMAGE, lake#659, docs/api/mcp-connections.md).
     std::string mcp_runner_image;
+    // The folder of tunnel client downloads (LAKE_TUNNEL_CLIENTS_DIR, lake#745,
+    // docs/api/tunnel-clients.md). The executable defaults it to /usr/share/lake/tunnel-clients,
+    // where the image puts them; empty or missing, the clients are reported unavailable.
+    std::string tunnel_clients_dir;
+    // Regions (LAKE_REGION, LAKE_REGION_LABEL, LAKE_REGIONS, LAKE_APEX_HOST; lake#757,
+    // docs/api/regions.md): reported by server_info; a request whose Host is the apex host gets the
+    // region picker. Empty: no region, no picker.
+    Regions regions;
     std::string apps_reserved_names;
     std::size_t apps_per_customer = 0;
     std::size_t app_replicas_per_customer = 0;
@@ -151,6 +161,10 @@ struct ServerOptions {
     // and sign-up are Clerk's and lake's own identity pages leave the navigation; empty or `xxx`
     // keeps lake's own sign-in, as an on-prem install uses. See docs/api/clerk.md.
     std::string clerk_publishable_key;
+    // Clerk webhook signing secret (LAKE_CLERK_WEBHOOK_SECRET, `whsec_…`), an Orama platform key
+    // the operator injects from the instance's Clerk configuration. Empty: POST
+    // /identity/clerk-webhook answers 404. See docs/api/clerk.md#webhooks (lake#765).
+    std::string clerk_webhook_secret;
     // The cluster's sealed-secret delivery key (LAKE_SEALING_PUBLIC_KEY, unpadded base64url X25519,
     // set by the operator from Lake status.sealing). When set, mint_sealed_secret seals only to it
     // (lake#625, docs/api/secrets.md#projections).

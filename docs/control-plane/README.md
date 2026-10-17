@@ -1,5 +1,11 @@
 # Control-plane contracts
 
+[network.md](network.md) defines migration `0084_network`, secure-networking desired and status
+rows, generation and revocation rules, scoped stores, atomic audit, notifications, rollout and the
+public capability handoff in [the API contract](../api/network.md).
+It also documents migration `0085_network_tunnel_ca`, the Lake/operator-owned public trust fields
+used by [tunnel credentials](../api/tunnel-grants.md), leaving 0084 unchanged.
+
 [streams.md](streams.md) describes creator ownership bound to a workspace incarnation (kept in
 the topic's workspace Zetta since lake#379), server-side shared-bus isolation, migration
 `0037_streams` with `streams_guard`, and `0047_stream_owner_workspaces`.

@@ -21,12 +21,14 @@
 #include "lake/api/server.hpp"
 #include "lake/control/identity_crypto.hpp"
 #include "lake/control/memory_store.hpp"
+#include "lake/control/network.hpp"
 #include "mcp_test_server.hpp"
 #include "objects/records.hpp"
 #include "one_thread_io.hpp"
 #include "repository_test_support.hpp"
 #include "stream_fixture.hpp"
 #include "temporary_directory.hpp"
+#include "tunnel_fixture.hpp"
 #include "zetta_object_fixture.hpp"
 
 extern char** environ;
@@ -283,7 +285,7 @@ void check_web_app(HttpEvidence& http,
                     {"message_id", sent.at("reply_id")},
                     {"index", 0}}));
 
-    // Background turns: the Project Agent's build of a project, and an AgentCreator proposal.
+    // Background turns: the Project Agent's build of a project, and an Agent Creator Agent proposal.
     const auto task = [&](std::string agent, std::string kind, std::string conversation) {
         return checked(store.create_agent_task({.id = lake::control::new_uuid_v4(),
                                                 .customer_id = customer.id,
@@ -357,6 +359,101 @@ void check_proofs(HttpEvidence& http) {
     http.read("transparency_inclusion_proof", "?leaf_index=0&tree_size=2");
     http.read("transparency_consistency_proof", "?old_tree_size=1&new_tree_size=2");
     http.read("transparency_proof_bundle", "?leaf_index=0");
+}
+
+void check_network(HttpEvidence& http,
+                   lake::control::Store& store,
+                   const lake::control::Customer& customer,
+                   const lake::control::User& user,
+                   const std::string& workspace_id) {
+    const auto session = checked(store.sign_up_password({"lake",
+                                                         "schema-tunnel@example.test",
+                                                         "correct horse battery staple",
+                                                         "Tunnel developer",
+                                                         "schema",
+                                                         "{}"}));
+    const auto developer = checked(store.get_user(session.session.user_id));
+    const auto object = checked(store.find_policy_object("customer", customer.id));
+    checked(store.create_grant({developer.taap_id,
+                                object.id,
+                                "read",
+                                "schema-network-attestation",
+                                "admin",
+                                "schema-network-grant"}));
+    const auto workspace = checked(store.get_workspace(workspace_id));
+    const auto app = checked(store.create_web_app({.customer_id = customer.id,
+                                                   .workspace_id = workspace_id,
+                                                   .name = "schema-network-client",
+                                                   .mode = "image",
+                                                   .image = "client:v1",
+                                                   .port = 3000,
+                                                   .host = "schema-network-client.test"}));
+    const json scope{{"customer_id", customer.id}, {"workspace_id", workspace_id}};
+    auto connection_input = scope;
+    connection_input.update({{"source_kind", "app"},
+                             {"source_id", app.id},
+                             {"target_kind", "service"},
+                             {"target_id", workspace.zetta_service_id},
+                             {"ports", json::array({4800})},
+                             {"credential_scope", {{"access", "read"}}}});
+    const auto connection = http.call("create_network_connection", connection_input);
+    http.call("list_network_connections", scope);
+    auto rotate = scope;
+    rotate["connection_id"] = connection.at("id");
+    http.call("rotate_network_connection_credential", rotate);
+
+    auto egress_input = scope;
+    egress_input.update({{"dns_name", "schema.example.test"}, {"ports", json::array({443})}});
+    http.call("create_network_egress_rule", egress_input);
+    http.call("list_network_egress_rules", scope);
+
+    auto tunnel_input = scope;
+    tunnel_input.update(
+        {{"user_id", developer.id},
+         {"target_kind", "service"},
+         {"target_id", workspace.zetta_service_id},
+         {"port", 4800},
+         {"expires_at",
+          lake::control::iso8601_at(std::chrono::system_clock::now() + std::chrono::hours(1))}});
+    const auto tunnel = http.call("grant_network_tunnel", tunnel_input);
+    auto& memory = dynamic_cast<lake::control::InMemoryStore&>(store);
+    const auto observed =
+        memory.set_network_tunnel_grant_status(tunnel.at("id"),
+                                               {.phase = "Ready",
+                                                .observed_generation = 1,
+                                                .endpoint = "relay.test:7443",
+                                                .relay_ca_pem = tunnel.at("client_ca_pem")});
+    ASSERT_TRUE(observed);
+    http.call("list_network_tunnel_grants", scope);
+    http.call("list_network_peers", scope);
+    http.call("network_rules", scope);
+    http.call("list_network_tunnel_sessions", scope);
+    http.call("network_activity", scope);
+
+    auto credentials = scope;
+    credentials.update(
+        {{"tunnel_grant_id", tunnel.at("id")}, {"csr_pem", lake::test::tunnel_csr().pem}});
+    // Even the operator cannot obtain a recipient's certificate.
+    http.call("issue_network_tunnel_certificate", credentials, false);
+    const auto operator_bearer = http.bearer;
+    http.bearer = session.secret;
+    http.call("issue_network_tunnel_certificate", credentials);
+    const auto [status, body] =
+        http.request("POST", "/v1/issue_network_tunnel_certificate", credentials);
+    EXPECT_EQ(status, 200U) << body;
+    http.document["rest"].push_back(
+        {{"name", "issue_network_tunnel_certificate"}, {"status", status}, {"body", body}});
+    http.bearer = operator_bearer;
+
+    auto remove = scope;
+    remove["connection_id"] = connection.at("id");
+    http.call("remove_network_connection", remove);
+    auto revoke = scope;
+    revoke["tunnel_grant_id"] = tunnel.at("id");
+    http.call("revoke_network_tunnel", revoke);
+    http.bearer = session.secret;
+    http.call("issue_network_tunnel_certificate", credentials, false);
+    http.bearer = operator_bearer;
 }
 
 void validate_evidence(const json& document) {
@@ -436,6 +533,7 @@ TEST(SchemaConformance, EveryToolAndRequiredOutputUsesHttpContract) {
         http.call(tool.at("name"), json::object(), false);
     }
     http.call("server_info");
+    check_network(http, *store, customer, user, experiments.id);
     for (const auto& [name, input] : lake::test::experiment_calls(customer.id, experiments.id)) {
         http.call(name, input);
         const auto [status, body] = http.request("POST", "/v1/" + name, input);

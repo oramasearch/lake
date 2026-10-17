@@ -31,7 +31,7 @@ registered once and therefore appear in `/v1/openapi.json` and `POST /mcp` autom
 | Capability | Input | Result |
 |---|---|---|
 | `get_model`, repository `get_dataset` | `id`, `revision` | Repository identity, immutable `sha`, visibility, card, files, storage totals, and provenance |
-| workspace `get_dataset` | `customer_id`, `workspace_id`, `id` as `<database>/<dataset>` (no `revision`) | Workspace dataset schema; an ApplicationAgent task credential supplies the customer implicitly |
+| workspace `get_dataset` | `customer_id`, `workspace_id`, `id` as `<database>/<dataset>` (no `revision`) | Workspace dataset schema; an Application Agent task credential supplies the customer implicitly |
 | workspace `get_model` | `customer_id`, `workspace_id`, `id` as the model id Ship → Models shows (no `revision`) | The workspace's trained model: measures, feature columns, published state. The same record `workspace_query` `get_model` answers, so the name means one thing on both surfaces (lake#450, [naming.md](naming.md)); an unknown id is `not_found` at `/id` |
 | `resolve_model_file`, `resolve_dataset_file` | `id`, `revision`, `path` | Exact bytes plus blob, size, and immutable revision metadata; `contents` as text and `content_base64`, the exact bytes of any file (binary included, lake#681) |
 | `prepare_repository_upload` | `id`, `files[{path,size}]` | `regular` for files through 5 MiB, otherwise `lfs` |

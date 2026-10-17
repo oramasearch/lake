@@ -8,6 +8,7 @@ import { Button, Field, fieldError, Form, Notice, Page } from "@/lib/ui";
 import { useSession } from "@/lib/session";
 import { AuthFrame, useSignedInRedirect } from "./AuthFrame";
 import { ClerkSignIn } from "./ClerkSignIn";
+import { AccountRegionNote } from "@/components/Region";
 import { landingAfterSignIn, leaveFor, messageOf, NO_WORKSPACE, returnQuery, returnTarget } from "./signIn";
 
 export default function SignInPage() {
@@ -24,6 +25,7 @@ function NativeSignIn() {
   return (
     <AuthFrame title="sign in">
       <Page eyebrow="identity" title="Sign In" sub="Use a password, passkey, or configured social provider.">
+        <AccountRegionNote mode="sign-in" />
         <div className="grid">
           <PasswordPanel />
           <OAuthPanel />

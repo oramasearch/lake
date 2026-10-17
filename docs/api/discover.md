@@ -19,7 +19,7 @@ Lake no longer writes or reads the `opportunities` table; the operator's one-sho
 `WorkspaceRecords.AnOpportunityStatusChangeRereadsAfterAConcurrentWrite`.
 
 **Updated 2026-09-27 (lake#269):** Discover became **Design → Opportunities** (`/design/opportunities`;
-the web app also opens `/design/discover`). *Scan my workspace* is a background Auto-Suggest turn
+the web app also opens `/design/discover`). *Scan my workspace* is a background Auto-Suggest Agent turn
 (`agent_turn`, kind `discover`); the page follows it and the Opportunities it recommends (and the
 ones it declines, *Not yet*) are **kept** as rows of `opportunities`, across scans. Each can become a
 project draft (`create_projects_from_opportunities {opportunity_ids}`, on confirmation) or be dismissed
@@ -61,15 +61,15 @@ returns every row, each with its `task_id`, which is what the grouping reads.
 # Discover Opportunities
 
 **Status: implemented 2026-09-27 (lake#237, epic lake#228).** Design's *Discover Opportunities*
-(`/design/discover`, linked beside *New Project*), backed by the Agent Library's Auto-Suggest
+(`/design/discover`, linked beside *New Project*), backed by the Agent Library's Auto-Suggest Agent
 ([`oramasearch/agent-autosuggest`](https://github.com/oramasearch/agent-autosuggest)). It follows
 Studio's discovery journey (orama-design `src/studio/discovery/`).
 
 1. **Scan my workspace** sends one `agent_turn` (kind `discover`) to
    `agent-autosuggest`. lake builds the **Workspace Profile** from the approved data the workspace
-   holds (`list_datasets`, then `get_dataset` for up to twelve: names and columns), so Auto-Suggest
+   holds (`list_datasets`, then `get_dataset` for up to twelve: names and columns), so Auto-Suggest Agent
    reads nothing itself and never changes anything.
-2. **Recommended Opportunities**: Auto-Suggest's `suggested` entries, each with its intent, solution
+2. **Recommended Opportunities**: Auto-Suggest Agent's `suggested` entries, each with its intent, solution
    id, methodology, why this data supports it, what must come first, and what it changes; **Not Yet**:
    its `declined` entries with the reason and *capture it first* or *cannot be done*.
 3. **Create project drafts** (`create_projects_from_opportunities`) needs the person's explicit
@@ -77,7 +77,7 @@ Studio's discovery journey (orama-design `src/studio/discovery/`).
    whose description carries its **Source Opportunity** (solution, methodology, evidence). Nothing
    runs until a plan is approved.
 
-When Auto-Suggest is not running on the lake (`LAKE_AGENT_ENDPOINTS`), the page says so and offers
+When Auto-Suggest Agent is not running on the lake (`LAKE_AGENT_ENDPOINTS`), the page says so and offers
 nothing behind a mock. A scan that fails says why.
 
 Verify: `HttpServer/HttpResponseIsolation.DiscoverOpportunitiesScansAndCreatesProjects`.

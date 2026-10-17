@@ -16,6 +16,7 @@
 #include <liquid/runtime.hpp>
 #include <nlohmann/json.hpp>
 
+#include "lake/api/regions.hpp"
 #include "lake/api/sync_store.hpp"
 #include "lake/control/policy.hpp"
 #include "lake/control/store_contents.hpp"
@@ -41,6 +42,7 @@ class Service;
 namespace lake::control {
 class PlatformService;
 class WorkspaceService;
+class NetworkRecords;
 class AgentCaller;
 class AgentTaskBus;
 } // namespace lake::control
@@ -82,7 +84,8 @@ const ErrorCode* find_error_code(std::string_view code);
 struct Capability;
 // What a capability does, as MCP's tool annotations and mcp_setup say it (lake#594), one rule for
 // both: it writes unless it is a read or authorized as one (`predict` scores without changing
-// anything); it destroys only when it deletes, destroys, removes, revokes or drops something; it
+// anything), except tunnel signing creates a new credential despite read authorization. It
+// destroys only when it deletes, destroys, removes, revokes or drops something; it
 // is idempotent when calling it again with the same input changes nothing more.
 bool capability_writes(const Capability& capability);
 bool capability_destroys(const Capability& capability);
@@ -415,6 +418,8 @@ struct ApiContext {
     nlohmann::json reauthorization_results = nlohmann::json::array();
     search::Service* search = nullptr;
     control::pki::Service* pki = nullptr;
+    // Null selects the explicit pending zetta#1281 implementation.
+    control::NetworkRecords* network_records = nullptr;
     control::callers::Service* callers = nullptr;
     control::agents::Service* agents = nullptr;
     control::PlatformService* platform = nullptr;
@@ -437,6 +442,11 @@ struct ApiContext {
     // The oramasearch/lake-mcp-runner image a stdio MCP connection's App runs
     // (LAKE_MCP_RUNNER_IMAGE, lake#659); empty: this Lake runs no stdio servers.
     std::string mcp_runner_image;
+    // The folder holding the tunnel client downloads (LAKE_TUNNEL_CLIENTS_DIR, lake#745,
+    // docs/api/tunnel-clients.md); empty or missing: tunnel_client_downloads answers unavailable.
+    std::string tunnel_clients_dir;
+    // This Lake's regions (lake#757, docs/api/regions.md), for server_info; null: none set.
+    const Regions* regions = nullptr;
     std::string apps_reserved_names;
     std::size_t apps_per_customer = 0;
     std::size_t app_replicas_per_customer = 0;

@@ -1,7 +1,8 @@
 /** The shell, in rev-os's layout on lake's colours: a 2px brand strip; a left rail of lake's groups
  * (Design, Train, Ship, Organization or Administration) with the current group open and its pages
  * listed beneath on a hairline, Docs and Developer at its foot, then the signed-in person and the
- * collapse control; a slim top bar with the breadcrumb, the space and workspace picker, search
+ * collapse control; a slim top bar with the breadcrumb, the region (lake#757), the space and
+ * workspace picker, search
  * (⌘K or /), the theme switch and Ask Orama. A signed-in person's home (`/`) is Ask Orama itself
  * (lake#600): there the top bar's Ask Orama button opens no panel but puts the cursor in the home's
  * message box, and an open panel closes. Collapsible to icons; below 1024px the rail is an
@@ -15,21 +16,15 @@ import { Link, useLocation, useNavigate } from "react-router-dom";
 import {
   BookMarked,
   BookOpen,
-  Building2,
   ChevronsLeft,
   ChevronsRight,
-  Code2,
   Compass,
-  Database,
-  FlaskConical,
   Home,
   type LucideIcon,
   Menu,
   Moon,
-  Rocket,
   Search,
   Share2,
-  ShieldCheck,
   Sparkles,
   Sun,
   X,
@@ -43,29 +38,22 @@ import { currentNav, matchScreen, navFor, sectionLabel, workspacePath, isWorkspa
 import { CommandPalette } from "./CommandPalette";
 import { ScreenBoundary } from "./ScreenBoundary";
 import { WorkspacePicker } from "./WorkspacePicker";
+import { RegionMenu } from "./Region";
 import { LakeMark } from "./LakeMark";
 import { resizingAsk, useAskWidth } from "@/lib/askWidth";
 import { focusAsk, onOpenAsk, type AskRequest } from "@/lib/ask";
 import { isAskHome } from "@/pages/ask/home";
 import { PHONE_QUERY } from "@/lib/phoneSheet";
+import { SECTION_ICONS } from "@/lib/sectionIcons";
 
 // Ask Orama loads the first time it is opened, so the shell carries no Markdown or conversation code.
 const AskPanel = lazy(() => import("./AskPanel").then((m) => ({ default: m.AskPanel })));
 
 /** G then this letter jumps to the group's first page (R for Data: its first page is Repositories). */
-const JUMPS: Record<string, SectionKey> = { r: "data", d: "design", t: "train", s: "ship", o: "organization", a: "administration" };
+const JUMPS: Record<string, SectionKey> = { r: "data", d: "design", t: "train", s: "ship", n: "network", o: "organization", a: "administration" };
 
 /** Each group's icon, and the icons of the ungrouped items at the top. */
-const SECTION_ICONS: Partial<Record<SectionKey, LucideIcon>> = {
-  home: Home,
-  data: Database,
-  design: Compass,
-  train: FlaskConical,
-  ship: Rocket,
-  organization: Building2,
-  administration: ShieldCheck,
-  developer: Code2,
-};
+// Each section's icon lives in @/lib/sectionIcons, shared with Ask Orama's home (lake#786).
 const TOP_ICONS: Record<string, LucideIcon> = {
   "/": Home,
   "/repositories": BookMarked,
@@ -386,6 +374,8 @@ export function Shell({ children }: { children: ReactNode }) {
             </button>
             <Breadcrumb trail={trail} />
             <div className="flex-1" />
+            {/* This Lake's region and links to the others; nothing without a region (lake#757). */}
+            <RegionMenu />
             {viewer.signed_in && viewer.spaces.length > 0 && <WorkspacePicker />}
             {viewer.signed_in && (
               <>

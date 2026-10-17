@@ -643,3 +643,170 @@ html[data-resizing-ask] .ask-panel {
   background: var(--lake-raised, transparent);
   cursor: default;
 }
+
+/* What the empty home explains (lake#764): the first step with no workspace, the agents a person can
+   talk to, and what Lake does, grouped as the rail is. One column on a phone. */
+.ask-first-step {
+  display: grid;
+  gap: var(--lake-space-2, 8px);
+  border: var(--lake-border-width) solid var(--lake-action, currentColor);
+  border-radius: 6px;
+  padding: var(--lake-space-4, 16px);
+  background: var(--lake-surface);
+  margin-bottom: var(--lake-space-6, 24px);
+}
+.ask-first-step h2,
+.ask-home-section h2 {
+  margin-top: 0;
+}
+.ask-first-step .sub {
+  margin: 0;
+}
+.ask-home-section {
+  margin-top: 56px;
+}
+.ask-home-section h2 {
+  margin-bottom: var(--lake-space-1, 4px);
+}
+.ask-home-section-line {
+  margin: 0 0 var(--lake-space-6, 24px);
+}
+.ask-home-lead {
+  margin: 0 0 var(--lake-space-2, 8px);
+  font-size: 17px;
+  line-height: 1.5;
+}
+.ask-map-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 260px), 1fr));
+  gap: var(--lake-space-2, 8px);
+}
+.ask-agent {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+}
+.ask-agent[aria-pressed="true"] {
+  border-color: var(--lake-action, currentColor);
+}
+.ask-agent-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: var(--lake-weight-medium, 500);
+}
+.ask-agent-purpose {
+  color: var(--lake-text-secondary);
+  font-size: 13px;
+}
+.ask-map {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 380px), 1fr));
+  gap: 40px var(--lake-space-6, 24px);
+}
+.ask-map-group h3 {
+  display: grid;
+  gap: 2px;
+  margin: 0 0 var(--lake-space-3, 12px);
+  font-size: 16px;
+}
+.ask-map-group h3 .muted {
+  font-weight: var(--lake-weight-regular);
+  font-size: 13px;
+}
+.ask-map-group ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: var(--lake-space-2, 8px);
+}
+.ask-map-group li {
+  display: grid;
+  gap: 2px;
+  border-top: var(--lake-border-width) solid var(--lake-border-subtle);
+  padding-top: var(--lake-space-2, 8px);
+}
+.ask-map-link {
+  font-weight: var(--lake-weight-medium, 500);
+  justify-self: start;
+}
+.ask-map-does {
+  color: var(--lake-text-secondary);
+  font-size: 13px;
+}
+.ask-map-ask {
+  display: inline-flex;
+  align-items: flex-start;
+  gap: 6px;
+  justify-self: start;
+  text-align: left;
+  font-size: 13px;
+  color: var(--lake-action, currentColor);
+  cursor: pointer;
+  min-height: 28px;
+}
+@media (max-width: 47.99rem) {
+  .ask-map-ask {
+    min-height: 44px;
+    align-items: center;
+  }
+}
+
+/* Icons and cards on Ask Orama's home (lake#786): each group a card with its rail icon in a tinted
+   tile, each agent with its own icon, and the AI sovereignty badge. Light and dark come from the
+   tokens. */
+.ask-home-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 var(--lake-space-2, 8px);
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 12.5px;
+  font-weight: var(--lake-weight-medium, 500);
+  color: var(--lake-action, currentColor);
+  background: color-mix(in srgb, var(--lake-action, currentColor) 12%, transparent);
+}
+.ask-icon-tile {
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  width: 36px;
+  height: 36px;
+  border-radius: 8px;
+  color: var(--lake-action, currentColor);
+  background: color-mix(in srgb, var(--lake-action, currentColor) 12%, transparent);
+}
+.ask-icon-tile-sm {
+  width: 26px;
+  height: 26px;
+  border-radius: 6px;
+}
+.ask-map-group {
+  border: var(--lake-border-width) solid var(--lake-border-subtle);
+  border-radius: 10px;
+  padding: var(--lake-space-4, 16px);
+  background: var(--lake-surface);
+  transition: border-color var(--lake-motion-standard, 150ms) var(--lake-motion-ease, ease);
+}
+.ask-map-group:hover,
+.ask-map-group:focus-within {
+  border-color: color-mix(in srgb, var(--lake-action, currentColor) 45%, var(--lake-border-subtle));
+}
+.ask-map-head {
+  display: flex;
+  align-items: center;
+  gap: var(--lake-space-3, 12px);
+  margin-bottom: var(--lake-space-3, 12px);
+}
+.ask-map-head h3 {
+  margin: 0;
+}
+.ask-map-group li:first-child {
+  border-top: 0;
+  padding-top: 0;
+}
+.ask-agent-name .ask-icon-tile-sm {
+  margin-right: 2px;
+}

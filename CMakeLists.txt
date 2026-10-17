@@ -27,7 +27,7 @@ if(NOT DEFINED CMAKE_CXX_COMPILER AND NOT LAKE_USE_SYSTEM_COMPILER)
   endif()
 endif()
 
-project(lake VERSION 0.1.0 LANGUAGES C CXX)
+project(lake VERSION 0.2.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 26)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -296,6 +296,7 @@ add_library(lake-core STATIC
   src/api/mcp.cpp
   src/api/agent_docs.cpp
   src/api/capabilities.cpp
+  src/api/clerk_webhooks.cpp
   src/api/console_capabilities.cpp
   src/api/forge_capabilities.cpp
   src/api/repository_people.cpp
@@ -327,6 +328,10 @@ add_library(lake-core STATIC
   src/api/build_capabilities.cpp
   src/api/image_capabilities.cpp
   src/api/volume_capabilities.cpp
+  src/api/network_capabilities.cpp
+  src/api/tunnel_clients.cpp
+  src/api/regions.cpp
+  src/api/tunnel_client_capabilities.cpp
   src/audit/audit.cpp
   src/api/secrets_capabilities.cpp
   src/api/sealed_delivery.cpp
@@ -334,6 +339,7 @@ add_library(lake-core STATIC
   src/api/agent_task_records_api.cpp
   src/api/offline_recovery_capabilities.cpp
   src/control/handles.cpp
+  src/control/own_identity.cpp
   src/control/policy.cpp
   src/search/index.cpp
   src/transparency/checkpoint.cpp
@@ -368,6 +374,9 @@ target_compile_options(lake-object-http PRIVATE -Werror=return-type)
 add_library(lake-control-postgres STATIC
   src/control/apps_memory.cpp
   src/control/memory_store.cpp
+  src/control/network.cpp
+  src/control/network_records.cpp
+  src/control/network_memory.cpp
   src/control/postgres_store.cpp
 )
 target_link_libraries(lake-control-postgres PUBLIC lake-core PRIVATE pqxx OpenSSL::Crypto)

@@ -1,7 +1,7 @@
 # Streams capabilities
 
 Train → Streams exposes workspace topics and the account's Lake bus topics through the same
-registry used by REST, MCP, Ask Orama and the ApplicationAgent. Reads may be offered freely;
+registry used by REST, MCP, Ask Orama and the Application Agent. Reads may be offered freely;
 agents must obtain the person's confirmation before writes. Browser credentials never contain a
 Zetta token. Lake calls Zetta with the workspace or bus service credential; Zetta audits that
 service identity, while Lake's signed audit records the person, account, topic, operation and outcome.

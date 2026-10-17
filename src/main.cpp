@@ -17,6 +17,7 @@
 
 #include "lake/api/billing.hpp"
 #include "lake/api/server.hpp"
+#include "lake/api/tunnel_clients.hpp"
 #include "lake/control/agent_bus.hpp"
 #include "lake/control/agent_library.hpp"
 #include "lake/control/agent_runs.hpp"
@@ -57,7 +58,8 @@ int usage() {
     std::println("  lake [--listen HOST:PORT] [--node NAME] [--control-db URI] "
                  "[--store-root PATH] [--external-origin ORIGIN]");
     std::println("       [--admin-token TOKEN] [--identity-seed BASE64] "
-                 "[--instance-kek VALUE] [--tsa-url URL] [--memory-store]");
+                 "[--instance-kek VALUE] [--tsa-url URL] [--tunnel-clients-dir PATH] "
+                 "[--memory-store]");
     std::println("  lake version");
     std::println("");
     std::println("  --control-db   Postgres URI of the control plane (default "
@@ -76,6 +78,8 @@ int usage() {
                  "(default $LAKE_INSTANCE_KEK)");
     std::println("  --clerk-publishable-key Clerk key; browser sign-in goes through Clerk "
                  "(default $LAKE_CLERK_PUBLISHABLE_KEY)");
+    std::println("  --clerk-webhook-secret Clerk webhook signing secret (whsec_...); enables "
+                 "POST /identity/clerk-webhook (default $LAKE_CLERK_WEBHOOK_SECRET)");
     std::println("  LAKE_OPENAI_API_KEY OpenAI key for speech-to-text and the model gateway "
                  "(/openai/v1); LAKE_TRANSCRIBE_MODEL the speech model "
                  "(default gpt-4o-transcribe)");
@@ -147,6 +151,12 @@ int usage() {
                  "LAKE_HTTP_MAX_LONG_REQUESTS_PER_CALLER per caller (default 64)");
     std::println("  LAKE_WORKSPACE_STORE_PREOPEN=false opens workspace stores on first use only "
                  "(default true: opened in the background from start)");
+    std::println("  --tunnel-clients-dir the tunnel client downloads (default "
+                 "$LAKE_TUNNEL_CLIENTS_DIR, then /usr/share/lake/tunnel-clients)");
+    std::println(
+        "  LAKE_REGION, LAKE_REGION_LABEL this Lake's region; LAKE_REGIONS the deployment's "
+        "regions as JSON [{{name,label,host,latitude,longitude}}]");
+    std::println("  LAKE_APEX_HOST the host whose every request gets the region picker");
     std::println("  --memory-store an in-memory control plane for local demos and tests");
     return 2;
 }
@@ -163,6 +173,7 @@ int main(int argc, char** argv) {
     opts.identity_seed = env_or("LAKE_IDENTITY_SEED", "");
     opts.instance_kek = env_or("LAKE_INSTANCE_KEK", "");
     opts.clerk_publishable_key = env_or("LAKE_CLERK_PUBLISHABLE_KEY", "");
+    opts.clerk_webhook_secret = env_or("LAKE_CLERK_WEBHOOK_SECRET", "");
     // The cluster delivery key the operator publishes (a public key, not a secret): the only one
     // mint_sealed_secret seals a user's secret to (lake#625).
     opts.sealing_public_key = env_or("LAKE_SEALING_PUBLIC_KEY", "");
@@ -221,6 +232,22 @@ int main(int argc, char** argv) {
     opts.apps_runtime_image = env_or("LAKE_APPS_RUNTIME_IMAGE", "");
     opts.methodology_runtime_image = env_or("LAKE_METHODOLOGY_RUNTIME_IMAGE", "");
     opts.mcp_runner_image = env_or("LAKE_MCP_RUNNER_IMAGE", "");
+    // The tunnel client downloads (lake#745): where the image puts them unless told otherwise.
+    opts.tunnel_clients_dir = env_or("LAKE_TUNNEL_CLIENTS_DIR",
+                                     std::string(lake::api::default_tunnel_clients_dir));
+    // Regions (lake#757, docs/api/regions.md): the operator sets these only where a region is
+    // configured; unset, Lake has no region and serves no picker. Invalid values stop startup.
+    {
+        auto regions = lake::api::regions_from_environment(env_or("LAKE_REGION", ""),
+                                                           env_or("LAKE_REGION_LABEL", ""),
+                                                           env_or("LAKE_REGIONS", ""),
+                                                           env_or("LAKE_APEX_HOST", ""));
+        if (!regions) {
+            std::println(stderr, "lake: {}", regions.error());
+            return 2;
+        }
+        opts.regions = std::move(*regions);
+    }
     opts.apps_reserved_names = env_or("LAKE_APPS_RESERVED_NAMES", "");
     opts.apps_per_customer = env_u64("LAKE_APPS_PER_CUSTOMER");
     opts.app_replicas_per_customer = env_u64("LAKE_APP_REPLICAS_PER_CUSTOMER");
@@ -308,12 +335,20 @@ int main(int argc, char** argv) {
             opts.identity_seed = value("--identity-seed");
             continue;
         }
+        if (arg == "--clerk-webhook-secret") {
+            opts.clerk_webhook_secret = value("--clerk-webhook-secret");
+            continue;
+        }
         if (arg == "--clerk-publishable-key") {
             opts.clerk_publishable_key = value("--clerk-publishable-key");
             continue;
         }
         if (arg == "--instance-kek") {
             opts.instance_kek = value("--instance-kek");
+            continue;
+        }
+        if (arg == "--tunnel-clients-dir") {
+            opts.tunnel_clients_dir = value("--tunnel-clients-dir");
             continue;
         }
         if (arg == "--tsa-url") {
@@ -492,6 +527,12 @@ int main(int argc, char** argv) {
             {"replication_token_set", opts.replication_token.empty() ? "no" : "yes"},
             {"operator_zetta_configured", operator_zetta_url.empty() ? "no" : "yes"},
             {"logs_configured", logs_url.empty() ? "no" : "yes"},
+            {"region",
+             opts.regions.name.empty() ? nlohmann::json(nullptr)
+                                       : nlohmann::json(opts.regions.name)},
+            {"apex_host",
+             opts.regions.apex_host.empty() ? nlohmann::json(nullptr)
+                                            : nlohmann::json(opts.regions.apex_host)},
             {"agent_bus", opts.agent_bus ? (bus_url.empty() ? "memory" : "zetta") : "no"},
             {"api", "/v1/openapi.json"},
             {"mcp", "POST /mcp"}}

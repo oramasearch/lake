@@ -187,6 +187,136 @@ public:
         return kind_;
     }
 
+    control::Result<control::NetworkConnection>
+    create_network_connection(const control::NetworkScope& scope,
+                              const control::NetworkConnectionSpec& spec,
+                              const control::NetworkActor& actor) override {
+        return call("create_network_connection",
+                    [&] { return store_->create_network_connection(scope, spec, actor); });
+    }
+    control::Result<control::NetworkConnection>
+    update_network_connection(const control::NetworkScope& scope,
+                              const std::string& id,
+                              const control::NetworkConnectionSpec& spec,
+                              const control::NetworkActor& actor) override {
+        return call("update_network_connection",
+                    [&] { return store_->update_network_connection(scope, id, spec, actor); });
+    }
+    control::Result<control::NetworkConnection>
+    withdraw_network_connection(const control::NetworkScope& scope,
+                                const std::string& id,
+                                const control::NetworkActor& actor) override {
+        return call("withdraw_network_connection",
+                    [&] { return store_->withdraw_network_connection(scope, id, actor); });
+    }
+    control::Result<control::NetworkConnection>
+    get_network_connection(const control::NetworkScope& scope, const std::string& id) override {
+        return call("get_network_connection",
+                    [&] { return store_->get_network_connection(scope, id); });
+    }
+    control::Result<std::vector<control::NetworkConnection>>
+    list_network_connections(const control::NetworkScope& scope) override {
+        return call("list_network_connections",
+                    [&] { return store_->list_network_connections(scope); });
+    }
+
+    control::Result<control::NetworkEgressRule>
+    create_network_egress_rule(const control::NetworkScope& scope,
+                               const control::NetworkEgressRuleSpec& spec,
+                               const control::NetworkActor& actor) override {
+        return call("create_network_egress_rule",
+                    [&] { return store_->create_network_egress_rule(scope, spec, actor); });
+    }
+    control::Result<control::NetworkEgressRule>
+    update_network_egress_rule(const control::NetworkScope& scope,
+                               const std::string& id,
+                               const control::NetworkEgressRuleSpec& spec,
+                               const control::NetworkActor& actor) override {
+        return call("update_network_egress_rule",
+                    [&] { return store_->update_network_egress_rule(scope, id, spec, actor); });
+    }
+    control::Result<control::NetworkEgressRule>
+    withdraw_network_egress_rule(const control::NetworkScope& scope,
+                                 const std::string& id,
+                                 const control::NetworkActor& actor) override {
+        return call("withdraw_network_egress_rule",
+                    [&] { return store_->withdraw_network_egress_rule(scope, id, actor); });
+    }
+    control::Result<control::NetworkEgressRule>
+    get_network_egress_rule(const control::NetworkScope& scope, const std::string& id) override {
+        return call("get_network_egress_rule",
+                    [&] { return store_->get_network_egress_rule(scope, id); });
+    }
+    control::Result<std::vector<control::NetworkEgressRule>>
+    list_network_egress_rules(const control::NetworkScope& scope) override {
+        return call("list_network_egress_rules",
+                    [&] { return store_->list_network_egress_rules(scope); });
+    }
+
+    control::Result<control::NetworkTunnelGrant>
+    create_network_tunnel_grant(const control::NetworkScope& scope,
+                                const control::NetworkTunnelGrantSpec& spec,
+                                const control::NetworkActor& actor) override {
+        return call("create_network_tunnel_grant",
+                    [&] { return store_->create_network_tunnel_grant(scope, spec, actor); });
+    }
+    control::Result<control::NetworkTunnelGrant>
+    update_network_tunnel_grant(const control::NetworkScope& scope,
+                                const std::string& id,
+                                const control::NetworkTunnelGrantSpec& spec,
+                                const control::NetworkActor& actor) override {
+        return call("update_network_tunnel_grant",
+                    [&] { return store_->update_network_tunnel_grant(scope, id, spec, actor); });
+    }
+    control::Result<control::NetworkTunnelGrant>
+    revoke_network_tunnel_grant(const control::NetworkScope& scope,
+                                const std::string& id,
+                                const control::NetworkActor& actor) override {
+        return call("revoke_network_tunnel_grant",
+                    [&] { return store_->revoke_network_tunnel_grant(scope, id, actor); });
+    }
+    control::Result<control::NetworkTunnelGrant>
+    get_network_tunnel_grant(const control::NetworkScope& scope, const std::string& id) override {
+        return call("get_network_tunnel_grant",
+                    [&] { return store_->get_network_tunnel_grant(scope, id); });
+    }
+    control::Result<std::vector<control::NetworkTunnelGrant>>
+    list_network_tunnel_grants(const control::NetworkScope& scope) override {
+        return call("list_network_tunnel_grants",
+                    [&] { return store_->list_network_tunnel_grants(scope); });
+    }
+
+    control::Result<control::NetworkPeer>
+    create_network_peer(const control::NetworkScope& scope,
+                        const control::NetworkPeerSpec& spec,
+                        const control::NetworkActor& actor) override {
+        return call("create_network_peer",
+                    [&] { return store_->create_network_peer(scope, spec, actor); });
+    }
+    control::Result<control::NetworkPeer>
+    update_network_peer(const control::NetworkScope& scope,
+                        const std::string& id,
+                        const control::NetworkPeerSpec& spec,
+                        const control::NetworkActor& actor) override {
+        return call("update_network_peer",
+                    [&] { return store_->update_network_peer(scope, id, spec, actor); });
+    }
+    control::Result<control::NetworkPeer>
+    withdraw_network_peer(const control::NetworkScope& scope,
+                          const std::string& id,
+                          const control::NetworkActor& actor) override {
+        return call("withdraw_network_peer",
+                    [&] { return store_->withdraw_network_peer(scope, id, actor); });
+    }
+    control::Result<control::NetworkPeer> get_network_peer(const control::NetworkScope& scope,
+                                                           const std::string& id) override {
+        return call("get_network_peer", [&] { return store_->get_network_peer(scope, id); });
+    }
+    control::Result<std::vector<control::NetworkPeer>>
+    list_network_peers(const control::NetworkScope& scope) override {
+        return call("list_network_peers", [&] { return store_->list_network_peers(scope); });
+    }
+
     control::Result<void> ping() override {
         return call("ping", [&] { return store_->ping(); });
     }
@@ -1150,6 +1280,51 @@ public:
     control::Result<control::IssuedSession>
     sign_in_clerk(const control::ClerkIdentity& value) override {
         return call("sign_in_clerk", [&] { return store_->sign_in_clerk(value); });
+    }
+    control::Result<control::ClerkUserProvisioned>
+    provision_clerk_user(const control::ClerkIdentity& value) override {
+        return call("provision_clerk_user", [&] { return store_->provision_clerk_user(value); });
+    }
+    control::Result<std::string> update_clerk_user(const control::ClerkIdentity& value) override {
+        return call("update_clerk_user", [&] { return store_->update_clerk_user(value); });
+    }
+    control::Result<std::string> disable_clerk_user(const std::string& subject) override {
+        return call("disable_clerk_user", [&] { return store_->disable_clerk_user(subject); });
+    }
+    control::Result<bool> clerk_webhook_applied(const std::string& delivery_id) override {
+        return call("clerk_webhook_applied",
+                    [&] { return store_->clerk_webhook_applied(delivery_id); });
+    }
+    control::Result<void> record_clerk_webhook(const std::string& delivery_id,
+                                               const std::string& event_type,
+                                               const std::string& subject) override {
+        return call("record_clerk_webhook",
+                    [&] { return store_->record_clerk_webhook(delivery_id, event_type, subject); });
+    }
+    control::Result<control::AccountIdentity>
+    account_identity(const std::string& user_id) override {
+        return call("account_identity", [&] { return store_->account_identity(user_id); });
+    }
+    control::Result<control::ManagedKey> managed_key(const std::string& user_id) override {
+        return call("managed_key", [&] { return store_->managed_key(user_id); });
+    }
+    control::Result<void>
+    create_identity_link_challenge(const control::IdentityLinkChallenge& value) override {
+        return call("create_identity_link_challenge",
+                    [&] { return store_->create_identity_link_challenge(value); });
+    }
+    control::Result<control::IdentityLinkChallenge>
+    consume_identity_link_challenge(const std::string& user_id,
+                                    const std::string& challenge) override {
+        return call("consume_identity_link_challenge",
+                    [&] { return store_->consume_identity_link_challenge(user_id, challenge); });
+    }
+    control::Result<control::AccountIdentity>
+    link_own_identity(const control::IdentityLink& value) override {
+        return call("link_own_identity", [&] { return store_->link_own_identity(value); });
+    }
+    control::Result<std::string> account_for_identity(const std::string& taap_id) override {
+        return call("account_for_identity", [&] { return store_->account_for_identity(taap_id); });
     }
     control::Result<void> register_oauth_provider(const control::OAuthProvider& value) override {
         return call("register_oauth_provider",

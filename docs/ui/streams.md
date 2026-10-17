@@ -66,14 +66,14 @@ System topics are marked *system · browse-only* and have no write controls; lak
 writes to REST and MCP. Account readers see reads; writers see publish, edit and New Topic; admins
 also see message deletion and purge. Only the topic's recorded creator (`can_manage`) sees
 settings and Delete Topic, and the capability also requires admin to drop. `my_permissions` only
-decides which controls show; every capability checks again. Ask Orama and ApplicationAgent may
+decides which controls show; every capability checks again. Ask Orama and the Application Agent may
 use the read capabilities freely and must ask the person to confirm writes.
 
 ## Links in
 
 App event panels link to `app-events.<app-id>`, and app builds and the Packages build log to
 `build-events.<build-id>`. Run detail links to the workspace's Streams list: training does not
-advertise a per-run topic, so lake does not invent one. ApplicationAgent, Ask Orama and Agent
+advertise a per-run topic, so lake does not invent one. Application Agent, Ask Orama and Agent
 Factory turns link to `/w/<workspace_id>/train/stream?zetta=workspace&topic=agent-events&task=<task-id>`
 (*View this turn in Streams*). Viewing never advances a consumer.
 

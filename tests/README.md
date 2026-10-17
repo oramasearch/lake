@@ -1,5 +1,32 @@
 # Tests
 
+`test_network_tunnel.cpp` exercises recipient-only CSR signing, trust, validity, refusal cases,
+admin grant/revoke and signed audit against memory and PostgreSQL. `tunnel_fixture.hpp` creates
+local keys and deliberately overprivileged CSRs. Transport evidence in `test_schema_conformance.cpp`
+covers REST/MCP issuance. Network tests also cover 0085 replay and pending/scoped history providers.
+See [tunnel credentials](../docs/api/tunnel-grants.md) and [the proof](../docs/build/tunnel-grants-proof.md).
+
+`test_network.cpp` runs shared memory/PostgreSQL store cases for all four secure-networking
+records through the telemetry wrapper. PostgreSQL-only cases verify contract columns, defaults,
+foreign keys, backfill idempotency, notifications, expired grants, audit rollback and concurrent
+updates. Shared validation rejects credentials outside app-to-service connections. See
+[network.md](../docs/control-plane/network.md#verify) for the proof command.
+
+`test_tunnel_clients.cpp` covers the tunnel client downloads (lake#745): the folder, the platform
+allow-list, links bound to platform, version, expiry and key, `tunnel_client_downloads` and
+`GET /tunnel-clients/<platform>` over a live server, refusing expired, tampered and unknown links.
+
+`test_network_capabilities.cpp` covers desired-state lifecycle, scoped credential rotation and
+refusal, effective rules, account permissions, OpenAPI and MCP registration, an MCP call, and the
+explicit workspace-record boundary.
+The schema-conformance case also calls every available network capability successfully and checks
+its required output with the independent validator. See [the capability
+contract](../docs/api/network.md#verify).
+
+`LAKE_TEST_SKIP_STALE_SWEEP=1` disables cleanup of previous runs' databases when a shared-host
+work order permits deleting only databases created by the current run. Current fixtures still
+clean up their own copies; see [testing.md](../docs/build/testing.md).
+
 `test_main.cpp` is the shared GoogleTest runner. `lake::test::postgres_uri()` gives each
 Postgres-backed test a private database copied from a `lake_fixture_template_<digest>` template
 loaded once per `db/schema.sql` version, and drops it afterwards; a start-up sweep removes only
@@ -47,7 +74,12 @@ The Streams task-credential fixture takes a real claim before making calls. See
 `HttpResponseIsolation.AskOramaSaysWhoIsWorkingOnALongTurn` (lake#451) runs a real Ask Orama
 claim, a delegation with its turn key, and the subagent's progress and result, and follows the turn
 through `settle_ask_turn`'s task message and the asking turn's `agent-events`.
-`Workspaces.TalkToOffersOnlyRunningAgentsAPersonUses` checks which agents *Talk to* offers.
+`Workspaces.TalkToOffersEveryAgentAndMarksTheOnesNotRunning` checks which agents *Talk to* offers, `Workspaces.EveryCatalogueAgentIsInTalkToWhenItRuns` that none of the catalogue is left out, and `Workspaces.ListAgentLibraryListsEveryAgentWhateverIncludeInternalSays` that `include_internal` no longer filters (lake#788).
+`AgentNames.*` (`test_agent_names.cpp`, lake#763) keeps the Agent Library the one source of agent
+names: every name follows the scheme (title-case words, "Agent" last but for Ask Orama), no old or
+run-together spelling appears in the code, the web app, the guide, the docs, the tests or the tools
+(release notes and dated records excepted), `docs/api/train-agents.md`'s table is the catalogue, and
+no code pairs an agent key with its name outside the catalogue.
 
 Lease regressions also cover delayed notice acknowledgements and stale waiting-deadline
 observations: neither may discard the final failure notice or fail a fresh retry.
@@ -290,7 +322,7 @@ repository reads, and cross-app, cache and write refusal.
 Authorization assertions use well-formed input; malformed authenticated calls separately assert
 `invalid_input`. Postgres registry contexts supply the fixture's audit encryption key.
 `HttpServer/HttpResponseIsolation.ShipAppsCreatesOperatesAndFollowsAnApp/*` starts an
-ApplicationAgent turn through `agent_turn`, replies to its question in the same conversation,
+Application Agent turn through `agent_turn`, replies to its question in the same conversation,
 refuses a confirmation without `proposal_task_id`, for a turn that proposed nothing, with another or
 a changed `proposal_sha256`, and for an unacknowledged public app, confirms the stored proposal and
 reads its deployed URL, then creates a repository app, queues an app build from the runtime image

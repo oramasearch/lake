@@ -20,7 +20,10 @@ add_executable(lake-tests test_main.cpp test_web_ui.cpp test_web_app.cpp test_ma
   test_policy.cpp
   test_oauth.cpp
   test_clerk.cpp
+  test_own_identity.cpp
+  test_clerk_webhooks.cpp
   test_workspaces.cpp
+  test_agent_names.cpp
   test_workspace_records.cpp
   test_transcripts.cpp
   test_mcp_client.cpp
@@ -65,6 +68,13 @@ add_executable(lake-tests test_main.cpp test_web_ui.cpp test_web_app.cpp test_ma
   test_token_attenuation.cpp
   test_docs_status.cpp
   test_volumes.cpp)
+target_sources(lake-tests PRIVATE test_network_capabilities.cpp test_network_tunnel.cpp)
+# The tunnel client downloads (lake#745).
+target_sources(lake-tests PRIVATE test_tunnel_clients.cpp)
+# Regions and the apex region picker (lake#757).
+target_sources(lake-tests PRIVATE test_regions.cpp)
+# The version and its release page (root CLAUDE.md, *Cutting a release*).
+target_sources(lake-tests PRIVATE test_release_version.cpp)
 target_link_libraries(lake-tests PRIVATE lake-api lake-control-postgres pqxx OpenSSL::Crypto
   Boost::beast2 Boost::http Boost::corosio GTest::gtest
   # zetta-api for a fake Zetta HTTP transport under ZettaWorkspaceCaller (test_workspaces.cpp).
@@ -76,12 +86,13 @@ target_compile_definitions(lake-tests PRIVATE
   LAKE_TEST_NODE="${LAKE_NODE_EXECUTABLE}"
   LAKE_TEST_CMAKE_COMMAND="${CMAKE_COMMAND}"
   LAKE_TEST_SERVER_PATH="$<TARGET_FILE:lake>"
-  LAKE_TEST_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
+  LAKE_TEST_SOURCE_DIR="${PROJECT_SOURCE_DIR}"
+  LAKE_TEST_PROJECT_VERSION="${PROJECT_VERSION}")
 add_dependencies(lake-tests lake)
 include(GoogleTest)
 gtest_discover_tests(lake-tests)
 
-add_executable(lake-postgres-tests test_main.cpp test_postgres.cpp test_operator_contract.cpp)
+add_executable(lake-postgres-tests test_main.cpp test_postgres.cpp test_operator_contract.cpp test_network.cpp)
 target_link_libraries(lake-postgres-tests PRIVATE lake-control-postgres pqxx OpenSSL::Crypto GTest::gtest)
 target_compile_definitions(lake-postgres-tests PRIVATE
   LAKE_TEST_SOURCE_DIR="${PROJECT_SOURCE_DIR}")

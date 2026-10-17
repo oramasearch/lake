@@ -7,17 +7,18 @@
 
 #include "forge_records_api.hpp"
 #include "http_connections.hpp"
+#include "lake/api/agent_stream_triggers.hpp"
 #include "lake/api/audit_recorder.hpp"
 #include "lake/api/billing.hpp"
+#include "lake/api/clerk_webhooks.hpp"
 #include "lake/api/mcp_client.hpp"
-#include "lake/api/agent_stream_triggers.hpp"
-#include "lake/control/store_buckets.hpp"
 #include "lake/api/mcp_connections.hpp"
 #include "lake/api/metering_recorder.hpp"
 #include "lake/api/request_recorder.hpp"
 #include "lake/api/server.hpp"
 #include "lake/api/stripe.hpp"
 #include "lake/api/usage_recorder.hpp"
+#include "lake/control/store_buckets.hpp"
 #include "lake/thread.hpp"
 
 #include "lake/control/agents.hpp"
@@ -106,6 +107,7 @@
 #include "lake/api/store_owner.hpp"
 #include "lake/api/sync_store.hpp"
 #include "lake/api/transcription.hpp"
+#include "lake/api/tunnel_clients.hpp"
 #include "lake/api/web_app.hpp"
 #include "lake/api/web_ui.hpp"
 #include "lake/api/workspace_deletion.hpp"
@@ -2675,6 +2677,7 @@ public:
                 .kind = item.kind == liquid::sync_item_kind::reference ? SyncPushItemKind::Reference
                                                                        : SyncPushItemKind::Change,
                 .change_id = liquid::to_string(item.reference.value),
+                .author = item.author.taap_id,
             };
             auto result = authorize(input, reference_updates);
             if (!result) {
@@ -8889,6 +8892,7 @@ struct ApiServer::Impl {
             "/identity/sign-up",
             "/identity/sign-in",
             "/identity/clerk-session",
+            "/identity/clerk-webhook",
             "/billing/stripe/webhook",
             "/identity/mfa/verify",
             "/identity/mfa/enroll",
@@ -8986,6 +8990,7 @@ struct ApiServer::Impl {
         ctx.store = options.store.get();
         ctx.search = options.search.get();
         ctx.pki = &pki;
+        ctx.network_records = options.network_records.get();
         ctx.agents = &agents;
         ctx.platform = options.platform.get();
         ctx.workspaces = options.workspaces.get();
@@ -9000,6 +9005,8 @@ struct ApiServer::Impl {
         ctx.apps_runtime_image = options.apps_runtime_image;
         ctx.methodology_runtime_image = options.methodology_runtime_image;
         ctx.mcp_runner_image = options.mcp_runner_image;
+        ctx.tunnel_clients_dir = options.tunnel_clients_dir;
+        ctx.regions = &options.regions;
         // Build registry targets use the in-cluster authority (LAKE_INTERNAL_URL).
         ctx.internal_url = options.internal_url;
         ctx.apps_reserved_names = options.apps_reserved_names;
@@ -10114,6 +10121,47 @@ struct ApiServer::Impl {
                                      "no-store");
     }
 
+    // POST /identity/clerk-webhook (docs/api/clerk.md#webhooks, lake#765): Clerk's user events,
+    // delivered by Svix. Unauthenticated: the svix-signature HMAC with LAKE_CLERK_WEBHOOK_SECRET is
+    // the credential. 404 without the secret.
+    boost::http::route_task serve_clerk_webhook(boost::http::route_params& route) {
+        namespace http = boost::http;
+        if (options.clerk_webhook_secret.empty() || !options.store) {
+            co_return co_await send_text(
+                route,
+                http::status::not_found,
+                error_body("not_found", "Clerk webhooks are not configured"),
+                "application/json; charset=utf-8",
+                "no-store");
+        }
+        auto [read_error, body] = co_await read_string_body(route, std::size_t{1024} * 1024);
+        if (read_error) {
+            if (body_is_too_large(read_error)) {
+                co_return co_await send_text(
+                    route,
+                    http::status::payload_too_large,
+                    error_body("size_invalid", "an event is at most 1 MiB"),
+                    "application/json; charset=utf-8",
+                    "no-store");
+            }
+            co_return http::route_error(read_error);
+        }
+        const auto header = [&](std::string_view name) {
+            return route.req.count(name) == 0 ? std::string() : std::string(route.req.at(name));
+        };
+        ApiContext context = context_for(route);
+        context.authentication_method = "clerk_webhook";
+        const auto outcome = clerk_webhooks::receive(
+            context,
+            options.clerk_webhook_secret,
+            {header("svix-id"), header("svix-timestamp"), header("svix-signature"), body});
+        co_return co_await send_text(route,
+                                     static_cast<http::status>(outcome.status),
+                                     outcome.body.dump(),
+                                     "application/json; charset=utf-8",
+                                     "no-store");
+    }
+
     boost::http::route_task serve_clerk_session(boost::http::route_params& route) {
         namespace http = boost::http;
         // redirect() takes views and runs when awaited, so the location lives in this frame.
@@ -10521,6 +10569,71 @@ struct ApiServer::Impl {
                                           : std::string("application/octet-stream"),
                                       context.sync_response,
                                       "\"" + json_string(result.value, "blob") + "\"");
+    }
+
+    // GET /tunnel-clients/<platform>?expires=&signature= (lake#745, docs/api/tunnel-clients.md):
+    // one tunnel client, for a link tunnel_client_downloads signed. The link is the credential, so
+    // a plain curl follows it without a session. The platform is checked against the allow-list
+    // before anything is read, so it never names a path.
+    boost::http::route_task serve_tunnel_client(boost::http::route_params& route) {
+        const auto refuse = [&route](ApiResult refused) -> boost::http::route_task {
+            return send_text(route,
+                             boost::http::int_to_status(static_cast<unsigned>(rest_status(refused))),
+                             refused.envelope().dump(),
+                             "application/json; charset=utf-8",
+                             "no-store");
+        };
+        const std::string platform = route_value(route, "platform");
+        if (find_tunnel_client_platform(platform) == nullptr) {
+            co_return co_await refuse(
+                ApiResult::failure("not_found", "no tunnel client for platform " + platform));
+        }
+        const auto clients = read_tunnel_clients(options.tunnel_clients_dir);
+        if (!clients) {
+            co_return co_await refuse(
+                ApiResult::failure("not_found", "this Lake has no tunnel clients"));
+        }
+        const std::int64_t now = std::chrono::duration_cast<std::chrono::seconds>(
+                                     std::chrono::system_clock::now().time_since_epoch())
+                                     .count();
+        const TunnelClientLinkCheck check = check_tunnel_client_link(options.instance_kek,
+                                                                     platform,
+                                                                     clients->version,
+                                                                     query_value(route, "expires"),
+                                                                     query_value(route, "signature"),
+                                                                     now);
+        if (check != TunnelClientLinkCheck::valid) {
+            ApiResult refused = ApiResult::failure(
+                "unauthenticated",
+                check == TunnelClientLinkCheck::expired
+                    ? "this download link has expired; open Get credentials again for a new one"
+                    : "this download link is not valid; open Get credentials again for a new one");
+            refused.error.reason = check == TunnelClientLinkCheck::expired ? "expired" : "invalid";
+            co_return co_await refuse(std::move(refused));
+        }
+        const auto client = std::ranges::find(clients->clients, platform, &TunnelClient::platform);
+        if (client == clients->clients.end()) {
+            co_return co_await refuse(
+                ApiResult::failure("not_found", "no tunnel client for platform " + platform));
+        }
+        auto read = co_await run_blocking([path = client->path, size = client->size] {
+            std::vector<std::byte> bytes(static_cast<std::size_t>(size));
+            std::ifstream in(path, std::ios::binary);
+            if (!in || !in.read(reinterpret_cast<char*>(bytes.data()),
+                                static_cast<std::streamsize>(bytes.size()))) {
+                bytes.clear();
+            }
+            return bytes;
+        });
+        if (!read || read->empty()) {
+            co_return co_await refuse(
+                ApiResult::failure("store_error", "the tunnel client could not be read"));
+        }
+        route.res.set("content-disposition", "attachment; filename=\"" + client->file_name + "\"");
+        route.res.set("x-content-type-options", "nosniff");
+        co_return co_await send_bytes(
+            route, boost::http::status::ok, "application/octet-stream", *read,
+            "\"" + client->sha256 + "\"");
     }
 
     // GET /drive/files/download?customer_id=&workspace_id=&drive_id=&id=[&inline=1]: a workspace
@@ -12376,19 +12489,7 @@ struct ApiServer::Impl {
                                      std::uint64_t expires) const {
         const std::string payload = std::string(repository_id) + "\n" + std::string(oid) + "\n" +
                                     std::to_string(size) + "\n" + std::to_string(expires);
-        std::array<unsigned char, EVP_MAX_MD_SIZE> digest{};
-        unsigned int digest_size = 0;
-        if (HMAC(EVP_sha256(),
-                 options.instance_kek.data(),
-                 static_cast<int>(options.instance_kek.size()),
-                 reinterpret_cast<const unsigned char*>(payload.data()),
-                 payload.size(),
-                 digest.data(),
-                 &digest_size) == nullptr) {
-            return {};
-        }
-        return control::identity_crypto::base64url_encode(
-            std::string_view(reinterpret_cast<const char*>(digest.data()), digest_size));
+        return signed_link_signature(options.instance_kek, payload);
     }
 
     boost::http::route_task serve_hub_lfs_batch(boost::http::route_params& route) {
@@ -12487,6 +12588,65 @@ struct ApiServer::Impl {
                           {{"id", repository_id}, {"oid", oid}, {"size", *size}},
                           context);
         co_return co_await send_hub_result(route, result);
+    }
+
+    // Whether the request is for the apex host (LAKE_APEX_HOST, lake#757): every path there is the
+    // region picker, apart from the stylesheet and fonts the picker links and the probes.
+    bool region_picker_serves(const boost::http::route_params& route) const {
+        if (options.regions.apex_host.empty()) {
+            return false;
+        }
+        std::string host = request_host(route);
+        std::ranges::transform(
+            host, host.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        if (host != options.regions.apex_host) {
+            return false;
+        }
+        const std::string_view path = route.url.encoded_path();
+        if (route.req.method() == boost::http::method::get &&
+            (path == web_ui_stylesheet_url() || path == "/style.css" ||
+             path.starts_with("/fonts/") || path == "/healthz" || path == "/readyz")) {
+            return false;
+        }
+        return true;
+    }
+
+    // The region picker (docs/ui/regions.md). GET (any method but POST): the page, preselecting
+    // the region chosen before (the `lake_region` cookie), else the closest to Cloudflare's
+    // CF-IPCountry, else the first. POST with `region`: remember it and continue to the same path
+    // and query on that region's host.
+    boost::http::route_task serve_region_picker(boost::http::route_params& route) {
+        namespace http = boost::http;
+        const Regions& regions = options.regions;
+        std::string target(route.url.encoded_path());
+        if (target.empty()) {
+            target = "/";
+        }
+        if (route.url.has_query()) {
+            target += "?" + std::string(route.url.encoded_query());
+        }
+        std::string error;
+        if (route.req.method() == http::method::post) {
+            auto [read_error, body] = co_await read_string_body(route);
+            if (read_error) {
+                co_return http::route_error(read_error);
+            }
+            if (const Region* chosen = regions.find(form_field(body, "region"))) {
+                co_return co_await redirect(
+                    route,
+                    region_continue_url(*chosen, target),
+                    region_preference_cookie(chosen->name, request_is_https(route)));
+            }
+            error = "Choose one of the regions below.";
+        }
+        const std::string country(route.req.value_or("cf-ipcountry", ""));
+        const Region* selected =
+            preselected_region(regions, cookie_value(route, region_cookie_name), country);
+        co_return co_await send_text(route,
+                                     error.empty() ? http::status::ok : http::status::bad_request,
+                                     web_ui_region_picker(regions, *selected, target, error),
+                                     "text/html; charset=utf-8",
+                                     "no-store");
     }
 
     // A file of the embedded web app (docs/ui/web-app.md); 404 when the build has no such file.
@@ -14020,6 +14180,19 @@ bool ApiServer::start() {
         }
         co_return result;
     });
+    // The apex host's region picker (lake#757, docs/ui/regions.md): before everything else that
+    // could answer, so no path on the apex reaches the app or the API.
+    router.use(guarded("region_picker", [&impl](http::route_params& route) -> http::route_task {
+        if (!impl.region_picker_serves(route)) {
+            co_return http::route_next;
+        }
+        const auto timing = request_timing(route);
+        const auto start = timing ? timing->started : std::chrono::steady_clock::now();
+        const RequestTimingScope timing_scope(route, start);
+        auto result = co_await impl.serve_region_picker(route);
+        impl.record_request(route, "region_picker", start);
+        co_return result;
+    }));
     // A cookie-authenticated unsafe request from another origin is refused before any route.
     router.use(guarded("cross_site", [&impl](http::route_params& route) -> http::route_task {
         auto result = co_await impl.refuse_cross_site(route);
@@ -14256,6 +14429,12 @@ bool ApiServer::start() {
                       route, "/billing/stripe/webhook", impl.serve_payment_notice(route));
               });
     add_route(http::method::post,
+              "/identity/clerk-webhook",
+              [&impl](http::route_params& route) -> http::route_task {
+                  return impl.observe_request(
+                      route, "/identity/clerk-webhook", impl.serve_clerk_webhook(route));
+              });
+    add_route(http::method::post,
               "/identity/clerk-session",
               [&impl](http::route_params& route) -> http::route_task {
                   return impl.observe_request(
@@ -14289,6 +14468,12 @@ bool ApiServer::start() {
               [&impl](http::route_params& route) -> http::route_task {
                   return impl.observe_request(
                       route, "/drive/files/download", impl.serve_workspace_file_download(route));
+              });
+    add_route(http::method::get,
+              "/tunnel-clients/:platform",
+              [&impl](http::route_params& route) -> http::route_task {
+                  return impl.observe_request(
+                      route, "/tunnel-clients/:platform", impl.serve_tunnel_client(route));
               });
     add_route(http::method::get, "/share/:token/download", [&impl](http::route_params& route) {
         return impl.observe_request(

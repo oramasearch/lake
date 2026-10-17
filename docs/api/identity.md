@@ -85,8 +85,11 @@ consumed on their first completion attempt.
 so an assertion cannot cross pool or origin. Additional pool-origin configuration belongs to the
 user-pools work in #51.
 
-Password sign-up requires the client-held TAAP/1 document as a base64url-encoded canonical-CBOR
-`identity_document`. lake decodes and verifies its self-signature through libliquid's public
+Lake-pool password sign-up does not require an identity document (lake#762, liquid-bridge
+decision 65): without one, Lake mints a **managed key** for the account (as for a first Clerk
+sign-in) and the person can switch to their own identity later ([Your own
+identity](#your-own-identity)). With one, and always in an application pool, password sign-up takes
+the client-held TAAP/1 document as a base64url-encoded canonical-CBOR `identity_document`. lake decodes and verifies its self-signature through libliquid's public
 `decode_identity_document`, `encode_identity_document`, and `verify_document` APIs, hashes the
 complete canonical record with SHA-512/256, writes `identity_documents`, and binds the resulting
 `taap_id` to the new user. lake never receives a person's private key.
@@ -213,6 +216,109 @@ exception because the provider invokes it as a browser redirect.
 OAuth registration, PKCE callback processing, JWKS verification and WebAuthn ceremonies use the
 `0007_identity_core` tables. Keep the passkey browser adapter limited to the one documented inline
 script that calls `navigator.credentials`.
+
+## Your own identity
+
+**Status: implemented 2026-10-17 (lake#762, migration `0086_identity_links`), not deployed.**
+Decision 65 in liquid-bridge's `docs/decisions.md`.
+
+### What
+
+Every account that starts without an identity document (Clerk sign-in, or Lake's own sign-up
+without one) signs with a **managed key**: an Ed25519 TAAP identity Lake mints and holds, its seed
+wrapped under `LAKE_INSTANCE_KEK` in `custodial_identities`. The account's identifier, the one
+grants, audit and repositories are keyed on, is that key's `taap:1:ed25519:…`.
+
+The person may later **use their own identity**: the liquid identity on their computer. The
+account keeps its identifier, so its grants, audit history and repositories stay exactly as they
+are; what changes is the key it signs with. The own identity becomes the managed key's **linked
+successor**, recorded once with both keys' signatures, and the managed seed is destroyed.
+
+| Capability | Kind | Input | Output |
+|---|---|---|---|
+| `account_identity` | read | — | `{taap_id, key: managed\|own, signs_as, managed_key: {public_key, held, destroyed_at} \| null, linked: {own_taap_id, own_document_hash, linked_at, link_document} \| null}` |
+| `begin_own_identity` | action | `{identity_document}` (the output of `liquid identity show --document`) | `{challenge, command, own_taap_id, expires_at, statement}` |
+| `use_own_identity` | action | `{challenge, signature}` (everything `liquid sign artifact <challenge>` printed) | the account identity, as `account_identity` |
+
+REST: `GET /v1/account_identity`, `POST /v1/begin_own_identity`, `POST /v1/use_own_identity`. MCP:
+the same names. The two actions are refused (`unauthorized`) for anything but the signed-in person
+in Lake's own pool: an API token, an agent, the operator credential or an application user cannot
+change which key an account signs with. They are `conflict` when the account already signs with its
+own identity, and when that identity already belongs to another Lake account.
+
+### How a person proves they hold their own key
+
+Lake does not take a successor document produced on the person's computer: that would need the
+managed key's signature, which only Lake holds. Instead the two keys sign the same transition:
+
+1. `begin_own_identity` decodes the document with libliquid's public codec
+   (`decode_identity_document`), re-encodes it and compares the bytes (canonical CBOR), verifies its
+   self-signature (`verify_document`), and accepts only an **initial document**: one without a
+   predecessor hash whose identifier is its own key's fingerprint, so the key proves the identifier.
+   A rotated successor names an identifier its key alone does not prove and is refused (link before
+   `liquid identity rotate`, or see *Limits*).
+2. Lake writes a **statement** `{version: "taap_identity_link/1", purpose: "lake_use_own_identity",
+   account, previous (the managed identifier), next (the own identifier), next_document_hash,
+   nonce, expires_at}`, and the challenge `sha256:<hex>` of its CBOR. The challenge, bound to the
+   account, is stored in `identity_link_challenges` for ten minutes and can be used once.
+3. The person runs `liquid sign artifact <challenge>` with their identity. liquid signs the
+   challenge text (a canonical CBOR text string) as a TAAP/1 `artifact` and prints
+   `signature=<hex of the canonical signature object>` and `signer=<identity>`.
+4. `use_own_identity` consumes the challenge (a refused attempt spends it too), checks a `signer=`
+   line names the identity being linked, decodes the signature with `decode_signature`, and
+   verifies it with `liquid::verify` against the key in the stored document. A signature by any
+   other key, or over any other challenge, is `unauthorized`.
+5. The managed key then signs the **link body** `{version, account, previous, next,
+   next_document_hash, challenge, statement, linked_at}` as `TAAP/1 identity_link`. The link
+   document is `{body, previous_signature, previous_public_key, next_signature}`:
+   `previous_signature` is the managed key's Ed25519 signature, `next_signature` the person's
+   signature over the challenge the body commits to. `own_identity::verify_link` re-checks both.
+6. In one transaction the link is written to `identity_links` and the managed seed is wiped
+   (`wrapped_seed` set to null, `seed_destroyed_at` set). The seed is never destroyed without a
+   committed link and never kept after one. Its public half stays, so the link still verifies.
+
+Each step is one audit event in the central log (`begin_own_identity`, `use_own_identity`), whose
+principal is the account and whose details name `previous` and `next`;
+`use_own_identity` adds `managed_seed_destroyed` and `own_document_hash`. Refusals are recorded too.
+
+### What the own identity can do afterwards
+
+- `sign_in_taap` with the own identity's document signs in to the account.
+- Repository pushes name each change's signer: the `push_change` audit event carries `author` (the
+  signing identity), `author_account` (the account that identity acts for, through
+  `Store::account_for_identity`) and `author_is_caller`. A push signed by the linked key is
+  attributed to the account.
+- Grants, memberships, workspace records and the audit history keep the account identifier.
+
+### Limits
+
+- A person whose liquid identity has already been rotated cannot link it yet: the current document
+  alone does not prove its identifier. Accepting the whole chain (`verify_chain`) is the follow-up.
+- Rotating the own key afterwards (`liquid identity rotate`) is not tracked by Lake: `sign_in_taap`
+  verifies the document presented, as before.
+- The link is one-way. An account that uses its own identity cannot return to a managed key.
+- Postgres keeps old row versions until vacuum; the wiped seed was wrapped under the instance key
+  throughout.
+
+### Verify
+
+```sh
+ctest --test-dir build -R 'OwnIdentity|Clerk'   # with LAKE_TEST_DB_URI set
+```
+
+`OwnIdentity.*` covers sign-up without a document (memory and Postgres), a Clerk sign-in starting
+with a managed key, the whole rotation on both stores with a real libliquid identity (wrong signer,
+wrong challenge, replay, token credential, second link and a taken identity refused; grants,
+repositories and identifier kept; managed seed gone; link verifies and a tampered one does not;
+`sign_in_taap` with the own key; audit), a rotated successor document refused, and a liquid push
+from the linked key attributed to the account.
+
+### Change it
+
+The statement, the link body and the verification are in `src/control/own_identity.cpp`; the
+capabilities in `register_own_identity_capabilities` (`src/api/capabilities.cpp`); the managed
+signature in `audit::sign_with_managed_key`. A change to the statement or the body changes every
+future challenge; keep `verify_link` able to read the links already written.
 
 ## Personal customer on sign-up
 

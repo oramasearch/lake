@@ -18,6 +18,61 @@ public:
         return "memory";
     }
     Result<void> ping() override;
+    Result<NetworkConnection> create_network_connection(const NetworkScope&,
+                                                        const NetworkConnectionSpec&,
+                                                        const NetworkActor&) override;
+    Result<NetworkConnection> update_network_connection(const NetworkScope&,
+                                                        const std::string& id,
+                                                        const NetworkConnectionSpec&,
+                                                        const NetworkActor&) override;
+    Result<NetworkConnection> withdraw_network_connection(const NetworkScope&,
+                                                          const std::string& id,
+                                                          const NetworkActor&) override;
+    Result<NetworkConnection> get_network_connection(const NetworkScope&,
+                                                     const std::string& id) override;
+    Result<std::vector<NetworkConnection>> list_network_connections(const NetworkScope&) override;
+    Result<NetworkEgressRule> create_network_egress_rule(const NetworkScope&,
+                                                         const NetworkEgressRuleSpec&,
+                                                         const NetworkActor&) override;
+    Result<NetworkEgressRule> update_network_egress_rule(const NetworkScope&,
+                                                         const std::string& id,
+                                                         const NetworkEgressRuleSpec&,
+                                                         const NetworkActor&) override;
+    Result<NetworkEgressRule> withdraw_network_egress_rule(const NetworkScope&,
+                                                           const std::string& id,
+                                                           const NetworkActor&) override;
+    Result<NetworkEgressRule> get_network_egress_rule(const NetworkScope&,
+                                                      const std::string& id) override;
+    Result<std::vector<NetworkEgressRule>> list_network_egress_rules(const NetworkScope&) override;
+    Result<NetworkTunnelGrant> create_network_tunnel_grant(const NetworkScope&,
+                                                           const NetworkTunnelGrantSpec&,
+                                                           const NetworkActor&) override;
+    Result<NetworkTunnelGrant> update_network_tunnel_grant(const NetworkScope&,
+                                                           const std::string& id,
+                                                           const NetworkTunnelGrantSpec&,
+                                                           const NetworkActor&) override;
+    Result<NetworkTunnelGrant> revoke_network_tunnel_grant(const NetworkScope&,
+                                                           const std::string& id,
+                                                           const NetworkActor&) override;
+    Result<NetworkTunnelGrant> get_network_tunnel_grant(const NetworkScope&,
+                                                        const std::string& id) override;
+    Result<std::vector<NetworkTunnelGrant>>
+    list_network_tunnel_grants(const NetworkScope&) override;
+    Result<NetworkPeer>
+    create_network_peer(const NetworkScope&, const NetworkPeerSpec&, const NetworkActor&) override;
+    Result<NetworkPeer> update_network_peer(const NetworkScope&,
+                                            const std::string& id,
+                                            const NetworkPeerSpec&,
+                                            const NetworkActor&) override;
+    Result<NetworkPeer>
+    withdraw_network_peer(const NetworkScope&, const std::string& id, const NetworkActor&) override;
+    Result<NetworkPeer> get_network_peer(const NetworkScope&, const std::string& id) override;
+    Result<std::vector<NetworkPeer>> list_network_peers(const NetworkScope&) override;
+    // Operator observation for tests and local demos, never a desired-state mutation.
+    Result<void> set_network_connection_status(const std::string& id, const NetworkStatus&);
+    Result<void> set_network_egress_rule_status(const std::string& id, const NetworkStatus&);
+    Result<void> set_network_tunnel_grant_status(const std::string& id, const NetworkStatus&);
+    Result<void> set_network_peer_status(const std::string& id, const NetworkStatus&);
     Result<User> create_user(const NewUser&) override;
     Result<std::vector<User>> list_users(int limit) override;
     Result<User> get_user(const std::string& id) override;
@@ -428,6 +483,23 @@ public:
     Result<IssuedSession> sign_in_passkey(const PasskeyAssertion&) override;
     Result<IssuedSession> sign_in_oauth(const OAuthIdentity&) override;
     Result<IssuedSession> sign_in_clerk(const ClerkIdentity&) override;
+    Result<ClerkUserProvisioned> provision_clerk_user(const ClerkIdentity&) override;
+    Result<std::string> update_clerk_user(const ClerkIdentity&) override;
+    Result<std::string> disable_clerk_user(const std::string& subject) override;
+    Result<bool> clerk_webhook_applied(const std::string& delivery_id) override;
+    Result<void> record_clerk_webhook(const std::string& delivery_id,
+                                      const std::string& event_type,
+                                      const std::string& subject) override;
+    // provision_clerk_user under the lock.
+    Result<ClerkUserProvisioned> clerk_user_locked(const ClerkIdentity&);
+    Result<AccountIdentity> account_identity(const std::string& user_id) override;
+    Result<ManagedKey> managed_key(const std::string& user_id) override;
+    Result<void> create_identity_link_challenge(const IdentityLinkChallenge&) override;
+    Result<IdentityLinkChallenge>
+    consume_identity_link_challenge(const std::string& user_id,
+                                    const std::string& challenge) override;
+    Result<AccountIdentity> link_own_identity(const IdentityLink&) override;
+    Result<std::string> account_for_identity(const std::string& taap_id) override;
     Result<void> register_oauth_provider(const OAuthProvider&) override;
     Result<OAuthProvider> get_oauth_provider(const std::string& pool_id,
                                              const std::string& provider) override;
@@ -498,6 +570,29 @@ public:
                                                                     int limit) override;
 
 private:
+    Result<void> check_network_scope_locked(const NetworkScope&) const;
+    Result<void> check_network_target_locked(const NetworkScope&,
+                                             const std::string& kind,
+                                             const std::string& id) const;
+    template <class Row>
+    Result<Row> change_network(const NetworkScope&,
+                               const std::string& id,
+                               const nlohmann::json& spec,
+                               const NetworkActor&,
+                               const std::string& operation,
+                               std::vector<Row>& rows);
+    template <class Row>
+    Result<Row>
+    get_network(const NetworkScope&, const std::string& id, const std::vector<Row>& rows);
+    template <class Row>
+    Result<std::vector<Row>> list_network(const NetworkScope&, const std::vector<Row>& rows);
+    template <class Row>
+    Result<void>
+    set_network_status(const std::string& id, const NetworkStatus&, std::vector<Row>& rows);
+    std::vector<NetworkConnection> network_connections_;
+    std::vector<NetworkEgressRule> network_egress_rules_;
+    std::vector<NetworkTunnelGrant> network_tunnel_grants_;
+    std::vector<NetworkPeer> network_peers_;
     bool user_can_access_web_app_locked(const WebApp& app, const std::string& user_id) const;
     // The organization's own space shares its organization-scope memberships' grants.
     void derive_space_grant_locked(const Membership& membership, const std::string& role);
@@ -621,6 +716,20 @@ private:
     std::vector<OAuthCredential> oauth_credentials_;
     // user id -> the TAAP identity lake minted for a Clerk sign-in (custodial_identities).
     std::map<std::string, ClerkIdentity> custodial_identities_;
+    // Accounts disabled by a Clerk user.deleted (lake#765), and the deliveries applied.
+    std::set<std::string> disabled_users_;
+    std::set<std::string> clerk_webhook_deliveries_;
+    // user id -> when its managed seed was destroyed by using its own identity (lake#762).
+    std::map<std::string, std::string> managed_seed_destroyed_at_;
+    struct IdentityLinkChallengeRecord {
+        IdentityLinkChallenge challenge;
+        std::chrono::system_clock::time_point expires_at;
+        bool used = false;
+    };
+    std::vector<IdentityLinkChallengeRecord> identity_link_challenges_;
+    // user id -> its own identity, linked as the managed key's successor.
+    std::map<std::string, IdentityLink> identity_links_;
+    std::map<std::string, std::string> identity_linked_at_;
     std::vector<WebAuthnChallengeRecord> webauthn_challenges_;
     std::vector<OAuthProvider> oauth_providers_;
     struct OAuthFlowRecord {

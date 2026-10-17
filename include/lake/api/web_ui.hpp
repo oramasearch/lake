@@ -8,12 +8,13 @@
 
 #include <nlohmann/json.hpp>
 
+#include "lake/api/regions.hpp"
 #include "lake/control/store.hpp"
 
 // What lake still renders on the server, as pure functions (data in, HTML out; no HTTP type, no
-// I/O). The console is the web app in frontend/ (docs/ui/web-app.md); the one server-rendered
-// surface left is the hosted sign-in pages an identity application shows its own users, with the
-// stylesheet and fonts they link.
+// I/O). The console is the web app in frontend/ (docs/ui/web-app.md); the server-rendered
+// surfaces left are the hosted sign-in pages an identity application shows its own users and the
+// apex host's region picker (docs/api/regions.md), with the stylesheet and fonts they link.
 namespace lake::api {
 
 std::string web_ui_escape(std::string_view text);
@@ -58,5 +59,14 @@ std::string web_ui_application_sign_in(const control::Application& application,
 std::string web_ui_application_mfa(const control::Application& application, std::string_view error);
 std::string web_ui_application_passkey_sign_in(const control::Application& application,
                                                std::string_view error);
+
+// The apex host's region picker (lake#757, docs/ui/regions.md): every region of the deployment as a
+// choice, `selected` preselected, posting back to `target` (the request's own path and query),
+// which remembers the choice and continues to that path on the chosen region's host. Works without
+// JavaScript. `error` is shown above the choices when not empty.
+std::string web_ui_region_picker(const Regions& regions,
+                                 const Region& selected,
+                                 std::string_view target,
+                                 std::string_view error);
 
 } // namespace lake::api

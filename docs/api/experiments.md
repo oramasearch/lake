@@ -81,7 +81,7 @@ engine names `/study` as `/experiment_id`. The engine's own names stay the engin
 parameter and the `study-events.*` topic. `workspace_query` and `workspace_act` call the engine by
 its names, so they keep `study` in and out: `workspace_act` with `create_study`, `stop_study`,
 `stop_trial` or `promote_trial` hands the call to the lake capability above, moving `study` to
-`experiment_id` on the way in and back on the way out. ExperimentsAgent and other agents call the
+`experiment_id` on the way in and back on the way out. Experiments Agent and other agents call the
 engine this way.
 
 **Renamed in lake#561.** `get_experiment_study` is now `get_experiment`, `start_study` is
@@ -94,15 +94,15 @@ alias was kept: no caller outside lake used the old names. The agent repositorie
 the workspace adapter, which keeps them. A capability-scoped token that named an old tool must name
 the new one.
 
-ExperimentsAgent's own turn protocol keeps the engine's word too, because the agent reads and
+Experiments Agent's own turn protocol keeps the engine's word too, because the agent reads and
 writes it: its proposal carries the experiment as `study`, `context.confirmed_proposal.study` is
 the edited experiment, and a status or explanation turn reads the experiment's id from
 `context.study`. A lake caller may name it `context.experiment_id` instead; `agent_turn` adds
 `context.study` for the agent.
 
-## ExperimentsAgent Turns
+## Experiments Agent Turns
 
-ExperimentsAgent is the Agent Library service `agent-experiments`. Its public operation is the
+Experiments Agent is the Agent Library service `agent-experiments`. Its public operation is the
 existing registered `agent_turn` action (`write` on the customer): REST clients use
 `POST /v1/agent_turn`, MCP clients use the `agent_turn` tool, and the Experiments page calls the
 same capability. Ask Orama and the Project Agent may delegate training and tuning requests to it.
@@ -145,8 +145,8 @@ Lake checks the confirmation itself (lake#561): `proposal_task_id` must be a fin
 `agent-experiments` `experiment` turn of this workspace that the caller may follow, whose answer is a
 proposal with an experiment (`study`); `proposal_sha256` must be that stored proposal's digest; and
 `confirmed_proposal` must be that proposal, with only `study` edited. Otherwise the turn is refused
-and nothing starts: `That task has no ExperimentsAgent proposal to confirm.` (400), `The
-ExperimentsAgent proposal changed before confirmation.` (409), or `The edited experiment proposal
+and nothing starts: `That task has no Experiments Agent proposal to confirm.` (400), `The
+Experiments Agent proposal changed before confirmation.` (409), or `The edited experiment proposal
 must be a JSON object.` (400). The confirmed task alone receives workspace `create_study` and
 backing `start_experiment`. Status and explanation use the same REST/MCP operation with
 `kind:"experiment_status"` or `kind:"experiment_explain"` and

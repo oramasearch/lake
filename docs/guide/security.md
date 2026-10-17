@@ -169,7 +169,7 @@ Who has access to one object, with the source of each grant, is
 - **Changes are proposals.** When an agent wants to change something, it shows a proposal; only
   **Confirm** runs it, as you, through the ordinary permission check and audit. Only a proposal Lake
   stored in your own conversation can be confirmed.
-- **Builders show the exact result first.** ApplicationAgent and ExperimentsAgent show the complete
+- **Builders show the exact result first.** Application Agent and Experiments Agent show the complete
   app or experiment before anything is written, and only a second turn carrying the exact proposal you
   reviewed gets the write tools. A public app needs its own confirmation.
 - **The audit names the agent.** An agent acting for you is recorded with your identity and the

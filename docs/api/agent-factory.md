@@ -1,16 +1,16 @@
 # The Agent Factory
 
 **Status: implemented 2026-09-27 (lake#233, epic lake#228).** *Build it with the Agent Factory* in
-Design → Agents → Describe it to the Agent Factory (`/design/agents/new`; `/train/agents/new` redirects there, lake#653): a conversation with **AgentCreator**
+Design → Agents → Describe it to the Agent Factory (`/design/agents/new`; `/train/agents/new` redirects there, lake#653): a conversation with **Agent Creator Agent**
 ([`oramasearch/agent-creator`](https://github.com/oramasearch/agent-creator)), which asks what it must
 and proposes an agent in Studio's shape. **Nothing is created until the person approves.**
 
 
-**AgentCreator's answer (agent-creator#1).** Its turn answers words a person reads in `reply` (the
+**Agent Creator Agent's answer (agent-creator#1).** Its turn answers words a person reads in `reply` (the
 question, or the proposal in one sentence) and the structured answer in `result`
 (`{kind: question | proposal, question?, proposal?, defects, facts}`), so an API or MCP caller reads
 `result` without parsing text. The Factory page reads `result`, falling back to the JSON an older
-AgentCreator put in `reply`.
+Agent Creator Agent put in `reply`.
 
 ## Skills
 
@@ -49,19 +49,19 @@ no skill and not on that list.
 
 The list is vendored from agent-runtime's `skills.json` by `tools/agents/vendor-agent-skills.py`
 (`src/control/agent_skills.cpp` for the keys, `frontend/src/pages/train/agent-skills.json` for the
-pages). AgentCreator proposes only these skills.
+pages). Agent Creator Agent proposes only these skills.
 
 ## The conversation
 
 The conversation is held through `send_ask_message` and `settle_ask_turn` with `kind: factory`
 ([ask-orama.md](ask-orama.md#capabilities-lake561)); the web app's Agent Factory page calls them.
 `send_ask_message` sends one `agent_turn` to `agent-creator` (a turn key limited to the
-workspace's reads). AgentCreator answers with one JSON object: a **question**, or a **proposal**
+workspace's reads). Agent Creator Agent answers with one JSON object: a **question**, or a **proposal**
 with the **defects** its own rules found (skills, work area, approved Pipelines, code that compiles
 and imports only what agent-runtime ships, no secrets, storage that fits the code). The page shows a
 proposal as a review panel: type and why, where it is stored and why, work area, manifesto, goal,
 skills, trigger, Pipelines, and every file. A proposal with defects offers no approval: the person
-tells AgentCreator what to change.
+tells Agent Creator Agent what to change.
 
 ## Approve and create
 

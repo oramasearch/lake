@@ -18,6 +18,7 @@ same list. Every value below is read once at startup; SIGINT and SIGTERM stop th
 | `--identity-seed BASE64` | base64 Ed25519 seed for lake's TAAP identity (default `$LAKE_IDENTITY_SEED`) |
 | `--instance-kek VALUE` | key-encryption key for a generated identity and wrapped keys (default `$LAKE_INSTANCE_KEK`) |
 | `--tsa-url URL` | RFC 3161 endpoint (default `$LAKE_TSA_URL`) |
+| `--tunnel-clients-dir PATH` | the tunnel client downloads (default `$LAKE_TUNNEL_CLIENTS_DIR`, then `/usr/share/lake/tunnel-clients`) |
 
 With `--memory-store` the control plane is `InMemoryStore`; otherwise a non-empty control-DB URI
 selects the Postgres store. `server_info` reports which one as `store` (`memory`, `postgres`, or
@@ -55,6 +56,10 @@ selects the Postgres store. `server_info` reports which one as `store` (`memory`
 | `LAKE_APPS_WILDCARD` | parent domain required for Ship app hosts; also enables app lifecycle topics on the Lake bus | [`../api/web-apps.md`](../api/web-apps.md) |
 | `LAKE_METHODOLOGY_RUNTIME_IMAGE` | the `oramasearch/methodology-runtime` image a workspace methodology's image is built `FROM` (build argument `METHODOLOGY_RUNTIME_IMAGE`) and its stage and collect pods run; supplied by the operator from `spec.methodologies.runtimeImage`; without it Validate and runs answer `store_unavailable` | [`../api/methodologies.md`](../api/methodologies.md) |
 | `LAKE_MCP_RUNNER_IMAGE` | the private `oramasearch/lake-mcp-runner` image (pinned tag) the workspace App of a stdio MCP connection runs; without it, `create_mcp_connection` with `stdio` answers `not_supported` | [`../api/mcp-connections.md`](../api/mcp-connections.md#servers-that-speak-only-stdio) |
+| `LAKE_TUNNEL_CLIENTS_DIR` | the folder of tunnel client binaries Developer Access hands out (`zetta-tunnel-<platform>`, `SHA256SUMS`, `VERSION`); default `/usr/share/lake/tunnel-clients`, where the image copies them from `oramasearch/zetta-tunnel-clients`. Missing or empty, `tunnel_client_downloads` answers `available: false` and the route `404` | [`../api/tunnel-clients.md`](../api/tunnel-clients.md) |
+| `LAKE_REGION`, `LAKE_REGION_LABEL` | this Lake's region (the cloud region name) and its label; set by the operator only where the `LakeSet` member has a region; reported by `server_info` as `region` | [`../api/regions.md`](../api/regions.md) |
+| `LAKE_REGIONS` | the deployment's regions as JSON `[{name, label, host, latitude, longitude}]`, this Lake's own included; reported by `server_info` as `regions`; invalid JSON or an invalid entry stops startup naming the variable | [`../api/regions.md`](../api/regions.md#configuration) |
+| `LAKE_APEX_HOST` | the host (e.g. `lake.live`) whose every request is the region picker; needs `LAKE_REGIONS` | [`../api/regions.md`](../api/regions.md#the-apex-picker) |
 | `LAKE_APPS_RUNTIME_IMAGE` | required base image for `build_app`; supplied by the operator from `spec.apps.runtimeImage` and recorded as `APP_RUNTIME_IMAGE` | [`../api/builds.md`](../api/builds.md) |
 | `LAKE_APPS_RESERVED_NAMES` | comma-separated additional Ship app names to refuse; surrounding whitespace is ignored | [`../api/web-apps.md`](../api/web-apps.md) |
 | `LAKE_APPS_PER_CUSTOMER` | maximum live Ship apps per account; zero means no configured limit | [`../api/web-apps.md`](../api/web-apps.md) |
