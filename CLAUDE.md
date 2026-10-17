@@ -65,6 +65,17 @@ sessions without erasing anything; every delivery is audited centrally. Not depl
 must vendor the schema, select `clerk_webhooks_guard` and configure the endpoint and secret
 (orama-operator#541). See [`docs/api/clerk.md#webhooks`](docs/api/clerk.md#webhooks).
 
+Deployments made with `liquid deploy` reach Ship → Deployments (lake#805, migration
+`0088_repository_liquid_ids`): `liquid deploy` sends the id liquid gave the repository, not lake's
+UUID, so `repositories.liquid_id` records it (every push, and the platform sync for repositories it
+has not read, at most every 20th poll while a row needs one) and the sync places a row by lake's id
+or that one. The workspace keeps the operator's value as `operator_repository`, and lake writes the
+environment's values and domains under it so the operator applies them. A row that names no single
+repository is reported (`unresolved_repository`, `platform_unresolved_repositories` on `/healthz`,
+the `lake_platform_unresolved_repositories` gauge, one log line per change), never skipped quietly.
+Not deployed; the operator must vendor the schema and select `repository_liquid_ids_guard`. See
+[`docs/api/platform.md#which-repository-a-row-names`](docs/api/platform.md#which-repository-a-row-names).
+
 The newest dated record, [`docs/deployment/dev-2026-10-01.md`](docs/deployment/dev-2026-10-01.md),
 and [`docs/design/status.md`](docs/design/status.md) still describe the 2026-10-01 deployment
 (`oramasearch/lake:20261001d`, `36679e1`); they have not been brought up to the release. Until they

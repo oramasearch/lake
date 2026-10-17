@@ -6,7 +6,7 @@ The HTTP server exposes three operational routes:
 
 | Route | Authentication | Response |
 |---|---|---|
-| `GET /healthz` | none | `200 {"ok":true,"platform":"ready|degraded"}` while the HTTP process is serving; `platform` is omitted when operator sync is not configured |
+| `GET /healthz` | none | `200 {"ok":true,"platform":"ready|degraded"}` while the HTTP process is serving; `platform` is omitted when operator sync is not configured, and `platform_unresolved_repositories` (a count) is added while some operator rows name no lake repository ([platform](../api/platform.md#which-repository-a-row-names)) |
 | `GET /readyz` | none | `200 {"ok":true,"store":"<kind>","store_root":"open|waiting|opening"}` after a successful store ping when the store root is open or is being handed over from a predecessor; otherwise `503` with the JSON error envelope (control store down, store root opening on a cold start or failed, or stopping after SIGTERM). `store_root` is omitted without a store root. See [`../deployment/store-volume.md`](../deployment/store-volume.md#the-hand-off) |
 | `GET /metrics` | the existing bearer or `lake_session` cookie | Prometheus text exposition; unauthorized requests receive the normal `403` JSON error |
 
@@ -29,6 +29,9 @@ The exported metric families are:
   request refused before any route (`workers_busy`, `store_root_wait`, `bad_url`, `bad_request`,
   `header_too_large`)
   is also logged and counted in `lake_http_requests_total` with that reason as its route
+- the gauge `lake_platform_unresolved_repositories`: the `repository` values in the operator's
+  deployment, environment-value and domain rows that name no lake repository, so their rows are not
+  shown ([platform](../api/platform.md#which-repository-a-row-names), lake#805)
 - `lake_store_calls_total{store,operation,result}`
 - `lake_store_call_duration_seconds{store,operation,result}`
 - `lake_metering_records_written_total{collection}`, `lake_metering_flush_errors_total`,

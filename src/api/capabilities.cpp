@@ -4793,6 +4793,30 @@ void register_repository_capabilities(Registry& registry) {
                 }
                 co_return from_sync_error(context, response.error());
             }
+            // A repository created empty takes the identity of its first push, so the liquid id
+            // `liquid deploy` sends is recorded again after each one (lake#805,
+            // docs/api/platform.md#which-repository-a-row-names). It does not fail the push.
+            if (context.store) {
+                const auto liquid_id = co_await blocking_call(
+                    [&] {
+                        return context.sync_store->repository_liquid_id(repository->customer_id,
+                                                                        repository->id);
+                    },
+                    [](std::string message) -> SyncStoreResult<std::string> {
+                        return std::unexpected(SyncStoreError{"store_unavailable", std::move(message)});
+                    });
+                if (!liquid_id) {
+                    if (liquid_id.error().code != "unsupported") {
+                        context.audit_details["liquid_id"] = liquid_id.error().message;
+                    }
+                } else if (*liquid_id != repository->liquid_id) {
+                    const auto recorded =
+                        context.store->set_repository_liquid_id(repository->id, *liquid_id);
+                    if (!recorded) {
+                        context.audit_details["liquid_id"] = recorded.error().message;
+                    }
+                }
+            }
             if (context.search) {
                 const auto indexed = co_await blocking_call(
                     [&] { return context.search->reindex_artifacts(repository->customer_id, repository->id); },

@@ -5,6 +5,13 @@ vendored copy at `internal/controller/assets/lake-schema.sql` and applies it to 
 Postgres. Change the schema here, then copy it into the operator in the same change; the
 operator's test checks the copy carries the source-of-truth header.
 
+`0088_repository_liquid_ids` (lake#805) adds nullable `repositories.liquid_id`, the id liquid gave
+the repository (32 lowercase hex digits, what `liquid deploy` sends), with the partial index
+`repositories_liquid_id_idx`; it is not unique, because a repository pushed from another's clone
+shares that one's id. Lake fills it after each push and from the platform sync. Additive; its guard
+is `repository_liquid_ids_guard`. The operator must vendor this schema and select that guard before
+the binary rolls. See [platform.md](../api/platform.md#which-repository-a-row-names).
+
 `0087_clerk_webhooks` (lake#765) adds `users.disabled_at` (set by a Clerk `user.deleted`; a disabled
 account is issued no session and its sessions no longer resolve) and `clerk_webhook_deliveries`
 (each applied `svix-id`, its event type and Clerk user). Its guard is `clerk_webhooks_guard`. The

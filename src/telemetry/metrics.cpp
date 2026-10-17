@@ -378,6 +378,21 @@ public:
     control::Result<control::Repository> get_repository(const std::string& id) override {
         return call("get_repository", [&] { return store_->get_repository(id); });
     }
+    control::Result<std::vector<control::Repository>>
+    repositories_by_liquid_id(const std::string& liquid_id) override {
+        return call("repositories_by_liquid_id",
+                    [&] { return store_->repositories_by_liquid_id(liquid_id); });
+    }
+    control::Result<void> set_repository_liquid_id(const std::string& id,
+                                                   const std::string& liquid_id) override {
+        return call("set_repository_liquid_id",
+                    [&] { return store_->set_repository_liquid_id(id, liquid_id); });
+    }
+    control::Result<std::vector<control::Repository>>
+    repositories_without_liquid_id(int limit) override {
+        return call("repositories_without_liquid_id",
+                    [&] { return store_->repositories_without_liquid_id(limit); });
+    }
     control::Result<control::Repository> rename_repository(const std::string& id,
                                                            const std::string& name) override {
         return call("rename_repository", [&] { return store_->rename_repository(id, name); });

@@ -358,6 +358,13 @@ public:
                                                          const std::string& digest) = 0;
     virtual SyncStoreResult<std::uint64_t> unique_stored_bytes(const std::string& customer_id) = 0;
 
+    // The id liquid gave the repository, as `liquid deploy` sends it: 32 lowercase hex digits
+    // (lake#805, docs/api/platform.md#which-repository-a-row-names).
+    virtual SyncStoreResult<std::string> repository_liquid_id(const std::string&,
+                                                              const std::string&) {
+        return std::unexpected(
+            SyncStoreError{"unsupported", "repository liquid ids are unavailable"});
+    }
     virtual SyncStoreResult<std::vector<RepositoryContentRef>>
     repository_refs(const std::string& customer_id, const std::string& repository_id) = 0;
     virtual SyncStoreResult<std::vector<RepositoryTreeEntry>>

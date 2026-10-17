@@ -64,6 +64,11 @@ struct PlatformConfig {
 using PlatformRecordsOpener = std::function<ZettaControlResult<WorkspaceRecords>(
     const std::string& customer_id, const std::string& workspace_id)>;
 
+// Reads the id liquid gave a repository (32 lowercase hex digits; the API layer opens the
+// repository's store). The sync uses it to record the ids lake has not read yet when a row names
+// one it does not know (lake#805, docs/api/platform.md#which-repository-a-row-names).
+using PlatformLiquidIdReader = std::function<PlatformResult<std::string>(const Repository&)>;
+
 // Lake's view of the operator's deployment control plane (docs/api/platform.md). The sync reads
 // the operator-control rows and keeps each repository's environments and last-seen rows in the
 // workspace Zetta of the repository's workspace (lake#358, lake#359); every read and write takes
@@ -77,13 +82,24 @@ public:
 
     // One poll. Failing to read the operator control plane degrades the whole service; failing to
     // reach one repository's workspace marks only that repository stale and is retried next poll.
-    liquid::runtime::task<PlatformResult<void>> sync(PlatformRecordsOpener open);
+    // A row's `repository` is lake's repository id or the id liquid gave it (what `liquid deploy`
+    // sends); a row lake cannot place in one repository is reported, never dropped quietly: the
+    // poll answers `unresolved_repository` naming it, and unresolved_repositories() lists it.
+    liquid::runtime::task<PlatformResult<void>> sync(PlatformRecordsOpener open,
+                                                     PlatformLiquidIdReader read_liquid_id = {});
     [[nodiscard]] bool sync_due() const;
     [[nodiscard]] bool degraded() const;
     [[nodiscard]] std::optional<std::string> stale_since() const;
     // Since when this repository's mirror has not been refreshed: the service's own stale marker,
     // else the repository's.
     [[nodiscard]] std::optional<std::string> stale_since(const std::string& repository_id) const;
+    // The `repository` values of the last poll's rows that name no single lake repository, each
+    // with the reason and since when (lake#805).
+    struct UnresolvedRepository {
+        std::string reason;
+        std::string since;
+    };
+    [[nodiscard]] std::map<std::string, UnresolvedRepository> unresolved_repositories() const;
 
     liquid::runtime::task<PlatformResult<nlohmann::json>>
     list_environments(WorkspaceRecords& records, std::string repository_id) const;
@@ -145,6 +161,10 @@ private:
     // records (recreated) is written again.
     std::map<std::string, std::string> mirrored_;
     int syncs_since_full_ = 0;
+    std::map<std::string, UnresolvedRepository> unresolved_;
+    // Polls since lake last read the liquid ids it lacked; read again at most every
+    // `full_sync_every` polls while some row stays unresolved (-1: never read).
+    int syncs_since_liquid_ids_ = -1;
 };
 
 } // namespace lake::control

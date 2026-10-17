@@ -92,6 +92,10 @@ public:
                                                       int limit,
                                                       const std::string& workspace_id = {}) override;
     Result<Repository> get_repository(const std::string& id) override;
+    Result<std::vector<Repository>> repositories_by_liquid_id(const std::string& liquid_id) override;
+    Result<void> set_repository_liquid_id(const std::string& id,
+                                          const std::string& liquid_id) override;
+    Result<std::vector<Repository>> repositories_without_liquid_id(int limit) override;
     Result<Repository> rename_repository(const std::string& id, const std::string& name) override;
     Result<Repository> set_repository_visibility(const std::string& id,
                                                  const std::string& visibility) override;
