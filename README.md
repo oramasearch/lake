@@ -59,7 +59,7 @@ protocol route. The full route table is [`docs/serving/http.md`](docs/serving/ht
 | `GET /v1/openapi.json`, `POST /mcp`; the same below `/w/<workspace_id>` | the registry as OpenAPI 3.1 and as MCP tools |
 | `POST /session`, `POST /logout`, `POST /identity/clerk-session`, `GET /v1/oauth/<provider>/callback` | the sign-in routes that set or clear the HttpOnly `lake_session` cookie |
 | `GET /file/raw`, `/file/download`, `/drive/download`, `/exports/download`, `/share/<token>/download` | file bytes; a protected download without a credential redirects to `/sign-in` |
-| `GET /apps/<id>/sign-up`, `/sign-in`, `/mfa`, `/passkey-sign-in` (also on a custom sign-in host), `/apps/authorize`, `/v1/apps/auth` | an identity application's hosted sign-in pages, the one server-rendered surface, and the Ship app handoff ([`docs/api/apps.md`](docs/api/apps.md), [`docs/api/web-apps.md`](docs/api/web-apps.md)) |
+| `GET /apps/<id>/sign-up`, `/sign-in`, `/mfa`, `/passkey-sign-in` (also on a custom sign-in host), `/apps/authorize`, `/v1/apps/auth` | an identity application's hosted sign-in pages, a server-rendered surface, and the Ship app handoff ([`docs/api/apps.md`](docs/api/apps.md), [`docs/api/web-apps.md`](docs/api/web-apps.md)) |
 | `GET /healthz`, `/readyz`, `/metrics` | probes and Prometheus metrics |
 | `/v1/repositories/<id>/sync/*`, `/v2/*`, npm, Python and debuginfod paths, `/api/models/*`, `/scim/v2/*`, `/acme/*` | liquid sync, the package registries, the Hugging Face subset, SCIM and ACME |
 | `GET /llms.txt`, `/llms-full.txt`, `/skills/lake/SKILL.md` | the agents' guide and skill |

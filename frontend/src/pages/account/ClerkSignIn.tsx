@@ -8,6 +8,7 @@ import { useLocation, useNavigate } from "react-router-dom";
 import { Notice, Page } from "@/lib/ui";
 import { useSession } from "@/lib/session";
 import { AuthFrame } from "./AuthFrame";
+import { AccountRegionNote } from "@/components/Region";
 import { INVITATION_NOTE, returnQuery, returnTarget } from "./signIn";
 
 /** The part of clerk-js this page uses. */
@@ -177,6 +178,7 @@ export function ClerkSignIn({ mode }: { mode: "sign-in" | "sign-up" }) {
             : "Sign in with the email address you were invited with."
         }
       >
+        <AccountRegionNote mode={signUp ? "sign-up" : "sign-in"} />
         {error && <Notice tone="danger">{error}</Notice>}
         <div ref={mount} className="clerk-mount" />
         <p className="muted" role="status" aria-live="polite">

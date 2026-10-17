@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "lake/api/billing.hpp"
+#include "lake/api/regions.hpp"
 #include "lake/api/registry.hpp"
 #include "lake/transparency/checkpoint.hpp"
 
@@ -136,6 +137,10 @@ struct ServerOptions {
     // docs/api/tunnel-clients.md). The executable defaults it to /usr/share/lake/tunnel-clients,
     // where the image puts them; empty or missing, the clients are reported unavailable.
     std::string tunnel_clients_dir;
+    // Regions (LAKE_REGION, LAKE_REGION_LABEL, LAKE_REGIONS, LAKE_APEX_HOST; lake#757,
+    // docs/api/regions.md): reported by server_info; a request whose Host is the apex host gets the
+    // region picker. Empty: no region, no picker.
+    Regions regions;
     std::string apps_reserved_names;
     std::size_t apps_per_customer = 0;
     std::size_t app_replicas_per_customer = 0;

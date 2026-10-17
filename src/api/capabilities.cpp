@@ -2089,8 +2089,9 @@ void register_server_info(Registry& registry, std::string_view version) {
     registry.add(Capability{
         .name = "server_info",
         .title = "Server info",
-        .description = "Name, node, version and API level of this Lake, and whether Deployments "
-                       "are set up on it. No authentication.",
+        .description = "Name, node, version and API level of this Lake, whether Deployments "
+                       "are set up on it, and its region and the deployment's regions. No "
+                       "authentication.",
         .input_schema = {{"type", "object"},
                          {"properties", json::object()},
                          {"additionalProperties", false}},
@@ -2105,7 +2106,25 @@ void register_server_info(Registry& registry, std::string_view version) {
                             {"deployments", {{"type", "boolean"}}},
                             {"billing", {{"type", "boolean"}}},
                             {"payment_provider", {{"type", json::array({"string", "null"})}}},
-                            {"online_payment", {{"type", "boolean"}}}}}},
+                            {"online_payment", {{"type", "boolean"}}},
+                            // Regions (lake#757, docs/api/regions.md): null and [] when this Lake
+                            // has no region, as on nonprod.
+                            {"region",
+                             {{"type", json::array({"object", "null"})},
+                              {"description", "This Lake's region; null when none is set."},
+                              {"properties",
+                               {{"name", {{"type", "string"}}}, {"label", {{"type", "string"}}}}}}},
+                            {"regions",
+                             {{"type", "array"},
+                              {"description",
+                               "Every region of this deployment, this one included; each is a "
+                               "separate Lake with its own accounts."},
+                              {"items",
+                               {{"type", "object"},
+                                {"properties",
+                                 {{"name", {{"type", "string"}}},
+                                  {"label", {{"type", "string"}}},
+                                  {"host", {{"type", "string"}}}}}}}}}}}},
         .kind = CapabilityKind::Read,
         .requires_auth = false,
         .object = "server",
@@ -2130,7 +2149,10 @@ void register_server_info(Registry& registry, std::string_view version) {
                  // without Stripe's keys (lake#628). Never a key.
                  {"billing", billing_registered(ctx.registry)},
                  {"payment_provider", payment.is_null() ? json(nullptr) : payment["provider"]},
-                 {"online_payment", !payment.is_null() && payment["online_payment"] == true}});
+                 {"online_payment", !payment.is_null() && payment["online_payment"] == true},
+                 // The region of this Lake and the deployment's regions (lake#757).
+                 {"region", region_json(ctx.regions)},
+                 {"regions", regions_json(ctx.regions)}});
         }});
 }
 

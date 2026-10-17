@@ -16,6 +16,7 @@
 #include <liquid/runtime.hpp>
 #include <nlohmann/json.hpp>
 
+#include "lake/api/regions.hpp"
 #include "lake/api/sync_store.hpp"
 #include "lake/control/policy.hpp"
 #include "lake/control/store_contents.hpp"
@@ -444,6 +445,8 @@ struct ApiContext {
     // The folder holding the tunnel client downloads (LAKE_TUNNEL_CLIENTS_DIR, lake#745,
     // docs/api/tunnel-clients.md); empty or missing: tunnel_client_downloads answers unavailable.
     std::string tunnel_clients_dir;
+    // This Lake's regions (lake#757, docs/api/regions.md), for server_info; null: none set.
+    const Regions* regions = nullptr;
     std::string apps_reserved_names;
     std::size_t apps_per_customer = 0;
     std::size_t app_replicas_per_customer = 0;

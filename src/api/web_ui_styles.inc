@@ -711,6 +711,18 @@ form.stack textarea {
   min-height: 8rem;
   resize: vertical;
 }
+/* The apex host's region picker (lake#757, web_ui_region_picker): one region per row. */
+fieldset.region-choices {
+  flex-direction: column;
+  gap: var(--lake-space-2);
+  padding: var(--lake-space-3);
+}
+form.stack label.region-choice {
+  display: flex;
+  align-items: center;
+  gap: var(--lake-space-2);
+  cursor: pointer;
+}
 form.search,
 .filters {
   display: flex;

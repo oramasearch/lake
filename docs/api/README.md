@@ -11,6 +11,10 @@ public trust, admin revocation and pending session history.
 `GET /tunnel-clients/<platform>`: the tunnel client binaries, offered per platform as signed
 15-minute links a plain `curl` follows (lake#745).
 
+lake#757: [regions.md](regions.md) documents regions: the four variables the operator sets,
+`server_info`'s `region` and `regions`, and the apex host's region picker (closest region from
+`CF-IPCountry`, the `lake_region` preference cookie, the path and query kept).
+
 lake#650: [engine-capabilities.md](engine-capabilities.md) documents every capability of a
 workspace's engine as a named Lake capability (its own route, OpenAPI operation and MCP tool, with
 the engine's input schema vendored in `src/api/engine_openapi.json`), the names Lake gives the
@@ -271,7 +275,7 @@ and `Experiments.CompareRunsAnswersItsGetFormWithRepeatedKeysOrACommaList`
 
 | Capability | Kind | Input | Value | Page |
 |---|---|---|---|---|
-| `server_info` | read, **no auth** | — | `{name, node, version, revision, api, store, deployments}`; `revision` is the embedded full source commit or `unknown`; `deployments` says whether the platform mirror is configured ([platform.md](platform.md#a-lake-without-the-platform-mirror), lake#605) | [../deployment/production-2026-09-08.md](../deployment/production-2026-09-08.md) |
+| `server_info` | read, **no auth** | — | `{name, node, version, revision, api, store, deployments, region, regions}`; `revision` is the embedded full source commit or `unknown`; `deployments` says whether the platform mirror is configured ([platform.md](platform.md#a-lake-without-the-platform-mirror), lake#605); `region` (`{name, label}` or `null`) and `regions` (`[{name, label, host}]` or `[]`) are this Lake's region and the deployment's regions ([regions.md](regions.md), lake#757) | [../deployment/production-2026-09-08.md](../deployment/production-2026-09-08.md) |
 | `viewer` | read, **no auth** | `workspace_id?`, `customer_id?` | who is signed in, their accounts and current workspace, Clerk, sign-up, origin, agent models, version | [web-app.md](web-app.md) |
 | `my_permissions`, `list_packages`, `list_docs`, `get_doc`, `mcp_setup`, `resolve_model` | read (`list_docs`, `get_doc` and a public `resolve_model` need no credential) | see the page | permission flags, the Packages catalog, the Docs guides, Developer → MCP, a model's repository by name | [web-app.md](web-app.md) |
 | `latest_agent_task`, `render_pipeline` / `compile_pipeline` | read / action | `customer_id`, `workspace_id`, then `subject`, or `project` and `graph`, or `project` and `intent` | a project's background task, a pipeline drawn as SVG, a pipeline compiled from a description | [web-app.md](web-app.md) |

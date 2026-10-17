@@ -1,7 +1,8 @@
 /** The shell, in rev-os's layout on lake's colours: a 2px brand strip; a left rail of lake's groups
  * (Design, Train, Ship, Organization or Administration) with the current group open and its pages
  * listed beneath on a hairline, Docs and Developer at its foot, then the signed-in person and the
- * collapse control; a slim top bar with the breadcrumb, the space and workspace picker, search
+ * collapse control; a slim top bar with the breadcrumb, the region (lake#757), the space and
+ * workspace picker, search
  * (⌘K or /), the theme switch and Ask Orama. A signed-in person's home (`/`) is Ask Orama itself
  * (lake#600): there the top bar's Ask Orama button opens no panel but puts the cursor in the home's
  * message box, and an open panel closes. Collapsible to icons; below 1024px the rail is an
@@ -44,6 +45,7 @@ import { currentNav, matchScreen, navFor, sectionLabel, workspacePath, isWorkspa
 import { CommandPalette } from "./CommandPalette";
 import { ScreenBoundary } from "./ScreenBoundary";
 import { WorkspacePicker } from "./WorkspacePicker";
+import { RegionMenu } from "./Region";
 import { LakeMark } from "./LakeMark";
 import { resizingAsk, useAskWidth } from "@/lib/askWidth";
 import { focusAsk, onOpenAsk, type AskRequest } from "@/lib/ask";
@@ -388,6 +390,8 @@ export function Shell({ children }: { children: ReactNode }) {
             </button>
             <Breadcrumb trail={trail} />
             <div className="flex-1" />
+            {/* This Lake's region and links to the others; nothing without a region (lake#757). */}
+            <RegionMenu />
             {viewer.signed_in && viewer.spaces.length > 0 && <WorkspacePicker />}
             {viewer.signed_in && (
               <>

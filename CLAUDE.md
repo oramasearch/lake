@@ -61,8 +61,8 @@ never say study. See `docs/api/experiments.md` and `docs/ui/experiments.md`.
 The console is the web app in `frontend/` (lake#561), embedded in the binary and answered for every
 browser page request; it calls only `/v1`. The server-rendered console pages, their deferred panels
 and HTML form handlers, the `lake_workspace` cookie and the experiment chart assets are retired in
-the source tree; an identity application's hosted sign-in pages are the one server-rendered
-surface. `agent_turn` checks a confirmed ApplicationAgent or ExperimentsAgent proposal against the
+the source tree; an identity application's hosted sign-in pages and the apex host's region picker
+(lake#757, `docs/api/regions.md`) are the server-rendered surfaces. `agent_turn` checks a confirmed ApplicationAgent or ExperimentsAgent proposal against the
 stored one (`proposal_task_id`, `proposal_sha256`). Not deployed yet. See `docs/ui/web-app.md` and
 `docs/serving/http.md`.
 
@@ -766,10 +766,12 @@ one adapter TU) and the pure renderers in `include/zetta/api/web_ui.hpp`.
   a server page or an HTML form handler. Build, page rules and checks: `docs/ui/web-app.md`. The
   server routes the app relies on (the cookie-setting sign-in routes and the download routes) are
   listed there and in `docs/serving/http.md`.
-- **Hosted application pages are the one server-rendered surface**: an identity application's
-  sign-in pages (`/apps/<id>/*` and its custom sign-in host), rendered by the pure functions in
-  `web_ui.cpp` in the application's colours, with the theme scripts and, on the passkey page, one
-  script for `navigator.credentials`. They work without JavaScript otherwise.
+- **Hosted application pages and the region picker are the server-rendered surfaces**: an identity
+  application's sign-in pages (`/apps/<id>/*` and its custom sign-in host), rendered by the pure
+  functions in `web_ui.cpp` in the application's colours, with the theme scripts and, on the passkey
+  page, one script for `navigator.credentials`; and the region picker every path of
+  `LAKE_APEX_HOST` answers (`web_ui_region_picker`, lake#757, `docs/api/regions.md`). They work
+  without JavaScript otherwise.
 - **Nav items and headings are Title Case** — "Search Indexes", not "Search indexes": every
   rail item and section label, page and section title, and `<h1>`–`<h4>` in the web app and the
   hosted pages.

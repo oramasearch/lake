@@ -68,6 +68,8 @@ add_executable(lake-tests test_main.cpp test_web_ui.cpp test_web_app.cpp test_ma
 target_sources(lake-tests PRIVATE test_network_capabilities.cpp test_network_tunnel.cpp)
 # The tunnel client downloads (lake#745).
 target_sources(lake-tests PRIVATE test_tunnel_clients.cpp)
+# Regions and the apex region picker (lake#757).
+target_sources(lake-tests PRIVATE test_regions.cpp)
 target_link_libraries(lake-tests PRIVATE lake-api lake-control-postgres pqxx OpenSSL::Crypto
   Boost::beast2 Boost::http Boost::corosio GTest::gtest
   # zetta-api for a fake Zetta HTTP transport under ZettaWorkspaceCaller (test_workspaces.cpp).
