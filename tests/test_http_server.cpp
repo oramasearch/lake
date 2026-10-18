@@ -2593,6 +2593,126 @@ TEST_P(HttpResponseIsolation, TheWebAppTalksToAskOramaThroughCapabilities) {
     EXPECT_TRUE(latest("churn").starts_with("HTTP/1.1 400"));
 }
 
+// lake#794: a proposal whose input the capability's schema refuses is never offered. The reply
+// says what is missing and asks for it; a confirm that still fails is not marked done.
+TEST_P(HttpResponseIsolation, AskOramaOffersOnlyProposalsTheCapabilitySchemaAccepts) {
+    auto connection = connect();
+    const std::string cookie = sign_in(*connection);
+    const std::string customer_id =
+        nlohmann::json::parse(
+            response_body(connection->request("GET", "/v1/list_customers", "", cookie)))
+            .at("value")
+            .at("items")
+            .at(0)
+            .at("id");
+    select_workspace(*connection, customer_id);
+    const std::string workspace_id = connection->workspace_id;
+    const std::vector<std::pair<std::string, std::string>> same_origin{
+        {"Origin", "http://localhost"}, {"Sec-Fetch-Site", "same-origin"}};
+    const auto call = [&](const std::string& name, nlohmann::json input) {
+        input["customer_id"] = customer_id;
+        input["workspace_id"] = workspace_id;
+        const std::string response = connection->request("POST",
+                                                         "/v1/" + name,
+                                                         input.dump(),
+                                                         cookie,
+                                                         "HTTP/1.1",
+                                                         {},
+                                                         "application/json",
+                                                         same_origin);
+        return std::pair{response, nlohmann::json::parse(response_body(response))};
+    };
+    const auto conversation_messages = [&](const std::string& conversation) {
+        return nlohmann::json::parse(response_body(connection->request(
+            "GET",
+            "/v1/get_ask_conversation?customer_id=" + customer_id +
+                "&workspace_id=" + workspace_id + "&conversation_id=" + conversation,
+            "",
+            cookie)))["value"]["messages"];
+    };
+
+    // create_index without `table` and create_stream without `zetta`, as Ask Orama proposed
+    // them, beside one that can run. workspace_id is left for lake to fill.
+    agents_->answer = {
+        {"ok", true},
+        {"reply", "I can do that."},
+        {"proposals",
+         nlohmann::json::array(
+             {{{"capability", "create_index"},
+               {"input", {{"customer_id", customer_id}}},
+               {"impact", "A search index over your customers dataset."}},
+              {{"capability", "create_stream"},
+               {"input", {{"customer_id", customer_id}, {"topic", "orders"}}},
+               {"impact", "A stream named orders."}},
+              {{"capability", "create_stream"},
+               {"input", {{"customer_id", customer_id}, {"zetta", "bus"}, {"topic", "orders"}}},
+               {"impact", "A stream named orders on the Lake bus."}},
+              {{"capability", "create_stream"},
+               {"input",
+                {{"customer_id", customer_id}, {"zetta", "workspace"}, {"topic", "two words"}}},
+               {"impact", "A stream named two words."}}})},
+        {"reads", nlohmann::json::array()},
+        {"delegations", nlohmann::json::array()}};
+    const auto [sent_response, sent] =
+        call("send_ask_message", {{"message", "Make a search index over my customers."}});
+    ASSERT_TRUE(sent_response.starts_with("HTTP/1.1 200")) << sent_response;
+    const std::string conversation = sent["value"]["conversation_id"];
+    const std::string task = sent["value"]["task_id"];
+    run_agent_task(*connection, task);
+    const auto [settled_response, settled] = call(
+        "settle_ask_turn", {{"conversation_id", conversation}, {"task_id", task}, {"kind", "ask"}});
+    ASSERT_TRUE(settled_response.starts_with("HTTP/1.1 200")) << settled_response;
+
+    const auto messages = conversation_messages(conversation);
+    ASSERT_EQ(messages.size(), 2U) << messages.dump();
+    const auto& reply = messages[1];
+    const auto& offered = reply["payload"]["proposals"];
+    ASSERT_EQ(offered.size(), 2U) << "only the proposals that can run are offered: "
+                                  << reply.dump();
+    EXPECT_EQ(offered[0]["capability"], "create_stream");
+    EXPECT_EQ(offered[0]["input"]["zetta"], "bus");
+    const auto& withheld = reply["payload"]["withheld_proposals"];
+    ASSERT_EQ(withheld.size(), 2U) << reply.dump();
+    EXPECT_EQ(withheld[0]["capability"], "create_index");
+    EXPECT_EQ(withheld[0]["error"]["code"], "invalid_input");
+    EXPECT_EQ(withheld[0]["error"]["path"], "/table");
+    EXPECT_EQ(withheld[1]["capability"], "create_stream");
+    EXPECT_EQ(withheld[1]["error"]["path"], "/zetta");
+    const std::string content = reply["content"];
+    EXPECT_TRUE(content.starts_with("I can do that.")) << content;
+    EXPECT_NE(content.find("create_index needs `table` (the source table to index), which this "
+                           "proposal does not name."),
+              std::string::npos)
+        << content;
+    EXPECT_NE(content.find("create_stream needs `zetta`"), std::string::npos) << content;
+    EXPECT_NE(content.find("Tell me what to use"), std::string::npos) << content;
+
+    // The offered proposal is valid but refused when it runs (the Lake bus is browse-only): the
+    // outcome is stored with ok false, so the page does not show it as Confirmed.
+    const std::string message_id = reply["id"];
+    const auto [refused_response, refused] =
+        call("confirm_ask_proposal",
+             {{"conversation_id", conversation}, {"message_id", message_id}, {"index", 0}});
+    ASSERT_TRUE(refused_response.starts_with("HTTP/1.1 200")) << refused_response;
+    EXPECT_EQ(refused["value"]["ok"], false) << refused_response;
+    EXPECT_EQ(refused["value"]["error"], "system streams are browse-only");
+    const auto after = conversation_messages(conversation);
+    ASSERT_EQ(after.size(), 3U);
+    EXPECT_EQ(after[2]["content"], "That did not work: system streams are browse-only");
+    EXPECT_EQ(after[2]["payload"]["ok"], false);
+    EXPECT_EQ(after[2]["payload"]["confirmed"]["message_id"], message_id);
+
+    // Input the capability itself refuses is said plainly, naming the field.
+    const auto [topic_response, topic] =
+        call("confirm_ask_proposal",
+             {{"conversation_id", conversation}, {"message_id", message_id}, {"index", 1}});
+    ASSERT_TRUE(topic_response.starts_with("HTTP/1.1 200")) << topic_response;
+    EXPECT_EQ(topic["value"]["ok"], false);
+    EXPECT_EQ(topic["value"]["error"],
+              "`topic` is not valid for create_stream: a concrete topic name is required. Ask "
+              "Orama again with what to use and it will propose the change again.");
+}
+
 TEST_P(HttpResponseIsolation, TheWebAppApprovesOnlyTheAgentFactoryProposalItWasShown) {
     auto* memory = dynamic_cast<lake::control::InMemoryStore*>(store_.get());
     if (memory == nullptr) {

@@ -106,3 +106,26 @@ export function greeting(displayName: string | undefined): string {
 export function landingAfterSignIn(administrator: boolean): string {
   return administrator ? "/repositories" : "/";
 }
+
+/** What each confirmed proposal came to, from the outcome messages Lake stored in the conversation
+ * (`payload.confirmed` names the proposal as `message_id/index`). Only a confirm that worked is
+ * Confirmed and never offered again; one that did not work (`payload.ok` false) keeps its button and
+ * its reason, so a failed confirm never reads as done (lake#794). A later success wins. */
+export function confirmOutcomes(
+  list: { content?: unknown; payload?: { confirmed?: unknown; ok?: unknown } | null }[],
+): { confirmed: Set<string>; refused: Record<string, string> } {
+  const confirmed = new Set<string>();
+  const refused: Record<string, string> = {};
+  for (const message of list) {
+    const mark = message.payload?.confirmed as { message_id?: unknown; index?: unknown } | undefined;
+    if (!mark || typeof mark !== "object") continue;
+    const key = `${mark.message_id}/${mark.index}`;
+    if (message.payload?.ok === false) {
+      if (!confirmed.has(key)) refused[key] = String(message.content ?? "");
+    } else {
+      confirmed.add(key);
+      delete refused[key];
+    }
+  }
+  return { confirmed, refused };
+}

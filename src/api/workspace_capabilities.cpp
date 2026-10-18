@@ -4795,6 +4795,136 @@ std::pair<std::string, json> answer_message(bool factory,
     return {answer.value("reply", std::string()), std::move(payload)};
 }
 
+// The input a stored Ask Orama proposal runs with when the person confirms it: the conversation's
+// account and workspace fill `customer_id` and `workspace_id` when the input names none and the
+// capability takes them (an MCP connection's call_mcp_tool from Ask Orama, lake#652).
+json proposal_input(const Capability* target,
+                    const json& proposal,
+                    const std::string& customer_id,
+                    const std::string& workspace_id) {
+    json proposed = proposal.value("input", json::object());
+    if (!proposed.is_object() || target == nullptr) {
+        return proposed;
+    }
+    const json properties = target->input_schema.value("properties", json::object());
+    if (!proposed.contains("customer_id") && properties.contains("customer_id")) {
+        proposed["customer_id"] = customer_id;
+    }
+    if (!proposed.contains("workspace_id") && properties.contains("workspace_id")) {
+        proposed["workspace_id"] = workspace_id;
+    }
+    return proposed;
+}
+
+// What is wrong with a proposal's input, said plainly for the person (lake#794): "create_index
+// needs `table` (the source table to index), which this proposal does not name." The error is
+// the registry's own (validate_input), so the words follow the rule Registry::call enforces.
+std::string proposal_problem_text(const Capability* target,
+                                  const std::string& capability,
+                                  const ApiError& error) {
+    std::string field;
+    if (error.path.size() > 1) {
+        const std::string pointer = error.path.substr(error.path.rfind('/') + 1);
+        for (std::size_t at = 0; at < pointer.size(); ++at) {
+            if (pointer[at] == '~' && at + 1 < pointer.size()) {
+                field += pointer[at + 1] == '1' ? '/' : '~';
+                ++at;
+            } else {
+                field += pointer[at];
+            }
+        }
+    }
+    if (field.empty()) {
+        return capability + " cannot run with this input: " + error.message + ".";
+    }
+    std::string description;
+    if (target != nullptr && error.path.find('/', 1) == std::string::npos) {
+        description = target->input_schema.value("properties", json::object())
+                          .value(field, json::object())
+                          .value("description", std::string());
+    }
+    // The description's first clause: "the source table to index (load it first with ...)"
+    // reads as "the source table to index".
+    description = description.substr(0, description.find(" ("));
+    const std::string about = description.empty() ? "" : " (" + description + ")";
+    if (error.message == field + " is required") {
+        return capability + " needs `" + field + "`" + about +
+               ", which this proposal does not name.";
+    }
+    if (error.message == "unexpected field " + field) {
+        return capability + " does not take `" + field + "`.";
+    }
+    return "`" + field + "`" + about + " is not valid for " + capability + ": " + error.message +
+           ".";
+}
+
+// Why a proposal cannot run as stored, checked by the registry's own rules before it is offered
+// (lake#794): an unknown capability, or input its schema refuses. Nothing is called. Empty when
+// the proposal can be offered.
+std::optional<ApiError> proposal_problem(const ApiContext& context,
+                                         const json& proposal,
+                                         const std::string& customer_id,
+                                         const std::string& workspace_id) {
+    if (!proposal.is_object() || !proposal.value("capability", json()).is_string()) {
+        return ApiError{"invalid_input", "the proposal names no capability", "/capability"};
+    }
+    const std::string capability = proposal.at("capability");
+    const auto target = context.registry != nullptr ? context.registry->find(capability) : nullptr;
+    if (!target) {
+        return ApiError{"unknown_capability", "Lake has no capability named " + capability, ""};
+    }
+    const json proposed = proposal_input(target.get(), proposal, customer_id, workspace_id);
+    const auto canonical = canonical_input(*target, proposed);
+    if (!canonical) {
+        return canonical.error();
+    }
+    if (ApiResult checked = validate_input(*target, *canonical); !checked.ok) {
+        return checked.error;
+    }
+    return std::nullopt;
+}
+
+// An answer's proposals, keeping only those that can run (lake#794). A proposal whose input the
+// capability's schema refuses is never offered: it moves to `withheld_proposals` with the reason,
+// and the reply says, in plain words, what is missing and asks the person for it.
+void withhold_invalid_proposals(const ApiContext& context,
+                                const std::string& customer_id,
+                                const std::string& workspace_id,
+                                std::string& content,
+                                json& payload) {
+    if (!payload.is_object() || !payload.value("proposals", json()).is_array()) {
+        return;
+    }
+    json offered = json::array();
+    json withheld = json::array();
+    std::string said;
+    for (const json& proposal : payload.at("proposals")) {
+        const auto problem = proposal_problem(context, proposal, customer_id, workspace_id);
+        if (!problem) {
+            offered.push_back(proposal);
+            continue;
+        }
+        const std::string capability =
+            proposal.is_object() ? proposal.value("capability", std::string()) : std::string();
+        const auto target =
+            context.registry != nullptr ? context.registry->find(capability) : nullptr;
+        const std::string text = problem->code == "invalid_input"
+                                     ? proposal_problem_text(target.get(), capability, *problem)
+                                     : problem->message + ".";
+        json entry = proposal.is_object() ? proposal : json::object();
+        entry["error"] = {{"code", problem->code}, {"message", text}, {"path", problem->path}};
+        withheld.push_back(std::move(entry));
+        said += "\n\nI could not offer this change yet: " + text +
+                " Tell me what to use and I will propose it again.";
+    }
+    if (withheld.empty()) {
+        return;
+    }
+    payload["proposals"] = std::move(offered);
+    payload["withheld_proposals"] = std::move(withheld);
+    content += said;
+}
+
 json conversation_kind_schema() {
     return {{"type", "string"}, {"enum", {"ask", "factory"}}};
 }
@@ -4882,6 +5012,7 @@ liquid::runtime::task<ApiResult> send_ask_message(const json& input, ApiContext&
         co_return ApiResult::success(std::move(out));
     }
     auto [content, payload] = answer_message(factory, true, answered.value, agent, "", "");
+    withhold_invalid_proposals(context, customer_id, workspace_id, content, payload);
     auto reply = control::settled(co_await append_message(context,
                                                           customer_id,
                                                           workspace_id,
@@ -4944,6 +5075,7 @@ liquid::runtime::task<ApiResult> settle_ask_turn(const json& input, ApiContext& 
                        task.value("agent", std::string()),
                        task_id,
                        task.value("message", std::string("the agent did not answer")));
+    withhold_invalid_proposals(context, customer_id, workspace_id, content, payload);
     auto written =
         control::settled(co_await append_message(context,
                                                  customer_id,
@@ -4993,25 +5125,26 @@ liquid::runtime::task<ApiResult> confirm_ask_proposal(const json& input, ApiCont
     const std::string capability = proposal.value("capability", std::string());
     context.audit_details = {
         {"ask_confirm", true}, {"conversation_id", conversation_id}, {"capability", capability}};
-    // A proposal runs in the conversation's workspace when its input names none (an MCP
-    // connection's call_mcp_tool from Ask Orama, lake#652).
-    json proposed = proposal.value("input", json::object());
-    if (proposed.is_object() && !proposed.contains("workspace_id") && context.registry != nullptr) {
-        if (const auto target = context.registry->find(capability);
-            target && target->input_schema.contains("properties") &&
-            target->input_schema.at("properties").contains("workspace_id")) {
-            proposed["workspace_id"] = workspace_id;
-        }
-    }
+    // A proposal runs in the conversation's account and workspace when its input names none (an
+    // MCP connection's call_mcp_tool from Ask Orama, lake#652).
+    const auto target = context.registry != nullptr ? context.registry->find(capability) : nullptr;
+    const json proposed = proposal_input(target.get(), proposal, customer_id, workspace_id);
     const ApiResult done = called(co_await call_capability(context, capability, proposed));
     context.audit_details["ok"] = done.ok;
+    // Input the capability refused is said plainly, naming what is missing (lake#794).
+    const std::string why =
+        done.ok ? std::string()
+        : done.error.code == "invalid_input" && !done.error.path.empty()
+            ? proposal_problem_text(target.get(), capability, done.error) +
+                  " Ask Orama again with what to use and it will propose the change again."
+            : done.error.message;
     auto outcome = control::settled(co_await append_message(
         context,
         customer_id,
         workspace_id,
         conversation_id,
         "assistant",
-        done.ok ? "Done: " + capability + "." : "That did not work: " + done.error.message,
+        done.ok ? "Done: " + capability + "." : "That did not work: " + why,
         {{"agent", "agent-ask-orama"},
          {"confirmed", {{"message_id", message_id}, {"index", std::to_string(index)}}},
          {"ok", done.ok}}));
@@ -5022,7 +5155,7 @@ liquid::runtime::task<ApiResult> confirm_ask_proposal(const json& input, ApiCont
     }
     json out{{"ok", done.ok}, {"message_id", outcome->id}, {"capability", capability}};
     if (!done.ok) {
-        out["error"] = done.error.message;
+        out["error"] = why;
     }
     co_return ApiResult::success(std::move(out));
 }

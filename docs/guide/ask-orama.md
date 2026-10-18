@@ -123,7 +123,13 @@ and a **Confirm** button.
 
 1. Read the proposal: what it calls and with which input.
 2. Press **Confirm**. Lake runs it as you and adds *Done: …* or *That did not work: …* to the
-   conversation. A confirmed proposal shows **Confirmed** and is never offered again.
+   conversation. A proposal that worked shows **Confirmed** and is never offered again. One that
+   did not work shows why and offers **Try again**.
+
+Lake checks every proposal before you see it. When Ask Orama proposes a change without something
+it needs (a search index without the table to index, a stream without saying where it lives), you
+are not offered a Confirm that would fail: the answer says what is missing and asks you for it.
+Reply with it and Ask Orama proposes the change again.
 
 A change to an existing pipeline goes to the Project Agent instead, and the answer shows **Review
 the proposed change**, which opens the pipeline page where you apply or discard it
@@ -188,6 +194,8 @@ tasks those agents asked for in turn. Only you can delete your conversations.
 | `workspace_not_ready` | The workspace is not ready; conversations live in it. |
 | `invalid_input` at `/workspace_id` | The workspace id is unknown or not one of the account's. |
 | *That did not finish: …* | The agent failed after its retries; send the message again. |
+| *I could not offer this change yet: … needs …* | Ask Orama left out something the change needs. Reply with it (for example the dataset to index) and it proposes the change again. |
+| *That did not work: …* under a proposal | Lake ran it and the capability refused. The message says why; fix that and press **Try again**, or ask Ask Orama again. |
 
 ## Related Pages
 
