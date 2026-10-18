@@ -2198,34 +2198,36 @@ TEST(AgentRuns, ABuiltPipelineSaysWhichTemplateItStartedFrom) {
 // with its punctuation dropped.
 TEST(AgentRuns, APipelineTitleIsShortAndReadable) {
     using lake::api::pipeline_title;
-    EXPECT_EQ(
-        pipeline_title("Predict which customers will churn (the churned column), with the reasons"),
-        "Customers churn");
-    EXPECT_EQ(pipeline_title("Predict which accounts will churn in the next 90 days, with the "
-                             "reasons"),
-              "Accounts churn");
-    EXPECT_EQ(pipeline_title("Predict the likelihood of churn"), "Likelihood of churn");
-    EXPECT_EQ(pipeline_title("Build a churn model"), "Churn model");
-    EXPECT_EQ(pipeline_title("Classify support tickets by urgency"), "Support tickets");
-    EXPECT_EQ(pipeline_title("What will revenue be next quarter?"), "Revenue next quarter");
-    EXPECT_EQ(pipeline_title("Answer questions about our product docs"), "Questions");
-    EXPECT_EQ(pipeline_title("churn"), "Churn");
-    EXPECT_EQ(pipeline_title("Forecast demand \u2014 weekly, per store"), "Demand");
-    EXPECT_EQ(pipeline_title("Score churn-risk for each account's renewal"), "Churn-risk");
-    EXPECT_EQ(pipeline_title("Predict which"), "Predict which");
-    EXPECT_EQ(pipeline_title("(!)"), "Pipeline");
-    EXPECT_EQ(pipeline_title(""), "Pipeline");
-    // Punctuation never lands in a title, and a title is a few words.
+    // The cases the web app's pipelineTitle runs too (frontend/tests/design.test.ts), so the two
+    // agree, non-ASCII text included.
+    std::ifstream file(std::filesystem::path(LAKE_TEST_SOURCE_DIR) /
+                       "frontend/tests/pipeline-titles.json");
+    ASSERT_TRUE(file) << "frontend/tests/pipeline-titles.json";
+    const json table = json::parse(file);
+    ASSERT_GE(table["cases"].size(), 30U);
+    for (const json& each : table["cases"]) {
+        const std::string description = each[0].get<std::string>();
+        EXPECT_EQ(pipeline_title(description), each[1].get<std::string>()) << description;
+    }
+    const auto characters = [](const std::string& text) {
+        return std::ranges::count_if(
+            text, [](char c) { return (static_cast<unsigned char>(c) & 0xC0) != 0x80; });
+    };
+    // Punctuation never lands in a title, and a title is a few words, at most 48 characters.
     for (const std::string_view description :
          {"Predict (churn), [now]; please: thanks.",
           "Find: which? accounts!",
           "Spot fraud -- quickly",
+          "Predict: (\u201cchurn\u201d)\u2026",
           "Predict which customers, accounts, users and orgs will "
           "churn soon and why and how much revenue we lose"}) {
         const std::string title = pipeline_title(description);
         EXPECT_FALSE(title.empty()) << description;
-        EXPECT_EQ(title.find_first_of("()[]{},;:.!?"), std::string::npos) << title;
-        EXPECT_LE(title.size(), 48U) << title;
+        EXPECT_EQ(title.find_first_of("()[]{},;:.!?\""), std::string::npos) << title;
+        for (const std::string_view mark : {"\u201c", "\u201d", "\u2018", "\u2026"}) {
+            EXPECT_EQ(title.find(mark), std::string::npos) << title;
+        }
+        EXPECT_LE(characters(title), 48) << title;
     }
 }
 
@@ -4086,7 +4088,12 @@ TEST(AgentRuns, AProjectAgentBuildChecksItsCompileAndThePickIgnoresTheCheckGraph
                                 {{"agent", "agent-project"},
                                  {"kind", "build:retention"},
                                  {"message", "Design the pipeline for the project retention"},
-                                 {"context", {{"opportunity", {{"methodology", "M-1"}}}}}});
+                                 {"context",
+                                  {{"opportunity",
+                                    {{"methodology", "M-1"},
+                                     {"intent",
+                                      "Predict which accounts will churn in the next 90 days, "
+                                      "with the reasons"}}}}}});
     ASSERT_TRUE(started.ok) << started.error.message;
     const auto task = r.task(started.value["task_id"]);
     ASSERT_TRUE(task);
@@ -4152,14 +4159,54 @@ TEST(AgentRuns, AProjectAgentBuildChecksItsCompileAndThePickIgnoresTheCheckGraph
         return call.first == "compile_intent";
     });
     ASSERT_NE(compiled, r.w.caller->calls.end()) << "the check graph was not taken as the pipeline";
-    // lake names its own compile with a short title (lake#816), never a check graph's name.
-    EXPECT_FALSE(compiled->second.value("name", std::string()).starts_with("Project Agent check"))
-        << "lake's own compile names no check graph";
+    // lake titles its own compile from the Opportunity's intent (lake#816): never a check graph's
+    // name, and never the brief's "Design the pipeline" words.
+    EXPECT_EQ(compiled->second.value("name", std::string()), "Accounts churn")
+        << "lake's own compile is titled from what the project is for";
     EXPECT_EQ(compiled->second["input_id"], "intent-1");
     EXPECT_TRUE(std::ranges::none_of(r.w.caller->calls, [](const auto& call) {
         return call.first == "get_graph" &&
                call.second.value("graph", std::string()).starts_with("Project Agent check");
     })) << "the check graph is never read as the pipeline to repoint";
+}
+
+// lake#816: a build without the Opportunity's intent is titled from the brief's words after
+// "Design the pipeline for the project <name>: ", never from "Design the pipeline".
+TEST(AgentRuns, AProjectAgentBuildIsTitledFromWhatTheProjectIsFor) {
+    AgentRuns r;
+    auto& config = const_cast<lake::control::WorkspaceConfig&>(r.w.service->config());
+    config.agent_endpoints = {{"agent-project", "http://project:8080"}};
+    config.internal_url = "http://lake.internal:4900";
+    const auto started = r.call(
+        "agent_turn",
+        {{"agent", "agent-project"},
+         {"kind", "build:retention"},
+         {"message",
+          "Design the pipeline for the project retention: Predict which customers will churn "
+          "(the churned column), with the reasons. Methodology: M-1"},
+         {"context", {{"opportunity", {{"methodology", "M-1"}}}}}});
+    ASSERT_TRUE(started.ok) << started.error.message;
+    const auto task = r.task(started.value["task_id"]);
+    ASSERT_TRUE(task);
+    r.w.caller->answers["get_project"] = {{"name", "retention"}, {"graphs", json::array()}};
+    r.w.caller->answers["list_methodologies"] = {
+        {"methodologies", json::array({{{"id", "M-1"}, {"runnable", true}}})}};
+    r.w.caller->answers["capture_intent"] = {{"input_id", "intent-1"}};
+    r.w.caller->answers["compile_intent"] = {{"name", "Customers churn"}, {"project", "retention"}};
+    ASSERT_TRUE(r.set_task_status(
+        task->id,
+        "Succeeded",
+        "",
+        "",
+        {{"ok", true},
+         {"result", {{"pipeline", {{"methodology", "M-1"}, {"label", "churned"}}}}}}));
+    r.w.caller->calls.clear();
+    ASSERT_TRUE(r.call("get_agent_task", {{"task_id", task->id}}).ok);
+    const auto compiled = std::ranges::find_if(r.w.caller->calls, [](const auto& call) {
+        return call.first == "compile_intent";
+    });
+    ASSERT_NE(compiled, r.w.caller->calls.end());
+    EXPECT_EQ(compiled->second.value("name", std::string()), "Customers churn");
 }
 
 TEST(AgentRuns, EachLibraryAgentHasItsOwnBusCredential) {

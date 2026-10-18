@@ -18,9 +18,9 @@ import { WorkspaceGate, useWorkspaceStatus } from "@/components/WorkspaceGate";
 import { qs, useScope, useScopedRead, useWq, useWsPath, wa, wq } from "./api";
 import {
   PROJECT_STATE_TONE,
+  buildModelName,
   datasetChoices,
   datasetColumns,
-  defaultModelName,
   pipelineActionError,
   pipelineTitle,
   projectState,
@@ -30,7 +30,6 @@ import {
   solutionState,
   taskIsActive,
   text,
-  uniqueModelName,
   uniquePipelineName,
   withoutProjectAgentChecks,
   type J,
@@ -390,8 +389,7 @@ function BuildPipeline({
   const [typedName, setName] = useState<string | null>(null);
   const [typedModel, setModel] = useState<string | null>(null);
   const name = typedName ?? (intent.trim() ? uniquePipelineName(pipelineTitle(intent), taken) : "");
-  const suggestedModel = name.trim() ? uniqueModelName(defaultModelName(name), models.data?.models, project, name) : "";
-  const modelName = typedModel ?? suggestedModel;
+  const modelName = typedModel ?? buildModelName(name, taken, models.data?.models, project);
   const { busy, error, run } = useSubmit();
   const choices = datasetChoices(datasets.data?.datasets);
   // The chosen dataset's columns: what it predicts and what each row is about, so lake's compiler
@@ -418,10 +416,12 @@ function BuildPipeline({
       // With a dataset the engine names the steps from it (zetta#1246); without, they are the template's.
       const from = template ? (dataset ? ` from ${template}, its steps named from ${dataset}` : ` from ${template}; rename its steps to fit your data`) : "";
       setIntent("");
-      const model = modelName.trim();
-      if (graph && (dataset || (model && model !== suggestedModel))) {
+      // Only a model name the person typed travels to the Run form; without one the Run form
+      // proposes its default from the pipeline lake actually built (lake#816).
+      const model = typedModel?.trim() ?? "";
+      if (graph && (dataset || model)) {
         // Pointed at a dataset, or a model name of the person's own: open the pipeline at its Run
-        // form, with the dataset and the model name chosen here.
+        // form, with the dataset and that model name chosen.
         if (from) toast(`Built${from}.`);
         navigate(ws(`/design/pipeline?${qs({ project, graph, ...(dataset ? { dataset } : {}), ...(model ? { model } : {}) })}#run`));
         return;

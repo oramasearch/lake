@@ -293,9 +293,12 @@ liquid::runtime::task<ApiResult> compile_pipeline(ApiContext& context,
                                                   std::string name = {});
 // A short, readable pipeline title from its description (lake#816): the first clause, without a
 // leading request ("Predict which", "Build a"), helper words ("will", "likely to") or what follows
-// a preposition, at most four words, first letter capitalized. "Predict which customers will
-// churn (the churned column), with the reasons" is "Customers churn". The web app's
-// `pipelineTitle` (frontend/src/pages/design/logic.ts) follows the same rules.
+// a preposition, at most four words and 48 characters (code points), first letter capitalized.
+// "Predict which customers will churn (the churned column), with the reasons" is "Customers
+// churn"; "Predict: customer churn" is "Customer churn". Curly quotes, the ellipsis and dashes are
+// read as plain punctuation, so none lands in a title. The web app's `pipelineTitle`
+// (frontend/src/pages/design/logic.ts) follows the same rules; both are tested on the cases in
+// frontend/tests/pipeline-titles.json.
 std::string pipeline_title(std::string_view description);
 // The workspace engine's methodologies (its list_methodologies answer, zetta#1061), or null
 // when the engine predates the registry: then only M-1 (churn / GBDT classification) runs.

@@ -127,8 +127,10 @@ refused and nothing is saved. **A saved change needs approval again before the p
    - **Train on**: the dataset to learn from.
    - **Hold out for measuring**: the share of rows kept out of training to measure the model. The
      default 0.2 keeps a fifth of the rows out. 0 measures nothing, and every score is in-sample.
-   - **Model name**: defaults to the pipeline's short title with `_model`, or the name chosen in
-     Build a Pipeline.
+   - **Model name**: the name of the model the pipeline already trained, so the run adds a version
+     to it. For a pipeline that has trained nothing yet it defaults to the pipeline's short title
+     with `_model`, numbered past a model of another pipeline. A model name typed in Build a
+     Pipeline fills it only on the run form that opens right after building.
 4. The run appears under the pipeline's **Runs** and on **Train → Runs**.
 
 Approve:

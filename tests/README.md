@@ -352,7 +352,11 @@ applies the proposal with `edit_pipeline`, approves it and runs it with the prop
 It also checks the proposal's `review_url` and that the check graph is not listed as a pipeline.
 `AgentRuns.AProjectAgentBuildChecksItsCompileAndThePickIgnoresTheCheckGraph` gives a build turn
 the same confined check and proves the pick after the build compiles the project's own pipeline
-rather than taking the check graph.
+rather than taking the check graph, titled from the Opportunity's intent (*Accounts churn*,
+lake#816); `AgentRuns.AProjectAgentBuildIsTitledFromWhatTheProjectIsFor` titles it from the brief's
+words when the Opportunity carries no intent. `AgentRuns.APipelineTitleIsShortAndReadable` runs the title cases
+in `frontend/tests/pipeline-titles.json`, which the web app's `design.test.ts` runs too, so
+`pipeline_title` and `pipelineTitle` agree.
 `AgentLeases.RetryNoticeIsTheTasksMessage` pins that a retry notice is the task's message, which
 the web app's working panels show.
 `HttpServer/HttpResponseIsolation.LibraryAgentsFinishEveryTurnKindWithoutAWorkspaceEcho/*`

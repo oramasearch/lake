@@ -18,16 +18,15 @@ import {
   cellText,
   clearRefusalsOnApprove,
   datasetChoices,
-  defaultModelName,
   graphOf,
   parseNumber,
   pipelineActionError,
   plainAgentFailure,
   projectAgentNeedsReply,
+  runModelName,
   runsOf,
   taskIsActive,
   text,
-  uniqueModelName,
   whenUtc,
   type Graph,
   type J,
@@ -794,11 +793,12 @@ function Govern({
   const deploy = useSubmit();
   const [trainOn, setTrainOn] = useState(dataset);
   const [holdoutFraction, setHoldoutFraction] = useState(holdout || "0.2");
-  // A short name from the pipeline's title, numbered past a model another pipeline made (lake#816);
-  // the person's own (typed here, or in Build a Pipeline) wins.
+  // The model this pipeline already trained, so a run adds a version to it; for a pipeline that has
+  // trained none, a short name from its title, numbered past a model another pipeline made
+  // (lake#816). The person's own (typed here, or in Build a Pipeline) wins.
   const models = useWq<J>("list_models");
   const [typedModelName, setModelName] = useState<string | null>(model || null);
-  const modelName = typedModelName ?? uniqueModelName(defaultModelName(graph.name), models.data?.models, project, graph.name);
+  const modelName = typedModelName ?? runModelName(models.data?.models, project, graph.name);
   const target = { project, graph: graph.name };
   const top = () => window.scrollTo({ top: 0, behavior: "smooth" });
   return (

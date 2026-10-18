@@ -76,8 +76,9 @@ again every 3 seconds.
    churn*), numbered *(2)* when the project already has one; the model name is that title in
    lowercase words with `_model` (`customers_churn_model`), numbered `_2` when a model of another
    pipeline has it. The full description is kept as the project's intent.
-6. Press **Build pipeline**. With a dataset, or a model name of your own, the pipeline opens at its
-   run form with them chosen.
+6. Press **Build pipeline**. With a dataset, or a model name you typed, the pipeline opens at its
+   run form with them chosen. A model name you leave as suggested is not carried: the run form
+   proposes it again from the pipeline Lake built.
 
 `POST /v1/compile_pipeline`
 
@@ -91,8 +92,11 @@ table and those columns to the engine's compiler as hints. Add `"name"` to name 
 without it Lake names it with a short title from the description, by the same rules as the form
 (`pipeline_title` in `src/api/workspace_capabilities.cpp`, `pipelineTitle` in the web app). Either
 is numbered ` (2)`, ` (3)` past a pipeline of the project that has it. The answer names the new
-pipeline as `graph`, and `template`, the template its steps started from. Without a dataset the steps keep the template's names: rename them to fit your data. The MCP
-tool is `compile_pipeline`.
+pipeline as `graph`, and `template`, the template its steps started from. Without a dataset the
+steps keep the template's names: rename them to fit your data. The MCP tool is `compile_pipeline`.
+
+A pipeline the Project Agent builds for a project made from an Opportunity is titled from the
+Opportunity's intent by the same rules.
 
 A pipeline whose methodology does not train yet says *This Pipeline Trains Nothing Yet* instead of
 pretending to train. A methodology the engine cannot run is refused with `not_supported`, naming
@@ -195,9 +199,11 @@ A changed pipeline needs **Approve** again before it runs.
    them too, marked *did not apply*.
 3. **Check and run**: choose the dataset under **Train on**, keep **Hold out for measuring** at
    0.2 (a fifth of the rows kept out of training to measure the model; 0 measures nothing), name
-   the model under **Model name** (it defaults to the pipeline's short title with `_model`, or the
-   name chosen when the pipeline was built, numbered past a model of another pipeline), and run. A passing
-   gate opens the run's page; a failing one shows the checks.
+   the model under **Model name**, and run. The model name is the one the pipeline already
+   trained, so the run adds a version to that model; for a pipeline that has trained nothing yet
+   it is the pipeline's short title with `_model`, numbered past a model of another pipeline. A
+   model name typed in Build a Pipeline fills it only on the run form that opens right after
+   building. A passing gate opens the run's page; a failing one shows the checks.
 4. **Deploy**: places the approved pipeline in the workspace behind its checks. The page then says
    *Deployed*.
 
