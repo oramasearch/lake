@@ -766,10 +766,12 @@ a.hosted-brand {
 .order-price {
   margin: 0;
   color: var(--lake-text-primary);
+  line-height: var(--lake-leading-tight);
   font-size: var(--lake-text-24);
   font-weight: var(--lake-weight-semibold);
 }
 .order-price small {
+  display: inline-block;
   color: var(--lake-text-secondary);
   font-size: var(--lake-text-14);
   font-weight: var(--lake-weight-regular);
@@ -788,6 +790,9 @@ a.hosted-brand {
   display: grid;
   gap: var(--lake-space-1);
   padding-left: var(--lake-space-5);
+}
+.order-actions a.button {
+  text-decoration: none;
 }
 .order-actions {
   display: flex;
