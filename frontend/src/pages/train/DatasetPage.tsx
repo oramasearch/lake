@@ -2,7 +2,7 @@
  * with their types, its first rows and its partitions beside its facts and actions. */
 import { useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { Columns3, Database, HardDrive, Rows3, Shield, Terminal, Trash2 } from "lucide-react";
+import { Columns3, Database, FlaskConical, HardDrive, Rows3, Shield, Terminal, Trash2 } from "lucide-react";
 import type { Row } from "@/lib/api";
 import { bytes } from "@/lib/format";
 import { useTrail, entityCrumb } from "@/lib/trail";
@@ -12,6 +12,7 @@ import { datasetLines } from "@/lib/deletion";
 import { DeletionButton } from "@/lib/deletionDialog";
 import { WorkspaceFrame, cellText, qs, text, useAsync, useSpaceRead, useWorkspace, useWq, useWsPath, wa } from "./workspace";
 import { ObjectTable, engineDatabase, resultDataset } from "./datasets";
+import { trainFromDatasetPath } from "@/pages/design/logic";
 import { datasetColumns } from "./columns";
 
 /** The value type SQL sees in a column, read from the first rows (web_ui.cpp sampled_type). */
@@ -98,9 +99,17 @@ export default function DatasetPage() {
       sub={name ? <span className="font-mono text-[12.5px]">{`${database}/${name}`}</span> : undefined}
       actions={
         name ? (
-          <Button to={ws(`/train/query?${qs({ customer_id: customerId, statement: `SELECT * FROM ${database}.${name}` })}`)}>
-            <Terminal size={14} aria-hidden /> Query it
-          </Button>
+          <>
+            <Button to={ws(`/train/query?${qs({ customer_id: customerId, statement: `SELECT * FROM ${database}.${name}` })}`)}>
+              <Terminal size={14} aria-hidden /> Query it
+            </Button>
+            {/* The next step after loading data is a model (lake#818); a run's output is not training data. */}
+            {!engineDatabase(database) && (
+              <Button variant="primary" to={ws(trainFromDatasetPath(database, name))}>
+                <FlaskConical size={14} aria-hidden /> Train a model on this
+              </Button>
+            )}
+          </>
         ) : null
       }
       before={error ? <Banner tone="warn">{error}</Banner> : null}
@@ -145,7 +154,9 @@ function DatasetContent({ name, database }: { name: string; database: string }) 
         <Stat label="Rows" icon={Rows3} value={typeof rows === "number" ? rows.toLocaleString("en-US") : cellText(rows) || "—"} />
         <Stat label="Size" icon={HardDrive} value={size ? bytes(size) : "—"} sub={size ? `${Number(size).toLocaleString("en-US")} bytes` : undefined} />
         <Stat label="Columns" icon={Columns3} value={names.length} />
-        <Stat label="Copies" icon={Shield} value={partitions.length === 0 ? "All" : copies} sub={partitions.length === 0 ? "every node" : `${partitions.length} partitions`} tone={single ? "bad" : undefined} />
+        {/* One copy is how a one-node workspace keeps every dataset, not a fault: the figure is plain
+            and Keep durable is offered as a secondary action (lake#818). */}
+        <Stat label="Copies" icon={Shield} value={partitions.length === 0 ? "All" : copies} sub={partitions.length === 0 ? "every node" : `${partitions.length} partitions`} />
       </StatRow>
       <Split
         side={
@@ -166,6 +177,14 @@ function DatasetContent({ name, database }: { name: string; database: string }) 
             </Card>
             <Card label="Actions">
               <div className="flex flex-col gap-2">
+                {!(resultDataset(dataset) || engineDatabase(database)) && (
+                  <>
+                    <Button variant="primary" to={ws(trainFromDatasetPath(database, name))}>
+                      <FlaskConical size={14} aria-hidden /> Train a model on this
+                    </Button>
+                    <p className="muted m-0 text-[12.5px]">Start a project with this dataset chosen as its data, then build its pipeline.</p>
+                  </>
+                )}
                 <Button to={ws(`/train/query?${qs({ customer_id: scope.customerId, statement: `SELECT * FROM ${database}.${name}` })}`)}>
                   <Terminal size={14} aria-hidden /> Query it
                 </Button>
@@ -173,7 +192,6 @@ function DatasetContent({ name, database }: { name: string; database: string }) 
                   <>
                     {promote.error ? <ErrorBlock error={promote.error} /> : null}
                     <Button
-                      variant="primary"
                       loading={promote.busy}
                       onClick={() =>
                         void promote.run(async () => {
@@ -184,7 +202,7 @@ function DatasetContent({ name, database }: { name: string; database: string }) 
                     >
                       <Shield size={14} aria-hidden /> Keep durable
                     </Button>
-                    <p className="muted m-0 text-[12.5px]">This dataset has one copy; keeping more lets it survive losing a node.</p>
+                    <p className="muted m-0 text-[12.5px]">Optional. This dataset has one copy, which is normal for a one-node workspace; keeping more lets it survive losing a node.</p>
                   </>
                 )}
                 <Button variant="ghost" to={ws(`/train/data?${qs({ customer_id: scope.customerId })}`)}>
