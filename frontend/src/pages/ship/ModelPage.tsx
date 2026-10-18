@@ -22,7 +22,7 @@ import { Banner, Button, Card, Chip, CopyBlock, DataTable, Empty, ErrorBlock, Fi
 import { NO_WORKSPACE } from "@/pages/account/signIn";
 import { Chart } from "../experiments/Chart";
 import { WorkspaceFrame, cellText, qs, text, useSpaceRead, useWorkspace, useWsPath, wa } from "../train/workspace";
-import { errorRate, featuresOf, filledSteps, groupOf, methodologyOf, parseRows, predictCurl, predictionRows, predictKeys, sampleRow, serverState, trafficOf, versionNumber, type ModelGroup } from "../train/models";
+import { errorRate, featuresOf, filledSteps, groupOf, methodologyOf, parseRows, predictCurl, predictionRows, predictKeys, rowNumber, sampleRow, serverState, trafficOf, versionNumber, type ModelGroup } from "../train/models";
 import { SourceText, VersionChip, useModelGroups, useModelLinks } from "../train/modelParts";
 import { CopyMono, useOrigin } from "./parts";
 import { UsageThisMonth } from "../usage/UsageThisMonth";
@@ -289,7 +289,7 @@ function Inference({ version }: { version: Row }) {
                   <tbody>
                     {predictions.map((entry, i) => (
                       <tr key={i}>
-                        <td className="font-mono">{cellText(entry.row)}</td>
+                        <td className="font-mono">{rowNumber(entry)}</td>
                         <td className="font-mono">{cellText(entry.entity)}</td>
                         <td className="text-right font-mono">{typeof entry.prediction === "number" ? entry.prediction.toFixed(3) : cellText(entry.prediction)}</td>
                       </tr>
@@ -310,7 +310,7 @@ function Inference({ version }: { version: Row }) {
                   <tbody>
                     {ranked.map((entry, i) => (
                       <tr key={i}>
-                        <td className="font-mono">{cellText(entry.row)}</td>
+                        <td className="font-mono">{rowNumber(entry)}</td>
                         <td className="font-mono">{cellText(entry.entity)}</td>
                         <td className="text-right font-mono">{typeof entry.risk === "number" ? entry.risk.toFixed(3) : cellText(entry.risk)}</td>
                       </tr>

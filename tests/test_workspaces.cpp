@@ -4561,7 +4561,38 @@ TEST(Workspaces, NamingPredictAnswersEachRowsOwnKey) {
     };
     const auto refused = r.call("predict", {{"model_id", "m-1"}, {"rows", rows}});
     EXPECT_EQ(refused.error.code, "invalid_input");
-    EXPECT_EQ(refused.error.path, "/rows/1/tenure");
+    EXPECT_EQ(refused.error.path, "/rows/1/tenure") << "the path keeps the zero-based index";
+    // People count rows from one, and the row's own key names it (lake#819).
+    EXPECT_EQ(refused.error.message,
+              "score: row 2 ('acct-b') has no 'tenure'; the model needs tenure");
+
+    // A numeric key is named without quotes; a row without one by its number alone.
+    const json numbered = json::array({{{"account_id", 7}, {"tenure", 4}}, {{"tenure", 40}}});
+    r.w.caller->before_reply = [&] {
+        if (r.w.caller->capability != "score") {
+            r.w.caller->failure.reset();
+        } else {
+            r.w.caller->failure = lake::control::ZettaControlError{
+                "engine_error", "score: row 0 has a non-numeric 'tenure'"};
+        }
+    };
+    const auto keyed_refusal = r.call(
+        "predict", {{"model_id", "m-1"}, {"rows", numbered}, {"entity_column", "account_id"}});
+    EXPECT_EQ(keyed_refusal.error.message, "score: row 1 (7) has a non-numeric 'tenure'");
+    EXPECT_EQ(keyed_refusal.error.path, "/rows/0/tenure");
+    r.w.caller->before_reply = [&] {
+        if (r.w.caller->capability != "score") {
+            r.w.caller->failure.reset();
+        } else {
+            r.w.caller->failure = lake::control::ZettaControlError{
+                "engine_error", "score: row 1 has no 'tenure'; the model needs tenure"};
+        }
+    };
+    const auto unkeyed_refusal = r.call(
+        "predict", {{"model_id", "m-1"}, {"rows", numbered}, {"entity_column", "account_id"}});
+    EXPECT_EQ(unkeyed_refusal.error.message,
+              "score: row 2 has no 'tenure'; the model needs tenure");
+    EXPECT_EQ(unkeyed_refusal.error.path, "/rows/1/tenure");
 }
 
 TEST(Workspaces, NamingCompareRunsWithoutNamesComparesEverySharedMetric) {
