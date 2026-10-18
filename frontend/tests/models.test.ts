@@ -30,6 +30,7 @@ import {
   predictCurl,
   predictKeys,
   predictionRows,
+  rowNumber,
   sampleRow,
   scoreSeries,
   serverState,
@@ -280,4 +281,12 @@ test("download weights: export_model's answer becomes the file to save (lake#681
   assert.equal(exportsAsOnnx({ feature_schema: { objective: "lambdamart" } }), false);
   assert.equal(exportsAsOnnx({ kind: "classifier" }), true);
   assert.equal(exportsAsOnnx({ kind: "anomaly" }), false);
+});
+
+test("the Try it table numbers rows from 1, as people count (lake#819)", () => {
+  assert.equal(rowNumber({ row: 0, entity: "risky" }), "1");
+  assert.equal(rowNumber({ row: 2, entity: "partial" }), "3");
+  assert.equal(rowNumber({ entity: "no row" }), "", "an entry without a row number shows none");
+  assert.equal(rowNumber({ row: "2" }), "");
+  assert.equal(rowNumber({ row: -1 }), "");
 });

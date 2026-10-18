@@ -2190,6 +2190,30 @@ void register_search_capabilities(Registry& registry) {
         .input_aliases = {{"index", "index_id"}}});
 }
 
+// The engine names a bad row by its zero-based index ("score: row 2 has no 'tenure'"), but people
+// count rows from one: the message names it as row 3, followed by the row's own key when it has one
+// as a string or a number ("row 3 ('partial')", lake#819). The error's `path` keeps the zero-based
+// index, since it points into the `rows` array.
+static std::string name_row_as_people_count(const std::string& message,
+                                            const std::smatch& match,
+                                            const json& rows,
+                                            const std::string& key) {
+    const auto index = std::stoull(match[1].str());
+    std::string named = "row " + std::to_string(index + 1);
+    if (index < rows.size() && rows[index].is_object() && rows[index].contains(key)) {
+        const json& entity = rows[index].at(key);
+        if (entity.is_string()) {
+            named += " ('" + entity.get<std::string>() + "')";
+        } else if (entity.is_number()) {
+            named += " (" + entity.dump() + ")";
+        }
+    }
+    // The match starts at "row <n>"; everything after the number is kept.
+    const auto start = static_cast<std::size_t>(match.position(0));
+    const auto after = static_cast<std::size_t>(match.position(1) + match.length(1));
+    return message.substr(0, start) + named + message.substr(after);
+}
+
 // Predict with one published model (lake#250): the public route a customer calls from outside lake,
 // with a lake key. The model must be published (expose_model); rows are keyed by the model's own
 // feature columns and answered ranked by risk with what drives it (Zetta's `score`). Each ranked
@@ -2239,13 +2263,14 @@ liquid::runtime::task<ApiResult> predict_rows(const json& input, ApiContext& con
         co_return ApiResult::failure("store_unavailable", scored.error().message);
     }
     if (!*scored) {
-        // "score: row 2 has no 'tenure'" is about /rows/2/tenure.
+        // "score: row 2 has no 'tenure'" is about /rows/2/tenure, and reads "row 3" (lake#819).
         const std::string message = scored->error().message;
         static const std::regex row_field(R"(row (\d+) has (?:no|a non-numeric) '([^']+)')");
         std::smatch match;
         if (std::regex_search(message, match, row_field)) {
-            co_return ApiResult::failure(
-                "invalid_input", message, "/rows/" + match[1].str() + "/" + match[2].str());
+            co_return ApiResult::failure("invalid_input",
+                                         name_row_as_people_count(message, match, rows, key),
+                                         "/rows/" + match[1].str() + "/" + match[2].str());
         }
         co_return workspace_failure(scored->error(), input);
     }
