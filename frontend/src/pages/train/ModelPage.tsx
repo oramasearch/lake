@@ -24,6 +24,7 @@ import { when } from "./RunsPage";
 import { broughtFrom, compareVersions, exportsAsOnnx, featuresOf, groupOf, measuredFigures, modelSteps, scoreSeries, trainingOf, versionNumber, weightsFile, type ModelGroup } from "./models";
 import { ScoreText, SourceText, VersionScore, useModelGroups, useModelLinks } from "./modelParts";
 import { BringDialog, RetrainDialog } from "./NewModel";
+import { pipelineActionError } from "../design/logic";
 
 export default function TrainModelPage() {
   const [params] = useSearchParams();
@@ -460,7 +461,9 @@ function Train({ group, groups, selected, n }: { group: ModelGroup; groups: Mode
           ) : (
             group.pipeline && <p className="muted mt-1 mb-0 text-[12.5px]">Runs {group.pipeline} again after its checks, as a new version of this model.</p>
           )}
-          <FormError error={error} />
+          {/* run_pipeline answers an edited (proposed) pipeline with the engine's not_approved
+              refusal, which names a capability; the page says it in its words (lake#813). */}
+          <FormError error={pipelineActionError(error)} />
         </div>
         <div>
           {selected.exposed === true && others.length === 0 ? (

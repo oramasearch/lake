@@ -16,6 +16,7 @@ import {
   EDGE_KINDS,
   STEP_KINDS,
   cellText,
+  clearRefusalsOnApprove,
   datasetChoices,
   defaultModelName,
   graphOf,
@@ -151,7 +152,7 @@ function PipelineBody({ project, graphName }: { project: string; graphName: stri
               })
             }
           />
-          <FormError error={audit.error} />
+          <FormError error={pipelineActionError(audit.error)} />
         </>
       )}
       {shown.deploy && (
@@ -201,6 +202,7 @@ function PipelineBody({ project, graphName }: { project: string; graphName: stri
               dataset={params.get("dataset") ?? ""}
               holdout={params.get("holdout") ?? ""}
               onShown={setShown}
+              audit={audit}
             />
           </>
         }
@@ -754,8 +756,10 @@ function ChangePipeline({ project, graph, go }: { project: string; graph: Graph;
 
 /* ------------------------------------------------------------------ governing */
 
-/** Approve, Check, Run and Deploy. Run and Deploy wait for approval. A run that starts opens its
- * page; a run the checks blocked, a check and a deploy show their answer here once. */
+/** Approve, Check, Run and Deploy. Check, Run and Deploy wait for approval. A run that starts opens
+ * its page; a run the checks blocked, a check and a deploy show their answer here once. Approve
+ * clears the refusals shown before it, the checks panel's audit (`audit`, owned by the page)
+ * included. */
 function Govern({
   project,
   graph,
@@ -764,6 +768,7 @@ function Govern({
   dataset,
   holdout,
   onShown,
+  audit,
 }: {
   project: string;
   graph: Graph;
@@ -772,6 +777,7 @@ function Govern({
   dataset: string;
   holdout: string;
   onShown: (shown: Shown) => void;
+  audit: { setError: (error: unknown) => void };
 }) {
   const scope = useScope();
   const ws = useWsPath();
@@ -799,7 +805,7 @@ function Govern({
               : approve.run(async () => {
                   await wa(scope, "approve_plan", target);
                   // A refusal shown before approving no longer holds once approved (lake#813).
-                  for (const action of [check, runIt, deploy]) action.setError(null);
+                  clearRefusalsOnApprove({ check, run: runIt, deploy, audit });
                   toast("Pipeline approved");
                 })
           }

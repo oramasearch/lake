@@ -242,7 +242,8 @@ Press a model's name to open its training page, at its latest version.
 
 Press **Retrain** on the model's training page. Lake runs the model's pipeline again, after its
 checks, under the model's name, and opens the new run. The new run's model becomes the next
-version.
+version. If the pipeline was changed since it was approved, Retrain says *Approve the pipeline
+first; checks run on an approved pipeline.* Approve it on its pipeline page, then retrain.
 
 - REST: `POST /v1/run_pipeline` with the model's pipeline and name:
 

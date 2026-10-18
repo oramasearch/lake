@@ -559,6 +559,16 @@ export function pipelineActionError(error: unknown): unknown {
   return refusedAsProposed ? new Error(APPROVE_FIRST) : error;
 }
 
+/** The pipeline page's actions the engine refuses on a proposed pipeline: Check, Check and run,
+ * Deploy, and the checks panel's "List them for an audit" (each calls `gate`). */
+export const WAITS_FOR_APPROVAL = ["check", "run", "deploy", "audit"] as const;
+
+/** After a successful Approve, a refusal shown before it no longer holds: clear every action in
+ * {@link WAITS_FOR_APPROVAL} (lake#813). */
+export function clearRefusalsOnApprove(actions: Record<(typeof WAITS_FOR_APPROVAL)[number], { setError: (error: unknown) => void }>): void {
+  for (const name of WAITS_FOR_APPROVAL) actions[name].setError(null);
+}
+
 /** The model name the Run form proposes: `<project>_<graph>`, lowercase, non-alphanumerics `_`. */
 export function defaultModelName(project: string, graph: string): string {
   return [...`${project}_${graph}`].map((c) => (/^[A-Za-z0-9]$/.test(c) ? c.toLowerCase() : "_")).join("");
