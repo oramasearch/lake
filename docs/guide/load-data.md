@@ -154,7 +154,19 @@ Open a dataset for its page:
 - **Partitions** tab, when the dataset has partitions.
 - **Facts**: database, **Stored as** (how the workspace keeps the rows, JSON rows for every
   dataset), rows, bytes, partitions and copies.
-- **Actions**: **Query it** and **All datasets**.
+- **Actions**: **Train a model on this** (the main action, for a dataset that is not a run
+  output), **Query it** and **All datasets**.
+
+### Train a Model on a Dataset
+
+**Train a model on this**, at the top of the dataset's page and first under Actions, is the next
+step after loading data (lake#818). It opens **Design → Projects** with **New project** open for
+the dataset: the name starts as `<dataset>-model` and the description names the dataset, and both
+can be changed. **Create project** opens the new project with **Build pipeline** open and the
+dataset already chosen under **From data**; describe what it should predict and press **Build
+pipeline** ([Design](/docs/design)). The addresses are `/design/projects?new=1&dataset=<database>.<name>`
+and `/design/project?name=<project>&build=1&dataset=<database>.<name>`; closing either drawer drops
+those parameters.
 
 The upload banner is where the original file format is shown; the workspace does not record it.
 
@@ -174,9 +186,10 @@ table the engine wrote as the output of a run*.
 
 ### Keep a Dataset Durable
 
-**Copies** is the fewest copies any part of the dataset has. When a partition has only one copy,
-the dataset page offers **Keep durable**, which asks the workspace to keep more so the dataset
-survives losing a node (`promote_dataset` inside `workspace_act`).
+**Copies** is the fewest copies any part of the dataset has. One copy is how a one-node workspace
+keeps every dataset, so the figure is shown plainly, not as a fault. When a partition has only one
+copy, the dataset page offers **Keep durable** as a secondary action, which asks the workspace to
+keep more so the dataset survives losing a node (`promote_dataset` inside `workspace_act`).
 
 ## Query a Dataset
 

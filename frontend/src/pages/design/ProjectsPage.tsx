@@ -3,21 +3,34 @@
  * and status come from the project's own `get_project`, read alongside the list (the same read the
  * project page makes, so opening one is instant). */
 import { useMemo, useState } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { useQueries } from "@tanstack/react-query";
 import { FolderKanban, Lightbulb, Plus, SearchX } from "lucide-react";
 import { Drawer } from "@/lib/overlay";
 import { Banner, Button, DataTable, Empty, Field, FilterChips, Form, Page, Query, SearchInput, Stat, StatRow, Status, Toolbar, fieldError } from "@/lib/ui";
 import { WorkspaceGate, useWorkspaceStatus } from "@/components/WorkspaceGate";
 import { qs, useScope, useWq, useWsPath, wa, wq } from "./api";
-import { PROJECT_STATE_TONE, projectState, runIsActive, text, withoutProjectAgentChecks, type J, type ProjectState } from "./logic";
+import { PROJECT_STATE_TONE, buildFromDatasetPath, projectNameFor, projectState, runIsActive, text, withoutProjectAgentChecks, type J, type ProjectState } from "./logic";
 import { FormError, useDesignTrail } from "./parts";
 import "@/styles/design.css";
 
 export default function ProjectsPage() {
   useDesignTrail({ label: "Projects", path: "/design/projects" }, [], "Projects");
   const ready = useWorkspaceStatus().q.data?.ready === true;
-  const [creating, setCreating] = useState(false);
+  // `?new=1&dataset=<database>.<name>` (a dataset's Train a model on this, lake#818) opens New
+  // project for that dataset.
+  const [params, setParams] = useSearchParams();
+  const dataset = params.get("dataset") ?? "";
+  const [creating, setCreating] = useState(params.get("new") === "1");
+  const close = () => {
+    setCreating(false);
+    if (params.has("new") || params.has("dataset")) {
+      const next = new URLSearchParams(params);
+      next.delete("new");
+      next.delete("dataset");
+      setParams(next, { replace: true });
+    }
+  };
   return (
     <Page
       eyebrow="Design"
@@ -33,7 +46,7 @@ export default function ProjectsPage() {
     >
       <WorkspaceGate>
         <Projects onNew={() => setCreating(true)} />
-        {creating && <NewProject onClose={() => setCreating(false)} />}
+        {creating && <NewProject dataset={dataset} onClose={close} />}
       </WorkspaceGate>
     </Page>
   );
@@ -171,12 +184,12 @@ function Projects({ onNew }: { onNew: () => void }) {
   );
 }
 
-function NewProject({ onClose }: { onClose: () => void }) {
+function NewProject({ dataset, onClose }: { dataset: string; onClose: () => void }) {
   const scope = useScope();
   const ws = useWsPath();
   const navigate = useNavigate();
-  const [name, setName] = useState("");
-  const [description, setDescription] = useState("");
+  const [name, setName] = useState(() => projectNameFor(dataset));
+  const [description, setDescription] = useState(() => (dataset ? `A model trained on ${dataset}` : ""));
   const [decision, setDecision] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
@@ -187,7 +200,8 @@ function NewProject({ onClose }: { onClose: () => void }) {
       // An empty description or decision is left out. The decision is lake's to keep (lake#577):
       // the engine's project has no field for it, and its `intent` is a trace note it discards.
       await wa(scope, "create_project", { name, ...(description ? { description } : {}), ...(decision.trim() ? { decision } : {}) });
-      navigate(ws(`/design/project?${qs({ name })}`));
+      // For a dataset, the project opens with Build pipeline open on it (lake#818).
+      navigate(ws(buildFromDatasetPath(name, dataset)));
     } catch (e) {
       setError(e);
       setBusy(false);
@@ -197,7 +211,11 @@ function NewProject({ onClose }: { onClose: () => void }) {
   return (
     <Drawer
       title="New Project"
-      subtitle="Start from the decision it should improve, then build its pipelines on the project page."
+      subtitle={
+        dataset
+          ? `Start from the decision it should improve. Creating it opens Build pipeline with ${dataset} chosen as its data.`
+          : "Start from the decision it should improve, then build its pipelines on the project page."
+      }
       onClose={onClose}
       footer={
         <>
