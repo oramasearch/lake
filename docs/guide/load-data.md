@@ -162,8 +162,8 @@ Open a dataset for its page:
   datetime, free text …) and **Empty**, the share of rows with no value in it.
 - **First Rows** tab: the first 20 rows.
 
-Both tabs list the columns in the file's own order: the CSV header, the Parquet file's schema, the
-order a JSON Lines file first writes each key, or a connection query's `SELECT` list. The workspace
+Both tabs list the columns in the file's own order: the CSV header, the order a JSON Lines file
+first writes each key, or a connection query's `SELECT` list. The workspace
 records that order when it loads the data and reports it as `get_dataset`'s `columns`
 and the `columns` of `SELECT *`; the page never sorts them. The Query page does the same with a
 query's answer: its headers follow the `columns` `workspace_sql` answers, which are in the order
