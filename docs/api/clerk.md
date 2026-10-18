@@ -125,6 +125,8 @@ without the secret, `401` to a forged delivery and `200` creating the account.
 
 ## Configuration
 
+Setting up an instance and its social connections is the runbook [`../deployment/sign-in.md`](../deployment/sign-in.md).
+
 | Setting | Where | Value |
 |---|---|---|
 | `LAKE_CLERK_PUBLISHABLE_KEY` / `--clerk-publishable-key` | lake runtime | The instance's `pk_test_…` or `pk_live_…`. Public. Empty or `xxx` turns Clerk off |
