@@ -181,7 +181,16 @@ its own (`frontend/src/pages/developer/`). Before, the rail's **API** item opene
   - **Quick start**: copy-ready `curl` and `fetch` against `viewer.external_origin` (else the page's
     origin) for `GET /v1/viewer`, a list read (`list_repositories`), an action
     (`create_repository`, with the viewer's account and workspace filled in) and a workspace-scoped
-    call under `/w/<workspace id>/v1`, with the envelope and the error codes explained.
+    call under `/w/<workspace id>/v1`, with the envelope and the error codes explained. With no key
+    made, each example reads the key from the `LAKE_KEY` environment variable in its own language:
+    `$LAKE_KEY` in curl, a template literal `` `Bearer ${process.env.LAKE_KEY}` `` in the `fetch`
+    example (JavaScript does not expand `$LAKE_KEY` inside a string, so the literal text was sent and
+    every call answered 401, lake#815), and `os.environ["LAKE_KEY"]` in Python. A key made on the
+    Keys tab is written into every example instead. `quickStartFetch` and `quickStartPython` in
+    `developer/logic.ts` build the two; `frontend/tests/developer.test.ts` runs the `fetch` example
+    against a stubbed `fetch` and checks the header it sends. Verify by hand: open Quick start with no
+    key, copy the JavaScript example, `export LAKE_KEY=<key>` and run it as an ES module with Node;
+    it prints the repositories.
   - **Operations**: every operation of `/v1/openapi.json` as the browser's session receives it,
     grouped by the product group `mcp_setup` gives its tool (liquid sync and the operations that
     are not MCP tools get groups of their own), searchable by path, name, summary or group. Each
