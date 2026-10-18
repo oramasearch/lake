@@ -723,6 +723,95 @@ form.stack label.region-choice {
   gap: var(--lake-space-2);
   cursor: pointer;
 }
+/* The apex order sheet (lake#831, web_ui_order_sheet): the offers side by side, one column on a
+   phone; the order form and status pages use the hosted card. */
+.hosted-main.order-sheet-main {
+  width: min(100%, 80rem);
+}
+a.hosted-brand {
+  color: inherit;
+  text-decoration: none;
+}
+.order-trust {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--lake-space-2) var(--lake-space-4);
+  margin: 0 0 var(--lake-space-4);
+  padding: 0;
+  list-style: none;
+  font-weight: var(--lake-weight-medium);
+}
+.order-sheet {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr));
+  gap: var(--lake-space-4);
+  margin: var(--lake-space-6) 0;
+}
+.order-offer {
+  display: flex;
+  flex-direction: column;
+  gap: var(--lake-space-3);
+  min-width: 0;
+  padding: var(--lake-space-5);
+  border: var(--lake-border-width) solid var(--lake-border-subtle);
+  border-top: 0.1875rem solid var(--app-accent);
+  background: var(--lake-surface);
+}
+.order-offer > * {
+  margin: 0;
+}
+.order-offer form.stack {
+  margin-top: auto;
+}
+.order-price {
+  margin: 0;
+  color: var(--lake-text-primary);
+  font-size: var(--lake-text-24);
+  font-weight: var(--lake-weight-semibold);
+}
+.order-price small {
+  color: var(--lake-text-secondary);
+  font-size: var(--lake-text-14);
+  font-weight: var(--lake-weight-regular);
+}
+.order-credit {
+  color: var(--lake-text-secondary);
+  font-size: var(--lake-text-14);
+}
+.order-promise {
+  padding: var(--lake-space-2) var(--lake-space-3);
+  color: var(--lake-success);
+  background: var(--lake-success-soft);
+  font-weight: var(--lake-weight-semibold);
+}
+.order-features {
+  display: grid;
+  gap: var(--lake-space-1);
+  padding-left: var(--lake-space-5);
+}
+.order-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--lake-space-2);
+  margin-top: auto;
+}
+.order-honeypot {
+  position: absolute;
+  left: -100vw;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+}
+.order-summary {
+  margin: var(--lake-space-4) 0;
+}
+.order-summary dd {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.order-prices {
+  width: 100%;
+}
 form.search,
 .filters {
   display: flex;

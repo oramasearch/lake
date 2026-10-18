@@ -881,6 +881,43 @@ public:
     apply_payment_event(const control::PaymentEvent& event) override {
         return call("apply_payment_event", [&] { return store_->apply_payment_event(event); });
     }
+    control::Result<control::CloudOrder>
+    create_cloud_order(const control::NewCloudOrder& order) override {
+        return call("create_cloud_order", [&] { return store_->create_cloud_order(order); });
+    }
+    control::Result<control::CloudOrder> get_cloud_order(const std::string& id) override {
+        return call("get_cloud_order", [&] { return store_->get_cloud_order(id); });
+    }
+    control::Result<control::CloudOrder>
+    transition_cloud_order(const control::CloudOrderTransition& change) override {
+        return call("transition_cloud_order",
+                    [&] { return store_->transition_cloud_order(change); });
+    }
+    control::Result<control::CloudOrderPaymentResult>
+    apply_cloud_order_payment(const control::CloudOrderPayment& payment) override {
+        return call("apply_cloud_order_payment",
+                    [&] { return store_->apply_cloud_order_payment(payment); });
+    }
+    control::Result<std::vector<control::CloudOrder>>
+    claim_cloud_order_emails(int limit, int lease_seconds) override {
+        return call("claim_cloud_order_emails",
+                    [&] { return store_->claim_cloud_order_emails(limit, lease_seconds); });
+    }
+    control::Result<void>
+    record_cloud_order_email(const control::CloudOrderEmailOutcome& outcome) override {
+        return call("record_cloud_order_email",
+                    [&] { return store_->record_cloud_order_email(outcome); });
+    }
+    control::Result<std::vector<control::CloudOrderEvent>>
+    unaudited_cloud_order_events(int limit) override {
+        return call("unaudited_cloud_order_events",
+                    [&] { return store_->unaudited_cloud_order_events(limit); });
+    }
+    control::Result<void>
+    mark_cloud_order_events_audited(const std::vector<std::int64_t>& ids) override {
+        return call("mark_cloud_order_events_audited",
+                    [&] { return store_->mark_cloud_order_events_audited(ids); });
+    }
     control::Result<std::uint64_t> set_storage_quota(const std::string& customer_id,
                                                      std::uint64_t quota_bytes) override {
         return call("set_storage_quota",

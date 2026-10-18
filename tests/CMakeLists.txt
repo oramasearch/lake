@@ -73,6 +73,8 @@ target_sources(lake-tests PRIVATE test_network_capabilities.cpp test_network_tun
 target_sources(lake-tests PRIVATE test_tunnel_clients.cpp)
 # Regions and the apex region picker (lake#757).
 target_sources(lake-tests PRIVATE test_regions.cpp)
+# The apex order sheet, its orders, Stripe Checkout and Resend (lake#831).
+target_sources(lake-tests PRIVATE test_orders.cpp)
 # The version and its release page (root CLAUDE.md, *Cutting a release*).
 target_sources(lake-tests PRIVATE test_release_version.cpp)
 target_link_libraries(lake-tests PRIVATE lake-api lake-control-postgres pqxx OpenSSL::Crypto

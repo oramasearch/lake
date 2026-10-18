@@ -331,6 +331,8 @@ add_library(lake-core STATIC
   src/api/network_capabilities.cpp
   src/api/tunnel_clients.cpp
   src/api/regions.cpp
+  src/api/orders.cpp
+  src/api/resend.cpp
   src/api/tunnel_client_capabilities.cpp
   src/audit/audit.cpp
   src/api/secrets_capabilities.cpp

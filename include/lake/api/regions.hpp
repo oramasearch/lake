@@ -30,6 +30,10 @@ struct Regions {
     std::string label;        // LAKE_REGION_LABEL, else the label of `name` in the list
     std::vector<Region> list; // LAKE_REGIONS, this Lake's own region included, in order
     std::string apex_host;    // LAKE_APEX_HOST, lowercased; empty: this Lake serves no picker
+    // Where the order sheet is (lake#831, docs/api/orders.md): LAKE_ORDER_SHEET's `url`, else
+    // https://<apex_host>/ where this Lake serves it; empty: none. server_info's
+    // `order_sheet_url`, which the web app's region menu links to.
+    std::string order_sheet_url;
 
     // Whether a region is set at all. False on nonprod and locally.
     bool configured() const {
@@ -82,5 +86,7 @@ std::string region_continue_url(const Region& region, std::string_view target);
 // server_info's `region` ({name, label} or null) and `regions` ([{name, label, host}] or []).
 nlohmann::json region_json(const Regions* regions);
 nlohmann::json regions_json(const Regions* regions);
+// server_info's `order_sheet_url`: the URL, or null.
+nlohmann::json order_sheet_url_json(const Regions* regions);
 
 } // namespace lake::api

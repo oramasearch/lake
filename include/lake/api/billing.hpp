@@ -53,6 +53,35 @@ struct PaymentNotice {
     std::string reference; // the provider's id of the invoice (PaymentRequest::reference)
     std::string state;
     std::string provider_status;
+    // A Checkout notice for an order of the apex order sheet (lake#831, docs/api/orders.md):
+    // `order_state` paid or cancelled (empty: not about an order, or nothing to do yet, as for a
+    // completed Checkout whose payment is still processing), the Checkout Session, lake's order id
+    // (client_reference_id), and the customer and subscription Stripe created.
+    std::string order_state;
+    std::string checkout_session;
+    std::string order_id;
+    std::string customer;
+    std::string subscription;
+    std::string order_detail;
+};
+
+// A subscription to pay for an order through the provider's hosted checkout (lake#831): one line,
+// `amount_cents` a month in `currency`, for `quantity`; where the person returns after paying or
+// giving up; and lake's order id, which comes back on the provider's notice.
+struct CheckoutRequest {
+    std::string order_id;
+    std::string product_name;
+    std::string product_description;
+    std::int64_t unit_amount_cents = 0; // the monthly fee of one
+    int quantity = 1;
+    std::string currency = "usd";
+    std::string customer_email;
+    std::string success_url;
+    std::string cancel_url;
+};
+struct CheckoutSession {
+    std::string id;  // cs_...
+    std::string url; // where the person pays
 };
 
 // Why a notice was refused: `invalid_signature`, `stale_timestamp` (outside the tolerance
@@ -100,6 +129,11 @@ public:
     // Whether an operator records each payment (record_invoice_payment). A provider that reports
     // payments itself answers false.
     virtual bool records_payments_by_hand() const = 0;
+    // Starts a hosted checkout for a monthly subscription (lake#831). The manual provider has
+    // none.
+    virtual std::expected<CheckoutSession, std::string> create_checkout(const CheckoutRequest&) {
+        return std::unexpected(std::string("card payment is not set up on this Lake"));
+    }
 };
 
 // Invoice only: lake issues the invoice and Orama collects payment outside lake (a bank transfer,
