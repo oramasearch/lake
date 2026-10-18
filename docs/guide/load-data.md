@@ -3,19 +3,26 @@
 A **dataset** is a table in your workspace: the data its pipelines train on, its search indexes
 cover and its agents read. Every dataset lives in the workspace it was loaded into; another workspace never sees it.
 
-Open **Data → Datasets** to see them. The page has two figures (Datasets, Run outputs) and the
+Open [**Data → Datasets**](/train/data) to see them. The page has two figures (Datasets, Run outputs) and the
 datasets table. Its header has **Query with SQL** and **Load data**, which appear once the
 workspace is ready. The databases the workspace reads are on **Data → Connections**
 ([Connections](/docs/connections)), and storage is the **Storage** tab of **Data → Drives**; an old
 link to Datasets' connections or storage opens those pages.
 
-There are three ways to bring data in, all under **Load data**:
+## Load Your First Dataset
+
+Go to [**Data → Datasets → Load data**](/train/data), keep **Upload** selected, choose a **CSV or
+JSONL** file (at most 16 MiB) and press **Upload**. Those are the only file formats Load data
+accepts; save another kind of file as CSV first. The steps are in [Upload a File](#upload-a-file).
+
+There are three ways to bring data in, all under **Load data**, and a fourth from a drive:
 
 | Way | What it does |
 |---|---|
 | **Upload** | loads one CSV or JSONL file of at most 16 MiB |
 | **Generate** | makes a dataset from one of the workspace engine's generators |
 | **From a connection** | pulls the result of one read-only `SELECT` from a database the workspace connects to |
+| **Load as dataset** in [**Data → Drives**](/drives) | loads a CSV or JSONL file kept in a drive ([below](#load-a-file-from-a-drive)) |
 
 Every REST and MCP call on this page names your workspace: `customer_id` is the id of the account
 that owns your workspaces (yours, or your organization's) and `workspace_id` is the workspace.
@@ -23,7 +30,7 @@ that owns your workspaces (yours, or your organization's) and `workspace_id` is 
 
 ## Upload a File
 
-1. Open **Data → Datasets** and press **Load data**.
+1. Open [**Data → Datasets**](/train/data) and press **Load data**.
 2. Keep **Upload** selected.
 3. Choose the file (CSV or JSONL, up to 16 MiB). A CSV has a header row, then one row per line; a
    JSONL file has one JSON object per line.
@@ -54,7 +61,7 @@ The same upload through the API is `upload_dataset` inside `workspace_act`:
 
 A CSV or JSONL file kept in a drive loads without leaving Lake.
 
-1. Open **Data → Drives**, open the drive and go to the file's folder.
+1. Open [**Data → Drives**](/drives), open the drive and go to the file's folder.
 2. In the file's menu (**⋯**) choose **Load as dataset**.
 3. Check the **Dataset name** (it starts from the file's name, as SQL can query it) and tick *If the
    name is taken, save it under the next free name* if you want that.
@@ -151,6 +158,14 @@ Open a dataset for its page:
   decimal, text, boolean) and **Reads as** (the workspace's analysis of the column: identifier,
   categorical, numeric, datetime, free text …).
 - **First Rows** tab: the first 20 rows.
+
+Both tabs list the columns in the table's own order, the order the workspace reports for the
+dataset (`get_dataset`'s `columns`, and the `columns` of `SELECT *`), never sorted by the page. The
+Query page does the same with a query's answer: its headers follow the `columns` `workspace_sql`
+answers, which are in the order the `SELECT` asked for (lake#812). A row arrives as a JSON object
+whose keys are sorted, so a table built from them read alphabetically before. The workspace keeps a
+loaded file's rows as JSON objects, so today the table's own order is alphabetical too; keeping the
+file's header order is zetta#1021, and the page follows it with no change once it lands.
 - **Partitions** tab, when the dataset has partitions.
 - **Facts**: database, **Stored as** (how the workspace keeps the rows, JSON rows for every
   dataset), rows, bytes, partitions and copies.

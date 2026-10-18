@@ -13,6 +13,7 @@ import { DeletionButton } from "@/lib/deletionDialog";
 import { WorkspaceFrame, cellText, qs, text, useAsync, useSpaceRead, useWorkspace, useWq, useWsPath, wa } from "./workspace";
 import { ObjectTable, engineDatabase, resultDataset } from "./datasets";
 import { trainFromDatasetPath } from "@/pages/design/logic";
+import { datasetColumns } from "./columns";
 
 /** The value type SQL sees in a column, read from the first rows (web_ui.cpp sampled_type). */
 function sampledType(rows: Row[], column: string): string {
@@ -31,14 +32,10 @@ function sampledType(rows: Row[], column: string): string {
 }
 
 
-/** The dataset's column names: those it lists, then any the analysis adds. */
-function columnNames(dataset: Row, analysis: Row): string[] {
-  const names: string[] = ((dataset.columns ?? []) as unknown[]).map((c) => cellText(c));
-  for (const column of (analysis.columns ?? []) as Row[]) {
-    const name = text(column, "name");
-    if (!names.includes(name)) names.push(name);
-  }
-  return names;
+/** The dataset's column names in the table's own order (lake#812): those it lists, then those the
+ * first rows' answer names, then any the analysis adds. Never sorted. */
+function columnNames(dataset: Row, sampled: unknown, analysis: Row): string[] {
+  return datasetColumns(dataset.columns, sampled, analysis.columns);
 }
 
 function ColumnsTable({ names, analysis, rows }: { names: string[]; analysis: Row; rows: Row[] }) {
@@ -131,7 +128,7 @@ function DatasetContent({ name, database }: { name: string; database: string }) 
   const [tab, setTab] = useState<"columns" | "rows" | "partitions">("columns");
   const got = useWq<Row>("get_dataset", { dataset: name, database });
   // The first rows and the analysis are extras: when either fails the page shows what it has.
-  const sample = useSpaceRead<{ rows?: Row[] }>("workspace_sql", { statement: `SELECT * FROM ${database}.${name} LIMIT 20` });
+  const sample = useSpaceRead<{ columns?: string[]; rows?: Row[] }>("workspace_sql", { statement: `SELECT * FROM ${database}.${name} LIMIT 20` });
   const analysis = useWq<Row>("analyze_dataset", { dataset: `${database}.${name}`, sample_rows: 256 });
   if (got.isLoading) return <Skeleton />;
   if (got.isError) return <ErrorBlock error={got.error} what="the dataset" retry={() => void got.refetch()} />;
@@ -146,7 +143,7 @@ function DatasetContent({ name, database }: { name: string; database: string }) 
     copies = copies === 0 ? owners : Math.min(copies, owners);
   }
   const rows = dataset.rows ?? dataset.expected_rows ?? "";
-  const names = columnNames(dataset, (analysis.data ?? {}) as Row);
+  const names = columnNames(dataset, sample.data?.columns, (analysis.data ?? {}) as Row);
   const size = text(dataset, "size_bytes");
   const single = partitions.length > 0 && copies <= 1;
   return (
@@ -255,7 +252,7 @@ function DatasetContent({ name, database }: { name: string; database: string }) 
                   The dataset holds no rows yet.
                 </Empty>
               ) : (
-                <ObjectTable rows={sampleRows} />
+                <ObjectTable rows={sampleRows} columns={sample.data?.columns ?? dataset.columns} />
               ))}
             {tab === "partitions" && <ObjectTable rows={partitions} />}
           </div>
