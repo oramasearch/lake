@@ -131,12 +131,15 @@ and a **Confirm** button.
 1. Read the proposal: what it calls and with which input.
 2. Press **Confirm**. Lake runs it as you and adds *Done: …* or *That did not work: …* to the
    conversation. A proposal that worked shows **Confirmed** and is never offered again. One that
-   did not work shows why and offers **Try again**.
+   did not work shows why. When the cause may pass on its own (your workspace was not reachable,
+   or was busy), it offers **Try again**. When the change itself was refused (a name already taken,
+   a value the capability does not accept), trying again would fail the same way, so the message
+   asks you to tell Ask Orama what to use instead, and it proposes the change again.
 
 Lake checks every proposal before you see it. When Ask Orama proposes a change without something
 it needs (a search index without the table to index, a stream without saying where it lives), you
-are not offered a Confirm that would fail: the answer says what is missing and asks you for it.
-Reply with it and Ask Orama proposes the change again.
+are not offered a Confirm that would fail: the answer says everything that is missing, in one
+sentence, and asks you for it. Reply with it and Ask Orama proposes the change again.
 
 A change to an existing pipeline goes to the Project Agent instead, and the answer shows **Review
 the proposed change**, which opens the pipeline page where you apply or discard it
@@ -202,7 +205,8 @@ tasks those agents asked for in turn. Only you can delete your conversations.
 | `invalid_input` at `/workspace_id` | The workspace id is unknown or not one of the account's. |
 | *That did not finish: …* | The agent failed after its retries; send the message again. |
 | *I could not offer this change yet: … needs …* | Ask Orama left out something the change needs. Reply with it (for example the dataset to index) and it proposes the change again. |
-| *That did not work: …* under a proposal | Lake ran it and the capability refused. The message says why; fix that and press **Try again**, or ask Ask Orama again. |
+| *That did not work: …* under a proposal, with **Try again** | Lake ran it and something that may pass on its own got in the way (the workspace was not reachable or busy). Press **Try again**. |
+| *That did not work: … Ask Orama again with what to use …* | Lake ran it and the capability refused this change as proposed. Tell Ask Orama what to change; it proposes the change again. |
 
 ## Related Pages
 

@@ -212,8 +212,9 @@ export function AskMessages({
   const [confirming, setConfirming] = useState("");
   const [failures, setFailures] = useState<Record<string, string>>({});
   // Which proposals have already been confirmed and done, so a confirmed one is never offered
-  // again. A confirm that did not work is not Confirmed (lake#794): the proposal keeps its button
-  // and shows why, from the outcome Lake stored.
+  // again. A confirm that did not work is not Confirmed (lake#794): the proposal shows why, from
+  // the outcome Lake stored, and keeps a Try again button only when Lake says trying again could
+  // work; otherwise its reason says to ask Ask Orama again.
   const { confirmed, refused } = useMemo(() => confirmOutcomes(list), [list]);
   const confirm = async (messageId: string, index: number) => {
     const key = `${messageId}/${index}`;
@@ -276,14 +277,14 @@ export function AskMessages({
                     <p>
                       <Badge>Confirmed</Badge>
                     </p>
-                  ) : (
+                  ) : refused[key] && !refused[key].retry ? null : (
                     <Button variant="primary" loading={confirming === key} disabled={!!confirming} onClick={() => void confirm(message.id, index)}>
                       {refused[key] ? "Try again" : "Confirm"}
                     </Button>
                   )}
                   {!confirmed.has(key) && (failures[key] || refused[key]) && (
                     <p className="error" role="alert">
-                      {failures[key] || refused[key]}
+                      {failures[key] || refused[key]?.reason}
                     </p>
                   )}
                 </div>

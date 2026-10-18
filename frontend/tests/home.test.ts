@@ -174,5 +174,22 @@ test("a confirm that did not work is not Confirmed and keeps its reason (lake#79
     { content: "Done: create_repository.", payload: { confirmed: { message_id: "m2", index: "0" }, ok: true } },
   ]);
   assert.deepEqual([...outcomes.confirmed].sort(), ["m1/1", "m2/0"]);
-  assert.deepEqual(outcomes.refused, { "m1/0": "That did not work: create_index needs `table`." });
+  assert.deepEqual(outcomes.refused, { "m1/0": { reason: "That did not work: create_index needs `table`.", retry: true } });
+});
+
+test("Try again is offered only when Lake says trying again could work (lake#794)", () => {
+  const outcomes = confirmOutcomes([
+    {
+      content: "That did not work: `topic` is not valid for create_stream: a concrete topic name is required. Ask Orama again with what to use and it will propose the change again.",
+      payload: { confirmed: { message_id: "m1", index: "0" }, ok: false, retry: false, error: { code: "invalid_input" } } as never,
+    },
+    {
+      content: "That did not work: the workspace is not reachable.",
+      payload: { confirmed: { message_id: "m1", index: "1" }, ok: false, retry: true, error: { code: "store_unavailable" } } as never,
+    },
+  ]);
+  assert.equal(outcomes.refused["m1/0"].retry, false);
+  assert.match(outcomes.refused["m1/0"].reason, /Ask Orama again/);
+  assert.equal(outcomes.refused["m1/1"].retry, true);
+  assert.equal(outcomes.confirmed.size, 0);
 });

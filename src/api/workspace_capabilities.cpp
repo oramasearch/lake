@@ -205,7 +205,11 @@ nlohmann::json agent_creator_answer(const nlohmann::json& turn) {
         return result;
     }
     nlohmann::json answer =
-        nlohmann::json::parse(turn.value("reply", std::string()), nullptr, false);
+        nlohmann::json::parse(turn.contains("reply") && turn.at("reply").is_string()
+                                  ? turn.at("reply").get<std::string>()
+                                  : std::string(),
+                              nullptr,
+                              false);
     return answer.is_object() ? answer : nlohmann::json::object();
 }
 
@@ -4777,6 +4781,18 @@ std::string error_text(const json& error) {
     return error.is_string() ? error.get<std::string>() : error.dump();
 }
 
+// A string field of JSON an agent or a model wrote, or `fallback` when it is absent or of another
+// type. nlohmann's value() throws when the key holds another type, and a reply must never be lost
+// because a model wrote `null` or a number where lake expects text (lake#794).
+std::string text_of(const json& object, const char* key, std::string fallback = {}) {
+    if (object.is_object()) {
+        if (const auto found = object.find(key); found != object.end() && found->is_string()) {
+            return found->get<std::string>();
+        }
+    }
+    return fallback;
+}
+
 // The assistant message an agent's finished answer becomes, the same text and payload the pages
 // stored: Ask Orama's reply with its proposals, reads and delegations; Agent Creator Agent's question,
 // proposal or reply; a failure as "That did not finish: …". `task_id` is empty for an answer the
@@ -4792,7 +4808,9 @@ std::pair<std::string, json> answer_message(bool factory,
         payload["task_id"] = task_id;
     }
     payload["agent"] = agent;
-    const bool ok = succeeded && answer.is_object() && answer.value("ok", true);
+    // Every field below is the agent's (a model's) writing, read by type: a `reply` that is null
+    // or a number is no reply, never an exception that loses the whole turn (lake#794).
+    const bool ok = succeeded && answer.is_object() && answer.value("ok", json(true)) != false;
     if (!ok) {
         return {"That did not finish: " + (answer.is_object() && answer.contains("error")
                                                ? error_text(answer["error"])
@@ -4801,11 +4819,11 @@ std::pair<std::string, json> answer_message(bool factory,
     }
     if (factory) {
         const json creator = agent_creator_answer(answer);
-        const std::string kind = creator.value("kind", std::string());
-        std::string text = kind == "question" ? creator.value("question", std::string())
+        const std::string kind = text_of(creator, "kind");
+        std::string text = kind == "question" ? text_of(creator, "question")
                            : kind == "proposal"
                                ? std::string("Here is the agent I propose. Review it below.")
-                               : answer.value("reply", std::string("Agent Creator Agent did not answer."));
+                               : text_of(answer, "reply", "Agent Creator Agent did not answer.");
         // The digest approve_agent_proposal checks, so a browser sends back exactly this one.
         if (const json proposal = creator.value("proposal", json()); proposal.is_object()) {
             payload["proposal_sha256"] = agent_proposal_digest(proposal);
@@ -4816,8 +4834,24 @@ std::pair<std::string, json> answer_message(bool factory,
     payload["proposals"] = answer.value("proposals", json::array());
     payload["reads"] = answer.value("reads", json::array());
     payload["delegations"] = answer.value("delegations", json::array());
-    payload["trace_id"] = answer.value("trace_id", std::string());
-    return {answer.value("reply", std::string()), std::move(payload)};
+    payload["trace_id"] = text_of(answer, "trace_id");
+    return {text_of(answer, "reply"), std::move(payload)};
+}
+
+// Whether confirming the same stored proposal again could work after it failed with `code`
+// (lake#794): the refusals that say nothing about the input, a dependency not reachable or not
+// ready, a busy resource or a full queue, or a server fault (docs/api/errors.md). Every other code
+// (invalid_input, conflict, not_found, unauthorized, engine_error, ...) refuses the same input the
+// same way every time, so Try again is not offered for it.
+bool confirm_retry_helps(const std::string& code) {
+    static constexpr std::array<std::string_view, 7> transient = {"store_unavailable",
+                                                                  "workspace_not_ready",
+                                                                  "busy",
+                                                                  "rate_limited",
+                                                                  "locked",
+                                                                  "store_error",
+                                                                  "io"};
+    return std::ranges::find(transient, code) != transient.end();
 }
 
 // The input a stored Ask Orama proposal runs with when the person confirms it: the conversation's
@@ -4841,12 +4875,69 @@ json proposal_input(const Capability* target,
     return proposed;
 }
 
+// The first clause of a top-level field's schema description: "the source table to index (load it
+// first with ...)" reads as "the source table to index". Empty when the schema says nothing.
+std::string field_description(const Capability* target, const std::string& field) {
+    if (target == nullptr) {
+        return {};
+    }
+    const json properties = target->input_schema.value("properties", json::object());
+    const auto schema = properties.is_object() ? properties.find(field) : properties.end();
+    if (schema == properties.end()) {
+        return {};
+    }
+    const std::string description = text_of(*schema, "description");
+    return description.substr(0, description.find(" ("));
+}
+
+// Every required top-level field `input` leaves out, in the schema's order, by the rule
+// validate_input applies (absent or null). validate_input stops at the first; the reply asks for
+// all of them at once (lake#794).
+std::vector<std::string> missing_required(const Capability* target, const json& input) {
+    std::vector<std::string> missing;
+    if (target == nullptr || !input.is_object()) {
+        return missing;
+    }
+    const json required = target->input_schema.value("required", json::array());
+    if (!required.is_array()) {
+        return missing;
+    }
+    for (const json& key : required) {
+        if (!key.is_string()) {
+            continue;
+        }
+        const auto found = input.find(key.get<std::string>());
+        if (found == input.end() || found->is_null()) {
+            missing.push_back(key.get<std::string>());
+        }
+    }
+    return missing;
+}
+
+// "create_stream needs `topic` (the topic name) and `zetta` (the workspace Zetta that holds it),
+// which this proposal does not name."
+std::string missing_fields_text(const Capability* target,
+                                const std::string& capability,
+                                const std::vector<std::string>& missing) {
+    std::string named;
+    for (std::size_t at = 0; at < missing.size(); ++at) {
+        if (at > 0) {
+            named += at + 1 == missing.size() ? " and " : ", ";
+        }
+        const std::string description = field_description(target, missing[at]);
+        named += "`" + missing[at] + "`" + (description.empty() ? "" : " (" + description + ")");
+    }
+    return capability + " needs " + named + ", which this proposal does not name.";
+}
+
 // What is wrong with a proposal's input, said plainly for the person (lake#794): "create_index
 // needs `table` (the source table to index), which this proposal does not name." The error is
-// the registry's own (validate_input), so the words follow the rule Registry::call enforces.
+// the registry's own (validate_input), so the words follow the rule Registry::call enforces. A
+// missing required field names every required field `input` leaves out, not only the first.
 std::string proposal_problem_text(const Capability* target,
                                   const std::string& capability,
-                                  const ApiError& error) {
+                                  const ApiError& error,
+                                  const json& input) {
     std::string field;
     if (error.path.size() > 1) {
         const std::string pointer = error.path.substr(error.path.rfind('/') + 1);
@@ -4862,51 +4953,71 @@ std::string proposal_problem_text(const Capability* target,
     if (field.empty()) {
         return capability + " cannot run with this input: " + error.message + ".";
     }
-    std::string description;
-    if (target != nullptr && error.path.find('/', 1) == std::string::npos) {
-        description = target->input_schema.value("properties", json::object())
-                          .value(field, json::object())
-                          .value("description", std::string());
-    }
-    // The description's first clause: "the source table to index (load it first with ...)"
-    // reads as "the source table to index".
-    description = description.substr(0, description.find(" ("));
-    const std::string about = description.empty() ? "" : " (" + description + ")";
+    const bool top_level = error.path.find('/', 1) == std::string::npos;
     if (error.message == field + " is required") {
-        return capability + " needs `" + field + "`" + about +
-               ", which this proposal does not name.";
+        std::vector<std::string> missing =
+            top_level ? missing_required(target, input) : std::vector<std::string>{};
+        if (std::ranges::find(missing, field) == missing.end()) {
+            missing = {field};
+        }
+        return missing_fields_text(top_level ? target : nullptr, capability, missing);
     }
     if (error.message == "unexpected field " + field) {
         return capability + " does not take `" + field + "`.";
     }
+    const std::string description = top_level ? field_description(target, field) : "";
+    const std::string about = description.empty() ? "" : " (" + description + ")";
     return "`" + field + "`" + about + " is not valid for " + capability + ": " + error.message +
            ".";
 }
 
 // Why a proposal cannot run as stored, checked by the registry's own rules before it is offered
-// (lake#794): an unknown capability, or input its schema refuses. Nothing is called. Empty when
-// the proposal can be offered.
-std::optional<ApiError> proposal_problem(const ApiContext& context,
-                                         const json& proposal,
-                                         const std::string& customer_id,
-                                         const std::string& workspace_id) {
-    if (!proposal.is_object() || !proposal.value("capability", json()).is_string()) {
-        return ApiError{"invalid_input", "the proposal names no capability", "/capability"};
+// (lake#794): an unknown capability, or input its schema refuses. Nothing is called.
+struct ProposalProblem {
+    ApiError error;
+    // What the person is told: plain words naming what is missing or wrong.
+    std::string text;
+    // The required top-level fields the input leaves out, every one (empty for another problem).
+    std::vector<std::string> missing;
+};
+
+// Empty when the proposal can be offered. Reads the model-written proposal by type only, so a
+// `capability` that is null, a number or absent is a problem to report, never an exception.
+std::optional<ProposalProblem> proposal_problem(const ApiContext& context,
+                                                const json& proposal,
+                                                const std::string& customer_id,
+                                                const std::string& workspace_id) {
+    const std::string capability = text_of(proposal, "capability");
+    if (capability.empty()) {
+        return ProposalProblem{
+            {"invalid_input", "the proposal names no capability", "/capability"},
+            "a proposed change does not say which capability it runs.",
+            {}};
     }
-    const std::string capability = proposal.at("capability");
     const auto target = context.registry != nullptr ? context.registry->find(capability) : nullptr;
     if (!target) {
-        return ApiError{"unknown_capability", "Lake has no capability named " + capability, ""};
+        ApiError error{"unknown_capability", "Lake has no capability named " + capability, ""};
+        return ProposalProblem{error, error.message + ".", {}};
     }
     const json proposed = proposal_input(target.get(), proposal, customer_id, workspace_id);
     const auto canonical = canonical_input(*target, proposed);
+    const json& checked_input = canonical ? *canonical : proposed;
+    std::optional<ApiError> error;
     if (!canonical) {
-        return canonical.error();
+        error = canonical.error();
+    } else if (ApiResult checked = validate_input(*target, *canonical); !checked.ok) {
+        error = checked.error;
     }
-    if (ApiResult checked = validate_input(*target, *canonical); !checked.ok) {
-        return checked.error;
+    if (!error) {
+        return std::nullopt;
     }
-    return std::nullopt;
+    std::vector<std::string> missing;
+    if (error->message.ends_with(" is required") && error->path.find('/', 1) == std::string::npos) {
+        missing = missing_required(target.get(), checked_input);
+    }
+    return ProposalProblem{*error,
+                           proposal_problem_text(target.get(), capability, *error, checked_input),
+                           std::move(missing)};
 }
 
 // An answer's proposals, keeping only those that can run (lake#794). A proposal whose input the
@@ -4929,17 +5040,15 @@ void withhold_invalid_proposals(const ApiContext& context,
             offered.push_back(proposal);
             continue;
         }
-        const std::string capability =
-            proposal.is_object() ? proposal.value("capability", std::string()) : std::string();
-        const auto target =
-            context.registry != nullptr ? context.registry->find(capability) : nullptr;
-        const std::string text = problem->code == "invalid_input"
-                                     ? proposal_problem_text(target.get(), capability, *problem)
-                                     : problem->message + ".";
         json entry = proposal.is_object() ? proposal : json::object();
-        entry["error"] = {{"code", problem->code}, {"message", text}, {"path", problem->path}};
+        entry["error"] = {{"code", problem->error.code},
+                          {"message", problem->text},
+                          {"path", problem->error.path}};
+        if (!problem->missing.empty()) {
+            entry["error"]["missing"] = problem->missing;
+        }
         withheld.push_back(std::move(entry));
-        said += "\n\nI could not offer this change yet: " + text +
+        said += "\n\nI could not offer this change yet: " + problem->text +
                 " Tell me what to use and I will propose it again.";
     }
     if (withheld.empty()) {
@@ -5097,9 +5206,9 @@ liquid::runtime::task<ApiResult> settle_ask_turn(const json& input, ApiContext& 
         answer_message(factory,
                        status == "succeeded",
                        task.value("answer", json::object()),
-                       task.value("agent", std::string()),
+                       text_of(task, "agent"),
                        task_id,
-                       task.value("message", std::string("the agent did not answer")));
+                       text_of(task, "message", "the agent did not answer"));
     withhold_invalid_proposals(context, customer_id, workspace_id, content, payload);
     auto written =
         control::settled(co_await append_message(context,
@@ -5156,23 +5265,42 @@ liquid::runtime::task<ApiResult> confirm_ask_proposal(const json& input, ApiCont
     const json proposed = proposal_input(target.get(), proposal, customer_id, workspace_id);
     const ApiResult done = called(co_await call_capability(context, capability, proposed));
     context.audit_details["ok"] = done.ok;
-    // Input the capability refused is said plainly, naming what is missing (lake#794).
-    const std::string why =
-        done.ok ? std::string()
-        : done.error.code == "invalid_input" && !done.error.path.empty()
-            ? proposal_problem_text(target.get(), capability, done.error) +
-                  " Ask Orama again with what to use and it will propose the change again."
-            : done.error.message;
-    auto outcome = control::settled(co_await append_message(
-        context,
-        customer_id,
-        workspace_id,
-        conversation_id,
-        "assistant",
-        done.ok ? "Done: " + capability + "." : "That did not work: " + why,
-        {{"agent", "agent-ask-orama"},
-         {"confirmed", {{"message_id", message_id}, {"index", std::to_string(index)}}},
-         {"ok", done.ok}}));
+    // Input the capability refused is said plainly, naming what is missing (lake#794). The stored
+    // outcome keeps the error's code and whether pressing Try again could help: only a refusal
+    // that may pass later with the same input (confirm_retry_helps). Any other refusal fails the
+    // same way every time, so the person is told to ask Ask Orama again instead.
+    const bool retry = !done.ok && confirm_retry_helps(done.error.code);
+    std::string why;
+    if (!done.ok) {
+        if (done.error.code == "invalid_input" && !done.error.path.empty()) {
+            const json checked =
+                target ? canonical_input(*target, proposed).value_or(proposed) : proposed;
+            why = proposal_problem_text(target.get(), capability, done.error, checked);
+        } else {
+            why = done.error.message;
+            if (!why.empty() && why.back() != '.') {
+                why += '.';
+            }
+        }
+        if (!retry) {
+            why += " Ask Orama again with what to use and it will propose the change again.";
+        }
+    }
+    json recorded{{"agent", "agent-ask-orama"},
+                  {"confirmed", {{"message_id", message_id}, {"index", std::to_string(index)}}},
+                  {"ok", done.ok}};
+    if (!done.ok) {
+        recorded["error"] = {{"code", done.error.code}, {"message", why}};
+        recorded["retry"] = retry;
+    }
+    auto outcome = control::settled(co_await append_message(context,
+                                                            customer_id,
+                                                            workspace_id,
+                                                            conversation_id,
+                                                            "assistant",
+                                                            done.ok ? "Done: " + capability + "."
+                                                                    : "That did not work: " + why,
+                                                            std::move(recorded)));
     if (!outcome) {
         co_return ApiResult::failure(outcome.error().code,
                                      "The conversation could not be saved: " +
@@ -5181,6 +5309,8 @@ liquid::runtime::task<ApiResult> confirm_ask_proposal(const json& input, ApiCont
     json out{{"ok", done.ok}, {"message_id", outcome->id}, {"capability", capability}};
     if (!done.ok) {
         out["error"] = why;
+        out["code"] = done.error.code;
+        out["retry"] = retry;
     }
     co_return ApiResult::success(std::move(out));
 }
@@ -6426,11 +6556,20 @@ void register_agent_run_capabilities(Registry& registry) {
                 co_return ApiResult::failure(reply->error().code, reply->error().message);
             }
             json answer = std::move(**reply);
+            if (!answer.is_object()) {
+                co_return ApiResult::failure("engine_error", "the agent's answer is not an object");
+            }
             answer["agent"] = agent;
-            co_return answer.value("ok", false)
-                ? ApiResult::success(std::move(answer))
-                : ApiResult::failure("engine_error",
-                                     answer.value("error", std::string("the agent failed")));
+            // The agent's own writing, read by type (lake#794): an `ok` or `error` of another type
+            // is a failed turn with its text, never an exception.
+            if (answer.value("ok", json(false)) == true) {
+                co_return ApiResult::success(std::move(answer));
+            }
+            co_return ApiResult::failure(
+                "engine_error",
+                answer.contains("error") && !answer.at("error").is_null()
+                    ? error_text(answer.at("error"))
+                    : std::string("the agent failed"));
         }});
 }
 

@@ -36,8 +36,10 @@ shows it and keeps it honest.
   name agents as people call them (*Experiments Agent*, not `agent-experiments`).
 - Each of Ask Orama's **proposals** (a change it wants to make) is shown with its capability and its
   impact, and a **Confirm** button. A confirmed proposal that worked shows *Confirmed* and is never
-  offered again. One whose confirm did not work keeps a **Try again** button and shows the stored
-  *That did not work: …* reason under it; it never shows *Confirmed* (lake#794).
+  offered again. One whose confirm did not work shows the stored *That did not work: …* reason
+  under it and never shows *Confirmed* (lake#794). It keeps a **Try again** button only when the
+  stored outcome says trying again could work (`retry: true`, a transient refusal); otherwise the
+  reason says to ask Ask Orama again and no button is shown.
 
 ## How it stays honest
 
@@ -129,21 +131,35 @@ conversation) and is audited in that workspace's log.
   `customer_id` and `workspace_id` from the conversation as a confirm does. A proposal the registry
   would refuse (an unknown capability, a missing required field, a wrong type or value) is not
   offered: it moves from `proposals` to `withheld_proposals`, each with `error {code, message,
-  path}`, and the reply gains a plain sentence per proposal that says what is missing and asks for
-  it, for example *I could not offer this change yet: create_index needs `table` (the source table
-  to index), which this proposal does not name. Tell me what to use
-  and I will propose it again.* Only the proposals that can run keep an index for
-  `confirm_ask_proposal`. Nothing is called to check. A check that needs the data (a topic already
-  taken, a system stream) still happens only when the person confirms.
+  path, missing?}`, and the reply gains a plain sentence per proposal that says what is missing and
+  asks for it, for example *I could not offer this change yet: create_index needs `table` (the
+  source table to index), which this proposal does not name. Tell me what to use and I will propose
+  it again.* A proposal missing several required fields names **every** one in one sentence
+  (*create_stream needs `zetta` and `topic`, …*), listed in `error.missing`, so one reply settles it;
+  `validate_input` itself still stops at the first. Only the proposals that can run keep an index
+  for `confirm_ask_proposal`. Nothing is called to check. A check that needs the data (a topic
+  already taken, a system stream) still happens only when the person confirms.
+- **The answer is the agent's writing, read by type.** A proposal whose `capability` is absent,
+  null or a number is withheld (*a proposed change does not say which capability it runs.*, at
+  `/capability`); a `reply` or `trace_id` that is not text is stored as empty. Neither ever fails the
+  turn: the reply and every proposal that can run are still stored.
 - **`confirm_ask_proposal`** takes `payload.proposals[index]` of that stored message (anything else
   is `not_found` *That proposal is not in this conversation.*), calls its capability with its input
   as the person (in the conversation's account and workspace when the input names neither,
   lake#652), and stores *Done: {capability}.* or *That did not work: {error}* with
   `{agent: "agent-ask-orama", confirmed: {message_id, index}, ok}`. The value's `message_id` is
-  that outcome message. A capability that refuses is still a successful confirm with `ok: false`.
-  When it refused the input (`invalid_input` at a field), `error` says so in plain words and how to
-  go on: *`topic` is not valid for create_stream: a concrete topic name is required. Ask Orama again
-  with what to use and it will propose the change again.*
+  that outcome message. A capability that refuses is still a successful confirm with `ok: false`,
+  and then both the value and the stored payload carry the refusal's code and whether trying the
+  same proposal again could work: the value `{error, code, retry}`, the payload `{error: {code,
+  message}, retry}`. `retry` is true only for a refusal that says nothing about the input and may
+  pass later: `store_unavailable`, `workspace_not_ready`, `busy`, `rate_limited`, `locked`,
+  `store_error` and `io` ([errors.md](errors.md)). Every other refusal (`invalid_input`,
+  `conflict`, `not_found`, `unauthorized`, `engine_error`, …) fails the same way every time, since
+  the stored input never changes, so its `error` ends *Ask Orama again with what to use and it will
+  propose the change again.* and the web app offers no Try again. When it refused the input
+  (`invalid_input` at a field), `error` says so in plain words: *`topic` is not valid for
+  create_stream: a concrete topic name is required. Ask Orama again with what to use and it will
+  propose the change again.*
   The call's own audit event carries `{ask_confirm: true, conversation_id, capability, ok}`; the
   proposal's capability records its own event.
 
@@ -203,8 +219,19 @@ agents *Talk to* offers.
 `zetta` is stored with neither offered, both in `withheld_proposals` at `/table` and `/zetta`, and
 a reply that names each missing field and asks for it; a valid proposal refused when it runs (a
 Lake bus stream) is stored as *That did not work: …* with `ok: false`, and one whose topic the
-capability refuses names the field in plain words. The web app's `confirmOutcomes`
-(`frontend/tests/home.test.ts`) shows only a confirm that worked as *Confirmed*.
+capability refuses names the field in plain words; both refusals are stored with their code and
+`retry: false`. The web app's `confirmOutcomes` (`frontend/tests/home.test.ts`) shows only a
+confirm that worked as *Confirmed*, and offers Try again only for an outcome with `retry` true.
+
+`HttpServer/HttpResponseIsolation.AskOramaKeepsTheTurnWhenAProposalIsMalformed` (lake#794): an
+answer with a null and a numeric `capability`, a `create_stream` with no input, and a
+`create_repository` naming only its `name` is stored, on the background path and on the at-once
+path (an agent of the workspace answering in `send_ask_message`), with the reply, the repository
+proposal offered and the other three withheld; the stream's sentence names both `zetta` and
+`topic`. Confirming the offered proposal creates the repository in the conversation's account and
+workspace (lake filled `customer_id` and `workspace_id`). A null `reply` or `trace_id` is stored as
+empty. `HttpServer/HttpResponseIsolation.AskOramaOffersTryAgainOnlyForATransientRefusal`: a confirm
+refused with `store_unavailable` is stored with `retry: true` and no *Ask Orama again*.
 
 `HttpServer/HttpResponseIsolation.TheWebAppTalksToAskOramaThroughCapabilities` (lake#561): the same
 conversation over `/v1` with the browser session: `send_ask_message` with a page, `settle_ask_turn`
