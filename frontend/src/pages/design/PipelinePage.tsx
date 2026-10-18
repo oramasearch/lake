@@ -27,6 +27,7 @@ import {
   runsOf,
   taskIsActive,
   text,
+  uniqueModelName,
   whenUtc,
   type Graph,
   type J,
@@ -201,6 +202,7 @@ function PipelineBody({ project, graphName }: { project: string; graphName: stri
               datasets={datasetChoices(datasets.data?.datasets).map((d) => d.path)}
               dataset={params.get("dataset") ?? ""}
               holdout={params.get("holdout") ?? ""}
+              model={params.get("model") ?? ""}
               onShown={setShown}
               audit={audit}
             />
@@ -767,6 +769,7 @@ function Govern({
   datasets,
   dataset,
   holdout,
+  model,
   onShown,
   audit,
 }: {
@@ -776,6 +779,8 @@ function Govern({
   datasets: string[];
   dataset: string;
   holdout: string;
+  /** The model name chosen in Build a Pipeline, carried here in the URL (lake#816). */
+  model: string;
   onShown: (shown: Shown) => void;
   audit: { setError: (error: unknown) => void };
 }) {
@@ -789,7 +794,11 @@ function Govern({
   const deploy = useSubmit();
   const [trainOn, setTrainOn] = useState(dataset);
   const [holdoutFraction, setHoldoutFraction] = useState(holdout || "0.2");
-  const [modelName, setModelName] = useState(() => defaultModelName(project, graph.name));
+  // A short name from the pipeline's title, numbered past a model another pipeline made (lake#816);
+  // the person's own (typed here, or in Build a Pipeline) wins.
+  const models = useWq<J>("list_models");
+  const [typedModelName, setModelName] = useState<string | null>(model || null);
+  const modelName = typedModelName ?? uniqueModelName(defaultModelName(graph.name), models.data?.models, project, graph.name);
   const target = { project, graph: graph.name };
   const top = () => window.scrollTo({ top: 0, behavior: "smooth" });
   return (

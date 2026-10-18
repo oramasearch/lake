@@ -2194,6 +2194,81 @@ TEST(AgentRuns, ABuiltPipelineSaysWhichTemplateItStartedFrom) {
     EXPECT_FALSE(older.value.contains("template"));
 }
 
+// lake#816: a pipeline built from a description gets a short title, never the description's words
+// with its punctuation dropped.
+TEST(AgentRuns, APipelineTitleIsShortAndReadable) {
+    using lake::api::pipeline_title;
+    EXPECT_EQ(
+        pipeline_title("Predict which customers will churn (the churned column), with the reasons"),
+        "Customers churn");
+    EXPECT_EQ(pipeline_title("Predict which accounts will churn in the next 90 days, with the "
+                             "reasons"),
+              "Accounts churn");
+    EXPECT_EQ(pipeline_title("Predict the likelihood of churn"), "Likelihood of churn");
+    EXPECT_EQ(pipeline_title("Build a churn model"), "Churn model");
+    EXPECT_EQ(pipeline_title("Classify support tickets by urgency"), "Support tickets");
+    EXPECT_EQ(pipeline_title("What will revenue be next quarter?"), "Revenue next quarter");
+    EXPECT_EQ(pipeline_title("Answer questions about our product docs"), "Questions");
+    EXPECT_EQ(pipeline_title("churn"), "Churn");
+    EXPECT_EQ(pipeline_title("Forecast demand \u2014 weekly, per store"), "Demand");
+    EXPECT_EQ(pipeline_title("Score churn-risk for each account's renewal"), "Churn-risk");
+    EXPECT_EQ(pipeline_title("Predict which"), "Predict which");
+    EXPECT_EQ(pipeline_title("(!)"), "Pipeline");
+    EXPECT_EQ(pipeline_title(""), "Pipeline");
+    // Punctuation never lands in a title, and a title is a few words.
+    for (const std::string_view description :
+         {"Predict (churn), [now]; please: thanks.",
+          "Find: which? accounts!",
+          "Spot fraud -- quickly",
+          "Predict which customers, accounts, users and orgs will "
+          "churn soon and why and how much revenue we lose"}) {
+        const std::string title = pipeline_title(description);
+        EXPECT_FALSE(title.empty()) << description;
+        EXPECT_EQ(title.find_first_of("()[]{},;:.!?"), std::string::npos) << title;
+        EXPECT_LE(title.size(), 48U) << title;
+    }
+}
+
+TEST(AgentRuns, ABuiltPipelineIsNamedWithAShortTitle) {
+    AgentRuns r;
+    const auto sent = [&](const std::string& capability) {
+        for (auto call = r.w.caller->calls.rbegin(); call != r.w.caller->calls.rend(); ++call) {
+            if (call->first == capability) {
+                return call->second;
+            }
+        }
+        return json(nullptr);
+    };
+    r.w.caller->answers["capture_intent"] = {{"input_id", "in-1"}};
+    r.w.caller->answers["compile_intent"] = {{"name", "Customers churn"}};
+    const std::string description =
+        "Predict which customers will churn (the churned column), with the reasons";
+    const auto built =
+        r.call("compile_pipeline", {{"project", "retention"}, {"intent", description}});
+    ASSERT_TRUE(built.ok) << built.error.message;
+    EXPECT_EQ(sent("compile_intent")["name"], "Customers churn");
+    // The full description is still the project's captured intent.
+    EXPECT_EQ(sent("capture_intent")["text"], description);
+
+    // A title the project already has is numbered, as the engine numbers its own.
+    r.w.caller->answers["get_project"] = {
+        {"graphs",
+         json::array({{{"name", "Customers churn"}}, {{"name", "Customers churn (2)"}}})}};
+    ASSERT_TRUE(r.call("compile_pipeline", {{"project", "retention"}, {"intent", description}}).ok);
+    EXPECT_EQ(sent("compile_intent")["name"], "Customers churn (3)");
+
+    // A name the caller chose is used, numbered the same way when it is taken.
+    ASSERT_TRUE(r.call("compile_pipeline",
+                       {{"project", "retention"}, {"intent", description}, {"name", "Churn"}})
+                    .ok);
+    EXPECT_EQ(sent("compile_intent")["name"], "Churn");
+    ASSERT_TRUE(
+        r.call("compile_pipeline",
+               {{"project", "retention"}, {"intent", description}, {"name", "Customers churn"}})
+            .ok);
+    EXPECT_EQ(sent("compile_intent")["name"], "Customers churn (3)");
+}
+
 // zetta#1246 (lake#615): compile_pipeline passes the chosen dataset's source and table and the
 // label and entity columns to the compiler as hints, so the steps are named from the data. A
 // connect step the engine already pointed is left as the engine named it; an older engine's step
@@ -4077,7 +4152,8 @@ TEST(AgentRuns, AProjectAgentBuildChecksItsCompileAndThePickIgnoresTheCheckGraph
         return call.first == "compile_intent";
     });
     ASSERT_NE(compiled, r.w.caller->calls.end()) << "the check graph was not taken as the pipeline";
-    EXPECT_EQ(compiled->second.value("name", std::string()), "")
+    // lake names its own compile with a short title (lake#816), never a check graph's name.
+    EXPECT_FALSE(compiled->second.value("name", std::string()).starts_with("Project Agent check"))
         << "lake's own compile names no check graph";
     EXPECT_EQ(compiled->second["input_id"], "intent-1");
     EXPECT_TRUE(std::ranges::none_of(r.w.caller->calls, [](const auto& call) {

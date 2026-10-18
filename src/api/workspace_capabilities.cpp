@@ -3847,7 +3847,8 @@ liquid::runtime::task<ApiResult> compile_pipeline(ApiContext& context,
                                                   std::string dataset,
                                                   json model,
                                                   std::string methodology,
-                                                  json columns) {
+                                                  json columns,
+                                                  std::string name) {
     const auto act = [&](std::string capability, json input) {
         return call_capability(context,
                                "workspace_act",
@@ -3857,7 +3858,28 @@ liquid::runtime::task<ApiResult> compile_pipeline(ApiContext& context,
     };
     ApiResult result = called(co_await act("capture_intent", {{"project", project}, {"text", intent}}));
     if (result.ok) {
-        json input{{"project", project}};
+        // A short title rather than the engine's, which is the description's words with the
+        // punctuation dropped (lake#816), numbered past a pipeline of the project that has it, as
+        // a name the caller chose is. The description itself stays the project's captured intent.
+        const std::string title = name.empty() ? pipeline_title(intent) : name;
+        name = title;
+        const ApiResult read = called(co_await call_capability(context,
+                                                               "workspace_query",
+                                                               {{"customer_id", customer_id},
+                                                                {"capability", "get_project"},
+                                                                {"input", {{"name", project}}}}));
+        const json graphs = read.ok ? read.value.value("graphs", json::array()) : json::array();
+        const auto taken = [&graphs](const std::string& candidate) {
+            return graphs.is_array() && std::ranges::any_of(graphs, [&](const json& graph) {
+                       return graph.is_object() && graph.value("name", std::string()) == candidate;
+                   });
+        };
+        for (int copy = 2; taken(name); ++copy) {
+            name = title + " (" + std::to_string(copy) + ")";
+        }
+    }
+    if (result.ok) {
+        json input{{"project", project}, {"name", name}};
         if (const std::string input_id = result.value.value("input_id", std::string());
             !input_id.empty()) {
             input["input_id"] = input_id;
@@ -5377,14 +5399,18 @@ void register_conversation_capabilities(Registry& registry) {
             "it. The dataset's source and table, and the optional `label_column` (what it "
             "predicts) and `entity_column` (what each row is about), are passed to the compiler "
             "as hints, so the steps are named from the data (\"Load subscriptions\", \"Train "
-            "downgraded model\"). Answers the new pipeline's name as `graph` (from the intent's "
-            "words) and, from an engine that says so, the `template` its steps started from.",
+            "downgraded model\"). The pipeline is named `name`, else a short title from the "
+            "intent (\"Predict which customers will churn, with the reasons\" is \"Customers "
+            "churn\"), numbered \" (2)\" when the project has one by that name; the intent stays "
+            "the project's description. Answers the new pipeline's name as `graph` and, from an "
+            "engine that says so, the `template` its steps started from.",
         .input_schema = customer_input_schema({{"project", {{"type", "string"}, {"minLength", 1}}},
                                                {"intent", {{"type", "string"}, {"minLength", 1}}},
                                                {"dataset", {{"type", "string"}}},
                                                {"label_column", {{"type", "string"}}},
                                                {"entity_column", {{"type", "string"}}},
-                                               {"methodology", {{"type", "string"}}}},
+                                               {"methodology", {{"type", "string"}}},
+                                               {"name", {{"type", "string"}}}},
                                               json::array({"project", "intent"})),
         .output_schema = {{"type", "object"},
                           {"properties",
@@ -5409,7 +5435,8 @@ void register_conversation_capabilities(Registry& registry) {
                 nullptr,
                 input.value("methodology", std::string()),
                 {{"label_column", input.value("label_column", std::string())},
-                 {"entity_column", input.value("entity_column", std::string())}}));
+                 {"entity_column", input.value("entity_column", std::string())}},
+                input.value("name", std::string())));
         }});
     registry.add(Capability{
         .name = "render_pipeline",
@@ -6356,6 +6383,123 @@ std::map<std::string, std::string> canonical_workspace_input(std::string_view ca
         renamed[field] = other;
     }
     return renamed;
+}
+
+std::string pipeline_title(std::string_view description) {
+    // The words of the first clause: a bracket, a comma, a semicolon, a colon, a sentence's end
+    // or a dash between words ends it, so punctuation never lands inside the title.
+    std::string text(description);
+    for (const std::string_view dash : {"\u2014", "\u2013"}) {
+        for (std::size_t at = text.find(dash); at != std::string::npos; at = text.find(dash)) {
+            text.replace(at, dash.size(), ",");
+        }
+    }
+    const auto word_byte = [](unsigned char c) {
+        return std::isalnum(c) != 0 || c == '_' || c >= 0x80;
+    };
+    std::vector<std::string> words;
+    std::string word;
+    for (std::size_t at = 0; at < text.size(); ++at) {
+        const auto c = static_cast<unsigned char>(text[at]);
+        const bool inside = !word.empty() && at + 1 < text.size() &&
+                            word_byte(static_cast<unsigned char>(text[at + 1]));
+        if (word_byte(c) || ((c == '-' || c == '\'') && inside)) {
+            word += static_cast<char>(c);
+            continue;
+        }
+        if (!word.empty()) {
+            words.push_back(std::move(word));
+            word.clear();
+        }
+        const bool sentence_end = (c == '.' || c == '!' || c == '?') &&
+                                  (at + 1 == text.size() || !word_byte(text[at + 1]));
+        if (std::string_view("([{,;:\n").contains(static_cast<char>(c)) || sentence_end ||
+            (c == '-' && !inside)) {
+            if (!words.empty()) {
+                break;
+            }
+        }
+    }
+    if (!word.empty()) {
+        words.push_back(std::move(word));
+    }
+    const auto lower = [](std::string value) {
+        for (char& c : value) {
+            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        }
+        return value;
+    };
+    const auto one_of = [](const std::string& value, const auto& list) {
+        return std::ranges::find(list, std::string_view(value)) != std::ranges::end(list);
+    };
+    // A request that leads the description, and the words that only lead into what it asks.
+    static constexpr std::string_view request[] = {
+        "predict", "forecast", "estimate", "classify",   "detect",  "find",      "identify",
+        "flag",    "score",    "rank",     "recommend",  "answer",  "determine", "tell",
+        "show",    "spot",     "list",     "segment",    "cluster", "group",     "measure",
+        "track",   "explain",  "know",     "understand", "see",     "figure",    "work",
+        "build",   "create",   "make",     "help",       "out",     "me",        "us",
+        "all",     "any",      "each",     "every"};
+    // Words that carry nothing in a title, wherever they are.
+    static constexpr std::string_view helper[] = {
+        "which", "what", "whether", "who",   "whom",   "how",   "that",   "the",      "a",
+        "an",    "will", "would",   "could", "should", "can",   "may",    "might",    "is",
+        "are",   "was",  "were",    "be",    "been",   "being", "likely", "unlikely", "going",
+        "to",    "do",   "does",    "did",   "has",    "have",  "had",    "most",     "more",
+        "least", "our",  "my",      "their", "its",    "your"};
+    // A preposition or conjunction after the subject ends the title ("in the next 90 days").
+    static constexpr std::string_view ending[] = {
+        "in",    "within", "over",   "during", "for",   "by",      "from",  "with",  "without",
+        "using", "based",  "before", "after",  "and",   "or",      "but",   "so",    "because",
+        "since", "per",    "at",     "on",     "as",    "than",    "given", "when",  "where",
+        "if",    "via",    "into",   "across", "among", "between", "until", "while", "about"};
+    std::vector<std::string> kept;
+    bool leading = true;
+    for (const std::string& each : words) {
+        const std::string folded = lower(each);
+        if (leading && one_of(folded, request)) {
+            continue;
+        }
+        if (one_of(folded, helper)) {
+            continue;
+        }
+        if (one_of(folded, ending) && !kept.empty()) {
+            break;
+        }
+        if (folded == "of" && kept.empty()) {
+            continue;
+        }
+        leading = false;
+        kept.push_back(each);
+        if (kept.size() == 4) {
+            break;
+        }
+    }
+    while (!kept.empty() && lower(kept.back()) == "of") {
+        kept.pop_back();
+    }
+    // Nothing left of the words (a description such as "Predict which"): its first words as
+    // written.
+    if (kept.empty()) {
+        for (const std::string& each : words) {
+            kept.push_back(each);
+            if (kept.size() == 4) {
+                break;
+            }
+        }
+    }
+    std::string title;
+    for (const std::string& each : kept) {
+        if (!title.empty() && title.size() + 1 + each.size() > 48) {
+            break;
+        }
+        title += (title.empty() ? "" : " ") + each;
+    }
+    if (title.empty()) {
+        return "Pipeline";
+    }
+    title.front() = static_cast<char>(std::toupper(static_cast<unsigned char>(title.front())));
+    return title;
 }
 
 std::string engine_words_in_lake_terms(std::string text) {

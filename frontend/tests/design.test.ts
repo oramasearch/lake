@@ -31,6 +31,7 @@ import {
   parseInteger,
   parseNumber,
   pipelineActionError,
+  pipelineTitle,
   plainAgentFailure,
   projectAgentNeedsReply,
   proposedFoundation,
@@ -40,6 +41,8 @@ import {
   solutionState,
   startReturn,
   topologicalOrder,
+  uniqueModelName,
+  uniquePipelineName,
   withoutProjectAgentChecks,
   WAITS_FOR_APPROVAL,
 } from "../src/pages/design/logic.ts";
@@ -236,7 +239,7 @@ test("Opportunities group by the newest scan", () => {
 });
 
 test("the Run form's model name and the Project Agent's question", () => {
-  assert.equal(defaultModelName("Churn Review", "weekly-v2"), "churn_review_weekly_v2");
+  assert.equal(defaultModelName("weekly-v2"), "weekly_v2_model");
   assert.equal(projectAgentNeedsReply({ status: "succeeded", answer: { result: { reply: "Which table?" } } }), true);
   assert.equal(projectAgentNeedsReply({ status: "succeeded", answer: { result: { proposal: {} } } }), false);
   assert.equal(projectAgentNeedsReply({ status: "running" }), false);
@@ -296,6 +299,55 @@ test("every pipeline action's error, the model page's Retrain included, is shown
   // As the engine answers run_pipeline on a proposed pipeline.
   const refusal = Object.assign(new Error("the plan 'weekly' is proposed — approve it (approve_plan) before verification"), { code: "not_approved" });
   assert.equal((pipelineActionError(refusal) as Error).message, APPROVE_FIRST);
+});
+
+test("a pipeline built from a description gets a short title (lake#816)", () => {
+  // The same cases as lake's AgentRuns.APipelineTitleIsShortAndReadable.
+  const cases: [string, string][] = [
+    ["Predict which customers will churn (the churned column), with the reasons", "Customers churn"],
+    ["Predict which accounts will churn in the next 90 days, with the reasons", "Accounts churn"],
+    ["Predict the likelihood of churn", "Likelihood of churn"],
+    ["Build a churn model", "Churn model"],
+    ["Classify support tickets by urgency", "Support tickets"],
+    ["What will revenue be next quarter?", "Revenue next quarter"],
+    ["Answer questions about our product docs", "Questions"],
+    ["churn", "Churn"],
+    ["Forecast demand \u2014 weekly, per store", "Demand"],
+    ["Score churn-risk for each account's renewal", "Churn-risk"],
+    ["Predict which", "Predict which"],
+    ["(!)", "Pipeline"],
+    ["", "Pipeline"],
+  ];
+  for (const [description, title] of cases) assert.equal(pipelineTitle(description), title, description);
+  // Punctuation never lands in a title, and a title is a few words.
+  for (const description of ["Predict (churn), [now]; please: thanks.", "Find: which? accounts!", "Spot fraud -- quickly", "Predict which customers, accounts, users and orgs will churn soon and why and how much revenue we lose"]) {
+    const title = pipelineTitle(description);
+    assert.ok(title.length > 0 && title.length <= 48, title);
+    assert.doesNotMatch(title, /[()[\]{},;:.!?]/);
+  }
+  assert.equal(uniquePipelineName("Customers churn", ["Customers churn", "Customers churn (2)"]), "Customers churn (3)");
+  assert.equal(uniquePipelineName("Customers churn", []), "Customers churn");
+});
+
+test("the default model name is short, and numbered past another pipeline's model (lake#816)", () => {
+  assert.equal(defaultModelName("Customers churn"), "customers_churn_model");
+  assert.equal(defaultModelName("Churn model"), "churn_model");
+  // A pipeline named before lake#816 is shortened as a description is.
+  const old = defaultModelName("Predict which customers will churn the churned column");
+  assert.equal(old, "customers_churn_churned_column_model");
+  assert.ok(old.length <= 40);
+  assert.ok(defaultModelName("Supercalifragilisticexpialidocious extraordinarily long words").length <= 40);
+  const models = [
+    { name: "customers_churn_model", project_name: "retention", pipeline_name: "Customers churn" },
+    { name: "churn_model", project_name: "billing", pipeline_name: "Churn" },
+    { name: "churn_model_2", project: "retention", pipeline_name: "Older churn" },
+  ];
+  // Its own pipeline training again makes a new version, so its own name is free.
+  assert.equal(uniqueModelName("customers_churn_model", models, "retention", "Customers churn"), "customers_churn_model");
+  // Another pipeline's model is not overwritten.
+  assert.equal(uniqueModelName("customers_churn_model", models, "retention", "Customers churn (2)"), "customers_churn_model_2");
+  assert.equal(uniqueModelName("churn_model", models, "retention", "Churn"), "churn_model_3");
+  assert.equal(uniqueModelName("fresh_model", undefined, "retention", "Fresh"), "fresh_model");
 });
 
 test("the graph is laid out as render_svg lays it out", () => {

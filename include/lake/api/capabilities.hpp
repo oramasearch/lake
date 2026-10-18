@@ -278,15 +278,25 @@ nlohmann::json workspace_openapi(const nlohmann::json& document, std::string_vie
 // The compiler is given the dataset's source and table and the label and entity columns as
 // `hints` (zetta#1246), so the steps are named from the data: `columns` carries `label_column`
 // and `entity_column` when the caller knows them; the label falls back to the model's `target`.
-liquid::runtime::task<ApiResult>
-compile_pipeline(ApiContext& context,
-                 std::string customer_id,
-                 std::string project,
-                 std::string intent,
-                 std::string dataset,
-                 nlohmann::json model = nullptr,
-                 std::string methodology = {},
-                 nlohmann::json columns = nlohmann::json::object());
+//
+// The pipeline is named `name`, or pipeline_title(intent) when it is empty, numbered " (2)",
+// " (3)" past a pipeline of the project that has the name (lake#816). The description stays the
+// project's captured intent.
+liquid::runtime::task<ApiResult> compile_pipeline(ApiContext& context,
+                                                  std::string customer_id,
+                                                  std::string project,
+                                                  std::string intent,
+                                                  std::string dataset,
+                                                  nlohmann::json model = nullptr,
+                                                  std::string methodology = {},
+                                                  nlohmann::json columns = nlohmann::json::object(),
+                                                  std::string name = {});
+// A short, readable pipeline title from its description (lake#816): the first clause, without a
+// leading request ("Predict which", "Build a"), helper words ("will", "likely to") or what follows
+// a preposition, at most four words, first letter capitalized. "Predict which customers will
+// churn (the churned column), with the reasons" is "Customers churn". The web app's
+// `pipelineTitle` (frontend/src/pages/design/logic.ts) follows the same rules.
+std::string pipeline_title(std::string_view description);
 // The workspace engine's methodologies (its list_methodologies answer, zetta#1061), or null
 // when the engine predates the registry: then only M-1 (churn / GBDT classification) runs.
 liquid::runtime::task<nlohmann::json> workspace_methodologies(ApiContext& context,
