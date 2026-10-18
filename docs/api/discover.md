@@ -66,9 +66,12 @@ returns every row, each with its `task_id`, which is what the grouping reads.
 Studio's discovery journey (orama-design `src/studio/discovery/`).
 
 1. **Scan my workspace** sends one `agent_turn` (kind `discover`) to
-   `agent-autosuggest`. lake builds the **Workspace Profile** from the approved data the workspace
-   holds (`list_datasets`, then `get_dataset` for up to twelve: names and columns), so Auto-Suggest Agent
-   reads nothing itself and never changes anything.
+   `agent-autosuggest`. Auto-Suggest Agent builds the **Workspace Profile** itself from the data
+   the workspace holds (`list_datasets`, then `get_dataset` for up to twelve: names and columns),
+   with the turn's read-only key. The same key lets it read the engine's methodologies and
+   solutions and the account's Ship Apps and image builds (`list_apps`, `get_app`,
+   `receive_app_events`, `list_builds`, `get_build`, `receive_build_events`; lake#795), and change
+   nothing. The key's exact contents are in [agent-launches.md](agent-launches.md#turns).
 2. **Recommended Opportunities**: Auto-Suggest Agent's `suggested` entries, each with its intent, solution
    id, methodology, why this data supports it, what must come first, and what it changes; **Not Yet**:
    its `declined` entries with the reason and *capture it first* or *cannot be done*.
@@ -80,4 +83,5 @@ Studio's discovery journey (orama-design `src/studio/discovery/`).
 When Auto-Suggest Agent is not running on the lake (`LAKE_AGENT_ENDPOINTS`), the page says so and offers
 nothing behind a mock. A scan that fails says why.
 
-Verify: `HttpServer/HttpResponseIsolation.DiscoverOpportunitiesScansAndCreatesProjects`.
+Verify: `HttpServer/HttpResponseIsolation.DiscoverOpportunitiesScansAndCreatesProjects`, and
+`AgentRuns.AutoSuggestDiscoverReadsAppsAndBuildsWithItsTaskCredential` for the turn key.

@@ -3243,6 +3243,55 @@ TEST(AgentRuns, AgentTurnReachesLibraryNativeAndPythonAgents) {
     EXPECT_EQ(std::get<2>(r.agents.turns.back())["message"], "hello again");
 }
 
+// Scan my workspace (lake#795): Auto-Suggest Agent's discover turn reads the account's Apps and
+// image builds with its task credential before it suggests (agent-autosuggest's apps.py), so the
+// credential grants those reads, and nothing that changes an App or a build.
+TEST(AgentRuns, AutoSuggestDiscoverReadsAppsAndBuildsWithItsTaskCredential) {
+    AgentRuns r;
+    auto& config = const_cast<lake::control::WorkspaceConfig&>(r.w.service->config());
+    config.agent_endpoints = {{"agent-autosuggest", "http://suggest:8080"}};
+    config.internal_url = "http://lake.internal:4900";
+
+    const auto started = r.call(
+        "agent_turn",
+        {{"agent", "agent-autosuggest"}, {"kind", "discover"}, {"message", "Scan my workspace"}});
+    ASSERT_TRUE(started.ok) << started.error.message;
+    const auto task = r.task(started.value["task_id"]);
+    ASSERT_TRUE(task);
+    EXPECT_EQ(task->kind, "discover");
+    for (const std::string_view capability : {"list_apps",
+                                              "get_app",
+                                              "receive_app_events",
+                                              "list_builds",
+                                              "get_build",
+                                              "receive_build_events"}) {
+        EXPECT_NE(std::ranges::find(task->scopes, capability), task->scopes.end()) << capability;
+    }
+    for (const std::string_view capability : {"workspace_act",
+                                              "create_app",
+                                              "deploy_app",
+                                              "build_app",
+                                              "delete_app",
+                                              "app_logs",
+                                              "build_logs",
+                                              "cancel_build",
+                                              "agent_turn"}) {
+        EXPECT_EQ(std::ranges::find(task->scopes, capability), task->scopes.end()) << capability;
+    }
+
+    const std::string credential = "lat." + task->id + ".0123456789abcdef0123456789abcdef";
+    ASSERT_TRUE(r.store.claim_agent_task(
+        task->id, "agent-autosuggest", lake::control::identity_crypto::sha256_hex(credential)));
+    const auto agent = r.store.context_for(credential);
+    ASSERT_TRUE(agent) << agent.error().message;
+    const auto apps = r.call_as(*agent, "list_apps", json::object());
+    EXPECT_TRUE(apps.ok) << apps.error.code << ": " << apps.error.message;
+    const auto builds = r.call_as(*agent, "list_builds", json::object());
+    EXPECT_TRUE(builds.ok) << builds.error.code << ": " << builds.error.message;
+    EXPECT_EQ(r.call_as(*agent, "app_logs", {{"app_id", "any"}}).error.code, "unauthorized")
+        << "a read Auto-Suggest Agent does not make is not granted";
+}
+
 TEST(AgentRuns, ApplicationAgentWritesAppsOnlyAfterTheProposalIsConfirmed) {
     AgentRuns r;
     auto& config = const_cast<lake::control::WorkspaceConfig&>(r.w.service->config());
