@@ -6121,7 +6121,17 @@ void register_agent_run_capabilities(Registry& registry) {
                     body["request"] = message;
                 } else if (agent == "agent-autosuggest") {
                     // Auto-Suggest Agent builds the workspace profile itself, with the task's
-                    // read-only credential; lake reads nothing inside the request.
+                    // read-only credential; lake reads nothing inside the request. Before it
+                    // suggests, it also reads the account's Ship Apps and image builds, so an
+                    // existing App can inform a proposal (agent-autosuggest's apps.py, lake#795):
+                    // those reads, and none of the App or build actions it may only propose.
+                    scopes.insert(scopes.end(),
+                                  {"list_apps",
+                                   "get_app",
+                                   "receive_app_events",
+                                   "list_builds",
+                                   "get_build",
+                                   "receive_build_events"});
                     if (const json profile =
                             input.value("context", json::object()).value("profile", json());
                         profile.is_object()) {
