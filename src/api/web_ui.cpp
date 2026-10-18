@@ -629,10 +629,14 @@ std::string web_ui_order_form(const OrderSheet& sheet,
             std::string options;
             for (const OrderRegion& region : provider.regions) {
                 const std::string value = provider.id + ":" + region.id;
-                options += std::format("<option value=\"{}\"{}>{}</option>",
-                                       web_ui_escape(value),
-                                       selected_if(values.location == value),
-                                       web_ui_escape(region.label));
+                options += std::format(
+                    "<option value=\"{}\"{}>{}{}</option>",
+                    web_ui_escape(value),
+                    selected_if(values.location == value),
+                    web_ui_escape(region.label),
+                    provider.checkout && !region.checkout
+                        ? " (order form: we'll confirm availability)"
+                        : "");
             }
             groups += std::format("<optgroup label=\"{}{}\">{}</optgroup>",
                                   web_ui_escape(provider.label),
@@ -667,8 +671,8 @@ std::string web_ui_order_form(const OrderSheet& sheet,
                      "nothing is set up until we have spoken."
                    : "Card payment is not available right now. Send the order form and we will "
                      "be in touch; nothing is set up or charged until we have spoken.";
-        note += " Providers marked \"order form\" and anything not listed are ordered with the "
-                "order form.";
+        note += " Providers and regions marked \"order form\" and anything not listed are ordered "
+                "with the order form.";
     } else {
         note = "We get in touch to plan it with you. Nothing is charged by sending this.";
     }

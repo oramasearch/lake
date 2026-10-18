@@ -30,6 +30,10 @@ namespace lake::api {
 struct OrderRegion {
     std::string id;    // the cloud's region name, e.g. canadacentral
     std::string label; // what a person reads, e.g. Canada (Toronto)
+    // Whether the operator can create a cluster here, so it can be paid for and provisioned
+    // without a person. Defaults to the provider's `checkout`; a region the operator cannot reach
+    // is listed but ordered with the order form ("we'll confirm availability").
+    bool checkout = false;
 };
 
 // A cloud provider a dedicated cluster can be ordered on. `checkout`: the operator can provision

@@ -27,7 +27,7 @@ list; how a bill applies the credit is in [billing.md](billing.md#order-sheet-su
 **Two paths, one table.** Every order is a row of `cloud_orders` in lake's control-plane
 PostgreSQL (orders are multitenancy and billing, decision 56; nothing from a workspace is in it):
 
-- **Pay** (private warehouse, dedicated cluster on a `checkout` provider): the order is recorded
+- **Pay** (private warehouse, dedicated cluster in a `checkout` region of a `checkout` provider): the order is recorded
   `pending_payment`, lake creates a Stripe Checkout Session and sends the person there. Stripe's
   signed webhook marks it `paid`. The operator provisions `paid` orders and writes `provisioning`,
   then `ready` with the host, or `failed` with the reason. A checkout that expires or whose payment
@@ -69,8 +69,8 @@ that serves the apex (for production, `https://eu.lake.live/billing/stripe/webho
 - Where it runs: a private warehouse names a shared region (`LAKE_REGIONS`); a dedicated cluster
   names `<provider>:<region>` from the configuration; on-prem says it in `details`. `other` is
   anything not listed and needs `details`.
-- `path=checkout` only for an offer with `checkout`, a listed location on a provider with
-  `checkout`, and a Lake with card payment (Stripe configured, `server_info.online_payment`).
+- `path=checkout` only for an offer with `checkout`, a listed location in a region with `checkout`
+  (on a provider with `checkout`), and a Lake with card payment (Stripe configured, `server_info.online_payment`).
   Otherwise the order form.
 - A name (1–200 characters, on one line), an email address, a company (≤ 200), details
   (≤ 4,000, line breaks kept), a quantity from 1 to 1,000 (default 1).
@@ -118,7 +118,8 @@ outside it.
     {"id": "azure", "label": "Microsoft Azure", "checkout": true, "regions": [
       {"id": "eastus", "label": "United States (Virginia)"}, {"id": "westus2", …},
       {"id": "swedencentral", …}, {"id": "westeurope", …}, {"id": "canadacentral", "label": "Canada (Toronto)"},
-      {"id": "japaneast", "label": "Asia (Tokyo)"}, {"id": "southeastasia", "label": "Asia (Singapore)"}]},
+      {"id": "japaneast", "label": "Asia (Tokyo)", "checkout": false},
+      {"id": "southeastasia", "label": "Asia (Singapore)", "checkout": false}]},
     {"id": "aws", "label": "Amazon Web Services", "checkout": false, "regions": […]},
     {"id": "gcp", "label": "Google Cloud", "checkout": false, "regions": […]}
   ],
@@ -139,6 +140,17 @@ outside it.
 - **`providers[].checkout`**: whether the operator provisions on that provider. Only Azure is
   `true`, because the operator creates clusters on Azure only today; the others are ordered through
   the order form until it supports them, and the form marks them "(order form)".
+- **`providers[].regions[].checkout`**: whether the operator can create a cluster in that region;
+  it defaults to the provider's value and cannot be `true` on a provider whose `checkout` is
+  `false` (startup stops naming the field). The operator reaches only the Azure regions in its
+  `cloudRegionLocations` (orama-operator#635, `internal/controller/lake_regions.go`: canadacentral,
+  centralus, eastus, eastus2, francecentral, germanywestcentral, northeurope, southcentralus,
+  swedencentral, uksouth, westeurope, westus, westus2, westus3). So the default lists Tokyo
+  (`japaneast`) and Singapore (`southeastasia`) with `checkout: false`: they appear in the form as
+  "(order form: we'll confirm availability)", and paying for them is refused with "This region is
+  ordered with the order form: we will confirm availability." before anything is recorded or sent
+  to Stripe. When the operator reaches a new region, set its `checkout` to `true` (or drop the
+  override) in the same release.
 - **`shared.show_promise`** is **off by default**. The line *"Train and serve a model in 5 minutes
   for under $5"* is shown only while the test that backs it passes and is recorded in
   [billing.md](billing.md#the-shared-tiers-promise); it is not recorded yet, so do not switch it on.

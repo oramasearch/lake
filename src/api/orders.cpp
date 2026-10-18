@@ -23,7 +23,9 @@ using nlohmann::json;
 
 // The default order sheet: the offers, prices and credit Steve gave on 2026-10-18 (lake#831). The
 // providers and regions are the clouds Orama runs on or can be asked for; only Azure is `checkout`,
-// because the operator creates clusters on Azure only today (orama-operator#634).
+// because the operator creates clusters on Azure only today (orama-operator#634), and only in the
+// Azure regions it can reach (orama-operator#635, cloudRegionLocations): the Asia regions are
+// listed but ordered with the order form.
 constexpr std::string_view default_sheet = R"json({
   "enabled": true,
   "url": "",
@@ -93,8 +95,8 @@ constexpr std::string_view default_sheet = R"json({
         {"id": "swedencentral", "label": "Europe (Sweden)"},
         {"id": "westeurope", "label": "Europe (Netherlands)"},
         {"id": "canadacentral", "label": "Canada (Toronto)"},
-        {"id": "japaneast", "label": "Asia (Tokyo)"},
-        {"id": "southeastasia", "label": "Asia (Singapore)"}
+        {"id": "japaneast", "label": "Asia (Tokyo)", "checkout": false},
+        {"id": "southeastasia", "label": "Asia (Singapore)", "checkout": false}
       ]
     },
     {
@@ -451,6 +453,14 @@ std::expected<OrderSheet, std::string> order_sheet_from_environment(std::string_
                     region_field,
                     region.id));
             }
+            region.checkout = boolean_at(regions[r], "checkout", provider.checkout);
+            if (region.checkout && !provider.checkout) {
+                return std::unexpected(std::format(
+                    "{}.checkout cannot be true on a provider whose checkout is false", region_field));
+            }
+            if (regions[r].contains("checkout") && !regions[r]["checkout"].is_boolean()) {
+                return std::unexpected(region_field + ".checkout must be true or false");
+            }
             if (!region_ids.insert(region.id).second) {
                 return std::unexpected(
                     std::format("{}.regions names the region \"{}\" twice", field, region.id));
@@ -610,7 +620,7 @@ validate_order_form(const OrderSheet& sheet,
             order.cloud_provider = provider->id;
             order.region = region->id;
             listed = true;
-            provisionable = provider->checkout;
+            provisionable = provider->checkout && region->checkout;
         } else {
             errors["location"] = "Choose a cloud provider and region, or tell us what you need.";
         }
@@ -629,10 +639,15 @@ validate_order_form(const OrderSheet& sheet,
         } else if (!checkout_available) {
             errors["path"] = "Card payment is not available right now: send the order form.";
         } else if (!provisionable) {
+            const OrderProvider* provider =
+                sheet.find_provider(order.cloud_provider);
             errors["path"] = location == "other"
                                  ? "Anything not listed is ordered with the order form."
-                                 : "This provider is ordered with the order form until Lake "
-                                   "provisions it automatically.";
+                             : provider != nullptr && !provider->checkout
+                                 ? "This provider is ordered with the order form until Lake "
+                                   "provisions it automatically."
+                                 : "This region is ordered with the order form: we will confirm "
+                                   "availability.";
         }
     }
     if (!errors.empty()) {

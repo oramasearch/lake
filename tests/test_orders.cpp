@@ -239,6 +239,17 @@ TEST(OrdersConfig, TheDefaultIsTheIssuesOffers) {
     };
     EXPECT_TRUE(has("canadacentral"));
     EXPECT_TRUE(has("japaneast"));
+    // Checkout only where the operator can create a cluster (orama-operator#635): the Asia regions
+    // are listed but ordered with the order form.
+    const auto checkout = [&](std::string_view id) {
+        return std::ranges::find(azure->regions, id, &OrderRegion::id)->checkout;
+    };
+    EXPECT_TRUE(checkout("canadacentral"));
+    EXPECT_TRUE(checkout("eastus"));
+    EXPECT_FALSE(checkout("japaneast"));
+    EXPECT_FALSE(checkout("southeastasia"));
+    EXPECT_FALSE(sheet.find_provider("aws")->regions.front().checkout)
+        << "a region defaults to its provider's checkout";
     ASSERT_NE(sheet.find_provider("aws"), nullptr);
     EXPECT_FALSE(sheet.find_provider("aws")->checkout);
     EXPECT_EQ(sheet.trust.size(), 2U);
@@ -288,6 +299,8 @@ TEST(OrdersConfig, InvalidValuesNameTheField) {
          "names the region \"r\" twice"},
         {R"({"providers":[{"id":"x","label":"X","regions":[{"id":"r","label":"R"}]},{"id":"x","label":"Y","regions":[{"id":"r","label":"R"}]}]})",
          "names the provider \"x\" twice"},
+        {R"({"providers":[{"id":"x","label":"X","checkout":false,"regions":[{"id":"r","label":"R","checkout":true}]}]})", "regions[0].checkout cannot be true on a provider whose checkout is false"},
+        {R"({"providers":[{"id":"x","label":"X","checkout":true,"regions":[{"id":"r","label":"R","checkout":"yes"}]}]})", "regions[0].checkout must be true or false"},
         {R"({"trust":[{"text":"SOC 2","url":"javascript:void"}]})",
          "trust[0].url must be an https or mailto URL"},
         {R"({"url":"http://lake.live/"})", "url must be an https URL"},
@@ -353,6 +366,15 @@ TEST(OrdersForm, EachOfferAndPathIsChecked) {
     EXPECT_EQ(cluster->quantity, 3);
     EXPECT_EQ(cluster->amount_cents, 1'500'000);
     EXPECT_EQ(cluster->included_credit_cents, 600'000);
+    // A region the operator cannot reach (Asia on Azure) is an order form, though listed.
+    const auto asia = form("dedicated_cluster", "checkout", "azure:japaneast");
+    ASSERT_FALSE(asia);
+    EXPECT_EQ(asia.error().at("path"),
+              "This region is ordered with the order form: we will confirm availability.");
+    EXPECT_TRUE(form("dedicated_cluster", "checkout", "azure:southeastasia").error().contains("path"));
+    auto asia_form = form("dedicated_cluster", "order_form", "azure:japaneast");
+    ASSERT_TRUE(asia_form);
+    EXPECT_EQ(asia_form->region, "japaneast");
     // A provider the operator does not provision yet is an order form.
     EXPECT_EQ(
         form("dedicated_cluster", "checkout", "aws:ca-central-1").error().at("path").substr(0, 13),
@@ -1396,4 +1418,38 @@ TEST(OrdersApex, AFailedEmailIsRetried) {
         rig.pass_until([&] { return rig.store->get_cloud_order(id)->email_attempts == 1; }));
     EXPECT_EQ(rig.store->get_cloud_order(id)->email_error,
               "Resend refused the email (HTTP 500): try again");
+}
+
+TEST(OrdersApex, AnAsiaClusterCannotBePaidForAndGoesToTheOrderForm) {
+    OrderRig rig;
+    // The form lists Tokyo and Singapore, marked for the order form.
+    const Response form = send(rig.port(), "GET", "/order/dedicated-cluster", "lake.live");
+    EXPECT_NE(form.body.find("value=\"azure:japaneast\">Asia (Tokyo) (order form: we'll confirm "
+                             "availability)</option>"),
+              std::string::npos);
+    EXPECT_NE(form.body.find("value=\"azure:canadacentral\">Canada (Toronto)</option>"),
+              std::string::npos);
+    // Paying for Tokyo is refused before anything is recorded or sent to Stripe.
+    const Response refused = send(rig.port(), "POST", "/order", "lake.live", form_headers,
+                                  "offer=dedicated_cluster&path=checkout&location=azure%3Ajapaneast&"
+                                  "contact_name=Ada&contact_email=ada%40example.com");
+    EXPECT_EQ(refused.status, 400);
+    EXPECT_NE(refused.body.find("This region is ordered with the order form: we will confirm "
+                                "availability."),
+              std::string::npos);
+    EXPECT_NE(refused.body.find("value=\"azure:japaneast\" selected"), std::string::npos)
+        << "the form keeps the choice, ready to send as an order form";
+    EXPECT_EQ(rig.stripe.count(), 0U);
+    EXPECT_TRUE(rig.store->unaudited_cloud_order_events(10)->empty());
+    // The same order sent as an order form is recorded and never reaches Stripe.
+    const Response sent = send(rig.port(), "POST", "/order", "lake.live", form_headers,
+                               "offer=dedicated_cluster&path=order_form&location=azure%3Ajapaneast&"
+                               "contact_name=Ada&contact_email=ada%40example.com");
+    ASSERT_EQ(sent.status, 200) << sent.body;
+    const auto order = rig.store->get_cloud_order(order_id_in(sent.body));
+    ASSERT_TRUE(order);
+    EXPECT_EQ(order->state, "submitted");
+    EXPECT_EQ(order->cloud_provider, "azure");
+    EXPECT_EQ(order->region, "japaneast");
+    EXPECT_EQ(rig.stripe.count(), 0U);
 }
