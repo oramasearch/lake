@@ -119,7 +119,7 @@ refused and nothing is saved. **A saved change needs approval again before the p
 
 1. **Approve** the pipeline. The workspace verifies and runs only an approved pipeline.
 2. **Check** runs the workspace's correctness checks without running anything. Each check is listed with its
-   reason.
+   reason. It is disabled until the pipeline is approved, and says so.
 3. **Check and run** checks and, when the checks pass, trains. Fill in the **Run settings**:
    - **Train on**: the dataset to learn from.
    - **Hold out for measuring**: the share of rows kept out of training to measure the model. The

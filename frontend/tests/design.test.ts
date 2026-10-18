@@ -5,6 +5,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  APPROVE_FIRST,
   a1Queue,
   actionCounts,
   certificateGroups,
@@ -27,6 +28,7 @@ import {
   missingPredicates,
   parseInteger,
   parseNumber,
+  pipelineActionError,
   plainAgentFailure,
   projectAgentNeedsReply,
   proposedFoundation,
@@ -235,6 +237,24 @@ test("the Run form's model name and the Project Agent's question", () => {
   assert.equal(projectAgentNeedsReply({ status: "succeeded", answer: { result: { reply: "Which table?" } } }), true);
   assert.equal(projectAgentNeedsReply({ status: "succeeded", answer: { result: { proposal: {} } } }), false);
   assert.equal(projectAgentNeedsReply({ status: "running" }), false);
+});
+
+test("a refusal to act on a proposed pipeline reads in page words (lake#813)", () => {
+  // As lake-dev answered Check on a proposed pipeline, 2026-10-18.
+  const refusal = Object.assign(
+    new Error("the plan 'Predict which customers will churn the churned column' is proposed — approve it (workspace_act with capability approve_plan) before verification"),
+    { code: "not_approved", status: 409 },
+  );
+  const shown = pipelineActionError(refusal) as Error;
+  assert.equal(shown.message, APPROVE_FIRST);
+  assert.doesNotMatch(shown.message, /workspace_act|approve_plan|capability/);
+  // The message alone is enough, from an engine that answers another code.
+  assert.equal((pipelineActionError(new Error("approve it (approve_plan) before deploying")) as Error).message, APPROVE_FIRST);
+  // Every other error, and no error, is left as it was.
+  const other = Object.assign(new Error("no graph named 'x'"), { code: "not_found" });
+  assert.equal(pipelineActionError(other), other);
+  assert.equal(pipelineActionError(null), null);
+  assert.doesNotMatch(APPROVE_FIRST, /workspace_act|approve_plan|capability/);
 });
 
 test("the graph is laid out as render_svg lays it out", () => {

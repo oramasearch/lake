@@ -172,7 +172,11 @@ A changed pipeline needs **Approve** again before it runs.
 
 1. **Approve**: the engine verifies and runs only an approved pipeline.
 2. **Check**: runs the correctness checks without running anything, and shows each check that
-   applied with its reason. The checks that did not apply to this pipeline are counted under the
+   applied with its reason. The workspace checks only an approved pipeline, so while a pipeline is
+   proposed Check is disabled and says *Approve the pipeline first; checks run on an approved
+   pipeline.* Approving clears any refusal shown before it, and the page never names a capability
+   in a refusal: the engine's "approve it (… approve_plan) before verification" reads as that same
+   sentence (lake#813). The checks that did not apply to this pipeline are counted under the
    table (*107 checks did not apply*) rather than shown as passes; **List them for an audit** lists
    them too, marked *did not apply*.
 3. **Check and run**: choose the dataset under **Train on**, keep **Hold out for measuring** at

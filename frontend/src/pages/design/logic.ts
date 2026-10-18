@@ -544,6 +544,21 @@ export function groupOpportunities(rows: J[]) {
   return { lastScan, latestTask, fresh, earlier, made, later, dismissed };
 }
 
+/** What the pipeline page says while a pipeline is proposed, beside Check (lake#813). */
+export const APPROVE_FIRST = "Approve the pipeline first; checks run on an approved pipeline.";
+
+/** An action's error in the page's words (lake#813). The engine refuses to check, run or deploy a
+ * proposed pipeline with `not_approved` and a message naming the capability that approves it
+ * ("approve it (workspace_act with capability approve_plan) before verification"); a page never
+ * names a capability, so that refusal reads as {@link APPROVE_FIRST}. Anything else is unchanged. */
+export function pipelineActionError(error: unknown): unknown {
+  if (!error || typeof error !== "object") return error;
+  const code = (error as { code?: unknown }).code;
+  const message = (error as { message?: unknown }).message;
+  const refusedAsProposed = code === "not_approved" || (typeof message === "string" && /\bapprove_plan\b/.test(message));
+  return refusedAsProposed ? new Error(APPROVE_FIRST) : error;
+}
+
 /** The model name the Run form proposes: `<project>_<graph>`, lowercase, non-alphanumerics `_`. */
 export function defaultModelName(project: string, graph: string): string {
   return [...`${project}_${graph}`].map((c) => (/^[A-Za-z0-9]$/.test(c) ? c.toLowerCase() : "_")).join("");
