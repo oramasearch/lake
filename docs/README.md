@@ -13,6 +13,10 @@ copied into the image, `tunnel_client_downloads` and its signed short-lived link
 `LAKE_REGION_LABEL`, `LAKE_REGIONS` and `LAKE_APEX_HOST`, `server_info`'s `region` and `regions`, and
 the apex host's region picker with its closest-region choice and preference cookie;
 [ui/regions.md](ui/regions.md) is where the web app shows the region.
+[api/orders.md](api/orders.md) defines the apex order sheet (lake#831): offers and prices from
+`LAKE_ORDER_SHEET`, Stripe Checkout and the order form, `cloud_orders` (migration `0089`, the
+contract orama-operator#634 provisions from), Resend email and the status link;
+[ui/regions.md](ui/regions.md#the-order-sheet) is the page.
 [api/scoped-credentials.md](api/scoped-credentials.md) defines an app connection's credential
 scope, workspace-secret reference, rotation and revocation (lake#731);
 [build/scoped-credentials-proof.md](build/scoped-credentials-proof.md) records its native proof

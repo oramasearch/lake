@@ -5,7 +5,7 @@ import { useEffect, useRef, useState } from "react";
 import { useLocation } from "react-router-dom";
 import { Globe } from "lucide-react";
 import { useRead } from "@/lib/api";
-import { accountRegionSentence, currentRegion, otherRegions, regionUrl, type ServerRegions } from "@/lib/regions";
+import { accountRegionSentence, currentRegion, orderSheetLinks, otherRegions, regionUrl, type ServerRegions } from "@/lib/regions";
 
 /** `server_info`'s region fields: one read, shared with every other `server_info` reader. */
 export function useServerRegions(): ServerRegions | undefined {
@@ -17,6 +17,7 @@ export function RegionMenu() {
   const info = useServerRegions();
   const own = currentRegion(info);
   const others = otherRegions(info);
+  const order = orderSheetLinks(info);
   const [open, setOpen] = useState(false);
   const box = useRef<HTMLDivElement>(null);
   const location = useLocation();
@@ -46,7 +47,7 @@ export function RegionMenu() {
     </>
   );
   const className = "hit inline-flex h-8 shrink-0 items-center gap-1.5 rounded-[5px] px-2 text-[12.5px] text-ink-2 hover:bg-raised hover:text-ink";
-  if (!others.length) {
+  if (!others.length && !order) {
     return (
       <span className={className} title={`Region: ${own.label}`} aria-label={`Region: ${own.label}`}>
         {label}
@@ -67,6 +68,17 @@ export function RegionMenu() {
               {region.label} <span className="font-mono text-[11.5px] text-ink-3">{region.host}</span>
             </a>
           ))}
+          {order && (
+            <>
+              <div className="my-1 border-t border-hairline" />
+              <a role="menuitem" href={order.newSetup} data-order-sheet="new-setup" className="block px-3 py-1.5 text-[13px] text-ink no-underline hover:bg-raised">
+                New setup…
+              </a>
+              <a role="menuitem" href={order.onPrem} data-order-sheet="on-prem" className="block px-3 py-1.5 text-[13px] text-ink no-underline hover:bg-raised">
+                On-prem…
+              </a>
+            </>
+          )}
         </div>
       )}
     </div>
@@ -99,5 +111,18 @@ export function AccountRegionNote({ mode }: { mode: "sign-in" | "sign-up" }) {
         </>
       )}
     </p>
+  );
+}
+
+/** The order sheet's two entries as links (lake#831), for a page with a region, such as Workspaces:
+ * "New setup…" and "On-prem…". Nothing where this Lake has no order sheet. */
+export function OrderSheetLinks() {
+  const order = orderSheetLinks(useServerRegions());
+  if (!order) return null;
+  return (
+    <span className="inline-flex items-center gap-3 text-[12.5px]" data-order-sheet-links>
+      <a href={order.newSetup}>New setup…</a>
+      <a href={order.onPrem}>On-prem…</a>
+    </span>
   );
 }

@@ -11,6 +11,11 @@ public trust, admin revocation and pending session history.
 `GET /tunnel-clients/<platform>`: the tunnel client binaries, offered per platform as signed
 15-minute links a plain `curl` follows (lake#745).
 
+lake#831: [orders.md](orders.md) documents the apex order sheet: its offers and prices from one
+configuration (`LAKE_ORDER_SHEET`), Stripe Checkout for a private warehouse or dedicated cluster,
+the order form that skips payment, `cloud_orders` (migration `0089`), email through Resend, the
+signed status link, the abuse limits and the audit of every state change.
+
 lake#757: [regions.md](regions.md) documents regions: the four variables the operator sets,
 `server_info`'s `region` and `regions`, and the apex host's region picker (closest region from
 `CF-IPCountry`, the `lake_region` preference cookie, the path and query kept).
@@ -275,7 +280,7 @@ and `Experiments.CompareRunsAnswersItsGetFormWithRepeatedKeysOrACommaList`
 
 | Capability | Kind | Input | Value | Page |
 |---|---|---|---|---|
-| `server_info` | read, **no auth** | — | `{name, node, version, revision, api, store, deployments, region, regions}`; `revision` is the embedded full source commit or `unknown`; `deployments` says whether the platform mirror is configured ([platform.md](platform.md#a-lake-without-the-platform-mirror), lake#605); `region` (`{name, label}` or `null`) and `regions` (`[{name, label, host}]` or `[]`) are this Lake's region and the deployment's regions ([regions.md](regions.md), lake#757) | [../deployment/production-2026-09-08.md](../deployment/production-2026-09-08.md) |
+| `server_info` | read, **no auth** | — | `{name, node, version, revision, api, store, deployments, region, regions, order_sheet_url}`; `revision` is the embedded full source commit or `unknown`; `deployments` says whether the platform mirror is configured ([platform.md](platform.md#a-lake-without-the-platform-mirror), lake#605); `region` (`{name, label}` or `null`) and `regions` (`[{name, label, host}]` or `[]`) are this Lake's region and the deployment's regions ([regions.md](regions.md), lake#757); `order_sheet_url` is where the apex order sheet is, or `null` ([orders.md](orders.md), lake#831) | [../deployment/production-2026-09-08.md](../deployment/production-2026-09-08.md) |
 | `viewer` | read, **no auth** | `workspace_id?`, `customer_id?` | who is signed in, their accounts and current workspace, Clerk, sign-up, origin, agent models, version | [web-app.md](web-app.md) |
 | `my_permissions`, `list_packages`, `list_docs`, `get_doc`, `mcp_setup`, `resolve_model` | read (`list_docs`, `get_doc` and a public `resolve_model` need no credential) | see the page | permission flags, the Packages catalog, the Docs guides, Developer → MCP, a model's repository by name | [web-app.md](web-app.md) |
 | `latest_agent_task`, `render_pipeline` / `compile_pipeline` | read / action | `customer_id`, `workspace_id`, then `subject`, or `project` and `graph`, or `project` and `intent` | a project's background task, a pipeline drawn as SVG, a pipeline compiled from a description | [web-app.md](web-app.md) |

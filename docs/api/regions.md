@@ -56,6 +56,7 @@ OpenAPI document and the MCP tool all carry the same two fields:
 |---|---|
 | `region` | `{name, label}` of this Lake, or `null` when `LAKE_REGION` is unset |
 | `regions` | `[{name, label, host}]`, every region of the deployment in the operator's order, this one included; `[]` when unset |
+| `order_sheet_url` | Where the apex order sheet is (lake#831, [orders.md](orders.md#configuration)): `LAKE_ORDER_SHEET`'s `url`, else `https://<LAKE_APEX_HOST>/` on the Lake that serves it; `null` elsewhere |
 
 Coordinates are not reported; they serve only the picker. Both fields are additions: a client that
 does not know them reads the rest of `server_info` as before.
@@ -73,13 +74,20 @@ $ curl -s https://eu.lake.live/v1/server_info | jq '.value | {region, regions}'
 
 ## The apex picker
 
+Since lake#831 the apex shows the **order sheet** ([orders.md](orders.md)) around this picker: the
+shared option holds exactly the choice below (same preselection, form, `POST`, redirect and cookie),
+beside a private warehouse, a dedicated cluster and on-prem with their prices. The sheet adds the
+paths `/order`, `/order/<offer>`, `/order/price-list` and `/orders/<id>` on the apex; every other
+path behaves as below. `LAKE_ORDER_SHEET` with `{"enabled":false}` gives the plain picker back.
+
 A request whose `Host` (port ignored, any case) equals `LAKE_APEX_HOST` is answered by the picker
 before any other route, so no path on the apex reaches the web app or the API. The only exceptions
 are the `GET`s of the stylesheet and fonts the page links (`/style-<hash>.css`, `/style.css`,
 `/fonts/…`) and the probes (`/healthz`, `/readyz`).
 
 - **`GET` (any method but `POST`)**: the page (`text/html`, `no-store`), server-rendered by
-  `web_ui_region_picker` (`src/api/web_ui.cpp`), one radio choice per region, working without
+  `web_ui_order_sheet` (`web_ui_region_picker` when the sheet is off; `src/api/web_ui.cpp`), one
+  radio choice per region, working without
   JavaScript. Its form posts back to the request's own path and query. The preselected region is:
   1. the region the visitor chose before: the `lake_region` cookie, when it names a region of this
      deployment;
@@ -120,6 +128,7 @@ library is involved.
 
 - A new region is a new `LakeSet` member with a region in the operator; Lake reads it from the
   variables and needs no change.
+- The order sheet around the picker is [orders.md](orders.md#how-to-change-it).
 - The page's words and layout are `web_ui_region_picker`; its styles are `fieldset.region-choices`
   and `label.region-choice` in `src/api/web_ui_styles.inc`.
 - The web app's region display is [`../ui/regions.md`](../ui/regions.md).

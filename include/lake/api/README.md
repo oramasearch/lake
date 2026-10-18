@@ -118,7 +118,14 @@ decision 56): the `PaymentProvider` interface and its manual implementation, `bi
 `payment_status_json`, and `receive_payment_notice`, the webhook's logic. `stripe.hpp` declares
 lake's own Stripe client: `stripe_payment_provider` over an injected `StripeHttp`, the
 `Stripe-Signature` check (`verify_stripe_signature`), `parse_stripe_event`, `stripe_form` and
-`stripe_cents`. `request_recorder.hpp` declares `RequestRecorder`, the
+`stripe_cents`; since lake#831 a provider also starts a Checkout subscription (`create_checkout`,
+`CheckoutRequest`) and a notice can move an order (`PaymentNotice::order_state`). `orders.hpp`
+declares the apex order sheet (lake#831, [orders](../../../docs/api/orders.md)): its configuration
+(`OrderSheet`, `order_sheet_from_environment`, `default_order_sheet_json`), the form's checks
+(`validate_order_form`), the status token, the emails (`order_email_recipients_due`,
+`order_email`), `price_list_rows` and `OrderRateLimiter`. `resend.hpp` declares lake's own Resend
+client (`send_resend_email` over an injected `ResendHttp`) and its settings
+(`resend_settings_from_environment`). `request_recorder.hpp` declares `RequestRecorder`, the
 bounded per-workspace `lake_requests` counts on their way to each workspace Zetta's time series
 (decision 54 S9, lake#384); `registry.hpp`'s `RequestAttribution` (`ApiContext::request_attribution`)
 is what one HTTP request's capability calls resolved: its outermost capability, its workspace and

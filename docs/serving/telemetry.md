@@ -29,6 +29,12 @@ The exported metric families are:
   request refused before any route (`workers_busy`, `store_root_wait`, `bad_url`, `bad_request`,
   `header_too_large`)
   is also logged and counted in `lake_http_requests_total` with that reason as its route
+- `lake_cloud_orders_total{offer,path}`, `lake_cloud_orders_refused_total{reason}` (`honeypot`,
+  `rate`, `size`) and `lake_cloud_order_emails_total{recipient,outcome}` (`sent`, `failed`): the
+  apex order sheet's orders and their email ([orders](../api/orders.md#metrics), lake#831). The
+  log lines `cloud_order_email_waiting`, `cloud_order_email_disabled`, `cloud_order_email_failed`,
+  `cloud_order_checkout_failed` and `cloud_order_not_recorded` carry the order id and the reason,
+  never a key
 - the gauge `lake_platform_unresolved_repositories`: the `repository` values in the operator's
   deployment, environment-value and domain rows that name no lake repository, so their rows are not
   shown ([platform](../api/platform.md#which-repository-a-row-names), lake#805)

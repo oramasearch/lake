@@ -152,7 +152,12 @@ form-encoded REST calls with an Idempotency-Key through the server's outbound cl
 webhook signature check with OpenSSL's HMAC; the payment provider is chosen at start from
 `LAKE_STRIPE_SECRET_KEY` and `LAKE_STRIPE_WEBHOOK_SECRET` (`environment_payment_providers`, lake#628:
 lake's own keys are platform environment variables, never a user's secret store), and `http_server.cpp` serves
-`POST /billing/stripe/webhook` through `receive_payment_notice`.
+`POST /billing/stripe/webhook` through `receive_payment_notice`. The apex order sheet (lake#831,
+[orders](../../docs/api/orders.md)): `orders.cpp` holds its configuration, checks, emails and rate
+limit, `resend.cpp` the Resend client, `web_ui.cpp` its pages (`web_ui_order_*`,
+`web_ui_price_list`, styles `.order-*` in `web_ui_styles.inc`), `stripe.cpp` the Checkout Session
+and the `checkout.session.*` events, and `http_server.cpp` its routes on the apex host and the order
+pass (email and audit) on the maintenance thread.
 
 `datasets.cpp` holds the workspace dataset rules lake applies on top of Zetta (lake#447): engine
 result databases, SQL-queryable names, CSV row checks with line numbers, and the one

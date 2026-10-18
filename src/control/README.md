@@ -204,6 +204,10 @@ They keep the payment provider's records too (migration `0074_payment_provider`,
 provider's customer id for each account, kept once (`billing_accounts`), an invoice's `payment_url`
 and `provider_status`, and `apply_payment_event`, which records a provider's event id and moves the
 invoice it names in one transaction, only while it is due, so an event is never applied twice.
+Both keep the apex order sheet's orders (migration `0089_cloud_orders`, lake#831): an order and its
+first event in one transaction, every state change with its `cloud_order_events` row, a Checkout
+notice applied once per event id through `billing_payment_events`, the email claim that holds an
+order for a lease (`FOR UPDATE SKIP LOCKED` on PostgreSQL), and the events not yet audited.
 `application_credential_records.cpp` keeps an application's signing keys and webhooks in its
 workspace (lake#352, lake#355). The stores no longer write or read `auth_app_signing_keys` or
 `auth_app_webhooks`: they envelope and open the credentials with the keystore
