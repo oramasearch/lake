@@ -788,3 +788,34 @@ export function startIntent(solution: J): string {
     const problem = text(solution, "problem");
     return [ decision, problem ? `The problem: ${problem}` : "" ].filter(Boolean).join(" ");
 }
+
+/** From a dataset to a model (lake#818). A dataset's page offers **Train a model on this**, which
+ * opens Design → Projects with New project open for that dataset; creating the project opens its
+ * page with Build pipeline open and the dataset chosen under From data. These are the addresses
+ * and the suggested name; the pages add the workspace prefix. */
+const query = (values: Record<string, string>) => new URLSearchParams(values).toString();
+
+/** The dataset as From data names it: `<database>.<name>` (`datasetChoices`' `path`). */
+export function datasetSource(database: string, name: string): string {
+  return `${database || "datasets"}.${name}`;
+}
+
+/** Where a dataset's Train a model on this goes: Projects, New project open for the dataset. */
+export function trainFromDatasetPath(database: string, name: string): string {
+  return `/design/projects?${query({ new: "1", dataset: datasetSource(database, name) })}`;
+}
+
+/** Where creating a project for a dataset goes: the project, Build pipeline open on the dataset. */
+export function buildFromDatasetPath(project: string, dataset: string): string {
+  return `/design/project?${query(dataset ? { name: project, build: "1", dataset } : { name: project })}`;
+}
+
+/** A project name to start from for a dataset: a project's name rule (lowercase letters, digits,
+ * - and _, starting with a letter or digit, at most 63), `<dataset>-model`. */
+export function projectNameFor(dataset: string): string {
+  const name = dataset.slice(dataset.lastIndexOf(".") + 1);
+  const stem = name.toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^[^a-z0-9]+/, "").replace(/-+$/, "");
+  const suffix = "-model";
+  return stem ? `${stem.slice(0, 63 - suffix.length).replace(/-+$/, "")}${suffix}` : "";
+}
+

@@ -343,3 +343,82 @@ TEST(Examples, EveryApiDocumentRequestRunsAgainstTheRegistrySchema) {
     }
     EXPECT_GE(checked, 20U) << "the experiments and streams requests at least";
 }
+
+namespace {
+
+std::string read_source(const std::string& relative) {
+    std::ifstream in(std::filesystem::path(LAKE_TEST_SOURCE_DIR) / relative);
+    std::stringstream text;
+    text << in.rdbuf();
+    return text.str();
+}
+
+std::string lowercase(std::string text) {
+    std::ranges::transform(
+        text, text.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return text;
+}
+
+} // namespace
+
+// lake#817: the home's first suggestion, "How do I load my first dataset?", is answered from the
+// Docs (Ask Orama reads them with list_docs and get_doc). The guide it finds names the page path
+// exactly as the rail shows it, links the page, and names only the formats upload_dataset takes.
+TEST(AskOramaGuidance, TheDocsAnswerTheHomesFirstSuggestionWithTheRealPath) {
+    const std::string question = "How do I load my first dataset?";
+    // The page the home asks it about, and the rail's name for that page.
+    const std::string map = read_source("frontend/src/pages/ask/lakeMap.ts");
+    const auto asked = map.find(question);
+    ASSERT_NE(asked, std::string::npos) << "the home no longer offers the question";
+    const auto line_start = map.rfind('\n', asked) + 1;
+    const auto key_start = map.find('"', line_start) + 1;
+    const std::string path = map.substr(key_start, map.find('"', key_start) - key_start);
+    ASSERT_EQ(path, "/train/data");
+    const std::string nav = read_source("frontend/src/routes/nav.ts");
+    EXPECT_NE(nav.find("{ section: \"data\", path: \"" + path + "\", label: \"Datasets\""),
+              std::string::npos)
+        << "the rail shows " << path << " as Data → Datasets";
+    EXPECT_NE(nav.find("{ section: \"data\", path: \"/drives\", label: \"Drives\""),
+              std::string::npos);
+
+    // The words a reader searches with find the guide first.
+    lake::api::ApiContext context;
+    const lake::api::ApiResult found =
+        registry().call("list_docs", {{"q", "load dataset"}}, context);
+    ASSERT_TRUE(found.ok) << found.error.message;
+    ASSERT_FALSE(found.value["pages"].empty());
+    EXPECT_EQ(found.value["pages"][0]["slug"], "load-data") << found.value.dump();
+
+    const auto guide =
+        std::ranges::find(lake::api::web_ui_guide(), "load-data", &lake::api::WebUiGuidePage::slug);
+    ASSERT_NE(guide, lake::api::web_ui_guide().end());
+    const std::string markdown(guide->markdown);
+    EXPECT_NE(markdown.find("[**Data → Datasets → Load data**](" + path + ")"), std::string::npos)
+        << "the path, exactly as the navigation shows it, linked";
+    EXPECT_NE(markdown.find("[**Data → Drives**](/drives)"), std::string::npos);
+    for (const std::string way :
+         {"**Upload**", "**Generate**", "**From a connection**", "**Load as dataset**"}) {
+        EXPECT_NE(markdown.find(way), std::string::npos) << "names the way in " << way;
+    }
+
+    // Only the formats the upload takes: each one upload_dataset accepts is named, and no other.
+    const auto upload = registry().find("upload_dataset");
+    ASSERT_NE(upload, nullptr);
+    const json formats = upload->input_schema.at("properties").at("format").at("enum");
+    const std::string first = markdown.substr(markdown.find("## Load Your First Dataset"));
+    const std::string first_section = first.substr(0, first.find("\n## ", 3));
+    for (const json& format : formats) {
+        std::string upper = format.get<std::string>();
+        std::ranges::transform(upper, upper.begin(), [](unsigned char c) {
+            return static_cast<char>(std::toupper(c));
+        });
+        EXPECT_NE(first_section.find(upper), std::string::npos) << "names " << upper;
+    }
+    const std::string lower = lowercase(markdown);
+    for (const std::string refused :
+         {"parquet", "xlsx", "excel", "avro", "feather", "orc file", "tsv", ".xls"}) {
+        EXPECT_EQ(lower.find(refused), std::string::npos)
+            << "the guide names " << refused << ", which Load data refuses";
+    }
+    EXPECT_EQ(lower.find("lake console →"), std::string::npos) << "no page is called Lake Console";
+}

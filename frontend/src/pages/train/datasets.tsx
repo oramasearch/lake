@@ -2,6 +2,7 @@
  * objects as a table. Shared by Data, Dataset, Query and Search Indexes. */
 import type { Row } from "@/lib/api";
 import { cellText, useSpaceRead } from "./workspace";
+import { tableColumns } from "./columns";
 
 /** A database the engine writes run outputs to (datasets.cpp engine_database). */
 export function engineDatabase(database: string): boolean {
@@ -28,8 +29,10 @@ export function annotateDatasets(value: { rows?: Row[] } | undefined): Row[] {
   });
 }
 
-/** A list of objects as a table, columns from the first row's keys (web_ui.cpp object_table). */
-export function ObjectTable({ rows }: { rows: unknown }) {
+/** A list of objects as a table (web_ui.cpp object_table). The headers follow `columns` when the
+ * answer names them (a `workspace_sql` answer's `columns`: SELECT order), never the rows' keys,
+ * which arrive sorted (lake#812); without them, the keys in the order the rows first carry them. */
+export function ObjectTable({ rows, columns: named }: { rows: unknown; columns?: unknown }) {
   if (!Array.isArray(rows) || rows.length === 0) return null;
   const first = rows[0];
   if (!first || typeof first !== "object" || Array.isArray(first)) {
@@ -41,7 +44,7 @@ export function ObjectTable({ rows }: { rows: unknown }) {
       </ul>
     );
   }
-  const columns = Object.keys(first as Row);
+  const columns = tableColumns(rows, named);
   return (
     <div className="table-wrap">
       <table>
