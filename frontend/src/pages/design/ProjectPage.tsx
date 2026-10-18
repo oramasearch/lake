@@ -36,14 +36,27 @@ import { ActiveSolution, ProposalContent } from "./SolutionPanels";
 import "@/styles/design.css";
 
 export default function ProjectPage() {
-  const [params] = useSearchParams();
+  const [params, setParams] = useSearchParams();
   const name = params.get("name") ?? "";
   useDesignTrail({ label: "Projects", path: "/design/projects" }, [name ? entityCrumb(name) : { label: "Project" }], name ? `Project: ${name}` : "Project");
   // The same read the body makes: the header carries the project's status.
   const ready = useWorkspaceStatus().q.data?.ready === true;
   const project = useWq<J>("get_project", { name }, { enabled: ready && !!name });
   const status = project.data ? projectState(withoutProjectAgentChecks<J>(project.data.graphs)).state : null;
-  const [building, setBuilding] = useState(false);
+  // `?build=1&dataset=<database>.<name>` (New project for a dataset, lake#818) opens Build pipeline
+  // with that dataset chosen.
+  const [building, setBuilding] = useState(params.get("build") === "1");
+  const source = params.get("dataset") ?? "";
+  const build = (open: boolean) => {
+    setBuilding(open);
+    // Closing it leaves the project's own address, so a reload does not open it again.
+    if (!open && (params.has("build") || params.has("dataset"))) {
+      const next = new URLSearchParams(params);
+      next.delete("build");
+      next.delete("dataset");
+      setParams(next, { replace: true });
+    }
+  };
   return (
     <Page
       eyebrow="Design · Project"
@@ -61,7 +74,7 @@ export default function ProjectPage() {
       }
     >
       <WorkspaceGate>
-        <ProjectBody key={name} name={name} building={building} onBuilding={setBuilding} />
+        <ProjectBody key={name} name={name} source={source} building={building} onBuilding={build} />
       </WorkspaceGate>
     </Page>
   );
@@ -71,7 +84,7 @@ type Task = J & { status?: string; message?: string; build_error?: string };
 const TABS = ["overview", "pipelines", "runs", "solution"] as const;
 type Tab = (typeof TABS)[number];
 
-function ProjectBody({ name, building, onBuilding }: { name: string; building: boolean; onBuilding: (open: boolean) => void }) {
+function ProjectBody({ name, source, building, onBuilding }: { name: string; source: string; building: boolean; onBuilding: (open: boolean) => void }) {
   const scope = useScope();
   const ws = useWsPath();
   const [live, setLive] = useState(false);
@@ -239,7 +252,7 @@ function ProjectBody({ name, building, onBuilding }: { name: string; building: b
             <ProposalContent project={name} task={solutionTask} />
           ) : null)}
       </Split>
-      {building && <BuildPipeline project={name} datasets={datasets} methodologies={methodologies.data} onClose={() => onBuilding(false)} />}
+      {building && <BuildPipeline project={name} source={source} datasets={datasets} methodologies={methodologies.data} onClose={() => onBuilding(false)} />}
     </div>
   );
 }
@@ -332,13 +345,26 @@ function PipelineAction({ project, graphId, approved }: { project: string; graph
   );
 }
 
-function BuildPipeline({ project, datasets, methodologies, onClose }: { project: string; datasets: ReturnType<typeof useWq<J>>; methodologies: J | undefined; onClose: () => void }) {
+function BuildPipeline({
+  project,
+  source,
+  datasets,
+  methodologies,
+  onClose,
+}: {
+  project: string;
+  source: string;
+  datasets: ReturnType<typeof useWq<J>>;
+  methodologies: J | undefined;
+  onClose: () => void;
+}) {
   const scope = useScope();
   const ws = useWsPath();
   const navigate = useNavigate();
   const toast = useToast();
   const [intent, setIntent] = useState("");
-  const [dataset, setDataset] = useState("");
+  // The dataset the address names (a dataset's Train a model on this, lake#818), else none.
+  const [dataset, setDataset] = useState(source);
   const [label, setLabel] = useState("");
   const [entity, setEntity] = useState("");
   const [methodology, setMethodology] = useState("");

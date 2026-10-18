@@ -252,6 +252,41 @@ function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
+/** A string literal of `value` in JavaScript or Python source: JSON's escaping is valid in both. */
+const sourceString = (value: string) => JSON.stringify(value);
+
+/** Quick start's JavaScript example: a list read with `fetch`. JavaScript does not expand a shell
+ * variable inside a string, so with no key the bearer is read from `process.env.LAKE_KEY` in a
+ * template literal; with a key made on the page, the key is written in as a string (lake#815). */
+export function quickStartFetch(origin: string, key: string | null): string {
+  const auth = key === null ? `\`Bearer \${process.env.${KEY_ENV}}\`` : sourceString(`Bearer ${key}`);
+  return (
+    `const res = await fetch("${origin}/v1/list_repositories?limit=5", {\n` +
+    `  headers: { Authorization: ${auth} },\n` +
+    `});\n` +
+    `const body = await res.json();\n` +
+    `if (!body.ok) throw new Error(\`\${body.error.code}: \${body.error.message} at \${body.error.path}\`);\n` +
+    `console.log(body.value.items);`
+  );
+}
+
+/** Quick start's Python example. Python's urllib announces itself as "Python-urllib/3.x", which
+ * the edge in front of lake refuses with "403 error code: 1010" (lake#589); a script names
+ * itself instead. With no key the bearer is read from `os.environ["LAKE_KEY"]`. */
+export function quickStartPython(origin: string, key: string | null): string {
+  const auth = key === null ? `"Bearer " + os.environ["${KEY_ENV}"]` : sourceString(`Bearer ${key}`);
+  return (
+    `import json, os, urllib.request\n\n` +
+    `req = urllib.request.Request(\n` +
+    `    "${origin}/v1/list_repositories?limit=5",\n` +
+    `    headers={"Authorization": ${auth},\n` +
+    `             "User-Agent": "my-script/1.0"},\n` +
+    `)\n` +
+    `body = json.load(urllib.request.urlopen(req))\n` +
+    `print(body["value"]["items"])`
+  );
+}
+
 /** Copy-as-curl for one operation: path parameters and required query parameters as
  * placeholders, a JSON body with the required fields, the bearer as given. */
 export function curlFor(op: Operation, origin: string, key: string, components?: Record<string, Row>): string {

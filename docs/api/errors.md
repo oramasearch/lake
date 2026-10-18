@@ -120,7 +120,8 @@ lacks a scope or a grant is still 403 `unauthorized`.
   the caller sent (`no model named 'm-1'`) is about the field that carried it. An `engine_error`
   or `invalid_argument` whose message names a field is answered as `invalid_input`. Inside
   `workspace_query`/`workspace_act` the path is below `/input`. `predict` reports the engine's
-  "row 2 has no 'tenure'" at `/rows/2/tenure`.
+  "row 2 has no 'tenure'" at `/rows/2/tenure`, and rewrites the message to count from one with the
+  row's key: "row 3 ('partial') has no 'tenure'" (lake#819).
 - **A message that leads with an input field's name** (`confirm must be the service name`): the
   registry points `path` at that field when the handler gave none.
 - **An account that does not own the workspace** is refused at `/customer_id` (`customer_id is not the

@@ -18,6 +18,8 @@ import {
   keyInput,
   keyState,
   operationsOf,
+  quickStartFetch,
+  quickStartPython,
   requestBodyOf,
   responseSchemaOf,
   skeleton,
@@ -265,4 +267,42 @@ test("each skill install fetches the public SKILL.md from lake's origin", () => 
   }
   assert.match(skillInstall("claude-code", "https://lake.example")[0].code, /~\/\.claude\/skills\/lake\/SKILL\.md$/);
   assert.match(skillInstall("codex", "https://lake.example")[0].code, /~\/\.codex\/AGENTS\.md/);
+});
+
+// lake#815: JavaScript does not expand `$LAKE_KEY` inside a string, so the Quick start fetch
+// example must read the key from the environment, and a key made on the page is written in.
+const runFetchSnippet = async (code: string, env: Record<string, string>) => {
+  const seen: { url: string; auth: string | undefined }[] = [];
+  const fakeFetch = async (url: string, init: { headers: Record<string, string> }) => {
+    seen.push({ url, auth: init.headers.Authorization });
+    return { json: async () => ({ ok: true, value: { items: [] } }) };
+  };
+  const quiet = { log: () => {} };
+  const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor;
+  await new AsyncFunction("fetch", "process", "console", code)(fakeFetch, { env }, quiet);
+  return seen;
+};
+
+test("the Quick start fetch example reads LAKE_KEY from the environment when no key is made", async () => {
+  const code = quickStartFetch("https://lake.example", null);
+  assert.doesNotMatch(code, /["']Bearer \$LAKE_KEY["']/, "no shell variable inside a JavaScript string");
+  assert.doesNotMatch(code, /"[^"\n]*\$LAKE_KEY[^"\n]*"/);
+  assert.match(code, /Authorization: `Bearer \$\{process\.env\.LAKE_KEY\}`/);
+  const seen = await runFetchSnippet(code, { LAKE_KEY: "lk_test" });
+  assert.deepEqual(seen, [{ url: "https://lake.example/v1/list_repositories?limit=5", auth: "Bearer lk_test" }]);
+});
+
+test("the Quick start fetch example carries a key made on the page", async () => {
+  const code = quickStartFetch("https://lake.example", "lk_made\"here");
+  assert.doesNotMatch(code, /LAKE_KEY/);
+  const seen = await runFetchSnippet(code, {});
+  assert.equal(seen[0].auth, 'Bearer lk_made"here');
+});
+
+test("the Quick start Python example reads LAKE_KEY or carries the key made", () => {
+  const none = quickStartPython("https://lake.example", null);
+  assert.match(none, /"Authorization": "Bearer " \+ os\.environ\["LAKE_KEY"\]/);
+  assert.match(none, /"User-Agent": "my-script\/1\.0"/);
+  assert.doesNotMatch(none, /\$LAKE_KEY/);
+  assert.match(quickStartPython("https://lake.example", "lk_x"), /"Authorization": "Bearer lk_x"/);
 });

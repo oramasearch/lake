@@ -29,6 +29,10 @@ organization's) and `workspace_id`; [Getting Started](/docs) says where to find 
    each week*.
 3. Press **Create project**.
 
+From a dataset's page, **Train a model on this** opens New project for that dataset, and
+**Create project** then opens **Build pipeline** with the dataset chosen under **From data**
+([Load Data](/docs/load-data#train-a-model-on-a-dataset)).
+
 `POST /v1/create_project`
 
 ```json
