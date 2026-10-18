@@ -2,6 +2,7 @@
  * use, and where the old Datasets links go now. Pure, so `tests/connections.test.ts` runs it under
  * Node. A connection is the workspace engine's (`list_connections`, `create_connection`,
  * `delete_connection`, `list_source_tables`, reached through `workspace_query`/`workspace_act`). */
+import { notAKeyword } from "../../lib/sqlKeywords.ts";
 
 export type Row = Record<string, unknown>;
 
@@ -127,10 +128,11 @@ export function tableQuery(schema: string, table: string, kind: string): string 
   return kind === "snowflake" ? `SELECT * FROM ${schema ? `${schema}.${table}` : table}` : `SELECT * FROM ${from}`;
 }
 
-/** A dataset name from a table's name: letters, digits and underscores, starting with a letter. */
+/** A dataset name from a table's name: letters, digits and underscores, starting with a letter or
+ * underscore, and not a SQL keyword (a table `Order` fills `Order_data`). */
 export function datasetNameFor(table: string): string {
   const cleaned = table.replace(/[^A-Za-z0-9_]/g, "_").replace(/^[^A-Za-z_]+/, "");
-  return (cleaned || "dataset").slice(0, 63);
+  return notAKeyword((cleaned || "dataset").slice(0, 63));
 }
 
 /** Where an old Data → Datasets link goes now: `?browse=<connection>` opens that connection and

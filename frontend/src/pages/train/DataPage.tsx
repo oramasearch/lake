@@ -382,7 +382,7 @@ function Upload({ onClose, onBusy }: { onClose: () => void; onBusy: (busy: boole
       <label>
         Dataset name
         <input name="table_name" required pattern={NAME_PATTERN} placeholder="e.g. accounts" value={tableName} onChange={(e) => setTableName(e.target.value)} />
-        <small className="muted">Named after the file; change it if you like. Letters, digits and underscores, starting with a letter, so SQL can query it.</small>
+        <small className="muted">Named after the file; change it if you like. Letters, digits and underscores, starting with a letter or an underscore, so SQL can query it.</small>
       </label>
       <label className="flex! items-start gap-2">
         <input type="checkbox" name="if_exists" value="rename" checked={rename} onChange={(e) => setRename(e.target.checked)} />

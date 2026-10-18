@@ -12,6 +12,14 @@ test("choosing a file fills an empty Dataset name from the file's name, made val
   assert.match(nameForFile("", "", "a".repeat(80) + ".csv"), /^[A-Za-z_][A-Za-z0-9_]{0,62}$/);
 });
 
+test("a file named after a SQL keyword fills a name lake accepts", () => {
+  assert.equal(nameForFile("", "", "order.csv"), "order_data");
+  assert.equal(nameForFile("", "", "group.csv"), "group_data");
+  assert.equal(nameForFile("", "", "Select.JSONL"), "select_data");
+  assert.equal(nameForFile("", "", "orders.csv"), "orders", "only a whole keyword gets the suffix");
+  assert.equal(nameForFile("order_data", "order_data", "group.csv"), "group_data", "a filled name follows the next file");
+});
+
 test("a name the person typed is kept when a file is chosen", () => {
   assert.equal(nameForFile("accounts", "", "customers.csv"), "accounts");
   assert.equal(nameForFile("accounts", "customers", "orders.csv"), "accounts", "edited after Lake filled it");
