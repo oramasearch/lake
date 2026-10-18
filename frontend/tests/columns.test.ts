@@ -3,7 +3,7 @@
  * runs it. */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { datasetColumns, tableColumns } from "../src/pages/train/columns.ts";
+import { cappedStatement, columnFacts, datasetColumns, firstRows, limitRefused, tableColumns, typeLabel } from "../src/pages/train/columns.ts";
 
 // The answer lake-dev gave the review's query (lake#812): `columns` in SELECT order, each row's keys
 // sorted.
@@ -56,4 +56,47 @@ test("a dataset's columns are the table's own order, never sorted", () => {
     "score",
   ]);
   assert.deepEqual(datasetColumns(undefined, ["z", "a"], undefined), ["z", "a"]);
+});
+
+// zetta#1021: get_dataset answers typed columns in the file's order; an older engine answers names.
+const typed = [
+  { name: "account_id", type: "integer", nullable: false, null_fraction: 0 },
+  { name: "plan", type: "string", nullable: true, null_fraction: 0.25 },
+  { name: "monthly_spend", type: "number", nullable: false, null_fraction: 0 },
+  { name: "churned", type: "boolean", nullable: false, null_fraction: null },
+];
+
+test("get_dataset's typed columns keep the file's order, for the Columns tab and the First Rows headers", () => {
+  assert.deepEqual(datasetColumns(typed, ["churned", "plan"], []), ["account_id", "plan", "monthly_spend", "churned"]);
+  const rows = [{ account_id: 1, churned: false, monthly_spend: 9.5, plan: "pro" }];
+  assert.deepEqual(tableColumns(rows, typed), ["account_id", "plan", "monthly_spend", "churned"]);
+});
+
+test("get_dataset's types and null shares are read by name; names alone carry none", () => {
+  const facts = columnFacts(typed);
+  assert.deepEqual(facts.get("plan"), { type: "string", nullable: true, nullFraction: 0.25 });
+  assert.equal(facts.get("churned")?.nullFraction, null, "an unknown share stays unknown");
+  assert.equal(columnFacts(["account_id", "plan"]).size, 0, "an engine before zetta#1021 answers names");
+  assert.deepEqual(
+    ["integer", "number", "string", "boolean", "object", "array", "null", "mixed", "unknown"].map(typeLabel),
+    ["integer", "decimal", "text", "boolean", "JSON", "JSON", "empty", "mixed", "unknown"],
+  );
+});
+
+test("an engine that refuses LIMIT is told apart from a query's own error", () => {
+  assert.ok(limitRefused(new Error("expected ';' after statement, got 'LIMIT' (at position 30)")));
+  assert.ok(limitRefused({ message: "expected ';' after statement, got 'limit'" }));
+  assert.ok(!limitRefused(new Error("column \"nope\" does not exist in datasets.accounts")));
+  assert.ok(!limitRefused(undefined));
+  assert.deepEqual(firstRows([1, 2, 3, 4], 2), [1, 2], "the fallback keeps the first rows itself");
+  assert.deepEqual(firstRows(undefined, 2), []);
+});
+
+test("the Query page asks for one row more than it shows, unless the statement pages itself", () => {
+  assert.equal(cappedStatement("SELECT * FROM datasets.accounts", 500), "SELECT * FROM datasets.accounts LIMIT 501");
+  assert.equal(cappedStatement("  select plan from t;  ", 500), "select plan from t LIMIT 501");
+  for (const own of ["SELECT * FROM t LIMIT 5", "SELECT * FROM t OFFSET 3", "SELECT * FROM t FETCH FIRST 2 ROWS ONLY", "WITH x AS (SELECT 1) SELECT * FROM x", "SELECT 1; SELECT 2"]) {
+    assert.equal(cappedStatement(own, 500), own, own);
+  }
+  assert.equal(cappedStatement("SELECT * FROM t WHERE note = 'no limit here'", 500), "SELECT * FROM t WHERE note = 'no limit here' LIMIT 501", "quoted text is not a LIMIT");
 });

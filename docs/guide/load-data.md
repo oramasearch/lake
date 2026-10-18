@@ -157,18 +157,29 @@ outputs** and **All tables**; search filters by name.
 Open a dataset for its page:
 
 - **Figures**: Rows, Size, Columns and Copies.
-- **Columns** tab: each column's **Type** (the value type SQL sees in the first rows: integer,
-  decimal, text, boolean) and **Reads as** (the workspace's analysis of the column: identifier,
-  categorical, numeric, datetime, free text …).
+- **Columns** tab: each column's **Type** (integer, decimal, text, boolean, JSON, mixed or empty),
+  **Reads as** (the workspace's analysis of the column: identifier, categorical, numeric,
+  datetime, free text …) and **Empty**, the share of rows with no value in it.
 - **First Rows** tab: the first 20 rows.
 
-Both tabs list the columns in the table's own order, the order the workspace reports for the
-dataset (`get_dataset`'s `columns`, and the `columns` of `SELECT *`), never sorted by the page. The
-Query page does the same with a query's answer: its headers follow the `columns` `workspace_sql`
-answers, which are in the order the `SELECT` asked for (lake#812). A row arrives as a JSON object
-whose keys are sorted, so a table built from them read alphabetically before. The workspace keeps a
-loaded file's rows as JSON objects, so today the table's own order is alphabetical too; keeping the
-file's header order is zetta#1021, and the page follows it with no change once it lands.
+Both tabs list the columns in the file's own order: the CSV header, the Parquet file's schema, the
+order a JSON Lines file first writes each key, or a connection query's `SELECT` list. The workspace
+records that order when it loads the data (zetta#1021) and reports it as `get_dataset`'s `columns`
+and the `columns` of `SELECT *`; the page never sorts them. The Query page does the same with a
+query's answer: its headers follow the `columns` `workspace_sql` answers, which are in the order
+the `SELECT` asked for (lake#812).
+
+**Type** and **Empty** are measured over the whole dataset: `get_dataset` answers each column as
+`{name, type, nullable, null_fraction}`. A workspace engine older than zetta#1021 answers the names
+only; the page then reads the type from the first 20 rows and the empty share from the analysis's
+sample, and the columns of a dataset loaded before zetta#1021 stay in the order the workspace has
+always given them (alphabetical, `column_order: "first_seen"`). Load the file again to get its own
+order.
+
+The page asks the workspace for only the first 20 rows (`LIMIT 20`, which the engine pushes down to
+its partitions, so no more than 20 rows per partition leave them). A workspace engine older than
+`LIMIT` (zetta#1039) refuses it with `expected ';' after statement, got 'LIMIT'`; the page then asks
+for the table and keeps the first 20 rows itself.
 - **Partitions** tab, when the dataset has partitions.
 - **Facts**: database, **Stored as** (how the workspace keeps the rows, JSON rows for every
   dataset), rows, bytes, partitions and copies.
@@ -214,7 +225,11 @@ keep more so the dataset survives losing a node (`promote_dataset` inside `works
 **Query with SQL** on Datasets, or **Query it** on a dataset, opens **Query**: read-only SQL over
 the workspace's data, one `SELECT` or `WITH` query at a time. ⌘ Enter (Ctrl Enter) runs it; the
 statement and database stay in the address so a query can be shared. Results show the first 500
-rows.
+rows. A `SELECT` that has no `LIMIT`, `OFFSET` or `FETCH` of its own is sent with `LIMIT 501`, so
+the workspace sends at most one row more than the page shows and the title says **More than 500
+rows** when there are; add `LIMIT` and `OFFSET` to page through the rest. Any other statement is
+sent as written. Against a workspace engine that refuses `LIMIT`, the statement is sent as written
+and the page shows the first 500 rows of the answer.
 
 `POST /v1/workspace_sql`
 
@@ -230,7 +245,7 @@ The workspace speaks a subset of SQL:
 - one `WHERE` comparison;
 - `COUNT(*)`, `COUNT(col)`, `SUM`, `AVG`, `MIN` and `MAX`, with or without `GROUP BY` (on any
   column, including text);
-- `ORDER BY`, `LIMIT` and `OFFSET`;
+- `ORDER BY`, `LIMIT`, `OFFSET` and `FETCH FIRST n ROWS ONLY`;
 - no joins and no expressions.
 
 Anything that does not start with `SELECT` or `WITH`, several statements, and writes are refused
@@ -272,7 +287,7 @@ members hold `read` unless they were granted more ([Grants and Effective Access]
 
 - An upload is one file of at most 16 MiB.
 - The dataset list shows names; row counts and sizes are on each dataset's page.
-- A query shows at most 500 rows; the dataset page samples 20.
+- A query shows at most 500 rows (and asks for at most 501); the dataset page reads 20.
 - Workspace reads time out after 15 seconds and actions after 60.
 
 ## Troubleshooting
