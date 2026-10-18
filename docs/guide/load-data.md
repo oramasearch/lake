@@ -164,21 +164,21 @@ Open a dataset for its page:
 
 Both tabs list the columns in the file's own order: the CSV header, the Parquet file's schema, the
 order a JSON Lines file first writes each key, or a connection query's `SELECT` list. The workspace
-records that order when it loads the data (zetta#1021) and reports it as `get_dataset`'s `columns`
+records that order when it loads the data and reports it as `get_dataset`'s `columns`
 and the `columns` of `SELECT *`; the page never sorts them. The Query page does the same with a
 query's answer: its headers follow the `columns` `workspace_sql` answers, which are in the order
 the `SELECT` asked for (lake#812).
 
 **Type** and **Empty** are measured over the whole dataset: `get_dataset` answers each column as
-`{name, type, nullable, null_fraction}`. A workspace engine older than zetta#1021 answers the names
-only; the page then reads the type from the first 20 rows and the empty share from the analysis's
-sample, and the columns of a dataset loaded before zetta#1021 stay in the order the workspace has
-always given them (alphabetical, `column_order: "first_seen"`). Load the file again to get its own
+`{name, type, nullable, null_fraction}`. A workspace that does not yet keep column order answers the
+names only; the page then reads the type from the first 20 rows and the empty share from the analysis's
+sample, and the columns of a dataset loaded before the workspace kept column order stay in the order
+it has always given them (alphabetical, `column_order: "first_seen"`). Load the file again to get its own
 order.
 
-The page asks the workspace for only the first 20 rows (`LIMIT 20`, which the engine pushes down to
-its partitions, so no more than 20 rows per partition leave them). A workspace engine older than
-`LIMIT` (zetta#1039) refuses it with `expected ';' after statement, got 'LIMIT'`; the page then asks
+The page asks the workspace for only the first 20 rows (`LIMIT 20`, which the workspace pushes down
+to its partitions, so no more than 20 rows per partition leave them). A workspace older than `LIMIT`
+refuses it with `expected ';' after statement, got 'LIMIT'`; the page then asks
 for the table and keeps the first 20 rows itself.
 - **Partitions** tab, when the dataset has partitions.
 - **Facts**: database, **Stored as** (how the workspace keeps the rows, JSON rows for every
@@ -228,7 +228,7 @@ statement and database stay in the address so a query can be shared. Results sho
 rows. A `SELECT` that has no `LIMIT`, `OFFSET` or `FETCH` of its own is sent with `LIMIT 501`, so
 the workspace sends at most one row more than the page shows and the title says **More than 500
 rows** when there are; add `LIMIT` and `OFFSET` to page through the rest. Any other statement is
-sent as written. Against a workspace engine that refuses `LIMIT`, the statement is sent as written
+sent as written. Against a workspace that refuses `LIMIT`, the statement is sent as written
 and the page shows the first 500 rows of the answer.
 
 `POST /v1/workspace_sql`
