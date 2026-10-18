@@ -151,6 +151,14 @@ Open a dataset for its page:
   decimal, text, boolean) and **Reads as** (the workspace's analysis of the column: identifier,
   categorical, numeric, datetime, free text …).
 - **First Rows** tab: the first 20 rows.
+
+Both tabs list the columns in the table's own order, the order the workspace reports for the
+dataset (`get_dataset`'s `columns`, and the `columns` of `SELECT *`), never sorted by the page. The
+Query page does the same with a query's answer: its headers follow the `columns` `workspace_sql`
+answers, which are in the order the `SELECT` asked for (lake#812). A row arrives as a JSON object
+whose keys are sorted, so a table built from them read alphabetically before. The workspace keeps a
+loaded file's rows as JSON objects, so today the table's own order is alphabetical too; keeping the
+file's header order is zetta#1021, and the page follows it with no change once it lands.
 - **Partitions** tab, when the dataset has partitions.
 - **Facts**: database, **Stored as** (how the workspace keeps the rows, JSON rows for every
   dataset), rows, bytes, partitions and copies.

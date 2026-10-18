@@ -44,7 +44,7 @@ function QueryContent() {
     setShown({ statement, database });
     setDraft({ statement, database });
   }
-  const result = useSpaceRead<{ rows?: Row[] }>("workspace_sql", { statement, database: database || undefined }, { enabled: !!statement });
+  const result = useSpaceRead<{ columns?: string[]; rows?: Row[] }>("workspace_sql", { statement, database: database || undefined }, { enabled: !!statement });
   const rows = result.data?.rows ?? [];
   const run = () => {
     const next = new URLSearchParams(params);
@@ -112,7 +112,7 @@ function QueryContent() {
               The query matched nothing.
             </Empty>
           ) : (
-            <ObjectTable rows={rows.slice(0, 500)} />
+            <ObjectTable rows={rows.slice(0, 500)} columns={result.data.columns} />
           )}
         </Card>
       )}
