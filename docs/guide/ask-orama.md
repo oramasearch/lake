@@ -97,6 +97,13 @@ Read the conversation back with
 Through MCP the tools have the same names and inputs: `send_ask_message`, `get_agent_task`,
 `settle_ask_turn`, `get_ask_conversation`.
 
+## Ask How to Do Something
+
+Ask how to do something in Lake (*How do I load my first dataset?*) and Ask Orama answers from
+these Docs: it names each page the way the navigation shows it, such as **Data → Datasets → Load
+data**, links to it, and names only the file formats and limits Lake accepts. When an answer names a
+page you cannot find, open the guide it cites, or search the Docs.
+
 ## Talk to Another Agent
 
 The **Talk to** selector under the message box picks who answers: Ask Orama first, then the Agent

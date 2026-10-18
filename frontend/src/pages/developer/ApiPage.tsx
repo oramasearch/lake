@@ -12,7 +12,7 @@ import { plural } from "@/lib/format";
 import { useSession } from "@/lib/session";
 import { Button, Card, cx, Empty, ErrorBlock, FilterChips, Notice, Page, Skeleton } from "@/lib/ui";
 import { CodeBlock, Chip, DownloadButton, EndpointStrip, JsonBox, KeysPanel, originOf, PageTabs, prettyJson, useMcpSetup, useTab } from "./parts";
-import { curlFor, groupOperations, type Operation, operationsOf, requestBodyOf, responseSchemaOf, schemaText } from "./logic";
+import { curlFor, groupOperations, type Operation, operationsOf, quickStartFetch, quickStartPython, requestBodyOf, responseSchemaOf, schemaText } from "./logic";
 
 const TABS = ["keys", "start", "operations"] as const;
 type Tab = (typeof TABS)[number];
@@ -121,29 +121,15 @@ function QuickStart({ keyValue }: { keyValue: string | null }) {
   const key = keyValue ?? "$LAKE_KEY";
   const customer = space?.id ?? viewer.customer_id ?? "<customer id>";
   const workspace = workspaceId ?? "<workspace id>";
-  const fetchCode =
-    `const res = await fetch("${base}/v1/list_repositories?limit=5", {\n` +
-    `  headers: { Authorization: "Bearer ${key}" },\n` +
-    `});\n` +
-    `const body = await res.json();\n` +
-    `if (!body.ok) throw new Error(\`\${body.error.code}: \${body.error.message} at \${body.error.path}\`);\n` +
-    `console.log(body.value.items);`;
-  // Python's urllib announces itself as "Python-urllib/3.x", which the edge in front of lake
-  // refuses with "403 error code: 1010" (lake#589); a script names itself instead.
-  const pythonCode =
-    `import json, os, urllib.request\n\n` +
-    `req = urllib.request.Request(\n` +
-    `    "${base}/v1/list_repositories?limit=5",\n` +
-    `    headers={"Authorization": "Bearer " + os.environ["LAKE_KEY"],\n` +
-    `             "User-Agent": "my-script/1.0"},\n` +
-    `)\n` +
-    `body = json.load(urllib.request.urlopen(req))\n` +
-    `print(body["value"]["items"])`;
+  const fetchCode = quickStartFetch(base, keyValue);
+  const pythonCode = quickStartPython(base, keyValue);
   return (
     <div className="space-y-4">
       {!keyValue && (
         <Notice title="Use Your Own Key">
-          The examples read the key from <code>$LAKE_KEY</code>. Make a key on the Keys tab and it is filled in here until you leave the page.
+          The examples read the key from the <code>LAKE_KEY</code> environment variable: <code>$LAKE_KEY</code> in the shell,{" "}
+          <code>process.env.LAKE_KEY</code> in JavaScript and <code>os.environ["LAKE_KEY"]</code> in Python. Make a key on the Keys tab and set it with{" "}
+          <code>export LAKE_KEY=…</code>, or it is filled in here until you leave the page.
         </Notice>
       )}
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">

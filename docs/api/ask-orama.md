@@ -71,6 +71,30 @@ shows it and keeps it honest.
   optional) and reads the person's conversation in that workspace; a missing, malformed, unknown or
   foreign `workspace_id` is `invalid_input` at `/workspace_id`.
 
+## How-to answers come from the Docs (lake#817)
+
+A question about using Lake ("How do I load my first dataset?", the home's first suggestion) is
+answered from the Docs, never from what an assistant assumes a data product looks like. Ask Orama
+reads `list_docs` with the subject's words and then `get_doc` for the best guide (both are public
+reads every turn key carries), and its instructions in `oramasearch/agent-ask-orama` say to name
+pages, tabs and buttons exactly as the guide and the navigation show them, joined by arrows, to
+link each page, and to name only the formats and limits the guide states.
+
+So the guides are written for that reader too. Each page a guide sends a person to is written as
+the rail shows it and linked to its path, for example
+`[**Data → Datasets → Load data**](/train/data)`; the web app's Markdown opens a lake path in the
+current workspace. [Datasets and Loading Data](../guide/load-data.md) starts with *Load Your First
+Dataset*: the path, the formats Load data accepts (CSV or JSONL, the `format` values
+`upload_dataset` takes) and the other ways in (Generate, From a connection, a drive's Load as
+dataset). An earlier answer named a "Lake Console → datasets" page, an "Upload dataset" button and
+Parquet, none of which Lake has.
+
+`AskOramaGuidance.TheDocsAnswerTheHomesFirstSuggestionWithTheRealPath` (`tests/test_examples.cpp`)
+holds this: the home still asks the question about `/train/data`, the rail shows that path as Data →
+Datasets, `list_docs` with `load dataset` finds the guide first, the guide links the path as Data →
+Datasets → Load data and names every way in, names each format `upload_dataset` accepts and no other
+(Parquet, Excel, Avro, …), and never calls a page "Lake Console".
+
 ## Capabilities (lake#561)
 
 The conversation is written only by lake. The web app, and the server-rendered page's forms, go
