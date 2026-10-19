@@ -2593,6 +2593,349 @@ TEST_P(HttpResponseIsolation, TheWebAppTalksToAskOramaThroughCapabilities) {
     EXPECT_TRUE(latest("churn").starts_with("HTTP/1.1 400"));
 }
 
+// lake#794: a proposal whose input the capability's schema refuses is never offered. The reply
+// says what is missing and asks for it; a confirm that still fails is not marked done.
+TEST_P(HttpResponseIsolation, AskOramaOffersOnlyProposalsTheCapabilitySchemaAccepts) {
+    auto connection = connect();
+    const std::string cookie = sign_in(*connection);
+    const std::string customer_id =
+        nlohmann::json::parse(
+            response_body(connection->request("GET", "/v1/list_customers", "", cookie)))
+            .at("value")
+            .at("items")
+            .at(0)
+            .at("id");
+    select_workspace(*connection, customer_id);
+    const std::string workspace_id = connection->workspace_id;
+    const std::vector<std::pair<std::string, std::string>> same_origin{
+        {"Origin", "http://localhost"}, {"Sec-Fetch-Site", "same-origin"}};
+    const auto call = [&](const std::string& name, nlohmann::json input) {
+        input["customer_id"] = customer_id;
+        input["workspace_id"] = workspace_id;
+        const std::string response = connection->request("POST",
+                                                         "/v1/" + name,
+                                                         input.dump(),
+                                                         cookie,
+                                                         "HTTP/1.1",
+                                                         {},
+                                                         "application/json",
+                                                         same_origin);
+        return std::pair{response, nlohmann::json::parse(response_body(response))};
+    };
+    const auto conversation_messages = [&](const std::string& conversation) {
+        return nlohmann::json::parse(response_body(connection->request(
+            "GET",
+            "/v1/get_ask_conversation?customer_id=" + customer_id +
+                "&workspace_id=" + workspace_id + "&conversation_id=" + conversation,
+            "",
+            cookie)))["value"]["messages"];
+    };
+
+    // create_index without `table` and create_stream without `zetta`, as Ask Orama proposed
+    // them, beside one that can run. workspace_id is left for lake to fill.
+    agents_->answer = {
+        {"ok", true},
+        {"reply", "I can do that."},
+        {"proposals",
+         nlohmann::json::array(
+             {{{"capability", "create_index"},
+               {"input", {{"customer_id", customer_id}}},
+               {"impact", "A search index over your customers dataset."}},
+              {{"capability", "create_stream"},
+               {"input", {{"customer_id", customer_id}, {"topic", "orders"}}},
+               {"impact", "A stream named orders."}},
+              {{"capability", "create_stream"},
+               {"input", {{"customer_id", customer_id}, {"zetta", "bus"}, {"topic", "orders"}}},
+               {"impact", "A stream named orders on the Lake bus."}},
+              {{"capability", "create_stream"},
+               {"input",
+                {{"customer_id", customer_id}, {"zetta", "workspace"}, {"topic", "two words"}}},
+               {"impact", "A stream named two words."}}})},
+        {"reads", nlohmann::json::array()},
+        {"delegations", nlohmann::json::array()}};
+    const auto [sent_response, sent] =
+        call("send_ask_message", {{"message", "Make a search index over my customers."}});
+    ASSERT_TRUE(sent_response.starts_with("HTTP/1.1 200")) << sent_response;
+    const std::string conversation = sent["value"]["conversation_id"];
+    const std::string task = sent["value"]["task_id"];
+    run_agent_task(*connection, task);
+    const auto [settled_response, settled] = call(
+        "settle_ask_turn", {{"conversation_id", conversation}, {"task_id", task}, {"kind", "ask"}});
+    ASSERT_TRUE(settled_response.starts_with("HTTP/1.1 200")) << settled_response;
+
+    const auto messages = conversation_messages(conversation);
+    ASSERT_EQ(messages.size(), 2U) << messages.dump();
+    const auto& reply = messages[1];
+    const auto& offered = reply["payload"]["proposals"];
+    ASSERT_EQ(offered.size(), 2U) << "only the proposals that can run are offered: "
+                                  << reply.dump();
+    EXPECT_EQ(offered[0]["capability"], "create_stream");
+    EXPECT_EQ(offered[0]["input"]["zetta"], "bus");
+    const auto& withheld = reply["payload"]["withheld_proposals"];
+    ASSERT_EQ(withheld.size(), 2U) << reply.dump();
+    EXPECT_EQ(withheld[0]["capability"], "create_index");
+    EXPECT_EQ(withheld[0]["error"]["code"], "invalid_input");
+    EXPECT_EQ(withheld[0]["error"]["path"], "/table");
+    EXPECT_EQ(withheld[1]["capability"], "create_stream");
+    EXPECT_EQ(withheld[1]["error"]["path"], "/zetta");
+    const std::string content = reply["content"];
+    EXPECT_TRUE(content.starts_with("I can do that.")) << content;
+    EXPECT_NE(content.find("create_index needs `table` (the source table to index), which this "
+                           "proposal does not name."),
+              std::string::npos)
+        << content;
+    EXPECT_NE(content.find("create_stream needs `zetta`"), std::string::npos) << content;
+    EXPECT_NE(content.find("Tell me what to use"), std::string::npos) << content;
+
+    // The offered proposal is valid but refused when it runs (the Lake bus is browse-only): the
+    // outcome is stored with ok false, so the page does not show it as Confirmed.
+    const std::string message_id = reply["id"];
+    const auto [refused_response, refused] =
+        call("confirm_ask_proposal",
+             {{"conversation_id", conversation}, {"message_id", message_id}, {"index", 0}});
+    ASSERT_TRUE(refused_response.starts_with("HTTP/1.1 200")) << refused_response;
+    EXPECT_EQ(refused["value"]["ok"], false) << refused_response;
+    // The refusal fails the same way every time, so the person is told to ask again, the stored
+    // outcome keeps its code, and Try again is not offered.
+    const std::string again =
+        " Ask Orama again with what to use and it will propose the change again.";
+    EXPECT_EQ(refused["value"]["error"], "system streams are browse-only." + again);
+    EXPECT_EQ(refused["value"]["code"], "unauthorized");
+    EXPECT_EQ(refused["value"]["retry"], false);
+    const auto after = conversation_messages(conversation);
+    ASSERT_EQ(after.size(), 3U);
+    EXPECT_EQ(after[2]["content"], "That did not work: system streams are browse-only." + again);
+    EXPECT_EQ(after[2]["payload"]["ok"], false);
+    EXPECT_EQ(after[2]["payload"]["confirmed"]["message_id"], message_id);
+    EXPECT_EQ(after[2]["payload"]["error"]["code"], "unauthorized");
+    EXPECT_EQ(after[2]["payload"]["retry"], false);
+
+    // Input the capability itself refuses is said plainly, naming the field.
+    const auto [topic_response, topic] =
+        call("confirm_ask_proposal",
+             {{"conversation_id", conversation}, {"message_id", message_id}, {"index", 1}});
+    ASSERT_TRUE(topic_response.starts_with("HTTP/1.1 200")) << topic_response;
+    EXPECT_EQ(topic["value"]["ok"], false);
+    EXPECT_EQ(topic["value"]["error"],
+              "`topic` is not valid for create_stream: a concrete topic name is required. Ask "
+              "Orama again with what to use and it will propose the change again.");
+    EXPECT_EQ(topic["value"]["code"], "invalid_input");
+    EXPECT_EQ(topic["value"]["retry"], false);
+    EXPECT_EQ(conversation_messages(conversation)[3]["payload"]["error"]["code"], "invalid_input");
+}
+
+// lake#794 review: proposals are the model's writing. One whose `capability` is null or a number,
+// or whose input leaves out several required fields, is withheld with the reason; the reply and
+// every proposal that can run are still stored, on the background path (settle_ask_turn) and on
+// the at-once path (send_ask_message, an agent of the workspace that answers at once). A proposal
+// that names neither `customer_id` nor `workspace_id` runs in the conversation's.
+TEST_P(HttpResponseIsolation, AskOramaKeepsTheTurnWhenAProposalIsMalformed) {
+    auto connection = connect();
+    const std::string cookie = sign_in(*connection);
+    const std::string customer_id =
+        nlohmann::json::parse(
+            response_body(connection->request("GET", "/v1/list_customers", "", cookie)))
+            .at("value")
+            .at("items")
+            .at(0)
+            .at("id");
+    select_workspace(*connection, customer_id);
+    const std::string workspace_id = connection->workspace_id;
+    const std::vector<std::pair<std::string, std::string>> same_origin{
+        {"Origin", "http://localhost"}, {"Sec-Fetch-Site", "same-origin"}};
+    const auto call = [&](const std::string& name, nlohmann::json input) {
+        input["customer_id"] = customer_id;
+        input["workspace_id"] = workspace_id;
+        const std::string response = connection->request("POST",
+                                                         "/v1/" + name,
+                                                         input.dump(),
+                                                         cookie,
+                                                         "HTTP/1.1",
+                                                         {},
+                                                         "application/json",
+                                                         same_origin);
+        return std::pair{response, nlohmann::json::parse(response_body(response))};
+    };
+    const auto conversation_messages = [&](const std::string& conversation) {
+        return nlohmann::json::parse(response_body(connection->request(
+            "GET",
+            "/v1/get_ask_conversation?customer_id=" + customer_id +
+                "&workspace_id=" + workspace_id + "&conversation_id=" + conversation,
+            "",
+            cookie)))["value"]["messages"];
+    };
+    // `account` is the repository proposal's own customer_id: absent, or null as a model may
+    // write it; lake fills it from the conversation either way.
+    const auto proposals = [](const std::string& name,
+                              std::optional<nlohmann::json> account = std::nullopt) {
+        nlohmann::json repository{{"name", name}};
+        if (account) {
+            repository["customer_id"] = std::move(*account);
+        }
+        return nlohmann::json::array(
+            {{{"capability", nullptr}, {"input", nlohmann::json::object()}},
+             {{"capability", 7}, {"input", nlohmann::json::object()}},
+             {{"capability", "create_stream"}, {"input", nlohmann::json::object()}},
+             {{"capability", "create_repository"},
+              {"input", std::move(repository)},
+              {"impact", "A repository named " + name + "."}}});
+    };
+    // What both paths must store: the reply, the one proposal that can run, and the other three
+    // withheld with what is wrong.
+    const auto expect_turn = [&](const nlohmann::json& reply, const std::string& said) {
+        const std::string content = reply["content"];
+        EXPECT_TRUE(content.starts_with(said)) << content;
+        const auto& offered = reply["payload"]["proposals"];
+        ASSERT_EQ(offered.size(), 1U) << reply.dump();
+        EXPECT_EQ(offered[0]["capability"], "create_repository");
+        const auto& withheld = reply["payload"]["withheld_proposals"];
+        ASSERT_EQ(withheld.size(), 3U) << reply.dump();
+        EXPECT_TRUE(withheld[0]["capability"].is_null());
+        EXPECT_EQ(withheld[0]["error"]["path"], "/capability");
+        EXPECT_EQ(withheld[1]["capability"], 7);
+        EXPECT_EQ(withheld[1]["error"]["path"], "/capability");
+        EXPECT_EQ(withheld[2]["error"]["missing"], nlohmann::json::array({"zetta", "topic"}))
+            << "every missing required field, not only the first";
+        EXPECT_NE(content.find("a proposed change does not say which capability it runs."),
+                  std::string::npos)
+            << content;
+        EXPECT_NE(content.find("create_stream needs `zetta`"), std::string::npos) << content;
+        EXPECT_NE(content.find(" and `topic`"), std::string::npos) << content;
+        EXPECT_NE(content.find(", which this proposal does not name."), std::string::npos)
+            << content;
+    };
+
+    // Background: Ask Orama's answer settled from its task.
+    agents_->answer = {{"ok", true},
+                       {"reply", "I can do that."},
+                       {"proposals", proposals("from-ask")},
+                       {"reads", nlohmann::json::array()},
+                       {"delegations", nlohmann::json::array()}};
+    const auto [sent_response, sent] =
+        call("send_ask_message", {{"message", "Make me a repository."}});
+    ASSERT_TRUE(sent_response.starts_with("HTTP/1.1 200")) << sent_response;
+    const std::string conversation = sent["value"]["conversation_id"];
+    const std::string task = sent["value"]["task_id"];
+    run_agent_task(*connection, task);
+    const auto [settled_response, settled] = call(
+        "settle_ask_turn", {{"conversation_id", conversation}, {"task_id", task}, {"kind", "ask"}});
+    ASSERT_TRUE(settled_response.starts_with("HTTP/1.1 200")) << settled_response;
+    EXPECT_EQ(settled["value"]["settled"], true);
+    const auto messages = conversation_messages(conversation);
+    ASSERT_EQ(messages.size(), 2U) << "the reply is stored: " << messages.dump();
+    expect_turn(messages[1], "I can do that.");
+
+    // Confirming the valid proposal fills customer_id and workspace_id from the conversation.
+    const auto [confirmed_response, confirmed] = call(
+        "confirm_ask_proposal",
+        {{"conversation_id", conversation}, {"message_id", messages[1]["id"]}, {"index", 0}});
+    ASSERT_TRUE(confirmed_response.starts_with("HTTP/1.1 200")) << confirmed_response;
+    EXPECT_EQ(confirmed["value"]["ok"], true) << confirmed_response;
+    const auto repositories = store_->list_repositories(customer_id, 10);
+    ASSERT_TRUE(repositories);
+    ASSERT_EQ(repositories->size(), 1U);
+    EXPECT_EQ(repositories->front().name, "from-ask");
+    EXPECT_EQ(repositories->front().workspace_id, workspace_id);
+
+    // At once: an agent of the workspace answers in the request; send_ask_message stores it.
+    workspace_caller_->answers["get_agent"] = {{"id", "space-agent"}, {"runtime", "native"}};
+    workspace_caller_->answers["chat"] = {{"reply", "Here is what I would do."},
+                                          {"proposals", proposals("from-space-agent", nullptr)},
+                                          {"reads", nlohmann::json::array()},
+                                          {"delegations", nlohmann::json::array()},
+                                          {"trace_id", nullptr}};
+    const auto [at_once_response, at_once] = call(
+        "send_ask_message", {{"agent", "space-agent"}, {"message", "Make me a repository."}});
+    ASSERT_TRUE(at_once_response.starts_with("HTTP/1.1 200")) << at_once_response;
+    EXPECT_FALSE(at_once["value"].contains("task_id")) << at_once_response;
+    ASSERT_TRUE(at_once["value"].contains("reply_id")) << at_once_response;
+    const auto answered = conversation_messages(at_once["value"]["conversation_id"]);
+    ASSERT_EQ(answered.size(), 2U) << answered.dump();
+    EXPECT_EQ(answered[1]["id"], at_once["value"]["reply_id"]);
+    expect_turn(answered[1], "Here is what I would do.");
+    EXPECT_EQ(answered[1]["payload"]["trace_id"], "") << "a null trace id is no trace id";
+
+    // A reply that is not text is no reply, never a lost turn.
+    workspace_caller_->answers["chat"] = {{"reply", nullptr}, {"proposals", proposals("x")}};
+    const auto [null_reply_response, null_reply] = call(
+        "send_ask_message", {{"agent", "space-agent"}, {"message", "Anything?"}});
+    ASSERT_TRUE(null_reply_response.starts_with("HTTP/1.1 200")) << null_reply_response;
+    ASSERT_EQ(conversation_messages(null_reply["value"]["conversation_id"]).size(), 2U);
+}
+
+// lake#794 review: a confirm refused for a reason that may pass later with the same input (the
+// workspace not reachable) keeps Try again; its stored outcome says so with the code.
+TEST_P(HttpResponseIsolation, AskOramaOffersTryAgainOnlyForATransientRefusal) {
+    auto connection = connect();
+    const std::string cookie = sign_in(*connection);
+    const std::string customer_id =
+        nlohmann::json::parse(
+            response_body(connection->request("GET", "/v1/list_customers", "", cookie)))
+            .at("value")
+            .at("items")
+            .at(0)
+            .at("id");
+    select_workspace(*connection, customer_id);
+    const std::string workspace_id = connection->workspace_id;
+    const std::vector<std::pair<std::string, std::string>> same_origin{
+        {"Origin", "http://localhost"}, {"Sec-Fetch-Site", "same-origin"}};
+    const auto call = [&](const std::string& name, nlohmann::json input) {
+        input["customer_id"] = customer_id;
+        input["workspace_id"] = workspace_id;
+        const std::string response = connection->request("POST",
+                                                         "/v1/" + name,
+                                                         input.dump(),
+                                                         cookie,
+                                                         "HTTP/1.1",
+                                                         {},
+                                                         "application/json",
+                                                         same_origin);
+        return std::pair{response, nlohmann::json::parse(response_body(response))};
+    };
+    agents_->answer = {{"ok", true},
+                       {"reply", "I can do that."},
+                       {"proposals",
+                        nlohmann::json::array({{{"capability", "create_stream"},
+                                                {"input", {{"zetta", "workspace"}, {"topic", "orders"}}},
+                                                {"impact", "A stream named orders."}}})}};
+    const auto [sent_response, sent] = call("send_ask_message", {{"message", "Make a stream."}});
+    ASSERT_TRUE(sent_response.starts_with("HTTP/1.1 200")) << sent_response;
+    const std::string conversation = sent["value"]["conversation_id"];
+    const std::string task = sent["value"]["task_id"];
+    run_agent_task(*connection, task);
+    ASSERT_TRUE(call("settle_ask_turn",
+                     {{"conversation_id", conversation}, {"task_id", task}, {"kind", "ask"}})
+                    .first.starts_with("HTTP/1.1 200"));
+    const auto messages = nlohmann::json::parse(response_body(connection->request(
+        "GET",
+        "/v1/get_ask_conversation?customer_id=" + customer_id + "&workspace_id=" + workspace_id +
+            "&conversation_id=" + conversation,
+        "",
+        cookie)))["value"]["messages"];
+    ASSERT_EQ(messages.size(), 2U) << messages.dump();
+    ASSERT_EQ(messages[1]["payload"]["proposals"].size(), 1U) << messages.dump();
+    // The workspace stops answering only now, after the turn is stored (the agent bus uses it).
+    workspace_caller_->topics.responder =
+        [](const std::string& capability,
+           const nlohmann::json&) -> std::optional<lake::control::ZettaControlResult<nlohmann::json>> {
+        if (capability != "create_topic") {
+            return std::nullopt;
+        }
+        return lake::control::ZettaControlResult<nlohmann::json>(std::unexpected(
+            lake::control::ZettaControlError{"store_unavailable", "the workspace is not reachable"}));
+    };
+    const auto [refused_response, refused] = call(
+        "confirm_ask_proposal",
+        {{"conversation_id", conversation}, {"message_id", messages[1]["id"]}, {"index", 0}});
+    ASSERT_TRUE(refused_response.starts_with("HTTP/1.1 200")) << refused_response;
+    EXPECT_EQ(refused["value"]["ok"], false) << refused_response;
+    EXPECT_EQ(refused["value"]["code"], "store_unavailable") << refused_response;
+    EXPECT_EQ(refused["value"]["retry"], true) << refused_response;
+    EXPECT_EQ(refused["value"]["error"].get<std::string>().find("Ask Orama again"),
+              std::string::npos)
+        << "a transient refusal is tried again, not asked again: " << refused_response;
+}
+
 TEST_P(HttpResponseIsolation, TheWebAppApprovesOnlyTheAgentFactoryProposalItWasShown) {
     auto* memory = dynamic_cast<lake::control::InMemoryStore*>(store_.get());
     if (memory == nullptr) {

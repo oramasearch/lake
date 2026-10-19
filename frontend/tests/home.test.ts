@@ -3,7 +3,7 @@
  * conversation, and the starting questions. `npm test`; the build runs it. */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { askLinkTarget, greeting, homeLink, homeView, isAskHome, landingAfterSignIn, linkThread, starterQuestions } from "../src/pages/ask/home.ts";
+import { askLinkTarget, confirmOutcomes, greeting, homeLink, homeView, isAskHome, landingAfterSignIn, linkThread, starterQuestions } from "../src/pages/ask/home.ts";
 import { HOME_NAV, currentNavIn, localPath } from "../src/routes/nav.ts";
 
 const person = { signed_in: true, administrator: false };
@@ -163,4 +163,33 @@ test("the home says what Lake does, grouped as the rail is, claiming only what t
   // An older Lake that does not say whether deployments are set up keeps the page.
   assert.ok(lakeMap(items, { runningAgents: new Set() }).find((g) => g.key === "ship")!.things.some((t) => t.path === "/deployments"));
   for (const group of all) for (const thing of group.things) assert.doesNotMatch(`${thing.does} ${thing.ask}`, /\b(space|study|Zetta)\b/);
+});
+
+test("a confirm that did not work is not Confirmed and keeps its reason (lake#794)", () => {
+  const outcomes = confirmOutcomes([
+    { content: "I can do that.", payload: { proposals: [] } as never },
+    { content: "That did not work: create_index needs `table`.", payload: { confirmed: { message_id: "m1", index: "0" }, ok: false } },
+    { content: "Done: create_stream.", payload: { confirmed: { message_id: "m1", index: "1" }, ok: true } },
+    { content: "That did not work: busy", payload: { confirmed: { message_id: "m2", index: "0" }, ok: false } },
+    { content: "Done: create_repository.", payload: { confirmed: { message_id: "m2", index: "0" }, ok: true } },
+  ]);
+  assert.deepEqual([...outcomes.confirmed].sort(), ["m1/1", "m2/0"]);
+  assert.deepEqual(outcomes.refused, { "m1/0": { reason: "That did not work: create_index needs `table`.", retry: true } });
+});
+
+test("Try again is offered only when Lake says trying again could work (lake#794)", () => {
+  const outcomes = confirmOutcomes([
+    {
+      content: "That did not work: `topic` is not valid for create_stream: a concrete topic name is required. Ask Orama again with what to use and it will propose the change again.",
+      payload: { confirmed: { message_id: "m1", index: "0" }, ok: false, retry: false, error: { code: "invalid_input" } } as never,
+    },
+    {
+      content: "That did not work: the workspace is not reachable.",
+      payload: { confirmed: { message_id: "m1", index: "1" }, ok: false, retry: true, error: { code: "store_unavailable" } } as never,
+    },
+  ]);
+  assert.equal(outcomes.refused["m1/0"].retry, false);
+  assert.match(outcomes.refused["m1/0"].reason, /Ask Orama again/);
+  assert.equal(outcomes.refused["m1/1"].retry, true);
+  assert.equal(outcomes.confirmed.size, 0);
 });
