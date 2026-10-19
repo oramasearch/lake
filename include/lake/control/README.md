@@ -168,7 +168,12 @@ workspace Zettas and an invoice line keeps only the quantity billed. `PaymentEve
 `PaymentEventResult`, `billing_provider_customer`, `set_billing_provider_customer` and
 `apply_payment_event` are the payment provider's records (migration `0074_payment_provider`,
 lake#620, decision 57): the provider's customer per account and its notices, applied once by event
-id.
+id. `CloudOrder`, `NewCloudOrder`, `CloudOrderTransition`, `CloudOrderPayment`, `CloudOrderEvent`
+and `CloudOrderEmailOutcome`, with `create_cloud_order`, `get_cloud_order`,
+`transition_cloud_order`, `apply_cloud_order_payment`, `claim_cloud_order_emails`,
+`record_cloud_order_email`, `unaudited_cloud_order_events` and `mark_cloud_order_events_audited`,
+are the apex order sheet's orders (migration `0089_cloud_orders`, lake#831,
+[orders](../../../docs/api/orders.md)), implemented in both stores and the instrumented wrapper.
 `application_credential_records.hpp` holds the application's credentials in its workspace (lake#352,
 lake#355): the key ring codec (one record per application, every key in version order, one
 current; `rotate_application_signing_keys` writes it with `if_revision` and rereads on a conflict)

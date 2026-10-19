@@ -183,10 +183,18 @@ server's outbound client, injected as a `StripeHttp` the tests replace with a fa
 The route answers `404` where billing is off or the manual provider is in use, `413` for a body
 over 1 MiB, and `503` (Stripe retries) when the keys or the store cannot be read.
 
+**Order sheet Checkout events** (lake#831): the same route takes `checkout.session.completed`,
+`checkout.session.async_payment_succeeded`, `checkout.session.async_payment_failed` and
+`checkout.session.expired` for the apex order sheet's paid orders. They move a `cloud_orders` row
+(`pending_payment` → `paid` or `cancelled`), never an invoice, once per event id through the same
+`billing_payment_events` row; the order's event row carries them to the central audit log.
+Contract: [orders.md](orders.md#paying).
+
 **Endpoint to register in the Stripe dashboard:** `https://<lake host>/billing/stripe/webhook`
 (on dev, `https://lake.oramadev.net/billing/stripe/webhook`), with the events `invoice.paid`,
-`invoice.payment_failed` and `invoice.voided`. Its signing secret (`whsec_...`) is the
-`webhook_secret` below.
+`invoice.payment_failed` and `invoice.voided`, and on the Lake that serves the apex order sheet the
+four `checkout.session.*` events above. Its signing secret (`whsec_...`) is the `webhook_secret`
+below. A restricted key (`rk_`) must also be allowed to write Checkout Sessions.
 
 ## Where the keys live
 
@@ -214,6 +222,36 @@ Stripe keys are the first kind and never go in a user's secret store or a secret
   the Billing page (the operator sees the reason; an account sees "Card payment is not set up"), in
   `billing_account`, `viewer.billing_payment` and `server_info`.
 - **Billing off** (an enterprise install): no provider, no route, nothing read.
+
+## Order sheet subscriptions
+
+lake#831 ([orders.md](orders.md)). The apex order sheet sells monthly subscriptions in USD: a
+private warehouse ($1,000, including $400 of usage credit), a dedicated cluster ($5,000, including
+$2,000), and on-prem from $10,000 (40% of the fee as credit), from the order sheet configuration
+(`LAKE_ORDER_SHEET`), not from this price list. Stripe Checkout bills the fee itself (subscription
+mode, the price inline). Each order records `amount_cents` and `included_credit_cents`.
+
+**Not built yet: the credit on the monthly bill.** The intended rule (Steve, 2026-10-18) is that
+the month's usage is priced at this price list, the included credit is applied first, and only the
+rest is billed, as usage lines after a credit line. Today lake's monthly invoice knows nothing of an
+order: an order is anonymous and the warehouse or cluster it provisions is not yet linked to a lake
+account (lake#758, lake#832), so the credit cannot be applied. Until then support applies it by
+hand. Whether the fees become plans on this list, the credit's percentage, whether unused credit
+expires, and what it covers on-prem are decisions still open in lake#831.
+
+## The shared tier's promise
+
+*"Train and serve a model in 5 minutes for under $5"* (Steve, 2026-10-18) leads the shared option
+only when `LAKE_ORDER_SHEET`'s `shared.show_promise` is `true`. It is **off**, because the test that
+backs it has not been run. The test, on lake.live against the published price list: upload a CSV,
+train a model, serve it, call `predict` once from outside, time the whole run, and read
+`bill_preview` for the month; it passes when the run takes at most five minutes and the preview
+comes to under $5. Record each run here (date, Lake revision, time, cost, the price list id), and
+switch the line on only while the latest run passes.
+
+| Date | Revision | Time | Cost (USD) | Price list | Result |
+|---|---|---|---|---|---|
+| — | — | — | — | — | Not run yet |
 
 ## Prices and bills
 

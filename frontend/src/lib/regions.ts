@@ -6,8 +6,25 @@
 
 export type Region = { name: string; label: string };
 export type RegionHost = { name: string; label: string; host: string };
-/** The part of `server_info` this reads. Older Lakes send neither field. */
-export type ServerRegions = { region?: Region | null; regions?: RegionHost[] | null };
+/** The part of `server_info` this reads. Older Lakes send none of these fields. `order_sheet_url`
+ * is where the apex order sheet is (lake#831), or null. */
+export type ServerRegions = { region?: Region | null; regions?: RegionHost[] | null; order_sheet_url?: string | null };
+
+/** The region selector's way back to the order sheet (lake#831, docs/ui/regions.md): "New setup…"
+ * opens the sheet, "On-prem…" its on-prem order form. Null when this Lake has no order sheet, or
+ * its URL is not https. */
+export function orderSheetLinks(info: ServerRegions | undefined): { newSetup: string; onPrem: string } | null {
+  const url = info?.order_sheet_url;
+  if (typeof url !== "string" || !url.startsWith("https://")) return null;
+  let base: URL;
+  try {
+    base = new URL(url);
+  } catch {
+    return null;
+  }
+  const root = `${base.origin}/`;
+  return { newSetup: root, onPrem: `${root}order/on-prem` };
+}
 
 /** This Lake's region, or null when it has none. */
 export function currentRegion(info: ServerRegions | undefined): Region | null {

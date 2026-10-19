@@ -233,6 +233,48 @@ public:
         return {};
     }
 
+    std::expected<CheckoutSession, std::string>
+    create_checkout(const CheckoutRequest& order) override {
+        if (order.order_id.empty() || order.unit_amount_cents <= 0 || order.quantity < 1 ||
+            order.success_url.empty() || order.cancel_url.empty()) {
+            return std::unexpected(
+                std::string("a checkout needs an order, an amount and its URLs"));
+        }
+        // A subscription with the price inline (price_data), so the order sheet's configuration
+        // is the one source of prices; Stripe creates the customer from the email.
+        std::vector<std::pair<std::string, std::string>> fields{
+            {"mode", "subscription"},
+            {"client_reference_id", order.order_id},
+            {"success_url", order.success_url},
+            {"cancel_url", order.cancel_url},
+            {"line_items[0][quantity]", std::to_string(order.quantity)},
+            {"line_items[0][price_data][currency]", order.currency},
+            {"line_items[0][price_data][unit_amount]", std::to_string(order.unit_amount_cents)},
+            {"line_items[0][price_data][recurring][interval]", "month"},
+            {"line_items[0][price_data][product_data][name]", order.product_name},
+            {"metadata[lake_order_id]", order.order_id},
+            {"subscription_data[metadata][lake_order_id]", order.order_id}};
+        if (!order.product_description.empty()) {
+            fields.emplace_back("line_items[0][price_data][product_data][description]",
+                                order.product_description);
+        }
+        if (!order.customer_email.empty()) {
+            fields.emplace_back("customer_email", order.customer_email);
+        }
+        auto session = post("/v1/checkout/sessions",
+                            fields,
+                            "lake-order-" + order.order_id + "-checkout",
+                            "start the checkout");
+        if (!session) {
+            return std::unexpected(session.error());
+        }
+        CheckoutSession result{session->value("id", ""), session->value("url", "")};
+        if (!result.id.starts_with("cs_") || !result.url.starts_with("https://")) {
+            return std::unexpected(std::string("Stripe answered a checkout without an id or URL"));
+        }
+        return result;
+    }
+
     std::expected<PaymentNotice, NoticeRejection>
     read_notice(std::string_view body,
                 std::string_view signature,
@@ -384,6 +426,38 @@ std::expected<PaymentNotice, NoticeRejection> parse_stripe_event(std::string_vie
                                  ? &event["data"]["object"]
                                  : nullptr) {
         notice.reference = object->value("id", "");
+    }
+    if (notice.event_type.starts_with("checkout.session.")) {
+        // The apex order sheet's Checkout (lake#831): the session is the reference, and its
+        // client_reference_id is lake's order id. Paid once Stripe says the payment is in; a
+        // session that expired or whose delayed payment failed cancels the order, which is never
+        // provisioned.
+        const json object = event.contains("data") && event["data"].is_object()
+                                ? event["data"].value("object", json::object())
+                                : json::object();
+        const auto text = [&](const char* key) {
+            return object.contains(key) && object[key].is_string() ? object[key].get<std::string>()
+                                                                   : std::string();
+        };
+        notice.checkout_session = text("id");
+        notice.order_id = text("client_reference_id");
+        notice.customer = text("customer");
+        notice.subscription = text("subscription");
+        const std::string payment_status = text("payment_status");
+        if (notice.event_type == "checkout.session.completed") {
+            if (payment_status == "paid" || payment_status == "no_payment_required") {
+                notice.order_state = "paid";
+            }
+        } else if (notice.event_type == "checkout.session.async_payment_succeeded") {
+            notice.order_state = "paid";
+        } else if (notice.event_type == "checkout.session.async_payment_failed") {
+            notice.order_state = "cancelled";
+            notice.order_detail = "the payment failed";
+        } else if (notice.event_type == "checkout.session.expired") {
+            notice.order_state = "cancelled";
+            notice.order_detail = "the checkout expired without payment";
+        }
+        return notice;
     }
     if (notice.event_type == "invoice.paid") {
         notice.state = "paid";

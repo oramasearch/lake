@@ -407,6 +407,87 @@ struct PaymentEventResult {
     bool changed = false;   // the invoice's state or provider_status changed
     Invoice invoice;        // the invoice after the event, when matched
 };
+// At most `bytes` bytes of `text`, never cut inside a UTF-8 sequence, so a bounded column is never
+// sent invalid UTF-8 (an order's event detail and email error, lake#833).
+inline std::string utf8_prefix(std::string_view text, std::size_t bytes) {
+    if (text.size() <= bytes) {
+        return std::string(text);
+    }
+    std::size_t end = bytes;
+    while (end > 0 && (static_cast<unsigned char>(text[end]) & 0xC0) == 0x80) {
+        --end;
+    }
+    return std::string(text.substr(0, end));
+}
+// An order from the apex order sheet (lake#831, migration 0089, docs/api/orders.md): what a person
+// asked for, how it is paid, and where it stands. Orders are multitenancy and billing, so they live
+// in the control plane; the operator reads `paid` rows and writes `state`, `host`,
+// `failure_reason`, `claimed_by` and `claimed_at` (orama-operator#634). Nullable columns read as
+// empty strings here.
+struct CloudOrder {
+    std::string id, created_at, updated_at;
+    std::string offer; // private_warehouse | dedicated_cluster | on_prem | shared
+    std::string path;  // checkout | order_form
+    std::string cloud_provider, region, contact_name, contact_email, company, details;
+    int quantity = 1;
+    std::int64_t amount_cents = 0; // the monthly fee for `quantity`
+    std::string currency = "usd";
+    std::int64_t included_credit_cents = 0; // the usage credit the fee includes, each month
+    std::string stripe_checkout_session_id, stripe_customer_id, stripe_subscription_id;
+    // submitted | pending_payment | paid | provisioning | ready | failed | cancelled
+    std::string state;
+    std::string host, failure_reason, claimed_by, claimed_at;
+    std::string organization_id; // set when the person ordering chose an organization (lake#832)
+    // Email delivery (docs/api/orders.md#email): the last state each recipient was told about,
+    // the failed attempts since the last delivery, the last failure, and when to try again.
+    std::string support_emailed_state, customer_emailed_state;
+    int email_attempts = 0;
+    std::string email_error, email_retry_at;
+};
+// A new order: `path` checkout starts it in `pending_payment`, order_form in `submitted`.
+struct NewCloudOrder {
+    std::string offer, path, cloud_provider, region, contact_name, contact_email, company, details;
+    int quantity = 1;
+    std::int64_t amount_cents = 0;
+    std::string currency = "usd";
+    std::int64_t included_credit_cents = 0;
+    std::string organization_id;
+    std::string email_error; // why the emails cannot go yet (LAKE_RESEND_API_KEY unset), or ""
+};
+// One state change of an order made by `actor` (lake | stripe | operator), only from `from`
+// (conflict otherwise). `to` equal to `from` changes only the non-empty fields below and records no
+// event. Every change of state is one cloud_order_events row.
+struct CloudOrderTransition {
+    std::string id, from, to, actor, detail;
+    std::string checkout_session_id, host, failure_reason;
+};
+// A Stripe Checkout notice for an order, applied once per (provider, event_id) through
+// billing_payment_events: `state` paid or cancelled, from pending_payment only.
+struct CloudOrderPayment {
+    std::string provider, event_id, event_type, checkout_session_id, order_id, state;
+    std::string customer_id, subscription_id, detail;
+};
+struct CloudOrderPaymentResult {
+    bool duplicate = false; // the event id was applied before; nothing changed
+    bool matched = false;   // an order has this Checkout Session
+    bool changed = false;   // the order moved
+    CloudOrder order;       // the order after the notice, when matched
+};
+// One row of cloud_order_events: the order's history, written by lake, Stripe's notices and the
+// operator alike. `audited_at` empty until lake has put it in the central audit log.
+struct CloudOrderEvent {
+    std::int64_t id = 0;
+    std::string order_id, at, from_state, to_state, actor, detail, audited_at;
+};
+// What one email attempt for an order did: `recipient` support or customer, about `state`.
+// Delivered: the recipient's emailed state becomes `state`. Not delivered: the attempt is counted,
+// `error` kept, and the next attempt waits `retry_seconds`.
+struct CloudOrderEmailOutcome {
+    std::string id, recipient, state;
+    bool delivered = false;
+    std::string error;
+    int retry_seconds = 60;
+};
 struct ManagedService {
     std::string id, customer_id, kind, name, slug;
     bool is_default = false;
@@ -1921,6 +2002,21 @@ public:
                                   const std::string& provider,
                                   const std::string& provider_customer_id) = 0;
     virtual Result<PaymentEventResult> apply_payment_event(const PaymentEvent& event) = 0;
+    // Cloud orders (lake#831, migration 0089, docs/api/orders.md).
+    // Records a new order and its first event (actor lake).
+    virtual Result<CloudOrder> create_cloud_order(const NewCloudOrder& order) = 0;
+    virtual Result<CloudOrder> get_cloud_order(const std::string& id) = 0;
+    virtual Result<CloudOrder> transition_cloud_order(const CloudOrderTransition& change) = 0;
+    virtual Result<CloudOrderPaymentResult>
+    apply_cloud_order_payment(const CloudOrderPayment& payment) = 0;
+    // Orders with an email due (a recipient not yet told about the order's state), at most `limit`,
+    // each held for `lease_seconds` so another pass does not send it twice.
+    virtual Result<std::vector<CloudOrder>> claim_cloud_order_emails(int limit,
+                                                                     int lease_seconds) = 0;
+    virtual Result<void> record_cloud_order_email(const CloudOrderEmailOutcome& outcome) = 0;
+    // Events not yet in the central audit log, oldest first, and marking them recorded.
+    virtual Result<std::vector<CloudOrderEvent>> unaudited_cloud_order_events(int limit) = 0;
+    virtual Result<void> mark_cloud_order_events_audited(const std::vector<std::int64_t>& ids) = 0;
 
     virtual Result<PkiAuthorityRecord> create_pki_authority(const NewPkiAuthorityRecord& value,
                                                             const std::string& instance_kek) = 0;

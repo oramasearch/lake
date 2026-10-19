@@ -157,6 +157,11 @@ int usage() {
         "  LAKE_REGION, LAKE_REGION_LABEL this Lake's region; LAKE_REGIONS the deployment's "
         "regions as JSON [{{name,label,host,latitude,longitude}}]");
     std::println("  LAKE_APEX_HOST the host whose every request gets the region picker");
+    std::println("  LAKE_ORDER_SHEET JSON merged over the apex order sheet's default offers, "
+                 "prices and limits (docs/api/orders.md)");
+    std::println("  LAKE_RESEND_API_KEY Orama's Resend key for order email; LAKE_RESEND_FROM the "
+                 "sender (default Lake <orders@lake.live>); LAKE_SUPPORT_EMAIL where orders go "
+                 "(default support@orama.com)");
     std::println("  --memory-store an in-memory control plane for local demos and tests");
     return 2;
 }
@@ -247,6 +252,26 @@ int main(int argc, char** argv) {
             return 2;
         }
         opts.regions = std::move(*regions);
+    }
+    // The apex order sheet (lake#831, docs/api/orders.md): the documented default with
+    // LAKE_ORDER_SHEET merged over it, and Orama's Resend credentials (platform environment
+    // variables, never logged). Invalid values stop startup.
+    {
+        auto sheet = lake::api::order_sheet_from_environment(env_or("LAKE_ORDER_SHEET", ""));
+        if (!sheet) {
+            std::println(stderr, "lake: {}", sheet.error());
+            return 2;
+        }
+        opts.order_sheet = std::move(*sheet);
+        opts.regions.order_sheet_url = opts.order_sheet.url;
+        auto resend = lake::api::resend_settings_from_environment(env_or("LAKE_RESEND_API_KEY", ""),
+                                                                  env_or("LAKE_RESEND_FROM", ""),
+                                                                  env_or("LAKE_SUPPORT_EMAIL", ""));
+        if (!resend) {
+            std::println(stderr, "lake: {}", resend.error());
+            return 2;
+        }
+        opts.resend = std::move(*resend);
     }
     opts.apps_reserved_names = env_or("LAKE_APPS_RESERVED_NAMES", "");
     opts.apps_per_customer = env_u64("LAKE_APPS_PER_CUSTOMER");
@@ -533,6 +558,8 @@ int main(int argc, char** argv) {
             {"apex_host",
              opts.regions.apex_host.empty() ? nlohmann::json(nullptr)
                                             : nlohmann::json(opts.regions.apex_host)},
+            {"order_sheet", opts.order_sheet.enabled ? "on" : "off"},
+            {"resend_api_key_set", opts.resend.api_key.empty() ? "no" : "yes"},
             {"agent_bus", opts.agent_bus ? (bus_url.empty() ? "memory" : "zetta") : "no"},
             {"api", "/v1/openapi.json"},
             {"mcp", "POST /mcp"}}

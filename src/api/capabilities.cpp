@@ -2137,7 +2137,14 @@ void register_server_info(Registry& registry, std::string_view version) {
                                 {"properties",
                                  {{"name", {{"type", "string"}}},
                                   {"label", {{"type", "string"}}},
-                                  {"host", {{"type", "string"}}}}}}}}}}}},
+                                  {"host", {{"type", "string"}}}}}}}}},
+                            // The order sheet (lake#831, docs/api/orders.md): null where none is
+                            // configured.
+                            {"order_sheet_url",
+                             {{"type", json::array({"string", "null"})},
+                              {"description",
+                               "Where to order a private warehouse, dedicated cluster or on-prem "
+                               "Lake; null when this Lake has no order sheet."}}}}}},
         .kind = CapabilityKind::Read,
         .requires_auth = false,
         .object = "server",
@@ -2165,7 +2172,8 @@ void register_server_info(Registry& registry, std::string_view version) {
                  {"online_payment", !payment.is_null() && payment["online_payment"] == true},
                  // The region of this Lake and the deployment's regions (lake#757).
                  {"region", region_json(ctx.regions)},
-                 {"regions", regions_json(ctx.regions)}});
+                 {"regions", regions_json(ctx.regions)},
+                 {"order_sheet_url", order_sheet_url_json(ctx.regions)}});
         }});
 }
 

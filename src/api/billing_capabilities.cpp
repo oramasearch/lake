@@ -897,6 +897,45 @@ liquid::runtime::task<NoticeOutcome> receive_payment_notice(PaymentProviders& pr
                          notice.error().code,
                          notice.error().message);
     }
+    if (!notice->order_state.empty()) {
+        // An order of the apex order sheet (lake#831, docs/api/orders.md#paying): applied once per
+        // event id, from pending_payment only. The order's event row is what reaches the central
+        // audit log (the order audit pass), so a lost audit write never loses the change.
+        const auto applied = context.store->apply_cloud_order_payment(
+            control::CloudOrderPayment{name,
+                                       notice->event_id,
+                                       notice->event_type,
+                                       notice->checkout_session,
+                                       notice->order_id,
+                                       notice->order_state,
+                                       notice->customer,
+                                       notice->subscription,
+                                       notice->order_detail});
+        if (!applied) {
+            co_return answer(applied.error().code == "invalid_input" ? 400 : 503,
+                             applied.error().code,
+                             applied.error().message);
+        }
+        if (applied->duplicate) {
+            co_return NoticeOutcome{200, {{"received", true}, {"duplicate", true}}};
+        }
+        if (!applied->matched) {
+            record({},
+                   "billing.payment.notice",
+                   "billing/" + name,
+                   "ignored",
+                   {{"provider", name},
+                    {"event_id", notice->event_id},
+                    {"event_type", notice->event_type},
+                    {"reference", notice->checkout_session}});
+            co_return NoticeOutcome{200, {{"received", true}, {"matched", false}}};
+        }
+        co_return NoticeOutcome{200,
+                                {{"received", true},
+                                 {"order_id", applied->order.id},
+                                 {"state", applied->order.state},
+                                 {"changed", applied->changed}}};
+    }
     if (notice->state.empty() && notice->provider_status.empty()) {
         // An event lake does not act on: acknowledged, so the provider stops sending it.
         co_return NoticeOutcome{200, {{"received", true}, {"ignored", true}}};

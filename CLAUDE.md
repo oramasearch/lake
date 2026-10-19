@@ -20,6 +20,12 @@ is also `oramasearch/lake:v0.1.0`, built from the tag (`2e6f6d7`) against liquid
 operator's schema is applied through `0083_methodology_deployments`. Its bus and workspace Zettas
 run `oramasearch/zetta:main-4015ef76` (zetta `v0.2.0`).
 
+The apex order sheet is in the source tree, not deployed (lake#831, migration `0089_cloud_orders`,
+[`docs/api/orders.md`](docs/api/orders.md)): lake.live's picker shows four offers with USD prices
+from `LAKE_ORDER_SHEET`, Stripe Checkout or an order form that skips payment, orders in
+`cloud_orders`, email through Resend (`LAKE_RESEND_API_KEY`). The operator provisions paid orders
+(orama-operator#634); the credit on the monthly bill and the 5-minute promise's test are not built.
+
 Secure-networking desired state is implemented in the source tree (lake#727, `0084_network`):
 four desired/status pairs, scoped stores, signed atomic audit and app-to-service rollout rows.
 Tunnel grants end through revocation or expiry; internet egress stays implicit in the operator.

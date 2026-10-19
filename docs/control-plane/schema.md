@@ -1212,3 +1212,64 @@ Lake outside a request ([`../api/mcp-connections.md`](../api/mcp-connections.md)
 The connection itself, its tools and its settings stay in the workspace Zetta. Nothing is dropped;
 idempotent; guard `mcp_connection_dispatch_guard`. The operator reads nothing of it; it vendors the
 schema and selects that guard before a lake with this change is rolled.
+
+## Cloud orders migration
+
+`0089_cloud_orders` (lake#831, [`../api/orders.md`](../api/orders.md)) records the apex order
+sheet's orders. It is the contract the Orama operator provisions from
+(https://github.com/oramasearch/orama-operator/issues/634); the names below are fixed.
+
+`cloud_orders`, one row per order, kept (a billing record):
+
+| Column | Type | Written by | Meaning |
+|---|---|---|---|
+| `id` | `uuid` PK, `gen_random_uuid()` | lake | The order id people and emails quote |
+| `created_at`, `updated_at` | `timestamptz` | lake; `updated_at` by the trigger `cloud_orders_touch` on every update, the operator's included | |
+| `offer` | `text`, `private_warehouse`, `dedicated_cluster`, `on_prem` or `shared` | lake | |
+| `path` | `text`, `checkout` or `order_form` | lake | `checkout` only for `private_warehouse` and `dedicated_cluster` (`cloud_orders_checkout_offer`), and only with `quantity` 1 (`cloud_orders_checkout_one`) |
+| `cloud_provider` | `text NOT NULL DEFAULT ''`, ≤ 64 | lake | The configuration's provider id (`azure`, `aws`, `gcp`); empty for a private warehouse (shared hardware), on-prem and anything not listed |
+| `region` | `text NOT NULL DEFAULT ''`, ≤ 64 | lake | The cloud region (`canadacentral`), or a shared region's name for a private warehouse; empty when not listed |
+| `contact_name` (1–200), `contact_email` (3–254), `company` (≤ 200, default `''`), `details` (≤ 4,000, default `''`) | `text` | lake | What the person typed; `details` holds anything not listed (other providers, hardware, regions, multi-region, quantities) |
+| `quantity` | `integer`, 1–1,000, default 1 | lake | Always 1 on a `checkout` order (`cloud_orders_checkout_one`): a paid order is one warehouse or one cluster with one `host`; more is an order form |
+| `amount_cents` | `bigint` ≥ 0 | lake | The monthly fee for `quantity` |
+| `currency` | `text`, default `'usd'` | lake | |
+| `included_credit_cents` | `bigint` ≥ 0, default 0 | lake | The usage credit included each month |
+| `stripe_checkout_session_id` | `text` UNIQUE, nullable | lake | The Checkout Session (`cs_…`) |
+| `stripe_customer_id`, `stripe_subscription_id` | `text`, nullable | lake, from Stripe's webhook | |
+| `state` | `text`: `submitted`, `pending_payment`, `paid`, `provisioning`, `ready`, `failed`, `cancelled` | lake and Stripe up to `paid` or `cancelled`; **the operator** from `paid` on | |
+| `host` | `text`, nullable, ≤ 253 | **the operator**, with `ready` | Where the provisioned Lake answers |
+| `failure_reason` | `text`, nullable, ≤ 2,000 | **the operator**, with `failed` | Emailed to support and the customer |
+| `claimed_by` | `text`, nullable, ≤ 255 | **the operator** | Which operator took the order |
+| `claimed_at` | `timestamptz`, nullable | **the operator** | |
+| `organization_id` | `uuid`, nullable, no foreign key | lake (lake#832) | The organization the order belongs to when the person ordering is signed in and chooses one; null for anonymous orders, which is every order today |
+| `support_emailed_state`, `customer_emailed_state` | `text`, nullable | lake | The last state each recipient was emailed about |
+| `email_attempts` | `integer` ≥ 0, default 0 | lake | Failed attempts since the last delivery |
+| `email_error` | `text NOT NULL DEFAULT ''`, ≤ 1,024 | lake | The last failure, or `LAKE_RESEND_API_KEY is not set` |
+| `email_retry_at` | `timestamptz`, nullable | lake | When the order pass may try again (also its five-minute hold) |
+
+`cloud_order_events`, the history, one row per state change:
+
+| Column | Type | Meaning |
+|---|---|---|
+| `id` | `bigserial` PK | Order of events |
+| `order_id` | `uuid` → `cloud_orders(id)` ON DELETE CASCADE | |
+| `at` | `timestamptz`, default `now()` | |
+| `from_state` | `text`, nullable (null when the order is created) | One of the states above |
+| `to_state` | `text` | One of the states above |
+| `actor` | `text`: `lake`, `stripe` or `operator` | Who changed it |
+| `detail` | `text NOT NULL DEFAULT ''`, ≤ 2,000 | The Stripe event, the reason, the operator's note |
+| `audited_at` | `timestamptz`, nullable | Set by lake once the event is in the central audit log; **the operator leaves it null** |
+
+**The operator's part**: read `paid` rows (index `cloud_orders_paid_idx`, or listen on
+`lake_cloud_orders`, which the trigger `cloud_orders_paid` notifies with the order id when an order
+becomes `paid`); claim one with `UPDATE … SET state = 'provisioning', claimed_by = $me, claimed_at =
+now() WHERE id = $1 AND state = 'paid' AND claimed_by IS NULL`; then write `ready` with `host` or
+`failed` with `failure_reason`; and insert a `cloud_order_events` row (`actor = 'operator'`) for
+each change. It writes no other column. Lake emails the customer on `ready` and `failed`, and
+support on `failed`, and records every event in the central audit log.
+
+Indexes: `cloud_orders_paid_idx` (`created_at` where `state = 'paid'`), `cloud_orders_email_due_idx`,
+`cloud_order_events_order_idx` (`order_id, id`) and `cloud_order_events_unaudited_idx`. Additive and
+idempotent; guard `cloud_orders_guard`. The operator vendors this schema and selects that guard
+before a lake with this change is rolled.
+

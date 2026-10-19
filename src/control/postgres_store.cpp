@@ -7212,6 +7212,331 @@ public:
         });
     }
 
+    // Cloud orders (lake#831, migration 0089, docs/api/orders.md).
+    static constexpr const char* cloud_order_columns =
+        "id::text, to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), "
+        "to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), offer, path, "
+        "cloud_provider, region, contact_name, contact_email, company, details, quantity, "
+        "amount_cents, currency, included_credit_cents, coalesce(stripe_checkout_session_id, ''), "
+        "coalesce(stripe_customer_id, ''), coalesce(stripe_subscription_id, ''), state, "
+        "coalesce(host, ''), coalesce(failure_reason, ''), coalesce(claimed_by, ''), "
+        "coalesce(to_char(claimed_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), ''), "
+        "coalesce(organization_id::text, ''), coalesce(support_emailed_state, ''), "
+        "coalesce(customer_emailed_state, ''), email_attempts, email_error, "
+        "coalesce(to_char(email_retry_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), "
+        "'')";
+
+    static CloudOrder cloud_order_row(const pqxx::row& row) {
+        CloudOrder order;
+        int column = 0;
+        const auto text = [&] { return row[column++].as<std::string>(); };
+        order.id = text();
+        order.created_at = text();
+        order.updated_at = text();
+        order.offer = text();
+        order.path = text();
+        order.cloud_provider = text();
+        order.region = text();
+        order.contact_name = text();
+        order.contact_email = text();
+        order.company = text();
+        order.details = text();
+        order.quantity = row[column++].as<int>();
+        order.amount_cents = row[column++].as<std::int64_t>();
+        order.currency = text();
+        order.included_credit_cents = row[column++].as<std::int64_t>();
+        order.stripe_checkout_session_id = text();
+        order.stripe_customer_id = text();
+        order.stripe_subscription_id = text();
+        order.state = text();
+        order.host = text();
+        order.failure_reason = text();
+        order.claimed_by = text();
+        order.claimed_at = text();
+        order.organization_id = text();
+        order.support_emailed_state = text();
+        order.customer_emailed_state = text();
+        order.email_attempts = row[column++].as<int>();
+        order.email_error = text();
+        order.email_retry_at = text();
+        return order;
+    }
+
+    static bool uuid_text(const std::string& id) {
+        if (id.size() != 36) {
+            return false;
+        }
+        for (std::size_t index = 0; index < id.size(); ++index) {
+            const bool dash = index == 8 || index == 13 || index == 18 || index == 23;
+            if (dash ? id[index] != '-'
+                     : std::isxdigit(static_cast<unsigned char>(id[index])) == 0) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    static Result<CloudOrder>
+    cloud_order_in(pqxx::work& tx, const std::string& id, bool for_update = false) {
+        const pqxx::result rows = tx.exec_params(std::string("SELECT ") + cloud_order_columns +
+                                                     " FROM cloud_orders WHERE id = $1::uuid" +
+                                                     (for_update ? " FOR UPDATE" : ""),
+                                                 id);
+        if (rows.empty()) {
+            return std::unexpected(StoreError{"not_found", "no order " + id});
+        }
+        return cloud_order_row(rows[0]);
+    }
+
+    static void cloud_order_event(pqxx::work& tx,
+                                  const std::string& id,
+                                  const std::string& from,
+                                  const std::string& to,
+                                  const std::string& actor,
+                                  const std::string& detail) {
+        tx.exec_params("INSERT INTO cloud_order_events (order_id, from_state, to_state, actor, "
+                       "detail) VALUES ($1::uuid, $2, $3, $4, $5)",
+                       id,
+                       nullable(from),
+                       to,
+                       actor,
+                       utf8_prefix(detail, 2000));
+    }
+
+    Result<CloudOrder> create_cloud_order(const NewCloudOrder& in) override {
+        if (in.path != "checkout" && in.path != "order_form") {
+            return std::unexpected(
+                StoreError{"invalid_input", "an order's path is checkout or order_form"});
+        }
+        if (!in.organization_id.empty() && !uuid_text(in.organization_id)) {
+            return std::unexpected(StoreError{"invalid_input", "organization_id must be a uuid"});
+        }
+        const std::string state = in.path == "checkout" ? "pending_payment" : "submitted";
+        return with_tx<CloudOrder>([&](pqxx::work& tx) -> Result<CloudOrder> {
+            const pqxx::result rows = tx.exec_params(
+                "INSERT INTO cloud_orders (offer, path, cloud_provider, region, contact_name, "
+                "contact_email, company, details, quantity, amount_cents, currency, "
+                "included_credit_cents, state, organization_id, email_error) VALUES ($1, $2, $3, "
+                "$4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14::uuid, $15) RETURNING id::text",
+                in.offer,
+                in.path,
+                in.cloud_provider,
+                in.region,
+                in.contact_name,
+                in.contact_email,
+                in.company,
+                in.details,
+                in.quantity,
+                in.amount_cents,
+                in.currency,
+                in.included_credit_cents,
+                state,
+                nullable(in.organization_id),
+                utf8_prefix(in.email_error, 1024));
+            const std::string id = rows[0][0].as<std::string>();
+            cloud_order_event(tx,
+                              id,
+                              "",
+                              state,
+                              "lake",
+                              in.path == "checkout" ? "ordered from the order sheet, to pay"
+                                                    : "order form sent from the order sheet");
+            return cloud_order_in(tx, id);
+        });
+    }
+
+    Result<CloudOrder> get_cloud_order(const std::string& id) override {
+        if (!uuid_text(id)) {
+            return std::unexpected(StoreError{"not_found", "no order " + id});
+        }
+        return with_tx<CloudOrder>([&](pqxx::work& tx) { return cloud_order_in(tx, id); });
+    }
+
+    Result<CloudOrder> transition_cloud_order(const CloudOrderTransition& change) override {
+        if (!uuid_text(change.id)) {
+            return std::unexpected(StoreError{"not_found", "no order " + change.id});
+        }
+        return with_tx<CloudOrder>([&](pqxx::work& tx) -> Result<CloudOrder> {
+            auto before = cloud_order_in(tx, change.id, true);
+            if (!before) {
+                return before;
+            }
+            if (before->state != change.from) {
+                return std::unexpected(StoreError{
+                    "conflict", "the order is " + before->state + ", not " + change.from});
+            }
+            tx.exec_params("UPDATE cloud_orders SET state = $2, stripe_checkout_session_id = "
+                           "coalesce($3, stripe_checkout_session_id), host = coalesce($4, host), "
+                           "failure_reason = coalesce($5, failure_reason) WHERE id = $1::uuid",
+                           change.id,
+                           change.to,
+                           nullable(change.checkout_session_id),
+                           nullable(change.host),
+                           nullable(change.failure_reason));
+            if (change.to != change.from) {
+                cloud_order_event(
+                    tx, change.id, change.from, change.to, change.actor, change.detail);
+            }
+            return cloud_order_in(tx, change.id);
+        });
+    }
+
+    Result<CloudOrderPaymentResult>
+    apply_cloud_order_payment(const CloudOrderPayment& payment) override {
+        if (payment.provider.empty() || payment.event_id.empty() || payment.event_id.size() > 255 ||
+            (payment.state != "paid" && payment.state != "cancelled")) {
+            return std::unexpected(StoreError{"invalid_input",
+                                              "an order payment needs its provider, its id and a "
+                                              "state of paid or cancelled"});
+        }
+        return with_tx<CloudOrderPaymentResult>(
+            [&](pqxx::work& tx) -> Result<CloudOrderPaymentResult> {
+                CloudOrderPaymentResult result;
+                const pqxx::result recorded = tx.exec_params(
+                    "INSERT INTO billing_payment_events (provider, event_id, event_type, "
+                    "reference) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING RETURNING 1",
+                    payment.provider,
+                    payment.event_id,
+                    payment.event_type.substr(0, 128),
+                    payment.checkout_session_id.substr(0, 256));
+                if (recorded.empty()) {
+                    result.duplicate = true;
+                    return result;
+                }
+                if (payment.checkout_session_id.empty()) {
+                    return result;
+                }
+                const pqxx::result rows = tx.exec_params(
+                    "SELECT id::text FROM cloud_orders WHERE stripe_checkout_session_id = $1 FOR "
+                    "UPDATE",
+                    payment.checkout_session_id);
+                if (rows.empty()) {
+                    return result;
+                }
+                const std::string id = rows[0][0].as<std::string>();
+                auto before = cloud_order_in(tx, id);
+                if (!before) {
+                    return std::unexpected(before.error());
+                }
+                result.matched = true;
+                if (before->state == "pending_payment") {
+                    tx.exec_params("UPDATE cloud_orders SET state = $2, stripe_customer_id = "
+                                   "coalesce($3, stripe_customer_id), stripe_subscription_id = "
+                                   "coalesce($4, stripe_subscription_id) WHERE id = $1::uuid",
+                                   id,
+                                   payment.state,
+                                   nullable(payment.customer_id.substr(0, 255)),
+                                   nullable(payment.subscription_id.substr(0, 255)));
+                    cloud_order_event(tx,
+                                      id,
+                                      "pending_payment",
+                                      payment.state,
+                                      "stripe",
+                                      payment.event_type + " " + payment.event_id +
+                                          (payment.detail.empty() ? "" : ": " + payment.detail));
+                    result.changed = true;
+                }
+                auto after = cloud_order_in(tx, id);
+                if (!after) {
+                    return std::unexpected(after.error());
+                }
+                result.order = std::move(*after);
+                return result;
+            });
+    }
+
+    Result<std::vector<CloudOrder>> claim_cloud_order_emails(int limit,
+                                                             int lease_seconds) override {
+        return with_tx<std::vector<CloudOrder>>(
+            [&](pqxx::work& tx) -> Result<std::vector<CloudOrder>> {
+                const pqxx::result rows = tx.exec_params(
+                    std::string("UPDATE cloud_orders SET email_retry_at = now() + make_interval("
+                                "secs => $2) WHERE id IN (SELECT id FROM cloud_orders WHERE "
+                                "((state IN ('submitted', 'paid', 'failed') AND "
+                                "support_emailed_state IS DISTINCT FROM state) OR (state IN "
+                                "('submitted', 'paid', 'ready', 'failed') AND "
+                                "customer_emailed_state IS DISTINCT FROM state)) AND "
+                                "(email_retry_at IS NULL OR email_retry_at <= now()) ORDER BY "
+                                "updated_at LIMIT $1 FOR UPDATE SKIP LOCKED) RETURNING ") +
+                        cloud_order_columns,
+                    std::max(limit, 1),
+                    std::max(lease_seconds, 1));
+                std::vector<CloudOrder> orders;
+                for (const pqxx::row& row : rows) {
+                    orders.push_back(cloud_order_row(row));
+                }
+                return orders;
+            });
+    }
+
+    Result<void> record_cloud_order_email(const CloudOrderEmailOutcome& outcome) override {
+        if (!uuid_text(outcome.id) ||
+            (outcome.recipient != "support" && outcome.recipient != "customer")) {
+            return std::unexpected(
+                StoreError{"invalid_input", "an email outcome needs an order and a recipient"});
+        }
+        return with_tx<void>([&](pqxx::work& tx) -> Result<void> {
+            if (outcome.delivered) {
+                tx.exec_params(
+                    std::string("UPDATE cloud_orders SET ") +
+                        (outcome.recipient == "support" ? "support_emailed_state"
+                                                        : "customer_emailed_state") +
+                        " = $2, email_attempts = 0, email_error = '', email_retry_at = NULL WHERE "
+                        "id = $1::uuid",
+                    outcome.id,
+                    outcome.state);
+            } else {
+                tx.exec_params("UPDATE cloud_orders SET email_attempts = email_attempts + 1, "
+                               "email_error = $2, email_retry_at = now() + make_interval(secs => "
+                               "$3) WHERE id = $1::uuid",
+                               outcome.id,
+                               utf8_prefix(outcome.error, 1024),
+                               std::max(outcome.retry_seconds, 1));
+            }
+            return {};
+        });
+    }
+
+    Result<std::vector<CloudOrderEvent>> unaudited_cloud_order_events(int limit) override {
+        return with_tx<std::vector<CloudOrderEvent>>(
+            [&](pqxx::work& tx) -> Result<std::vector<CloudOrderEvent>> {
+                const pqxx::result rows = tx.exec_params(
+                    "SELECT id, order_id::text, to_char(at AT TIME ZONE 'UTC', "
+                    "'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), coalesce(from_state, ''), to_state, actor, "
+                    "detail FROM cloud_order_events WHERE audited_at IS NULL ORDER BY id LIMIT $1",
+                    std::max(limit, 1));
+                std::vector<CloudOrderEvent> events;
+                for (const pqxx::row& row : rows) {
+                    events.push_back(CloudOrderEvent{row[0].as<std::int64_t>(),
+                                                     row[1].as<std::string>(),
+                                                     row[2].as<std::string>(),
+                                                     row[3].as<std::string>(),
+                                                     row[4].as<std::string>(),
+                                                     row[5].as<std::string>(),
+                                                     row[6].as<std::string>(),
+                                                     {}});
+                }
+                return events;
+            });
+    }
+
+    Result<void> mark_cloud_order_events_audited(const std::vector<std::int64_t>& ids) override {
+        if (ids.empty()) {
+            return {};
+        }
+        return with_tx<void>([&](pqxx::work& tx) -> Result<void> {
+            std::string list = "{";
+            for (std::size_t index = 0; index < ids.size(); ++index) {
+                list += (index == 0 ? "" : ",") + std::to_string(ids[index]);
+            }
+            list += "}";
+            tx.exec_params("UPDATE cloud_order_events SET audited_at = now() WHERE id = "
+                           "ANY($1::bigint[]) AND audited_at IS NULL",
+                           list);
+            return {};
+        });
+    }
+
     Result<IssuedSession> sign_up_password(const NewPasswordUser& in) override {
         if (in.pool_id.empty() || in.email.empty() || in.password.size() < 12) {
             return std::unexpected(StoreError{
