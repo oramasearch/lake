@@ -4567,7 +4567,9 @@ CREATE TABLE IF NOT EXISTS cloud_orders (
     email_retry_at             timestamptz,
     -- Only the two offers lake can take payment for go through Checkout.
     CONSTRAINT cloud_orders_checkout_offer
-        CHECK (path = 'order_form' OR offer IN ('private_warehouse', 'dedicated_cluster'))
+        CHECK (path = 'order_form' OR offer IN ('private_warehouse', 'dedicated_cluster')),
+    -- A paid order is one warehouse or one cluster, with one host; more is an order form.
+    CONSTRAINT cloud_orders_checkout_one CHECK (path = 'order_form' OR quantity = 1)
 );
 -- The operator's read: paid orders, oldest first.
 CREATE INDEX IF NOT EXISTS cloud_orders_paid_idx ON cloud_orders (created_at) WHERE state = 'paid';

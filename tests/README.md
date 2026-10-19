@@ -588,8 +588,10 @@ from a secret mount with rotation and the manual fallback, and the route only wh
 The apex order sheet (lake#831): `test_orders.cpp` covers its configuration (the default, the merge
 patch, every startup error), the order form's checks, the status token, the rate limit, the emails
 and the Resend client against a test double for HTTP, Stripe Checkout and its webhook events, the
-`cloud_orders` contract in both stores (the operator's writes as plain SQL on PostgreSQL), and the
-pages and routes over HTTP with a fake Stripe and a fake Resend.
+`cloud_orders` contract in both stores (on PostgreSQL, orama-operator#635's own list, claim and
+finish statements: an unpaid order is never claimed, a paid one is claimed once and finished only
+by its claimant), a paid order of more than one refused by both stores, and the pages and routes
+over HTTP with a fake Stripe and a fake Resend.
 
 The audit split by subject (decision 52, lake#317): `test_workspace_records.cpp`'s
 `AuditEventsAboutAWorkspaceLiveInItsOwnChain` covers the `AuditRecorder` and the readers across two

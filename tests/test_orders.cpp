@@ -13,6 +13,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -358,8 +359,16 @@ TEST(OrdersForm, EachOfferAndPathIsChecked) {
     EXPECT_EQ(warehouse->amount_cents, 100'000);
     EXPECT_EQ(warehouse->included_credit_cents, 40'000);
     EXPECT_EQ(warehouse->currency, "usd");
-    // A dedicated cluster in Canada on Azure, three of them.
-    auto cluster = form("dedicated_cluster", "checkout", "azure:canadacentral", "", "3");
+    // Card payment is one at a time: the operator provisions one cluster and writes one host, so
+    // three are a larger order, sent as the order form.
+    const auto three_paid = form("dedicated_cluster", "checkout", "azure:canadacentral", "", "3");
+    ASSERT_FALSE(three_paid);
+    EXPECT_EQ(three_paid.error().at("path"),
+              "Card payment orders one at a time: send the order form for more.");
+    EXPECT_FALSE(form("private_warehouse", "checkout", "eastus", "", "2"));
+    EXPECT_TRUE(form("dedicated_cluster", "checkout", "azure:canadacentral", "", "1"));
+    // A dedicated cluster in Canada on Azure, three of them, through the order form.
+    auto cluster = form("dedicated_cluster", "order_form", "azure:canadacentral", "", "3");
     ASSERT_TRUE(cluster);
     EXPECT_EQ(cluster->cloud_provider, "azure");
     EXPECT_EQ(cluster->region, "canadacentral");
@@ -899,8 +908,10 @@ TEST(OrdersStore, ThePostgresStoreKeepsTheContractAndTheOperatorsWrites) {
     auto store = lake::control::make_postgres_store(uri, std::string(kek));
     expect_order_contract(*store);
 
-    // The operator, as orama-operator#634 does it, in plain SQL: read the paid orders, claim one,
-    // move it and write its event. The trigger keeps updated_at, and lake reads the result.
+    // The operator's own statements, copied from orama-operator#635
+    // (internal/controller/lake_orders_pgx.go): list the paid orders, claim one, then finish it.
+    // Each writes the row and its event in one statement. The trigger keeps updated_at, and lake
+    // reads the result.
     const auto order = checkout_order(*store, "cs_operator_1");
     ASSERT_TRUE(store->apply_cloud_order_payment({"stripe",
                                                   "evt_operator_1",
@@ -911,31 +922,60 @@ TEST(OrdersStore, ThePostgresStoreKeepsTheContractAndTheOperatorsWrites) {
                                                   "cus",
                                                   "sub",
                                                   ""}));
+    constexpr const char* list_sql =
+        "SELECT id::text, offer, COALESCE(cloud_provider, ''), COALESCE(region, ''), state, "
+        "COALESCE(host, ''), COALESCE(claimed_by, '') FROM cloud_orders WHERE state = 'paid' OR "
+        "(claimed_by = $1 AND state IN ('provisioning', 'ready', 'failed')) ORDER BY id";
+    constexpr const char* claim_sql =
+        "WITH claimed AS (UPDATE cloud_orders SET state = 'provisioning', claimed_by = $2, "
+        "claimed_at = now() WHERE id = $1::uuid AND state = 'paid' RETURNING id) INSERT INTO "
+        "cloud_order_events (order_id, at, from_state, to_state, actor, detail) SELECT id, now(), "
+        "'paid', 'provisioning', 'operator', $3 FROM claimed RETURNING order_id";
+    constexpr const char* finish_sql =
+        "WITH moved AS (UPDATE cloud_orders SET state = $3, host = COALESCE($4::text, host), "
+        "failure_reason = COALESCE($5::text, failure_reason) WHERE id = $1::uuid AND state = "
+        "'provisioning' AND claimed_by = $2 RETURNING id) INSERT INTO cloud_order_events "
+        "(order_id, at, from_state, to_state, actor, detail) SELECT id, now(), 'provisioning', $3, "
+        "'operator', $6 FROM moved RETURNING order_id";
     pqxx::connection connection(uri);
     {
         pqxx::work tx(connection);
-        const auto paid = tx.exec("SELECT id::text, offer, cloud_provider, region, quantity, "
-                                  "amount_cents, currency, included_credit_cents FROM cloud_orders "
-                                  "WHERE state = 'paid' ORDER BY created_at");
+        const auto paid = tx.exec_params(list_sql, "orama-operator/0");
         ASSERT_EQ(paid.size(), 1U);
         EXPECT_EQ(paid[0][0].as<std::string>(), order.id);
         EXPECT_EQ(paid[0][1].as<std::string>(), "dedicated_cluster");
         EXPECT_EQ(paid[0][2].as<std::string>(), "azure");
         EXPECT_EQ(paid[0][3].as<std::string>(), "canadacentral");
-        EXPECT_EQ(paid[0][6].as<std::string>(), "usd");
-        const auto claimed = tx.exec_params(
-            "UPDATE cloud_orders SET state = 'provisioning', claimed_by = 'orama-operator/0', "
-            "claimed_at = now() WHERE id = $1::uuid AND state = 'paid' AND claimed_by IS NULL "
-            "RETURNING updated_at > created_at",
-            order.id);
-        ASSERT_EQ(claimed.size(), 1U);
-        EXPECT_TRUE(claimed[0][0].as<bool>()) << "updated_at follows the operator's write";
-        tx.exec_params("INSERT INTO cloud_order_events (order_id, from_state, to_state, actor, "
-                       "detail) VALUES ($1::uuid, 'paid', 'provisioning', 'operator', 'claimed')",
-                       order.id);
-        tx.exec_params("UPDATE cloud_orders SET state = 'failed', failure_reason = 'no capacity' "
-                       "WHERE id = $1::uuid",
-                       order.id);
+        EXPECT_EQ(paid[0][4].as<std::string>(), "paid");
+        // An order still waiting for Stripe, and an order form, are never listed.
+        const auto unpaid = checkout_order(*store, "cs_operator_unpaid");
+        EXPECT_EQ(tx.exec_params(claim_sql, unpaid.id, "orama-operator/0", "claimed").size(), 0U)
+            << "an unpaid order cannot be claimed";
+        EXPECT_EQ(tx.exec_params(claim_sql, order.id, "orama-operator/0", "claimed").size(), 1U);
+        EXPECT_EQ(tx.exec_params(claim_sql, order.id, "orama-operator/1", "claimed").size(), 0U)
+            << "claimed exactly once";
+        EXPECT_EQ(tx.exec_params(finish_sql,
+                                 order.id,
+                                 "orama-operator/1",
+                                 "failed",
+                                 std::optional<std::string>{},
+                                 std::optional<std::string>{"not mine"},
+                                 "not mine")
+                      .size(),
+                  0U)
+            << "only the claimant finishes it";
+        EXPECT_EQ(tx.exec_params(finish_sql,
+                                 order.id,
+                                 "orama-operator/0",
+                                 "failed",
+                                 std::optional<std::string>{},
+                                 std::optional<std::string>{"no capacity"},
+                                 "no capacity")
+                      .size(),
+                  1U);
+        const auto updated = tx.exec_params(
+            "SELECT updated_at > created_at FROM cloud_orders WHERE id = $1::uuid", order.id);
+        EXPECT_TRUE(updated[0][0].as<bool>()) << "updated_at follows the operator's write";
         tx.commit();
     }
     const auto seen = store->get_cloud_order(order.id);
@@ -949,6 +989,45 @@ TEST(OrdersStore, ThePostgresStoreKeepsTheContractAndTheOperatorsWrites) {
     EXPECT_THROW(
         tx.exec_params("UPDATE cloud_orders SET state = 'shipped' WHERE id = $1::uuid", order.id),
         pqxx::check_violation);
+}
+
+TEST(OrdersStore, ThePostgresSchemaRefusesAPaidOrderForMoreThanOne) {
+    const char* uri = lake::test::postgres_uri();
+    if (uri == nullptr || *uri == '\0') {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
+    }
+    auto store = lake::control::make_postgres_store(uri, std::string(kek));
+    // One host per order: a paid order is one warehouse or one cluster.
+    const auto three = store->create_cloud_order({"dedicated_cluster",
+                                                  "checkout",
+                                                  "azure",
+                                                  "canadacentral",
+                                                  "Ada",
+                                                  "ada@example.com",
+                                                  "",
+                                                  "",
+                                                  3,
+                                                  1'500'000,
+                                                  "usd",
+                                                  600'000,
+                                                  "",
+                                                  ""});
+    EXPECT_FALSE(three);
+    lake::control::InMemoryStore memory;
+    EXPECT_FALSE(memory.create_cloud_order({"dedicated_cluster",
+                                            "checkout",
+                                            "azure",
+                                            "canadacentral",
+                                            "Ada",
+                                            "ada@example.com",
+                                            "",
+                                            "",
+                                            3,
+                                            1'500'000,
+                                            "usd",
+                                            600'000,
+                                            "",
+                                            ""}));
 }
 
 // ------------------------------------------------------------------------------------------------

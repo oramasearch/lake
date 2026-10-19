@@ -2991,8 +2991,9 @@ Result<CloudOrder> InMemoryStore::create_cloud_order(const NewCloudOrder& in) {
     if ((in.path != "checkout" && in.path != "order_form") || !offers.contains(in.offer) ||
         in.contact_name.empty() || in.contact_email.size() < 3 || in.quantity < 1 ||
         in.quantity > 1000 || in.amount_cents < 0 || in.included_credit_cents < 0 ||
-        (in.path == "checkout" && in.offer != "private_warehouse" &&
-         in.offer != "dedicated_cluster")) {
+        (in.path == "checkout" && ((in.offer != "private_warehouse" &&
+                                    in.offer != "dedicated_cluster") ||
+                                   in.quantity != 1))) {
         return std::unexpected(StoreError{"invalid_input", "the order is not valid"});
     }
     std::lock_guard lock(mutex_);

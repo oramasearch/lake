@@ -70,8 +70,10 @@ that serves the apex (for production, `https://eu.lake.live/billing/stripe/webho
   names `<provider>:<region>` from the configuration; on-prem says it in `details`. `other` is
   anything not listed and needs `details`.
 - `path=checkout` only for an offer with `checkout`, a listed location in a region with `checkout`
-  (on a provider with `checkout`), and a Lake with card payment (Stripe configured, `server_info.online_payment`).
-  Otherwise the order form.
+  (on a provider with `checkout`), a quantity of 1, and a Lake with card payment (Stripe configured,
+  `server_info.online_payment`). Otherwise the order form. A paid order is one warehouse or one
+  cluster: the operator provisions one and writes one `host`, so more than one is a larger order
+  ("Card payment orders one at a time: send the order form for more.").
 - A name (1–200 characters, on one line), an email address, a company (≤ 200), details
   (≤ 4,000, line breaks kept), a quantity from 1 to 1,000 (default 1).
 - The amount is the monthly fee times the quantity; the credit is `credit_percent` of it.
@@ -291,7 +293,7 @@ Lake writes every column; the operator reads `paid` rows and writes only `state`
   the rate limit, who is emailed about which state and what the emails say, the Resend client
   against a test double for HTTP (headers, body, idempotency key, refusals), the Checkout request,
   the Checkout events, the webhook moving an order once per event, the `cloud_orders` contract in
-  the memory store and in PostgreSQL (with the operator's writes as plain SQL), and over HTTP the
+  the memory store and in PostgreSQL (with orama-operator#635's own statements), and over HTTP the
   sheet, an order form recorded and emailed, a paid order through Checkout, the webhook and
   `ready`, a failed checkout, the honeypot, the rate limit, the size limit, a missing Resend key and
   a retried email.

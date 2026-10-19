@@ -648,6 +648,10 @@ validate_order_form(const OrderSheet& sheet,
                                    "provisions it automatically."
                                  : "This region is ordered with the order form: we will confirm "
                                    "availability.";
+        } else if (order.quantity != 1 && !errors.contains("quantity")) {
+            // A paid order is one warehouse or one cluster: the operator provisions one and
+            // writes one host (orama-operator#635). More than one is a larger order.
+            errors["path"] = "Card payment orders one at a time: send the order form for more.";
         }
     }
     if (!errors.empty()) {

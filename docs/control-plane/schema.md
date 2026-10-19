@@ -1226,11 +1226,11 @@ sheet's orders. It is the contract the Orama operator provisions from
 | `id` | `uuid` PK, `gen_random_uuid()` | lake | The order id people and emails quote |
 | `created_at`, `updated_at` | `timestamptz` | lake; `updated_at` by the trigger `cloud_orders_touch` on every update, the operator's included | |
 | `offer` | `text`, `private_warehouse`, `dedicated_cluster`, `on_prem` or `shared` | lake | |
-| `path` | `text`, `checkout` or `order_form` | lake | `checkout` only for `private_warehouse` and `dedicated_cluster` (`cloud_orders_checkout_offer`) |
+| `path` | `text`, `checkout` or `order_form` | lake | `checkout` only for `private_warehouse` and `dedicated_cluster` (`cloud_orders_checkout_offer`), and only with `quantity` 1 (`cloud_orders_checkout_one`) |
 | `cloud_provider` | `text NOT NULL DEFAULT ''`, ≤ 64 | lake | The configuration's provider id (`azure`, `aws`, `gcp`); empty for a private warehouse (shared hardware), on-prem and anything not listed |
 | `region` | `text NOT NULL DEFAULT ''`, ≤ 64 | lake | The cloud region (`canadacentral`), or a shared region's name for a private warehouse; empty when not listed |
 | `contact_name` (1–200), `contact_email` (3–254), `company` (≤ 200, default `''`), `details` (≤ 4,000, default `''`) | `text` | lake | What the person typed; `details` holds anything not listed (other providers, hardware, regions, multi-region, quantities) |
-| `quantity` | `integer`, 1–1,000, default 1 | lake | |
+| `quantity` | `integer`, 1–1,000, default 1 | lake | Always 1 on a `checkout` order (`cloud_orders_checkout_one`): a paid order is one warehouse or one cluster with one `host`; more is an order form |
 | `amount_cents` | `bigint` ≥ 0 | lake | The monthly fee for `quantity` |
 | `currency` | `text`, default `'usd'` | lake | |
 | `included_credit_cents` | `bigint` ≥ 0, default 0 | lake | The usage credit included each month |
