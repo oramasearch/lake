@@ -17,8 +17,8 @@ provider's console and in a Kubernetes Secret. This page names where it lives, n
 | Lake | Identity provider | Who configures it |
 |---|---|---|
 | **Hosted** (`lake-dev`, `lake-testing`, `lake-staging`, `lake.live`) | **Clerk**: email code, and social connections (Google, GitHub, Microsoft, Apple) | The Clerk instance is created once by hand and the operator keeps it configured ([§1](#1-a-clerk-instance)); social connections by hand ([§2](#2-social-connections-on-a-clerk-instance)) |
-| **Without Clerk** (on-prem, air-gapped, [private-install.md](private-install.md)) | Lake's own: password + TOTP, passkeys, TAAP identity, and **Lake OAuth** (Google, GitHub, any OIDC issuer) | Lake's administrator ([§3](#3-lake-oauth-without-clerk)) |
-| **A customer organization's own IdP** | **Enterprise SSO**: SAML 2.0 or OIDC, plus SCIM provisioning | The organization's administrator ([§4](#4-enterprise-sso-and-scim)) |
+| **Without Clerk** (on-prem, air-gapped, [private-install.md](private-install.md)) | Lake's own: password + TOTP, passkeys, TAAP identity, and **Lake OAuth** (Google, GitHub, and an OIDC issuer that serves Lake's fixed paths) | Lake's administrator ([§3](#3-lake-oauth-without-clerk)) |
+| **A customer organization's own IdP** | **Enterprise SSO**: SAML 2.0 or OIDC, plus SCIM provisioning. **Not ready to offer** ([§4](#4-enterprise-sso-and-scim)) | The organization's administrator ([§4](#4-enterprise-sso-and-scim)) |
 
 Under Clerk, Lake turns its own password sign-up off (`viewer` answers `password_sign_up: false`), so
 on a hosted Lake **every person signs in through Clerk**. Clerk sits in front of Lake's own sessions:
@@ -37,8 +37,9 @@ earlier environment and its production instance the later one:
 | staging | `Orama Lake` (`app_3Kq02xRIBqet27addrsP0tGAjTG`) | development `ins_3Kq02xkj1OzPV8CCC9Q2ZB7Ngcq` | `guided-porpoise-2344.clerk.accounts.dev` | `clerk-lake-staging` |
 | prod (`lake.live`, `eu.lake.live`, `us.lake.live`) | same | production `ins_3Kq0xJzpNiRB38AIhYHon8uoCYb` | `clerk.lake.live` | `clerk-lake-prod` |
 
-Read from `clerk apps list` on 2026-10-18. Applications are addressed by ID; their display names can
-change.
+Read from `clerk apps list` on 2026-10-18 and again on 2026-10-19. Applications are addressed by ID;
+their display names can change: `app_3JpNNpVUwgRgnkItIPbzzRWa2BP` was first named `lake`, and is now
+`lake-testing`.
 
 **What the operator does** with `Lake.spec.clerk` ([orama-operator `docs/lake/clerk.md`](https://github.com/oramasearch/orama-operator/blob/dev/docs/lake/clerk.md)),
 from the instance's secret key, every hour and on any change:
@@ -69,8 +70,10 @@ access to.
 
 **Check:**
 
-- `kubectl get lake -A` shows `ClerkReady=True`, with a message like *"production instance on
-  lake.live, webhook ep_…, N DNS record(s)"*.
+- The Lake's `ClerkReady` condition is `True`, with a message like *"production instance on lake.live,
+  webhook ep_…, N DNS record(s)"*. `kubectl get lake -A` has no column for it; read it with
+  `kubectl describe lake <name> -n <namespace>` (under *Conditions*) or
+  `kubectl get lake <name> -n <namespace> -o jsonpath='{.status.conditions[?(@.type=="ClerkReady")]}'`.
 - `curl -s https://<host>/v1/viewer` shows `"clerk": {"enabled": true, "frontend_api":
   "clerk.<domain>", "publishable_key": "pk_live_…"}`.
 - Sign in with an invited email in a private window, and Lake lands on `/`.
@@ -152,47 +155,85 @@ Development instances (dev, staging) need none.
 ## 3. Lake OAuth without Clerk
 
 This is for an install with no Clerk publishable key. The administrator registers each provider with
-`register_oauth_provider` (issuer, client id, client secret, scopes, user pool). Lake encrypts the
-client secret under `LAKE_INSTANCE_KEK` ([`../api/identity.md`](../api/identity.md)).
+`register_oauth_provider`. Its required inputs are `provider`, `issuer`, `client_id`,
+`client_secret` and `scopes`; `pool_id` (the user pool) defaults to `lake`. Lake encrypts the client
+secret under `LAKE_INSTANCE_KEK` ([`../api/identity.md`](../api/identity.md)).
 
-| Provider | Endpoints Lake uses | Redirect URI to register at the provider |
-|---|---|---|
-| Google | Google's fixed public endpoints. The ID token is verified (RS256, issuer, audience, nonce) | `https://<LAKE_PUBLIC_HOST>/v1/oauth/google/callback` |
-| GitHub | GitHub's fixed endpoints. The access token is checked through `https://api.github.com/user` | `https://<LAKE_PUBLIC_HOST>/v1/oauth/github/callback` |
-| Any other OIDC issuer | `<issuer>/authorize`, `<issuer>/token` and `<issuer>/jwks`. **Not** OIDC discovery, so an issuer whose endpoints live elsewhere does not work | `https://<LAKE_PUBLIC_HOST>/v1/oauth/<provider>/callback` |
+**`provider` chooses the endpoints.** Only the exact values `google` and `github` get the fixed
+endpoints below; any other value is treated as a generic OIDC issuer (`src/api/oauth.cpp`,
+`oauth_endpoints`). The same value is the path segment of the redirect URI.
 
-- Plain `http://` provider URLs are refused, except on loopback.
-- A first OAuth sign-in may carry the person's TAAP identity document. Lake records it before
-  creating the user.
+| `provider` | Endpoints Lake uses | `issuer` | Redirect URI to register at the provider |
+|---|---|---|---|
+| `google` | Google's fixed public endpoints. The ID token is verified (RS256, issuer, audience, nonce) | Exactly `https://accounts.google.com`: the token's `iss` is compared to it exactly | `https://<LAKE_PUBLIC_HOST>/v1/oauth/google/callback` |
+| `github` | GitHub's fixed endpoints. The access token is checked through `https://api.github.com/user` | Required by the input schema, not used for the endpoints | `https://<LAKE_PUBLIC_HOST>/v1/oauth/github/callback` |
+| Any other value | `<issuer>/authorize`, `<issuer>/token` and `<issuer>/jwks` | The issuer, compared exactly to the ID token's `iss` | `https://<LAKE_PUBLIC_HOST>/v1/oauth/<provider>/callback` |
+
+- **A generic issuer works only if it serves exactly those three paths.** Lake does not read OIDC
+  discovery (`.well-known/openid-configuration`), so Microsoft Entra, Okta and Google Workspace,
+  whose endpoints live elsewhere, do not work this way today
+  ([lake#837](https://github.com/oramasearch/lake/issues/837)).
+- `start_oauth` refuses a provider whose endpoints are plain `http://`, except on loopback
+  (`127.0.0.1`, `localhost`, `[::1]`). It also needs `LAKE_PUBLIC_HOST`.
+- **A first OAuth sign-in must carry the person's TAAP identity document** (`start_oauth`'s
+  `identity_document`). Lake verifies and records it before creating the user. Without it the user is
+  not created, and the callback answers **403** `OAuth identity could not sign in`. A returning
+  person, whose provider subject is already linked, does not need it.
 - **Check:** sign in through the provider. The audit log has one `authentication` event for the
   callback.
 
-Password, TOTP, passkeys and TAAP sign-in need no external provider. Passkeys use
-`LAKE_PUBLIC_HOST` as the relying-party id, so it must be the host people actually visit.
+Password, TOTP, passkeys and TAAP sign-in need no external provider. **The passkey relying-party id
+is the host of the request's own origin**; `LAKE_PUBLIC_HOST` is used only when the request has no
+origin (`webauthn_relying_party` in `src/api/capabilities.cpp`). A passkey registered on one host
+therefore does not work on another, for example `eu.lake.live` and `us.lake.live`.
 
 ## 4. Enterprise SSO and SCIM
 
-A customer organization brings its own IdP (Okta, Entra ID, Google Workspace, …). Its administrator
-registers it with `register_sso_provider` ([`../api/sso.md`](../api/sso.md)):
+A customer organization brings its own IdP. Its administrator registers it with
+`register_sso_provider` ([`../api/sso.md`](../api/sso.md)). Its required inputs are
+`organization_id`, `name`, `protocol` (`saml` or `oidc`), `issuer` and `scim_token`.
+
+**Do not offer enterprise SSO to a customer yet.** Three gaps stand in the way:
+
+- [lake#562](https://github.com/oramasearch/lake/issues/562): the unauthenticated `sign_in_sso`
+  capability issues a session for an assertion it never verifies. It is a security defect, and it
+  blocks offering enterprise SSO at all.
+- **SAML has no ACS endpoint** ([lake#836](https://github.com/oramasearch/lake/issues/836)). SAML
+  sign-in exists only as the `sign_in_saml` capability, whose input is JSON
+  `{provider_id, saml_response}`. No route accepts an identity provider's HTTP-POST `SAMLResponse`,
+  no SP entity id or metadata is published, and no page calls `sign_in_saml`. So there is no ACS URL
+  or entity id to give a customer, and an IdP cannot sign anyone in.
+- **Enterprise OIDC uses the generic endpoints** `<issuer>/authorize`, `<issuer>/token` and
+  `<issuer>/jwks`, not OIDC discovery (as in [§3](#3-lake-oauth-without-clerk)). Microsoft Entra,
+  Okta and Google Workspace serve other paths, so **they do not work over OIDC today**
+  ([lake#837](https://github.com/oramasearch/lake/issues/837)).
 
 | Protocol | The customer gives | Lake gives the customer |
 |---|---|---|
-| **SAML 2.0** | IdP metadata and its signing certificate (PEM). Assertions must be enveloped and signed with RSA-SHA256 | The ACS URL and entity id (see *Open questions*) |
-| **OIDC** | Issuer, client id and client secret (encrypted at rest) | The redirect URI (see *Open questions*) |
+| **SAML 2.0** | IdP metadata and its signing certificate (PEM). Responses must be enveloped and signed with RSA-SHA256 | Nothing yet: there is no ACS URL ([lake#836](https://github.com/oramasearch/lake/issues/836)) |
+| **OIDC** | Issuer, client id and client secret (encrypted at rest) | The redirect URI `https://<LAKE_PUBLIC_HOST>/v1/oauth/sso-<provider id>/callback`, where the provider id is the one `register_sso_provider` returns |
 
 Then:
 
 1. Run `create_federation_issuer` once for each accepted claim: one `(organization, issuer, claim)`
    row each. An assertion from an issuer that is not listed is refused and audited as denied.
-2. Turn **just-in-time provisioning** on or off. A first sign-in can create the user only when it is
-   on and the assertion carries the user's TAAP identity.
-3. **SCIM:** Lake creates one bearer token per provider. The customer's IdP calls
-   `https://<host>/scim/v2/Users` and `/Groups` with it. Deactivating or deleting a user revokes
-   every session of that user at once.
-4. **Check:**
+2. Turn **just-in-time provisioning** (`jit_provisioning`) on or off. A first sign-in can create the
+   user only when it is on and the sign-in carries the user's TAAP identity (`taap_id` on
+   `start_sso_oidc` or `sign_in_saml`). Otherwise the user must already be provisioned through SCIM.
+3. **SCIM:** Lake does not create the token. The administrator generates a long random token,
+   passes it as `scim_token` to `register_sso_provider`, and gives the same token to the IdP. Lake
+   stores only its hash, so it cannot be read back; keep it only in the IdP. The IdP calls
+   `https://<host>/scim/v2/Users` and `/Groups` with it as a bearer token. Deactivating or deleting a
+   user revokes every session of that user at once.
+4. **SCIM users need a TAAP identity.** Map the user's TAAP id in the IdP's SCIM attribute mapping,
+   as `taapId` at the top level or as `taapId` in the
+   `urn:orama:params:scim:schemas:extension:taap:2.0:User` extension. Without it Lake refuses the
+   user: *"SCIM user requires externalId or userName and a TAAP identity"*.
+5. **Check:**
    - `test_sso_provider` records a test time;
-   - a test user can sign in;
-   - `list_sso_provisioning_logs` shows the SCIM create.
+   - `list_sso_provisioning_logs` shows the SCIM create;
+   - OIDC only, with an issuer that serves Lake's fixed paths: a test user signs in through
+     `start_sso_oidc`.
 
 ## Troubleshooting
 
@@ -202,7 +243,9 @@ Then:
 | Google: *Error 400: redirect_uri_mismatch* | The redirect URI at Google differs from the one Clerk shows | Copy Clerk's URI into the OAuth client exactly |
 | Google: *Access blocked: … has not completed the Google verification process* | The consent screen is still in *Testing* and the person is not a test user | Publish the consent screen (*In production*) |
 | Clerk says sign-ups are restricted, or offers no account | Sign-up is restricted and the email was never invited | Invite the person ([users.md](users.md)). Otherwise this is correct |
-| Lake `/sign-in?error=…` mentions the audience or the token | The `lake` JWT template is missing or wrong on the instance | Check `ClerkReady` on the Lake. The operator recreates the template |
+| Lake `/sign-in?error=Your sign-in could not be verified. Please try again.` | Lake refused the Clerk token: wrong audience (the `lake` template's `aud` is not `lake`), wrong issuer, expired, or not signed by the instance's keys. The message names none of these | Check `ClerkReady` on the Lake. The operator rewrites the template. The audit log has an `authentication` event on `clerk` with outcome `denied` |
+| The sign-in page shows *Sign-in could not load: …* | Clerk could not give a `lake` template token, for example because the template is missing on the instance. The request never reaches Lake | Check `ClerkReady` on the Lake. The operator recreates the template |
+| Lake OAuth callback answers **403** `OAuth identity could not sign in` | A first sign-in without a TAAP identity document ([§3](#3-lake-oauth-without-clerk)) | Start the sign-in with `start_oauth`'s `identity_document` |
 | The Clerk widget does not load, or the console reports an origin error | The host is not among the instance's allowed origins | Check `ClerkReady`. The operator adds `https://<host>` and the apex |
 | The Clerk dashboard shows DNS not verified on a production instance | The `clerk.`, `accounts.` or email records are missing | Check the Lake's `CloudflareDNSRecord`s, and that `dnsSecretRef` is the zone's token |
 | Microsoft sign-in stops working after months | The Entra client secret expired | Create a new secret in Entra and paste it into Clerk |
@@ -224,8 +267,7 @@ Then:
   secrets. Check it in the dashboard (Configure → SSO connections).
 - **Who owns the provider-side OAuth apps:** the Google Cloud project, the GitHub OAuth app, the
   Entra tenant and the Apple team. Record each here once it is created.
-- **Enterprise SSO's URIs** (the SAML ACS URL and entity id, and the OIDC redirect URI) are not stated
-  in [`../api/sso.md`](../api/sso.md). Read them from the code before giving them to a customer.
+- **SAML's ACS URL and entity id** do not exist yet: [lake#836](https://github.com/oramasearch/lake/issues/836).
 - **Enterprise SSO under Clerk** is not decided: a hosted Lake customer's IdP could connect through
   Lake's own SSO ([§4](#4-enterprise-sso-and-scim)) or through Clerk's enterprise connections.
 - **Microsoft client secret expiry dates**, once the secrets are created.
