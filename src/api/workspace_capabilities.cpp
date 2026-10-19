@@ -205,7 +205,11 @@ nlohmann::json agent_creator_answer(const nlohmann::json& turn) {
         return result;
     }
     nlohmann::json answer =
-        nlohmann::json::parse(turn.value("reply", std::string()), nullptr, false);
+        nlohmann::json::parse(turn.contains("reply") && turn.at("reply").is_string()
+                                  ? turn.at("reply").get<std::string>()
+                                  : std::string(),
+                              nullptr,
+                              false);
     return answer.is_object() ? answer : nlohmann::json::object();
 }
 
@@ -2190,6 +2194,30 @@ void register_search_capabilities(Registry& registry) {
         .input_aliases = {{"index", "index_id"}}});
 }
 
+// The engine names a bad row by its zero-based index ("score: row 2 has no 'tenure'"), but people
+// count rows from one: the message names it as row 3, followed by the row's own key when it has one
+// as a string or a number ("row 3 ('partial')", lake#819). The error's `path` keeps the zero-based
+// index, since it points into the `rows` array.
+static std::string name_row_as_people_count(const std::string& message,
+                                            const std::smatch& match,
+                                            const json& rows,
+                                            const std::string& key) {
+    const auto index = std::stoull(match[1].str());
+    std::string named = "row " + std::to_string(index + 1);
+    if (index < rows.size() && rows[index].is_object() && rows[index].contains(key)) {
+        const json& entity = rows[index].at(key);
+        if (entity.is_string()) {
+            named += " ('" + entity.get<std::string>() + "')";
+        } else if (entity.is_number()) {
+            named += " (" + entity.dump() + ")";
+        }
+    }
+    // The match starts at "row <n>"; everything after the number is kept.
+    const auto start = static_cast<std::size_t>(match.position(0));
+    const auto after = static_cast<std::size_t>(match.position(1) + match.length(1));
+    return message.substr(0, start) + named + message.substr(after);
+}
+
 // Predict with one published model (lake#250): the public route a customer calls from outside lake,
 // with a lake key. The model must be published (expose_model); rows are keyed by the model's own
 // feature columns and answered ranked by risk with what drives it (Zetta's `score`). Each ranked
@@ -2239,13 +2267,14 @@ liquid::runtime::task<ApiResult> predict_rows(const json& input, ApiContext& con
         co_return ApiResult::failure("store_unavailable", scored.error().message);
     }
     if (!*scored) {
-        // "score: row 2 has no 'tenure'" is about /rows/2/tenure.
+        // "score: row 2 has no 'tenure'" is about /rows/2/tenure, and reads "row 3" (lake#819).
         const std::string message = scored->error().message;
         static const std::regex row_field(R"(row (\d+) has (?:no|a non-numeric) '([^']+)')");
         std::smatch match;
         if (std::regex_search(message, match, row_field)) {
-            co_return ApiResult::failure(
-                "invalid_input", message, "/rows/" + match[1].str() + "/" + match[2].str());
+            co_return ApiResult::failure("invalid_input",
+                                         name_row_as_people_count(message, match, rows, key),
+                                         "/rows/" + match[1].str() + "/" + match[2].str());
         }
         co_return workspace_failure(scored->error(), input);
     }
@@ -3822,7 +3851,8 @@ liquid::runtime::task<ApiResult> compile_pipeline(ApiContext& context,
                                                   std::string dataset,
                                                   json model,
                                                   std::string methodology,
-                                                  json columns) {
+                                                  json columns,
+                                                  std::string name) {
     const auto act = [&](std::string capability, json input) {
         return call_capability(context,
                                "workspace_act",
@@ -3832,7 +3862,34 @@ liquid::runtime::task<ApiResult> compile_pipeline(ApiContext& context,
     };
     ApiResult result = called(co_await act("capture_intent", {{"project", project}, {"text", intent}}));
     if (result.ok) {
-        json input{{"project", project}};
+        // A short title rather than the engine's, which is the description's words with the
+        // punctuation dropped (lake#816), numbered past a pipeline of the project that has it, as
+        // a name the caller chose is. The description itself stays the project's captured intent.
+        // A chosen name is trimmed; one that is only spaces is no name.
+        const auto space = [](char c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r'; };
+        while (!name.empty() && space(name.back())) {
+            name.pop_back();
+        }
+        name.erase(0, std::ranges::find_if_not(name, space) - name.begin());
+        const std::string title = name.empty() ? pipeline_title(intent) : name;
+        name = title;
+        const ApiResult read = called(co_await call_capability(context,
+                                                               "workspace_query",
+                                                               {{"customer_id", customer_id},
+                                                                {"capability", "get_project"},
+                                                                {"input", {{"name", project}}}}));
+        const json graphs = read.ok ? read.value.value("graphs", json::array()) : json::array();
+        const auto taken = [&graphs](const std::string& candidate) {
+            return graphs.is_array() && std::ranges::any_of(graphs, [&](const json& graph) {
+                       return graph.is_object() && graph.value("name", std::string()) == candidate;
+                   });
+        };
+        for (int copy = 2; taken(name); ++copy) {
+            name = title + " (" + std::to_string(copy) + ")";
+        }
+    }
+    if (result.ok) {
+        json input{{"project", project}, {"name", name}};
         if (const std::string input_id = result.value.value("input_id", std::string());
             !input_id.empty()) {
             input["input_id"] = input_id;
@@ -3901,14 +3958,31 @@ liquid::runtime::task<ApiResult> settle_build(ApiContext& context, control::Agen
     // The methodology the design names, else the one of the Opportunity the build came from
     // (lake#289). An engine with the registry (zetta#1061) builds that methodology's own
     // pipeline; one it cannot run yet is refused here, never replaced by a skeleton.
+    const json context_body =
+        task.body.is_object() ? task.body.value("context", json::object()) : json::object();
+    const json opportunity = context_body.is_object()
+                                 ? context_body.value("opportunity", json::object())
+                                 : json::object();
+    // The pipeline is titled from what the project is for (lake#816): the Opportunity's intent,
+    // else the brief's words after "Design the pipeline for the project <name>: ", never the
+    // brief's own "Design the pipeline" words.
+    std::string title;
+    if (const std::string intent =
+            opportunity.is_object() ? design_text_field(opportunity, "intent") : std::string();
+        !intent.empty()) {
+        title = pipeline_title(intent);
+    } else if (const std::string brief = design_text_field(task.body, "message"),
+               lead = "Design the pipeline for the project " + project + ": ";
+               brief.starts_with(lead) && brief.size() > lead.size()) {
+        title = pipeline_title(std::string_view(brief).substr(lead.size()));
+    } else if (brief.starts_with("Design the pipeline")) {
+        // A brief that says only "Design the pipeline ..." (an agent_turn a client started with
+        // no description after it) is titled with the project's own name.
+        title = pipeline_title(project);
+    }
     std::string methodology;
     auto listed = co_await workspace_methodologies(context, task.customer_id);
     if (const json registry = listed ? *listed : json(nullptr); registry.is_array()) {
-        const json context_body = task.body.is_object() ? task.body.value("context", json::object())
-                                                        : json::object();
-        const json opportunity = context_body.is_object()
-                                     ? context_body.value("opportunity", json::object())
-                                     : json::object();
         json entry = find_methodology(registry, design_text_field(design, "methodology"),
                                       design_text_field(design, "solution"));
         if (entry.is_null() && opportunity.is_object()) {
@@ -3942,7 +4016,8 @@ liquid::runtime::task<ApiResult> settle_build(ApiContext& context, control::Agen
                                       dataset,
                                       model,
                                       methodology,
-                                      design_columns));
+                                      design_columns,
+                                      title));
     }
     // The project's own pipeline (Zetta compiles one from its intent when it is created):
     // the first one not yet approved. Applied once: a connect step that already reads the
@@ -3965,7 +4040,8 @@ liquid::runtime::task<ApiResult> settle_build(ApiContext& context, control::Agen
                                       dataset,
                                       model,
                                       methodology,
-                                      design_columns));
+                                      design_columns,
+                                      title));
     }
     const ApiResult current = called(co_await call_capability(
         context,
@@ -4752,6 +4828,18 @@ std::string error_text(const json& error) {
     return error.is_string() ? error.get<std::string>() : error.dump();
 }
 
+// A string field of JSON an agent or a model wrote, or `fallback` when it is absent or of another
+// type. nlohmann's value() throws when the key holds another type, and a reply must never be lost
+// because a model wrote `null` or a number where lake expects text (lake#794).
+std::string text_of(const json& object, const char* key, std::string fallback = {}) {
+    if (object.is_object()) {
+        if (const auto found = object.find(key); found != object.end() && found->is_string()) {
+            return found->get<std::string>();
+        }
+    }
+    return fallback;
+}
+
 // The assistant message an agent's finished answer becomes, the same text and payload the pages
 // stored: Ask Orama's reply with its proposals, reads and delegations; Agent Creator Agent's question,
 // proposal or reply; a failure as "That did not finish: …". `task_id` is empty for an answer the
@@ -4767,7 +4855,9 @@ std::pair<std::string, json> answer_message(bool factory,
         payload["task_id"] = task_id;
     }
     payload["agent"] = agent;
-    const bool ok = succeeded && answer.is_object() && answer.value("ok", true);
+    // Every field below is the agent's (a model's) writing, read by type: a `reply` that is null
+    // or a number is no reply, never an exception that loses the whole turn (lake#794).
+    const bool ok = succeeded && answer.is_object() && answer.value("ok", json(true)) != false;
     if (!ok) {
         return {"That did not finish: " + (answer.is_object() && answer.contains("error")
                                                ? error_text(answer["error"])
@@ -4776,11 +4866,11 @@ std::pair<std::string, json> answer_message(bool factory,
     }
     if (factory) {
         const json creator = agent_creator_answer(answer);
-        const std::string kind = creator.value("kind", std::string());
-        std::string text = kind == "question" ? creator.value("question", std::string())
+        const std::string kind = text_of(creator, "kind");
+        std::string text = kind == "question" ? text_of(creator, "question")
                            : kind == "proposal"
                                ? std::string("Here is the agent I propose. Review it below.")
-                               : answer.value("reply", std::string("Agent Creator Agent did not answer."));
+                               : text_of(answer, "reply", "Agent Creator Agent did not answer.");
         // The digest approve_agent_proposal checks, so a browser sends back exactly this one.
         if (const json proposal = creator.value("proposal", json()); proposal.is_object()) {
             payload["proposal_sha256"] = agent_proposal_digest(proposal);
@@ -4791,8 +4881,234 @@ std::pair<std::string, json> answer_message(bool factory,
     payload["proposals"] = answer.value("proposals", json::array());
     payload["reads"] = answer.value("reads", json::array());
     payload["delegations"] = answer.value("delegations", json::array());
-    payload["trace_id"] = answer.value("trace_id", std::string());
-    return {answer.value("reply", std::string()), std::move(payload)};
+    payload["trace_id"] = text_of(answer, "trace_id");
+    return {text_of(answer, "reply"), std::move(payload)};
+}
+
+// Whether confirming the same stored proposal again could work after it failed with `code`
+// (lake#794): the refusals that say nothing about the input, a dependency not reachable or not
+// ready, a busy resource or a full queue, or a server fault (docs/api/errors.md). Every other code
+// (invalid_input, conflict, not_found, unauthorized, engine_error, ...) refuses the same input the
+// same way every time, so Try again is not offered for it.
+bool confirm_retry_helps(const std::string& code) {
+    static constexpr std::array<std::string_view, 7> transient = {"store_unavailable",
+                                                                  "workspace_not_ready",
+                                                                  "busy",
+                                                                  "rate_limited",
+                                                                  "locked",
+                                                                  "store_error",
+                                                                  "io"};
+    return std::ranges::find(transient, code) != transient.end();
+}
+
+// The input a stored Ask Orama proposal runs with when the person confirms it: the conversation's
+// account and workspace fill `customer_id` and `workspace_id` when the input names none and the
+// capability takes them (an MCP connection's call_mcp_tool from Ask Orama, lake#652). A model that
+// writes `null` or "" for one names none, so it is filled too, never asked of the person.
+json proposal_input(const Capability* target,
+                    const json& proposal,
+                    const std::string& customer_id,
+                    const std::string& workspace_id) {
+    json proposed = proposal.value("input", json::object());
+    if (!proposed.is_object() || target == nullptr) {
+        return proposed;
+    }
+    const json properties = target->input_schema.value("properties", json::object());
+    const auto fill = [&](const char* key, const std::string& value) {
+        const auto found = proposed.find(key);
+        const bool named = found != proposed.end() && !found->is_null() &&
+                           !(found->is_string() && found->get_ref<const std::string&>().empty());
+        if (!named && properties.is_object() && properties.contains(key)) {
+            proposed[key] = value;
+        }
+    };
+    fill("customer_id", customer_id);
+    fill("workspace_id", workspace_id);
+    return proposed;
+}
+
+// The first clause of a top-level field's schema description: "the source table to index (load it
+// first with ...)" reads as "the source table to index". Empty when the schema says nothing.
+std::string field_description(const Capability* target, const std::string& field) {
+    if (target == nullptr) {
+        return {};
+    }
+    const json properties = target->input_schema.value("properties", json::object());
+    const auto schema = properties.is_object() ? properties.find(field) : properties.end();
+    if (schema == properties.end()) {
+        return {};
+    }
+    const std::string description = text_of(*schema, "description");
+    return description.substr(0, description.find(" ("));
+}
+
+// Every required top-level field `input` leaves out, in the schema's order, by the rule
+// validate_input applies (absent or null). validate_input stops at the first; the reply asks for
+// all of them at once (lake#794).
+std::vector<std::string> missing_required(const Capability* target, const json& input) {
+    std::vector<std::string> missing;
+    if (target == nullptr || !input.is_object()) {
+        return missing;
+    }
+    const json required = target->input_schema.value("required", json::array());
+    if (!required.is_array()) {
+        return missing;
+    }
+    for (const json& key : required) {
+        if (!key.is_string()) {
+            continue;
+        }
+        const auto found = input.find(key.get<std::string>());
+        if (found == input.end() || found->is_null()) {
+            missing.push_back(key.get<std::string>());
+        }
+    }
+    return missing;
+}
+
+// "create_stream needs `topic` (the topic name) and `zetta` (the workspace Zetta that holds it),
+// which this proposal does not name."
+std::string missing_fields_text(const Capability* target,
+                                const std::string& capability,
+                                const std::vector<std::string>& missing) {
+    std::string named;
+    for (std::size_t at = 0; at < missing.size(); ++at) {
+        if (at > 0) {
+            named += at + 1 == missing.size() ? " and " : ", ";
+        }
+        const std::string description = field_description(target, missing[at]);
+        named += "`" + missing[at] + "`" + (description.empty() ? "" : " (" + description + ")");
+    }
+    return capability + " needs " + named + ", which this proposal does not name.";
+}
+
+// What is wrong with a proposal's input, said plainly for the person (lake#794): "create_index
+// needs `table` (the source table to index), which this proposal does not name." The error is
+// the registry's own (validate_input), so the words follow the rule Registry::call enforces. A
+// missing required field names every required field `input` leaves out, not only the first.
+std::string proposal_problem_text(const Capability* target,
+                                  const std::string& capability,
+                                  const ApiError& error,
+                                  const json& input) {
+    std::string field;
+    if (error.path.size() > 1) {
+        const std::string pointer = error.path.substr(error.path.rfind('/') + 1);
+        for (std::size_t at = 0; at < pointer.size(); ++at) {
+            if (pointer[at] == '~' && at + 1 < pointer.size()) {
+                field += pointer[at + 1] == '1' ? '/' : '~';
+                ++at;
+            } else {
+                field += pointer[at];
+            }
+        }
+    }
+    if (field.empty()) {
+        return capability + " cannot run with this input: " + error.message + ".";
+    }
+    const bool top_level = error.path.find('/', 1) == std::string::npos;
+    if (error.message == field + " is required") {
+        std::vector<std::string> missing =
+            top_level ? missing_required(target, input) : std::vector<std::string>{};
+        if (std::ranges::find(missing, field) == missing.end()) {
+            missing = {field};
+        }
+        return missing_fields_text(top_level ? target : nullptr, capability, missing);
+    }
+    if (error.message == "unexpected field " + field) {
+        return capability + " does not take `" + field + "`.";
+    }
+    const std::string description = top_level ? field_description(target, field) : "";
+    const std::string about = description.empty() ? "" : " (" + description + ")";
+    return "`" + field + "`" + about + " is not valid for " + capability + ": " + error.message +
+           ".";
+}
+
+// Why a proposal cannot run as stored, checked by the registry's own rules before it is offered
+// (lake#794): an unknown capability, or input its schema refuses. Nothing is called.
+struct ProposalProblem {
+    ApiError error;
+    // What the person is told: plain words naming what is missing or wrong.
+    std::string text;
+    // The required top-level fields the input leaves out, every one (empty for another problem).
+    std::vector<std::string> missing;
+};
+
+// Empty when the proposal can be offered. Reads the model-written proposal by type only, so a
+// `capability` that is null, a number or absent is a problem to report, never an exception.
+std::optional<ProposalProblem> proposal_problem(const ApiContext& context,
+                                                const json& proposal,
+                                                const std::string& customer_id,
+                                                const std::string& workspace_id) {
+    const std::string capability = text_of(proposal, "capability");
+    if (capability.empty()) {
+        return ProposalProblem{
+            {"invalid_input", "the proposal names no capability", "/capability"},
+            "a proposed change does not say which capability it runs.",
+            {}};
+    }
+    const auto target = context.registry != nullptr ? context.registry->find(capability) : nullptr;
+    if (!target) {
+        ApiError error{"unknown_capability", "Lake has no capability named " + capability, ""};
+        return ProposalProblem{error, error.message + ".", {}};
+    }
+    const json proposed = proposal_input(target.get(), proposal, customer_id, workspace_id);
+    const auto canonical = canonical_input(*target, proposed);
+    const json& checked_input = canonical ? *canonical : proposed;
+    std::optional<ApiError> error;
+    if (!canonical) {
+        error = canonical.error();
+    } else if (ApiResult checked = validate_input(*target, *canonical); !checked.ok) {
+        error = checked.error;
+    }
+    if (!error) {
+        return std::nullopt;
+    }
+    std::vector<std::string> missing;
+    if (error->message.ends_with(" is required") && error->path.find('/', 1) == std::string::npos) {
+        missing = missing_required(target.get(), checked_input);
+    }
+    return ProposalProblem{*error,
+                           proposal_problem_text(target.get(), capability, *error, checked_input),
+                           std::move(missing)};
+}
+
+// An answer's proposals, keeping only those that can run (lake#794). A proposal whose input the
+// capability's schema refuses is never offered: it moves to `withheld_proposals` with the reason,
+// and the reply says, in plain words, what is missing and asks the person for it.
+void withhold_invalid_proposals(const ApiContext& context,
+                                const std::string& customer_id,
+                                const std::string& workspace_id,
+                                std::string& content,
+                                json& payload) {
+    if (!payload.is_object() || !payload.value("proposals", json()).is_array()) {
+        return;
+    }
+    json offered = json::array();
+    json withheld = json::array();
+    std::string said;
+    for (const json& proposal : payload.at("proposals")) {
+        const auto problem = proposal_problem(context, proposal, customer_id, workspace_id);
+        if (!problem) {
+            offered.push_back(proposal);
+            continue;
+        }
+        json entry = proposal.is_object() ? proposal : json::object();
+        entry["error"] = {{"code", problem->error.code},
+                          {"message", problem->text},
+                          {"path", problem->error.path}};
+        if (!problem->missing.empty()) {
+            entry["error"]["missing"] = problem->missing;
+        }
+        withheld.push_back(std::move(entry));
+        said += "\n\nI could not offer this change yet: " + problem->text +
+                " Tell me what to use and I will propose it again.";
+    }
+    if (withheld.empty()) {
+        return;
+    }
+    payload["proposals"] = std::move(offered);
+    payload["withheld_proposals"] = std::move(withheld);
+    content += said;
 }
 
 json conversation_kind_schema() {
@@ -4882,6 +5198,7 @@ liquid::runtime::task<ApiResult> send_ask_message(const json& input, ApiContext&
         co_return ApiResult::success(std::move(out));
     }
     auto [content, payload] = answer_message(factory, true, answered.value, agent, "", "");
+    withhold_invalid_proposals(context, customer_id, workspace_id, content, payload);
     auto reply = control::settled(co_await append_message(context,
                                                           customer_id,
                                                           workspace_id,
@@ -4941,9 +5258,10 @@ liquid::runtime::task<ApiResult> settle_ask_turn(const json& input, ApiContext& 
         answer_message(factory,
                        status == "succeeded",
                        task.value("answer", json::object()),
-                       task.value("agent", std::string()),
+                       text_of(task, "agent"),
                        task_id,
-                       task.value("message", std::string("the agent did not answer")));
+                       text_of(task, "message", "the agent did not answer"));
+    withhold_invalid_proposals(context, customer_id, workspace_id, content, payload);
     auto written =
         control::settled(co_await append_message(context,
                                                  customer_id,
@@ -4993,28 +5311,48 @@ liquid::runtime::task<ApiResult> confirm_ask_proposal(const json& input, ApiCont
     const std::string capability = proposal.value("capability", std::string());
     context.audit_details = {
         {"ask_confirm", true}, {"conversation_id", conversation_id}, {"capability", capability}};
-    // A proposal runs in the conversation's workspace when its input names none (an MCP
-    // connection's call_mcp_tool from Ask Orama, lake#652).
-    json proposed = proposal.value("input", json::object());
-    if (proposed.is_object() && !proposed.contains("workspace_id") && context.registry != nullptr) {
-        if (const auto target = context.registry->find(capability);
-            target && target->input_schema.contains("properties") &&
-            target->input_schema.at("properties").contains("workspace_id")) {
-            proposed["workspace_id"] = workspace_id;
-        }
-    }
+    // A proposal runs in the conversation's account and workspace when its input names none (an
+    // MCP connection's call_mcp_tool from Ask Orama, lake#652).
+    const auto target = context.registry != nullptr ? context.registry->find(capability) : nullptr;
+    const json proposed = proposal_input(target.get(), proposal, customer_id, workspace_id);
     const ApiResult done = called(co_await call_capability(context, capability, proposed));
     context.audit_details["ok"] = done.ok;
-    auto outcome = control::settled(co_await append_message(
-        context,
-        customer_id,
-        workspace_id,
-        conversation_id,
-        "assistant",
-        done.ok ? "Done: " + capability + "." : "That did not work: " + done.error.message,
-        {{"agent", "agent-ask-orama"},
-         {"confirmed", {{"message_id", message_id}, {"index", std::to_string(index)}}},
-         {"ok", done.ok}}));
+    // Input the capability refused is said plainly, naming what is missing (lake#794). The stored
+    // outcome keeps the error's code and whether pressing Try again could help: only a refusal
+    // that may pass later with the same input (confirm_retry_helps). Any other refusal fails the
+    // same way every time, so the person is told to ask Ask Orama again instead.
+    const bool retry = !done.ok && confirm_retry_helps(done.error.code);
+    std::string why;
+    if (!done.ok) {
+        if (done.error.code == "invalid_input" && !done.error.path.empty()) {
+            const json checked =
+                target ? canonical_input(*target, proposed).value_or(proposed) : proposed;
+            why = proposal_problem_text(target.get(), capability, done.error, checked);
+        } else {
+            why = done.error.message;
+            if (!why.empty() && why.back() != '.') {
+                why += '.';
+            }
+        }
+        if (!retry) {
+            why += " Ask Orama again with what to use and it will propose the change again.";
+        }
+    }
+    json recorded{{"agent", "agent-ask-orama"},
+                  {"confirmed", {{"message_id", message_id}, {"index", std::to_string(index)}}},
+                  {"ok", done.ok}};
+    if (!done.ok) {
+        recorded["error"] = {{"code", done.error.code}, {"message", why}};
+        recorded["retry"] = retry;
+    }
+    auto outcome = control::settled(co_await append_message(context,
+                                                            customer_id,
+                                                            workspace_id,
+                                                            conversation_id,
+                                                            "assistant",
+                                                            done.ok ? "Done: " + capability + "."
+                                                                    : "That did not work: " + why,
+                                                            std::move(recorded)));
     if (!outcome) {
         co_return ApiResult::failure(outcome.error().code,
                                      "The conversation could not be saved: " +
@@ -5022,7 +5360,9 @@ liquid::runtime::task<ApiResult> confirm_ask_proposal(const json& input, ApiCont
     }
     json out{{"ok", done.ok}, {"message_id", outcome->id}, {"capability", capability}};
     if (!done.ok) {
-        out["error"] = done.error.message;
+        out["error"] = why;
+        out["code"] = done.error.code;
+        out["retry"] = retry;
     }
     co_return ApiResult::success(std::move(out));
 }
@@ -5352,14 +5692,18 @@ void register_conversation_capabilities(Registry& registry) {
             "it. The dataset's source and table, and the optional `label_column` (what it "
             "predicts) and `entity_column` (what each row is about), are passed to the compiler "
             "as hints, so the steps are named from the data (\"Load subscriptions\", \"Train "
-            "downgraded model\"). Answers the new pipeline's name as `graph` (from the intent's "
-            "words) and, from an engine that says so, the `template` its steps started from.",
+            "downgraded model\"). The pipeline is named `name`, else a short title from the "
+            "intent (\"Predict which customers will churn, with the reasons\" is \"Customers "
+            "churn\"), numbered \" (2)\" when the project has one by that name; the intent stays "
+            "the project's description. Answers the new pipeline's name as `graph` and, from an "
+            "engine that says so, the `template` its steps started from.",
         .input_schema = customer_input_schema({{"project", {{"type", "string"}, {"minLength", 1}}},
                                                {"intent", {{"type", "string"}, {"minLength", 1}}},
                                                {"dataset", {{"type", "string"}}},
                                                {"label_column", {{"type", "string"}}},
                                                {"entity_column", {{"type", "string"}}},
-                                               {"methodology", {{"type", "string"}}}},
+                                               {"methodology", {{"type", "string"}}},
+                                               {"name", {{"type", "string"}}}},
                                               json::array({"project", "intent"})),
         .output_schema = {{"type", "object"},
                           {"properties",
@@ -5384,7 +5728,8 @@ void register_conversation_capabilities(Registry& registry) {
                 nullptr,
                 input.value("methodology", std::string()),
                 {{"label_column", input.value("label_column", std::string())},
-                 {"entity_column", input.value("entity_column", std::string())}}));
+                 {"entity_column", input.value("entity_column", std::string())}},
+                input.value("name", std::string())));
         }});
     registry.add(Capability{
         .name = "render_pipeline",
@@ -6121,7 +6466,17 @@ void register_agent_run_capabilities(Registry& registry) {
                     body["request"] = message;
                 } else if (agent == "agent-autosuggest") {
                     // Auto-Suggest Agent builds the workspace profile itself, with the task's
-                    // read-only credential; lake reads nothing inside the request.
+                    // read-only credential; lake reads nothing inside the request. Before it
+                    // suggests, it also reads the account's Ship Apps and image builds, so an
+                    // existing App can inform a proposal (agent-autosuggest's apps.py, lake#795):
+                    // those reads, and none of the App or build actions it may only propose.
+                    scopes.insert(scopes.end(),
+                                  {"list_apps",
+                                   "get_app",
+                                   "receive_app_events",
+                                   "list_builds",
+                                   "get_build",
+                                   "receive_build_events"});
                     if (const json profile =
                             input.value("context", json::object()).value("profile", json());
                         profile.is_object()) {
@@ -6258,11 +6613,20 @@ void register_agent_run_capabilities(Registry& registry) {
                 co_return ApiResult::failure(reply->error().code, reply->error().message);
             }
             json answer = std::move(**reply);
+            if (!answer.is_object()) {
+                co_return ApiResult::failure("engine_error", "the agent's answer is not an object");
+            }
             answer["agent"] = agent;
-            co_return answer.value("ok", false)
-                ? ApiResult::success(std::move(answer))
-                : ApiResult::failure("engine_error",
-                                     answer.value("error", std::string("the agent failed")));
+            // The agent's own writing, read by type (lake#794): an `ok` or `error` of another type
+            // is a failed turn with its text, never an exception.
+            if (answer.value("ok", json(false)) == true) {
+                co_return ApiResult::success(std::move(answer));
+            }
+            co_return ApiResult::failure(
+                "engine_error",
+                answer.contains("error") && !answer.at("error").is_null()
+                    ? error_text(answer.at("error"))
+                    : std::string("the agent failed"));
         }});
 }
 
@@ -6321,6 +6685,256 @@ std::map<std::string, std::string> canonical_workspace_input(std::string_view ca
         renamed[field] = other;
     }
     return renamed;
+}
+
+namespace {
+
+// The first code point of a UTF-8 string and its length in bytes, or nullopt when the string
+// does not start with a well-formed one.
+std::optional<std::pair<char32_t, std::size_t>> first_code_point(std::string_view text) {
+    if (text.empty()) {
+        return std::nullopt;
+    }
+    const auto lead = static_cast<unsigned char>(text[0]);
+    const std::size_t size = lead < 0x80                ? 1
+                             : (lead & 0xE0) == 0xC0 ? 2
+                             : (lead & 0xF0) == 0xE0 ? 3
+                             : (lead & 0xF8) == 0xF0 ? 4
+                                                     : 0;
+    if (size == 0 || text.size() < size) {
+        return std::nullopt;
+    }
+    char32_t value = size == 1   ? lead
+                     : size == 2 ? (lead & 0x1F)
+                     : size == 3 ? (lead & 0x0F)
+                                 : (lead & 0x07);
+    for (std::size_t at = 1; at < size; ++at) {
+        const auto next = static_cast<unsigned char>(text[at]);
+        if ((next & 0xC0) != 0x80) {
+            return std::nullopt;
+        }
+        value = (value << 6) | (next & 0x3F);
+    }
+    return std::pair{value, size};
+}
+
+std::string utf8_of(char32_t value) {
+    std::string out;
+    if (value < 0x80) {
+        out += static_cast<char>(value);
+    } else if (value < 0x800) {
+        out += static_cast<char>(0xC0 | (value >> 6));
+        out += static_cast<char>(0x80 | (value & 0x3F));
+    } else if (value < 0x10000) {
+        out += static_cast<char>(0xE0 | (value >> 12));
+        out += static_cast<char>(0x80 | ((value >> 6) & 0x3F));
+        out += static_cast<char>(0x80 | (value & 0x3F));
+    } else {
+        out += static_cast<char>(0xF0 | (value >> 18));
+        out += static_cast<char>(0x80 | ((value >> 12) & 0x3F));
+        out += static_cast<char>(0x80 | ((value >> 6) & 0x3F));
+        out += static_cast<char>(0x80 | (value & 0x3F));
+    }
+    return out;
+}
+
+// The capital of a lowercase letter of Latin-1, Latin Extended-A, Greek or Cyrillic; any other
+// code point as it is. The web app's `upperFirst` maps the same letters.
+char32_t title_capital(char32_t c) {
+    if (c >= U'a' && c <= U'z') {
+        return c - 0x20;
+    }
+    if (c >= 0xE0 && c <= 0xFE && c != 0xF7) {
+        return c - 0x20;
+    }
+    if (c == 0xFF) {
+        return 0x178;
+    }
+    if ((c >= 0x100 && c <= 0x137) || (c >= 0x14A && c <= 0x177)) {
+        return c % 2 == 1 ? c - 1 : c;
+    }
+    if ((c >= 0x139 && c <= 0x148) || (c >= 0x179 && c <= 0x17E)) {
+        return c % 2 == 0 ? c - 1 : c;
+    }
+    if (c >= 0x3B1 && c <= 0x3C9) {
+        return c == 0x3C2 ? 0x3A3 : c - 0x20;
+    }
+    if (c >= 0x430 && c <= 0x44F) {
+        return c - 0x20;
+    }
+    if (c >= 0x450 && c <= 0x45F) {
+        return c - 0x50;
+    }
+    return c;
+}
+
+// How many characters (code points) a UTF-8 string holds: the bytes that do not continue one.
+std::size_t characters_in(std::string_view text) {
+    return static_cast<std::size_t>(std::ranges::count_if(
+        text, [](char c) { return (static_cast<unsigned char>(c) & 0xC0) != 0x80; }));
+}
+
+// The first `count` characters of a UTF-8 string.
+std::string first_characters(std::string_view text, std::size_t count) {
+    std::size_t seen = 0;
+    for (std::size_t at = 0; at < text.size(); ++at) {
+        if ((static_cast<unsigned char>(text[at]) & 0xC0) != 0x80 && seen++ == count) {
+            return std::string(text.substr(0, at));
+        }
+    }
+    return std::string(text);
+}
+
+}  // namespace
+
+std::string pipeline_title(std::string_view description) {
+    // Typographic punctuation is read as its plain form first: a dash ends the clause, curly
+    // quotes are quotes (an apostrophe inside a word stays one), an ellipsis is three dots and a
+    // no-break space is a space. Every other non-ASCII character is part of a word.
+    std::string text(description);
+    for (const auto& [from, to] : {std::pair<std::string_view, std::string_view>{"—", ","},
+                                   {"–", ","},
+                                   {"‘", "'"},
+                                   {"’", "'"},
+                                   {"‚", "'"},
+                                   {"‛", "'"},
+                                   {"“", "\""},
+                                   {"”", "\""},
+                                   {"„", "\""},
+                                   {"‟", "\""},
+                                   {"«", "\""},
+                                   {"»", "\""},
+                                   {"…", "..."},
+                                   {" ", " "}}) {
+        for (std::size_t at = text.find(from); at != std::string::npos;
+             at = text.find(from, at + to.size())) {
+            text.replace(at, from.size(), to);
+        }
+    }
+    const auto lower = [](std::string value) {
+        for (char& c : value) {
+            if (c >= 'A' && c <= 'Z') {
+                c = static_cast<char>(c - 'A' + 'a');
+            }
+        }
+        return value;
+    };
+    const auto one_of = [](const std::string& value, const auto& list) {
+        return std::ranges::find(list, std::string_view(value)) != std::ranges::end(list);
+    };
+    // A request that leads the description, and the words that only lead into what it asks.
+    static constexpr std::string_view request[] = {
+        "predict", "forecast", "estimate", "classify",   "detect",  "find",      "identify",
+        "flag",    "score",    "rank",     "recommend",  "answer",  "determine", "tell",
+        "show",    "spot",     "list",     "segment",    "cluster", "group",     "measure",
+        "track",   "explain",  "know",     "understand", "see",     "figure",    "work",
+        "build",   "create",   "make",     "help",       "out",     "me",        "us",
+        "all",     "any",      "each",     "every"};
+    // Words that carry nothing in a title, wherever they are.
+    static constexpr std::string_view helper[] = {
+        "which", "what", "whether", "who",   "whom",   "how",   "that",   "the",      "a",
+        "an",    "will", "would",   "could", "should", "can",   "may",    "might",    "is",
+        "are",   "was",  "were",    "be",    "been",   "being", "likely", "unlikely", "going",
+        "to",    "do",   "does",    "did",   "has",    "have",  "had",    "most",     "more",
+        "least", "our",  "my",      "their", "its",    "your"};
+    // A preposition or conjunction after the subject ends the title ("in the next 90 days").
+    static constexpr std::string_view ending[] = {
+        "in",    "within", "over",   "during", "for",   "by",      "from",  "with",  "without",
+        "using", "based",  "before", "after",  "and",   "or",      "but",   "so",    "because",
+        "since", "per",    "at",     "on",     "as",    "than",    "given", "when",  "where",
+        "if",    "via",    "into",   "across", "among", "between", "until", "while", "about"};
+    // A word the title keeps: not a request, a helper or a leading "of".
+    const auto carries = [&](const std::string& each) {
+        const std::string folded = lower(each);
+        return !one_of(folded, request) && !one_of(folded, helper) && folded != "of";
+    };
+    // The words of the first clause: a bracket, a comma, a semicolon, a colon, a sentence's end
+    // or a dash between words ends it, so punctuation never lands inside the title. It ends only
+    // once a word the title keeps is read, so "Predict: customer churn" reads past the colon.
+    const auto word_byte = [](unsigned char c) {
+        return std::isalnum(c) != 0 || c == '_' || c >= 0x80;
+    };
+    std::vector<std::string> words;
+    std::string word;
+    for (std::size_t at = 0; at < text.size(); ++at) {
+        const auto c = static_cast<unsigned char>(text[at]);
+        const bool inside = !word.empty() && at + 1 < text.size() &&
+                            word_byte(static_cast<unsigned char>(text[at + 1]));
+        if (word_byte(c) || ((c == '-' || c == '\'') && inside)) {
+            word += static_cast<char>(c);
+            continue;
+        }
+        if (!word.empty()) {
+            words.push_back(std::move(word));
+            word.clear();
+        }
+        const bool sentence_end =
+            (c == '.' || c == '!' || c == '?') &&
+            (at + 1 == text.size() || !word_byte(static_cast<unsigned char>(text[at + 1])));
+        if (std::string_view("([{,;:\n").contains(static_cast<char>(c)) || sentence_end ||
+            (c == '-' && !inside)) {
+            if (std::ranges::any_of(words, carries)) {
+                break;
+            }
+        }
+    }
+    if (!word.empty()) {
+        words.push_back(std::move(word));
+    }
+    std::vector<std::string> kept;
+    bool leading = true;
+    for (const std::string& each : words) {
+        const std::string folded = lower(each);
+        if (leading && one_of(folded, request)) {
+            continue;
+        }
+        if (one_of(folded, helper)) {
+            continue;
+        }
+        if (one_of(folded, ending) && !kept.empty()) {
+            break;
+        }
+        if (folded == "of" && kept.empty()) {
+            continue;
+        }
+        leading = false;
+        kept.push_back(each);
+        if (kept.size() == 4) {
+            break;
+        }
+    }
+    while (!kept.empty() && lower(kept.back()) == "of") {
+        kept.pop_back();
+    }
+    // Nothing left of the words (a description such as "Predict which"): its first words as
+    // written.
+    if (kept.empty()) {
+        for (const std::string& each : words) {
+            kept.push_back(each);
+            if (kept.size() == 4) {
+                break;
+            }
+        }
+    }
+    // At most 48 characters (code points, not bytes): whole words, or the first word cut.
+    std::string title;
+    for (const std::string& each : kept) {
+        if (title.empty()) {
+            title = first_characters(each, 48);
+            continue;
+        }
+        if (characters_in(title) + 1 + characters_in(each) > 48) {
+            break;
+        }
+        title += " " + each;
+    }
+    if (title.empty()) {
+        return "Pipeline";
+    }
+    if (const auto first = first_code_point(title)) {
+        title.replace(0, first->second, utf8_of(title_capital(first->first)));
+    }
+    return title;
 }
 
 std::string engine_words_in_lake_terms(std::string text) {

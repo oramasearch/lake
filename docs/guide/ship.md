@@ -77,7 +77,9 @@ What you send:
 What comes back: the rows ranked by risk. Each ranked entry has `entity` (the value of the record's
 `entity_column` field, left out when the record has none), `row` (its position in the `rows` you
 sent) and `risk`, and the answer says what drives the scores. A record with a missing feature is
-refused with its place: *row 2 has no 'tenure'* is answered `invalid_input` at `/rows/2/tenure`.
+refused with its place, counted from one and named by its key: the third record, keyed `partial`,
+reads *row 3 ('partial') has no 'tenure'* and is answered `invalid_input` at `/rows/2/tenure`
+(the path is the record's position in `rows`, from 0).
 
 To ask for only the top five of a batch, keyed by your own column:
 
@@ -281,7 +283,7 @@ be undone.
 |---|---|---|
 | `unauthenticated` (401) | No key, or the key is unknown, revoked or expired; the error's `reason` says which. | Send `Authorization: Bearer <key>`; make a new key on Developer → API. |
 | `unauthorized` (403) | The key is valid but does not grant this call, such as a search key calling `predict`. | Use a key whose scopes include the capability. |
-| `invalid_input` at `/rows/2/tenure` | Row 2 lacks the feature `tenure`. | Send every feature the model reads; the Call drawer lists them. |
+| `invalid_input` at `/rows/2/tenure` | The third row (*row 3* in the message; the path counts from 0) lacks the feature `tenure`. | Send every feature the model reads; the Call drawer lists them. |
 | `invalid_input` at `/workspace_id` or `/customer_id` | The workspace is unknown, or is not one of that account's workspaces. | Copy both ids from the page address or the Call drawer. |
 | A refusal saying the model or index is not published | It was never published, or was unpublished. | Publish it on Ship → Models or the index page. |
 | `workspace_not_ready` (503) | The workspace is starting or stopped. | Open any Design, Train or Ship page and wait until it is ready, or start it ([Workspaces](/docs/workspaces)). |

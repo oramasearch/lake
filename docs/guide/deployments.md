@@ -41,6 +41,11 @@ An image built in Lake is named on [Packages, Builds and the Registry](/docs/reg
 environment appears in Lake once the operator has reported it; Lake checks the operator every 15
 seconds.
 
+Run `liquid deploy` in a checkout cloned from the repository in Lake (`liquid clone`), or in the
+checkout you pushed to a new, empty repository: liquid names the repository by an id the checkout
+shares with it, and Lake shows the deployment on that repository. A deployment Lake cannot place
+on one repository is not shown, and Lake reports it to the people who run it.
+
 ## Ship → Deployments
 
 **Ship → Deployments** opens with figures (**Environments**, **Repositories** with an environment,

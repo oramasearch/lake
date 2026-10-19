@@ -2,7 +2,7 @@
  * `npm test`; the build runs it. */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { accountRegionSentence, currentRegion, otherRegions, regionUrl, workspaceRegionLabel } from "../src/lib/regions.ts";
+import { accountRegionSentence, currentRegion, orderSheetLinks, otherRegions, regionUrl, workspaceRegionLabel } from "../src/lib/regions.ts";
 
 const production = {
   region: { name: "swedencentral", label: "Europe" },
@@ -49,4 +49,21 @@ test("sign-in and sign-up say which region the account is in, and nothing withou
 test("a workspace shows the region of the Lake it was created on", () => {
   assert.equal(workspaceRegionLabel(production), "Europe");
   assert.equal(workspaceRegionLabel(nonprod), null);
+});
+
+test("the region selector leads back to the order sheet where there is one (lake#831)", () => {
+  assert.deepEqual(orderSheetLinks({ ...production, order_sheet_url: "https://lake.live/" }), {
+    newSetup: "https://lake.live/",
+    onPrem: "https://lake.live/order/on-prem",
+  });
+  // A configured URL with a path still leads to the sheet at its origin.
+  assert.deepEqual(orderSheetLinks({ order_sheet_url: "https://lake.live/pricing" }), {
+    newSetup: "https://lake.live/",
+    onPrem: "https://lake.live/order/on-prem",
+  });
+  assert.equal(orderSheetLinks({ ...production, order_sheet_url: null }), null);
+  assert.equal(orderSheetLinks(production), null);
+  assert.equal(orderSheetLinks({ order_sheet_url: "http://lake.live/" }), null);
+  assert.equal(orderSheetLinks({ order_sheet_url: "javascript:alert(1)" }), null);
+  assert.equal(orderSheetLinks(undefined), null);
 });

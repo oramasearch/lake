@@ -170,7 +170,10 @@ sync writes each repository's environments and rows into that repository's works
 environment's policy object (external id `platform_environment_id`) on first sight, skipping a
 repository whose rows have not changed since its last write, and marking only that repository
 stale when its workspace cannot be written. The stores no longer write or read either retired
-table (migration `0060_platform_workspaces`), which `0070` drops.
+table (migration `0060_platform_workspaces`), which `0070` drops. The sync places a row by lake's
+repository id or the liquid id `liquid deploy` sends (`repositories.liquid_id`, migration
+`0088_repository_liquid_ids`, lake#805), reading the ids it lacks through an injected reader, and
+reports a row it cannot place (`unresolved_repositories()`) instead of skipping it.
 `application_webhook_records.cpp` is the next: an application's lifecycle events and its webhook
 delivery attempts in the application's workspace (lake#356, lake#357), each attempt claimed with
 `if_absent` before it is sent and settled with `if_revision`. The stores no longer write or read
@@ -201,6 +204,10 @@ They keep the payment provider's records too (migration `0074_payment_provider`,
 provider's customer id for each account, kept once (`billing_accounts`), an invoice's `payment_url`
 and `provider_status`, and `apply_payment_event`, which records a provider's event id and moves the
 invoice it names in one transaction, only while it is due, so an event is never applied twice.
+Both keep the apex order sheet's orders (migration `0089_cloud_orders`, lake#831): an order and its
+first event in one transaction, every state change with its `cloud_order_events` row, a Checkout
+notice applied once per event id through `billing_payment_events`, the email claim that holds an
+order for a lease (`FOR UPDATE SKIP LOCKED` on PostgreSQL), and the events not yet audited.
 `application_credential_records.cpp` keeps an application's signing keys and webhooks in its
 workspace (lake#352, lake#355). The stores no longer write or read `auth_app_signing_keys` or
 `auth_app_webhooks`: they envelope and open the credentials with the keystore

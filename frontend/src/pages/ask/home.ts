@@ -106,3 +106,34 @@ export function greeting(displayName: string | undefined): string {
 export function landingAfterSignIn(administrator: boolean): string {
   return administrator ? "/repositories" : "/";
 }
+
+/** A confirm that did not work, as Lake stored it: its reason, and whether pressing the button again
+ * could work. */
+export type ConfirmRefusal = { reason: string; retry: boolean };
+
+/** What each confirmed proposal came to, from the outcome messages Lake stored in the conversation
+ * (`payload.confirmed` names the proposal as `message_id/index`). Only a confirm that worked is
+ * Confirmed and never offered again; one that did not work (`payload.ok` false) keeps its reason,
+ * so a failed confirm never reads as done (lake#794). `retry` is Lake's own `payload.retry`: true
+ * only for a refusal that may pass later with the same input (the workspace not reachable, a busy
+ * resource); a refusal of the input itself fails the same way every time, so the page offers no
+ * Try again and the reason says to ask Ask Orama again. An outcome stored before Lake recorded
+ * `retry` keeps Try again. A later success wins. */
+export function confirmOutcomes(
+  list: { content?: unknown; payload?: { confirmed?: unknown; ok?: unknown; retry?: unknown } | null }[],
+): { confirmed: Set<string>; refused: Record<string, ConfirmRefusal> } {
+  const confirmed = new Set<string>();
+  const refused: Record<string, ConfirmRefusal> = {};
+  for (const message of list) {
+    const mark = message.payload?.confirmed as { message_id?: unknown; index?: unknown } | undefined;
+    if (!mark || typeof mark !== "object") continue;
+    const key = `${mark.message_id}/${mark.index}`;
+    if (message.payload?.ok === false) {
+      if (!confirmed.has(key)) refused[key] = { reason: String(message.content ?? ""), retry: message.payload?.retry !== false };
+    } else {
+      confirmed.add(key);
+      delete refused[key];
+    }
+  }
+  return { confirmed, refused };
+}

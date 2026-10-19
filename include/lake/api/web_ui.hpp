@@ -8,6 +8,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include "lake/api/orders.hpp"
 #include "lake/api/regions.hpp"
 #include "lake/control/store.hpp"
 
@@ -68,5 +69,42 @@ std::string web_ui_region_picker(const Regions& regions,
                                  const Region& selected,
                                  std::string_view target,
                                  std::string_view error);
+
+// The apex order sheet (lake#831, docs/ui/regions.md#the-order-sheet), server-rendered and working
+// without JavaScript. The sheet: the trust line, then the shared option holding the region picker
+// above unchanged (`selected` preselected, posting back to `target`), and one card per paid offer
+// with its price in USD, its included usage credit and an Order link to its form.
+std::string web_ui_order_sheet(const OrderSheet& sheet,
+                               const Regions& regions,
+                               const Region& selected,
+                               std::string_view target,
+                               std::string_view error);
+// One offer's order form, posting to /order: where it runs, the contact details, the quantity and
+// free text, a hidden field people never fill (a bot does), and the two ways to send it: pay with
+// card (when `checkout_available` and the offer is paid through Checkout) or send it as an order
+// form. `values` refill the form; `errors` are shown beside their fields.
+std::string web_ui_order_form(const OrderSheet& sheet,
+                              const Regions& regions,
+                              const OrderOffer& offer,
+                              const OrderFormInput& values,
+                              const OrderFormErrors& errors,
+                              bool checkout_available);
+// After an order form is sent: its id and the status link.
+std::string web_ui_order_received(const OrderSheet& sheet,
+                                  const Regions& regions,
+                                  const control::CloudOrder& order,
+                                  std::string_view status_url);
+// An order's status page: its state in words, the host once ready, what was ordered.
+// `checkout` is the `checkout` query value Stripe returns with (done or cancelled).
+std::string web_ui_order_status(const OrderSheet& sheet,
+                                const Regions& regions,
+                                const control::CloudOrder& order,
+                                std::string_view checkout);
+// A short page on the apex that says one thing (an order not found, too many orders).
+std::string web_ui_order_message(std::string_view title, std::string_view message);
+// The published price list the shared option links to: the list in force, or a sentence when none
+// is published yet.
+std::string web_ui_price_list(const std::vector<PriceListRow>& rows,
+                              std::string_view effective_from);
 
 } // namespace lake::api

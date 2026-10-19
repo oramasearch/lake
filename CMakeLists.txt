@@ -27,7 +27,7 @@ if(NOT DEFINED CMAKE_CXX_COMPILER AND NOT LAKE_USE_SYSTEM_COMPILER)
   endif()
 endif()
 
-project(lake VERSION 0.2.0 LANGUAGES C CXX)
+project(lake VERSION 0.3.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 26)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -331,6 +331,8 @@ add_library(lake-core STATIC
   src/api/network_capabilities.cpp
   src/api/tunnel_clients.cpp
   src/api/regions.cpp
+  src/api/orders.cpp
+  src/api/resend.cpp
   src/api/tunnel_client_capabilities.cpp
   src/audit/audit.cpp
   src/api/secrets_capabilities.cpp

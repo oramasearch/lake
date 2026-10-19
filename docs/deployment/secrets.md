@@ -15,6 +15,7 @@ Lake has two levels of secrets, and they never mix.
 
 Level 1 is lake's configuration and stays out of this page's migration: the Stripe keys are
 `LAKE_STRIPE_SECRET_KEY` and `LAKE_STRIPE_WEBHOOK_SECRET` (lake#628, [aks.md](aks.md#stripe)),
+Resend's, for the order sheet's email, is `LAKE_RESEND_API_KEY` ([resend.md](resend.md)),
 OpenAI's is `LAKE_OPENAI_API_KEY` ([aks.md](aks.md#speech-to-text-key)), Clerk's publishable key is
 `LAKE_CLERK_PUBLISHABLE_KEY` (public by design; lake holds no Clerk secret key), and Clerk's webhook
 signing secret is `LAKE_CLERK_WEBHOOK_SECRET` (`whsec_…`, an Orama platform key the operator injects

@@ -23,14 +23,15 @@ tick.
 
 | Route | Serves |
 |---|---|
-| any request whose `Host` is `LAKE_APEX_HOST`, apart from the stylesheet, fonts and probes | the region picker, before every other route; `POST` with `region` sets the `lake_region` preference cookie and redirects to the region's host with the same path and query ([`../api/regions.md`](../api/regions.md#the-apex-picker), lake#757) |
+| any request whose `Host` is `LAKE_APEX_HOST`, apart from the stylesheet, fonts and probes | the region picker, before every other route, inside the order sheet (lake#831); `POST` with `region` sets the `lake_region` preference cookie and redirects to the region's host with the same path and query ([`../api/regions.md`](../api/regions.md#the-apex-picker), lake#757) |
+| on `LAKE_APEX_HOST`: `GET /order/<offer>`, `GET /order/price-list`, `POST /order`, `GET /orders/<id>?token=…` | the order sheet's forms, the published price list, an order (recorded, then Stripe Checkout or the confirmation; 32 KiB, rate limited, honeypot), and an order's status by its signed link ([`../api/orders.md`](../api/orders.md#routes), lake#831) |
 | a browser's `GET` or `HEAD` of any other path (`Accept: text/html`) | the web app's `index.html` (`no-cache`, `Content-Security-Policy: frame-ancestors 'self'`): `/`, `/repositories`, `/w/<workspace_id>/design/projects` and every other page are the app's ([`../ui/web-app.md`](../ui/web-app.md)); the same path asked for by anything else is the 404 |
 | `GET /ui/<file>` | the app's content-hashed files (`public, max-age=31536000, immutable`) |
 | `GET /style-<hash>.css`, `GET /fonts/<IBM Plex face>-<hash>.woff2` | content-hashed design-system assets (`public, max-age=31536000, immutable`) linked by the hosted application pages |
 | `GET /style.css`, `GET /fonts/<IBM Plex face>.woff2` | compatibility aliases for direct and older links (`no-cache`) |
 | `GET /healthz`, `GET /readyz` | unauthenticated liveness and control-store readiness probes; see [`telemetry.md`](telemetry.md) |
 | `GET /metrics` | Prometheus metrics, guarded by the same bearer or session cookie as capabilities |
-| `GET /v1/server_info` | `{ok, value: {name, node, version, revision, api, store, …, region, regions}}`, no auth; `region` and `regions` are [regions](../api/regions.md); `revision` is the full source commit embedded at image build time, or `unknown` for a build that did not supply it |
+| `GET /v1/server_info` | `{ok, value: {name, node, version, revision, api, store, …, region, regions, order_sheet_url}}`, no auth; `region`, `regions` and `order_sheet_url` are [regions](../api/regions.md); `revision` is the full source commit embedded at image build time, or `unknown` for a build that did not supply it |
 | `POST /session` | the operator token form: a matching token becomes the Strict `lake_session` cookie and redirects to `/repositories`; a wrong one redirects to `/login?error=…` |
 | `POST /logout` | revokes the session, clears the cookie and redirects to `/` (to `/sign-in?signed_out=1` under Clerk) |
 | `POST /billing/stripe/webhook` | Stripe's payment notices (lake#620, [billing.md](../api/billing.md#webhooks)): no lake credential, the `Stripe-Signature` HMAC with a five-minute window is checked against the webhook secret in lake's secret store; each event applied once by id and audited centrally; `404` where the lake does not bill or has no Stripe keys |

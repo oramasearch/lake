@@ -18,7 +18,7 @@ calls the capability or the shared function, so the two cannot disagree.
 | `mcp_setup` | read | signed in | — | `{origin, mcp_url, tool_groups, flows, scopes}` |
 | `resolve_model` | read | anyone, for a public model | `namespace?`, `name` | `{repository_id, revision}` |
 | `latest_agent_task` | read | read on the account | `customer_id`, `workspace_id`, `subject` | `{task: <get_agent_task value> \| null}` |
-| `compile_pipeline` | action | write on the account | `customer_id`, `workspace_id`, `project`, `intent`, `dataset?`, `methodology?` | `{graph, template?}` |
+| `compile_pipeline` | action | write on the account | `customer_id`, `workspace_id`, `project`, `intent`, `dataset?`, `label_column?`, `entity_column?`, `methodology?`, `name?` | `{graph, template?}` |
 | `render_pipeline` | read | read on the account | `customer_id`, `workspace_id`, `project`, `graph`, `step?` | `{svg}` |
 
 The Ask Orama and Agent Factory conversation (`send_ask_message`, `settle_ask_turn`,
@@ -149,10 +149,15 @@ The project page's Build a Pipeline, as one call, with exactly what its form pos
 `methodology` that methodology's own pipeline), and with `dataset` (`"<database>.<table>"`) point
 the new pipeline's first connect step at it (`get_graph`, then `edit_pipeline`). The value names
 the new pipeline as `graph` (empty when the engine named none) and, from an engine with zetta#1238,
-`template`: the template its steps started from (`"the M-1 churn template"`). The engine names the
-pipeline from the intent's own words, so `graph` is no longer always `churn skeleton`; the step
-names (`load_customers`, `notify_retention` …) are the template's until edited, and Build a
-Pipeline says so when it finishes. Each step is its own audited
+`template`: the template its steps started from (`"the M-1 churn template"`). Lake names the
+pipeline, not the engine (lake#816): `name` when the caller gives one (trimmed; a blank one is no
+name), else a short title from the
+intent (`pipeline_title`: *Predict which accounts will churn in the next 90 days* is *Accounts
+churn*), numbered ` (2)`, ` (3)` past a pipeline of the project that has it, and passes that name to
+`compile_intent`. Build a Pipeline shows the same title (`pipelineTitle` in the web app, tested on
+the same cases) and sends what the person leaves or types there as `name`. The intent itself stays
+the project's description. The step names (`load_customers`, `notify_retention` …) are the
+template's until edited, and Build a Pipeline says so when it finishes. Each step is its own audited
 capability call. The web app's project page calls it. For example,
 `POST /w/<workspace_id>/v1/compile_pipeline`:
 

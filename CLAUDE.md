@@ -8,10 +8,11 @@ document rules, confidentiality, and the decisions not to drift past. Read both.
 
 ## Status
 
-Status: 2026-10-17. The current release is **v0.2.0**
-([`docs/releases/v0.2.0.md`](docs/releases/v0.2.0.md): secure networking, regions, the managed key
-and own identity, Clerk webhooks, the agents' names and Ask Orama's home, with its known issues).
-`server_info` of a v0.2.0 build reports version `0.2.0`. The paragraph below describes v0.1.0, the
+Status: 2026-10-19. The current release is **v0.3.0**
+([`docs/releases/v0.3.0.md`](docs/releases/v0.3.0.md): the lake.live order sheet and the 2026-10-18
+UX review's fixes, with its known issues); v0.2.0 ([`docs/releases/v0.2.0.md`](docs/releases/v0.2.0.md))
+added secure networking, regions, the managed key and own identity, Clerk webhooks, the agents'
+names and Ask Orama's home. `server_info` of a v0.3.0 build reports version `0.3.0`. The paragraph below describes v0.1.0, the
 first tagged release ([`docs/releases/v0.1.0.md`](docs/releases/v0.1.0.md) lists everything in it),
 and what ran on 2026-10-12. `Lake/prod` on the
 dev AKS cluster (there is no production environment yet) serves `oramasearch/lake:20261012a`, which
@@ -19,6 +20,12 @@ is also `oramasearch/lake:v0.1.0`, built from the tag (`2e6f6d7`) against liquid
 (`f669726`). `GET /v1/server_info` reports version `0.1.0`; the OpenAPI lists 554 paths and the
 operator's schema is applied through `0083_methodology_deployments`. Its bus and workspace Zettas
 run `oramasearch/zetta:main-4015ef76` (zetta `v0.2.0`).
+
+The apex order sheet is in the source tree, not deployed (lake#831, migration `0089_cloud_orders`,
+[`docs/api/orders.md`](docs/api/orders.md)): lake.live's picker shows four offers with USD prices
+from `LAKE_ORDER_SHEET`, Stripe Checkout or an order form that skips payment, orders in
+`cloud_orders`, email through Resend (`LAKE_RESEND_API_KEY`). The operator provisions paid orders
+(orama-operator#634); the credit on the monthly bill and the 5-minute promise's test are not built.
 
 Secure-networking desired state is implemented in the source tree (lake#727, `0084_network`):
 four desired/status pairs, scoped stores, signed atomic audit and app-to-service rollout rows.
@@ -64,6 +71,17 @@ sets its verified email and name, `user.deleted` disables it (`users.disabled_at
 sessions without erasing anything; every delivery is audited centrally. Not deployed; the operator
 must vendor the schema, select `clerk_webhooks_guard` and configure the endpoint and secret
 (orama-operator#541). See [`docs/api/clerk.md#webhooks`](docs/api/clerk.md#webhooks).
+
+Deployments made with `liquid deploy` reach Ship → Deployments (lake#805, migration
+`0088_repository_liquid_ids`): `liquid deploy` sends the id liquid gave the repository, not lake's
+UUID, so `repositories.liquid_id` records it (every push, and the platform sync for repositories it
+has not read, at most every 20th poll while a row needs one) and the sync places a row by lake's id
+or that one. The workspace keeps the operator's value as `operator_repository`, and lake writes the
+environment's values and domains under it so the operator applies them. A row that names no single
+repository is reported (`unresolved_repository`, `platform_unresolved_repositories` on `/healthz`,
+the `lake_platform_unresolved_repositories` gauge, one log line per change), never skipped quietly.
+Not deployed; the operator must vendor the schema and select `repository_liquid_ids_guard`. See
+[`docs/api/platform.md#which-repository-a-row-names`](docs/api/platform.md#which-repository-a-row-names).
 
 The newest dated record, [`docs/deployment/dev-2026-10-01.md`](docs/deployment/dev-2026-10-01.md),
 and [`docs/design/status.md`](docs/design/status.md) still describe the 2026-10-01 deployment

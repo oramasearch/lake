@@ -1,5 +1,10 @@
 # Tests
 
+`test_platform.cpp`'s `LiquidIdFixture` covers deployment rows that name a repository by the liquid
+id `liquid deploy` sends, by lake's UUID, by an unknown id (reported, not skipped) and by a liquid
+id two repositories share (lake#805); `*.RecordsAndFindsLiquidIds` runs the store contract on
+memory and PostgreSQL, and `test_api.cpp`'s `SyncHttp.PushRecordsTheRepositorysLiquidId` the push.
+
 `test_network_tunnel.cpp` exercises recipient-only CSR signing, trust, validity, refusal cases,
 admin grant/revoke and signed audit against memory and PostgreSQL. `tunnel_fixture.hpp` creates
 local keys and deliberately overprivileged CSRs. Transport evidence in `test_schema_conformance.cpp`
@@ -347,7 +352,12 @@ applies the proposal with `edit_pipeline`, approves it and runs it with the prop
 It also checks the proposal's `review_url` and that the check graph is not listed as a pipeline.
 `AgentRuns.AProjectAgentBuildChecksItsCompileAndThePickIgnoresTheCheckGraph` gives a build turn
 the same confined check and proves the pick after the build compiles the project's own pipeline
-rather than taking the check graph.
+rather than taking the check graph, titled from the Opportunity's intent (*Accounts churn*,
+lake#816); `AgentRuns.AProjectAgentBuildIsTitledFromWhatTheProjectIsFor` titles it from the brief's
+words when the Opportunity carries no intent, and with the project's name when the brief says
+only *Design the pipeline for the project <name>*. `AgentRuns.APipelineTitleIsShortAndReadable` runs the title cases
+in `frontend/tests/pipeline-titles.json`, which the web app's `design.test.ts` runs too, so
+`pipeline_title` and `pipelineTitle` agree.
 `AgentLeases.RetryNoticeIsTheTasksMessage` pins that a retry notice is the task's message, which
 the web app's working panels show.
 `HttpServer/HttpResponseIsolation.LibraryAgentsFinishEveryTurnKindWithoutAWorkspaceEcho/*`
@@ -575,6 +585,14 @@ leaving every billing capability, `viewer.billing` and the Billing guide absent;
 finalize, voids, idempotency keys, a retry that bills once, rounding to the cent), the webhook
 signature and its window, notices applied once per event id with the central audit, the keys read
 from a secret mount with rotation and the manual fallback, and the route only where the lake bills.
+The apex order sheet (lake#831): `test_orders.cpp` covers its configuration (the default, the merge
+patch, every startup error), the order form's checks, the status token, the rate limit, the emails
+(the customer's copy carries nothing the sender typed; support's carries every field), text bounded
+on a UTF-8 boundary, and the Resend client against a test double for HTTP, Stripe Checkout and its webhook events, the
+`cloud_orders` contract in both stores (on PostgreSQL, orama-operator#635's own list, claim and
+finish statements: an unpaid order is never claimed, a paid one is claimed once and finished only
+by its claimant), a paid order of more than one refused by both stores, and the pages and routes
+over HTTP with a fake Stripe and a fake Resend.
 
 The audit split by subject (decision 52, lake#317): `test_workspace_records.cpp`'s
 `AuditEventsAboutAWorkspaceLiveInItsOwnChain` covers the `AuditRecorder` and the readers across two

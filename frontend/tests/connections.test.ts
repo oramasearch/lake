@@ -107,4 +107,6 @@ test("Load into a dataset fills in the table's query and a dataset name", () => 
   assert.equal(datasetNameFor("2024-sales"), "_sales", "SQL names start with a letter or underscore");
   assert.equal(datasetNameFor("2024"), "dataset");
   assert.equal(datasetNameFor("x".repeat(80)).length, 63);
+  assert.equal(datasetNameFor("Order"), "Order_data", "lake refuses a SQL keyword, so it gets _data");
+  assert.equal(datasetNameFor("group"), "group_data");
 });

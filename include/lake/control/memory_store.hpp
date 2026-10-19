@@ -92,6 +92,10 @@ public:
                                                       int limit,
                                                       const std::string& workspace_id = {}) override;
     Result<Repository> get_repository(const std::string& id) override;
+    Result<std::vector<Repository>> repositories_by_liquid_id(const std::string& liquid_id) override;
+    Result<void> set_repository_liquid_id(const std::string& id,
+                                          const std::string& liquid_id) override;
+    Result<std::vector<Repository>> repositories_without_liquid_id(int limit) override;
     Result<Repository> rename_repository(const std::string& id, const std::string& name) override;
     Result<Repository> set_repository_visibility(const std::string& id,
                                                  const std::string& visibility) override;
@@ -404,6 +408,15 @@ public:
                                   const std::string& provider,
                                   const std::string& provider_customer_id) override;
     Result<PaymentEventResult> apply_payment_event(const PaymentEvent& event) override;
+    Result<CloudOrder> create_cloud_order(const NewCloudOrder& order) override;
+    Result<CloudOrder> get_cloud_order(const std::string& id) override;
+    Result<CloudOrder> transition_cloud_order(const CloudOrderTransition& change) override;
+    Result<CloudOrderPaymentResult>
+    apply_cloud_order_payment(const CloudOrderPayment& payment) override;
+    Result<std::vector<CloudOrder>> claim_cloud_order_emails(int limit, int lease_seconds) override;
+    Result<void> record_cloud_order_email(const CloudOrderEmailOutcome& outcome) override;
+    Result<std::vector<CloudOrderEvent>> unaudited_cloud_order_events(int limit) override;
+    Result<void> mark_cloud_order_events_audited(const std::vector<std::int64_t>& ids) override;
     Result<std::uint64_t> set_storage_quota(const std::string& customer_id,
                                             std::uint64_t quota_bytes) override;
     Result<PkiAuthorityRecord> create_pki_authority(const NewPkiAuthorityRecord& value,
@@ -633,6 +646,15 @@ private:
     std::vector<Invoice> invoices_;
     std::map<std::pair<std::string, std::string>, std::string> billing_provider_customers_;
     std::set<std::pair<std::string, std::string>> payment_events_;
+    // Cloud orders (migration 0089), their events, and when each order's next email is due.
+    std::vector<CloudOrder> cloud_orders_;
+    std::vector<CloudOrderEvent> cloud_order_events_;
+    std::map<std::string, std::chrono::system_clock::time_point> cloud_order_email_due_;
+    void cloud_order_event_locked(const std::string& id,
+                                  const std::string& from,
+                                  const std::string& to,
+                                  const std::string& actor,
+                                  const std::string& detail);
     std::vector<ManagedService> services_;
     std::vector<Workspace> workspaces_;
     std::vector<WorkspaceDeletion> workspace_deletions_;

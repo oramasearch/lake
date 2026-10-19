@@ -2,6 +2,7 @@
  * a folder chosen or dropped with its subfolders, the move plan for items dragged onto a folder,
  * sorting, range selection and upload chunks. No React and no `@/` imports, so
  * `tests/drives.test.ts` runs them under Node directly. */
+import { notAKeyword } from "../../lib/sqlKeywords.ts";
 
 /* ------------------------------------------------------------------ paths */
 
@@ -229,12 +230,13 @@ export function datasetFormat(name: string): "csv" | "jsonl" | null {
 }
 
 /** A dataset name from a file's name, as SQL can query it: letters, digits and underscores,
- * starting with a letter or underscore, at most 63 characters ("Churn 2026.csv" → "churn_2026"). */
+ * starting with a letter or underscore, at most 63 characters, and not a SQL keyword
+ * ("Churn 2026.csv" → "churn_2026", "order.csv" → "order_data"). */
 export function datasetName(fileName: string): string {
   const dot = fileName.lastIndexOf(".");
   const stem = (dot > 0 ? fileName.slice(0, dot) : fileName).toLowerCase();
   let name = stem.replace(/[^a-z0-9_]+/g, "_").replace(/^_+|_+$/g, "").replace(/_+/g, "_");
   if (!name) name = "dataset";
   if (/^[0-9]/.test(name)) name = `_${name}`;
-  return name.slice(0, 63);
+  return notAKeyword(name.slice(0, 63));
 }

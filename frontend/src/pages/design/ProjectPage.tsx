@@ -18,8 +18,11 @@ import { WorkspaceGate, useWorkspaceStatus } from "@/components/WorkspaceGate";
 import { qs, useScope, useScopedRead, useWq, useWsPath, wa, wq } from "./api";
 import {
   PROJECT_STATE_TONE,
+  buildModelName,
   datasetChoices,
   datasetColumns,
+  pipelineActionError,
+  pipelineTitle,
   projectState,
   runIsActive,
   runsOf,
@@ -27,6 +30,7 @@ import {
   solutionState,
   taskIsActive,
   text,
+  uniquePipelineName,
   withoutProjectAgentChecks,
   type J,
 } from "./logic";
@@ -35,14 +39,27 @@ import { ActiveSolution, ProposalContent } from "./SolutionPanels";
 import "@/styles/design.css";
 
 export default function ProjectPage() {
-  const [params] = useSearchParams();
+  const [params, setParams] = useSearchParams();
   const name = params.get("name") ?? "";
   useDesignTrail({ label: "Projects", path: "/design/projects" }, [name ? entityCrumb(name) : { label: "Project" }], name ? `Project: ${name}` : "Project");
   // The same read the body makes: the header carries the project's status.
   const ready = useWorkspaceStatus().q.data?.ready === true;
   const project = useWq<J>("get_project", { name }, { enabled: ready && !!name });
   const status = project.data ? projectState(withoutProjectAgentChecks<J>(project.data.graphs)).state : null;
-  const [building, setBuilding] = useState(false);
+  // `?build=1&dataset=<database>.<name>` (New project for a dataset, lake#818) opens Build pipeline
+  // with that dataset chosen.
+  const [building, setBuilding] = useState(params.get("build") === "1");
+  const source = params.get("dataset") ?? "";
+  const build = (open: boolean) => {
+    setBuilding(open);
+    // Closing it leaves the project's own address, so a reload does not open it again.
+    if (!open && (params.has("build") || params.has("dataset"))) {
+      const next = new URLSearchParams(params);
+      next.delete("build");
+      next.delete("dataset");
+      setParams(next, { replace: true });
+    }
+  };
   return (
     <Page
       eyebrow="Design · Project"
@@ -60,7 +77,7 @@ export default function ProjectPage() {
       }
     >
       <WorkspaceGate>
-        <ProjectBody key={name} name={name} building={building} onBuilding={setBuilding} />
+        <ProjectBody key={name} name={name} source={source} building={building} onBuilding={build} />
       </WorkspaceGate>
     </Page>
   );
@@ -70,7 +87,7 @@ type Task = J & { status?: string; message?: string; build_error?: string };
 const TABS = ["overview", "pipelines", "runs", "solution"] as const;
 type Tab = (typeof TABS)[number];
 
-function ProjectBody({ name, building, onBuilding }: { name: string; building: boolean; onBuilding: (open: boolean) => void }) {
+function ProjectBody({ name, source, building, onBuilding }: { name: string; source: string; building: boolean; onBuilding: (open: boolean) => void }) {
   const scope = useScope();
   const ws = useWsPath();
   const [live, setLive] = useState(false);
@@ -238,7 +255,16 @@ function ProjectBody({ name, building, onBuilding }: { name: string; building: b
             <ProposalContent project={name} task={solutionTask} />
           ) : null)}
       </Split>
-      {building && <BuildPipeline project={name} datasets={datasets} methodologies={methodologies.data} onClose={() => onBuilding(false)} />}
+      {building && (
+        <BuildPipeline
+          project={name}
+          source={source}
+          taken={(Array.isArray(project.data?.graphs) ? (project.data!.graphs as J[]) : []).map((graph) => text(graph, "name"))}
+          datasets={datasets}
+          methodologies={methodologies.data}
+          onClose={() => onBuilding(false)}
+        />
+      )}
     </div>
   );
 }
@@ -326,21 +352,44 @@ function PipelineAction({ project, graphId, approved }: { project: string; graph
       <Button variant={approved ? "secondary" : "primary"} loading={busy} onClick={() => void submit()}>
         {approved ? "Check and run" : "Approve"}
       </Button>
-      <FormError error={error} />
+      <FormError error={pipelineActionError(error)} />
     </div>
   );
 }
 
-function BuildPipeline({ project, datasets, methodologies, onClose }: { project: string; datasets: ReturnType<typeof useWq<J>>; methodologies: J | undefined; onClose: () => void }) {
+function BuildPipeline({
+  project,
+  source,
+  taken,
+  datasets,
+  methodologies,
+  onClose,
+}: {
+  project: string;
+  source: string;
+  /** The project's pipeline names, so a new one is numbered past them. */
+  taken: string[];
+  datasets: ReturnType<typeof useWq<J>>;
+  methodologies: J | undefined;
+  onClose: () => void;
+}) {
   const scope = useScope();
   const ws = useWsPath();
   const navigate = useNavigate();
   const toast = useToast();
   const [intent, setIntent] = useState("");
-  const [dataset, setDataset] = useState("");
+  // The dataset the address names (a dataset's Train a model on this, lake#818), else none.
+  const [dataset, setDataset] = useState(source);
   const [label, setLabel] = useState("");
   const [entity, setEntity] = useState("");
   const [methodology, setMethodology] = useState("");
+  // A short name from the description and a short model name from that, both shown and editable
+  // before building (lake#816); what the person types wins.
+  const models = useWq<J>("list_models");
+  const [typedName, setName] = useState<string | null>(null);
+  const [typedModel, setModel] = useState<string | null>(null);
+  const name = typedName ?? (intent.trim() ? uniquePipelineName(pipelineTitle(intent), taken) : "");
+  const modelName = typedModel ?? buildModelName(name, taken, models.data?.models, project);
   const { busy, error, run } = useSubmit();
   const choices = datasetChoices(datasets.data?.datasets);
   // The chosen dataset's columns: what it predicts and what each row is about, so lake's compiler
@@ -355,6 +404,7 @@ function BuildPipeline({ project, datasets, methodologies, onClose }: { project:
         workspace_id: scope.workspaceId,
         project,
         intent,
+        ...(name.trim() ? { name: name.trim() } : {}),
         ...(dataset ? { dataset } : {}),
         ...(dataset && label ? { label_column: label } : {}),
         ...(dataset && entity ? { entity_column: entity } : {}),
@@ -366,10 +416,14 @@ function BuildPipeline({ project, datasets, methodologies, onClose }: { project:
       // With a dataset the engine names the steps from it (zetta#1246); without, they are the template's.
       const from = template ? (dataset ? ` from ${template}, its steps named from ${dataset}` : ` from ${template}; rename its steps to fit your data`) : "";
       setIntent("");
-      if (dataset && graph) {
-        // Pointed at a dataset: open the pipeline at its Run form, the dataset chosen.
+      // Only a model name the person typed travels to the Run form; without one the Run form
+      // proposes its default from the pipeline lake actually built (lake#816).
+      const model = typedModel?.trim() ?? "";
+      if (graph && (dataset || model)) {
+        // Pointed at a dataset, or a model name of the person's own: open the pipeline at its Run
+        // form, with the dataset and that model name chosen.
         if (from) toast(`Built${from}.`);
-        navigate(ws(`/design/pipeline?${qs({ project, graph, dataset })}#run`));
+        navigate(ws(`/design/pipeline?${qs({ project, graph, ...(dataset ? { dataset } : {}), ...(model ? { model } : {}) })}#run`));
         return;
       }
       toast(graph ? `Pipeline ${graph} built${from}` : "Pipeline built");
@@ -393,6 +447,12 @@ function BuildPipeline({ project, datasets, methodologies, onClose }: { project:
         <FormError error={error} />
         <Field label="What should it predict or answer?" required>
           <textarea name="intent" rows={4} placeholder="Predict which accounts will churn in the next 90 days, with the reasons" value={intent} onChange={(e) => setIntent(e.target.value)} />
+        </Field>
+        <Field label="Pipeline name" help="A few words, made from the description; the description is kept as the project's intent.">
+          <input name="name" placeholder="Made from the description" value={name} onChange={(e) => setName(e.target.value)} />
+        </Field>
+        <Field label="Model name" help="What the trained model is called in Ship → Models and when it is called. Change it here or before a run.">
+          <input name="model_name" placeholder="Made from the pipeline name" value={modelName} onChange={(e) => setModel(e.target.value)} />
         </Field>
         <Field label="From data" help="Choose a dataset and the pipeline reads it, and its runs train on it." error={datasets.isError ? `The datasets could not be listed: ${(datasets.error as Error).message}` : undefined}>
           <select

@@ -19,7 +19,7 @@ import { Button, type Column, cx, DataTable, Empty, ErrorBlock, Field, FilterChi
 import { dateTime, relative } from "@/lib/format";
 import { postRead } from "@/pages/design/api";
 import { FormError } from "@/pages/design/parts";
-import { useServerRegions } from "@/components/Region";
+import { OrderSheetLinks, useServerRegions } from "@/components/Region";
 import { workspaceRegionLabel } from "@/lib/regions";
 import "@/styles/design.css";
 
@@ -185,10 +185,15 @@ export default function WorkspacesPage() {
       sub={`Isolated environments, each keeping its own projects, data and models apart from every other.${region ? ` Workspaces here are in ${region}.` : ""}`}
       actions={
         customerId ? (
-          <Button variant="primary" onClick={() => setCreating(customerId)}>
-            <Plus size={14} aria-hidden /> New workspace
-          </Button>
-        ) : undefined
+          <>
+            <OrderSheetLinks />
+            <Button variant="primary" onClick={() => setCreating(customerId)}>
+              <Plus size={14} aria-hidden /> New workspace
+            </Button>
+          </>
+        ) : (
+          <OrderSheetLinks />
+        )
       }
     >
       {!customerId ? (

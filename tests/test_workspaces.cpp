@@ -2194,6 +2194,93 @@ TEST(AgentRuns, ABuiltPipelineSaysWhichTemplateItStartedFrom) {
     EXPECT_FALSE(older.value.contains("template"));
 }
 
+// lake#816: a pipeline built from a description gets a short title, never the description's words
+// with its punctuation dropped.
+TEST(AgentRuns, APipelineTitleIsShortAndReadable) {
+    using lake::api::pipeline_title;
+    // The cases the web app's pipelineTitle runs too (frontend/tests/design.test.ts), so the two
+    // agree, non-ASCII text included.
+    std::ifstream file(std::filesystem::path(LAKE_TEST_SOURCE_DIR) /
+                       "frontend/tests/pipeline-titles.json");
+    ASSERT_TRUE(file) << "frontend/tests/pipeline-titles.json";
+    const json table = json::parse(file);
+    ASSERT_GE(table["cases"].size(), 30U);
+    for (const json& each : table["cases"]) {
+        const std::string description = each[0].get<std::string>();
+        EXPECT_EQ(pipeline_title(description), each[1].get<std::string>()) << description;
+    }
+    const auto characters = [](const std::string& text) {
+        return std::ranges::count_if(
+            text, [](char c) { return (static_cast<unsigned char>(c) & 0xC0) != 0x80; });
+    };
+    // Punctuation never lands in a title, and a title is a few words, at most 48 characters.
+    for (const std::string_view description :
+         {"Predict (churn), [now]; please: thanks.",
+          "Find: which? accounts!",
+          "Spot fraud -- quickly",
+          "Predict: (\u201cchurn\u201d)\u2026",
+          "Predict which customers, accounts, users and orgs will "
+          "churn soon and why and how much revenue we lose"}) {
+        const std::string title = pipeline_title(description);
+        EXPECT_FALSE(title.empty()) << description;
+        EXPECT_EQ(title.find_first_of("()[]{},;:.!?\""), std::string::npos) << title;
+        for (const std::string_view mark : {"\u201c", "\u201d", "\u2018", "\u2026"}) {
+            EXPECT_EQ(title.find(mark), std::string::npos) << title;
+        }
+        EXPECT_LE(characters(title), 48) << title;
+    }
+}
+
+TEST(AgentRuns, ABuiltPipelineIsNamedWithAShortTitle) {
+    AgentRuns r;
+    const auto sent = [&](const std::string& capability) {
+        for (auto call = r.w.caller->calls.rbegin(); call != r.w.caller->calls.rend(); ++call) {
+            if (call->first == capability) {
+                return call->second;
+            }
+        }
+        return json(nullptr);
+    };
+    r.w.caller->answers["capture_intent"] = {{"input_id", "in-1"}};
+    r.w.caller->answers["compile_intent"] = {{"name", "Customers churn"}};
+    const std::string description =
+        "Predict which customers will churn (the churned column), with the reasons";
+    const auto built =
+        r.call("compile_pipeline", {{"project", "retention"}, {"intent", description}});
+    ASSERT_TRUE(built.ok) << built.error.message;
+    EXPECT_EQ(sent("compile_intent")["name"], "Customers churn");
+    // The full description is still the project's captured intent.
+    EXPECT_EQ(sent("capture_intent")["text"], description);
+
+    // A title the project already has is numbered, as the engine numbers its own.
+    r.w.caller->answers["get_project"] = {
+        {"graphs",
+         json::array({{{"name", "Customers churn"}}, {{"name", "Customers churn (2)"}}})}};
+    ASSERT_TRUE(r.call("compile_pipeline", {{"project", "retention"}, {"intent", description}}).ok);
+    EXPECT_EQ(sent("compile_intent")["name"], "Customers churn (3)");
+
+    // A name the caller chose is used, numbered the same way when it is taken.
+    ASSERT_TRUE(r.call("compile_pipeline",
+                       {{"project", "retention"}, {"intent", description}, {"name", "Churn"}})
+                    .ok);
+    EXPECT_EQ(sent("compile_intent")["name"], "Churn");
+    ASSERT_TRUE(
+        r.call("compile_pipeline",
+               {{"project", "retention"}, {"intent", description}, {"name", "Customers churn"}})
+            .ok);
+    EXPECT_EQ(sent("compile_intent")["name"], "Customers churn (3)");
+
+    // A chosen name is trimmed, and one that is only spaces is no name.
+    ASSERT_TRUE(r.call("compile_pipeline",
+                       {{"project", "retention"}, {"intent", description}, {"name", "  Churn \n"}})
+                    .ok);
+    EXPECT_EQ(sent("compile_intent")["name"], "Churn");
+    ASSERT_TRUE(r.call("compile_pipeline",
+                       {{"project", "retention"}, {"intent", description}, {"name", "   "}})
+                    .ok);
+    EXPECT_EQ(sent("compile_intent")["name"], "Customers churn (3)");
+}
+
 // zetta#1246 (lake#615): compile_pipeline passes the chosen dataset's source and table and the
 // label and entity columns to the compiler as hints, so the steps are named from the data. A
 // connect step the engine already pointed is left as the engine named it; an older engine's step
@@ -3243,6 +3330,55 @@ TEST(AgentRuns, AgentTurnReachesLibraryNativeAndPythonAgents) {
     EXPECT_EQ(std::get<2>(r.agents.turns.back())["message"], "hello again");
 }
 
+// Scan my workspace (lake#795): Auto-Suggest Agent's discover turn reads the account's Apps and
+// image builds with its task credential before it suggests (agent-autosuggest's apps.py), so the
+// credential grants those reads, and nothing that changes an App or a build.
+TEST(AgentRuns, AutoSuggestDiscoverReadsAppsAndBuildsWithItsTaskCredential) {
+    AgentRuns r;
+    auto& config = const_cast<lake::control::WorkspaceConfig&>(r.w.service->config());
+    config.agent_endpoints = {{"agent-autosuggest", "http://suggest:8080"}};
+    config.internal_url = "http://lake.internal:4900";
+
+    const auto started = r.call(
+        "agent_turn",
+        {{"agent", "agent-autosuggest"}, {"kind", "discover"}, {"message", "Scan my workspace"}});
+    ASSERT_TRUE(started.ok) << started.error.message;
+    const auto task = r.task(started.value["task_id"]);
+    ASSERT_TRUE(task);
+    EXPECT_EQ(task->kind, "discover");
+    for (const std::string_view capability : {"list_apps",
+                                              "get_app",
+                                              "receive_app_events",
+                                              "list_builds",
+                                              "get_build",
+                                              "receive_build_events"}) {
+        EXPECT_NE(std::ranges::find(task->scopes, capability), task->scopes.end()) << capability;
+    }
+    for (const std::string_view capability : {"workspace_act",
+                                              "create_app",
+                                              "deploy_app",
+                                              "build_app",
+                                              "delete_app",
+                                              "app_logs",
+                                              "build_logs",
+                                              "cancel_build",
+                                              "agent_turn"}) {
+        EXPECT_EQ(std::ranges::find(task->scopes, capability), task->scopes.end()) << capability;
+    }
+
+    const std::string credential = "lat." + task->id + ".0123456789abcdef0123456789abcdef";
+    ASSERT_TRUE(r.store.claim_agent_task(
+        task->id, "agent-autosuggest", lake::control::identity_crypto::sha256_hex(credential)));
+    const auto agent = r.store.context_for(credential);
+    ASSERT_TRUE(agent) << agent.error().message;
+    const auto apps = r.call_as(*agent, "list_apps", json::object());
+    EXPECT_TRUE(apps.ok) << apps.error.code << ": " << apps.error.message;
+    const auto builds = r.call_as(*agent, "list_builds", json::object());
+    EXPECT_TRUE(builds.ok) << builds.error.code << ": " << builds.error.message;
+    EXPECT_EQ(r.call_as(*agent, "app_logs", {{"app_id", "any"}}).error.code, "unauthorized")
+        << "a read Auto-Suggest Agent does not make is not granted";
+}
+
 TEST(AgentRuns, ApplicationAgentWritesAppsOnlyAfterTheProposalIsConfirmed) {
     AgentRuns r;
     auto& config = const_cast<lake::control::WorkspaceConfig&>(r.w.service->config());
@@ -3962,7 +4098,12 @@ TEST(AgentRuns, AProjectAgentBuildChecksItsCompileAndThePickIgnoresTheCheckGraph
                                 {{"agent", "agent-project"},
                                  {"kind", "build:retention"},
                                  {"message", "Design the pipeline for the project retention"},
-                                 {"context", {{"opportunity", {{"methodology", "M-1"}}}}}});
+                                 {"context",
+                                  {{"opportunity",
+                                    {{"methodology", "M-1"},
+                                     {"intent",
+                                      "Predict which accounts will churn in the next 90 days, "
+                                      "with the reasons"}}}}}});
     ASSERT_TRUE(started.ok) << started.error.message;
     const auto task = r.task(started.value["task_id"]);
     ASSERT_TRUE(task);
@@ -4028,13 +4169,65 @@ TEST(AgentRuns, AProjectAgentBuildChecksItsCompileAndThePickIgnoresTheCheckGraph
         return call.first == "compile_intent";
     });
     ASSERT_NE(compiled, r.w.caller->calls.end()) << "the check graph was not taken as the pipeline";
-    EXPECT_EQ(compiled->second.value("name", std::string()), "")
-        << "lake's own compile names no check graph";
+    // lake titles its own compile from the Opportunity's intent (lake#816): never a check graph's
+    // name, and never the brief's "Design the pipeline" words.
+    EXPECT_EQ(compiled->second.value("name", std::string()), "Accounts churn")
+        << "lake's own compile is titled from what the project is for";
     EXPECT_EQ(compiled->second["input_id"], "intent-1");
     EXPECT_TRUE(std::ranges::none_of(r.w.caller->calls, [](const auto& call) {
         return call.first == "get_graph" &&
                call.second.value("graph", std::string()).starts_with("Project Agent check");
     })) << "the check graph is never read as the pipeline to repoint";
+}
+
+// lake#816: a build without the Opportunity's intent is titled from the brief's words after
+// "Design the pipeline for the project <name>: ", never from "Design the pipeline"; a brief with
+// nothing after those words is titled with the project's name.
+TEST(AgentRuns, AProjectAgentBuildIsTitledFromWhatTheProjectIsFor) {
+    AgentRuns r;
+    auto& config = const_cast<lake::control::WorkspaceConfig&>(r.w.service->config());
+    config.agent_endpoints = {{"agent-project", "http://project:8080"}};
+    config.internal_url = "http://lake.internal:4900";
+    r.w.caller->answers["get_project"] = {{"name", "retention"}, {"graphs", json::array()}};
+    r.w.caller->answers["list_methodologies"] = {
+        {"methodologies", json::array({{{"id", "M-1"}, {"runnable", true}}})}};
+    r.w.caller->answers["capture_intent"] = {{"input_id", "intent-1"}};
+    r.w.caller->answers["compile_intent"] = {{"name", "Customers churn"}, {"project", "retention"}};
+    const auto title_of_build = [&](const std::string& brief) -> std::string {
+        const auto started = r.call("agent_turn",
+                                    {{"agent", "agent-project"},
+                                     {"kind", "build:retention"},
+                                     {"message", brief},
+                                     {"context", {{"opportunity", {{"methodology", "M-1"}}}}}});
+        EXPECT_TRUE(started.ok) << started.error.message;
+        const auto task = r.task(started.value["task_id"]);
+        if (!task) {
+            ADD_FAILURE() << "no task for " << brief;
+            return {};
+        }
+        EXPECT_TRUE(r.set_task_status(
+            task->id,
+            "Succeeded",
+            "",
+            "",
+            {{"ok", true},
+             {"result", {{"pipeline", {{"methodology", "M-1"}, {"label", "churned"}}}}}}));
+        r.w.caller->calls.clear();
+        EXPECT_TRUE(r.call("get_agent_task", {{"task_id", task->id}}).ok);
+        const auto compiled = std::ranges::find_if(
+            r.w.caller->calls, [](const auto& call) { return call.first == "compile_intent"; });
+        if (compiled == r.w.caller->calls.end()) {
+            ADD_FAILURE() << "nothing compiled for " << brief;
+            return {};
+        }
+        return compiled->second.value("name", std::string());
+    };
+    EXPECT_EQ(title_of_build("Design the pipeline for the project retention: Predict which "
+                             "customers will churn (the churned column), with the reasons. "
+                             "Methodology: M-1"),
+              "Customers churn");
+    EXPECT_EQ(title_of_build("Design the pipeline for the project retention"), "Retention")
+        << "never \"Design pipeline\"";
 }
 
 TEST(AgentRuns, EachLibraryAgentHasItsOwnBusCredential) {
@@ -4561,7 +4754,38 @@ TEST(Workspaces, NamingPredictAnswersEachRowsOwnKey) {
     };
     const auto refused = r.call("predict", {{"model_id", "m-1"}, {"rows", rows}});
     EXPECT_EQ(refused.error.code, "invalid_input");
-    EXPECT_EQ(refused.error.path, "/rows/1/tenure");
+    EXPECT_EQ(refused.error.path, "/rows/1/tenure") << "the path keeps the zero-based index";
+    // People count rows from one, and the row's own key names it (lake#819).
+    EXPECT_EQ(refused.error.message,
+              "score: row 2 ('acct-b') has no 'tenure'; the model needs tenure");
+
+    // A numeric key is named without quotes; a row without one by its number alone.
+    const json numbered = json::array({{{"account_id", 7}, {"tenure", 4}}, {{"tenure", 40}}});
+    r.w.caller->before_reply = [&] {
+        if (r.w.caller->capability != "score") {
+            r.w.caller->failure.reset();
+        } else {
+            r.w.caller->failure = lake::control::ZettaControlError{
+                "engine_error", "score: row 0 has a non-numeric 'tenure'"};
+        }
+    };
+    const auto keyed_refusal = r.call(
+        "predict", {{"model_id", "m-1"}, {"rows", numbered}, {"entity_column", "account_id"}});
+    EXPECT_EQ(keyed_refusal.error.message, "score: row 1 (7) has a non-numeric 'tenure'");
+    EXPECT_EQ(keyed_refusal.error.path, "/rows/0/tenure");
+    r.w.caller->before_reply = [&] {
+        if (r.w.caller->capability != "score") {
+            r.w.caller->failure.reset();
+        } else {
+            r.w.caller->failure = lake::control::ZettaControlError{
+                "engine_error", "score: row 1 has no 'tenure'; the model needs tenure"};
+        }
+    };
+    const auto unkeyed_refusal = r.call(
+        "predict", {{"model_id", "m-1"}, {"rows", numbered}, {"entity_column", "account_id"}});
+    EXPECT_EQ(unkeyed_refusal.error.message,
+              "score: row 2 has no 'tenure'; the model needs tenure");
+    EXPECT_EQ(unkeyed_refusal.error.path, "/rows/1/tenure");
 }
 
 TEST(Workspaces, NamingCompareRunsWithoutNamesComparesEverySharedMetric) {

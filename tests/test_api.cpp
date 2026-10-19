@@ -11,6 +11,7 @@
 #include <csignal>
 #include <cstdlib>
 #include <filesystem>
+#include <format>
 #include <fstream>
 #include <initializer_list>
 #include <map>
@@ -6485,6 +6486,73 @@ TEST(ModelSync, MultiGigabyteRevisionsDeduplicateAndResumePull) {
     EXPECT_GT(storage["dedup_ratio"].get<double>(), 0.99);
     EXPECT_EQ(storage["revisions"].size(), 2U);
     server.stop();
+}
+
+// lake#805: a push records the id liquid gave the repository, the one `liquid deploy` from a
+// checkout of it sends, so the platform sync finds the repository a deployment row names.
+TEST(SyncHttp, PushRecordsTheRepositorysLiquidId) {
+    TemporarySyncRoot temporary;
+    auto control = std::make_shared<lake::control::InMemoryStore>();
+    const auto user = control->create_user(
+        {"taap:1:ed25519:liquid-id-owner", "liquid-id-owner@example.test", "Liquid Id Owner"});
+    ASSERT_TRUE(user);
+    const auto customer = control->create_customer({"individual", user->id, "", "liquid-ids"});
+    ASSERT_TRUE(customer);
+    const auto repository =
+        control->create_repository({customer->id, "deployed", "", "private",
+                                    lake::test::repository_workspace(*control, customer->id)});
+    ASSERT_TRUE(repository);
+    EXPECT_TRUE(repository->liquid_id.empty());
+
+    const std::filesystem::path file = temporary.path() / "app.txt";
+    {
+        std::ofstream output(file);
+        output << "hello";
+    }
+    auto source =
+        liquid::runtime::block_on(liquid::repository::create(temporary.path() / "checkout"));
+    ASSERT_TRUE(source);
+    ASSERT_TRUE(liquid::runtime::block_on(source->write_file("app.txt", file)));
+    ASSERT_TRUE(liquid::runtime::block_on(source->cut("first")));
+
+    ServerOptions options;
+    options.port = 0;
+    options.node_name = "liquid-id-test";
+    options.admin_token = "liquid-id-admin";
+    options.instance_kek = "liquid-id-instance-kek";
+    options.store_root = (temporary.path() / "lake").string();
+    options.store = control;
+    ApiServer server(options);
+    ASSERT_TRUE(server.start()) << server.reason();
+    liquid::sync_endpoint endpoint(
+        "http://127.0.0.1:" + std::to_string(server.port()) + "/v1/repositories/" + repository->id,
+        liquid::sync_endpoint_options{.bearer_token = "liquid-id-admin"});
+    const auto pushed = liquid::runtime::block_on(endpoint.push(*source));
+    ASSERT_TRUE(pushed) << pushed.error().message;
+    // A new checkout takes the identity of the repository it pulls from, as `liquid clone` does.
+    auto clone = liquid::runtime::block_on(liquid::repository::create(temporary.path() / "clone"));
+    ASSERT_TRUE(clone);
+    const auto pulled = liquid::runtime::block_on(endpoint.pull(*clone));
+    ASSERT_TRUE(pulled) << pulled.error().message;
+    server.stop();
+
+    // A repository lake created empty took the identity of its first push: the checkout's id.
+    const auto id = source->id();
+    ASSERT_TRUE(id);
+    const auto cloned = clone->id();
+    ASSERT_TRUE(cloned);
+    EXPECT_EQ(*cloned, *id) << "liquid deploy from the clone sends the same id";
+    std::string hex;
+    for (const std::byte octet : *id) {
+        hex += std::format("{:02x}", std::to_integer<unsigned char>(octet));
+    }
+    const auto recorded = control->get_repository(repository->id);
+    ASSERT_TRUE(recorded);
+    EXPECT_EQ(recorded->liquid_id, hex);
+    const auto named = control->repositories_by_liquid_id(hex);
+    ASSERT_TRUE(named);
+    ASSERT_EQ(named->size(), 1U);
+    EXPECT_EQ(named->front().id, repository->id);
 }
 
 TEST(SyncHttp, PushPullShareCustomerStoreAndTransferOnlyMissingChunks) {

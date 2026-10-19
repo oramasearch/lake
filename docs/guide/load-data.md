@@ -3,19 +3,26 @@
 A **dataset** is a table in your workspace: the data its pipelines train on, its search indexes
 cover and its agents read. Every dataset lives in the workspace it was loaded into; another workspace never sees it.
 
-Open **Data → Datasets** to see them. The page has two figures (Datasets, Run outputs) and the
+Open [**Data → Datasets**](/train/data) to see them. The page has two figures (Datasets, Run outputs) and the
 datasets table. Its header has **Query with SQL** and **Load data**, which appear once the
 workspace is ready. The databases the workspace reads are on **Data → Connections**
 ([Connections](/docs/connections)), and storage is the **Storage** tab of **Data → Drives**; an old
 link to Datasets' connections or storage opens those pages.
 
-There are three ways to bring data in, all under **Load data**:
+## Load Your First Dataset
+
+Go to [**Data → Datasets → Load data**](/train/data), keep **Upload** selected, choose a **CSV or
+JSONL** file (at most 16 MiB) and press **Upload**. Those are the only file formats Load data
+accepts; save another kind of file as CSV first. The steps are in [Upload a File](#upload-a-file).
+
+There are three ways to bring data in, all under **Load data**, and a fourth from a drive:
 
 | Way | What it does |
 |---|---|
 | **Upload** | loads one CSV or JSONL file of at most 16 MiB |
 | **Generate** | makes a dataset from one of the workspace engine's generators |
 | **From a connection** | pulls the result of one read-only `SELECT` from a database the workspace connects to |
+| **Load as dataset** in [**Data → Drives**](/drives) | loads a CSV or JSONL file kept in a drive ([below](#load-a-file-from-a-drive)) |
 
 Every REST and MCP call on this page names your workspace: `customer_id` is the id of the account
 that owns your workspaces (yours, or your organization's) and `workspace_id` is the workspace.
@@ -23,13 +30,16 @@ that owns your workspaces (yours, or your organization's) and `workspace_id` is 
 
 ## Upload a File
 
-1. Open **Data → Datasets** and press **Load data**.
+1. Open [**Data → Datasets**](/train/data) and press **Load data**.
 2. Keep **Upload** selected.
 3. Choose the file (CSV or JSONL, up to 16 MiB). A CSV has a header row, then one row per line; a
    JSONL file has one JSON object per line.
 4. Leave the format as **From the file name**, or choose **CSV** or **JSONL**.
-5. Name the dataset, for example `accounts`.
-6. Tick *If the name is taken, save it under the next free name (accounts_2)* if you want that.
+5. Check the **Dataset name**. Choosing the file fills it from the file's name, made a name SQL
+   can query (`customers.csv` becomes `customers`, `My Data 2024.csv` becomes `my_data_2024`, and
+   a SQL keyword gets `_data`, so `order.csv` becomes `order_data`); change it if you like. A name
+   you typed is kept when you choose another file.
+6. Tick *If the name is taken, save it under the next free name (customers_2)* if you want that.
 7. Press **Upload**.
 
 The page returns to Datasets with a banner saying how many rows arrived, from which kind of file,
@@ -54,7 +64,7 @@ The same upload through the API is `upload_dataset` inside `workspace_act`:
 
 A CSV or JSONL file kept in a drive loads without leaving Lake.
 
-1. Open **Data → Drives**, open the drive and go to the file's folder.
+1. Open [**Data → Drives**](/drives), open the drive and go to the file's folder.
 2. In the file's menu (**⋯**) choose **Load as dataset**.
 3. Check the **Dataset name** (it starts from the file's name, as SQL can query it) and tick *If the
    name is taken, save it under the next free name* if you want that.
@@ -147,14 +157,45 @@ outputs** and **All tables**; search filters by name.
 Open a dataset for its page:
 
 - **Figures**: Rows, Size, Columns and Copies.
-- **Columns** tab: each column's **Type** (the value type SQL sees in the first rows: integer,
-  decimal, text, boolean) and **Reads as** (the workspace's analysis of the column: identifier,
-  categorical, numeric, datetime, free text …).
+- **Columns** tab: each column's **Type** (integer, decimal, text, boolean, JSON, mixed or empty),
+  **Reads as** (the workspace's analysis of the column: identifier, categorical, numeric,
+  datetime, free text …) and **Empty**, the share of rows with no value in it.
 - **First Rows** tab: the first 20 rows.
+
+Both tabs list the columns in the file's own order: the CSV header, the order a JSON Lines file
+first writes each key, or a connection query's `SELECT` list. The workspace
+records that order when it loads the data and reports it as `get_dataset`'s `columns`
+and the `columns` of `SELECT *`; the page never sorts them. The Query page does the same with a
+query's answer: its headers follow the `columns` `workspace_sql` answers, which are in the order
+the `SELECT` asked for (lake#812).
+
+**Type** and **Empty** are measured over the whole dataset: `get_dataset` answers each column as
+`{name, type, nullable, null_fraction}`. A workspace that does not yet keep column order answers the
+names only; the page then reads the type from the first 20 rows and the empty share from the analysis's
+sample, and the columns of a dataset loaded before the workspace kept column order stay in the order
+it has always given them (alphabetical, `column_order: "first_seen"`). Load the file again to get its own
+order.
+
+The page asks the workspace for only the first 20 rows (`LIMIT 20`, which the workspace pushes down
+to its partitions, so no more than 20 rows per partition leave them). A workspace older than `LIMIT`
+refuses it with `expected ';' after statement, got 'LIMIT'`; the page then asks
+for the table and keeps the first 20 rows itself.
 - **Partitions** tab, when the dataset has partitions.
 - **Facts**: database, **Stored as** (how the workspace keeps the rows, JSON rows for every
   dataset), rows, bytes, partitions and copies.
-- **Actions**: **Query it** and **All datasets**.
+- **Actions**: **Train a model on this** (the main action, for a dataset that is not a run
+  output), **Query it** and **All datasets**.
+
+### Train a Model on a Dataset
+
+**Train a model on this**, at the top of the dataset's page and first under Actions, is the next
+step after loading data (lake#818). It opens **Design → Projects** with **New project** open for
+the dataset: the name starts as `<dataset>-model` and the description names the dataset, and both
+can be changed. **Create project** opens the new project with **Build pipeline** open and the
+dataset already chosen under **From data**; describe what it should predict and press **Build
+pipeline** ([Design](/docs/design)). The addresses are `/design/projects?new=1&dataset=<database>.<name>`
+and `/design/project?name=<project>&build=1&dataset=<database>.<name>`; closing either drawer drops
+those parameters.
 
 The upload banner is where the original file format is shown; the workspace does not record it.
 
@@ -174,16 +215,21 @@ table the engine wrote as the output of a run*.
 
 ### Keep a Dataset Durable
 
-**Copies** is the fewest copies any part of the dataset has. When a partition has only one copy,
-the dataset page offers **Keep durable**, which asks the workspace to keep more so the dataset
-survives losing a node (`promote_dataset` inside `workspace_act`).
+**Copies** is the fewest copies any part of the dataset has. One copy is how a one-node workspace
+keeps every dataset, so the figure is shown plainly, not as a fault. When a partition has only one
+copy, the dataset page offers **Keep durable** as a secondary action, which asks the workspace to
+keep more so the dataset survives losing a node (`promote_dataset` inside `workspace_act`).
 
 ## Query a Dataset
 
 **Query with SQL** on Datasets, or **Query it** on a dataset, opens **Query**: read-only SQL over
 the workspace's data, one `SELECT` or `WITH` query at a time. ⌘ Enter (Ctrl Enter) runs it; the
 statement and database stay in the address so a query can be shared. Results show the first 500
-rows.
+rows. A `SELECT` that has no `LIMIT`, `OFFSET` or `FETCH` of its own is sent with `LIMIT 501`, so
+the workspace sends at most one row more than the page shows and the title says **More than 500
+rows** when there are; add `LIMIT` and `OFFSET` to page through the rest. Any other statement is
+sent as written. Against a workspace that refuses `LIMIT`, the statement is sent as written
+and the page shows the first 500 rows of the answer.
 
 `POST /v1/workspace_sql`
 
@@ -199,7 +245,7 @@ The workspace speaks a subset of SQL:
 - one `WHERE` comparison;
 - `COUNT(*)`, `COUNT(col)`, `SUM`, `AVG`, `MIN` and `MAX`, with or without `GROUP BY` (on any
   column, including text);
-- `ORDER BY`, `LIMIT` and `OFFSET`;
+- `ORDER BY`, `LIMIT`, `OFFSET` and `FETCH FIRST n ROWS ONLY`;
 - no joins and no expressions.
 
 Anything that does not start with `SELECT` or `WITH`, several statements, and writes are refused
@@ -241,7 +287,7 @@ members hold `read` unless they were granted more ([Grants and Effective Access]
 
 - An upload is one file of at most 16 MiB.
 - The dataset list shows names; row counts and sizes are on each dataset's page.
-- A query shows at most 500 rows; the dataset page samples 20.
+- A query shows at most 500 rows (and asks for at most 501); the dataset page reads 20.
 - Workspace reads time out after 15 seconds and actions after 60.
 
 ## Troubleshooting

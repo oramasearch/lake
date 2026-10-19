@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <array>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -24,9 +25,11 @@
 #include "lake/api/mcp.hpp"
 #include "lake/api/rest.hpp"
 #include "lake/control/memory_store.hpp"
+#include "lake/control/postgres_store.hpp"
 #include "lake/control/platform.hpp"
 #include "lake/control/workspace_audit.hpp"
 #include "lake/control/zetta_control.hpp"
+#include "postgres_fixture.hpp"
 #include "repository_test_support.hpp"
 #include "workspace_fixture.hpp"
 
@@ -695,6 +698,255 @@ TEST_F(PlatformFixture, DiscoveryExposesPlatformSurface) {
     ASSERT_TRUE(response);
     EXPECT_NE(response->find("environment_logs"), std::string::npos);
     EXPECT_NE(response->find("set_environment_env"), std::string::npos);
+}
+
+// lake#805: `liquid deploy` sends the id liquid gave the repository (32 hex digits), not lake's
+// UUID. The fixture's reader stands in for the repository's store.
+constexpr std::string_view liquid_id = "00112233445566778899aabbccddeeff";
+
+class LiquidIdFixture : public PlatformFixture {
+protected:
+    std::map<std::string, std::string> liquid_ids; // lake repository id -> its liquid id
+    int reads = 0;
+
+    void SetUp() override {
+        PlatformFixture::SetUp();
+        control->deployments.clear();
+        liquid_ids[repository.id] = std::string(liquid_id);
+    }
+
+    lake::control::PlatformLiquidIdReader reader() {
+        return [this](const lake::control::Repository& read) -> PlatformResult<std::string> {
+            ++reads;
+            const auto found = liquid_ids.find(read.id);
+            if (found == liquid_ids.end()) {
+                return std::unexpected(lake::control::PlatformError{"not_found", "no store"});
+            }
+            return found->second;
+        };
+    }
+
+    // The poll's own answer (the fixture's sync() expects success).
+    PlatformResult<void> poll() {
+        auto completed = liquid::runtime::block_on(platform->sync(opener(), reader()));
+        EXPECT_TRUE(completed) << (completed ? "" : completed.error().message);
+        if (!completed) {
+            return std::unexpected(
+                lake::control::PlatformError{"store_error", completed.error().message});
+        }
+        return std::move(*completed);
+    }
+};
+
+TEST_F(LiquidIdFixture, ADeploymentNamingTheLiquidIdIsShownOnItsRepository) {
+    control->deployments.push_back(
+        deployment_row(std::string(liquid_id), "Pending", "2026-10-17T00:01:00.000000Z"));
+    control->deployments.push_back(
+        deployment_row("00112233445566778899AABBCCDDEEFF", "Ready", "2026-10-17T00:02:00.000000Z"));
+    const auto polled = poll();
+    ASSERT_TRUE(polled) << polled.error().message;
+    EXPECT_TRUE(platform->unresolved_repositories().empty());
+    EXPECT_EQ(store->get_repository(repository.id)->liquid_id, liquid_id)
+        << "lake recorded the id it read";
+
+    const auto environments = list_environments();
+    ASSERT_TRUE(environments) << environments.error().message;
+    ASSERT_EQ(environments->at("items").size(), 1U);
+    EXPECT_EQ(environments->at("items").at(0).at("phase"), "Ready");
+    const auto deployments = list_deployments("production", 10);
+    ASSERT_TRUE(deployments) << deployments.error().message;
+    ASSERT_EQ(deployments->at("items").size(), 1U);
+    const json& shown = deployments->at("items").at(0);
+    EXPECT_EQ(shown.at("repository"), repository.id);
+    EXPECT_EQ(shown.at("operator_repository"), "00112233445566778899AABBCCDDEEFF");
+    const auto events = workspace_audit();
+    EXPECT_EQ(std::ranges::count_if(events,
+                                    [](const lake::audit::Event& event) {
+                                        return event.draft.kind == "platform.deployment.phase";
+                                    }),
+              2);
+
+    // The operator keys the environment by the deployment's own value, so lake's values and
+    // domains for it are written under that value too, or the operator would never apply them.
+    ApiResult set = call_async("set_environment_env",
+                               {{"repository_id", repository.id},
+                                {"environment", "production"},
+                                {"key", "COLOR"},
+                                {"value", "green"}});
+    ASSERT_TRUE(set.ok) << set.error.message;
+    EXPECT_EQ(control->environment_env.back().at("repository"),
+              "00112233445566778899AABBCCDDEEFF");
+    ApiResult domain = call_async("create_domain",
+                                  {{"repository_id", repository.id},
+                                   {"environment", "production"},
+                                   {"host", "www.example.test"},
+                                   {"tls", "acme"}});
+    ASSERT_TRUE(domain.ok) << domain.error.message;
+    EXPECT_EQ(control->domains.back().at("repository"), "00112233445566778899AABBCCDDEEFF");
+    json ready_domain = control->domains.back();
+    ready_domain["status"] = "ready";
+    ready_domain["updated_at"] = "2099-10-17T00:03:00.000000Z";
+    control->domains.push_back(std::move(ready_domain));
+    ASSERT_TRUE(poll());
+    const auto environment = get_environment("production");
+    ASSERT_TRUE(environment) << environment.error().message;
+    ASSERT_EQ(environment->at("env").size(), 1U);
+    EXPECT_EQ(environment->at("env").at(0).at("value"), "green");
+    ASSERT_EQ(environment->at("domains").size(), 1U);
+    EXPECT_EQ(environment->at("domains").at(0).at("status"), "ready");
+
+    // Once recorded, the id is an index lookup: no repository is read again.
+    const int before = reads;
+    ASSERT_TRUE(poll());
+    EXPECT_EQ(reads, before);
+}
+
+TEST_F(LiquidIdFixture, ADeploymentNamingLakesIdIsShownAndReadsNoLiquidId) {
+    control->deployments.push_back(
+        deployment_row(repository.id, "Ready", "2026-10-17T00:01:00.000000Z"));
+    const auto polled = poll();
+    ASSERT_TRUE(polled) << polled.error().message;
+    EXPECT_TRUE(platform->unresolved_repositories().empty());
+    EXPECT_EQ(reads, 0);
+    const auto deployments = list_deployments("production", 10);
+    ASSERT_TRUE(deployments) << deployments.error().message;
+    ASSERT_EQ(deployments->at("items").size(), 1U);
+    EXPECT_EQ(deployments->at("items").at(0).at("repository"), repository.id);
+    EXPECT_FALSE(deployments->at("items").at(0).contains("operator_repository"));
+    ApiResult set = call_async("set_environment_env",
+                               {{"repository_id", repository.id},
+                                {"environment", "production"},
+                                {"key", "COLOR"},
+                                {"value", "green"}});
+    ASSERT_TRUE(set.ok) << set.error.message;
+    EXPECT_EQ(control->environment_env.back().at("repository"), repository.id);
+}
+
+TEST_F(LiquidIdFixture, ARowNamingNoRepositoryIsReportedNotSkippedQuietly) {
+    const std::string unknown_liquid = "ffeeddccbbaa99887766554433221100";
+    const std::string unknown_lake = lake::control::new_uuid_v4();
+    control->deployments.push_back(
+        deployment_row(repository.id, "Ready", "2026-10-17T00:01:00.000000Z"));
+    json foreign = deployment_row(unknown_liquid, "Ready", "2026-10-17T00:01:00.000000Z");
+    foreign["deployment_id"] = "deployment-unknown-liquid";
+    control->deployments.push_back(foreign);
+    foreign = deployment_row(unknown_lake, "Ready", "2026-10-17T00:01:00.000000Z");
+    foreign["deployment_id"] = "deployment-unknown-lake";
+    control->deployments.push_back(foreign);
+    control->environment_env.push_back(
+        environment_env_row("not-a-repository", "COLOR", "blue", false, "2026-10-17T00:01:00Z"));
+
+    const auto polled = poll();
+    ASSERT_FALSE(polled);
+    EXPECT_EQ(polled.error().code, "unresolved_repository");
+    EXPECT_NE(polled.error().message.find(unknown_liquid), std::string::npos);
+    EXPECT_NE(polled.error().message.find(unknown_lake), std::string::npos);
+    EXPECT_NE(polled.error().message.find("not-a-repository"), std::string::npos);
+    const auto unresolved = platform->unresolved_repositories();
+    ASSERT_EQ(unresolved.size(), 3U);
+    EXPECT_EQ(unresolved.at(unknown_liquid).reason, "no repository has this liquid id");
+    EXPECT_EQ(unresolved.at(unknown_lake).reason, "no repository has this id");
+    EXPECT_FALSE(unresolved.at(unknown_liquid).since.empty());
+    // The operator plane answered, so the service is ready; the known repository is mirrored.
+    EXPECT_FALSE(platform->degraded());
+    const auto deployments = list_deployments("production", 10);
+    ASSERT_TRUE(deployments) << deployments.error().message;
+    EXPECT_EQ(deployments->at("items").size(), 1U);
+    // The ids lake lacked were read once; the next poll does not read them again.
+    EXPECT_EQ(reads, 1);
+    ASSERT_FALSE(poll());
+    EXPECT_EQ(reads, 1);
+    EXPECT_EQ(platform->unresolved_repositories().at(unknown_liquid).since,
+              unresolved.at(unknown_liquid).since);
+
+    // The rows go away, and so does the report.
+    control->deployments.resize(1);
+    control->environment_env.clear();
+    ASSERT_TRUE(poll());
+    EXPECT_TRUE(platform->unresolved_repositories().empty());
+}
+
+TEST_F(LiquidIdFixture, ALiquidIdSharedByTwoRepositoriesIsReportedNotGuessed) {
+    const auto other = store->create_repository(
+        {repository.customer_id, "platform-copy", "", "private", repository.workspace_id});
+    ASSERT_TRUE(other);
+    ASSERT_TRUE(store->set_repository_liquid_id(repository.id, std::string(liquid_id)));
+    ASSERT_TRUE(store->set_repository_liquid_id(other->id, std::string(liquid_id)));
+    control->deployments.push_back(
+        deployment_row(std::string(liquid_id), "Ready", "2026-10-17T00:01:00.000000Z"));
+    const auto polled = poll();
+    ASSERT_FALSE(polled);
+    EXPECT_EQ(polled.error().code, "unresolved_repository");
+    const auto unresolved = platform->unresolved_repositories();
+    ASSERT_EQ(unresolved.size(), 1U);
+    EXPECT_NE(unresolved.at(std::string(liquid_id)).reason.find("2 repositories"),
+              std::string::npos);
+    const auto environments = list_environments();
+    ASSERT_TRUE(environments);
+    EXPECT_TRUE(environments->at("items").empty());
+}
+
+// The store contract, on both stores: a recorded liquid id finds its live repositories.
+void expect_liquid_id_contract(lake::control::Store& store,
+                               const std::string& customer_id,
+                               const std::string& workspace_id) {
+    const std::string suffix = lake::control::new_uuid_v4().substr(0, 8);
+    const auto first = store.create_repository(
+        {customer_id, "liquid-first-" + suffix, "", "private", workspace_id});
+    ASSERT_TRUE(first) << first.error().message;
+    const auto second = store.create_repository(
+        {customer_id, "liquid-second-" + suffix, "", "private", workspace_id});
+    ASSERT_TRUE(second) << second.error().message;
+    EXPECT_TRUE(first->liquid_id.empty());
+    const auto unread = store.repositories_without_liquid_id(10000);
+    ASSERT_TRUE(unread);
+    EXPECT_TRUE(std::ranges::any_of(*unread, [&](const auto& r) { return r.id == first->id; }));
+
+    const std::string id = "0123456789abcdef0123456789" + suffix.substr(0, 6);
+    ASSERT_TRUE(store.set_repository_liquid_id(first->id, id));
+    ASSERT_TRUE(store.set_repository_liquid_id(first->id, id)) << "unchanged is fine";
+    EXPECT_EQ(store.get_repository(first->id)->liquid_id, id);
+    auto named = store.repositories_by_liquid_id(id);
+    ASSERT_TRUE(named);
+    ASSERT_EQ(named->size(), 1U);
+    EXPECT_EQ(named->front().id, first->id);
+    const auto after = store.repositories_without_liquid_id(10000);
+    ASSERT_TRUE(after);
+    EXPECT_FALSE(std::ranges::any_of(*after, [&](const auto& r) { return r.id == first->id; }));
+
+    ASSERT_TRUE(store.set_repository_liquid_id(second->id, id));
+    named = store.repositories_by_liquid_id(id);
+    ASSERT_TRUE(named);
+    EXPECT_EQ(named->size(), 2U);
+    ASSERT_TRUE(store.delete_repository(second->id, {"2026-10-17T00:00:00Z", "2026-11-17T00:00:00Z"}));
+    named = store.repositories_by_liquid_id(id);
+    ASSERT_TRUE(named);
+    EXPECT_EQ(named->size(), 1U) << "a deleted repository names nothing";
+
+    const auto missing = store.set_repository_liquid_id(lake::control::new_uuid_v4(), id);
+    ASSERT_FALSE(missing);
+    EXPECT_EQ(missing.error().code, "not_found");
+}
+
+TEST_F(PlatformFixture, MemoryStoreRecordsAndFindsLiquidIds) {
+    expect_liquid_id_contract(*store, repository.customer_id, repository.workspace_id);
+}
+
+TEST(PlatformLiquidIds, PostgresStoreRecordsAndFindsLiquidIds) {
+    const char* uri = lake::test::postgres_uri();
+    if (uri == nullptr || *uri == '\0') {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
+    }
+    auto store = lake::control::make_postgres_store(uri, std::string(platform_kek));
+    const std::string suffix = lake::control::new_uuid_v4().substr(0, 8);
+    const auto user = store->create_user(
+        {"taap:1:ed25519:liquid-ids-" + suffix, "liquid-ids-" + suffix + "@example.test", "Ids"});
+    ASSERT_TRUE(user) << user.error().message;
+    const auto customer =
+        store->create_customer({"individual", user->id, "", "liquid-ids-" + suffix});
+    ASSERT_TRUE(customer) << customer.error().message;
+    expect_liquid_id_contract(*store, customer->id,
+                              lake::test::repository_workspace(*store, customer->id));
 }
 
 } // namespace

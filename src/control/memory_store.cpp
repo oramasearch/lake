@@ -2969,6 +2969,228 @@ Result<PaymentEventResult> InMemoryStore::apply_payment_event(const PaymentEvent
     return result;
 }
 
+void InMemoryStore::cloud_order_event_locked(const std::string& id,
+                                             const std::string& from,
+                                             const std::string& to,
+                                             const std::string& actor,
+                                             const std::string& detail) {
+    cloud_order_events_.push_back(
+        CloudOrderEvent{static_cast<std::int64_t>(cloud_order_events_.size()) + 1,
+                        id,
+                        now_iso8601(),
+                        from,
+                        to,
+                        actor,
+                        utf8_prefix(detail, 2000),
+                        {}});
+}
+
+Result<CloudOrder> InMemoryStore::create_cloud_order(const NewCloudOrder& in) {
+    static const std::set<std::string> offers{
+        "private_warehouse", "dedicated_cluster", "on_prem", "shared"};
+    if ((in.path != "checkout" && in.path != "order_form") || !offers.contains(in.offer) ||
+        in.contact_name.empty() || in.contact_email.size() < 3 || in.quantity < 1 ||
+        in.quantity > 1000 || in.amount_cents < 0 || in.included_credit_cents < 0 ||
+        (in.path == "checkout" && ((in.offer != "private_warehouse" &&
+                                    in.offer != "dedicated_cluster") ||
+                                   in.quantity != 1))) {
+        return std::unexpected(StoreError{"invalid_input", "the order is not valid"});
+    }
+    std::lock_guard lock(mutex_);
+    CloudOrder order;
+    order.id = new_uuid_v4();
+    order.created_at = order.updated_at = now_iso8601();
+    order.offer = in.offer;
+    order.path = in.path;
+    order.cloud_provider = in.cloud_provider;
+    order.region = in.region;
+    order.contact_name = in.contact_name;
+    order.contact_email = in.contact_email;
+    order.company = in.company;
+    order.details = in.details;
+    order.quantity = in.quantity;
+    order.amount_cents = in.amount_cents;
+    order.currency = in.currency;
+    order.included_credit_cents = in.included_credit_cents;
+    order.state = in.path == "checkout" ? "pending_payment" : "submitted";
+    order.organization_id = in.organization_id;
+    order.email_error = utf8_prefix(in.email_error, 1024);
+    cloud_orders_.push_back(order);
+    cloud_order_event_locked(order.id,
+                             "",
+                             order.state,
+                             "lake",
+                             in.path == "checkout" ? "ordered from the order sheet, to pay"
+                                                   : "order form sent from the order sheet");
+    return order;
+}
+
+Result<CloudOrder> InMemoryStore::get_cloud_order(const std::string& id) {
+    std::lock_guard lock(mutex_);
+    const auto found = std::ranges::find(cloud_orders_, id, &CloudOrder::id);
+    if (found == cloud_orders_.end()) {
+        return std::unexpected(StoreError{"not_found", "no order " + id});
+    }
+    return *found;
+}
+
+Result<CloudOrder> InMemoryStore::transition_cloud_order(const CloudOrderTransition& change) {
+    std::lock_guard lock(mutex_);
+    const auto found = std::ranges::find(cloud_orders_, change.id, &CloudOrder::id);
+    if (found == cloud_orders_.end()) {
+        return std::unexpected(StoreError{"not_found", "no order " + change.id});
+    }
+    if (found->state != change.from) {
+        return std::unexpected(
+            StoreError{"conflict", "the order is " + found->state + ", not " + change.from});
+    }
+    if (!change.checkout_session_id.empty()) {
+        if (std::ranges::any_of(cloud_orders_, [&](const CloudOrder& other) {
+                return other.id != change.id &&
+                       other.stripe_checkout_session_id == change.checkout_session_id;
+            })) {
+            return std::unexpected(StoreError{"conflict", "the Checkout Session has an order"});
+        }
+        found->stripe_checkout_session_id = change.checkout_session_id;
+    }
+    if (!change.host.empty()) {
+        found->host = change.host;
+    }
+    if (!change.failure_reason.empty()) {
+        found->failure_reason = change.failure_reason;
+    }
+    found->state = change.to;
+    found->updated_at = now_iso8601();
+    if (change.to != change.from) {
+        cloud_order_event_locked(change.id, change.from, change.to, change.actor, change.detail);
+    }
+    return *found;
+}
+
+Result<CloudOrderPaymentResult>
+InMemoryStore::apply_cloud_order_payment(const CloudOrderPayment& payment) {
+    if (payment.provider.empty() || payment.event_id.empty() || payment.event_id.size() > 255 ||
+        (payment.state != "paid" && payment.state != "cancelled")) {
+        return std::unexpected(StoreError{"invalid_input",
+                                          "an order payment needs its provider, its id and a "
+                                          "state of paid or cancelled"});
+    }
+    std::lock_guard lock(mutex_);
+    CloudOrderPaymentResult result;
+    if (!payment_events_.insert({payment.provider, payment.event_id}).second) {
+        result.duplicate = true;
+        return result;
+    }
+    if (payment.checkout_session_id.empty()) {
+        return result;
+    }
+    const auto found = std::ranges::find(
+        cloud_orders_, payment.checkout_session_id, &CloudOrder::stripe_checkout_session_id);
+    if (found == cloud_orders_.end()) {
+        return result;
+    }
+    result.matched = true;
+    if (found->state == "pending_payment") {
+        found->state = payment.state;
+        if (!payment.customer_id.empty()) {
+            found->stripe_customer_id = payment.customer_id;
+        }
+        if (!payment.subscription_id.empty()) {
+            found->stripe_subscription_id = payment.subscription_id;
+        }
+        found->updated_at = now_iso8601();
+        cloud_order_event_locked(found->id,
+                                 "pending_payment",
+                                 payment.state,
+                                 "stripe",
+                                 payment.event_type + " " + payment.event_id +
+                                     (payment.detail.empty() ? "" : ": " + payment.detail));
+        result.changed = true;
+    }
+    result.order = *found;
+    return result;
+}
+
+Result<std::vector<CloudOrder>> InMemoryStore::claim_cloud_order_emails(int limit,
+                                                                        int lease_seconds) {
+    std::lock_guard lock(mutex_);
+    const auto now = std::chrono::system_clock::now();
+    std::vector<CloudOrder*> due;
+    for (CloudOrder& order : cloud_orders_) {
+        const bool support =
+            (order.state == "submitted" || order.state == "paid" || order.state == "failed") &&
+            order.support_emailed_state != order.state;
+        const bool customer = (order.state == "submitted" || order.state == "paid" ||
+                               order.state == "ready" || order.state == "failed") &&
+                              order.customer_emailed_state != order.state;
+        const auto retry = cloud_order_email_due_.find(order.id);
+        if ((support || customer) &&
+            (retry == cloud_order_email_due_.end() || retry->second <= now)) {
+            due.push_back(&order);
+        }
+    }
+    std::ranges::sort(due, {}, &CloudOrder::updated_at);
+    std::vector<CloudOrder> claimed;
+    for (CloudOrder* order : due) {
+        if (static_cast<int>(claimed.size()) >= std::max(limit, 1)) {
+            break;
+        }
+        const auto until = now + std::chrono::seconds(std::max(lease_seconds, 1));
+        cloud_order_email_due_[order->id] = until;
+        order->email_retry_at = iso8601_at(until);
+        claimed.push_back(*order);
+    }
+    return claimed;
+}
+
+Result<void> InMemoryStore::record_cloud_order_email(const CloudOrderEmailOutcome& outcome) {
+    if (outcome.recipient != "support" && outcome.recipient != "customer") {
+        return std::unexpected(StoreError{"invalid_input", "the recipient is support or customer"});
+    }
+    std::lock_guard lock(mutex_);
+    const auto found = std::ranges::find(cloud_orders_, outcome.id, &CloudOrder::id);
+    if (found == cloud_orders_.end()) {
+        return std::unexpected(StoreError{"not_found", "no order " + outcome.id});
+    }
+    if (outcome.delivered) {
+        (outcome.recipient == "support" ? found->support_emailed_state
+                                        : found->customer_emailed_state) = outcome.state;
+        found->email_attempts = 0;
+        found->email_error.clear();
+        found->email_retry_at.clear();
+        cloud_order_email_due_.erase(found->id);
+    } else {
+        ++found->email_attempts;
+        found->email_error = utf8_prefix(outcome.error, 1024);
+        const auto until = std::chrono::system_clock::now() +
+                           std::chrono::seconds(std::max(outcome.retry_seconds, 1));
+        cloud_order_email_due_[found->id] = until;
+        found->email_retry_at = iso8601_at(until);
+    }
+    return {};
+}
+
+Result<std::vector<CloudOrderEvent>> InMemoryStore::unaudited_cloud_order_events(int limit) {
+    std::lock_guard lock(mutex_);
+    std::vector<CloudOrderEvent> events;
+    for (const CloudOrderEvent& event : cloud_order_events_) {
+        if (event.audited_at.empty() && static_cast<int>(events.size()) < std::max(limit, 1)) {
+            events.push_back(event);
+        }
+    }
+    return events;
+}
+
+Result<void> InMemoryStore::mark_cloud_order_events_audited(const std::vector<std::int64_t>& ids) {
+    std::lock_guard lock(mutex_);
+    for (CloudOrderEvent& event : cloud_order_events_) {
+        if (event.audited_at.empty() && std::ranges::find(ids, event.id) != ids.end()) {
+            event.audited_at = now_iso8601();
+        }
+    }
+    return {};
+}
+
 Result<User> InMemoryStore::get_user(const std::string& id) {
     std::lock_guard lock(mutex_);
     for (const auto& u : users_)
@@ -5263,6 +5485,40 @@ Result<Repository> InMemoryStore::get_repository(const std::string& id) {
         if (r.id == id)
             return r;
     return std::unexpected(StoreError{"not_found", "no repository " + id});
+}
+
+Result<std::vector<Repository>>
+InMemoryStore::repositories_by_liquid_id(const std::string& liquid_id) {
+    std::lock_guard lock(mutex_);
+    std::vector<Repository> out;
+    for (const auto& r : repositories_)
+        if (!liquid_id.empty() && r.liquid_id == liquid_id && r.deleted_at.empty())
+            out.push_back(r);
+    return out;
+}
+
+Result<void> InMemoryStore::set_repository_liquid_id(const std::string& id,
+                                                     const std::string& liquid_id) {
+    std::lock_guard lock(mutex_);
+    for (auto& r : repositories_) {
+        if (r.id == id) {
+            r.liquid_id = liquid_id;
+            return {};
+        }
+    }
+    return std::unexpected(StoreError{"not_found", "no repository " + id});
+}
+
+Result<std::vector<Repository>> InMemoryStore::repositories_without_liquid_id(int limit) {
+    std::lock_guard lock(mutex_);
+    std::vector<Repository> out;
+    for (const auto& r : repositories_) {
+        if (limit > 0 && out.size() >= static_cast<std::size_t>(limit))
+            break;
+        if (r.liquid_id.empty() && r.deleted_at.empty() && !r.workspace_id.empty())
+            out.push_back(r);
+    }
+    return out;
 }
 
 namespace {

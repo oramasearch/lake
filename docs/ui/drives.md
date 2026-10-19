@@ -61,7 +61,8 @@ A workspace-files upload sends each file at its relative path and lake makes the
   suggestion, so typing replaces it rather than appending to it, and once the person has typed a
   name a new target leaves it alone (`nameAfterTarget`, `selectsOnFocus`, lake#580).
 - **Load as dataset** (lake#593). A CSV or JSONL file's menu (`datasetFormat` in `paths.ts`)
-  opens `LoadDataset`: a dataset name started from the file's name (`datasetName`) and the
+  opens `LoadDataset`: a dataset name started from the file's name (`datasetName`; a SQL keyword gets `_data` from
+  `notAKeyword` in `lib/sqlKeywords.ts`, the server's list, lake#814) and the
   take-the-next-free-name box; it calls `load_drive_dataset` with the drive and the item's key and
   opens **Data → Datasets** with the loaded banner, as an upload there does. Both repository and
   workspace-files drives offer it.

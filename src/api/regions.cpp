@@ -513,4 +513,11 @@ nlohmann::json regions_json(const Regions* regions) {
     return list;
 }
 
+nlohmann::json order_sheet_url_json(const Regions* regions) {
+    if (regions == nullptr || regions->order_sheet_url.empty()) {
+        return nullptr;
+    }
+    return regions->order_sheet_url;
+}
+
 } // namespace lake::api

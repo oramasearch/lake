@@ -2,13 +2,17 @@
  * The Design pages' rules (src/pages/design/logic.ts): what lake's renderers and form handlers
  * computed on the server, checked against the server's own behaviour.
  */
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  APPROVE_FIRST,
   a1Queue,
   actionCounts,
+  buildModelName,
   certificateGroups,
   checkTone,
+  clearRefusalsOnApprove,
   datasetChoices,
   datasetColumns,
   gateCounts,
@@ -27,16 +31,23 @@ import {
   missingPredicates,
   parseInteger,
   parseNumber,
+  pipelineActionError,
+  pipelineModelName,
+  pipelineTitle,
   plainAgentFailure,
   projectAgentNeedsReply,
   proposedFoundation,
+  runModelName,
   runsBadge,
   slugText,
   solutionProjectOf,
   solutionState,
   startReturn,
   topologicalOrder,
+  uniqueModelName,
+  uniquePipelineName,
   withoutProjectAgentChecks,
+  WAITS_FOR_APPROVAL,
 } from "../src/pages/design/logic.ts";
 
 test("cell numbers print as %.4g", () => {
@@ -231,10 +242,136 @@ test("Opportunities group by the newest scan", () => {
 });
 
 test("the Run form's model name and the Project Agent's question", () => {
-  assert.equal(defaultModelName("Churn Review", "weekly-v2"), "churn_review_weekly_v2");
+  assert.equal(defaultModelName("weekly-v2"), "weekly_v2_model");
   assert.equal(projectAgentNeedsReply({ status: "succeeded", answer: { result: { reply: "Which table?" } } }), true);
   assert.equal(projectAgentNeedsReply({ status: "succeeded", answer: { result: { proposal: {} } } }), false);
   assert.equal(projectAgentNeedsReply({ status: "running" }), false);
+});
+
+test("a refusal to act on a proposed pipeline reads in page words (lake#813)", () => {
+  // As lake-dev answered Check on a proposed pipeline, 2026-10-18.
+  const refusal = Object.assign(
+    new Error("the plan 'Predict which customers will churn the churned column' is proposed — approve it (workspace_act with capability approve_plan) before verification"),
+    { code: "not_approved", status: 409 },
+  );
+  const shown = pipelineActionError(refusal) as Error;
+  assert.equal(shown.message, APPROVE_FIRST);
+  assert.doesNotMatch(shown.message, /workspace_act|approve_plan|capability/);
+  // The message alone is enough, from an engine that answers another code.
+  assert.equal((pipelineActionError(new Error("approve it (approve_plan) before deploying")) as Error).message, APPROVE_FIRST);
+  // Every other error, and no error, is left as it was.
+  const other = Object.assign(new Error("no graph named 'x'"), { code: "not_found" });
+  assert.equal(pipelineActionError(other), other);
+  assert.equal(pipelineActionError(null), null);
+  assert.doesNotMatch(APPROVE_FIRST, /workspace_act|approve_plan|capability/);
+});
+
+test("approve, Check, edit a step, audit, Approve: the audit's refusal reads in page words and Approve clears it (lake#813)", () => {
+  // Approved and checked, then a step is edited: the pipeline is proposed again while the checks
+  // panel stays, so "List them for an audit" calls gate and the engine refuses it as Check is refused.
+  const auditRefusal = Object.assign(
+    new Error("the plan 'weekly' is proposed — approve it (approve_plan) before verification"),
+    { code: "not_approved", status: 409 },
+  );
+  const errors: Record<string, unknown> = { check: null, run: null, deploy: null, audit: auditRefusal };
+  const action = (name: string) => ({ setError: (error: unknown) => void (errors[name] = error) });
+  // What the panel shows under the audit button.
+  assert.equal((pipelineActionError(errors.audit) as Error).message, APPROVE_FIRST);
+  // Approve succeeds: every refusal shown before it is gone, the audit's included.
+  clearRefusalsOnApprove({ check: action("check"), run: action("run"), deploy: action("deploy"), audit: action("audit") });
+  assert.deepEqual(errors, { check: null, run: null, deploy: null, audit: null });
+  assert.deepEqual([...WAITS_FOR_APPROVAL], ["check", "run", "deploy", "audit"]);
+});
+
+test("every pipeline action's error, the model page's Retrain included, is shown through pipelineActionError (lake#813)", () => {
+  const pipeline = readFileSync(new URL("../src/pages/design/PipelinePage.tsx", import.meta.url), "utf8");
+  for (const name of ["check", "runIt", "deploy", "audit"]) {
+    assert.match(pipeline, new RegExp(`<FormError error=\\{pipelineActionError\\(${name}\\.error\\)\\} />`), `${name}'s error is shown in page words`);
+    assert.doesNotMatch(pipeline, new RegExp(`<FormError error=\\{${name}\\.error\\} />`), `${name}'s error is never shown raw`);
+  }
+  // Approve clears through the one list, so an action added to it is cleared too.
+  assert.match(pipeline, /clearRefusalsOnApprove\(\{ check, run: runIt, deploy, audit \}\)/);
+  // Retrain calls run_pipeline, which answers an edited pipeline with the same not_approved refusal.
+  const page = readFileSync(new URL("../src/pages/train/ModelPage.tsx", import.meta.url), "utf8");
+  const start = page.indexOf("\nfunction Train(");
+  const model = page.slice(start, page.indexOf("\nfunction ", start + 1));
+  assert.ok(start > 0, "ModelPage has its Train card");
+  assert.match(model, /act<Row>\("run_pipeline"/);
+  assert.match(model, /<FormError error=\{pipelineActionError\(error\)\} \/>/);
+  assert.doesNotMatch(model, /<FormError error=\{error\} \/>/);
+  // As the engine answers run_pipeline on a proposed pipeline.
+  const refusal = Object.assign(new Error("the plan 'weekly' is proposed — approve it (approve_plan) before verification"), { code: "not_approved" });
+  assert.equal((pipelineActionError(refusal) as Error).message, APPROVE_FIRST);
+});
+
+test("a pipeline built from a description gets a short title (lake#816)", () => {
+  // The cases lake's AgentRuns.APipelineTitleIsShortAndReadable runs too, so the two agree.
+  const table = JSON.parse(readFileSync(new URL("./pipeline-titles.json", import.meta.url), "utf8")) as { cases: [string, string][] };
+  assert.ok(table.cases.length >= 30);
+  for (const [description, title] of table.cases) assert.equal(pipelineTitle(description), title, description);
+  // Punctuation never lands in a title, and a title is a few words, at most 48 characters.
+  for (const description of [
+    "Predict (churn), [now]; please: thanks.",
+    "Find: which? accounts!",
+    "Spot fraud -- quickly",
+    "Predict: (\u201cchurn\u201d)\u2026",
+    "Predict which customers, accounts, users and orgs will churn soon and why and how much revenue we lose",
+  ]) {
+    const title = pipelineTitle(description);
+    assert.ok(title.length > 0 && [...title].length <= 48, title);
+    assert.doesNotMatch(title, /[()[\]{},;:.!?"\u201C\u201D\u2018\u2026]/);
+  }
+  assert.equal(uniquePipelineName("Customers churn", ["Customers churn", "Customers churn (2)"]), "Customers churn (3)");
+  assert.equal(uniquePipelineName("Customers churn", []), "Customers churn");
+});
+
+test("the Run form keeps the model a pipeline already trained (lake#816)", () => {
+  const models = [
+    { name: "retention_customers_churn", project_name: "retention", pipeline_name: "Customers churn", created: "2026-10-01T00:00:00Z" },
+    { name: "retention_customers_churn_v0", project_name: "retention", pipeline_name: "Customers churn", created: "2026-09-01T00:00:00Z" },
+    { name: "accounts_churn_model", project_name: "retention", pipeline_name: "Accounts churn", created: "2026-10-02T00:00:00Z" },
+    { name: "retention_customers_churn", project_name: "billing", pipeline_name: "Other", created: "2026-10-03T00:00:00Z" },
+  ];
+  // A pipeline trained before lake#816 keeps its <project>_<pipeline> model, the newest one.
+  assert.equal(pipelineModelName(models, "retention", "Customers churn"), "retention_customers_churn");
+  assert.equal(runModelName(models, "retention", "Customers churn"), "retention_customers_churn");
+  // Another project's pipeline of the same name is not this one.
+  assert.equal(pipelineModelName(models, "billing", "Customers churn"), "");
+  // A pipeline that has trained nothing gets the short default, numbered past another pipeline's.
+  assert.equal(pipelineModelName(models, "retention", "Weekly demand"), "");
+  assert.equal(runModelName(models, "retention", "Weekly demand"), "weekly_demand_model");
+  assert.equal(runModelName(models, "retention", "Accounts churn (2)"), "accounts_churn_model_2");
+  assert.equal(runModelName(undefined, "retention", "Weekly demand"), "weekly_demand_model");
+});
+
+test("Build a Pipeline suggests the model of the pipeline lake builds, not of one with its name (lake#816)", () => {
+  const models = [{ name: "customers_churn_model", project_name: "retention", pipeline_name: "Customers churn" }];
+  // The project has "Customers churn": lake builds "Customers churn (2)", whose model is not the
+  // other pipeline's.
+  assert.equal(buildModelName("Customers churn", ["Customers churn"], models, "retention"), "customers_churn_model_2");
+  assert.equal(buildModelName("Customers churn", [], [], "retention"), "customers_churn_model");
+  assert.equal(buildModelName("  ", [], models, "retention"), "");
+});
+
+test("the default model name is short, and numbered past another pipeline's model (lake#816)", () => {
+  assert.equal(defaultModelName("Customers churn"), "customers_churn_model");
+  assert.equal(defaultModelName("Churn model"), "churn_model");
+  // A pipeline named before lake#816 is shortened as a description is.
+  const old = defaultModelName("Predict which customers will churn the churned column");
+  assert.equal(old, "customers_churn_churned_column_model");
+  assert.ok(old.length <= 40);
+  assert.ok(defaultModelName("Supercalifragilisticexpialidocious extraordinarily long words").length <= 40);
+  const models = [
+    { name: "customers_churn_model", project_name: "retention", pipeline_name: "Customers churn" },
+    { name: "churn_model", project_name: "billing", pipeline_name: "Churn" },
+    { name: "churn_model_2", project: "retention", pipeline_name: "Older churn" },
+  ];
+  // Its own pipeline training again makes a new version, so its own name is free.
+  assert.equal(uniqueModelName("customers_churn_model", models, "retention", "Customers churn"), "customers_churn_model");
+  // Another pipeline's model is not overwritten.
+  assert.equal(uniqueModelName("customers_churn_model", models, "retention", "Customers churn (2)"), "customers_churn_model_2");
+  assert.equal(uniqueModelName("churn_model", models, "retention", "Churn"), "churn_model_3");
+  assert.equal(uniqueModelName("fresh_model", undefined, "retention", "Fresh"), "fresh_model");
 });
 
 test("the graph is laid out as render_svg lays it out", () => {

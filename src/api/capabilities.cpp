@@ -2137,7 +2137,14 @@ void register_server_info(Registry& registry, std::string_view version) {
                                 {"properties",
                                  {{"name", {{"type", "string"}}},
                                   {"label", {{"type", "string"}}},
-                                  {"host", {{"type", "string"}}}}}}}}}}}},
+                                  {"host", {{"type", "string"}}}}}}}}},
+                            // The order sheet (lake#831, docs/api/orders.md): null where none is
+                            // configured.
+                            {"order_sheet_url",
+                             {{"type", json::array({"string", "null"})},
+                              {"description",
+                               "Where to order a private warehouse, dedicated cluster or on-prem "
+                               "Lake; null when this Lake has no order sheet."}}}}}},
         .kind = CapabilityKind::Read,
         .requires_auth = false,
         .object = "server",
@@ -2165,7 +2172,8 @@ void register_server_info(Registry& registry, std::string_view version) {
                  {"online_payment", !payment.is_null() && payment["online_payment"] == true},
                  // The region of this Lake and the deployment's regions (lake#757).
                  {"region", region_json(ctx.regions)},
-                 {"regions", regions_json(ctx.regions)}});
+                 {"regions", regions_json(ctx.regions)},
+                 {"order_sheet_url", order_sheet_url_json(ctx.regions)}});
         }});
 }
 
@@ -4792,6 +4800,30 @@ void register_repository_capabilities(Registry& registry) {
                                                       {"quota_bytes", *quota}};
                 }
                 co_return from_sync_error(context, response.error());
+            }
+            // A repository created empty takes the identity of its first push, so the liquid id
+            // `liquid deploy` sends is recorded again after each one (lake#805,
+            // docs/api/platform.md#which-repository-a-row-names). It does not fail the push.
+            if (context.store) {
+                const auto liquid_id = co_await blocking_call(
+                    [&] {
+                        return context.sync_store->repository_liquid_id(repository->customer_id,
+                                                                        repository->id);
+                    },
+                    [](std::string message) -> SyncStoreResult<std::string> {
+                        return std::unexpected(SyncStoreError{"store_unavailable", std::move(message)});
+                    });
+                if (!liquid_id) {
+                    if (liquid_id.error().code != "unsupported") {
+                        context.audit_details["liquid_id"] = liquid_id.error().message;
+                    }
+                } else if (*liquid_id != repository->liquid_id) {
+                    const auto recorded =
+                        context.store->set_repository_liquid_id(repository->id, *liquid_id);
+                    if (!recorded) {
+                        context.audit_details["liquid_id"] = recorded.error().message;
+                    }
+                }
             }
             if (context.search) {
                 const auto indexed = co_await blocking_call(

@@ -406,6 +406,12 @@ export function predictionRows(answer: Row | null | undefined): Row[] {
   return answer && Array.isArray(answer.predictions) ? (answer.predictions as Row[]) : [];
 }
 
+/** The row an answered entry is about, counted the way people count: `predict` answers `row` from
+ * 0 (its position in `rows`), the Try it table shows it from 1 (lake#819). "" without one. */
+export function rowNumber(entry: Row): string {
+  return typeof entry.row === "number" && Number.isInteger(entry.row) && entry.row >= 0 ? String(entry.row + 1) : "";
+}
+
 /* ------------------------------------------------- bring and download (lake#681) */
 
 /** "tenure, spend , tickets" typed as a model's columns, in its order. */

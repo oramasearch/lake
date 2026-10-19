@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "lake/api/billing.hpp"
+#include "lake/api/orders.hpp"
 #include "lake/api/regions.hpp"
 #include "lake/api/registry.hpp"
 #include "lake/transparency/checkpoint.hpp"
@@ -141,6 +142,17 @@ struct ServerOptions {
     // docs/api/regions.md): reported by server_info; a request whose Host is the apex host gets the
     // region picker. Empty: no region, no picker.
     Regions regions;
+    // The apex order sheet (LAKE_ORDER_SHEET, lake#831, docs/api/orders.md): its offers, prices and
+    // limits. Shown on the apex host in place of the plain picker while `enabled`.
+    OrderSheet order_sheet = *order_sheet_from_environment("");
+    // Email through Resend (LAKE_RESEND_API_KEY, LAKE_RESEND_FROM, LAKE_SUPPORT_EMAIL): Orama's
+    // platform credentials. Without the key, orders are still recorded and their email waits.
+    // `resend_http` replaces the outbound client (tests); `resend_api_base` is Resend's origin.
+    ResendSettings resend;
+    ResendHttp resend_http;
+    std::string resend_api_base = std::string(lake::api::resend_api_base);
+    // How often the order pass (the orders' email and audit) runs; tests shorten it.
+    std::chrono::milliseconds order_pass_interval{std::chrono::seconds(10)};
     std::string apps_reserved_names;
     std::size_t apps_per_customer = 0;
     std::size_t app_replicas_per_customer = 0;

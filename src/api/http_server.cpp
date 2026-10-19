@@ -14,7 +14,9 @@
 #include "lake/api/mcp_client.hpp"
 #include "lake/api/mcp_connections.hpp"
 #include "lake/api/metering_recorder.hpp"
+#include "lake/api/orders.hpp"
 #include "lake/api/request_recorder.hpp"
+#include "lake/api/resend.hpp"
 #include "lake/api/server.hpp"
 #include "lake/api/stripe.hpp"
 #include "lake/api/usage_recorder.hpp"
@@ -66,10 +68,10 @@
 #endif
 #include <boost/capy/buffers/buffer_copy.hpp>
 #include <boost/capy/buffers/vector_dynamic_buffer.hpp>
+#include <boost/capy/delay.hpp>
 #include <boost/capy/ex/run_async.hpp>
 #include <boost/capy/io/push_to.hpp>
 #include <boost/capy/read.hpp>
-#include <boost/capy/delay.hpp>
 #include <boost/capy/timeout.hpp>
 #include <boost/corosio/io_context.hpp>
 #include <boost/corosio/openssl_stream.hpp>
@@ -90,6 +92,7 @@
 #include <nlohmann/json.hpp>
 #include <openssl/evp.h>
 #include <openssl/hmac.h>
+#include <openssl/rand.h>
 
 #include "agent_task_records_api.hpp"
 #include "lake/api/agent_docs.hpp"
@@ -2608,6 +2611,28 @@ public:
             return std::unexpected(space.error());
         }
         return unique_stored_bytes_locked(customer_id, true);
+    }
+
+    SyncStoreResult<std::string> repository_liquid_id(const std::string& customer_id,
+                                                      const std::string& repository_id) override {
+        auto entered_repository = enter_repository(customer_id, repository_id);
+        auto& state = entered_repository.state;
+        if (!state) {
+            return std::unexpected(state.error());
+        }
+        const auto id = (*state)->subject->id();
+        if (!id) {
+            return std::unexpected(error_of(id.error()));
+        }
+        static constexpr std::string_view digits = "0123456789abcdef";
+        std::string output;
+        output.reserve(id->size() * 2);
+        for (const std::byte octet : *id) {
+            const auto value = std::to_integer<unsigned char>(octet);
+            output += digits[value >> 4U];
+            output += digits[value & 0x0fU];
+        }
+        return output;
     }
 
     SyncStoreResult<std::vector<std::pair<std::string, std::string>>>
@@ -7497,6 +7522,8 @@ struct ApiServer::Impl {
     std::chrono::steady_clock::time_point last_usage_sample{};
     UsageRecorder::Totals reported_usage;
     mutable LiquidCustomerStores sync_store;
+    // The last platform poll's problem as logged, so an unchanged one is not logged every poll.
+    std::string last_platform_sync_problem;
     ArtifactRegistry artifacts;
     // The instance registry's tenant images, for the workspace deletion cascade (lake#514).
     WorkspaceContent workspace_content{
@@ -7578,6 +7605,14 @@ struct ApiServer::Impl {
     mutable OutboundHttpClient outbound_http;
     // How invoices are paid where billing is on (docs/api/billing.md#payment-providers).
     std::shared_ptr<PaymentProviders> payments;
+    // The apex order sheet (lake#831, docs/api/orders.md): the anonymous form's limit, the key its
+    // status links are signed with (LAKE_INSTANCE_KEK, else one made at start), when the order
+    // pass runs next, and whether an order asked for it sooner.
+    std::unique_ptr<OrderRateLimiter> order_limiter;
+    std::string order_status_key;
+    std::chrono::steady_clock::time_point next_order_pass{};
+    std::atomic<bool> order_pass_requested{false};
+    bool order_email_waiting_logged = false;
     // Speech-to-text (docs/api/transcripts.md): the injected one, else OpenAI over outbound_http
     // when a key is configured, else empty.
     Transcriber transcriber;
@@ -8530,6 +8565,22 @@ struct ApiServer::Impl {
                     });
             }
             register_billing_capabilities(registry, payments);
+        }
+        order_limiter = std::make_unique<OrderRateLimiter>(
+            options.order_sheet.orders_per_client_per_hour, options.order_sheet.orders_per_hour);
+        order_status_key = options.instance_kek;
+        if (order_status_key.empty()) {
+            // No instance key (a local Lake): status links work until this process stops.
+            std::array<unsigned char, 32> random{};
+            if (RAND_bytes(random.data(), static_cast<int>(random.size())) == 1) {
+                for (const unsigned char byte : random) {
+                    order_status_key += std::format("{:02x}", byte);
+                }
+            }
+        }
+        if (options.order_sheet.enabled && options.regions.order_sheet_url.empty() &&
+            !options.regions.apex_host.empty()) {
+            options.regions.order_sheet_url = "https://" + options.regions.apex_host + "/";
         }
         openapi_body = openapi_document(registry, version_string()).dump();
         agent_openapi_body =
@@ -12618,6 +12669,22 @@ struct ApiServer::Impl {
     boost::http::route_task serve_region_picker(boost::http::route_params& route) {
         namespace http = boost::http;
         const Regions& regions = options.regions;
+        // The order sheet's own paths (lake#831, docs/api/orders.md#routes): /order (the form's
+        // POST), /order/<offer> and /order/price-list, /orders/<id>. Every other path is the sheet.
+        if (options.order_sheet.enabled && options.store) {
+            const std::string_view path = route.url.encoded_path();
+            const bool post = route.req.method() == http::method::post;
+            if (post && path == "/order") {
+                co_return co_await serve_order_submit(route);
+            }
+            if (!post && path.starts_with("/order/") &&
+                (path == "/order/price-list" || !offer_from_slug(path.substr(7)).empty())) {
+                co_return co_await serve_order_page(route, std::string(path.substr(7)));
+            }
+            if (!post && path.starts_with("/orders/") && path.size() > 8) {
+                co_return co_await serve_order_status(route, std::string(path.substr(8)));
+            }
+        }
         std::string target(route.url.encoded_path());
         if (target.empty()) {
             target = "/";
@@ -12642,11 +12709,372 @@ struct ApiServer::Impl {
         const std::string country(route.req.value_or("cf-ipcountry", ""));
         const Region* selected =
             preselected_region(regions, cookie_value(route, region_cookie_name), country);
-        co_return co_await send_text(route,
-                                     error.empty() ? http::status::ok : http::status::bad_request,
-                                     web_ui_region_picker(regions, *selected, target, error),
-                                     "text/html; charset=utf-8",
-                                     "no-store");
+        co_return co_await send_text(
+            route,
+            error.empty() ? http::status::ok : http::status::bad_request,
+            options.order_sheet.enabled
+                ? web_ui_order_sheet(options.order_sheet, regions, *selected, target, error)
+                : web_ui_region_picker(regions, *selected, target, error),
+            "text/html; charset=utf-8",
+            "no-store");
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // The apex order sheet's orders (lake#831, docs/api/orders.md).
+
+    boost::http::route_task send_order_html(boost::http::route_params& route,
+                                            boost::http::status status,
+                                            std::string html) {
+        co_return co_await send_text(
+            route, status, std::move(html), "text/html; charset=utf-8", "no-store");
+    }
+
+    // The address an anonymous order is counted against: Cloudflare's CF-Connecting-IP, else the
+    // first X-Forwarded-For hop, else one bucket for every direct client.
+    static std::string order_client_address(const boost::http::route_params& route) {
+        if (route.req.count("cf-connecting-ip") != 0) {
+            return std::string(route.req.at("cf-connecting-ip")).substr(0, 64);
+        }
+        if (route.req.count("x-forwarded-for") != 0) {
+            std::string forwarded(route.req.at("x-forwarded-for"));
+            forwarded = forwarded.substr(0, forwarded.find(','));
+            return forwarded.substr(0, 64);
+        }
+        return "direct";
+    }
+
+    // Where order links point: https://<apex host>, else the order sheet's configured URL.
+    std::string order_origin() const {
+        if (!options.regions.apex_host.empty()) {
+            return "https://" + options.regions.apex_host;
+        }
+        std::string url = options.regions.order_sheet_url;
+        while (url.ends_with('/')) {
+            url.pop_back();
+        }
+        return url;
+    }
+
+    std::string order_status_url(const control::CloudOrder& order) const {
+        const std::string origin = order_origin();
+        if (origin.empty() || order_status_key.empty()) {
+            return {};
+        }
+        return origin + "/orders/" + order.id +
+               "?token=" + order_status_token(order_status_key, order.id);
+    }
+
+    bool order_checkout_available() const {
+        return payments != nullptr && payments->status().online_payment;
+    }
+
+    // GET /order/<offer> (the offer's form; `location` preselects) and GET /order/price-list.
+    boost::http::route_task serve_order_page(boost::http::route_params& route, std::string rest) {
+        namespace http = boost::http;
+        const OrderSheet& sheet = options.order_sheet;
+        if (rest == "price-list") {
+            std::vector<PriceListRow> rows;
+            std::string effective_from;
+            if (const auto plans = options.store->billing_plans(); plans) {
+                const std::chrono::year_month_day today{
+                    std::chrono::floor<std::chrono::days>(std::chrono::system_clock::now())};
+                const std::string month = std::format("{:04}-{:02}",
+                                                      static_cast<int>(today.year()),
+                                                      static_cast<unsigned>(today.month()));
+                if (const auto list = price_list_for(price_lists(*plans), month); list) {
+                    rows = price_list_rows(list->prices);
+                    effective_from = list->effective_from;
+                }
+            }
+            co_return co_await send_order_html(
+                route, http::status::ok, web_ui_price_list(rows, effective_from));
+        }
+        const OrderOffer* offer = sheet.find_offer(offer_from_slug(rest));
+        OrderFormInput values;
+        values.offer = offer->id;
+        values.location = query_value(route, "location");
+        co_return co_await send_order_html(
+            route,
+            http::status::ok,
+            web_ui_order_form(
+                sheet, options.regions, *offer, values, {}, order_checkout_available()));
+    }
+
+    // POST /order: an order form, sent or to pay. Recorded in the control plane first; a checkout
+    // then continues to Stripe, an order form to its confirmation.
+    boost::http::route_task serve_order_submit(boost::http::route_params& route) {
+        namespace http = boost::http;
+        const OrderSheet& sheet = options.order_sheet;
+        auto [read_error, body] = co_await read_string_body(route, std::size_t{32} * 1024);
+        if (read_error) {
+            if (body_is_too_large(read_error)) {
+                metrics.increment_counter("lake_cloud_orders_refused_total", {{"reason", "size"}});
+                co_return co_await send_order_html(
+                    route,
+                    http::status::payload_too_large,
+                    web_ui_order_message("Order Too Large",
+                                         "An order form is at most 32 KiB. Shorten the details "
+                                         "and send it again."));
+            }
+            co_return http::route_error(read_error);
+        }
+        OrderFormInput input{form_field(body, "offer"),
+                             form_field(body, "path"),
+                             form_field(body, "location"),
+                             form_field(body, "contact_name"),
+                             form_field(body, "contact_email"),
+                             form_field(body, "company"),
+                             form_field(body, "details"),
+                             form_field(body, "quantity")};
+        const OrderOffer* offer = sheet.find_offer(input.offer);
+        if (offer == nullptr) {
+            co_return co_await send_order_html(
+                route,
+                http::status::bad_request,
+                web_ui_order_message("Choose an Offer",
+                                     "Choose one of the offers on the order sheet."));
+        }
+        // The field people never see: only a bot fills it. It is answered as if received, so the
+        // bot learns nothing, and nothing is recorded or sent.
+        if (!form_field(body, "website").empty()) {
+            metrics.increment_counter("lake_cloud_orders_refused_total", {{"reason", "honeypot"}});
+            co_return co_await send_order_html(
+                route,
+                http::status::ok,
+                web_ui_order_message("Order Received", "Thank you. We will be in touch."));
+        }
+        const bool checkout_available = order_checkout_available();
+        auto order = validate_order_form(sheet, options.regions, input, checkout_available);
+        if (!order) {
+            co_return co_await send_order_html(
+                route,
+                http::status::bad_request,
+                web_ui_order_form(
+                    sheet, options.regions, *offer, input, order.error(), checkout_available));
+        }
+        if (!order_limiter->allow(order_client_address(route), std::chrono::steady_clock::now())) {
+            metrics.increment_counter("lake_cloud_orders_refused_total", {{"reason", "rate"}});
+            co_return co_await send_order_html(
+                route,
+                http::status::too_many_requests,
+                web_ui_order_message("Too Many Orders",
+                                     "We have received many orders from here in the last hour. "
+                                     "Please try again later."));
+        }
+        order->email_error = options.resend.unavailable_reason();
+        auto created = options.store->create_cloud_order(*order);
+        if (!created) {
+            std::cerr << nlohmann::json{{"event", "cloud_order_not_recorded"},
+                                        {"code", created.error().code},
+                                        {"message", created.error().message}}
+                             .dump()
+                      << '\n';
+            co_return co_await send_order_html(
+                route,
+                http::status::service_unavailable,
+                web_ui_order_message("Not Recorded",
+                                     "We could not record your order just now. Please try again "
+                                     "in a minute."));
+        }
+        metrics.increment_counter("lake_cloud_orders_total",
+                                  {{"offer", created->offer}, {"path", created->path}});
+        if (!created->email_error.empty()) {
+            // The order is kept; its email goes once the key is set (docs/api/orders.md#email).
+            std::cerr << nlohmann::json{{"event", "cloud_order_email_waiting"},
+                                        {"order_id", created->id},
+                                        {"reason", created->email_error}}
+                             .dump()
+                      << '\n';
+        }
+        if (created->path == "checkout") {
+            ApiContext context = context_for(route);
+            context.registry = &registry;
+            auto provider = co_await payments->current(context);
+            const std::string origin = order_origin();
+            const std::string status = order_status_url(*created);
+            CheckoutRequest request{created->id,
+                                    "Lake " + offer->title,
+                                    order_location_label(sheet, options.regions, *created),
+                                    offer->monthly_cents,
+                                    created->quantity,
+                                    "usd",
+                                    created->contact_email,
+                                    status + "&checkout=done",
+                                    status + "&checkout=cancelled"};
+            std::shared_ptr<PaymentProvider> payment_provider =
+                provider && *provider ? **provider : nullptr;
+            std::expected<CheckoutSession, std::string> session =
+                std::unexpected(std::string("the payment provider is not available"));
+            if (status.empty()) {
+                session = std::unexpected(std::string("this Lake has no order sheet URL"));
+            } else if (payment_provider) {
+                session = payment_provider->create_checkout(request);
+            }
+            if (session) {
+                const auto recorded = options.store->transition_cloud_order(
+                    {created->id, "pending_payment", "pending_payment", "lake", "", session->id});
+                if (recorded) {
+                    co_return co_await redirect(route, session->url);
+                }
+                session = std::unexpected("the checkout could not be recorded: " +
+                                          recorded.error().message);
+            }
+            // Nothing was paid: the order is cancelled, never provisioned, and the person can
+            // send it as an order form instead.
+            static_cast<void>(options.store->transition_cloud_order(
+                {created->id,
+                 "pending_payment",
+                 "cancelled",
+                 "lake",
+                 "the checkout could not start: " + session.error()}));
+            std::cerr << nlohmann::json{{"event", "cloud_order_checkout_failed"},
+                                        {"order_id", created->id},
+                                        {"message", session.error()}}
+                             .dump()
+                      << '\n';
+            co_return co_await send_order_html(
+                route,
+                http::status::service_unavailable,
+                web_ui_order_form(sheet,
+                                  options.regions,
+                                  *offer,
+                                  input,
+                                  {{"path",
+                                    "Card payment could not start, and nothing was charged. Send "
+                                    "it as an order form, or try again in a minute."}},
+                                  checkout_available));
+        }
+        order_pass_requested.store(true);
+        co_return co_await send_order_html(
+            route,
+            http::status::ok,
+            web_ui_order_received(sheet, options.regions, *created, order_status_url(*created)));
+    }
+
+    // GET /orders/<id>?token=...: the order's status, for whoever holds its link.
+    boost::http::route_task serve_order_status(boost::http::route_params& route, std::string id) {
+        namespace http = boost::http;
+        const std::string token = query_value(route, "token");
+        const auto not_found = [&] {
+            return web_ui_order_message("Order Not Found",
+                                        "This order link is not valid. Use the link in the email "
+                                        "we sent you.");
+        };
+        if (order_status_key.empty() || !order_status_token_matches(order_status_key, id, token)) {
+            co_return co_await send_order_html(route, http::status::not_found, not_found());
+        }
+        const auto order = options.store->get_cloud_order(id);
+        if (!order) {
+            co_return co_await send_order_html(
+                route,
+                order.error().code == "not_found" ? http::status::not_found
+                                                  : http::status::service_unavailable,
+                order.error().code == "not_found"
+                    ? not_found()
+                    : web_ui_order_message("Try Again", "We could not read your order just now."));
+        }
+        co_return co_await send_order_html(
+            route,
+            http::status::ok,
+            web_ui_order_status(
+                options.order_sheet, options.regions, *order, query_value(route, "checkout")));
+    }
+
+    // The order pass (docs/api/orders.md#email, #audit), on the maintenance thread: every order
+    // event not yet in the central audit log is recorded there, and every email due is sent
+    // through Resend, retried with backoff when it fails.
+    void run_order_pass() {
+        control::Store& store = *options.store;
+        if (auto events = store.unaudited_cloud_order_events(200); events && !events->empty()) {
+            std::vector<std::int64_t> recorded;
+            const audit::IdentityOptions identity{.configured_seed = options.identity_seed,
+                                                  .instance_kek = options.instance_kek};
+            for (const control::CloudOrderEvent& event : *events) {
+                audit::EventDraft draft{
+                    .customer_id = {},
+                    .kind = "cloud_order." + event.to_state,
+                    .principal = event.actor == "stripe" ? "payment-provider" : event.actor,
+                    .object = "cloud_order/" + event.order_id,
+                    .action = "cloud_order_state",
+                    .outcome = "success",
+                    .request_id = {},
+                    .method = "order",
+                    .device = {},
+                    .details = {{"event_id", event.id},
+                                {"at", event.at},
+                                {"from_state",
+                                 event.from_state.empty() ? nlohmann::json(nullptr)
+                                                          : nlohmann::json(event.from_state)},
+                                {"to_state", event.to_state},
+                                {"actor", event.actor},
+                                {"detail", event.detail}}};
+                if (!audit::record(store, draft, identity)) {
+                    break;
+                }
+                recorded.push_back(event.id);
+            }
+            static_cast<void>(store.mark_cloud_order_events_audited(recorded));
+        }
+        if (options.resend.api_key.empty()) {
+            if (!order_email_waiting_logged && !options.regions.apex_host.empty() &&
+                options.order_sheet.enabled) {
+                order_email_waiting_logged = true;
+                std::cerr << nlohmann::json{{"event", "cloud_order_email_disabled"},
+                                            {"reason", options.resend.unavailable_reason()}}
+                                 .dump()
+                          << '\n';
+            }
+            return;
+        }
+        const ResendHttp http =
+            options.resend_http
+                ? options.resend_http
+                : ResendHttp([this](const ResendRequest& request) {
+                      OutboundResponse response = outbound_http.request(
+                          {request.method, request.url, request.body, request.headers});
+                      return ResendResponse{
+                          response.status, std::move(response.body), std::move(response.error)};
+                  });
+        const auto orders = store.claim_cloud_order_emails(20, 300);
+        if (!orders) {
+            return;
+        }
+        for (const control::CloudOrder& order : *orders) {
+            for (const std::string& recipient : order_email_recipients_due(order)) {
+                const Email email =
+                    order_email(options.order_sheet,
+                                options.regions,
+                                options.resend,
+                                order,
+                                recipient,
+                                recipient == "customer" ? order_status_url(order) : "");
+                const auto sent = send_resend_email(options.resend,
+                                                    email,
+                                                    "lake-order-" + order.id + "-" + order.state +
+                                                        "-" + recipient,
+                                                    http,
+                                                    options.resend_api_base);
+                static_cast<void>(store.record_cloud_order_email(
+                    {order.id,
+                     recipient,
+                     order.state,
+                     sent.has_value(),
+                     sent ? std::string() : sent.error(),
+                     order_email_retry_seconds(order.email_attempts + 1)}));
+                metrics.increment_counter(
+                    "lake_cloud_order_emails_total",
+                    {{"recipient", recipient}, {"outcome", sent ? "sent" : "failed"}});
+                if (!sent) {
+                    std::cerr << nlohmann::json{{"event", "cloud_order_email_failed"},
+                                                {"order_id", order.id},
+                                                {"recipient", recipient},
+                                                {"message", sent.error()}}
+                                     .dump()
+                              << '\n';
+                    break;
+                }
+            }
+        }
     }
 
     // A file of the embedded web app (docs/ui/web-app.md); 404 when the build has no such file.
@@ -12735,6 +13163,11 @@ struct ApiServer::Impl {
         nlohmann::json body{{"ok", true}};
         if (options.platform) {
             body["platform"] = options.platform->degraded() ? "degraded" : "ready";
+            // Rows naming no lake repository are not shown; the count says so (lake#805).
+            if (const auto unresolved = options.platform->unresolved_repositories().size();
+                unresolved != 0) {
+                body["platform_unresolved_repositories"] = unresolved;
+            }
         }
         return send_text(route,
                          boost::http::status::ok,
@@ -15204,6 +15637,16 @@ void ApiServer::drain() {
         Impl* impl = impl_.get();
         impl_->schedule_maintenance("workspace deletions", [impl] { impl->resume_workspace_deletions(); });
     }
+    // The orders' email and audit (lake#831): the store root's owner alone, so two lakes never
+    // send one email twice; an order sent just now asks for it sooner.
+    if (impl_->options.store &&
+        (impl_->options.store_root.empty() ||
+         impl_->store_root_state.load() == StoreRootState::open) &&
+        (now >= impl_->next_order_pass || impl_->order_pass_requested.exchange(false))) {
+        impl_->next_order_pass = now + impl_->options.order_pass_interval;
+        Impl* impl = impl_.get();
+        impl_->schedule_maintenance("cloud orders", [impl] { impl->run_order_pass(); });
+    }
     if (impl_->options.store && impl_->options.workspaces && !impl_->options.instance_kek.empty() &&
         now >= impl_->next_secret_lease_sweep) {
         impl_->next_secret_lease_sweep = now + impl_->options.secret_lease_expiry_interval;
@@ -15229,7 +15672,8 @@ void ApiServer::drain() {
         // The mirror lives in each repository's workspace (lake#358, lake#359).
         control::WorkspaceService* workspaces = impl_->options.workspaces.get();
         const std::string kek = impl_->options.instance_kek;
-        static_cast<void>(liquid::runtime::block_on(impl_->options.platform->sync(
+        Impl* impl = impl_.get();
+        const auto synced = liquid::runtime::block_on(impl_->options.platform->sync(
             [workspaces, kek](const std::string& customer_id, const std::string& workspace_id)
                 -> control::ZettaControlResult<control::WorkspaceRecords> {
                 if (!workspaces) {
@@ -15243,7 +15687,33 @@ void ApiServer::drain() {
                                                 read, std::move(input));
                     },
                     workspace_id, kek);
-            })));
+            },
+            // The id liquid gave a repository, which `liquid deploy` sends (lake#805).
+            [impl](const control::Repository& repository) -> control::PlatformResult<std::string> {
+                auto id = impl->sync_store.repository_liquid_id(repository.customer_id, repository.id);
+                if (!id) {
+                    return std::unexpected(control::PlatformError{id.error().code, id.error().message});
+                }
+                return std::move(*id);
+            }));
+        // A poll that left rows out says so once per change, with the reason (lake#805): a row
+        // whose repository lake cannot place is never dropped quietly.
+        const std::string outcome =
+            !synced ? synced.error().message : (*synced ? std::string() : synced->error().message);
+        if (outcome != impl_->last_platform_sync_problem) {
+            impl_->last_platform_sync_problem = outcome;
+            if (!outcome.empty()) {
+                std::cerr << nlohmann::json{{"event", "platform_sync_incomplete"},
+                                            {"code", synced && !*synced ? synced->error().code
+                                                                        : std::string("store_unavailable")},
+                                            {"message", outcome}}
+                                 .dump()
+                          << '\n';
+            }
+        }
+        impl_->metrics.set_gauge(
+            "lake_platform_unresolved_repositories", {},
+            static_cast<double>(impl_->options.platform->unresolved_repositories().size()));
     }
 }
 

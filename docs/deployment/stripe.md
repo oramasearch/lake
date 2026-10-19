@@ -31,12 +31,16 @@ key.
 
 1. In the Stripe dashboard (test mode), **Developers → API keys**: take the **secret key**
    (`sk_test_…`). A **restricted key** (`rk_test_…`) is better: give it write access to
-   **Customers**, **Invoices** and **Invoice Items**, and nothing else.
+   **Customers**, **Invoices**, **Invoice Items** and **Checkout Sessions** (the order sheet), and
+   nothing else.
 2. **Developers → Webhooks → Add endpoint:**
    - URL: `https://<lake host>/billing/stripe/webhook` — on dev
      `https://lake.oramadev.net/billing/stripe/webhook`, on Orama Cloud
      `https://lake.live/billing/stripe/webhook`.
-   - Events: `invoice.paid`, `invoice.payment_failed`, `invoice.voided`.
+   - Events: `invoice.paid`, `invoice.payment_failed`, `invoice.voided`, and for the order sheet's
+     card payments (lake#831, [../api/orders.md](../api/orders.md#paying)):
+     `checkout.session.completed`, `checkout.session.async_payment_succeeded`,
+     `checkout.session.async_payment_failed`, `checkout.session.expired`.
    - Save, then reveal the endpoint's **signing secret** (`whsec_…`).
 
 Keep both values in your password manager; nothing else needs them.

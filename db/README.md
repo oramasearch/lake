@@ -1,5 +1,17 @@
 # Database schema
 
+Migration `0089_cloud_orders` (lake#831) adds `cloud_orders` and `cloud_order_events`, the apex
+order sheet's orders and their history, with the `updated_at` trigger, the `lake_cloud_orders`
+notification of a paid order and the guard `cloud_orders_guard`. The Orama operator reads paid
+orders and writes their provisioning state (orama-operator#634). Additive; apply before the new
+binary, and have the operator vendor the schema and select the guard. See
+[schema.md](../docs/control-plane/schema.md#cloud-orders-migration).
+
+Migration `0088_repository_liquid_ids` (lake#805) adds the nullable `repositories.liquid_id` (the
+id `liquid deploy` sends), its partial index and the guard `repository_liquid_ids_guard`. Additive;
+apply before the new binary, and have the operator vendor the schema and select the guard. See
+[platform.md](../docs/api/platform.md#which-repository-a-row-names).
+
 Migration `0087_clerk_webhooks` (lake#765) adds `users.disabled_at`, `clerk_webhook_deliveries`
 and the guard `clerk_webhooks_guard`. Additive; apply before the new binary, and have the operator
 vendor the schema and select the guard. See [clerk.md](../docs/api/clerk.md#webhooks).

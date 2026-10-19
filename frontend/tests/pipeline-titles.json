@@ -1,0 +1,153 @@
+{
+  "_comment": "lake#816: pipeline titles from a description. Run by both lake's C++ tests (AgentRuns.APipelineTitleIsShortAndReadable, tests/test_workspaces.cpp) and the web app's (frontend/tests/design.test.ts), so pipeline_title and pipelineTitle agree. Each case is [description, title].",
+  "cases": [
+    [
+      "Predict which customers will churn (the churned column), with the reasons",
+      "Customers churn"
+    ],
+    [
+      "Predict which accounts will churn in the next 90 days, with the reasons",
+      "Accounts churn"
+    ],
+    [
+      "Predict the likelihood of churn",
+      "Likelihood of churn"
+    ],
+    [
+      "Build a churn model",
+      "Churn model"
+    ],
+    [
+      "Classify support tickets by urgency",
+      "Support tickets"
+    ],
+    [
+      "What will revenue be next quarter?",
+      "Revenue next quarter"
+    ],
+    [
+      "Answer questions about our product docs",
+      "Questions"
+    ],
+    [
+      "churn",
+      "Churn"
+    ],
+    [
+      "Forecast demand — weekly, per store",
+      "Demand"
+    ],
+    [
+      "Score churn-risk for each account's renewal",
+      "Churn-risk"
+    ],
+    [
+      "Predict which",
+      "Predict which"
+    ],
+    [
+      "(!)",
+      "Pipeline"
+    ],
+    [
+      "",
+      "Pipeline"
+    ],
+    [
+      "Predict: customer churn",
+      "Customer churn"
+    ],
+    [
+      "Predict (customer churn)",
+      "Customer churn"
+    ],
+    [
+      "Predict — customer churn, weekly",
+      "Customer churn"
+    ],
+    [
+      "Find: which? accounts!",
+      "Accounts"
+    ],
+    [
+      "Predict “customer churn” for each account",
+      "Customer churn"
+    ],
+    [
+      "Predict «customer churn»",
+      "Customer churn"
+    ],
+    [
+      "Predict the customer’s churn risk",
+      "Customer's churn risk"
+    ],
+    [
+      "Predict which customers will churn… and why",
+      "Customers churn"
+    ],
+    [
+      "Predict which…",
+      "Predict which"
+    ],
+    [
+      "Predict churn",
+      "Churn"
+    ],
+    [
+      "élan des clients",
+      "Élan des clients"
+    ],
+    [
+      "ñandú sightings",
+      "Ñandú sightings"
+    ],
+    [
+      "ÿoung accounts",
+      "Ÿoung accounts"
+    ],
+    [
+      "ąccounts at risk",
+      "Ąccounts"
+    ],
+    [
+      "straße volume",
+      "Straße volume"
+    ],
+    [
+      "ßmall batches",
+      "ßmall batches"
+    ],
+    [
+      "σύνολο πελατών",
+      "Σύνολο πελατών"
+    ],
+    [
+      "жизнь клиента",
+      "Жизнь клиента"
+    ],
+    [
+      "ёлки продажи",
+      "Ёлки продажи"
+    ],
+    [
+      "日本の売上",
+      "日本の売上"
+    ],
+    [
+      "прогнозирование ежемесячных региональных продаж",
+      "Прогнозирование ежемесячных региональных продаж"
+    ],
+    [
+      "Predict прогнозирование ежемесячных региональных продаж weekly",
+      "Прогнозирование ежемесячных региональных продаж"
+    ],
+    [
+      "Predict extraordinarily complicated multidimensional subscription renewals",
+      "Extraordinarily complicated multidimensional"
+    ],
+    [
+      "Supercalifragilisticexpialidociousextraordinarilylongword churn",
+      "Supercalifragilisticexpialidociousextraordinaril"
+    ]
+  ]
+}

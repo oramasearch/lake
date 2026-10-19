@@ -36,7 +36,9 @@ of the account that owns your workspaces (yours, or your organization's).
 3. Optionally choose a dataset under **From data**: the pipeline reads it, and its runs train on it.
 4. Optionally choose a **Methodology** to get that methodology's own pipeline. Only the
    methodologies your workspace's engine runs are listed.
-5. Submit. The pipeline page opens.
+5. Check **Pipeline name** and **Model name**: a few words from the description (*Customers
+   churn*) and that title as a model name (`customers_churn_model`). Change either if you like.
+6. Submit. The pipeline page opens.
 
 A pipeline whose methodology does not train yet says **This Pipeline Trains Nothing Yet** instead of
 pretending to train.
@@ -46,8 +48,9 @@ pretending to train.
   then `POST /v1/compile_pipeline` with
   `{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "project": "retention", "intent": "Predict the churned column of accounts", "dataset": "datasets.accounts"}`.
   Without the project, `compile_pipeline` answers `not_found` at `/project` and says to create it.
-  `dataset` is `<database>.<table>`; `methodology` (for example `M-3`) is optional. The answer's
-  `graph` is the new pipeline's name, taken from your description's first words; `template` says
+  `dataset` is `<database>.<table>`; `methodology` (for example `M-3`) is optional. `name` names
+  the pipeline; without it Lake makes a short title from the description. The answer's
+  `graph` is the new pipeline's name; `template` says
   which template its steps started from.
 - MCP: `workspace_act` with `create_project`, then the `compile_pipeline` tool, with the same
   input. `compile_pipeline` is the one recipe: it captures the sentence and compiles it (the
@@ -119,12 +122,15 @@ refused and nothing is saved. **A saved change needs approval again before the p
 
 1. **Approve** the pipeline. The workspace verifies and runs only an approved pipeline.
 2. **Check** runs the workspace's correctness checks without running anything. Each check is listed with its
-   reason.
+   reason. It is disabled until the pipeline is approved, and says so.
 3. **Check and run** checks and, when the checks pass, trains. Fill in the **Run settings**:
    - **Train on**: the dataset to learn from.
    - **Hold out for measuring**: the share of rows kept out of training to measure the model. The
      default 0.2 keeps a fifth of the rows out. 0 measures nothing, and every score is in-sample.
-   - **Model name**: defaults to the project and pipeline names.
+   - **Model name**: the name of the model the pipeline already trained, so the run adds a version
+     to it. For a pipeline that has trained nothing yet it defaults to the pipeline's short title
+     with `_model`, numbered past a model of another pipeline. A model name typed in Build a
+     Pipeline fills it only on the run form that opens right after building.
 4. The run appears under the pipeline's **Runs** and on **Train → Runs**.
 
 Approve:
@@ -242,7 +248,8 @@ Press a model's name to open its training page, at its latest version.
 
 Press **Retrain** on the model's training page. Lake runs the model's pipeline again, after its
 checks, under the model's name, and opens the new run. The new run's model becomes the next
-version.
+version. If the pipeline was changed since it was approved, Retrain says *Approve the pipeline
+first; checks run on an approved pipeline.* Approve it on its pipeline page, then retrain.
 
 - REST: `POST /v1/run_pipeline` with the model's pipeline and name:
 

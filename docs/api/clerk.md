@@ -125,6 +125,8 @@ without the secret, `401` to a forged delivery and `200` creating the account.
 
 ## Configuration
 
+Setting up an instance and its social connections is the runbook [`../deployment/sign-in.md`](../deployment/sign-in.md).
+
 | Setting | Where | Value |
 |---|---|---|
 | `LAKE_CLERK_PUBLISHABLE_KEY` / `--clerk-publishable-key` | lake runtime | The instance's `pk_test_…` or `pk_live_…`. Public. Empty or `xxx` turns Clerk off |
@@ -147,13 +149,14 @@ The Clerk instance needs:
 
 ### The instance lake.oramadev.net uses
 
-Clerk application `lake` (`app_3JpNNpVUwgRgnkItIPbzzRWa2BP`) in the `steve@orama.com` workspace,
-development instance `ins_3JpNNvZd4jnehvW6XsKWcMq6MKx` (`above-seahorse-7535.clerk.accounts.dev`),
-created 2026-09-25. Template `jtmp_3JpNeutaiIPwfTcdSz8BXC1SEYW`; sign-up `restricted`; email-code
-sign-in, password optional. Add a person with `clerk users create --email <address>` from a
-directory linked to that application (`clerk link --app app_3JpNNpVUwgRgnkItIPbzzRWa2BP`). Before
-any Clerk command, run `clerk whoami` and confirm the linked application; the same email holds
-several workspaces.
+Clerk application `lake-testing` (`app_3JpNNpVUwgRgnkItIPbzzRWa2BP`, first named `lake`) in the
+`steve@orama.com` workspace, development instance `ins_3JpNNvZd4jnehvW6XsKWcMq6MKx`
+(`above-seahorse-7535.clerk.accounts.dev`), created 2026-09-25. Template
+`jtmp_3JpNeutaiIPwfTcdSz8BXC1SEYW`; sign-up `restricted`; email-code sign-in, password optional. Add
+a person with `clerk users create --email <address>` from a directory linked to that application
+(`clerk link --app app_3JpNNpVUwgRgnkItIPbzzRWa2BP`). Before any Clerk command, run `clerk whoami`
+and confirm the linked application; the same email holds several workspaces. Every environment's
+instance is listed in [`../deployment/sign-in.md`](../deployment/sign-in.md).
 
 ## Verify
 
