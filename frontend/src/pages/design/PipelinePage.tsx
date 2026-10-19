@@ -12,13 +12,16 @@ import { Banner, Button, Chip, DataTable, Empty, ErrorBlock, Field, Form, KeyVal
 import { WorkspaceGate, useWorkspaceStatus } from "@/components/WorkspaceGate";
 import { qs, useScope, useScopedRead, useWq, useWsPath, wa } from "./api";
 import {
+  APPROVE_FIRST,
   EDGE_KINDS,
   STEP_KINDS,
   cellText,
+  clearRefusalsOnApprove,
   datasetChoices,
   defaultModelName,
   graphOf,
   parseNumber,
+  pipelineActionError,
   plainAgentFailure,
   projectAgentNeedsReply,
   runsOf,
@@ -149,7 +152,7 @@ function PipelineBody({ project, graphName }: { project: string; graphName: stri
               })
             }
           />
-          <FormError error={audit.error} />
+          <FormError error={pipelineActionError(audit.error)} />
         </>
       )}
       {shown.deploy && (
@@ -199,6 +202,7 @@ function PipelineBody({ project, graphName }: { project: string; graphName: stri
               dataset={params.get("dataset") ?? ""}
               holdout={params.get("holdout") ?? ""}
               onShown={setShown}
+              audit={audit}
             />
           </>
         }
@@ -752,8 +756,10 @@ function ChangePipeline({ project, graph, go }: { project: string; graph: Graph;
 
 /* ------------------------------------------------------------------ governing */
 
-/** Approve, Check, Run and Deploy. Run and Deploy wait for approval. A run that starts opens its
- * page; a run the checks blocked, a check and a deploy show their answer here once. */
+/** Approve, Check, Run and Deploy. Check, Run and Deploy wait for approval. A run that starts opens
+ * its page; a run the checks blocked, a check and a deploy show their answer here once. Approve
+ * clears the refusals shown before it, the checks panel's audit (`audit`, owned by the page)
+ * included. */
 function Govern({
   project,
   graph,
@@ -762,6 +768,7 @@ function Govern({
   dataset,
   holdout,
   onShown,
+  audit,
 }: {
   project: string;
   graph: Graph;
@@ -770,6 +777,7 @@ function Govern({
   dataset: string;
   holdout: string;
   onShown: (shown: Shown) => void;
+  audit: { setError: (error: unknown) => void };
 }) {
   const scope = useScope();
   const ws = useWsPath();
@@ -796,6 +804,8 @@ function Govern({
               ? undefined
               : approve.run(async () => {
                   await wa(scope, "approve_plan", target);
+                  // A refusal shown before approving no longer holds once approved (lake#813).
+                  clearRefusalsOnApprove({ check, run: runIt, deploy, audit });
                   toast("Pipeline approved");
                 })
           }
@@ -820,17 +830,21 @@ function Govern({
         </Form>
         <Form
           onSubmit={() =>
-            check.run(async () => {
-              const gate = await wa<J>(scope, "gate", target);
-              onShown({ gate });
-              top();
-            })
+            approved
+              ? check.run(async () => {
+                  const gate = await wa<J>(scope, "gate", target);
+                  onShown({ gate });
+                  top();
+                })
+              : undefined
           }
         >
-          <FormError error={check.error} />
-          <p className="m-0 text-[12.5px] text-ink-2">Run Lake's correctness checks without running anything.</p>
+          <FormError error={pipelineActionError(check.error)} />
+          {/* Lake checks only an approved pipeline, so Check waits for Approve and says why
+              (lake#813). */}
+          <p className="m-0 text-[12.5px] text-ink-2">{approved ? "Run Lake's correctness checks without running anything." : APPROVE_FIRST}</p>
           <div>
-            <Button type="submit" loading={check.busy}>
+            <Button type="submit" loading={check.busy} disabled={!approved}>
               Check
             </Button>
           </div>
@@ -858,7 +872,7 @@ function Govern({
             })
           }
         >
-          <FormError error={runIt.error} />
+          <FormError error={pipelineActionError(runIt.error)} />
           <Field label="Train on">
             <select name="dataset_path" value={trainOn} onChange={(e) => setTrainOn(e.target.value)}>
               <option value="">the pipeline's own source</option>
@@ -890,7 +904,7 @@ function Govern({
             })
           }
         >
-          <FormError error={deploy.error} />
+          <FormError error={pipelineActionError(deploy.error)} />
           <p className="m-0 text-[12.5px] text-ink-2">Place it in the workspace behind its checks.</p>
           <div>
             <Button type="submit" loading={deploy.busy} disabled={!approved}>

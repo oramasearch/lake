@@ -2,13 +2,16 @@
  * The Design pages' rules (src/pages/design/logic.ts): what lake's renderers and form handlers
  * computed on the server, checked against the server's own behaviour.
  */
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  APPROVE_FIRST,
   a1Queue,
   actionCounts,
   certificateGroups,
   checkTone,
+  clearRefusalsOnApprove,
   datasetChoices,
   datasetColumns,
   gateCounts,
@@ -27,6 +30,7 @@ import {
   missingPredicates,
   parseInteger,
   parseNumber,
+  pipelineActionError,
   plainAgentFailure,
   projectAgentNeedsReply,
   proposedFoundation,
@@ -37,6 +41,7 @@ import {
   startReturn,
   topologicalOrder,
   withoutProjectAgentChecks,
+  WAITS_FOR_APPROVAL,
 } from "../src/pages/design/logic.ts";
 
 test("cell numbers print as %.4g", () => {
@@ -235,6 +240,62 @@ test("the Run form's model name and the Project Agent's question", () => {
   assert.equal(projectAgentNeedsReply({ status: "succeeded", answer: { result: { reply: "Which table?" } } }), true);
   assert.equal(projectAgentNeedsReply({ status: "succeeded", answer: { result: { proposal: {} } } }), false);
   assert.equal(projectAgentNeedsReply({ status: "running" }), false);
+});
+
+test("a refusal to act on a proposed pipeline reads in page words (lake#813)", () => {
+  // As lake-dev answered Check on a proposed pipeline, 2026-10-18.
+  const refusal = Object.assign(
+    new Error("the plan 'Predict which customers will churn the churned column' is proposed — approve it (workspace_act with capability approve_plan) before verification"),
+    { code: "not_approved", status: 409 },
+  );
+  const shown = pipelineActionError(refusal) as Error;
+  assert.equal(shown.message, APPROVE_FIRST);
+  assert.doesNotMatch(shown.message, /workspace_act|approve_plan|capability/);
+  // The message alone is enough, from an engine that answers another code.
+  assert.equal((pipelineActionError(new Error("approve it (approve_plan) before deploying")) as Error).message, APPROVE_FIRST);
+  // Every other error, and no error, is left as it was.
+  const other = Object.assign(new Error("no graph named 'x'"), { code: "not_found" });
+  assert.equal(pipelineActionError(other), other);
+  assert.equal(pipelineActionError(null), null);
+  assert.doesNotMatch(APPROVE_FIRST, /workspace_act|approve_plan|capability/);
+});
+
+test("approve, Check, edit a step, audit, Approve: the audit's refusal reads in page words and Approve clears it (lake#813)", () => {
+  // Approved and checked, then a step is edited: the pipeline is proposed again while the checks
+  // panel stays, so "List them for an audit" calls gate and the engine refuses it as Check is refused.
+  const auditRefusal = Object.assign(
+    new Error("the plan 'weekly' is proposed — approve it (approve_plan) before verification"),
+    { code: "not_approved", status: 409 },
+  );
+  const errors: Record<string, unknown> = { check: null, run: null, deploy: null, audit: auditRefusal };
+  const action = (name: string) => ({ setError: (error: unknown) => void (errors[name] = error) });
+  // What the panel shows under the audit button.
+  assert.equal((pipelineActionError(errors.audit) as Error).message, APPROVE_FIRST);
+  // Approve succeeds: every refusal shown before it is gone, the audit's included.
+  clearRefusalsOnApprove({ check: action("check"), run: action("run"), deploy: action("deploy"), audit: action("audit") });
+  assert.deepEqual(errors, { check: null, run: null, deploy: null, audit: null });
+  assert.deepEqual([...WAITS_FOR_APPROVAL], ["check", "run", "deploy", "audit"]);
+});
+
+test("every pipeline action's error, the model page's Retrain included, is shown through pipelineActionError (lake#813)", () => {
+  const pipeline = readFileSync(new URL("../src/pages/design/PipelinePage.tsx", import.meta.url), "utf8");
+  for (const name of ["check", "runIt", "deploy", "audit"]) {
+    assert.match(pipeline, new RegExp(`<FormError error=\\{pipelineActionError\\(${name}\\.error\\)\\} />`), `${name}'s error is shown in page words`);
+    assert.doesNotMatch(pipeline, new RegExp(`<FormError error=\\{${name}\\.error\\} />`), `${name}'s error is never shown raw`);
+  }
+  // Approve clears through the one list, so an action added to it is cleared too.
+  assert.match(pipeline, /clearRefusalsOnApprove\(\{ check, run: runIt, deploy, audit \}\)/);
+  // Retrain calls run_pipeline, which answers an edited pipeline with the same not_approved refusal.
+  const page = readFileSync(new URL("../src/pages/train/ModelPage.tsx", import.meta.url), "utf8");
+  const start = page.indexOf("\nfunction Train(");
+  const model = page.slice(start, page.indexOf("\nfunction ", start + 1));
+  assert.ok(start > 0, "ModelPage has its Train card");
+  assert.match(model, /act<Row>\("run_pipeline"/);
+  assert.match(model, /<FormError error=\{pipelineActionError\(error\)\} \/>/);
+  assert.doesNotMatch(model, /<FormError error=\{error\} \/>/);
+  // As the engine answers run_pipeline on a proposed pipeline.
+  const refusal = Object.assign(new Error("the plan 'weekly' is proposed — approve it (approve_plan) before verification"), { code: "not_approved" });
+  assert.equal((pipelineActionError(refusal) as Error).message, APPROVE_FIRST);
 });
 
 test("the graph is laid out as render_svg lays it out", () => {

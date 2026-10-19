@@ -20,6 +20,7 @@ import {
   PROJECT_STATE_TONE,
   datasetChoices,
   datasetColumns,
+  pipelineActionError,
   projectState,
   runIsActive,
   runsOf,
@@ -339,7 +340,7 @@ function PipelineAction({ project, graphId, approved }: { project: string; graph
       <Button variant={approved ? "secondary" : "primary"} loading={busy} onClick={() => void submit()}>
         {approved ? "Check and run" : "Approve"}
       </Button>
-      <FormError error={error} />
+      <FormError error={pipelineActionError(error)} />
     </div>
   );
 }
