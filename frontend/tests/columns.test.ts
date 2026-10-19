@@ -83,6 +83,15 @@ test("get_dataset's types and null shares are read by name; names alone carry no
   );
 });
 
+test("a column the caller may not read keeps its place but carries no facts", () => {
+  // zetta#1299 answers a column hidden by a column-scoped sql:read with its name and the rest null.
+  const masked = [...typed.slice(0, 2), { name: "ssn", type: null, nullable: null, null_fraction: null }, typed[3]];
+  assert.deepEqual(datasetColumns(masked, [], []), ["account_id", "plan", "ssn", "churned"]);
+  const facts = columnFacts(masked);
+  assert.equal(facts.has("ssn"), false, "no type or share is shown for it");
+  assert.equal(facts.get("plan")?.type, "string");
+});
+
 test("an engine that refuses LIMIT is told apart from a query's own error", () => {
   assert.ok(limitRefused(new Error("expected ';' after statement, got 'LIMIT' (at position 30)")));
   assert.ok(limitRefused({ message: "expected ';' after statement, got 'limit'" }));
