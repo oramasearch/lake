@@ -150,8 +150,8 @@ The project page's Build a Pipeline, as one call, with exactly what its form pos
 the new pipeline's first connect step at it (`get_graph`, then `edit_pipeline`). The value names
 the new pipeline as `graph` (empty when the engine named none) and, from an engine with zetta#1238,
 `template`: the template its steps started from (`"the M-1 churn template"`). Lake names the
-pipeline, not the engine (lake#816): `name` when the caller gives one (trimmed; one of only spaces
-is no name), else a short title from the
+pipeline, not the engine (lake#816): `name` when the caller gives one (trimmed; a blank one is no
+name), else a short title from the
 intent (`pipeline_title`: *Predict which accounts will churn in the next 90 days* is *Accounts
 churn*), numbered ` (2)`, ` (3)` past a pipeline of the project that has it, and passes that name to
 `compile_intent`. Build a Pipeline shows the same title (`pipelineTitle` in the web app, tested on
