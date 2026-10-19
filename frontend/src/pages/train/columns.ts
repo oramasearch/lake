@@ -99,12 +99,13 @@ export function firstRows<T>(rows: readonly T[] | undefined, limit: number): T[]
 /** A Query page statement with `LIMIT cap + 1` appended, so the engine sends at most one row more
  * than the page shows (enough to say there are more) instead of the whole table. Only a plain
  * `SELECT` that names no `LIMIT`, `FETCH` or `OFFSET` of its own is changed; anything else is sent
- * as written. Quoted text is ignored when looking. */
+ * as written. Quoted text is ignored when looking. After a `--` comment the `LIMIT` goes on a line
+ * of its own, so the comment does not swallow it. */
 export function cappedStatement(statement: string, cap: number): string {
   const body = statement.trim().replace(/;\s*$/, "");
   if (!/^select\b/i.test(body)) return statement;
   const unquoted = body.replace(/'(?:[^']|'')*'/g, "''").replace(/"(?:[^"]|"")*"/g, '""');
   if (/\b(limit|fetch|offset)\b/i.test(unquoted)) return statement;
   if (unquoted.includes(";")) return statement;
-  return `${body} LIMIT ${cap + 1}`;
+  return `${body}${unquoted.includes("--") ? "\n" : " "}LIMIT ${cap + 1}`;
 }

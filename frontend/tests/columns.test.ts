@@ -99,4 +99,5 @@ test("the Query page asks for one row more than it shows, unless the statement p
     assert.equal(cappedStatement(own, 500), own, own);
   }
   assert.equal(cappedStatement("SELECT * FROM t WHERE note = 'no limit here'", 500), "SELECT * FROM t WHERE note = 'no limit here' LIMIT 501", "quoted text is not a LIMIT");
+  assert.equal(cappedStatement("SELECT * FROM t -- every account", 500), "SELECT * FROM t -- every account\nLIMIT 501", "a line comment does not swallow the LIMIT");
 });
