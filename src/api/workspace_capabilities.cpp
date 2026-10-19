@@ -3847,7 +3847,8 @@ liquid::runtime::task<ApiResult> compile_pipeline(ApiContext& context,
                                                   std::string dataset,
                                                   json model,
                                                   std::string methodology,
-                                                  json columns) {
+                                                  json columns,
+                                                  std::string name) {
     const auto act = [&](std::string capability, json input) {
         return call_capability(context,
                                "workspace_act",
@@ -3857,7 +3858,34 @@ liquid::runtime::task<ApiResult> compile_pipeline(ApiContext& context,
     };
     ApiResult result = called(co_await act("capture_intent", {{"project", project}, {"text", intent}}));
     if (result.ok) {
-        json input{{"project", project}};
+        // A short title rather than the engine's, which is the description's words with the
+        // punctuation dropped (lake#816), numbered past a pipeline of the project that has it, as
+        // a name the caller chose is. The description itself stays the project's captured intent.
+        // A chosen name is trimmed; one that is only spaces is no name.
+        const auto space = [](char c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r'; };
+        while (!name.empty() && space(name.back())) {
+            name.pop_back();
+        }
+        name.erase(0, std::ranges::find_if_not(name, space) - name.begin());
+        const std::string title = name.empty() ? pipeline_title(intent) : name;
+        name = title;
+        const ApiResult read = called(co_await call_capability(context,
+                                                               "workspace_query",
+                                                               {{"customer_id", customer_id},
+                                                                {"capability", "get_project"},
+                                                                {"input", {{"name", project}}}}));
+        const json graphs = read.ok ? read.value.value("graphs", json::array()) : json::array();
+        const auto taken = [&graphs](const std::string& candidate) {
+            return graphs.is_array() && std::ranges::any_of(graphs, [&](const json& graph) {
+                       return graph.is_object() && graph.value("name", std::string()) == candidate;
+                   });
+        };
+        for (int copy = 2; taken(name); ++copy) {
+            name = title + " (" + std::to_string(copy) + ")";
+        }
+    }
+    if (result.ok) {
+        json input{{"project", project}, {"name", name}};
         if (const std::string input_id = result.value.value("input_id", std::string());
             !input_id.empty()) {
             input["input_id"] = input_id;
@@ -3926,14 +3954,31 @@ liquid::runtime::task<ApiResult> settle_build(ApiContext& context, control::Agen
     // The methodology the design names, else the one of the Opportunity the build came from
     // (lake#289). An engine with the registry (zetta#1061) builds that methodology's own
     // pipeline; one it cannot run yet is refused here, never replaced by a skeleton.
+    const json context_body =
+        task.body.is_object() ? task.body.value("context", json::object()) : json::object();
+    const json opportunity = context_body.is_object()
+                                 ? context_body.value("opportunity", json::object())
+                                 : json::object();
+    // The pipeline is titled from what the project is for (lake#816): the Opportunity's intent,
+    // else the brief's words after "Design the pipeline for the project <name>: ", never the
+    // brief's own "Design the pipeline" words.
+    std::string title;
+    if (const std::string intent =
+            opportunity.is_object() ? design_text_field(opportunity, "intent") : std::string();
+        !intent.empty()) {
+        title = pipeline_title(intent);
+    } else if (const std::string brief = design_text_field(task.body, "message"),
+               lead = "Design the pipeline for the project " + project + ": ";
+               brief.starts_with(lead) && brief.size() > lead.size()) {
+        title = pipeline_title(std::string_view(brief).substr(lead.size()));
+    } else if (brief.starts_with("Design the pipeline")) {
+        // A brief that says only "Design the pipeline ..." (an agent_turn a client started with
+        // no description after it) is titled with the project's own name.
+        title = pipeline_title(project);
+    }
     std::string methodology;
     auto listed = co_await workspace_methodologies(context, task.customer_id);
     if (const json registry = listed ? *listed : json(nullptr); registry.is_array()) {
-        const json context_body = task.body.is_object() ? task.body.value("context", json::object())
-                                                        : json::object();
-        const json opportunity = context_body.is_object()
-                                     ? context_body.value("opportunity", json::object())
-                                     : json::object();
         json entry = find_methodology(registry, design_text_field(design, "methodology"),
                                       design_text_field(design, "solution"));
         if (entry.is_null() && opportunity.is_object()) {
@@ -3967,7 +4012,8 @@ liquid::runtime::task<ApiResult> settle_build(ApiContext& context, control::Agen
                                       dataset,
                                       model,
                                       methodology,
-                                      design_columns));
+                                      design_columns,
+                                      title));
     }
     // The project's own pipeline (Zetta compiles one from its intent when it is created):
     // the first one not yet approved. Applied once: a connect step that already reads the
@@ -3990,7 +4036,8 @@ liquid::runtime::task<ApiResult> settle_build(ApiContext& context, control::Agen
                                       dataset,
                                       model,
                                       methodology,
-                                      design_columns));
+                                      design_columns,
+                                      title));
     }
     const ApiResult current = called(co_await call_capability(
         context,
@@ -5377,14 +5424,18 @@ void register_conversation_capabilities(Registry& registry) {
             "it. The dataset's source and table, and the optional `label_column` (what it "
             "predicts) and `entity_column` (what each row is about), are passed to the compiler "
             "as hints, so the steps are named from the data (\"Load subscriptions\", \"Train "
-            "downgraded model\"). Answers the new pipeline's name as `graph` (from the intent's "
-            "words) and, from an engine that says so, the `template` its steps started from.",
+            "downgraded model\"). The pipeline is named `name`, else a short title from the "
+            "intent (\"Predict which customers will churn, with the reasons\" is \"Customers "
+            "churn\"), numbered \" (2)\" when the project has one by that name; the intent stays "
+            "the project's description. Answers the new pipeline's name as `graph` and, from an "
+            "engine that says so, the `template` its steps started from.",
         .input_schema = customer_input_schema({{"project", {{"type", "string"}, {"minLength", 1}}},
                                                {"intent", {{"type", "string"}, {"minLength", 1}}},
                                                {"dataset", {{"type", "string"}}},
                                                {"label_column", {{"type", "string"}}},
                                                {"entity_column", {{"type", "string"}}},
-                                               {"methodology", {{"type", "string"}}}},
+                                               {"methodology", {{"type", "string"}}},
+                                               {"name", {{"type", "string"}}}},
                                               json::array({"project", "intent"})),
         .output_schema = {{"type", "object"},
                           {"properties",
@@ -5409,7 +5460,8 @@ void register_conversation_capabilities(Registry& registry) {
                 nullptr,
                 input.value("methodology", std::string()),
                 {{"label_column", input.value("label_column", std::string())},
-                 {"entity_column", input.value("entity_column", std::string())}}));
+                 {"entity_column", input.value("entity_column", std::string())}},
+                input.value("name", std::string())));
         }});
     registry.add(Capability{
         .name = "render_pipeline",
@@ -6356,6 +6408,256 @@ std::map<std::string, std::string> canonical_workspace_input(std::string_view ca
         renamed[field] = other;
     }
     return renamed;
+}
+
+namespace {
+
+// The first code point of a UTF-8 string and its length in bytes, or nullopt when the string
+// does not start with a well-formed one.
+std::optional<std::pair<char32_t, std::size_t>> first_code_point(std::string_view text) {
+    if (text.empty()) {
+        return std::nullopt;
+    }
+    const auto lead = static_cast<unsigned char>(text[0]);
+    const std::size_t size = lead < 0x80                ? 1
+                             : (lead & 0xE0) == 0xC0 ? 2
+                             : (lead & 0xF0) == 0xE0 ? 3
+                             : (lead & 0xF8) == 0xF0 ? 4
+                                                     : 0;
+    if (size == 0 || text.size() < size) {
+        return std::nullopt;
+    }
+    char32_t value = size == 1   ? lead
+                     : size == 2 ? (lead & 0x1F)
+                     : size == 3 ? (lead & 0x0F)
+                                 : (lead & 0x07);
+    for (std::size_t at = 1; at < size; ++at) {
+        const auto next = static_cast<unsigned char>(text[at]);
+        if ((next & 0xC0) != 0x80) {
+            return std::nullopt;
+        }
+        value = (value << 6) | (next & 0x3F);
+    }
+    return std::pair{value, size};
+}
+
+std::string utf8_of(char32_t value) {
+    std::string out;
+    if (value < 0x80) {
+        out += static_cast<char>(value);
+    } else if (value < 0x800) {
+        out += static_cast<char>(0xC0 | (value >> 6));
+        out += static_cast<char>(0x80 | (value & 0x3F));
+    } else if (value < 0x10000) {
+        out += static_cast<char>(0xE0 | (value >> 12));
+        out += static_cast<char>(0x80 | ((value >> 6) & 0x3F));
+        out += static_cast<char>(0x80 | (value & 0x3F));
+    } else {
+        out += static_cast<char>(0xF0 | (value >> 18));
+        out += static_cast<char>(0x80 | ((value >> 12) & 0x3F));
+        out += static_cast<char>(0x80 | ((value >> 6) & 0x3F));
+        out += static_cast<char>(0x80 | (value & 0x3F));
+    }
+    return out;
+}
+
+// The capital of a lowercase letter of Latin-1, Latin Extended-A, Greek or Cyrillic; any other
+// code point as it is. The web app's `upperFirst` maps the same letters.
+char32_t title_capital(char32_t c) {
+    if (c >= U'a' && c <= U'z') {
+        return c - 0x20;
+    }
+    if (c >= 0xE0 && c <= 0xFE && c != 0xF7) {
+        return c - 0x20;
+    }
+    if (c == 0xFF) {
+        return 0x178;
+    }
+    if ((c >= 0x100 && c <= 0x137) || (c >= 0x14A && c <= 0x177)) {
+        return c % 2 == 1 ? c - 1 : c;
+    }
+    if ((c >= 0x139 && c <= 0x148) || (c >= 0x179 && c <= 0x17E)) {
+        return c % 2 == 0 ? c - 1 : c;
+    }
+    if (c >= 0x3B1 && c <= 0x3C9) {
+        return c == 0x3C2 ? 0x3A3 : c - 0x20;
+    }
+    if (c >= 0x430 && c <= 0x44F) {
+        return c - 0x20;
+    }
+    if (c >= 0x450 && c <= 0x45F) {
+        return c - 0x50;
+    }
+    return c;
+}
+
+// How many characters (code points) a UTF-8 string holds: the bytes that do not continue one.
+std::size_t characters_in(std::string_view text) {
+    return static_cast<std::size_t>(std::ranges::count_if(
+        text, [](char c) { return (static_cast<unsigned char>(c) & 0xC0) != 0x80; }));
+}
+
+// The first `count` characters of a UTF-8 string.
+std::string first_characters(std::string_view text, std::size_t count) {
+    std::size_t seen = 0;
+    for (std::size_t at = 0; at < text.size(); ++at) {
+        if ((static_cast<unsigned char>(text[at]) & 0xC0) != 0x80 && seen++ == count) {
+            return std::string(text.substr(0, at));
+        }
+    }
+    return std::string(text);
+}
+
+}  // namespace
+
+std::string pipeline_title(std::string_view description) {
+    // Typographic punctuation is read as its plain form first: a dash ends the clause, curly
+    // quotes are quotes (an apostrophe inside a word stays one), an ellipsis is three dots and a
+    // no-break space is a space. Every other non-ASCII character is part of a word.
+    std::string text(description);
+    for (const auto& [from, to] : {std::pair<std::string_view, std::string_view>{"—", ","},
+                                   {"–", ","},
+                                   {"‘", "'"},
+                                   {"’", "'"},
+                                   {"‚", "'"},
+                                   {"‛", "'"},
+                                   {"“", "\""},
+                                   {"”", "\""},
+                                   {"„", "\""},
+                                   {"‟", "\""},
+                                   {"«", "\""},
+                                   {"»", "\""},
+                                   {"…", "..."},
+                                   {" ", " "}}) {
+        for (std::size_t at = text.find(from); at != std::string::npos;
+             at = text.find(from, at + to.size())) {
+            text.replace(at, from.size(), to);
+        }
+    }
+    const auto lower = [](std::string value) {
+        for (char& c : value) {
+            if (c >= 'A' && c <= 'Z') {
+                c = static_cast<char>(c - 'A' + 'a');
+            }
+        }
+        return value;
+    };
+    const auto one_of = [](const std::string& value, const auto& list) {
+        return std::ranges::find(list, std::string_view(value)) != std::ranges::end(list);
+    };
+    // A request that leads the description, and the words that only lead into what it asks.
+    static constexpr std::string_view request[] = {
+        "predict", "forecast", "estimate", "classify",   "detect",  "find",      "identify",
+        "flag",    "score",    "rank",     "recommend",  "answer",  "determine", "tell",
+        "show",    "spot",     "list",     "segment",    "cluster", "group",     "measure",
+        "track",   "explain",  "know",     "understand", "see",     "figure",    "work",
+        "build",   "create",   "make",     "help",       "out",     "me",        "us",
+        "all",     "any",      "each",     "every"};
+    // Words that carry nothing in a title, wherever they are.
+    static constexpr std::string_view helper[] = {
+        "which", "what", "whether", "who",   "whom",   "how",   "that",   "the",      "a",
+        "an",    "will", "would",   "could", "should", "can",   "may",    "might",    "is",
+        "are",   "was",  "were",    "be",    "been",   "being", "likely", "unlikely", "going",
+        "to",    "do",   "does",    "did",   "has",    "have",  "had",    "most",     "more",
+        "least", "our",  "my",      "their", "its",    "your"};
+    // A preposition or conjunction after the subject ends the title ("in the next 90 days").
+    static constexpr std::string_view ending[] = {
+        "in",    "within", "over",   "during", "for",   "by",      "from",  "with",  "without",
+        "using", "based",  "before", "after",  "and",   "or",      "but",   "so",    "because",
+        "since", "per",    "at",     "on",     "as",    "than",    "given", "when",  "where",
+        "if",    "via",    "into",   "across", "among", "between", "until", "while", "about"};
+    // A word the title keeps: not a request, a helper or a leading "of".
+    const auto carries = [&](const std::string& each) {
+        const std::string folded = lower(each);
+        return !one_of(folded, request) && !one_of(folded, helper) && folded != "of";
+    };
+    // The words of the first clause: a bracket, a comma, a semicolon, a colon, a sentence's end
+    // or a dash between words ends it, so punctuation never lands inside the title. It ends only
+    // once a word the title keeps is read, so "Predict: customer churn" reads past the colon.
+    const auto word_byte = [](unsigned char c) {
+        return std::isalnum(c) != 0 || c == '_' || c >= 0x80;
+    };
+    std::vector<std::string> words;
+    std::string word;
+    for (std::size_t at = 0; at < text.size(); ++at) {
+        const auto c = static_cast<unsigned char>(text[at]);
+        const bool inside = !word.empty() && at + 1 < text.size() &&
+                            word_byte(static_cast<unsigned char>(text[at + 1]));
+        if (word_byte(c) || ((c == '-' || c == '\'') && inside)) {
+            word += static_cast<char>(c);
+            continue;
+        }
+        if (!word.empty()) {
+            words.push_back(std::move(word));
+            word.clear();
+        }
+        const bool sentence_end =
+            (c == '.' || c == '!' || c == '?') &&
+            (at + 1 == text.size() || !word_byte(static_cast<unsigned char>(text[at + 1])));
+        if (std::string_view("([{,;:\n").contains(static_cast<char>(c)) || sentence_end ||
+            (c == '-' && !inside)) {
+            if (std::ranges::any_of(words, carries)) {
+                break;
+            }
+        }
+    }
+    if (!word.empty()) {
+        words.push_back(std::move(word));
+    }
+    std::vector<std::string> kept;
+    bool leading = true;
+    for (const std::string& each : words) {
+        const std::string folded = lower(each);
+        if (leading && one_of(folded, request)) {
+            continue;
+        }
+        if (one_of(folded, helper)) {
+            continue;
+        }
+        if (one_of(folded, ending) && !kept.empty()) {
+            break;
+        }
+        if (folded == "of" && kept.empty()) {
+            continue;
+        }
+        leading = false;
+        kept.push_back(each);
+        if (kept.size() == 4) {
+            break;
+        }
+    }
+    while (!kept.empty() && lower(kept.back()) == "of") {
+        kept.pop_back();
+    }
+    // Nothing left of the words (a description such as "Predict which"): its first words as
+    // written.
+    if (kept.empty()) {
+        for (const std::string& each : words) {
+            kept.push_back(each);
+            if (kept.size() == 4) {
+                break;
+            }
+        }
+    }
+    // At most 48 characters (code points, not bytes): whole words, or the first word cut.
+    std::string title;
+    for (const std::string& each : kept) {
+        if (title.empty()) {
+            title = first_characters(each, 48);
+            continue;
+        }
+        if (characters_in(title) + 1 + characters_in(each) > 48) {
+            break;
+        }
+        title += " " + each;
+    }
+    if (title.empty()) {
+        return "Pipeline";
+    }
+    if (const auto first = first_code_point(title)) {
+        title.replace(0, first->second, utf8_of(title_capital(first->first)));
+    }
+    return title;
 }
 
 std::string engine_words_in_lake_terms(std::string text) {

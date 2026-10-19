@@ -569,9 +569,175 @@ export function clearRefusalsOnApprove(actions: Record<(typeof WAITS_FOR_APPROVA
   for (const name of WAITS_FOR_APPROVAL) actions[name].setError(null);
 }
 
-/** The model name the Run form proposes: `<project>_<graph>`, lowercase, non-alphanumerics `_`. */
-export function defaultModelName(project: string, graph: string): string {
-  return [...`${project}_${graph}`].map((c) => (/^[A-Za-z0-9]$/.test(c) ? c.toLowerCase() : "_")).join("");
+// lake#816: the words a pipeline title leaves out. The same lists as `pipeline_title` in lake's
+// src/api/workspace_capabilities.cpp, which names a pipeline built without a name.
+const TITLE_REQUEST = new Set(
+  "predict forecast estimate classify detect find identify flag score rank recommend answer determine tell show spot list segment cluster group measure track explain know understand see figure work build create make help out me us all any each every".split(" "),
+);
+const TITLE_HELPER = new Set("which what whether who whom how that the a an will would could should can may might is are was were be been being likely unlikely going to do does did has have had most more least our my their its your".split(" "));
+const TITLE_ENDING = new Set(
+  "in within over during for by from with without using based before after and or but so because since per at on as than given when where if via into across among between until while about".split(" "),
+);
+
+// Typographic punctuation read as its plain form before the words are split, as lake's
+// `pipeline_title` reads it: a dash ends the clause, curly quotes are quotes (an apostrophe inside a
+// word stays one), an ellipsis is three dots and a no-break space is a space.
+const TITLE_PLAIN: [RegExp, string][] = [
+  [/[—–]/g, ","],
+  [/[‘’‚‛]/g, "'"],
+  [/[“”„‟«»]/g, '"'],
+  [/…/g, "..."],
+  [/ /g, " "],
+];
+
+/** Lowercase of ASCII letters only, as lake's `pipeline_title` folds a word to match its lists. */
+function asciiLower(value: string): string {
+  return value.replace(/[A-Z]/g, (c) => c.toLowerCase());
+}
+
+/** The capital of a lowercase letter of Latin-1, Latin Extended-A, Greek or Cyrillic; any other code
+ * point as it is. The same letters as `title_capital` in lake's workspace_capabilities.cpp, rather
+ * than `toUpperCase`, which maps more (ß is "SS") and would make the two titles differ. */
+export function titleCapital(code: number): number {
+  if (code >= 0x61 && code <= 0x7a) return code - 0x20;
+  if (code >= 0xe0 && code <= 0xfe && code !== 0xf7) return code - 0x20;
+  if (code === 0xff) return 0x178;
+  if ((code >= 0x100 && code <= 0x137) || (code >= 0x14a && code <= 0x177)) return code % 2 === 1 ? code - 1 : code;
+  if ((code >= 0x139 && code <= 0x148) || (code >= 0x179 && code <= 0x17e)) return code % 2 === 0 ? code - 1 : code;
+  if (code >= 0x3b1 && code <= 0x3c9) return code === 0x3c2 ? 0x3a3 : code - 0x20;
+  if (code >= 0x430 && code <= 0x44f) return code - 0x20;
+  if (code >= 0x450 && code <= 0x45f) return code - 0x50;
+  return code;
+}
+
+/** A short, readable pipeline title from its description (lake#816): the first clause, without a
+ * leading request ("Predict which", "Build a"), helper words ("will", "likely to") or what follows a
+ * preposition, at most four words and 48 characters, first letter capitalized. "Predict which
+ * customers will churn (the churned column), with the reasons" is "Customers churn"; "Predict:
+ * customer churn" is "Customer churn". Lake's `pipeline_title` follows the same rules for a
+ * pipeline built through the API without a name; frontend/tests/pipeline-titles.json holds the cases
+ * both are tested on. */
+export function pipelineTitle(description: string): string {
+  let text = description;
+  for (const [from, to] of TITLE_PLAIN) text = text.replace(from, to);
+  const isWord = (c: string | undefined) => c !== undefined && (/^[A-Za-z0-9_]$/.test(c) || c.codePointAt(0)! >= 0x80);
+  // A word the title keeps: not a request, a helper or a leading "of".
+  const carries = (each: string) => {
+    const folded = asciiLower(each);
+    return !TITLE_REQUEST.has(folded) && !TITLE_HELPER.has(folded) && folded !== "of";
+  };
+  const chars = [...text];
+  const words: string[] = [];
+  let word = "";
+  for (let at = 0; at < chars.length; at++) {
+    const c = chars[at];
+    const inside = word !== "" && isWord(chars[at + 1]);
+    if (isWord(c) || ((c === "-" || c === "'") && inside)) {
+      word += c;
+      continue;
+    }
+    if (word) {
+      words.push(word);
+      word = "";
+    }
+    const sentenceEnd = (c === "." || c === "!" || c === "?") && !isWord(chars[at + 1]);
+    // The clause ends only once a word the title keeps is read, so "Predict: customer churn" reads
+    // past the colon.
+    if (("([{,;:\n".includes(c) || sentenceEnd || (c === "-" && !inside)) && words.some(carries)) break;
+  }
+  if (word) words.push(word);
+  let kept: string[] = [];
+  let leading = true;
+  for (const each of words) {
+    const folded = asciiLower(each);
+    if (leading && TITLE_REQUEST.has(folded)) continue;
+    if (TITLE_HELPER.has(folded)) continue;
+    if (TITLE_ENDING.has(folded) && kept.length) break;
+    if (folded === "of" && !kept.length) continue;
+    leading = false;
+    kept.push(each);
+    if (kept.length === 4) break;
+  }
+  while (kept.length && asciiLower(kept[kept.length - 1]) === "of") kept.pop();
+  if (!kept.length) kept = words.slice(0, 4);
+  // At most 48 characters (code points, not UTF-16 units): whole words, or the first word cut.
+  let title: string[] = [];
+  for (const each of kept) {
+    const letters = [...each];
+    if (!title.length) {
+      title = letters.slice(0, 48);
+      continue;
+    }
+    if (title.length + 1 + letters.length > 48) break;
+    title.push(" ", ...letters);
+  }
+  if (!title.length) return "Pipeline";
+  title[0] = String.fromCodePoint(titleCapital(title[0].codePointAt(0)!));
+  return title.join("");
+}
+
+/** `name`, numbered " (2)", " (3)" past the names already taken, as lake and the engine number a
+ * pipeline's name. */
+export function uniquePipelineName(name: string, taken: string[]): string {
+  const used = new Set(taken);
+  let candidate = name;
+  for (let copy = 2; used.has(candidate); copy++) candidate = `${name} (${copy})`;
+  return candidate;
+}
+
+/** The model name proposed for a pipeline (lake#816): its short title in lowercase words joined
+ * by `_`, ending `_model`, at most about 40 characters: "Customers churn" is
+ * `customers_churn_model`. A long pipeline name is shortened as {@link pipelineTitle} shortens a
+ * description. */
+export function defaultModelName(graph: string): string {
+  let slug = pipelineTitle(graph)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+  while (slug.length > 32 && slug.includes("_")) slug = slug.slice(0, slug.lastIndexOf("_"));
+  slug = slug.slice(0, 32) || "pipeline";
+  return slug === "model" || slug.endsWith("_model") ? slug : `${slug}_model`;
+}
+
+/** The name of the model a pipeline already trained, the newest when it trained several, else "".
+ * The Run form keeps it, so running the pipeline again adds a version to that model rather than
+ * starting another (lake#816): a pipeline trained before lake#816 keeps its `<project>_<pipeline>`. */
+export function pipelineModelName(models: J[] | undefined, project: string, pipeline: string): string {
+  if (!pipeline) return "";
+  const own = (Array.isArray(models) ? models : [])
+    .filter((model) => model && typeof model === "object" && text(model, "name"))
+    .filter((model) => text(model, "pipeline_name") === pipeline && (text(model, "project_name") === project || text(model, "project") === project));
+  own.sort((a, b) => text(b, "created").localeCompare(text(a, "created")));
+  return own.length ? text(own[0], "name") : "";
+}
+
+/** The model name the Run form proposes for a pipeline (lake#816): the model it already trained
+ * ({@link pipelineModelName}), else the short default from its title, numbered past another
+ * pipeline's model. */
+export function runModelName(models: J[] | undefined, project: string, pipeline: string): string {
+  return pipelineModelName(models, project, pipeline) || uniqueModelName(defaultModelName(pipeline), models, project, pipeline);
+}
+
+/** The model name Build a Pipeline suggests for the pipeline lake will build under `name`: a name
+ * the project already has is numbered " (2)" by lake, so the suggestion is that new pipeline's,
+ * never the model of the pipeline that has the name (lake#816). */
+export function buildModelName(name: string, taken: string[], models: J[] | undefined, project: string): string {
+  const built = name.trim() ? uniquePipelineName(name.trim(), taken) : "";
+  return built ? uniqueModelName(defaultModelName(built), models, project, built) : "";
+}
+
+/** `name`, or `name_2`, `name_3`… when a model by that name came from another pipeline (lake#816).
+ * A model's own pipeline training again makes a new version of it, so its own name is not taken. */
+export function uniqueModelName(name: string, models: J[] | undefined, project: string, pipeline: string): string {
+  const taken = new Set(
+    (Array.isArray(models) ? models : [])
+      .filter((model) => model && typeof model === "object")
+      .filter((model) => !(text(model, "pipeline_name") === pipeline && pipeline !== "" && (text(model, "project_name") === project || text(model, "project") === project)))
+      .map((model) => text(model, "name")),
+  );
+  let candidate = name;
+  for (let copy = 2; taken.has(candidate); copy++) candidate = `${name}_${copy}`;
+  return candidate;
 }
 
 /** Whether a finished Project Agent pipeline turn asks the person something (agent_task_needs_reply

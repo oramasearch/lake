@@ -18,12 +18,12 @@ import {
   cellText,
   clearRefusalsOnApprove,
   datasetChoices,
-  defaultModelName,
   graphOf,
   parseNumber,
   pipelineActionError,
   plainAgentFailure,
   projectAgentNeedsReply,
+  runModelName,
   runsOf,
   taskIsActive,
   text,
@@ -201,6 +201,7 @@ function PipelineBody({ project, graphName }: { project: string; graphName: stri
               datasets={datasetChoices(datasets.data?.datasets).map((d) => d.path)}
               dataset={params.get("dataset") ?? ""}
               holdout={params.get("holdout") ?? ""}
+              model={params.get("model") ?? ""}
               onShown={setShown}
               audit={audit}
             />
@@ -767,6 +768,7 @@ function Govern({
   datasets,
   dataset,
   holdout,
+  model,
   onShown,
   audit,
 }: {
@@ -776,6 +778,8 @@ function Govern({
   datasets: string[];
   dataset: string;
   holdout: string;
+  /** The model name chosen in Build a Pipeline, carried here in the URL (lake#816). */
+  model: string;
   onShown: (shown: Shown) => void;
   audit: { setError: (error: unknown) => void };
 }) {
@@ -789,7 +793,12 @@ function Govern({
   const deploy = useSubmit();
   const [trainOn, setTrainOn] = useState(dataset);
   const [holdoutFraction, setHoldoutFraction] = useState(holdout || "0.2");
-  const [modelName, setModelName] = useState(() => defaultModelName(project, graph.name));
+  // The model this pipeline already trained, so a run adds a version to it; for a pipeline that has
+  // trained none, a short name from its title, numbered past a model another pipeline made
+  // (lake#816). The person's own (typed here, or in Build a Pipeline) wins.
+  const models = useWq<J>("list_models");
+  const [typedModelName, setModelName] = useState<string | null>(model || null);
+  const modelName = typedModelName ?? runModelName(models.data?.models, project, graph.name);
   const target = { project, graph: graph.name };
   const top = () => window.scrollTo({ top: 0, behavior: "smooth" });
   return (
