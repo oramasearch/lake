@@ -540,6 +540,55 @@ TEST(OrdersEmail, SupportGetsEveryFieldAndTheCustomerTheStatusLink) {
     EXPECT_NE(failed.text.find("Failure: quota exceeded in canadacentral"), std::string::npos);
 }
 
+// The customer's copy goes to whatever address was typed, so it must not relay anything the
+// sender wrote: only Lake's wording, the offer, where, quantity, price, the id and the link.
+TEST(OrdersEmail, TheCustomersCopyCarriesNothingTheSenderTyped) {
+    const OrderSheet sheet = default_sheet();
+    const Regions regions = production();
+    const ResendSettings settings = resend_settings();
+    lake::control::CloudOrder order;
+    order.id = "0b6f2c1e-1111-4222-8333-444455556666";
+    order.offer = "dedicated_cluster";
+    order.path = "order_form";
+    order.cloud_provider = "azure";
+    order.region = "canadacentral";
+    order.contact_name = "Click https://phish.example/name";
+    order.contact_email = "victim@example.com";
+    order.company = "Visit https://phish.example/company";
+    order.details = "Your account is locked: https://phish.example/details";
+    order.quantity = 2;
+    order.amount_cents = 1'000'000;
+    order.included_credit_cents = 400'000;
+    order.created_at = "2026-10-18T12:00:00Z";
+    order.host = "acme.lake.live";
+    const std::string status = "https://lake.live/orders/x?token=t";
+    for (const std::string state : {"submitted", "paid", "ready", "failed"}) {
+        order.state = state;
+        order.failure_reason = state == "failed" ? "quota exceeded" : "";
+        const Email customer = order_email(sheet, regions, settings, order, "customer", status);
+        for (const std::string& email_part : {customer.subject, customer.text}) {
+            EXPECT_EQ(email_part.find("phish.example"), std::string::npos) << state << "\n"
+                                                                         << email_part;
+            EXPECT_EQ(email_part.find("quota exceeded"), std::string::npos) << state;
+        }
+        for (const std::string_view expected :
+             {std::string_view("Order: 0b6f2c1e-1111-4222-8333-444455556666"),
+              std::string_view("Offer: Dedicated Cluster"),
+              std::string_view("Microsoft Azure, Canada (Toronto) (canadacentral)"),
+              std::string_view("Quantity: 2"),
+              std::string_view("$10,000 USD / month (2 x $5,000)"),
+              std::string_view("https://lake.live/orders/x?token=t")}) {
+            EXPECT_NE(customer.text.find(expected), std::string::npos) << state << ": " << expected;
+        }
+        if (state == "submitted" || state == "paid" || state == "failed") {
+            const Email support = order_email(sheet, regions, settings, order, "support", "");
+            EXPECT_NE(support.text.find("https://phish.example/details"), std::string::npos);
+            EXPECT_NE(support.text.find("https://phish.example/name"), std::string::npos);
+            EXPECT_NE(support.text.find("https://phish.example/company"), std::string::npos);
+        }
+    }
+}
+
 TEST(Resend, SettingsComeFromTheEnvironment) {
     const auto defaults = resend_settings_from_environment("", "", "");
     ASSERT_TRUE(defaults);

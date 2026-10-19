@@ -721,17 +721,21 @@ Email order_email(const OrderSheet& sheet,
                                          order.quantity,
                                          format_usd(order.amount_cents / order.quantity))
                            : std::string());
-    std::string fields;
-    fields += "Order: " + order.id + "\n";
-    fields += "Offer: " + offer_title + "\n";
-    fields += "How: " +
-              std::string(order.path == "checkout" ? "Stripe Checkout" : "Order form, no payment") +
-              "\n";
-    fields += "Where: " + order_location_label(sheet, regions, order) + "\n";
-    fields += "Quantity: " + std::to_string(order.quantity) + "\n";
-    fields += "Price: " + price + "\n";
-    fields += "Included usage credit: " + format_usd(order.included_credit_cents) +
-              " USD / month; usage beyond it is billed at the price list\n";
+    // What was ordered, in Lake's own words and the configuration's: both recipients get it.
+    std::string ordered;
+    ordered += "Order: " + order.id + "\n";
+    ordered += "Offer: " + offer_title + "\n";
+    ordered += "How: " +
+               std::string(order.path == "checkout" ? "Stripe Checkout" : "Order form, no payment") +
+               "\n";
+    ordered += "Where: " + order_location_label(sheet, regions, order) + "\n";
+    ordered += "Quantity: " + std::to_string(order.quantity) + "\n";
+    ordered += "Price: " + price + "\n";
+    ordered += "Included usage credit: " + format_usd(order.included_credit_cents) +
+               " USD / month; usage beyond it is billed at the price list\n";
+    // Everything else, the sender's free text included, goes to support only: the customer's copy
+    // goes to whatever address was typed, so it carries nothing the sender wrote (lake#833).
+    std::string fields = ordered;
     fields += "Name: " + order.contact_name + "\n";
     fields += "Email: " + order.contact_email + "\n";
     fields +=
@@ -801,7 +805,7 @@ Email order_email(const OrderSheet& sheet,
     if (!status_url.empty()) {
         text += "Your order: " + std::string(status_url) + "\n\n";
     }
-    text += fields;
+    text += ordered;
     text += "\nQuestions: reply to this email or write to " + settings.support_email + ".\n";
     email.text = std::move(text);
     return email;

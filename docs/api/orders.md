@@ -223,6 +223,13 @@ a 401/403 is reported without any of it.
 | `ready` | — | Ready, with the host and the status link |
 | `failed` | Every field, the order id and the failure reason | A problem, support has been told |
 
+**The customer's copy carries nothing the sender typed.** It goes to whatever address was typed into
+an anonymous form, so it must not relay a stranger's words from `orders@lake.live`: no name, company,
+details or failure reason, and no greeting with the name. It has Lake's own wording, the offer, where
+it runs (the configuration's labels, or "Not listed: as described"), the quantity, the price and
+credit, the order id, the status link, and the host once `ready`. Support's email keeps every field,
+the free text included (`TheCustomersCopyCarriesNothingTheSenderTyped` in `tests/test_orders.cpp`).
+
 **Delivery state is on the row**: `support_emailed_state` and `customer_emailed_state` (the last
 state each recipient was told about), `email_attempts`, `email_error` and `email_retry_at`. The
 **order pass** (`run_order_pass`, on the maintenance thread every 10 seconds, sooner after an order
