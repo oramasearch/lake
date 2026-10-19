@@ -3,6 +3,11 @@
 One page per tagged release, newest first. A page states what the release includes, what it
 does not, what is knowingly still broken, and how it was verified.
 
+- [v0.3.0](v0.3.0.md) — 2026-10-19. The lake.live order sheet (four offers, Stripe Checkout,
+  order forms, Resend email, status page; migration `0089_cloud_orders`), and the 2026-10-18 UX
+  review's fixes: datasets named after their file and shown in the file's column order with types,
+  a dataset page that leads to a model, short pipeline and model names, Check after Approve, and
+  Ask Orama proposals the capability accepts. A sign-in runbook and a Resend runbook.
 - [v0.2.0](v0.2.0.md) — 2026-10-17. Secure networking (connections, scoped credentials, egress,
   developer tunnels and the Network section), regions and the apex picker, a managed key for
   every new account with an optional own identity, Clerk webhooks, one name per agent with all

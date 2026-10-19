@@ -8,10 +8,11 @@ document rules, confidentiality, and the decisions not to drift past. Read both.
 
 ## Status
 
-Status: 2026-10-17. The current release is **v0.2.0**
-([`docs/releases/v0.2.0.md`](docs/releases/v0.2.0.md): secure networking, regions, the managed key
-and own identity, Clerk webhooks, the agents' names and Ask Orama's home, with its known issues).
-`server_info` of a v0.2.0 build reports version `0.2.0`. The paragraph below describes v0.1.0, the
+Status: 2026-10-19. The current release is **v0.3.0**
+([`docs/releases/v0.3.0.md`](docs/releases/v0.3.0.md): the lake.live order sheet and the 2026-10-18
+UX review's fixes, with its known issues); v0.2.0 ([`docs/releases/v0.2.0.md`](docs/releases/v0.2.0.md))
+added secure networking, regions, the managed key and own identity, Clerk webhooks, the agents'
+names and Ask Orama's home. `server_info` of a v0.3.0 build reports version `0.3.0`. The paragraph below describes v0.1.0, the
 first tagged release ([`docs/releases/v0.1.0.md`](docs/releases/v0.1.0.md) lists everything in it),
 and what ran on 2026-10-12. `Lake/prod` on the
 dev AKS cluster (there is no production environment yet) serves `oramasearch/lake:20261012a`, which

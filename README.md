@@ -150,10 +150,11 @@ For the full PostgreSQL-backed suite, local database setup, and every run option
 
 ## Releases
 
-The current release is **v0.2.0** (2026-10-17).
-[`docs/releases/v0.2.0.md`](docs/releases/v0.2.0.md) lists what it adds (secure networking, regions,
-the managed key and own identity, Clerk webhooks, the agents' names and Ask Orama's home), what it
-does not include, and its known issues. [`docs/releases/v0.1.0.md`](docs/releases/v0.1.0.md), the
+The current release is **v0.3.0** (2026-10-19).
+[`docs/releases/v0.3.0.md`](docs/releases/v0.3.0.md) lists what it adds (the lake.live order sheet
+and the 2026-10-18 UX review's fixes), what it does not include, and its known issues.
+[`docs/releases/v0.2.0.md`](docs/releases/v0.2.0.md) covers secure networking, regions, the managed
+key and own identity, Clerk webhooks, the agents' names and Ask Orama's home. [`docs/releases/v0.1.0.md`](docs/releases/v0.1.0.md), the
 first tagged release, lists every feature, capability, web app page and guide.
 [`docs/releases/README.md`](docs/releases/README.md) is the index, and `CLAUDE.md` has the steps for
 cutting one.
