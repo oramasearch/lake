@@ -4194,12 +4194,11 @@ TEST(AgentRuns, AProjectAgentBuildIsTitledFromWhatTheProjectIsFor) {
     r.w.caller->answers["capture_intent"] = {{"input_id", "intent-1"}};
     r.w.caller->answers["compile_intent"] = {{"name", "Customers churn"}, {"project", "retention"}};
     const auto title_of_build = [&](const std::string& brief) -> std::string {
-        const auto started =
-            r.call("agent_turn",
-                   {{"agent", "agent-project"},
-                    {"kind", "build:retention"},
-                    {"message", brief},
-                    {"context", {{"opportunity", {{"methodology", "M-1"}}}}}});
+        const auto started = r.call("agent_turn",
+                                    {{"agent", "agent-project"},
+                                     {"kind", "build:retention"},
+                                     {"message", brief},
+                                     {"context", {{"opportunity", {{"methodology", "M-1"}}}}}});
         EXPECT_TRUE(started.ok) << started.error.message;
         const auto task = r.task(started.value["task_id"]);
         if (!task) {
@@ -4215,9 +4214,8 @@ TEST(AgentRuns, AProjectAgentBuildIsTitledFromWhatTheProjectIsFor) {
              {"result", {{"pipeline", {{"methodology", "M-1"}, {"label", "churned"}}}}}}));
         r.w.caller->calls.clear();
         EXPECT_TRUE(r.call("get_agent_task", {{"task_id", task->id}}).ok);
-        const auto compiled = std::ranges::find_if(r.w.caller->calls, [](const auto& call) {
-            return call.first == "compile_intent";
-        });
+        const auto compiled = std::ranges::find_if(
+            r.w.caller->calls, [](const auto& call) { return call.first == "compile_intent"; });
         if (compiled == r.w.caller->calls.end()) {
             ADD_FAILURE() << "nothing compiled for " << brief;
             return {};
