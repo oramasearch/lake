@@ -8,6 +8,11 @@ import { useTrail } from "@/lib/trail";
 import { Banner, Button, Card, Empty, ErrorBlock, Kbd, Skeleton } from "@/lib/ui";
 import { WorkspaceFrame, qs, useSpaceRead, useWorkspace, useWsPath } from "./workspace";
 import { ObjectTable } from "./datasets";
+import { cappedStatement, limitRefused } from "./columns";
+
+/** The most rows the page shows. The engine is asked for one more (`LIMIT`, zetta#1021), so the page
+ * can say there are more without reading the whole table. */
+const SHOWN = 500;
 
 export default function QueryPage() {
   const { customerId } = useWorkspace();
@@ -44,8 +49,17 @@ function QueryContent() {
     setShown({ statement, database });
     setDraft({ statement, database });
   }
-  const result = useSpaceRead<{ columns?: string[]; rows?: Row[] }>("workspace_sql", { statement, database: database || undefined }, { enabled: !!statement });
+  // A plain SELECT with no LIMIT of its own is sent with `LIMIT 501`. An engine older than zetta#1039
+  // refuses LIMIT; then the statement goes as written and the page shows the first rows itself.
+  const capped = cappedStatement(statement, SHOWN);
+  const first = useSpaceRead<{ columns?: string[]; rows?: Row[] }>("workspace_sql", { statement: capped, database: database || undefined }, { enabled: !!statement });
+  const asWritten = capped !== statement && first.isError && limitRefused(first.error);
+  const whole = useSpaceRead<{ columns?: string[]; rows?: Row[] }>("workspace_sql", { statement, database: database || undefined }, { enabled: !!statement && asWritten });
+  const result = asWritten ? whole : first;
   const rows = result.data?.rows ?? [];
+  // With the cap, more than SHOWN rows back means the statement has more than that many.
+  const more = rows.length > SHOWN;
+  const counted = capped !== statement && !asWritten && more ? `More than ${SHOWN.toLocaleString("en-US")} rows` : `${rows.length.toLocaleString("en-US")} rows`;
   const run = () => {
     const next = new URLSearchParams(params);
     next.delete("error");
@@ -105,14 +119,14 @@ function QueryContent() {
       {statement && result.isLoading && <Skeleton />}
       {statement && result.isError && <ErrorBlock error={result.error} what="the query" />}
       {statement && result.data && (
-        <Card label="Results" title={`${rows.length.toLocaleString("en-US")} rows`}>
-          {rows.length > 500 && <Banner tone="quiet">Showing the first 500.</Banner>}
+        <Card label="Results" title={counted}>
+          {more && <Banner tone="quiet">Showing the first {SHOWN}. Add LIMIT and OFFSET to page through the rest.</Banner>}
           {rows.length === 0 ? (
             <Empty compact icon={Rows3} title="No rows">
               The query matched nothing.
             </Empty>
           ) : (
-            <ObjectTable rows={rows.slice(0, 500)} columns={result.data.columns} />
+            <ObjectTable rows={rows.slice(0, SHOWN)} columns={result.data.columns} />
           )}
         </Card>
       )}

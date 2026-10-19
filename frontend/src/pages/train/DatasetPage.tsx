@@ -13,7 +13,10 @@ import { DeletionButton } from "@/lib/deletionDialog";
 import { WorkspaceFrame, cellText, qs, text, useAsync, useSpaceRead, useWorkspace, useWq, useWsPath, wa } from "./workspace";
 import { ObjectTable, engineDatabase, resultDataset } from "./datasets";
 import { trainFromDatasetPath } from "@/pages/design/logic";
-import { datasetColumns } from "./columns";
+import { type ColumnFacts, columnFacts, datasetColumns, firstRows, limitRefused, typeLabel } from "./columns";
+
+/** How many first rows the page shows; the engine is asked for no more (`LIMIT`, zetta#1021). */
+const FIRST_ROWS = 20;
 
 /** The value type SQL sees in a column, read from the first rows (web_ui.cpp sampled_type). */
 function sampledType(rows: Row[], column: string): string {
@@ -38,7 +41,23 @@ function columnNames(dataset: Row, sampled: unknown, analysis: Row): string[] {
   return datasetColumns(dataset.columns, sampled, analysis.columns);
 }
 
-function ColumnsTable({ names, analysis, rows }: { names: string[]; analysis: Row; rows: Row[] }) {
+/** A column's type: get_dataset's, over the whole dataset (zetta#1021), else read from the first
+ * rows. */
+function columnType(facts: Map<string, ColumnFacts>, rows: Row[], name: string): string {
+  const known = facts.get(name);
+  return known ? typeLabel(known.type) : sampledType(rows, name);
+}
+
+/** The share of rows with no value: get_dataset's, over the whole dataset (zetta#1021), else the
+ * analysis's sampled `null_rate`. */
+function emptyShare(facts: Map<string, ColumnFacts>, analysed: Map<string, Row>, name: string): number | null {
+  const known = facts.get(name)?.nullFraction;
+  if (typeof known === "number") return known;
+  const rate = (analysed.get(name) ?? {}).null_rate;
+  return typeof rate === "number" ? rate : null;
+}
+
+function ColumnsTable({ names, analysis, rows, facts }: { names: string[]; analysis: Row; rows: Row[]; facts: Map<string, ColumnFacts> }) {
   const analysed = new Map<string, Row>();
   for (const column of (analysis.columns ?? []) as Row[]) analysed.set(text(column, "name"), column);
   if (names.length === 0)
@@ -54,18 +73,15 @@ function ColumnsTable({ names, analysis, rows }: { names: string[]; analysis: Ro
       rowKey={(name) => name}
       columns={[
         { key: "column", label: "Column", sort: (name) => name, render: (name) => <Mono>{name}</Mono> },
-        { key: "type", label: "Type", sort: (name) => sampledType(rows, name), render: (name) => <Chip>{sampledType(rows, name)}</Chip> },
+        { key: "type", label: "Type", sort: (name) => columnType(facts, rows, name), render: (name) => <Chip>{columnType(facts, rows, name)}</Chip> },
         { key: "semantic", label: "Reads as", render: (name) => text(analysed.get(name) ?? {}, "semantic_type") || <span className="muted">—</span> },
         {
           key: "empty",
           label: "Empty",
           numeric: true,
-          sort: (name) => {
-            const rate = (analysed.get(name) ?? {}).null_rate;
-            return typeof rate === "number" ? rate : null;
-          },
+          sort: (name) => emptyShare(facts, analysed, name),
           render: (name) => {
-            const rate = (analysed.get(name) ?? {}).null_rate;
+            const rate = emptyShare(facts, analysed, name);
             return typeof rate === "number" ? <span className="font-mono">{`${(rate * 100).toFixed(0)}%`}</span> : "";
           },
         },
@@ -127,14 +143,21 @@ function DatasetContent({ name, database }: { name: string; database: string }) 
   const promote = useAsync();
   const [tab, setTab] = useState<"columns" | "rows" | "partitions">("columns");
   const got = useWq<Row>("get_dataset", { dataset: name, database });
-  // The first rows and the analysis are extras: when either fails the page shows what it has.
-  const sample = useSpaceRead<{ columns?: string[]; rows?: Row[] }>("workspace_sql", { statement: `SELECT * FROM ${database}.${name} LIMIT 20` });
+  // The first rows and the analysis are extras: when either fails the page shows what it has. The
+  // engine sends only the first rows (`LIMIT`, pushed to its partitions by zetta#1021). An engine
+  // older than zetta#1039 refuses `LIMIT`; then the page asks for the table and keeps the first rows
+  // itself.
+  const limited = useSpaceRead<{ columns?: string[]; rows?: Row[] }>("workspace_sql", { statement: `SELECT * FROM ${database}.${name} LIMIT ${FIRST_ROWS}` });
+  const unlimited = limited.isError && limitRefused(limited.error);
+  const whole = useSpaceRead<{ columns?: string[]; rows?: Row[] }>("workspace_sql", { statement: `SELECT * FROM ${database}.${name}` }, { enabled: unlimited });
+  const sample = unlimited ? whole : limited;
   const analysis = useWq<Row>("analyze_dataset", { dataset: `${database}.${name}`, sample_rows: 256 });
   if (got.isLoading) return <Skeleton />;
   if (got.isError) return <ErrorBlock error={got.error} what="the dataset" retry={() => void got.refetch()} />;
   const dataset = (got.data ?? {}) as Row;
   const partitions = (dataset.partitions ?? []) as Row[];
-  const sampleRows = ((sample.data?.rows ?? []) as Row[]).slice(0, 20);
+  const sampleRows = firstRows((sample.data?.rows ?? []) as Row[], FIRST_ROWS);
+  const facts = columnFacts(dataset.columns);
   const stored = text(dataset, "format") === "jsonl" ? "JSON rows" : text(dataset, "format");
   // The fewest copies any partition has (web_ui.cpp fewest_copies).
   let copies = 0;
@@ -241,7 +264,7 @@ function DatasetContent({ name, database }: { name: string; database: string }) 
             />
           </div>
           <div className="px-4 pb-4">
-            {tab === "columns" && <ColumnsTable names={names} analysis={(analysis.data ?? {}) as Row} rows={sampleRows} />}
+            {tab === "columns" && <ColumnsTable names={names} analysis={(analysis.data ?? {}) as Row} rows={sampleRows} facts={facts} />}
             {tab === "rows" &&
               (sample.isLoading ? (
                 <Skeleton />
