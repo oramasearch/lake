@@ -289,7 +289,8 @@ Lake writes every column; the operator reads `paid` rows and writes only `state`
 - **The 5-minute promise** stays off until its test is recorded.
 - **A restore rehearsed on each tier** (orama-operator#127) backs the backups line.
 - **Real keys**: Stripe live (lake#754) and a Resend key with a verified sending domain are
-  platform secrets still to be set.
+  platform secrets still to be set ([../deployment/resend.md](../deployment/resend.md),
+  [../deployment/stripe.md](../deployment/stripe.md)).
 - `organization_id` is a nullable column for lake#832 (orders and servers belonging to
   organizations); the apex is anonymous and never sets it today.
 
