@@ -16,6 +16,7 @@ import { useTrail } from "@/lib/trail";
 import { Banner, Button, Chip, DataTable, Empty, FilePicker, FilterChips, Form, Query, SearchInput, Stat, StateTabs, StatRow, Toolbar } from "@/lib/ui";
 import { WorkspaceFrame, qs, useAsync, useWorkspace, useWorkspaceReady, useWq, useWsPath, wa, text } from "./workspace";
 import { annotateDatasets, resultDataset, useLeanDatasets } from "./datasets";
+import { nameForFile, nextFreeExample } from "./upload";
 
 const SUB = "The datasets your workspace trains on.";
 const NAME_PATTERN = "[A-Za-z_][A-Za-z0-9_]{0,62}";
@@ -320,7 +321,18 @@ function Upload({ onClose, onBusy }: { onClose: () => void; onBusy: (busy: boole
   const [file, setFile] = useState<File | null>(null);
   const [format, setFormat] = useState("");
   const [tableName, setTableName] = useState("");
+  // The name Lake last filled in from a file, so choosing another file replaces it but never a
+  // name the person typed (lake#814).
+  const [filled, setFilled] = useState("");
   const [rename, setRename] = useState(false);
+  const choose = (next: File | null) => {
+    setFile(next);
+    const name = nameForFile(tableName, filled, next?.name ?? null);
+    if (name !== tableName) {
+      setTableName(name);
+      setFilled(name);
+    }
+  };
   return (
     <Form
       id="load-upload"
@@ -352,7 +364,7 @@ function Upload({ onClose, onBusy }: { onClose: () => void; onBusy: (busy: boole
         <span className="mb-1 block">File</span>
         <FilePicker
           file={file}
-          onFile={setFile}
+          onFile={choose}
           name="file"
           accept=".csv,.jsonl,.ndjson,text/csv"
           prompt="Choose a CSV or JSONL file, or drop it here"
@@ -369,12 +381,12 @@ function Upload({ onClose, onBusy }: { onClose: () => void; onBusy: (busy: boole
       </label>
       <label>
         Dataset name
-        <input name="table_name" required pattern={NAME_PATTERN} placeholder="accounts" value={tableName} onChange={(e) => setTableName(e.target.value)} />
-        <small className="muted">Letters, digits and underscores, starting with a letter, so SQL can query it.</small>
+        <input name="table_name" required pattern={NAME_PATTERN} placeholder="e.g. accounts" value={tableName} onChange={(e) => setTableName(e.target.value)} />
+        <small className="muted">Named after the file; change it if you like. Letters, digits and underscores, starting with a letter or an underscore, so SQL can query it.</small>
       </label>
       <label className="flex! items-start gap-2">
         <input type="checkbox" name="if_exists" value="rename" checked={rename} onChange={(e) => setRename(e.target.checked)} />
-        <span>If the name is taken, save it under the next free name (accounts_2)</span>
+        <span>If the name is taken, save it under the next free name ({nextFreeExample(tableName)})</span>
       </label>
       <Banner tone="quiet">Otherwise a taken name is refused, and a CSV row whose field count differs from the header is refused with its line number.</Banner>
     </Form>

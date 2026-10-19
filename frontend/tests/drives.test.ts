@@ -123,6 +123,8 @@ test("Load as dataset is offered for CSV and JSONL files, under a name SQL can q
   assert.equal(datasetFormat("csv"), null);
   assert.equal(datasetName("Churn 2026.csv"), "churn_2026");
   assert.equal(datasetName("2026-q3.csv"), "_2026_q3");
+  assert.equal(datasetName("order.csv"), "order_data", "lake refuses a SQL keyword, so it gets _data");
+  assert.equal(datasetName("group.csv"), "group_data");
   assert.equal(datasetName("--.csv"), "dataset");
   assert.equal(datasetName("a".repeat(80) + ".csv").length, 63);
   assert.match(datasetName("Ünïcode name.jsonl"), /^[A-Za-z_][A-Za-z0-9_]{0,62}$/);

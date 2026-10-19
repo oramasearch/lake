@@ -35,8 +35,11 @@ that owns your workspaces (yours, or your organization's) and `workspace_id` is 
 3. Choose the file (CSV or JSONL, up to 16 MiB). A CSV has a header row, then one row per line; a
    JSONL file has one JSON object per line.
 4. Leave the format as **From the file name**, or choose **CSV** or **JSONL**.
-5. Name the dataset, for example `accounts`.
-6. Tick *If the name is taken, save it under the next free name (accounts_2)* if you want that.
+5. Check the **Dataset name**. Choosing the file fills it from the file's name, made a name SQL
+   can query (`customers.csv` becomes `customers`, `My Data 2024.csv` becomes `my_data_2024`, and
+   a SQL keyword gets `_data`, so `order.csv` becomes `order_data`); change it if you like. A name
+   you typed is kept when you choose another file.
+6. Tick *If the name is taken, save it under the next free name (customers_2)* if you want that.
 7. Press **Upload**.
 
 The page returns to Datasets with a banner saying how many rows arrived, from which kind of file,

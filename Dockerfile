@@ -41,6 +41,8 @@ COPY frontend/ ./
 COPY assets/catalogue-icons/ /assets/catalogue-icons/
 # The agents test checks the vendored skills against the engine's create_agent schema (lake#653).
 COPY src/api/engine_openapi.json /src/api/engine_openapi.json
+# The SQL keywords test checks the web app's list against the server's (lake#814).
+COPY src/api/datasets.cpp /src/api/datasets.cpp
 RUN npm run build
 
 # ---------- build stage ----------
