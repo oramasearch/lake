@@ -354,7 +354,8 @@ It also checks the proposal's `review_url` and that the check graph is not liste
 the same confined check and proves the pick after the build compiles the project's own pipeline
 rather than taking the check graph, titled from the Opportunity's intent (*Accounts churn*,
 lake#816); `AgentRuns.AProjectAgentBuildIsTitledFromWhatTheProjectIsFor` titles it from the brief's
-words when the Opportunity carries no intent. `AgentRuns.APipelineTitleIsShortAndReadable` runs the title cases
+words when the Opportunity carries no intent, and with the project's name when the brief says
+only *Design the pipeline for the project <name>*. `AgentRuns.APipelineTitleIsShortAndReadable` runs the title cases
 in `frontend/tests/pipeline-titles.json`, which the web app's `design.test.ts` runs too, so
 `pipeline_title` and `pipelineTitle` agree.
 `AgentLeases.RetryNoticeIsTheTasksMessage` pins that a retry notice is the task's message, which

@@ -96,7 +96,8 @@ pipeline as `graph`, and `template`, the template its steps started from. Withou
 steps keep the template's names: rename them to fit your data. The MCP tool is `compile_pipeline`.
 
 A pipeline the Project Agent builds for a project made from an Opportunity is titled from the
-Opportunity's intent by the same rules.
+Opportunity's intent by the same rules, else from the brief's description, else with the
+project's name; never *Design pipeline*.
 
 A pipeline whose methodology does not train yet says *This Pipeline Trains Nothing Yet* instead of
 pretending to train. A methodology the engine cannot run is refused with `not_supported`, naming

@@ -3861,6 +3861,12 @@ liquid::runtime::task<ApiResult> compile_pipeline(ApiContext& context,
         // A short title rather than the engine's, which is the description's words with the
         // punctuation dropped (lake#816), numbered past a pipeline of the project that has it, as
         // a name the caller chose is. The description itself stays the project's captured intent.
+        // A chosen name is trimmed; one that is only spaces is no name.
+        const auto space = [](char c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r'; };
+        while (!name.empty() && space(name.back())) {
+            name.pop_back();
+        }
+        name.erase(0, std::ranges::find_if_not(name, space) - name.begin());
         const std::string title = name.empty() ? pipeline_title(intent) : name;
         name = title;
         const ApiResult read = called(co_await call_capability(context,
@@ -3965,6 +3971,10 @@ liquid::runtime::task<ApiResult> settle_build(ApiContext& context, control::Agen
                lead = "Design the pipeline for the project " + project + ": ";
                brief.starts_with(lead) && brief.size() > lead.size()) {
         title = pipeline_title(std::string_view(brief).substr(lead.size()));
+    } else if (brief.starts_with("Design the pipeline")) {
+        // A brief that says only "Design the pipeline ..." (an agent_turn a client started with
+        // no description after it) is titled with the project's own name.
+        title = pipeline_title(project);
     }
     std::string methodology;
     auto listed = co_await workspace_methodologies(context, task.customer_id);

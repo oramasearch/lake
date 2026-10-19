@@ -2269,6 +2269,16 @@ TEST(AgentRuns, ABuiltPipelineIsNamedWithAShortTitle) {
                {{"project", "retention"}, {"intent", description}, {"name", "Customers churn"}})
             .ok);
     EXPECT_EQ(sent("compile_intent")["name"], "Customers churn (3)");
+
+    // A chosen name is trimmed, and one that is only spaces is no name.
+    ASSERT_TRUE(r.call("compile_pipeline",
+                       {{"project", "retention"}, {"intent", description}, {"name", "  Churn \n"}})
+                    .ok);
+    EXPECT_EQ(sent("compile_intent")["name"], "Churn");
+    ASSERT_TRUE(r.call("compile_pipeline",
+                       {{"project", "retention"}, {"intent", description}, {"name", "   "}})
+                    .ok);
+    EXPECT_EQ(sent("compile_intent")["name"], "Customers churn (3)");
 }
 
 // zetta#1246 (lake#615): compile_pipeline passes the chosen dataset's source and table and the
@@ -4171,42 +4181,55 @@ TEST(AgentRuns, AProjectAgentBuildChecksItsCompileAndThePickIgnoresTheCheckGraph
 }
 
 // lake#816: a build without the Opportunity's intent is titled from the brief's words after
-// "Design the pipeline for the project <name>: ", never from "Design the pipeline".
+// "Design the pipeline for the project <name>: ", never from "Design the pipeline"; a brief with
+// nothing after those words is titled with the project's name.
 TEST(AgentRuns, AProjectAgentBuildIsTitledFromWhatTheProjectIsFor) {
     AgentRuns r;
     auto& config = const_cast<lake::control::WorkspaceConfig&>(r.w.service->config());
     config.agent_endpoints = {{"agent-project", "http://project:8080"}};
     config.internal_url = "http://lake.internal:4900";
-    const auto started = r.call(
-        "agent_turn",
-        {{"agent", "agent-project"},
-         {"kind", "build:retention"},
-         {"message",
-          "Design the pipeline for the project retention: Predict which customers will churn "
-          "(the churned column), with the reasons. Methodology: M-1"},
-         {"context", {{"opportunity", {{"methodology", "M-1"}}}}}});
-    ASSERT_TRUE(started.ok) << started.error.message;
-    const auto task = r.task(started.value["task_id"]);
-    ASSERT_TRUE(task);
     r.w.caller->answers["get_project"] = {{"name", "retention"}, {"graphs", json::array()}};
     r.w.caller->answers["list_methodologies"] = {
         {"methodologies", json::array({{{"id", "M-1"}, {"runnable", true}}})}};
     r.w.caller->answers["capture_intent"] = {{"input_id", "intent-1"}};
     r.w.caller->answers["compile_intent"] = {{"name", "Customers churn"}, {"project", "retention"}};
-    ASSERT_TRUE(r.set_task_status(
-        task->id,
-        "Succeeded",
-        "",
-        "",
-        {{"ok", true},
-         {"result", {{"pipeline", {{"methodology", "M-1"}, {"label", "churned"}}}}}}));
-    r.w.caller->calls.clear();
-    ASSERT_TRUE(r.call("get_agent_task", {{"task_id", task->id}}).ok);
-    const auto compiled = std::ranges::find_if(r.w.caller->calls, [](const auto& call) {
-        return call.first == "compile_intent";
-    });
-    ASSERT_NE(compiled, r.w.caller->calls.end());
-    EXPECT_EQ(compiled->second.value("name", std::string()), "Customers churn");
+    const auto title_of_build = [&](const std::string& brief) -> std::string {
+        const auto started =
+            r.call("agent_turn",
+                   {{"agent", "agent-project"},
+                    {"kind", "build:retention"},
+                    {"message", brief},
+                    {"context", {{"opportunity", {{"methodology", "M-1"}}}}}});
+        EXPECT_TRUE(started.ok) << started.error.message;
+        const auto task = r.task(started.value["task_id"]);
+        if (!task) {
+            ADD_FAILURE() << "no task for " << brief;
+            return {};
+        }
+        EXPECT_TRUE(r.set_task_status(
+            task->id,
+            "Succeeded",
+            "",
+            "",
+            {{"ok", true},
+             {"result", {{"pipeline", {{"methodology", "M-1"}, {"label", "churned"}}}}}}));
+        r.w.caller->calls.clear();
+        EXPECT_TRUE(r.call("get_agent_task", {{"task_id", task->id}}).ok);
+        const auto compiled = std::ranges::find_if(r.w.caller->calls, [](const auto& call) {
+            return call.first == "compile_intent";
+        });
+        if (compiled == r.w.caller->calls.end()) {
+            ADD_FAILURE() << "nothing compiled for " << brief;
+            return {};
+        }
+        return compiled->second.value("name", std::string());
+    };
+    EXPECT_EQ(title_of_build("Design the pipeline for the project retention: Predict which "
+                             "customers will churn (the churned column), with the reasons. "
+                             "Methodology: M-1"),
+              "Customers churn");
+    EXPECT_EQ(title_of_build("Design the pipeline for the project retention"), "Retention")
+        << "never \"Design pipeline\"";
 }
 
 TEST(AgentRuns, EachLibraryAgentHasItsOwnBusCredential) {
