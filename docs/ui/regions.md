@@ -52,8 +52,9 @@ lake#831. The apex host is the order sheet, server-rendered by `web_ui_order_she
   provision marked "(order form)", a region it cannot reach marked "(order form: we'll confirm
   availability)", and "not listed"), name, email, company, quantity, free text, the
   hidden honeypot field, and the two buttons: **Pay $X USD / month with card** (where card payment
-  is available and the offer is paid) and **Send as an order form**. Errors show beside their field
-  with `aria-invalid`.
+  is available and the offer is paid; it orders one, so a quantity above 1 is refused with "Card
+  payment orders one at a time: send the order form for more.") and **Send as an order form**.
+  Errors show beside their field with `aria-invalid`.
 - **Order Received** and **the status page** (`/orders/<id>?token=…`): the order id, the state in
   words, what was ordered, and the host as a button once ready.
 
