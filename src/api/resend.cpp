@@ -8,6 +8,8 @@
 
 #include <nlohmann/json.hpp>
 
+#include "lake/control/store.hpp"
+
 namespace lake::api {
 namespace {
 
@@ -131,7 +133,7 @@ std::expected<std::string, std::string> send_resend_email(const ResendSettings& 
             message = "no message";
         }
         return std::unexpected(std::format(
-            "Resend refused the email (HTTP {}): {}", response.status, message.substr(0, 300)));
+            "Resend refused the email (HTTP {}): {}", response.status, control::utf8_prefix(message, 300)));
     }
     if (!answer.is_object() || !answer.contains("id") || !answer["id"].is_string()) {
         return std::unexpected(std::string("Resend answered without an email id"));

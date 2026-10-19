@@ -1581,3 +1581,33 @@ TEST(OrdersApex, AnAsiaClusterCannotBePaidForAndGoesToTheOrderForm) {
     EXPECT_EQ(order->region, "japaneast");
     EXPECT_EQ(rig.stripe.count(), 0U);
 }
+
+TEST(OrdersStore, BoundedTextIsNeverCutInsideAUtf8Sequence) {
+    using lake::control::utf8_prefix;
+    // "é" is two bytes: a cut at 2 would leave half of it.
+    EXPECT_EQ(utf8_prefix("a\xC3\xA9", 2), "a");
+    EXPECT_EQ(utf8_prefix("a\xC3\xA9", 3), "a\xC3\xA9");
+    // "€" is three bytes.
+    EXPECT_EQ(utf8_prefix("\xE2\x82\xAC\xE2\x82\xAC", 5), "\xE2\x82\xAC");
+    EXPECT_EQ(utf8_prefix("plain", 3), "pla");
+    EXPECT_EQ(utf8_prefix("", 3), "");
+    // An email error of 1,023 ASCII bytes and a two-byte character is cut before the character,
+    // not inside it (both stores use utf8_prefix for the error and the event detail).
+    lake::control::InMemoryStore store;
+    const auto created = store.create_cloud_order({"on_prem",
+                                                   "order_form",
+                                                   "",
+                                                   "",
+                                                   "Ada",
+                                                   "ada@example.com",
+                                                   "",
+                                                   "x",
+                                                   1,
+                                                   1'000'000,
+                                                   "usd",
+                                                   400'000,
+                                                   "",
+                                                   std::string(1023, 'e') + "\xC3\xA9"});
+    ASSERT_TRUE(created);
+    EXPECT_EQ(created->email_error, std::string(1023, 'e'));
+}

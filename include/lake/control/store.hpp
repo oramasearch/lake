@@ -407,6 +407,18 @@ struct PaymentEventResult {
     bool changed = false;   // the invoice's state or provider_status changed
     Invoice invoice;        // the invoice after the event, when matched
 };
+// At most `bytes` bytes of `text`, never cut inside a UTF-8 sequence, so a bounded column is never
+// sent invalid UTF-8 (an order's event detail and email error, lake#833).
+inline std::string utf8_prefix(std::string_view text, std::size_t bytes) {
+    if (text.size() <= bytes) {
+        return std::string(text);
+    }
+    std::size_t end = bytes;
+    while (end > 0 && (static_cast<unsigned char>(text[end]) & 0xC0) == 0x80) {
+        --end;
+    }
+    return std::string(text.substr(0, end));
+}
 // An order from the apex order sheet (lake#831, migration 0089, docs/api/orders.md): what a person
 // asked for, how it is paid, and where it stands. Orders are multitenancy and billing, so they live
 // in the control plane; the operator reads `paid` rows and writes `state`, `host`,

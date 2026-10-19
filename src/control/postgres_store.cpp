@@ -7300,7 +7300,7 @@ public:
                        nullable(from),
                        to,
                        actor,
-                       detail.substr(0, 2000));
+                       utf8_prefix(detail, 2000));
     }
 
     Result<CloudOrder> create_cloud_order(const NewCloudOrder& in) override {
@@ -7332,7 +7332,7 @@ public:
                 in.included_credit_cents,
                 state,
                 nullable(in.organization_id),
-                in.email_error.substr(0, 1024));
+                utf8_prefix(in.email_error, 1024));
             const std::string id = rows[0][0].as<std::string>();
             cloud_order_event(tx,
                               id,
@@ -7490,7 +7490,7 @@ public:
                                "email_error = $2, email_retry_at = now() + make_interval(secs => "
                                "$3) WHERE id = $1::uuid",
                                outcome.id,
-                               outcome.error.substr(0, 1024),
+                               utf8_prefix(outcome.error, 1024),
                                std::max(outcome.retry_seconds, 1));
             }
             return {};

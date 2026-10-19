@@ -2981,7 +2981,7 @@ void InMemoryStore::cloud_order_event_locked(const std::string& id,
                         from,
                         to,
                         actor,
-                        detail.substr(0, 2000),
+                        utf8_prefix(detail, 2000),
                         {}});
 }
 
@@ -3014,7 +3014,7 @@ Result<CloudOrder> InMemoryStore::create_cloud_order(const NewCloudOrder& in) {
     order.included_credit_cents = in.included_credit_cents;
     order.state = in.path == "checkout" ? "pending_payment" : "submitted";
     order.organization_id = in.organization_id;
-    order.email_error = in.email_error.substr(0, 1024);
+    order.email_error = utf8_prefix(in.email_error, 1024);
     cloud_orders_.push_back(order);
     cloud_order_event_locked(order.id,
                              "",
@@ -3161,7 +3161,7 @@ Result<void> InMemoryStore::record_cloud_order_email(const CloudOrderEmailOutcom
         cloud_order_email_due_.erase(found->id);
     } else {
         ++found->email_attempts;
-        found->email_error = outcome.error.substr(0, 1024);
+        found->email_error = utf8_prefix(outcome.error, 1024);
         const auto until = std::chrono::system_clock::now() +
                            std::chrono::seconds(std::max(outcome.retry_seconds, 1));
         cloud_order_email_due_[found->id] = until;
