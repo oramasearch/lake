@@ -4856,7 +4856,8 @@ bool confirm_retry_helps(const std::string& code) {
 
 // The input a stored Ask Orama proposal runs with when the person confirms it: the conversation's
 // account and workspace fill `customer_id` and `workspace_id` when the input names none and the
-// capability takes them (an MCP connection's call_mcp_tool from Ask Orama, lake#652).
+// capability takes them (an MCP connection's call_mcp_tool from Ask Orama, lake#652). A model that
+// writes `null` or "" for one names none, so it is filled too, never asked of the person.
 json proposal_input(const Capability* target,
                     const json& proposal,
                     const std::string& customer_id,
@@ -4866,12 +4867,16 @@ json proposal_input(const Capability* target,
         return proposed;
     }
     const json properties = target->input_schema.value("properties", json::object());
-    if (!proposed.contains("customer_id") && properties.contains("customer_id")) {
-        proposed["customer_id"] = customer_id;
-    }
-    if (!proposed.contains("workspace_id") && properties.contains("workspace_id")) {
-        proposed["workspace_id"] = workspace_id;
-    }
+    const auto fill = [&](const char* key, const std::string& value) {
+        const auto found = proposed.find(key);
+        const bool named = found != proposed.end() && !found->is_null() &&
+                           !(found->is_string() && found->get_ref<const std::string&>().empty());
+        if (!named && properties.is_object() && properties.contains(key)) {
+            proposed[key] = value;
+        }
+    };
+    fill("customer_id", customer_id);
+    fill("workspace_id", workspace_id);
     return proposed;
 }
 

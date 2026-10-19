@@ -128,7 +128,8 @@ conversation) and is audited in that workspace's log.
   `send_ask_message`, for an agent that answers at once) stores an answer, each proposal's input is
   checked against its capability's input schema with the registry's own `canonical_input` and
   `validate_input`, the checks `Registry::call` runs on every call, after lake fills
-  `customer_id` and `workspace_id` from the conversation as a confirm does. A proposal the registry
+  `customer_id` and `workspace_id` from the conversation as a confirm does (a field the input
+  leaves out, or writes as `null` or `""`, is filled; one it names is kept). A proposal the registry
   would refuse (an unknown capability, a missing required field, a wrong type or value) is not
   offered: it moves from `proposals` to `withheld_proposals`, each with `error {code, message,
   path, missing?}`, and the reply gains a plain sentence per proposal that says what is missing and
@@ -229,7 +230,8 @@ answer with a null and a numeric `capability`, a `create_stream` with no input, 
 path (an agent of the workspace answering in `send_ask_message`), with the reply, the repository
 proposal offered and the other three withheld; the stream's sentence names both `zetta` and
 `topic`. Confirming the offered proposal creates the repository in the conversation's account and
-workspace (lake filled `customer_id` and `workspace_id`). A null `reply` or `trace_id` is stored as
+workspace (lake filled `customer_id` and `workspace_id`); on the at-once path the repository
+proposal writes `customer_id: null`, which lake fills the same way. A null `reply` or `trace_id` is stored as
 empty. `HttpServer/HttpResponseIsolation.AskOramaOffersTryAgainOnlyForATransientRefusal`: a confirm
 refused with `store_unavailable` is stored with `retry: true` and no *Ask Orama again*.
 

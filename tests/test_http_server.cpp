@@ -2764,13 +2764,20 @@ TEST_P(HttpResponseIsolation, AskOramaKeepsTheTurnWhenAProposalIsMalformed) {
             "",
             cookie)))["value"]["messages"];
     };
-    const auto proposals = [](const std::string& name) {
+    // `account` is the repository proposal's own customer_id: absent, or null as a model may
+    // write it; lake fills it from the conversation either way.
+    const auto proposals = [](const std::string& name,
+                              std::optional<nlohmann::json> account = std::nullopt) {
+        nlohmann::json repository{{"name", name}};
+        if (account) {
+            repository["customer_id"] = std::move(*account);
+        }
         return nlohmann::json::array(
             {{{"capability", nullptr}, {"input", nlohmann::json::object()}},
              {{"capability", 7}, {"input", nlohmann::json::object()}},
              {{"capability", "create_stream"}, {"input", nlohmann::json::object()}},
              {{"capability", "create_repository"},
-              {"input", {{"name", name}}},
+              {"input", std::move(repository)},
               {"impact", "A repository named " + name + "."}}});
     };
     // What both paths must store: the reply, the one proposal that can run, and the other three
@@ -2833,7 +2840,7 @@ TEST_P(HttpResponseIsolation, AskOramaKeepsTheTurnWhenAProposalIsMalformed) {
     // At once: an agent of the workspace answers in the request; send_ask_message stores it.
     workspace_caller_->answers["get_agent"] = {{"id", "space-agent"}, {"runtime", "native"}};
     workspace_caller_->answers["chat"] = {{"reply", "Here is what I would do."},
-                                          {"proposals", proposals("from-space-agent")},
+                                          {"proposals", proposals("from-space-agent", nullptr)},
                                           {"reads", nlohmann::json::array()},
                                           {"delegations", nlohmann::json::array()},
                                           {"trace_id", nullptr}};
