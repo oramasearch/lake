@@ -855,6 +855,8 @@ TEST(SchemaConformance, EveryToolAndRequiredOutputUsesHttpContract) {
     http.call("price_list", {{"include_history", true}});
     http.call("billing_account", {{"customer_id", customer.id}});
     http.read("billing_account", "?customer_id=" + customer.id);
+    http.call("set_billing_contact",
+              {{"customer_id", customer.id}, {"email", "billing@example.com"}, {"country", "DE"}});
     http.call("bill_preview", {{"customer_id", customer.id}});
     // January at a list with no rates, so its invoice reads no workspace's usage.
     http.call("set_price_list", {{"effective_from", "2026-01"}, {"prices", json::array()}});

@@ -72,10 +72,12 @@ for now"*. Lake collects payment through `PaymentProvider` (`include/lake/api/bi
 interface with:
 
 - `name()` and `title()`: stored on each invoice (`provider`) and shown by `billing_account`;
-- `provider_customer(account)`: the provider's id for the account, created the first time, and
-  the kept id it `replaces` when the provider no longer has that customer
-  ([below](#stripe), lake#856); lake keeps it (`billing_accounts`) before it asks for payment, so a
-  failed request never loses it;
+- `provider_customer(account)`: the provider's id for the account, created the first time with the
+  account's [billing contact](#billing-contact) when it has one, and the kept id it `replaces` when
+  the provider no longer has that customer ([below](#stripe), lake#856); lake keeps it
+  (`billing_accounts`) before it asks for payment, so a failed request never loses it;
+- `update_customer(account)`: sends a saved billing contact to the provider's customer the account
+  already has; an error leaves the contact lake keeps as it is;
 - `request_payment(account, invoice)`: called for an invoice about to be issued (its account, month,
   price list, lines and total, and which issue of the month it is). It answers the provider's `reference`,
   the `instructions` the invoice shows, the `payment_url` where the account pays and the provider's
@@ -137,9 +139,11 @@ this version must have its products before it bills; one on the manual provider 
 
 **Customers.** A lake account becomes one Stripe Customer (`POST /v1/customers`, name and
 `metadata[lake_customer_id]`, with the tags above) the first time one of its invoices is issued, so
-accounts that are never invoiced leave nothing in Stripe. Its id (`cus_...`) is kept in
-`billing_accounts` (customer, provider, provider customer id), the account's billing row in
-PostgreSQL (decision 56), and reused for every later invoice.
+accounts that are never invoiced leave nothing in Stripe. It carries the account's billing contact,
+its email, name and address, when one is saved ([below](#billing-contact)); without one, the name is
+the account's. Its id (`cus_...`) is kept in `billing_accounts` (customer, provider, provider
+customer id), the account's billing row in PostgreSQL (decision 56), and reused for every later
+invoice.
 
 **A customer Stripe no longer has** (lake#856). A `cus_` id exists in one Stripe account and mode
 only. Before each invoice lake reads the kept customer (`GET /v1/customers/<id>`). When Stripe
@@ -213,6 +217,58 @@ Stripe, and Stripe's notice voids it in lake.
 
 The client is `src/api/stripe.cpp` (`include/lake/api/stripe.hpp`); its HTTP exchange is the
 server's outbound client, injected as a `StripeHttp` the tests replace with a fake Stripe.
+
+## Billing contact
+
+[lake#857](https://github.com/oramasearch/lake/issues/857): where an account's invoices go, and the
+name and address a business needs on them. It is a billing record, one row per account in
+`billing_contacts` (migration `0090_billing_contacts`, guard `billing_contacts_guard`), in lake's
+control PostgreSQL (decision 56), deleted with the account:
+
+| Field | Holds | At most |
+|---|---|---|
+| `email` | where invoices go; required, one `@` with something on each side and no whitespace | 320 characters |
+| `name` | the legal or company name on the invoice; empty: the account's name is used | 256 |
+| `line1`, `line2` | the street address | 256 each |
+| `city`, `state` | | 128 each |
+| `postal_code` | | 32 |
+| `country` | an ISO 3166-1 alpha-2 code in capitals (`DE`), or empty | 2 |
+
+Lengths are characters, as PostgreSQL counts them. The table's checks and `billing_contact_problem`
+(`include/lake/control/store.hpp`), which both stores and `set_billing_contact` apply, say the same.
+
+**Reading it.** `billing_account` answers `contact`, `{email, name, line1, line2, city, postal_code,
+state, country, updated_at}`, or null while the account has none. While it has none,
+`suggested_email` is the signed-in person's own email (from their user record, which Clerk fills)
+when they may set the contact, so the Billing page can offer it; it is null for a member, for the
+operator, and once a contact is saved. Nothing is stored until someone saves it.
+
+**Setting it.** `set_billing_contact` is for the account's owners and admins (who hold `admin` on the
+customer) and the operator; a member is refused `unauthorized`. It replaces the whole contact: a
+field left out is emptied. Whitespace around each field is trimmed, and a field the checks refuse
+is `invalid_input` with its path (`/email`, `/country`). The central audit records kind
+`billing.contact.set` on `customer/<id>/billing` with `fields`, the names of the fields that were
+set, never their values, `provider` and `provider_update`.
+
+**What reaches Stripe.**
+
+- At the account's first invoice, `POST /v1/customers` carries `email`, `name` (the contact's, else
+  the account's) and the address fields the contact has: `address[line1]`, `address[line2]`,
+  `address[city]`, `address[postal_code]`, `address[state]`, `address[country]`. Its key stays
+  `lake-customer-<customer>`, so a creation that failed after Stripe answered and is retried within
+  24 hours with a changed contact is refused by Stripe's idempotency check until the key expires.
+- Each later save, while the account has a Stripe customer, is `POST /v1/customers/<cus_...>` with
+  `email`, `name` and all six address fields, so one the contact no longer has is cleared (`address=`
+  when it has no address at all), under the key `lake-customer-<customer>-contact-<updated_at>`: one
+  key per save.
+- `set_billing_contact` answers `provider_update`: `updated`; `none` when the account has no
+  customer yet (it gets the contact at creation); or `failed` with Stripe's message in
+  `provider_error`. A refusal never undoes the save: the contact stays stored and is sent again at
+  the next save.
+
+The manual provider has no customer, so its accounts always answer `none`. Lake does not yet ask
+Stripe to email an invoice; its invoices are still finalized with `auto_advance=false` and paid from
+lake's invoice page.
 
 ## Webhooks
 
@@ -545,7 +601,8 @@ pre-filled with these rates.
 |---|---|---|---|---|
 | `price_list` | read | anyone signed in | `period?` (`YYYY-MM`; default this month), `include_history?` | `{period, list, next, history?}`: the list in force for the month (null before one is published), a list published for a later month (or null), and, for the operator with `include_history`, every publication, newest first. A list is `{id, effective_from, published_at, currency, prices}`, each price `{dimension, class, title, unit, unit_micros, per, priced}` (`class` empty but for a GPU class rate; `priced` false for a dimension a list from before lake#643 rated and a new list may not). |
 | `set_price_list` | action | operator, instance administrator | `prices` (each `{dimension, class?, unit_micros, per?}`), `currency?` (default `USD`), `effective_from?` (`YYYY-MM`; default this month) | Publishes the price list, kept as a new publication. A dimension (or a dimension's class) rated twice, an unknown dimension, a retired one (`instances`, `build_compute`, `run_compute`), a `class` on a dimension without classes, `included` or a fee is `invalid_input`. Audit object `billing_price_list/<id>`, kind `billing.price_list.set`. |
-| `billing_account` | read | `read` on the customer | `customer_id` | `{customer_id, month, price_list, provider}`: the list the account is billed at this month (null before one is published) and the payment `provider`. |
+| `billing_account` | read | `read` on the customer | `customer_id` | `{customer_id, month, price_list, provider, contact, suggested_email}`: the list the account is billed at this month (null before one is published), the payment `provider`, the [billing contact](#billing-contact) (null while there is none) and, until one is saved, the signed-in owner's or admin's email to offer. |
+| `set_billing_contact` | action | `admin` on the customer (owners, admins), operator | `customer_id`, `email`, `name?`, `line1?`, `line2?`, `city?`, `postal_code?`, `state?`, `country?` | Replaces the [billing contact](#billing-contact) and sends it to the account's Stripe customer, if it has one: `{customer_id, contact, provider_update, provider_error?}`, `provider_update` `updated`, `none` or `failed` (the contact stays saved). |
 | `bill_preview` | read | `read` on the customer | `customer_id`, `period?` (`YYYY-MM`; default this month) | The bill for the month worked out now at the list in force for it; nothing is stored. `price_list` is `{id, effective_from}`. `complete` is false when a workspace's usage could not be read (`unread_workspaces`); `not_measured` repeats what `usage_over_time` cannot include; `invoice` is the month's issued invoice that is not void, or null. No list for the month is `conflict`. |
 | `issue_invoice` | action | operator, instance administrator | `customer_id`, `period` | Issues the invoice for a month that has ended (`conflict` before), at the list in force for it, with the lines frozen, then asks the provider for payment. Refused with `store_unavailable` while any workspace's usage cannot be read, never issued short; `conflict` when the month already has an invoice that is not void. Issued by hand today; automatic monthly issue is [lake#621](https://github.com/oramasearch/lake/issues/621). |
 | `list_invoices` | read | `read` on the customer | `customer_id` | The account's invoices, newest month first, each with its lines. |
@@ -554,7 +611,8 @@ pre-filled with these rates.
 | `void_invoice` | action | operator, instance administrator | `invoice_id`, `note` | Marks a due invoice `void`, after voiding it at its provider (Stripe); the month can be invoiced again. A paid invoice is never voided (`conflict`). |
 
 The operator-only capabilities answer anyone else `unauthorized` before the handler runs. Audit
-objects are `customer/<id>/billing` (kinds `billing.account.read`, `billing.bill.preview`,
+objects are `customer/<id>/billing` (kinds `billing.account.read`, `billing.contact.set`,
+`billing.bill.preview`,
 `billing.invoice.issue`, `billing.invoices.read`, `billing.invoice.read`, `billing.invoice.paid`,
 `billing.invoice.void`, and `billing.account.provider_customer_replaced` beside an issue that
 replaced the account's Stripe customer) except `set_price_list`'s.
@@ -633,6 +691,18 @@ POST /v1/record_invoice_payment
   environment: unset, half set and malformed falling back to manual with a reason that names the
   variable in `billing_account`, `viewer` and `server_info`, never a value, and rotation by restart
   (lake#628); and the route answering only where the lake bills.
+- `Billing.OwnersAndAdminsSetTheBillingContact` (`tests/test_billing.cpp`, lake#857): an
+  organization account's owner offered their own email, its member and the operator not; the member
+  refused, the owner's contact trimmed and shown to the member, an admin's save replacing it whole,
+  each refused field `invalid_input` at its path with nothing changed, and the audit naming the
+  fields, never their values. `StripeBilling.TheBillingContactReachesTheStripeCustomer`
+  (`tests/test_stripe.cpp`): no Stripe call before the first invoice, the customer created with
+  the contact's email, name and address, a later save updating it with every address field and its
+  own key, a bare contact sending the account's name and `address=`, and a refused update reported
+  with the contact kept. `MemoryBilling.BillingContactsFollowTheContract` and
+  `PostgresBilling.BillingContactsFollowTheContract` (`tests/test_postgres.cpp`): the migration's
+  table and guard, set, read, replace, refusals, lengths in characters, the table's checks, and the
+  cascade with the account.
 - `PostgresBilling.PriceListsAndInvoicesFollowTheContract`,
   `PostgresBilling.PaymentProviderCustomersAndNoticesFollowTheContract` and
   `PostgresBilling.WorkloadResourcesAndClassRatesFollowTheContract` (`tests/test_postgres.cpp`):
@@ -660,6 +730,11 @@ POST /v1/record_invoice_payment
 - A Stripe event lake should act on: map it in `parse_stripe_event` (`src/api/stripe.cpp`), decide
   whose its object is (`foreign_object`, with the `lake_*` key lake sets on it), add the transition
   to `apply_payment_event` in both stores, and register it in the Stripe dashboard.
+- A new billing contact field: a migration adding the column with its check, then
+  `BillingContact` and `billing_contact_problem` (`include/lake/control/store.hpp`,
+  `src/control/memory_store.cpp`), both stores, `contact_json` and the input of
+  `set_billing_contact` (`src/api/billing_capabilities.cpp`), `billing_details`
+  (`src/api/stripe.cpp`) when Stripe should have it, and the [table above](#billing-contact).
 - A new kind of Stripe object lake creates: tag it with `tag` in `src/api/stripe.cpp`
   (`orama_app`, `lake_instance`) and give it a `lake_*` key, never one of Cloud v1's bare keys.
 - A new product (a new paid offer, say): add its id to `include/lake/api/stripe.hpp` (and

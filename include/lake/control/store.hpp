@@ -407,6 +407,20 @@ struct PaymentEventResult {
     bool changed = false;   // the invoice's state or provider_status changed
     Invoice invoice;        // the invoice after the event, when matched
 };
+// Where an account's invoices go and the name and address they carry (migration 0090, lake#857,
+// docs/api/billing.md#billing-contact). `name` is the legal or company name on the invoice;
+// `country` an ISO 3166-1 alpha-2 code in capitals, or empty.
+struct BillingContact {
+    std::string customer_id, email, name, line1, line2, city, postal_code, state, country;
+    std::string updated_at;
+};
+// A field billing_contacts refuses, and what it must be.
+struct FieldProblem {
+    std::string field, message;
+};
+// The first field of `contact` billing_contacts' checks refuse (lengths in characters, as
+// PostgreSQL counts them), or nullopt when it keeps them all.
+std::optional<FieldProblem> billing_contact_problem(const BillingContact& contact);
 // At most `bytes` bytes of `text`, never cut inside a UTF-8 sequence, so a bounded column is never
 // sent invalid UTF-8 (an order's event detail and email error, lake#833).
 inline std::string utf8_prefix(std::string_view text, std::size_t bytes) {
@@ -2010,6 +2024,12 @@ public:
                                       const std::string& expected_id,
                                       const std::string& provider_customer_id) = 0;
     virtual Result<PaymentEventResult> apply_payment_event(const PaymentEvent& event) = 0;
+    // Billing contacts (migration 0090, lake#857): nullopt while the account has none (not_found
+    // for an unknown customer); set_billing_contact replaces the account's whole contact and
+    // answers it with its updated_at.
+    virtual Result<std::optional<BillingContact>>
+    billing_contact(const std::string& customer_id) = 0;
+    virtual Result<BillingContact> set_billing_contact(const BillingContact& contact) = 0;
     // Cloud orders (lake#831, migration 0089, docs/api/orders.md).
     // Records a new order and its first event (actor lake).
     virtual Result<CloudOrder> create_cloud_order(const NewCloudOrder& order) = 0;

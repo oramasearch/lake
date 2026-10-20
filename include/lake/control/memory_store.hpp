@@ -413,6 +413,8 @@ public:
                                       const std::string& expected_id,
                                       const std::string& provider_customer_id) override;
     Result<PaymentEventResult> apply_payment_event(const PaymentEvent& event) override;
+    Result<std::optional<BillingContact>> billing_contact(const std::string& customer_id) override;
+    Result<BillingContact> set_billing_contact(const BillingContact& contact) override;
     Result<CloudOrder> create_cloud_order(const NewCloudOrder& order) override;
     Result<CloudOrder> get_cloud_order(const std::string& id) override;
     Result<CloudOrder> transition_cloud_order(const CloudOrderTransition& change) override;
@@ -651,6 +653,7 @@ private:
     std::vector<Invoice> invoices_;
     std::map<std::pair<std::string, std::string>, std::string> billing_provider_customers_;
     std::set<std::pair<std::string, std::string>> payment_events_;
+    std::map<std::string, BillingContact> billing_contacts_; // by customer
     // Cloud orders (migration 0089), their events, and when each order's next email is due.
     std::vector<CloudOrder> cloud_orders_;
     std::vector<CloudOrderEvent> cloud_order_events_;
