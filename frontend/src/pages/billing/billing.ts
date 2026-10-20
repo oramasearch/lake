@@ -1,7 +1,7 @@
 /** Billing (lake#564, decision 56): the shapes the billing capabilities answer and the pure rules the
  * pages share — amounts in a currency from millionths, a rate in a person's units, a line as usage ×
- * rate = cost, the months a bill covers, the price list editor's rows, and an invoice's state as a
- * chip. Lake is priced by usage only (lake#635): one rate per usage dimension, no plans, no fee,
+ * rate = cost, the months a bill covers, the price list editor's rows, an invoice's state as a
+ * chip, and the billing contact's countries and address (lake#857). Lake is priced by usage only (lake#635): one rate per usage dimension, no plans, no fee,
  * nothing included. No React here, so `npm test` runs it (tests/billing.test.ts). Billing exists
  * only where the lake has it on (`viewer.billing`). */
 import { formatValue } from "../usage/usage.ts";
@@ -14,7 +14,17 @@ export type PriceList = { id: string; effective_from: string; published_at?: str
 /** What `price_list` answers: the list in force for `period`, one published for a later month, and
  * (for the operator, with `include_history`) every publication, newest first. */
 export type PriceListAnswer = { period: string; list: PriceList | null; next: PriceList | null; history?: PriceList[] };
-export type Account = { customer_id: string; month: string; price_list: PriceList | null; provider: Provider };
+/** What `billing_account` answers. `suggested_email`, while there is no contact, is the signed-in
+ * owner's or admin's own email to offer; nothing is stored until it is saved. */
+export type Account = { customer_id: string; month: string; price_list: PriceList | null; provider: Provider; contact: Contact | null; suggested_email: string | null };
+/** Where an account's invoices go, and the name and address on them (lake#857,
+ * docs/api/billing.md#billing-contact). An empty `name` puts the account's name on the invoice;
+ * `country` is an ISO 3166-1 alpha-2 code, or empty. */
+export type Contact = { email: string; name: string; line1: string; line2: string; city: string; postal_code: string; state: string; country: string; updated_at: string };
+/** The billing contact form's fields: what `set_billing_contact` takes besides `customer_id`. */
+export type ContactDraft = Omit<Contact, "updated_at">;
+/** What `set_billing_contact` answers: the saved contact, and whether Stripe's customer took it. */
+export type ContactSaved = { customer_id: string; contact: Contact; provider_update: "updated" | "none" | "failed"; provider_error?: string };
 /** How invoices are paid (lake#620): Stripe, or invoice only with `reason` saying why card payment is
  * not set up. */
 export type Provider = { name: string; title: string; records_payments_by_hand: boolean; online_payment?: boolean; reason?: string };
@@ -278,4 +288,66 @@ export function providerStatus(status: string | undefined): { label: string; ton
 export function paymentSummary(provider: Provider): { value: string; sub: string } {
   if (!provider.records_payments_by_hand) return { value: provider.title, sub: `pay each invoice on ${provider.title}'s page` };
   return { value: provider.title, sub: provider.reason ? "card payment is not set up" : "Orama records each payment" };
+}
+
+/** The ISO 3166-1 alpha-2 codes officially assigned: what the contact form's country offers. */
+const ISO_COUNTRIES = (
+  "AD AE AF AG AI AL AM AO AQ AR AS AT AU AW AX AZ BA BB BD BE BF BG BH BI BJ BL BM BN BO BQ BR BS BT BV BW BY BZ " +
+  "CA CC CD CF CG CH CI CK CL CM CN CO CR CU CV CW CX CY CZ DE DJ DK DM DO DZ EC EE EG EH ER ES ET FI FJ FK FM FO FR " +
+  "GA GB GD GE GF GG GH GI GL GM GN GP GQ GR GS GT GU GW GY HK HM HN HR HT HU ID IE IL IM IN IO IQ IR IS IT JE JM JO JP " +
+  "KE KG KH KI KM KN KP KR KW KY KZ LA LB LC LI LK LR LS LT LU LV LY MA MC MD ME MF MG MH MK ML MM MN MO MP MQ MR MS MT " +
+  "MU MV MW MX MY MZ NA NC NE NF NG NI NL NO NP NR NU NZ OM PA PE PF PG PH PK PL PM PN PR PS PT PW PY QA RE RO RS RU RW " +
+  "SA SB SC SD SE SG SH SI SJ SK SL SM SN SO SR SS ST SV SX SY SZ TC TD TF TG TH TJ TK TL TM TN TO TR TT TV TW TZ " +
+  "UA UG UM US UY UZ VA VC VE VG VI VN VU WF WS YE YT ZA ZM ZW"
+).split(" ");
+
+/** Whether `code` is an assigned ISO 3166-1 alpha-2 code in capitals ("DE"). */
+export function isCountryCode(code: string): boolean {
+  return ISO_COUNTRIES.includes(code);
+}
+
+let regions: Intl.DisplayNames | undefined;
+
+/** A country's English name ("DE" is "Germany"); a code the browser cannot name stays a code. */
+export function countryName(code: string): string {
+  try {
+    regions ??= new Intl.DisplayNames(["en"], { type: "region" });
+    return regions.of(code) ?? code;
+  } catch {
+    return code;
+  }
+}
+
+/** The countries the contact form offers, by name. A saved code that is not an assigned one
+ * (set_billing_contact takes any two capitals) is offered too, so saving the form keeps it. */
+export function countryOptions(current = ""): { code: string; name: string }[] {
+  const codes = current && !isCountryCode(current) ? [...ISO_COUNTRIES, current] : ISO_COUNTRIES;
+  return codes.map((code) => ({ code, name: countryName(code) })).sort((a, b) => a.name.localeCompare(b.name, "en"));
+}
+
+/** The contact form, from the saved contact, else empty but for the email billing_account suggests. */
+export function contactDraft(contact: Contact | null, suggested: string | null): ContactDraft {
+  const from = contact ?? { email: suggested ?? "", name: "", line1: "", line2: "", city: "", postal_code: "", state: "", country: "" };
+  return { email: from.email, name: from.name, line1: from.line1, line2: from.line2, city: from.city, postal_code: from.postal_code, state: from.state, country: from.country };
+}
+
+/** A contact's address as lines: the street, then city, state and postal code, then the country's
+ * name. Empty parts are left out, so a contact with no address has no lines. */
+export function addressLines(contact: Pick<Contact, "line1" | "line2" | "city" | "postal_code" | "state" | "country">): string[] {
+  const place = [contact.city, contact.state, contact.postal_code].filter(Boolean).join(", ");
+  return [contact.line1, contact.line2, place, contact.country ? countryName(contact.country) : ""].filter(Boolean);
+}
+
+/** Whether the Billing page asks for a billing email: the account has no contact, and its invoices
+ * are paid online, so Stripe would email them once it has one. */
+export function asksForBillingEmail(account: Pick<Account, "contact" | "provider">): boolean {
+  return !account.contact && account.provider.online_payment === true;
+}
+
+/** What the page says after a save: the contact is kept even when the provider refuses it, and is
+ * sent again at the next save. */
+export function contactSavedMessage(saved: Pick<ContactSaved, "provider_update" | "provider_error">, provider: string): { text: string; tone: "ok" | "bad" } {
+  if (saved.provider_update === "updated") return { text: `Billing contact saved and sent to ${provider}`, tone: "ok" };
+  if (saved.provider_update === "failed") return { text: `Billing contact saved, but ${provider} refused it: ${saved.provider_error || "no reason given"}. It is sent again at the next save.`, tone: "bad" };
+  return { text: "Billing contact saved", tone: "ok" };
 }
