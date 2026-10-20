@@ -49,6 +49,9 @@ constexpr std::string_view kek = "6c616b652d6f726465722d73686565742d746573742d6b
 constexpr std::string_view stripe_key = "sk_test_lake831fakekey0001";
 constexpr std::string_view stripe_webhook = "whsec_lake831fakesecret0001";
 constexpr std::string_view resend_key = "re_lake831fakekey0001";
+// This Lake's public host, and another Lake's billing through the same Stripe account (lake#855).
+constexpr std::string_view this_lake = "eu.lake.live";
+constexpr std::string_view other_lake = "us.lake.live";
 
 constexpr std::string_view production_regions =
     R"([{"name":"swedencentral","label":"Europe","host":"eu.lake.live","latitude":"60.67488","longitude":"17.14127"},)"
@@ -133,6 +136,7 @@ struct FakeCheckout {
     std::shared_ptr<PaymentProviders> providers() {
         return fixed_payment_providers(stripe_payment_provider(
             {std::string(stripe_key), std::string(stripe_webhook)},
+            std::string(this_lake),
             [this](const StripeRequest& request) { return answer(request); },
             "https://stripe.test"));
     }
@@ -691,12 +695,20 @@ TEST(OrdersCheckout, ASubscriptionWithTheSheetsPriceInline) {
               "month");
     EXPECT_EQ(field(request.body, "customer_email"), "ada%40example.com");
     EXPECT_EQ(field(request.body, "metadata%5Blake_order_id%5D"), "order-1");
+    // The session and its subscription are tagged as this Lake's (lake#855).
+    for (const std::string prefix : {"metadata", "subscription_data%5Bmetadata%5D"}) {
+        EXPECT_EQ(field(request.body, prefix + "%5Blake_order_id%5D"), "order-1") << prefix;
+        EXPECT_EQ(field(request.body, prefix + "%5Borama_app%5D"), "lake") << prefix;
+        EXPECT_EQ(field(request.body, prefix + "%5Blake_instance%5D"), this_lake) << prefix;
+    }
     // The manual provider has no checkout.
     EXPECT_FALSE(manual_payment_provider()->create_checkout({}));
 }
 
 TEST(OrdersCheckout, CheckoutEventsBecomeOrderStates) {
-    const auto parse = [](std::string type, std::string payment_status) {
+    const auto parse = [](std::string type,
+                          std::string payment_status,
+                          json metadata = {{"lake_order_id", "order-9"}}) {
         const json event{{"id", "evt_1"},
                          {"type", type},
                          {"data",
@@ -706,8 +718,9 @@ TEST(OrdersCheckout, CheckoutEventsBecomeOrderStates) {
                              {"client_reference_id", "order-9"},
                              {"customer", "cus_9"},
                              {"subscription", "sub_9"},
-                             {"payment_status", payment_status}}}}}};
-        auto notice = parse_stripe_event(event.dump());
+                             {"payment_status", payment_status},
+                             {"metadata", metadata}}}}}};
+        auto notice = parse_stripe_event(event.dump(), this_lake);
         EXPECT_TRUE(notice);
         return *notice;
     };
@@ -723,6 +736,19 @@ TEST(OrdersCheckout, CheckoutEventsBecomeOrderStates) {
     EXPECT_EQ(parse("checkout.session.async_payment_succeeded", "paid").order_state, "paid");
     EXPECT_EQ(parse("checkout.session.async_payment_failed", "unpaid").order_state, "cancelled");
     EXPECT_EQ(parse("checkout.session.expired", "unpaid").order_state, "cancelled");
+    // Whose session it is (lake#855): lake_order_id marks the order sheet's, and lake_instance
+    // which Lake's; one from before lake_instance existed is this Lake's.
+    EXPECT_FALSE(paid.foreign);
+    EXPECT_FALSE(parse("checkout.session.completed",
+                       "paid",
+                       {{"lake_order_id", "order-9"}, {"lake_instance", this_lake}})
+                     .foreign);
+    EXPECT_TRUE(parse("checkout.session.completed",
+                      "paid",
+                      {{"lake_order_id", "order-9"}, {"lake_instance", other_lake}})
+                    .foreign);
+    EXPECT_TRUE(parse("checkout.session.completed", "paid", json::object()).foreign)
+        << "another app's session";
 }
 
 namespace {
@@ -751,21 +777,27 @@ lake::control::CloudOrder checkout_order(lake::control::Store& store, const std:
     return *kept;
 }
 
+// A Checkout event for `session`, tagged as POST /order tags it unless `metadata` is given.
 std::string checkout_event(const std::string& id,
                            const std::string& type,
                            const std::string& session,
-                           const std::string& order_id) {
-    return json{
-        {"id", id},
-        {"type", type},
-        {"data",
-         {{"object",
-           {{"id", session},
-            {"object", "checkout.session"},
-            {"client_reference_id", order_id},
-            {"customer", "cus_" + id},
-            {"subscription", "sub_" + id},
-            {"payment_status", type == "checkout.session.completed" ? "paid" : "unpaid"}}}}}}
+                           const std::string& order_id,
+                           const json& metadata = nullptr) {
+    return json{{"id", id},
+                {"type", type},
+                {"data",
+                 {{"object",
+                   {{"id", session},
+                    {"object", "checkout.session"},
+                    {"client_reference_id", order_id},
+                    {"customer", "cus_" + id},
+                    {"subscription", "sub_" + id},
+                    {"payment_status", type == "checkout.session.completed" ? "paid" : "unpaid"},
+                    {"metadata",
+                     metadata.is_null() ? json{{"lake_order_id", order_id},
+                                               {"orama_app", "lake"},
+                                               {"lake_instance", this_lake}}
+                                        : metadata}}}}}}
         .dump();
 }
 
@@ -809,11 +841,25 @@ TEST(OrdersCheckout, TheSignedWebhookMarksAnOrderPaidOncePerEvent) {
         "evt_late", "checkout.session.completed", "cs_test_abandoned", abandoned.id));
     EXPECT_EQ(late.body["changed"], false);
     EXPECT_EQ(store.get_cloud_order(abandoned.id)->state, "cancelled");
-    // A session lake did not start (another Lake's, say) is acknowledged and ignored.
+    // A session tagged as this Lake's that it did not start is acknowledged and unmatched.
     EXPECT_EQ(
         notice(checkout_event("evt_other", "checkout.session.completed", "cs_test_other", "x"))
             .body["matched"],
         false);
+    // Another Lake's session, and another app's, are ignored with nothing recorded (lake#855),
+    // even for a session id this Lake knows.
+    const auto ignored = [&](const std::string& id, const json& metadata) {
+        const NoticeOutcome outcome = notice(
+            checkout_event(id, "checkout.session.completed", "cs_test_abandoned", "x", metadata));
+        EXPECT_EQ(outcome.status, 200) << id;
+        EXPECT_EQ(outcome.body, (json{{"received", true}, {"ignored", true}})) << id;
+        const auto unused = store.apply_payment_event({"stripe", id, "checkout.session.completed"});
+        EXPECT_TRUE(unused && !unused->duplicate) << id << ": no billing_payment_events row";
+    };
+    ignored(
+        "evt_other_lake",
+        {{"lake_order_id", abandoned.id}, {"orama_app", "lake"}, {"lake_instance", other_lake}});
+    ignored("evt_other_app", json::object());
     // A bad signature is refused before anything is read.
     ApiContext context;
     context.store = &store;

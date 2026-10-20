@@ -93,10 +93,55 @@ std::string stripe_failure(std::string_view what, const StripeResponse& response
     return std::format("Stripe refused to {} (HTTP {}): {}", what, response.status, message);
 }
 
+// The tags on every object Lake creates in a Stripe account it shares with Orama Cloud v1 and with
+// other Lakes (orama-bridge#199, lake#855), as fields under `prefix` (`metadata`,
+// `subscription_data[metadata]`): orama_app=lake, and lake_instance, this Lake's public host, when
+// it has one. Lake's own keys are lake_*. It never sets Cloud v1's bare team_id, plan_id,
+// addon_type or addon_config: Cloud v1's webhook handlers read those, so a Lake object carrying one
+// could be taken for Cloud v1's.
+void tag(std::vector<std::pair<std::string, std::string>>& fields,
+         std::string_view prefix,
+         std::string_view instance) {
+    fields.emplace_back(std::format("{}[orama_app]", prefix), "lake");
+    if (!instance.empty()) {
+        fields.emplace_back(std::format("{}[lake_instance]", prefix), instance);
+    }
+}
+
+// Whether an event's invoice or Checkout Session is another app's or another Lake's (lake#855).
+// Lake's `owner` key marks it Lake's: lake_customer_id on an invoice Lake issued, lake_order_id on
+// an order sheet session. Stripe does not copy a subscription's metadata into the invoices it
+// generates, so an invoice without the key is read by its subscription_details, whose owner key is
+// the order's. A lake_instance other than `instance` is another Lake's; an object tagged before
+// lake_instance existed is this Lake's.
+bool foreign_object(const json& object, std::string_view owner, std::string_view instance) {
+    const auto metadata = [](const json& holder) {
+        return holder.is_object() && holder.contains("metadata") && holder["metadata"].is_object()
+                   ? holder["metadata"]
+                   : json::object();
+    };
+    const auto text = [](const json& tags, std::string_view key) {
+        const auto found = tags.find(key);
+        return found != tags.end() && found->is_string() ? found->get<std::string>()
+                                                         : std::string();
+    };
+    json tags = metadata(object);
+    if (text(tags, owner).empty() && object.contains("subscription_details")) {
+        tags = metadata(object["subscription_details"]);
+        owner = "lake_order_id";
+    }
+    if (text(tags, owner).empty()) {
+        return true;
+    }
+    const std::string lake_instance = text(tags, "lake_instance");
+    return !lake_instance.empty() && lake_instance != instance;
+}
+
 class StripePaymentProvider final : public PaymentProvider {
 public:
-    StripePaymentProvider(StripeKeys keys, StripeHttp http, std::string base)
-        : keys_(std::move(keys)), http_(std::move(http)), base_(std::move(base)) {}
+    StripePaymentProvider(StripeKeys keys, std::string instance, StripeHttp http, std::string base)
+        : keys_(std::move(keys)), instance_(std::move(instance)), http_(std::move(http)),
+          base_(std::move(base)) {}
 
     std::string_view name() const override {
         return "stripe";
@@ -113,12 +158,13 @@ public:
         if (!account.provider_customer_id.empty()) {
             return account.provider_customer_id;
         }
-        auto created = post("/v1/customers",
-                            {{"name", account.name.empty() ? account.customer_id : account.name},
-                             {"description", "Lake account " + account.customer_id},
-                             {"metadata[lake_customer_id]", account.customer_id}},
-                            "lake-customer-" + account.customer_id,
-                            "create the customer");
+        std::vector<std::pair<std::string, std::string>> fields{
+            {"name", account.name.empty() ? account.customer_id : account.name},
+            {"description", "Lake account " + account.customer_id},
+            {"metadata[lake_customer_id]", account.customer_id}};
+        tag(fields, "metadata", instance_);
+        auto created = post(
+            "/v1/customers", fields, "lake-customer-" + account.customer_id, "create the customer");
         if (!created) {
             return std::unexpected(created.error());
         }
@@ -141,19 +187,19 @@ public:
         // failed step) returns Stripe's first result instead of a second invoice.
         const std::string key = std::format(
             "lake-invoice-{}-{}-{}", invoice.customer_id, invoice.period, account.attempt);
-        auto draft = post("/v1/invoices",
-                          {{"customer", account.provider_customer_id},
-                           {"currency", "usd"},
-                           {"collection_method", "send_invoice"},
-                           {"days_until_due", "30"},
-                           {"auto_advance", "false"},
-                           {"pending_invoice_items_behavior", "exclude"},
-                           {"description", std::format("Orama Cloud usage, {}", invoice.period)},
-                           {"metadata[lake_customer_id]", invoice.customer_id},
-                           {"metadata[lake_period]", invoice.period},
-                           {"metadata[lake_price_list_id]", invoice.plan_id}},
-                          key,
-                          "create the invoice");
+        std::vector<std::pair<std::string, std::string>> fields{
+            {"customer", account.provider_customer_id},
+            {"currency", "usd"},
+            {"collection_method", "send_invoice"},
+            {"days_until_due", "30"},
+            {"auto_advance", "false"},
+            {"pending_invoice_items_behavior", "exclude"},
+            {"description", std::format("Orama Cloud usage, {}", invoice.period)},
+            {"metadata[lake_customer_id]", invoice.customer_id},
+            {"metadata[lake_period]", invoice.period},
+            {"metadata[lake_price_list_id]", invoice.plan_id}};
+        tag(fields, "metadata", instance_);
+        auto draft = post("/v1/invoices", fields, key, "create the invoice");
         if (!draft) {
             return std::unexpected(draft.error());
         }
@@ -254,6 +300,8 @@ public:
             {"line_items[0][price_data][product_data][name]", order.product_name},
             {"metadata[lake_order_id]", order.order_id},
             {"subscription_data[metadata][lake_order_id]", order.order_id}};
+        tag(fields, "metadata", instance_);
+        tag(fields, "subscription_data[metadata]", instance_);
         if (!order.product_description.empty()) {
             fields.emplace_back("line_items[0][price_data][product_data][description]",
                                 order.product_description);
@@ -283,7 +331,7 @@ public:
         if (!verified) {
             return std::unexpected(verified.error());
         }
-        return parse_stripe_event(body);
+        return parse_stripe_event(body, instance_);
     }
 
 private:
@@ -312,6 +360,7 @@ private:
     }
 
     StripeKeys keys_;
+    std::string instance_;
     StripeHttp http_;
     std::string base_;
 };
@@ -408,7 +457,8 @@ std::string stripe_signature_header(std::string_view body,
     return std::format("t={},v1={}", timestamp, hmac_sha256_hex(webhook_secret, payload));
 }
 
-std::expected<PaymentNotice, NoticeRejection> parse_stripe_event(std::string_view body) {
+std::expected<PaymentNotice, NoticeRejection> parse_stripe_event(std::string_view body,
+                                                                 std::string_view instance) {
     const json event = json::parse(body, nullptr, false);
     if (!event.is_object() || !event.contains("id") || !event["id"].is_string() ||
         !event.contains("type") || !event["type"].is_string()) {
@@ -420,21 +470,19 @@ std::expected<PaymentNotice, NoticeRejection> parse_stripe_event(std::string_vie
     if (notice.event_id.empty() || notice.event_id.size() > 255) {
         return std::unexpected(NoticeRejection{"invalid_input", "the event has no usable id"});
     }
-    if (const json* object = event.contains("data") && event["data"].is_object() &&
-                                     event["data"].contains("object") &&
-                                     event["data"]["object"].is_object()
-                                 ? &event["data"]["object"]
-                                 : nullptr) {
-        notice.reference = object->value("id", "");
-    }
+    const json no_object = json::object();
+    const json& object = event.contains("data") && event["data"].is_object() &&
+                                 event["data"].contains("object") &&
+                                 event["data"]["object"].is_object()
+                             ? event["data"]["object"]
+                             : no_object;
+    notice.reference = object.value("id", "");
     if (notice.event_type.starts_with("checkout.session.")) {
         // The apex order sheet's Checkout (lake#831): the session is the reference, and its
         // client_reference_id is lake's order id. Paid once Stripe says the payment is in; a
         // session that expired or whose delayed payment failed cancels the order, which is never
         // provisioned.
-        const json object = event.contains("data") && event["data"].is_object()
-                                ? event["data"].value("object", json::object())
-                                : json::object();
+        notice.foreign = foreign_object(object, "lake_order_id", instance);
         const auto text = [&](const char* key) {
             return object.contains(key) && object[key].is_string() ? object[key].get<std::string>()
                                                                    : std::string();
@@ -458,6 +506,9 @@ std::expected<PaymentNotice, NoticeRejection> parse_stripe_event(std::string_vie
             notice.order_detail = "the checkout expired without payment";
         }
         return notice;
+    }
+    if (notice.event_type.starts_with("invoice.")) {
+        notice.foreign = foreign_object(object, "lake_customer_id", instance);
     }
     if (notice.event_type == "invoice.paid") {
         notice.state = "paid";
@@ -483,9 +534,9 @@ bool stripe_webhook_secret_shape(std::string_view secret) {
 }
 
 std::shared_ptr<PaymentProvider>
-stripe_payment_provider(StripeKeys keys, StripeHttp http, std::string base) {
+stripe_payment_provider(StripeKeys keys, std::string instance, StripeHttp http, std::string base) {
     return std::make_shared<StripePaymentProvider>(
-        std::move(keys), std::move(http), std::move(base));
+        std::move(keys), std::move(instance), std::move(http), std::move(base));
 }
 
 } // namespace lake::api

@@ -8554,6 +8554,7 @@ struct ApiServer::Impl {
                     [this, base](const StripeKeys& keys) -> std::shared_ptr<PaymentProvider> {
                         return stripe_payment_provider(
                             keys,
+                            options.public_host,
                             [this](const StripeRequest& request) {
                                 OutboundResponse response = outbound_http.request(
                                     {request.method, request.url, request.body, request.headers});
@@ -10128,9 +10129,8 @@ struct ApiServer::Impl {
     // exp/nbf/iat), then the same session, audit and cookie path as OAuth sign-in runs. Failures
     // return to the sign-in page with a message rather than an API error.
     // POST /billing/stripe/webhook (docs/api/billing.md#webhooks, lake#620): Stripe's payment
-    // notices. Unauthenticated: the Stripe-Signature HMAC is the credential, checked with the
-    // webhook secret from lake's secret store. 404 where this lake does not bill or takes no
-    // notices.
+    // notices. Unauthenticated: the Stripe-Signature HMAC is the credential, checked with
+    // LAKE_STRIPE_WEBHOOK_SECRET. 404 where this lake does not bill or takes no notices.
     boost::http::route_task serve_payment_notice(boost::http::route_params& route) {
         namespace http = boost::http;
         if (!payments) {
