@@ -2923,6 +2923,31 @@ InMemoryStore::set_billing_provider_customer(const std::string& customer_id,
         .first->second;
 }
 
+Result<std::string>
+InMemoryStore::replace_billing_provider_customer(const std::string& customer_id,
+                                                 const std::string& provider,
+                                                 const std::string& expected_id,
+                                                 const std::string& provider_customer_id) {
+    if (provider.empty() || expected_id.empty() || provider_customer_id.empty() ||
+        provider_customer_id.size() > 255) {
+        return std::unexpected(StoreError{
+            "invalid_input", "a provider, the kept customer id and its replacement are required"});
+    }
+    std::lock_guard lock(mutex_);
+    if (std::ranges::none_of(
+            customers_, [&](const Customer& customer) { return customer.id == customer_id; })) {
+        return std::unexpected(StoreError{"not_found", "no customer " + customer_id});
+    }
+    const auto found = billing_provider_customers_.find({customer_id, provider});
+    if (found == billing_provider_customers_.end()) {
+        return std::string();
+    }
+    if (found->second == expected_id) {
+        found->second = provider_customer_id;
+    }
+    return found->second;
+}
+
 Result<PaymentEventResult> InMemoryStore::apply_payment_event(const PaymentEvent& event) {
     if (event.provider.empty() || event.event_id.empty() || event.event_id.size() > 255 ||
         (!event.state.empty() && event.state != "paid" && event.state != "void")) {

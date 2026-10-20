@@ -7139,6 +7139,39 @@ public:
         });
     }
 
+    Result<std::string>
+    replace_billing_provider_customer(const std::string& customer_id,
+                                      const std::string& provider,
+                                      const std::string& expected_id,
+                                      const std::string& provider_customer_id) override {
+        if (provider.empty() || expected_id.empty() || provider_customer_id.empty() ||
+            provider_customer_id.size() > 255) {
+            return std::unexpected(
+                StoreError{"invalid_input",
+                           "a provider, the kept customer id and its replacement are required"});
+        }
+        return with_tx<std::string>([&](pqxx::work& tx) -> Result<std::string> {
+            if (tx.exec_params("SELECT 1 FROM customers WHERE id = $1::uuid", customer_id)
+                    .empty()) {
+                return std::unexpected(StoreError{"not_found", "no customer " + customer_id});
+            }
+            // The row lock taken by a concurrent update makes this one wait and then match
+            // nothing, so the first replacement stays.
+            tx.exec_params("UPDATE billing_accounts SET provider_customer_id = $4 WHERE "
+                           "customer_id = $1::uuid AND provider = $2 AND provider_customer_id = $3",
+                           customer_id,
+                           provider,
+                           expected_id,
+                           provider_customer_id);
+            const pqxx::result rows = tx.exec_params(
+                "SELECT provider_customer_id FROM billing_accounts WHERE customer_id = $1::uuid "
+                "AND provider = $2",
+                customer_id,
+                provider);
+            return rows.empty() ? std::string() : rows[0][0].as<std::string>();
+        });
+    }
+
     Result<PaymentEventResult> apply_payment_event(const PaymentEvent& event) override {
         if (event.provider.empty() || event.event_id.empty() || event.event_id.size() > 255 ||
             (!event.state.empty() && event.state != "paid" && event.state != "void")) {

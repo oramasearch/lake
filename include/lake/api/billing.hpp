@@ -36,6 +36,14 @@ struct PaymentAccount {
     std::uint64_t attempt = 0;
 };
 
+// The provider's id for an account (PaymentProvider::provider_customer). `replaces` is the kept id
+// it stands in for when the provider no longer has that customer (lake#856: deleted, or kept from
+// another Stripe account or mode); empty otherwise.
+struct ProviderCustomer {
+    std::string id;
+    std::string replaces;
+};
+
 // What a payment provider answers when lake asks it to collect an invoice.
 struct PaymentRequest {
     std::string reference;    // the provider's own id for the request; may be empty
@@ -104,10 +112,11 @@ public:
     // A short lower-case name stored on each invoice (`manual`, `stripe`).
     virtual std::string_view name() const = 0;
     virtual std::string_view title() const = 0;
-    // The provider's id for the account, created when it has none. Lake keeps it before it asks
-    // for payment, so a failed request never loses it. The manual provider answers "".
-    virtual std::expected<std::string, std::string> provider_customer(const PaymentAccount&) {
-        return std::string();
+    // The provider's id for the account, created when it has none, or when the provider no longer
+    // has the kept one (`replaces`). Lake keeps it before it asks for payment, so a failed request
+    // never loses it. The manual provider answers "".
+    virtual std::expected<ProviderCustomer, std::string> provider_customer(const PaymentAccount&) {
+        return ProviderCustomer{};
     }
     // Asks for payment of an invoice about to be issued: `invoice` has its account, month, price
     // list (plan_id), currency, lines and total, but no id or number yet. An error leaves the

@@ -1,8 +1,8 @@
 // Stripe, lake's payment provider (decision 57, lake#620, docs/api/billing.md#stripe): lake's own
 // REST client against a fake Stripe, the webhook signature and its tolerance window, notices
 // applied once per event id, other apps' and other Lakes' events ignored in a shared account
-// (lake#855), the keys read from the environment with rotation, and the manual provider when
-// they are absent.
+// (lake#855), a kept customer Stripe no longer has replaced (lake#856), the keys read from the
+// environment with rotation, and the manual provider when they are absent.
 
 #include <gtest/gtest.h>
 
@@ -15,6 +15,7 @@
 #include <mutex>
 #include <set>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -59,8 +60,8 @@ std::int64_t unix_now() {
 }
 
 // Stripe as far as lake uses it: customers, invoices, invoice items, finalize and void, with
-// Stripe's idempotency (a repeated Idempotency-Key answers the first successful answer), and the
-// products the operator created in the account (lake#855).
+// Stripe's idempotency (a repeated Idempotency-Key answers the first successful answer), the
+// products the operator created in the account (lake#855), and the customers it has (lake#856).
 struct FakeStripe {
     std::mutex mutex;
     std::vector<lake::api::StripeRequest> requests;
@@ -72,6 +73,12 @@ struct FakeStripe {
     std::map<std::string, std::vector<std::string>> products; // invoice -> item products ("": none)
     std::map<std::string, std::string> status;                // invoice -> status
     std::set<std::string> catalog{std::string(lake::api::stripe_usage_product)};
+    // The customers this account has, and those deleted in the Dashboard, which Stripe still
+    // reads as {id, deleted: true}. Any other cus_ id is missing (another account or mode).
+    std::set<std::string> known_customers;
+    std::set<std::string> deleted_customers;
+    int customer_reads = 0;
+    int customer_read_status = 0; // the status a customer read fails with; 0, none
     bool fail_finalize = false;
 
     static std::string field(std::string_view body, std::string_view name) {
@@ -121,8 +128,32 @@ struct FakeStripe {
 
     lake::api::StripeResponse route(const lake::api::StripeRequest& request) {
         const std::string path = request.url.substr(request.url.find("/v1/"));
+        if (request.method == "GET" && path.starts_with("/v1/customers/")) {
+            ++customer_reads;
+            if (customer_read_status != 0) {
+                return {customer_read_status, R"({"error":{"message":"try again"}})", {}};
+            }
+            const std::string id = path.substr(std::string_view("/v1/customers/").size());
+            if (deleted_customers.contains(id)) {
+                return {
+                    200, json{{"id", id}, {"object", "customer"}, {"deleted", true}}.dump(), {}};
+            }
+            if (!known_customers.contains(id)) {
+                return {404,
+                        json{{"error",
+                              {{"type", "invalid_request_error"},
+                               {"code", "resource_missing"},
+                               {"param", "id"},
+                               {"message", "No such customer: '" + id + "'"}}}}
+                            .dump(),
+                        {}};
+            }
+            return {200, json{{"id", id}, {"object", "customer"}}.dump(), {}};
+        }
         if (path == "/v1/customers") {
-            return {200, json{{"id", std::format("cus_{}", ++customers)}}.dump(), {}};
+            const std::string id = std::format("cus_{}", ++customers);
+            known_customers.insert(id);
+            return {200, json{{"id", id}}.dump(), {}};
         }
         if (path == "/v1/invoices") {
             const std::string id = std::format("in_{}", ++invoices);
@@ -293,6 +324,19 @@ struct StripeRig {
         return notice(body, lake::api::stripe_signature_header(body, secret, at));
     }
 };
+
+// The central audit's events of a kept Stripe customer replaced (lake#856).
+std::vector<lake::audit::Event> replacements(lake::control::Store& store) {
+    const auto events = lake::test::audit_events(store, {.limit = 500});
+    EXPECT_TRUE(events) << events.error().message;
+    std::vector<lake::audit::Event> out;
+    for (const auto& entry : events.value_or(std::vector<lake::audit::Event>{})) {
+        if (entry.draft.kind == "billing.account.provider_customer_replaced") {
+            out.push_back(entry);
+        }
+    }
+    return out;
+}
 
 std::shared_ptr<lake::api::PaymentProviders> stripe_providers(FakeStripe& stripe) {
     return lake::api::fixed_payment_providers(
@@ -633,6 +677,132 @@ TEST(StripeBilling, AMissingProductSaysTheOperatorCreatesIt) {
     EXPECT_EQ(issued.value["provider_reference"], "in_1");
     EXPECT_EQ(stripe.invoices, 1);
     EXPECT_EQ(stripe.amounts["in_1"], std::vector<std::int64_t>{2000});
+}
+
+// A kept customer is read before it is reused (lake#856): one GET with lake's key and version, and
+// no customer created.
+TEST(StripeBilling, AKeptCustomerStripeStillHasIsReusedAfterOneRead) {
+    FakeStripe stripe;
+    stripe.known_customers.insert("cus_kept");
+    StripeRig rig(stripe_providers(stripe));
+    ASSERT_TRUE(rig.store->set_billing_provider_customer(rig.customer, "stripe", "cus_kept"));
+    const auto issued =
+        rig.call("issue_invoice", {{"customer_id", rig.customer}, {"period", rig.period}});
+    ASSERT_TRUE(issued.ok) << issued.error.message;
+    EXPECT_EQ(stripe.customer_reads, 1);
+    EXPECT_EQ(stripe.customers, 0) << "the kept customer is reused";
+    const auto& read = stripe.requests[0];
+    EXPECT_EQ(read.method, "GET");
+    EXPECT_EQ(read.url, "https://stripe.test/v1/customers/cus_kept");
+    EXPECT_TRUE(read.body.empty());
+    EXPECT_EQ(FakeStripe::header(read, "Authorization"), "Bearer " + std::string(test_key));
+    EXPECT_EQ(FakeStripe::header(read, "Stripe-Version"), lake::api::stripe_api_version);
+    EXPECT_EQ(FakeStripe::header(read, "Idempotency-Key"), "") << "a read takes no key";
+    EXPECT_EQ(FakeStripe::field(stripe.requests[1].body, "customer"), "cus_kept");
+    EXPECT_EQ(*rig.store->billing_provider_customer(rig.customer, "stripe"), "cus_kept");
+    EXPECT_TRUE(replacements(*rig.store).empty());
+}
+
+// A kept customer Stripe does not have (404 resource_missing: a sandbox reset or replaced, a
+// switch from test mode to live) or has deleted is replaced by a new one under its own key; the
+// new id is kept, the invoice is the new customer's, and the replacement is audited (lake#856).
+TEST(StripeBilling, AKeptCustomerStripeNoLongerHasIsReplaced) {
+    for (const bool deleted : {false, true}) {
+        SCOPED_TRACE(deleted ? "deleted" : "missing");
+        FakeStripe stripe;
+        if (deleted) {
+            stripe.deleted_customers.insert("cus_old");
+        }
+        StripeRig rig(stripe_providers(stripe));
+        ASSERT_TRUE(rig.store->set_billing_provider_customer(rig.customer, "stripe", "cus_old"));
+        const auto issued =
+            rig.call("issue_invoice", {{"customer_id", rig.customer}, {"period", rig.period}});
+        ASSERT_TRUE(issued.ok) << issued.error.message;
+        EXPECT_EQ(stripe.customer_reads, 1);
+        EXPECT_EQ(stripe.customers, 1);
+        EXPECT_EQ(*rig.store->billing_provider_customer(rig.customer, "stripe"), "cus_1");
+        // The plain key would replay the first create within Stripe's 24 hours.
+        const auto& created = stripe.requests[1];
+        ASSERT_TRUE(created.url.ends_with("/v1/customers"));
+        EXPECT_EQ(FakeStripe::header(created, "Idempotency-Key"),
+                  "lake-customer-" + rig.customer + "-replaces-cus_old");
+        EXPECT_EQ(FakeStripe::field(created.body, "metadata%5Blake_customer_id%5D"), rig.customer);
+        EXPECT_EQ(FakeStripe::field(created.body, "metadata%5Borama_app%5D"), "lake");
+        EXPECT_EQ(FakeStripe::field(stripe.requests[2].body, "customer"), "cus_1");
+        EXPECT_EQ(FakeStripe::field(stripe.requests[3].body, "customer"), "cus_1");
+        EXPECT_EQ(issued.value["provider_reference"], "in_1");
+
+        const auto replaced = replacements(*rig.store);
+        ASSERT_EQ(replaced.size(), 1U);
+        EXPECT_EQ(replaced[0].draft.customer_id, rig.customer);
+        EXPECT_EQ(replaced[0].draft.object, "customer/" + rig.customer + "/billing");
+        EXPECT_EQ(replaced[0].draft.principal, "admin");
+        EXPECT_EQ(replaced[0].draft.outcome, "success");
+        EXPECT_EQ(replaced[0].draft.details,
+                  (json{{"provider", "stripe"},
+                        {"old_provider_customer_id", "cus_old"},
+                        {"new_provider_customer_id", "cus_1"}}));
+
+        // The replacement is kept and read like any customer: the next issue reuses it.
+        ASSERT_TRUE(
+            rig.call("void_invoice", {{"invoice_id", issued.value["id"]}, {"note", "again"}}).ok);
+        const auto again =
+            rig.call("issue_invoice", {{"customer_id", rig.customer}, {"period", rig.period}});
+        ASSERT_TRUE(again.ok) << again.error.message;
+        EXPECT_EQ(stripe.customer_reads, 2);
+        EXPECT_EQ(stripe.customers, 1);
+        EXPECT_EQ(replacements(*rig.store).size(), 1U);
+    }
+}
+
+// A read that fails for any reason but the customer's absence fails the issue and keeps the kept
+// id: a refused key, a rate limit or Stripe's own failure never replaces a customer (lake#856).
+TEST(StripeBilling, AFailedCustomerReadKeepsTheKeptCustomer) {
+    for (const int status : {500, 401, 403, 429}) {
+        SCOPED_TRACE(status);
+        FakeStripe stripe;
+        stripe.known_customers.insert("cus_kept");
+        stripe.customer_read_status = status;
+        StripeRig rig(stripe_providers(stripe));
+        ASSERT_TRUE(rig.store->set_billing_provider_customer(rig.customer, "stripe", "cus_kept"));
+        const auto failed =
+            rig.call("issue_invoice", {{"customer_id", rig.customer}, {"period", rig.period}});
+        EXPECT_EQ(failed.error.code, "store_unavailable");
+        EXPECT_NE(failed.error.message.find("read the customer"), std::string::npos)
+            << failed.error.message;
+        EXPECT_EQ(stripe.customer_reads, 1);
+        EXPECT_EQ(stripe.customers, 0);
+        EXPECT_EQ(stripe.invoices, 0);
+        EXPECT_TRUE(rig.store->list_invoices(rig.customer)->empty()) << "nothing is issued";
+        EXPECT_EQ(*rig.store->billing_provider_customer(rig.customer, "stripe"), "cus_kept");
+        EXPECT_TRUE(replacements(*rig.store).empty());
+    }
+}
+
+// The memory store replaces a kept customer only while it still holds the id read, so a second,
+// concurrent replacement gets the first one's id back (lake#856).
+TEST(StripeBilling, TheMemoryStoreReplacesOnlyTheIdItWasGiven) {
+    lake::control::InMemoryStore store;
+    const auto user = store.create_user({"taap:1:ed25519:replace", "replace@example.test", "R"});
+    ASSERT_TRUE(user) << user.error().message;
+    const auto customer = store.create_customer({"individual", user->id, "", "replace"});
+    ASSERT_TRUE(customer) << customer.error().message;
+    const std::string id = customer->id;
+    EXPECT_EQ(*store.replace_billing_provider_customer(id, "stripe", "cus_1", "cus_2"), "")
+        << "nothing is kept to replace";
+    EXPECT_EQ(*store.billing_provider_customer(id, "stripe"), "");
+    ASSERT_TRUE(store.set_billing_provider_customer(id, "stripe", "cus_1"));
+    EXPECT_EQ(*store.replace_billing_provider_customer(id, "stripe", "cus_1", "cus_2"), "cus_2");
+    EXPECT_EQ(*store.replace_billing_provider_customer(id, "stripe", "cus_1", "cus_3"), "cus_2")
+        << "the first replacement stays";
+    EXPECT_EQ(*store.billing_provider_customer(id, "stripe"), "cus_2");
+    EXPECT_EQ(store.replace_billing_provider_customer(id, "stripe", "", "cus_3").error().code,
+              "invalid_input");
+    EXPECT_EQ(
+        store.replace_billing_provider_customer("no-such-customer", "stripe", "cus_2", "cus_3")
+            .error()
+            .code,
+        "not_found");
 }
 
 TEST(StripeBilling, WebhooksMoveTheInvoiceOncePerEvent) {

@@ -882,7 +882,8 @@ pull request before a lake with this change is rolled.
 
 - `billing_accounts` (customer, `provider`, `provider_customer_id`, created; primary key customer and
   provider; cascading with the customer): the account's billing row, holding its Stripe customer id
-  (`cus_...`). Written once; a second write keeps the first id;
+  (`cus_...`). Written once; a second write keeps the first id. Replaced only when Stripe no
+  longer has that customer, by an update conditional on the id read (lake#856, no migration);
 - `billing_invoices.payment_url` (Stripe's hosted invoice page, at most 2048 characters) and
   `provider_status` (`open`, `paid`, `payment_failed`, `void`), both empty for the manual provider,
   and the partial index `billing_invoices_by_provider_reference` on (`provider`,

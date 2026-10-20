@@ -2001,6 +2001,14 @@ public:
     set_billing_provider_customer(const std::string& customer_id,
                                   const std::string& provider,
                                   const std::string& provider_customer_id) = 0;
+    // Replaces a kept id the provider no longer has (lake#856) only while the row still holds
+    // `expected_id`, and answers what the row holds after: `provider_customer_id`, or another
+    // request's replacement stored first ("" when the account has no row).
+    virtual Result<std::string>
+    replace_billing_provider_customer(const std::string& customer_id,
+                                      const std::string& provider,
+                                      const std::string& expected_id,
+                                      const std::string& provider_customer_id) = 0;
     virtual Result<PaymentEventResult> apply_payment_event(const PaymentEvent& event) = 0;
     // Cloud orders (lake#831, migration 0089, docs/api/orders.md).
     // Records a new order and its first event (actor lake).

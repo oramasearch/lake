@@ -9,6 +9,7 @@
 #include <charconv>
 #include <format>
 #include <limits>
+#include <optional>
 
 #include <nlohmann/json.hpp>
 #include <openssl/crypto.h>
@@ -118,6 +119,27 @@ std::string missing_product(const StripeResponse& response,
     return named == fields.end() ? std::string() : named->second;
 }
 
+// Whether Stripe answered that the object read does not exist in this account and mode (404
+// resource_missing), as for a customer kept from another sandbox or from test mode (lake#856).
+bool missing_object(const StripeResponse& response) {
+    if (!response.error.empty() || response.status != 404) {
+        return false;
+    }
+    const json body = json::parse(response.body, nullptr, false);
+    return body.is_object() && body.contains("error") && body["error"].is_object() &&
+           body["error"].contains("code") && body["error"]["code"] == "resource_missing";
+}
+
+// A successful answer's JSON object.
+std::expected<json, std::string> answer_object(const StripeResponse& response,
+                                               std::string_view what) {
+    json body = json::parse(response.body, nullptr, false);
+    if (!body.is_object()) {
+        return std::unexpected(std::format("Stripe answered {} with no JSON object", what));
+    }
+    return body;
+}
+
 // The tags on every object Lake creates in a Stripe account it shares with Orama Cloud v1 and with
 // other Lakes (orama-bridge#199, lake#855), as fields under `prefix` (`metadata`,
 // `subscription_data[metadata]`): orama_app=lake, and lake_instance, this Lake's public host, when
@@ -178,18 +200,31 @@ public:
         return false;
     }
 
-    std::expected<std::string, std::string>
+    // The kept customer while Stripe still has it. One it no longer has (404 resource_missing, or
+    // deleted: true) is replaced by a new customer under its own key, since the plain key would
+    // replay the first create within Stripe's 24 hours in the same account (lake#856). Any other
+    // failure is an error and never replaces it.
+    std::expected<ProviderCustomer, std::string>
     provider_customer(const PaymentAccount& account) override {
+        std::string key = "lake-customer-" + account.customer_id;
         if (!account.provider_customer_id.empty()) {
-            return account.provider_customer_id;
+            auto kept = get("/v1/customers/" + percent_encode(account.provider_customer_id),
+                            "read the customer");
+            if (!kept) {
+                return std::unexpected(kept.error());
+            }
+            const std::optional<json>& customer = *kept;
+            if (customer && !(customer->contains("deleted") && customer->at("deleted") == true)) {
+                return ProviderCustomer{account.provider_customer_id, {}};
+            }
+            key += "-replaces-" + account.provider_customer_id;
         }
         std::vector<std::pair<std::string, std::string>> fields{
             {"name", account.name.empty() ? account.customer_id : account.name},
             {"description", "Lake account " + account.customer_id},
             {"metadata[lake_customer_id]", account.customer_id}};
         tag(fields, "metadata", instance_);
-        auto created = post(
-            "/v1/customers", fields, "lake-customer-" + account.customer_id, "create the customer");
+        auto created = post("/v1/customers", fields, key, "create the customer");
         if (!created) {
             return std::unexpected(created.error());
         }
@@ -197,7 +232,7 @@ public:
         if (!id.starts_with("cus_")) {
             return std::unexpected(std::string("Stripe answered a customer without an id"));
         }
-        return id;
+        return ProviderCustomer{id, account.provider_customer_id};
     }
 
     std::expected<PaymentRequest, std::string>
@@ -408,11 +443,27 @@ private:
             }
             return std::unexpected(stripe_failure(what, response));
         }
-        json body = json::parse(response.body, nullptr, false);
-        if (!body.is_object()) {
-            return std::unexpected(std::format("Stripe answered {} with no JSON object", what));
+        return answer_object(response, what);
+    }
+
+    // Stripe's object at `path` (GET with the secret key and Stripe-Version a write sends; a read
+    // takes no Idempotency-Key), or nullopt when Stripe has no such object in this account and
+    // mode. Any other failure is an error, Stripe's message dropped on 401 and 403 as for a write.
+    std::expected<std::optional<json>, std::string> get(const std::string& path,
+                                                        std::string_view what) {
+        StripeRequest request;
+        request.method = "GET";
+        request.url = base_ + path;
+        request.headers = {{"Authorization", "Bearer " + keys_.secret_key},
+                           {"Stripe-Version", std::string(stripe_api_version)}};
+        const StripeResponse response = http_(request);
+        if (missing_object(response)) {
+            return std::nullopt;
         }
-        return body;
+        if (!response.error.empty() || response.status < 200 || response.status >= 300) {
+            return std::unexpected(stripe_failure(what, response));
+        }
+        return answer_object(response, what);
     }
 
     StripeKeys keys_;

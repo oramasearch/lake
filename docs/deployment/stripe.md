@@ -110,7 +110,10 @@ If issuing fails with "Stripe has no product", the account lacks Lake's products
 
 Repeat steps 1–3 with Stripe in **live mode**: a live restricted key (`rk_live_…`), a live webhook
 endpoint with the same three events, and its live signing secret. Invoices issued while on test keys
-stay in Stripe's test data. Record the switch (date, deployment) on lake#620.
+stay in Stripe's test data: settle or void the open ones first, because Lake cannot learn about a
+payment made in test mode afterwards. Each account's test-mode customer is replaced by a live one at
+its next invoice (lake#856, [../api/billing.md](../api/billing.md#stripe)). Record the switch (date,
+deployment) on lake#620.
 
 ## Rotate a key
 
