@@ -22,6 +22,12 @@ key.
   {"received": true, "ignored": true}` without recording them. So `LAKE_PUBLIC_HOST` must be set,
   different on every Lake that shares the account, and kept: a Lake whose host changes takes the
   objects it tagged before for another Lake's.
+- **Lake's products are in the account.** Every invoice line names the product `lake_usage`, and an
+  order sheet Checkout `lake_private_warehouse` or `lake_dedicated_cluster`
+  ([../api/billing.md](../api/billing.md#stripe)). The operator creates them in each account from
+  the Lake's `spec.payments` (orama-operator `docs/lake/payments.md`); never create them by hand.
+  Without them every invoice fails with "Stripe has no product lake_usage in this account; the
+  operator creates it (spec.payments)".
 - **Use test mode first.** Do the whole runbook with Stripe's test keys (`sk_test_…`) and a test
   card; switch to live keys only after the check passes.
 - **The keys are Orama's, never a customer's.** They are platform environment variables: a
@@ -90,12 +96,15 @@ In the Lake service's **Variables**, set `LAKE_STRIPE_SECRET_KEY` and `LAKE_STRI
 4. Within a minute the invoice in Lake reads **Paid**. In the Stripe dashboard, **Webhooks → the
    endpoint → Event deliveries** shows `invoice.paid` delivered with Lake's `200`.
 5. In the Stripe dashboard, the invoice's and its customer's **Metadata** show `orama_app` `lake`
-   and `lake_instance` this Lake's host.
+   and `lake_instance` this Lake's host, the invoice is described "Lake usage, `<month>`", and each
+   of its lines is of the product `lake_usage`.
 
 If the invoice stays open: a delivery answered `400` means a wrong webhook secret (re-check step 1's
 `whsec_…` and step 2); `404` means Lake has no Stripe keys (step 2 not applied or Lake not
 restarted); `200` with `"ignored": true` means the invoice's `lake_instance` is not this Lake's
 `LAKE_PUBLIC_HOST`. Stripe retries failed deliveries for three days, so a fixed key catches up.
+If issuing fails with "Stripe has no product", the account lacks Lake's products: apply the Lake's
+`spec.payments` and issue again, and again after 24 hours if Stripe repeats the answer it saved.
 
 ## 4. Go live
 

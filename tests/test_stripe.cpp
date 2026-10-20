@@ -59,7 +59,8 @@ std::int64_t unix_now() {
 }
 
 // Stripe as far as lake uses it: customers, invoices, invoice items, finalize and void, with
-// Stripe's idempotency (a repeated Idempotency-Key answers the first answer).
+// Stripe's idempotency (a repeated Idempotency-Key answers the first successful answer), and the
+// products the operator created in the account (lake#855).
 struct FakeStripe {
     std::mutex mutex;
     std::vector<lake::api::StripeRequest> requests;
@@ -68,7 +69,9 @@ struct FakeStripe {
     int invoices = 0;
     int items = 0;
     std::map<std::string, std::vector<std::int64_t>> amounts; // invoice -> item amounts
+    std::map<std::string, std::vector<std::string>> products; // invoice -> item products ("": none)
     std::map<std::string, std::string> status;                // invoice -> status
+    std::set<std::string> catalog{std::string(lake::api::stripe_usage_product)};
     bool fail_finalize = false;
 
     static std::string field(std::string_view body, std::string_view name) {
@@ -127,9 +130,45 @@ struct FakeStripe {
             return {200, json{{"id", id}, {"status", "draft"}}.dump(), {}};
         }
         if (path == "/v1/invoiceitems") {
+            // A bare amount, or an inline price of a product in the account, never both; an
+            // inline price is never negative.
+            const std::string product = field(request.body, "price_data%5Bproduct%5D");
+            const std::string amount = field(request.body, "amount");
+            const auto refused = [](std::string_view message) {
+                return lake::api::StripeResponse{
+                    400, json{{"error", {{"message", std::string(message)}}}}.dump(), {}};
+            };
+            std::int64_t cents = 0;
+            if (product.empty()) {
+                if (amount.empty()) {
+                    return refused("Missing required param: amount");
+                }
+                cents = std::stoll(amount);
+            } else {
+                if (!amount.empty()) {
+                    return refused("You may only specify one of these parameters: amount, "
+                                   "price_data");
+                }
+                if (!catalog.contains(product)) {
+                    return {400,
+                            json{{"error",
+                                  {{"type", "invalid_request_error"},
+                                   {"code", "resource_missing"},
+                                   {"param", "price_data[product]"},
+                                   {"message", "No such product: '" + product + "'"}}}}
+                                .dump(),
+                            {}};
+                }
+                const std::string unit = field(request.body, "price_data%5Bunit_amount%5D");
+                const std::string quantity = field(request.body, "quantity");
+                if (unit.empty() || unit.starts_with('-') || quantity.empty()) {
+                    return refused("Invalid non-negative integer");
+                }
+                cents = std::stoll(unit) * std::stoll(quantity);
+            }
             ++items;
-            amounts[field(request.body, "invoice")].push_back(
-                std::stoll(field(request.body, "amount")));
+            amounts[field(request.body, "invoice")].push_back(cents);
+            products[field(request.body, "invoice")].push_back(product);
             return {200, json{{"id", std::format("ii_{}", items)}}.dump(), {}};
         }
         if (path.ends_with("/finalize")) {
@@ -393,8 +432,10 @@ TEST(StripeBilling, AnInvoiceBecomesAStripeInvoiceWithItsLines) {
     // One customer, kept on the account's billing row.
     EXPECT_EQ(stripe.customers, 1);
     EXPECT_EQ(*rig.store->billing_provider_customer(rig.customer, "stripe"), "cus_1");
-    // The calls line: $20.00 is 2000 cents; lake's total is the same, so no rounding line.
+    // The calls line: $20.00 is 2000 cents, of Lake's usage product; lake's total is the same, so
+    // no rounding line.
     EXPECT_EQ(stripe.amounts["in_1"], std::vector<std::int64_t>{2000});
+    EXPECT_EQ(stripe.products["in_1"], std::vector<std::string>{"lake_usage"});
     EXPECT_EQ(stripe.status["in_1"], "open");
 
     // Every request is a form POST with lake's key, the pinned version and an Idempotency-Key.
@@ -414,6 +455,22 @@ TEST(StripeBilling, AnInvoiceBecomesAStripeInvoiceWithItsLines) {
     EXPECT_EQ(FakeStripe::field(create.body, "collection_method"), "send_invoice");
     EXPECT_EQ(FakeStripe::header(create, "Idempotency-Key"),
               "lake-invoice-" + rig.customer + "-" + rig.period + "-0");
+    EXPECT_EQ(FakeStripe::field(create.body, "description"), "Lake%20usage%2C%20" + rig.period);
+    // The line names Lake's usage product with an inline price, and is tagged like the invoice.
+    const auto& item = stripe.requests[2];
+    ASSERT_TRUE(item.url.ends_with("/v1/invoiceitems"));
+    EXPECT_EQ(FakeStripe::header(item, "Idempotency-Key"),
+              "lake-invoice-" + rig.customer + "-" + rig.period + "-0-line-0-p");
+    EXPECT_EQ(FakeStripe::field(item.body, "customer"), "cus_1");
+    EXPECT_EQ(FakeStripe::field(item.body, "invoice"), "in_1");
+    EXPECT_EQ(FakeStripe::field(item.body, "quantity"), "1");
+    EXPECT_EQ(FakeStripe::field(item.body, "price_data%5Bcurrency%5D"), "usd");
+    EXPECT_EQ(FakeStripe::field(item.body, "price_data%5Bproduct%5D"), "lake_usage");
+    EXPECT_EQ(FakeStripe::field(item.body, "price_data%5Bunit_amount%5D"), "2000");
+    EXPECT_EQ(FakeStripe::field(item.body, "amount"), "");
+    EXPECT_EQ(FakeStripe::field(item.body, "metadata%5Borama_app%5D"), "lake");
+    EXPECT_EQ(FakeStripe::field(item.body, "metadata%5Blake_instance%5D"), this_lake);
+    EXPECT_FALSE(FakeStripe::field(item.body, "description").empty());
     // The customer and the invoice are tagged as this Lake's (lake#855), beside lake's own keys,
     // and nothing lake sends carries Cloud v1's bare keys.
     const auto& customer = stripe.requests[0];
@@ -501,6 +558,15 @@ TEST(StripeBilling, StripesTotalIsLakesTotalToTheCent) {
     const auto requested = provider->request_payment({"c", "acme", "cus_9", 0}, invoice);
     ASSERT_TRUE(requested) << requested.error();
     EXPECT_EQ(stripe.amounts["in_1"], (std::vector<std::int64_t>{1, 1, -1}));
+    // The negative rounding line keeps the bare amount, since an inline price cannot be negative.
+    EXPECT_EQ(stripe.products["in_1"], (std::vector<std::string>{"lake_usage", "lake_usage", ""}));
+    const auto& rounding = stripe.requests[stripe.requests.size() - 2]; // before the finalize
+    ASSERT_TRUE(rounding.url.ends_with("/v1/invoiceitems"));
+    EXPECT_EQ(FakeStripe::header(rounding, "Idempotency-Key"), "lake-invoice-c-2026-09-0-rounding");
+    EXPECT_EQ(FakeStripe::field(rounding.body, "amount"), "-1");
+    EXPECT_EQ(FakeStripe::field(rounding.body, "currency"), "usd");
+    EXPECT_EQ(FakeStripe::field(rounding.body, "description"), "Rounding%20to%20the%20cent");
+    EXPECT_EQ(FakeStripe::field(rounding.body, "metadata%5Borama_app%5D"), "lake");
     // USD only, and a customer first.
     invoice.currency = "EUR";
     EXPECT_FALSE(provider->request_payment({"c", "acme", "cus_9", 1}, invoice));
@@ -515,6 +581,58 @@ TEST(StripeBilling, StripesTotalIsLakesTotalToTheCent) {
     const auto refused = wrong->provider_customer({"c", "acme", "", 0});
     ASSERT_FALSE(refused);
     EXPECT_EQ(refused.error().find("sk_test"), std::string::npos) << refused.error();
+    // Three lines under half a cent bill nothing each; lake's total is one cent, a positive
+    // rounding line of Lake's usage product.
+    invoice.lines = {{"usage", "predictions", "Predictions", "calls", 1, 0, 1, 4'000, 1, 4'000},
+                     {"usage", "calls", "Calls", "calls", 1, 0, 1, 4'000, 1, 4'000},
+                     {"usage", "searches", "Searches", "calls", 1, 0, 1, 4'000, 1, 4'000}};
+    invoice.total_micros = 12'000;
+    ASSERT_TRUE(provider->request_payment({"c", "acme", "cus_9", 2}, invoice));
+    EXPECT_EQ(stripe.amounts["in_2"], (std::vector<std::int64_t>{1}));
+    EXPECT_EQ(stripe.products["in_2"], (std::vector<std::string>{"lake_usage"}));
+}
+
+// Lake's products are the operator's to create in each account (lake#855): until it has, an issue
+// fails saying so, nothing is issued in lake, and the same issue goes through once it exists.
+TEST(StripeBilling, AMissingProductSaysTheOperatorCreatesIt) {
+    FakeStripe stripe;
+    stripe.catalog.clear();
+    StripeRig rig(stripe_providers(stripe));
+    const auto failed =
+        rig.call("issue_invoice", {{"customer_id", rig.customer}, {"period", rig.period}});
+    EXPECT_EQ(failed.error.code, "store_unavailable");
+    EXPECT_NE(failed.error.message.find("Stripe has no product lake_usage in this account; the "
+                                        "operator creates it (spec.payments)"),
+              std::string::npos)
+        << failed.error.message;
+    EXPECT_NE(failed.error.message.find("24 hours"), std::string::npos) << failed.error.message;
+    EXPECT_TRUE(rig.store->list_invoices(rig.customer)->empty()) << "nothing is issued";
+    EXPECT_EQ(stripe.items, 0);
+    EXPECT_EQ(stripe.status["in_1"], "draft") << "the Stripe invoice is left as it was";
+
+    // Any other refusal keeps Stripe's own message.
+    auto other = lake::api::stripe_payment_provider(
+        {std::string(test_key), std::string(test_webhook)},
+        std::string(this_lake),
+        [](const lake::api::StripeRequest&) {
+            return lake::api::StripeResponse{
+                400,
+                R"({"error":{"code":"resource_missing","param":"customer","message":"No such customer"}})",
+                {}};
+        },
+        "https://stripe.test");
+    const auto refused = other->provider_customer({"c", "acme", "", 0});
+    ASSERT_FALSE(refused);
+    EXPECT_NE(refused.error().find("No such customer"), std::string::npos) << refused.error();
+
+    // The operator creates the product; issuing again uses the same Stripe invoice.
+    stripe.catalog.insert(std::string(lake::api::stripe_usage_product));
+    const auto issued =
+        rig.call("issue_invoice", {{"customer_id", rig.customer}, {"period", rig.period}});
+    ASSERT_TRUE(issued.ok) << issued.error.message;
+    EXPECT_EQ(issued.value["provider_reference"], "in_1");
+    EXPECT_EQ(stripe.invoices, 1);
+    EXPECT_EQ(stripe.amounts["in_1"], std::vector<std::int64_t>{2000});
 }
 
 TEST(StripeBilling, WebhooksMoveTheInvoiceOncePerEvent) {

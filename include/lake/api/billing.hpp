@@ -69,12 +69,13 @@ struct PaymentNotice {
 };
 
 // A subscription to pay for an order through the provider's hosted checkout (lake#831): one line,
-// `amount_cents` a month in `currency`, for `quantity`; where the person returns after paying or
-// giving up; and lake's order id, which comes back on the provider's notice.
+// the order sheet's `offer` (private_warehouse, dedicated_cluster) at `unit_amount_cents` a month
+// in `currency`, for `quantity`; `description`, where it runs; where the person returns after
+// paying or giving up; and lake's order id, which comes back on the provider's notice.
 struct CheckoutRequest {
     std::string order_id;
-    std::string product_name;
-    std::string product_description;
+    std::string offer;
+    std::string description;
     std::int64_t unit_amount_cents = 0; // the monthly fee of one
     int quantity = 1;
     std::string currency = "usd";

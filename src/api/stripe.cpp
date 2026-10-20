@@ -93,6 +93,31 @@ std::string stripe_failure(std::string_view what, const StripeResponse& response
     return std::format("Stripe refused to {} (HTTP {}): {}", what, response.status, message);
 }
 
+// The product a refused request named, when Stripe answers that it does not exist
+// (resource_missing on `price_data[product]`, or `line_items[0][price_data][product]` for a
+// Checkout): the operator has not created Lake's products in this account yet. Empty for any other
+// refusal.
+std::string missing_product(const StripeResponse& response,
+                            const std::vector<std::pair<std::string, std::string>>& fields) {
+    const json body = json::parse(response.body, nullptr, false);
+    if (!body.is_object() || !body.contains("error") || !body["error"].is_object()) {
+        return {};
+    }
+    const json& error = body["error"];
+    const auto text = [&](const char* key) {
+        return error.contains(key) && error[key].is_string() ? error[key].get<std::string>()
+                                                             : std::string();
+    };
+    const std::string param = text("param");
+    if (text("code") != "resource_missing" ||
+        !(param == "price_data[product]" || param.ends_with("[price_data][product]"))) {
+        return {};
+    }
+    const auto named =
+        std::ranges::find(fields, param, &std::pair<std::string, std::string>::first);
+    return named == fields.end() ? std::string() : named->second;
+}
+
 // The tags on every object Lake creates in a Stripe account it shares with Orama Cloud v1 and with
 // other Lakes (orama-bridge#199, lake#855), as fields under `prefix` (`metadata`,
 // `subscription_data[metadata]`): orama_app=lake, and lake_instance, this Lake's public host, when
@@ -194,7 +219,7 @@ public:
             {"days_until_due", "30"},
             {"auto_advance", "false"},
             {"pending_invoice_items_behavior", "exclude"},
-            {"description", std::format("Orama Cloud usage, {}", invoice.period)},
+            {"description", std::format("Lake usage, {}", invoice.period)},
             {"metadata[lake_customer_id]", invoice.customer_id},
             {"metadata[lake_period]", invoice.period},
             {"metadata[lake_price_list_id]", invoice.plan_id}};
@@ -209,7 +234,8 @@ public:
         }
         // An invoice item per lake line with an amount, in cents; then, when rounding each line
         // to the cent does not add up to lake's total to the cent, one line with the difference.
-        // Lake's invoice is the source of truth for amounts.
+        // Lake's invoice is the source of truth for amounts. Each lake line's key ends in -p
+        // since its fields changed (lake#855): Stripe refuses a key sent again with other fields.
         std::int64_t items = 0;
         for (std::size_t index = 0; index < invoice.lines.size(); ++index) {
             const control::InvoiceLine& line = invoice.lines[index];
@@ -221,14 +247,12 @@ public:
             if (line.kind == "usage") {
                 description += std::format(" ({} {} billed)", line.billable, line.unit);
             }
-            auto item = post("/v1/invoiceitems",
-                             {{"customer", account.provider_customer_id},
-                              {"invoice", stripe_invoice},
-                              {"currency", "usd"},
-                              {"amount", std::to_string(cents)},
-                              {"description", description}},
-                             std::format("{}-line-{}", key, index),
-                             "add an invoice line");
+            auto item = add_item(account.provider_customer_id,
+                                 stripe_invoice,
+                                 cents,
+                                 description,
+                                 std::format("{}-line-{}-p", key, index),
+                                 "add an invoice line");
             if (!item) {
                 return std::unexpected(item.error());
             }
@@ -236,14 +260,12 @@ public:
         }
         const std::int64_t total = stripe_cents(invoice.total_micros);
         if (total != items) {
-            auto rounding = post("/v1/invoiceitems",
-                                 {{"customer", account.provider_customer_id},
-                                  {"invoice", stripe_invoice},
-                                  {"currency", "usd"},
-                                  {"amount", std::to_string(total - items)},
-                                  {"description", "Rounding to the cent"}},
-                                 key + "-rounding",
-                                 "add the rounding line");
+            auto rounding = add_item(account.provider_customer_id,
+                                     stripe_invoice,
+                                     total - items,
+                                     "Rounding to the cent",
+                                     key + "-rounding",
+                                     "add the rounding line");
             if (!rounding) {
                 return std::unexpected(rounding.error());
             }
@@ -281,13 +303,15 @@ public:
 
     std::expected<CheckoutSession, std::string>
     create_checkout(const CheckoutRequest& order) override {
-        if (order.order_id.empty() || order.unit_amount_cents <= 0 || order.quantity < 1 ||
-            order.success_url.empty() || order.cancel_url.empty()) {
+        const std::string_view product = stripe_offer_product(order.offer);
+        if (order.order_id.empty() || product.empty() || order.unit_amount_cents <= 0 ||
+            order.quantity < 1 || order.success_url.empty() || order.cancel_url.empty()) {
             return std::unexpected(
-                std::string("a checkout needs an order, an amount and its URLs"));
+                std::string("a checkout needs an order, an offer, an amount and its URLs"));
         }
-        // A subscription with the price inline (price_data), so the order sheet's configuration
-        // is the one source of prices; Stripe creates the customer from the email.
+        // A subscription to the offer's Lake product with the price inline (price_data), so the
+        // order sheet's configuration is the one source of prices; where it runs is the
+        // subscription's description. Stripe creates the customer from the email.
         std::vector<std::pair<std::string, std::string>> fields{
             {"mode", "subscription"},
             {"client_reference_id", order.order_id},
@@ -295,16 +319,15 @@ public:
             {"cancel_url", order.cancel_url},
             {"line_items[0][quantity]", std::to_string(order.quantity)},
             {"line_items[0][price_data][currency]", order.currency},
+            {"line_items[0][price_data][product]", std::string(product)},
             {"line_items[0][price_data][unit_amount]", std::to_string(order.unit_amount_cents)},
             {"line_items[0][price_data][recurring][interval]", "month"},
-            {"line_items[0][price_data][product_data][name]", order.product_name},
             {"metadata[lake_order_id]", order.order_id},
             {"subscription_data[metadata][lake_order_id]", order.order_id}};
         tag(fields, "metadata", instance_);
         tag(fields, "subscription_data[metadata]", instance_);
-        if (!order.product_description.empty()) {
-            fields.emplace_back("line_items[0][price_data][product_data][description]",
-                                order.product_description);
+        if (!order.description.empty()) {
+            fields.emplace_back("subscription_data[description]", order.description);
         }
         if (!order.customer_email.empty()) {
             fields.emplace_back("customer_email", order.customer_email);
@@ -335,6 +358,31 @@ public:
     }
 
 private:
+    // One invoice item of `cents` on a draft invoice, tagged as this Lake's. A positive amount is
+    // Lake's usage product at an inline price; a negative one (a rounding difference) keeps the
+    // bare amount, because an inline price cannot be negative.
+    std::expected<json, std::string> add_item(const std::string& customer,
+                                              const std::string& stripe_invoice,
+                                              std::int64_t cents,
+                                              const std::string& description,
+                                              const std::string& idempotency_key,
+                                              std::string_view what) {
+        std::vector<std::pair<std::string, std::string>> fields{{"customer", customer},
+                                                                {"invoice", stripe_invoice}};
+        if (cents > 0) {
+            fields.insert(fields.end(),
+                          {{"quantity", "1"},
+                           {"price_data[currency]", "usd"},
+                           {"price_data[product]", std::string(stripe_usage_product)},
+                           {"price_data[unit_amount]", std::to_string(cents)}});
+        } else {
+            fields.insert(fields.end(), {{"currency", "usd"}, {"amount", std::to_string(cents)}});
+        }
+        fields.emplace_back("description", description);
+        tag(fields, "metadata", instance_);
+        return post("/v1/invoiceitems", fields, idempotency_key, what);
+    }
+
     std::expected<json, std::string>
     post(const std::string& path,
          const std::vector<std::pair<std::string, std::string>>& fields,
@@ -350,6 +398,14 @@ private:
                            {"Idempotency-Key", idempotency_key}};
         const StripeResponse response = http_(request);
         if (!response.error.empty() || response.status < 200 || response.status >= 300) {
+            if (const std::string product = missing_product(response, fields); !product.empty()) {
+                // Stripe may save this answer under the key and replay it for 24 hours.
+                return std::unexpected(std::format(
+                    "Stripe has no product {} in this account; the operator creates it "
+                    "(spec.payments). Try again once it exists, and again after 24 hours if "
+                    "Stripe repeats this answer",
+                    product));
+            }
             return std::unexpected(stripe_failure(what, response));
         }
         json body = json::parse(response.body, nullptr, false);
@@ -384,6 +440,16 @@ std::int64_t stripe_cents(std::uint64_t micros) {
     const std::uint64_t cents = micros / 10'000 + (micros % 10'000 >= 5'000 ? 1 : 0);
     return static_cast<std::int64_t>(
         std::min<std::uint64_t>(cents, std::numeric_limits<std::int64_t>::max()));
+}
+
+std::string_view stripe_offer_product(std::string_view offer) {
+    if (offer == "private_warehouse") {
+        return stripe_private_warehouse_product;
+    }
+    if (offer == "dedicated_cluster") {
+        return stripe_dedicated_cluster_product;
+    }
+    return {};
 }
 
 std::expected<void, NoticeRejection>
