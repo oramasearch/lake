@@ -106,9 +106,20 @@ ever carries a key.
 
 ## Stripe
 
+**One account, several apps** (lake#855). Lake bills through the same Stripe account as Orama
+Cloud v1, and two Lakes can share it (orama-bridge#199). Every object lake creates there, a
+customer, an invoice or an order sheet Checkout Session and its subscription
+([orders.md](orders.md#paying)), carries `metadata[orama_app]=lake` and
+`metadata[lake_instance]`, the Lake's public host (`LAKE_PUBLIC_HOST`; left out when it is unset),
+beside lake's own `lake_*` keys. Lake never sets Cloud v1's bare keys `team_id`, `plan_id`,
+`addon_type` or `addon_config`: Cloud v1's webhook handlers read them, so a Lake object carrying
+one could be taken for Cloud v1's. A Customer is per app: a person who uses both products has two,
+and neither app reuses the other's `cus_` id. Events about objects that are not this Lake's are
+acknowledged and ignored ([below](#webhooks)).
+
 **Customers.** A lake account becomes one Stripe Customer (`POST /v1/customers`, name and
-`metadata[lake_customer_id]`) the first time one of its invoices is issued, so accounts that are never
-invoiced leave nothing in Stripe. Its id (`cus_...`) is kept in
+`metadata[lake_customer_id]`, with the tags above) the first time one of its invoices is issued, so
+accounts that are never invoiced leave nothing in Stripe. Its id (`cus_...`) is kept in
 `billing_accounts` (customer, provider, provider customer id), the account's billing row in
 PostgreSQL (decision 56), and reused for every later invoice.
 
@@ -117,7 +128,7 @@ PostgreSQL (decision 56), and reused for every later invoice.
 1. `POST /v1/invoices`: a draft for the customer, `currency=usd`, `collection_method=send_invoice`,
    `days_until_due=30`, `auto_advance=false`, `pending_invoice_items_behavior=exclude`, described
    as "Orama Cloud usage, `<month>`", with the month and the price list id
-   (`metadata[lake_price_list_id]`) in its metadata;
+   (`metadata[lake_price_list_id]`) in its metadata, beside `lake_customer_id` and the tags above;
 2. `POST /v1/invoiceitems`: one item per lake line with an amount, in cents (millionths rounded half
    up), described as the line is; when the rounded lines do not add up to lake's total rounded to the
    cent, one more item, **Rounding to the cent**, carries the difference;
@@ -134,6 +145,10 @@ customer, `lake-invoice-<customer>-<month>-<n>` for the invoice (n is the issue 
 then 1 after a void), with `-line-<i>`, `-rounding` and `-finalize` for the steps after it, and
 `lake-void-<invoice>` for a void. A retry of a failed issue within Stripe's 24 hours therefore gets
 Stripe's first answers back instead of a second invoice; an issue after a void is a new invoice.
+Stripe refuses a key sent again with other parameters, so a retry of an issue that failed under an
+older Lake whose request was different (lake#855 added the tags to the customer and the invoice) is
+refused with Stripe's idempotency error until the key expires, 24 hours after the first attempt;
+issue it again after that. Nothing is billed twice.
 Stripe's error message is kept, except on 401 and 403, where it can echo part of the key.
 
 **Payment.** The account pays on Stripe's hosted invoice page, by card or bank, from **Pay with
@@ -159,11 +174,25 @@ server's outbound client, injected as a `StripeHttp` the tests replace with a fa
 2. **Replays.** A `t` more than 300 seconds from lake's clock, either way, is `400
    stale_timestamp`: a captured request cannot be replayed later. Within the window, the event id
    decides.
-3. **Once per event.** Each applied event is recorded in `billing_payment_events` (provider, event
+3. **Whose event it is** (lake#855). Stripe cannot filter an endpoint's events by metadata, so in a
+   shared account each endpoint receives Cloud v1's and the other Lakes' events of the types it
+   subscribes to. After the signature check, and before anything is recorded, lake reads the
+   event's object (`parse_stripe_event`):
+
+   | Object | This Lake's when |
+   |---|---|
+   | An invoice (`invoice.*`) | its `metadata.lake_customer_id` is set (an invoice lake issued), or, for an invoice Stripe generated from a subscription, which does not copy the subscription's metadata, its `subscription_details.metadata.lake_order_id` is |
+   | A Checkout Session (`checkout.session.*`) | its `metadata.lake_order_id` is set |
+
+   and, in both, `lake_instance` is this Lake's public host or absent (an object tagged before
+   lake#855). Any other is foreign, Cloud v1's or another Lake's: the route answers `200
+   {"received": true, "ignored": true}` and writes no `billing_payment_events` row and no audit
+   event. An unsigned or stale foreign event is still refused (steps 1 and 2).
+4. **Once per event.** Each applied event is recorded in `billing_payment_events` (provider, event
    id, type, Stripe invoice, lake invoice), in the same transaction that moves the invoice. The same
    event again (Stripe's own retry, or a replay inside the window) answers `200 {"duplicate":
    true}` and changes nothing.
-4. **What moves.** Only a due invoice moves:
+5. **What moves.** Only a due invoice moves:
 
    | Event | Lake invoice | `provider_status` |
    |---|---|---|
@@ -173,8 +202,8 @@ server's outbound client, injected as a `StripeHttp` the tests replace with a fa
 
    A paid invoice is never voided or failed by a later event; a void lake asked for is confirmed
    (`provider_status` becomes `void`). Other event types answer `200 {"ignored": true}`; an invoice
-   lake did not issue answers `200 {"matched": false}`.
-5. **Audit.** Every event that moves an invoice is a central audit event (decision 52) on
+   tagged as this Lake's that lake did not issue answers `200 {"matched": false}`.
+6. **Audit.** Every event that moves an invoice is a central audit event (decision 52) on
    `customer/<id>/billing`, action `payment_notice`, kind `billing.invoice.paid`,
    `billing.invoice.void` or `billing.invoice.payment_failed`, principal `payment-provider`, with
    the event id and both invoice ids. Refused notices are recorded `denied` on `billing/stripe`,
@@ -187,7 +216,8 @@ over 1 MiB, and `503` (Stripe retries) when the keys or the store cannot be read
 `checkout.session.async_payment_succeeded`, `checkout.session.async_payment_failed` and
 `checkout.session.expired` for the apex order sheet's paid orders. They move a `cloud_orders` row
 (`pending_payment` → `paid` or `cancelled`), never an invoice, once per event id through the same
-`billing_payment_events` row; the order's event row carries them to the central audit log.
+`billing_payment_events` row; the order's event row carries them to the central audit log. A
+session that is not this Lake's (step 3) is ignored the same way.
 Contract: [orders.md](orders.md#paying).
 
 **Endpoint to register in the Stripe dashboard:** `https://<lake host>/billing/stripe/webhook`
@@ -539,11 +569,14 @@ POST /v1/record_invoice_payment
   cents; a customer made once and kept; an invoice with its items, finalize and hosted URL, every
   write with its own idempotency key; a retry after a failed step that bills once; Stripe's total
   equal to lake's to the cent; a void in lake voiding in Stripe; webhooks applying paid, failed and
-  void once per event id, refusing bad and stale signatures, acknowledging foreign and unknown
-  events, with the central audit; the keys from the environment: unset, half set and malformed
-  falling back to manual with a reason that names the variable in `billing_account`, `viewer` and
-  `server_info`, never a value, and rotation by restart (lake#628); and the route answering only
-  where the lake bills.
+  void once per event id, refusing bad and stale signatures, acknowledging unknown events, with the
+  central audit; the customer and invoice tagged `orama_app` and `lake_instance` and no Cloud v1
+  bare key sent (lake#855); Cloud v1's, untagged and another Lake's invoices, subscription invoices
+  included, ignored with no `billing_payment_events` row and no audit event, after the signature
+  check, while a Lake-tagged invoice lake did not issue stays `matched: false`; the keys from the
+  environment: unset, half set and malformed falling back to manual with a reason that names the
+  variable in `billing_account`, `viewer` and `server_info`, never a value, and rotation by restart
+  (lake#628); and the route answering only where the lake bills.
 - `PostgresBilling.PriceListsAndInvoicesFollowTheContract`,
   `PostgresBilling.PaymentProviderCustomersAndNoticesFollowTheContract` and
   `PostgresBilling.WorkloadResourcesAndClassRatesFollowTheContract` (`tests/test_postgres.cpp`):
@@ -568,5 +601,8 @@ POST /v1/record_invoice_payment
   in `PaymentProviders` (by which secret the mount holds, say), record the choice as a decision, and
   document how its payment notices reach lake. Stripe's choice is decision 57; revisit it if fees,
   regions or an enterprise install's own processor call for another.
-- A Stripe event lake should act on: map it in `parse_stripe_event` (`src/api/stripe.cpp`), add the
-  transition to `apply_payment_event` in both stores, and register it in the Stripe dashboard.
+- A Stripe event lake should act on: map it in `parse_stripe_event` (`src/api/stripe.cpp`), decide
+  whose its object is (`foreign_object`, with the `lake_*` key lake sets on it), add the transition
+  to `apply_payment_event` in both stores, and register it in the Stripe dashboard.
+- A new kind of Stripe object lake creates: tag it with `tag` in `src/api/stripe.cpp`
+  (`orama_app`, `lake_instance`) and give it a `lake_*` key, never one of Cloud v1's bare keys.

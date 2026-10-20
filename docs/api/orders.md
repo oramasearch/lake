@@ -181,6 +181,7 @@ lake-order-<id>-checkout`:
 | `line_items[0][price_data]` | `currency=usd`, `unit_amount` the offer's monthly fee in cents, `recurring[interval]=month`, `product_data[name]` "Lake <offer title>", `product_data[description]` where it runs |
 | `line_items[0][quantity]` | the order's quantity |
 | `client_reference_id`, `metadata[lake_order_id]`, `subscription_data[metadata][lake_order_id]` | the order id |
+| `metadata[orama_app]`, `metadata[lake_instance]`, and the same under `subscription_data[metadata]` | `lake` and the Lake's public host, the tags of a shared Stripe account (lake#855, [billing.md](billing.md#stripe)) |
 | `customer_email` | the contact email |
 | `success_url`, `cancel_url` | the status link with `&checkout=done` / `&checkout=cancelled` |
 
@@ -202,7 +203,10 @@ Checkout events, matched by the session id and applied once per event id (the sa
 | `checkout.session.async_payment_failed`, `checkout.session.expired` | `cancelled` |
 
 The answer is `{received, order_id, state, changed}`; a repeat delivery `{received, duplicate}`; a
-session lake did not start `{received, matched: false}` (audited as ignored). A late completion for
+session tagged as this Lake's that it did not start `{received, matched: false}` (audited as
+ignored). A session without `metadata.lake_order_id` (another app's) or whose `lake_instance` names
+another Lake is `{received, ignored: true}`, with nothing recorded (lake#855,
+[billing.md](billing.md#webhooks)). A late completion for
 a `cancelled` order changes nothing. Subscribe the Stripe endpoint to these four events besides the
 invoice events. Test mode only until lake#754 (Stripe live).
 

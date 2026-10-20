@@ -15,6 +15,13 @@ key.
   `LAKE_BILLING=on` on the deployment first ([aks.md](aks.md)).
 - **The schema has `0074_payment_provider`** (guard `payment_provider_guard`) or later. It does on
   every Lake built after 2026-10-11.
+- **The account is shared** with Orama Cloud v1 and, in live mode, with the other production Lake
+  (lake#855, [../api/billing.md](../api/billing.md#stripe)). Lake tags every customer, invoice and
+  Checkout Session it creates with `metadata[orama_app]=lake` and `metadata[lake_instance]`, its
+  `LAKE_PUBLIC_HOST`, and answers events about other apps' and other Lakes' objects `200
+  {"received": true, "ignored": true}` without recording them. So `LAKE_PUBLIC_HOST` must be set,
+  different on every Lake that shares the account, and kept: a Lake whose host changes takes the
+  objects it tagged before for another Lake's.
 - **Use test mode first.** Do the whole runbook with Stripe's test keys (`sk_test_…`) and a test
   card; switch to live keys only after the check passes.
 - **The keys are Orama's, never a customer's.** They are platform environment variables: a
@@ -82,10 +89,13 @@ In the Lake service's **Variables**, set `LAKE_STRIPE_SECRET_KEY` and `LAKE_STRI
    date, any CVC).
 4. Within a minute the invoice in Lake reads **Paid**. In the Stripe dashboard, **Webhooks → the
    endpoint → Event deliveries** shows `invoice.paid` delivered with Lake's `200`.
+5. In the Stripe dashboard, the invoice's and its customer's **Metadata** show `orama_app` `lake`
+   and `lake_instance` this Lake's host.
 
 If the invoice stays open: a delivery answered `400` means a wrong webhook secret (re-check step 1's
 `whsec_…` and step 2); `404` means Lake has no Stripe keys (step 2 not applied or Lake not
-restarted). Stripe retries failed deliveries for three days, so a fixed key catches up.
+restarted); `200` with `"ignored": true` means the invoice's `lake_instance` is not this Lake's
+`LAKE_PUBLIC_HOST`. Stripe retries failed deliveries for three days, so a fixed key catches up.
 
 ## 4. Go live
 

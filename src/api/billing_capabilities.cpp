@@ -897,6 +897,12 @@ liquid::runtime::task<NoticeOutcome> receive_payment_notice(PaymentProviders& pr
                          notice.error().code,
                          notice.error().message);
     }
+    if (notice->foreign) {
+        // Another app's or another Lake's object in a shared Stripe account (lake#855): every
+        // endpoint receives every event of its types, so it is acknowledged with nothing recorded,
+        // neither a payment event row nor an audit event.
+        co_return NoticeOutcome{200, {{"received", true}, {"ignored", true}}};
+    }
     if (!notice->order_state.empty()) {
         // An order of the apex order sheet (lake#831, docs/api/orders.md#paying): applied once per
         // event id, from pending_payment only. The order's event row is what reaches the central

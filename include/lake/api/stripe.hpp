@@ -64,17 +64,25 @@ std::string stripe_signature_header(std::string_view body,
 
 // What lake does with a verified event: invoice.paid moves a due invoice to paid,
 // invoice.voided to void, invoice.payment_failed keeps it due with provider_status
-// payment_failed; any other event is acknowledged and ignored.
-std::expected<PaymentNotice, NoticeRejection> parse_stripe_event(std::string_view body);
+// payment_failed; any other event is acknowledged and ignored. An invoice or Checkout event whose
+// object is not this Lake's is `foreign` (docs/api/billing.md#webhooks): it has no
+// lake_customer_id (an invoice) or lake_order_id (a session, or an invoice of its subscription),
+// or its lake_instance names a Lake other than `instance`, this Lake's public host.
+std::expected<PaymentNotice, NoticeRejection> parse_stripe_event(std::string_view body,
+                                                                 std::string_view instance);
 
 // Whether a value looks like a Stripe secret key (sk_ or rk_) or a webhook secret (whsec_).
 bool stripe_secret_key_shape(std::string_view key);
 bool stripe_webhook_secret_shape(std::string_view secret);
 
 // The Stripe provider: customers, invoices with an invoice item per lake line, finalization and
-// the hosted invoice URL, voids, and webhook events. `base` is Stripe's API origin (a fake's in
-// tests).
-std::shared_ptr<PaymentProvider> stripe_payment_provider(
-    StripeKeys keys, StripeHttp http, std::string base = std::string(stripe_api_base));
+// the hosted invoice URL, voids, and webhook events. `instance` is this Lake's public host
+// (LAKE_PUBLIC_HOST), tagged on every object it creates and checked on every event, since two
+// Lakes can bill through one account. `base` is Stripe's API origin (a fake's in tests).
+std::shared_ptr<PaymentProvider>
+stripe_payment_provider(StripeKeys keys,
+                        std::string instance,
+                        StripeHttp http,
+                        std::string base = std::string(stripe_api_base));
 
 } // namespace lake::api

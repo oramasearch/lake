@@ -63,6 +63,9 @@ struct PaymentNotice {
     std::string customer;
     std::string subscription;
     std::string order_detail;
+    // The object is another app's or another Lake's in a shared Stripe account (lake#855): it is
+    // acknowledged and nothing is recorded.
+    bool foreign = false;
 };
 
 // A subscription to pay for an order through the provider's hosted checkout (lake#831): one line,
@@ -195,7 +198,8 @@ struct NoticeOutcome {
 
 // A provider's payment notice (POST /billing/stripe/webhook): checks the signature through the
 // current provider (once more with fresh keys when it fails), applies the event once per event id
-// (billing_payment_events), moves the invoice, and records the outcome in the central audit.
+// (billing_payment_events), moves the invoice, and records the outcome in the central audit. A
+// foreign notice is acknowledged (`ignored`) with nothing recorded.
 // 400 for a bad signature or a stale timestamp, 404 where the provider takes no notices, 503 when
 // the keys or the store cannot be read (the provider tries again), 200 otherwise, a duplicate
 // included.

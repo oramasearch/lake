@@ -1,7 +1,8 @@
 // Stripe, lake's payment provider (decision 57, lake#620, docs/api/billing.md#stripe): lake's own
 // REST client against a fake Stripe, the webhook signature and its tolerance window, notices
-// applied once per event id, the keys read from lake's secret store with rotation, and the
-// manual provider when they are absent.
+// applied once per event id, other apps' and other Lakes' events ignored in a shared account
+// (lake#855), the keys read from the environment with rotation, and the manual provider when
+// they are absent.
 
 #include <gtest/gtest.h>
 
@@ -37,6 +38,9 @@ using nlohmann::json;
 constexpr std::string_view kek = "6c616b652d776f726b73706163652d7265636f7264732d746573742d6b656b31";
 constexpr std::string_view test_key = "sk_test_lake620fakekey0001";
 constexpr std::string_view test_webhook = "whsec_lake620fakesecret0001";
+// This Lake's public host, and another Lake's billing through the same Stripe account.
+constexpr std::string_view this_lake = "shared.lake.test";
+constexpr std::string_view other_lake = "shared-us.lake.test";
 
 std::string month_name(std::chrono::sys_days day) {
     return std::format("{:%Y-%m}", day);
@@ -154,12 +158,17 @@ struct FakeStripe {
     }
 };
 
-// A Stripe webhook event for a Stripe invoice.
-std::string event(const std::string& id, const std::string& type, const std::string& invoice) {
-    return json{{"id", id},
-                {"object", "event"},
-                {"type", type},
-                {"data", {{"object", {{"id", invoice}, {"object", "invoice"}}}}}}
+// A Stripe webhook event for a Stripe invoice whose metadata is `metadata`: by default an invoice
+// lake issued (lake_customer_id), and with none, another app's.
+std::string event(const std::string& id,
+                  const std::string& type,
+                  const std::string& invoice,
+                  const json& metadata = {{"lake_customer_id", "c"}}) {
+    return json{
+        {"id", id},
+        {"object", "event"},
+        {"type", type},
+        {"data", {{"object", {{"id", invoice}, {"object", "invoice"}, {"metadata", metadata}}}}}}
         .dump();
 }
 
@@ -247,8 +256,11 @@ struct StripeRig {
 };
 
 std::shared_ptr<lake::api::PaymentProviders> stripe_providers(FakeStripe& stripe) {
-    return lake::api::fixed_payment_providers(lake::api::stripe_payment_provider(
-        {std::string(test_key), std::string(test_webhook)}, stripe.http(), "https://stripe.test"));
+    return lake::api::fixed_payment_providers(
+        lake::api::stripe_payment_provider({std::string(test_key), std::string(test_webhook)},
+                                           std::string(this_lake),
+                                           stripe.http(),
+                                           "https://stripe.test"));
 }
 
 TEST(StripeSignature, ChecksTheHmacAndTheToleranceWindow) {
@@ -298,23 +310,66 @@ TEST(StripeClient, FormsCentsAndEvents) {
     EXPECT_TRUE(lake::api::stripe_webhook_secret_shape(test_webhook));
     EXPECT_FALSE(lake::api::stripe_webhook_secret_shape("sk_test_wrongkind0001"));
 
-    const auto paid = lake::api::parse_stripe_event(event("evt_1", "invoice.paid", "in_9"));
+    const auto parse = [](const std::string& body) {
+        return lake::api::parse_stripe_event(body, this_lake);
+    };
+    const auto paid = parse(event("evt_1", "invoice.paid", "in_9"));
     ASSERT_TRUE(paid);
     EXPECT_EQ(paid->reference, "in_9");
     EXPECT_EQ(paid->state, "paid");
-    const auto failed =
-        lake::api::parse_stripe_event(event("evt_2", "invoice.payment_failed", "in_9"));
+    EXPECT_FALSE(paid->foreign);
+    const auto failed = parse(event("evt_2", "invoice.payment_failed", "in_9"));
     ASSERT_TRUE(failed);
     EXPECT_EQ(failed->state, "");
     EXPECT_EQ(failed->provider_status, "payment_failed");
-    const auto voided = lake::api::parse_stripe_event(event("evt_3", "invoice.voided", "in_9"));
+    const auto voided = parse(event("evt_3", "invoice.voided", "in_9"));
     ASSERT_TRUE(voided);
     EXPECT_EQ(voided->state, "void");
-    const auto other = lake::api::parse_stripe_event(event("evt_4", "customer.created", "cus_1"));
+    const auto other = parse(event("evt_4", "customer.created", "cus_1"));
     ASSERT_TRUE(other);
     EXPECT_TRUE(other->state.empty() && other->provider_status.empty());
-    EXPECT_FALSE(lake::api::parse_stripe_event("not json"));
-    EXPECT_FALSE(lake::api::parse_stripe_event(R"({"type":"invoice.paid"})"));
+    EXPECT_FALSE(parse("not json"));
+    EXPECT_FALSE(parse(R"({"type":"invoice.paid"})"));
+}
+
+// Whose invoice an event is about, in a Stripe account shared with Cloud v1 and other Lakes
+// (lake#855): lake_customer_id marks an invoice lake issued, lake_instance which Lake issued it,
+// and an invoice Stripe generated from a subscription carries the subscription's metadata in
+// subscription_details, never in its own.
+TEST(StripeClient, AnInvoiceThatIsNotThisLakesIsForeign) {
+    const auto foreign = [](const json& object) {
+        const json body{{"id", "evt_1"},
+                        {"object", "event"},
+                        {"type", "invoice.paid"},
+                        {"data", {{"object", object}}}};
+        const auto notice = lake::api::parse_stripe_event(body.dump(), this_lake);
+        EXPECT_TRUE(notice);
+        return notice && notice->foreign;
+    };
+    const auto invoice = [](const json& metadata) {
+        return json{{"id", "in_1"}, {"object", "invoice"}, {"metadata", metadata}};
+    };
+    // This Lake's, tagged or from before lake_instance existed.
+    EXPECT_FALSE(foreign(invoice({{"lake_customer_id", "c"}, {"lake_instance", this_lake}})));
+    EXPECT_FALSE(foreign(invoice({{"lake_customer_id", "c"}})));
+    // Cloud v1's (its bare keys, or nothing at all) and another Lake's.
+    EXPECT_TRUE(foreign(invoice({{"team_id", "t"}, {"plan_id", "p"}})));
+    EXPECT_TRUE(foreign(invoice(json::object())));
+    EXPECT_TRUE(foreign({{"id", "in_1"}, {"object", "invoice"}}));
+    EXPECT_TRUE(foreign(invoice({{"lake_customer_id", "c"}, {"lake_instance", other_lake}})));
+    EXPECT_TRUE(foreign(invoice({{"lake_customer_id", 7}})));
+    // An invoice of an order sheet subscription: this Lake's, another Lake's, or Cloud v1's.
+    const auto generated = [](const json& subscription) {
+        return json{{"id", "in_2"},
+                    {"object", "invoice"},
+                    {"metadata", json::object()},
+                    {"subscription_details", {{"metadata", subscription}}}};
+    };
+    EXPECT_FALSE(foreign(generated({{"lake_order_id", "o"}, {"lake_instance", this_lake}})));
+    EXPECT_TRUE(foreign(generated({{"lake_order_id", "o"}, {"lake_instance", other_lake}})));
+    EXPECT_TRUE(foreign(generated({{"team_id", "t"}})));
+    EXPECT_TRUE(
+        foreign({{"id", "in_2"}, {"object", "invoice"}, {"subscription_details", nullptr}}));
 }
 
 TEST(StripeBilling, AnInvoiceBecomesAStripeInvoiceWithItsLines) {
@@ -359,6 +414,21 @@ TEST(StripeBilling, AnInvoiceBecomesAStripeInvoiceWithItsLines) {
     EXPECT_EQ(FakeStripe::field(create.body, "collection_method"), "send_invoice");
     EXPECT_EQ(FakeStripe::header(create, "Idempotency-Key"),
               "lake-invoice-" + rig.customer + "-" + rig.period + "-0");
+    // The customer and the invoice are tagged as this Lake's (lake#855), beside lake's own keys,
+    // and nothing lake sends carries Cloud v1's bare keys.
+    const auto& customer = stripe.requests[0];
+    ASSERT_TRUE(customer.url.ends_with("/v1/customers"));
+    for (const auto* request : {&customer, &create}) {
+        EXPECT_EQ(FakeStripe::field(request->body, "metadata%5Blake_customer_id%5D"), rig.customer);
+        EXPECT_EQ(FakeStripe::field(request->body, "metadata%5Borama_app%5D"), "lake");
+        EXPECT_EQ(FakeStripe::field(request->body, "metadata%5Blake_instance%5D"), this_lake);
+    }
+    for (const auto& request : stripe.requests) {
+        for (const char* bare : {"team_id", "plan_id", "addon_type", "addon_config"}) {
+            EXPECT_EQ(request.body.find(std::format("%5B{}%5D", bare)), std::string::npos)
+                << request.url << " sets " << bare;
+        }
+    }
 
     // Paid through Stripe, never by hand.
     EXPECT_EQ(rig.call("record_invoice_payment", {{"invoice_id", issued.value["id"]}}).error.code,
@@ -413,8 +483,11 @@ TEST(StripeBilling, ARetryAfterAFailedStepNeverBillsTwice) {
 
 TEST(StripeBilling, StripesTotalIsLakesTotalToTheCent) {
     FakeStripe stripe;
-    auto provider = lake::api::stripe_payment_provider(
-        {std::string(test_key), std::string(test_webhook)}, stripe.http(), "https://stripe.test");
+    auto provider =
+        lake::api::stripe_payment_provider({std::string(test_key), std::string(test_webhook)},
+                                           std::string(this_lake),
+                                           stripe.http(),
+                                           "https://stripe.test");
     lake::control::Invoice invoice;
     invoice.customer_id = "c";
     invoice.period = "2026-09";
@@ -436,6 +509,7 @@ TEST(StripeBilling, StripesTotalIsLakesTotalToTheCent) {
     // A wrong key is refused without echoing it.
     auto wrong =
         lake::api::stripe_payment_provider({"sk_test_notthekey00000001", std::string(test_webhook)},
+                                           std::string(this_lake),
                                            stripe.http(),
                                            "https://stripe.test");
     const auto refused = wrong->provider_customer({"c", "acme", "", 0});
@@ -492,13 +566,18 @@ TEST(StripeBilling, WebhooksMoveTheInvoiceOncePerEvent) {
     EXPECT_EQ(read().state, "paid");
     EXPECT_EQ(read().provider_status, "paid");
 
-    // Events lake does not act on, and invoices that are not lake's, are acknowledged.
+    // Events lake does not act on, another app's invoice, and an invoice tagged as lake's that it
+    // did not issue, are acknowledged.
     const auto other = rig.signed_notice(event("evt_other", "customer.created", "cus_1"));
     EXPECT_EQ(other.status, 200);
     EXPECT_EQ(other.body["ignored"], true);
-    const auto foreign = rig.signed_notice(event("evt_foreign", "invoice.paid", "in_999"));
+    const auto foreign =
+        rig.signed_notice(event("evt_foreign", "invoice.paid", "in_999", json::object()));
     EXPECT_EQ(foreign.status, 200);
-    EXPECT_EQ(foreign.body["matched"], false);
+    EXPECT_EQ(foreign.body["ignored"], true);
+    const auto unknown = rig.signed_notice(event("evt_unknown", "invoice.paid", "in_999"));
+    EXPECT_EQ(unknown.status, 200);
+    EXPECT_EQ(unknown.body["matched"], false);
 
     // Every notice that moved an invoice, and every refusal, is in the central audit.
     const auto events = lake::test::audit_events(*rig.store, {.limit = 500});
@@ -521,6 +600,51 @@ TEST(StripeBilling, WebhooksMoveTheInvoiceOncePerEvent) {
     }
     EXPECT_EQ(paid_events, 1);
     EXPECT_EQ(denied, 3);
+}
+
+// One Stripe account, several apps (lake#855): every endpoint receives every event of its types,
+// so an invoice of Cloud v1 or of another Lake is acknowledged before anything is recorded, even
+// one whose Stripe id is one of this Lake's.
+TEST(StripeBilling, AnotherAppsOrAnotherLakesInvoiceRecordsNothing) {
+    FakeStripe stripe;
+    StripeRig rig(stripe_providers(stripe));
+    const auto issued =
+        rig.call("issue_invoice", {{"customer_id", rig.customer}, {"period", rig.period}});
+    ASSERT_TRUE(issued.ok) << issued.error.message;
+    const std::string invoice_id = issued.value["id"];
+
+    const std::vector<std::pair<std::string, json>> foreign = {
+        {"evt_cloud_v1", {{"team_id", "team_1"}, {"plan_id", "plan_1"}}},
+        {"evt_untagged", json::object()},
+        {"evt_other_lake", {{"lake_customer_id", rig.customer}, {"lake_instance", other_lake}}}};
+    for (const auto& [id, metadata] : foreign) {
+        const auto ignored = rig.signed_notice(event(id, "invoice.paid", "in_1", metadata));
+        EXPECT_EQ(ignored.status, 200) << id;
+        EXPECT_EQ(ignored.body, (json{{"received", true}, {"ignored", true}})) << id;
+    }
+    EXPECT_EQ(rig.store->get_invoice(invoice_id)->state, "due");
+    // No billing_payment_events row: each event id is still unused. No audit event names one.
+    for (const auto& [id, metadata] : foreign) {
+        const auto unused = rig.store->apply_payment_event({"stripe", id, "invoice.paid"});
+        ASSERT_TRUE(unused) << unused.error().message;
+        EXPECT_FALSE(unused->duplicate) << id;
+    }
+    const auto events = lake::test::audit_events(*rig.store, {.limit = 500});
+    ASSERT_TRUE(events) << events.error().message;
+    for (const auto& entry : *events) {
+        EXPECT_NE(entry.draft.action, "payment_notice") << entry.draft.details.dump();
+    }
+    // The signature still comes first: an unsigned foreign event is refused.
+    EXPECT_EQ(rig.notice(event("evt_unsigned", "invoice.paid", "in_1", json::object()), "").status,
+              400);
+    // This Lake's own tag is this Lake's.
+    const auto own = rig.signed_notice(
+        event("evt_own",
+              "invoice.paid",
+              "in_1",
+              {{"lake_customer_id", rig.customer}, {"lake_instance", this_lake}}));
+    EXPECT_EQ(own.body["state"], "paid");
+    EXPECT_EQ(rig.store->get_invoice(invoice_id)->state, "paid");
 }
 
 TEST(StripeBilling, AVoidNoticeVoidsADueInvoice) {
@@ -559,7 +683,8 @@ TEST(StripeBilling, KeysComeFromTheEnvironmentAndAChangeTakesARestart) {
     const lake::api::StripeProviderFactory factory =
         [&](const lake::api::StripeKeys& keys) -> std::shared_ptr<lake::api::PaymentProvider> {
         ++built;
-        return lake::api::stripe_payment_provider(keys, stripe.http(), "https://stripe.test");
+        return lake::api::stripe_payment_provider(
+            keys, std::string(this_lake), stripe.http(), "https://stripe.test");
     };
     const std::string key(test_key);
     const std::string webhook(test_webhook);
