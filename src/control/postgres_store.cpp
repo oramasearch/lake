@@ -7245,6 +7245,72 @@ public:
         });
     }
 
+    // ---- billing contacts (migration 0090, lake#857, docs/api/billing.md#billing-contact) ----
+
+    Result<std::optional<BillingContact>> billing_contact(const std::string& customer_id) override {
+        return with_tx<std::optional<BillingContact>>(
+            [&](pqxx::work& tx) -> Result<std::optional<BillingContact>> {
+                if (tx.exec_params("SELECT 1 FROM customers WHERE id = $1::uuid", customer_id)
+                        .empty()) {
+                    return std::unexpected(StoreError{"not_found", "no customer " + customer_id});
+                }
+                const pqxx::result rows = tx.exec_params(
+                    "SELECT email, name, line1, line2, city, postal_code, state, country, "
+                    "to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') "
+                    "FROM billing_contacts WHERE customer_id = $1::uuid",
+                    customer_id);
+                if (rows.empty()) {
+                    return std::optional<BillingContact>();
+                }
+                const pqxx::row row = rows[0];
+                return BillingContact{customer_id,
+                                      row[0].as<std::string>(),
+                                      row[1].as<std::string>(),
+                                      row[2].as<std::string>(),
+                                      row[3].as<std::string>(),
+                                      row[4].as<std::string>(),
+                                      row[5].as<std::string>(),
+                                      row[6].as<std::string>(),
+                                      row[7].as<std::string>(),
+                                      row[8].as<std::string>()};
+            });
+    }
+
+    Result<BillingContact> set_billing_contact(const BillingContact& contact) override {
+        if (const auto problem = billing_contact_problem(contact)) {
+            return std::unexpected(
+                StoreError{"invalid_input",
+                           "billing contact " + problem->field + " must be " + problem->message});
+        }
+        return with_tx<BillingContact>([&](pqxx::work& tx) -> Result<BillingContact> {
+            if (tx.exec_params("SELECT 1 FROM customers WHERE id = $1::uuid", contact.customer_id)
+                    .empty()) {
+                return std::unexpected(
+                    StoreError{"not_found", "no customer " + contact.customer_id});
+            }
+            const pqxx::result rows = tx.exec_params(
+                "INSERT INTO billing_contacts (customer_id, email, name, line1, line2, city, "
+                "postal_code, state, country) VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, $9) "
+                "ON CONFLICT (customer_id) DO UPDATE SET email = EXCLUDED.email, name = "
+                "EXCLUDED.name, line1 = EXCLUDED.line1, line2 = EXCLUDED.line2, city = "
+                "EXCLUDED.city, postal_code = EXCLUDED.postal_code, state = EXCLUDED.state, "
+                "country = EXCLUDED.country, updated_at = now() RETURNING "
+                "to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"')",
+                contact.customer_id,
+                contact.email,
+                contact.name,
+                contact.line1,
+                contact.line2,
+                contact.city,
+                contact.postal_code,
+                contact.state,
+                contact.country);
+            BillingContact stored = contact;
+            stored.updated_at = rows[0][0].as<std::string>();
+            return stored;
+        });
+    }
+
     // Cloud orders (lake#831, migration 0089, docs/api/orders.md).
     static constexpr const char* cloud_order_columns =
         "id::text, to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), "

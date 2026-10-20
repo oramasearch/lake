@@ -59,9 +59,9 @@ std::int64_t unix_now() {
         .count();
 }
 
-// Stripe as far as lake uses it: customers, invoices, invoice items, finalize and void, with
-// Stripe's idempotency (a repeated Idempotency-Key answers the first successful answer), the
-// products the operator created in the account (lake#855), and the customers it has (lake#856).
+// Stripe as far as lake uses it: customers and their updates, invoices, invoice items, finalize and
+// void, with Stripe's idempotency (a repeated Idempotency-Key answers the first successful answer),
+// the products the operator created in the account (lake#855), and the customers it has (lake#856).
 struct FakeStripe {
     std::mutex mutex;
     std::vector<lake::api::StripeRequest> requests;
@@ -80,6 +80,8 @@ struct FakeStripe {
     int customer_reads = 0;
     int customer_read_status = 0; // the status a customer read fails with; 0, none
     bool fail_finalize = false;
+    bool fail_customer_update = false;
+    int customer_updates = 0;
 
     static std::string field(std::string_view body, std::string_view name) {
         const std::string key = std::string(name) + "=";
@@ -154,6 +156,13 @@ struct FakeStripe {
             const std::string id = std::format("cus_{}", ++customers);
             known_customers.insert(id);
             return {200, json{{"id", id}}.dump(), {}};
+        }
+        if (path.starts_with("/v1/customers/")) {
+            if (fail_customer_update) {
+                return {400, R"({"error":{"message":"Invalid address: no such postal code"}})", {}};
+            }
+            ++customer_updates;
+            return {200, json{{"id", path.substr(14)}}.dump(), {}};
         }
         if (path == "/v1/invoices") {
             const std::string id = std::format("in_{}", ++invoices);
@@ -519,6 +528,9 @@ TEST(StripeBilling, AnInvoiceBecomesAStripeInvoiceWithItsLines) {
     // and nothing lake sends carries Cloud v1's bare keys.
     const auto& customer = stripe.requests[0];
     ASSERT_TRUE(customer.url.ends_with("/v1/customers"));
+    EXPECT_EQ(FakeStripe::field(customer.body, "name"), "acme") << "the account's name";
+    EXPECT_EQ(FakeStripe::field(customer.body, "email"), "") << "no billing contact, no email";
+    EXPECT_EQ(customer.body.find("address"), std::string::npos);
     for (const auto* request : {&customer, &create}) {
         EXPECT_EQ(FakeStripe::field(request->body, "metadata%5Blake_customer_id%5D"), rig.customer);
         EXPECT_EQ(FakeStripe::field(request->body, "metadata%5Borama_app%5D"), "lake");
@@ -548,6 +560,87 @@ TEST(StripeBilling, AnInvoiceBecomesAStripeInvoiceWithItsLines) {
     EXPECT_EQ(stripe.customers, 1) << "the kept customer is reused";
     EXPECT_EQ(FakeStripe::header(stripe.requests[stripe.requests.size() - 3], "Idempotency-Key"),
               "lake-invoice-" + rig.customer + "-" + rig.period + "-1");
+}
+
+// lake#857: the billing contact reaches the Stripe customer, when it is created at the first
+// invoice and at every later save of the contact. A refused update keeps the contact lake stored.
+TEST(StripeBilling, TheBillingContactReachesTheStripeCustomer) {
+    FakeStripe stripe;
+    StripeRig rig(stripe_providers(stripe));
+    const json contact{{"customer_id", rig.customer},
+                       {"email", "ap@acme.test"},
+                       {"name", "Acme GmbH"},
+                       {"line1", "Hauptstrasse 1"},
+                       {"city", "Berlin"},
+                       {"postal_code", "10115"},
+                       {"country", "DE"}};
+    // No Stripe customer before the first invoice: the contact waits for it.
+    const auto saved = rig.call("set_billing_contact", contact);
+    ASSERT_TRUE(saved.ok) << saved.error.message;
+    EXPECT_EQ(saved.value["provider_update"], "none");
+    EXPECT_TRUE(stripe.requests.empty());
+
+    // The customer is created with the contact's email, name and the address fields it has.
+    const auto issued =
+        rig.call("issue_invoice", {{"customer_id", rig.customer}, {"period", rig.period}});
+    ASSERT_TRUE(issued.ok) << issued.error.message;
+    const auto& created = stripe.requests[0];
+    ASSERT_TRUE(created.url.ends_with("/v1/customers")) << created.url;
+    EXPECT_EQ(FakeStripe::field(created.body, "email"), "ap%40acme.test");
+    EXPECT_EQ(FakeStripe::field(created.body, "name"), "Acme%20GmbH");
+    EXPECT_EQ(FakeStripe::field(created.body, "address%5Bline1%5D"), "Hauptstrasse%201");
+    EXPECT_EQ(FakeStripe::field(created.body, "address%5Bcity%5D"), "Berlin");
+    EXPECT_EQ(FakeStripe::field(created.body, "address%5Bpostal_code%5D"), "10115");
+    EXPECT_EQ(FakeStripe::field(created.body, "address%5Bcountry%5D"), "DE");
+    EXPECT_EQ(created.body.find("address%5Bline2%5D"), std::string::npos);
+    EXPECT_EQ(created.body.find("address%5Bstate%5D"), std::string::npos);
+    EXPECT_EQ(FakeStripe::field(created.body, "metadata%5Blake_customer_id%5D"), rig.customer);
+    EXPECT_EQ(FakeStripe::field(created.body, "metadata%5Borama_app%5D"), "lake");
+
+    // A later save updates that customer with every address field, so a removed one is cleared.
+    auto moved = contact;
+    moved["email"] = "billing@acme.test";
+    moved["line1"] = "Neue Strasse 2";
+    const auto updated = rig.call("set_billing_contact", moved);
+    ASSERT_TRUE(updated.ok) << updated.error.message;
+    EXPECT_EQ(updated.value["provider_update"], "updated");
+    EXPECT_FALSE(updated.value.contains("provider_error"));
+    EXPECT_EQ(stripe.customer_updates, 1);
+    EXPECT_EQ(stripe.customers, 1) << "the kept customer is updated, never made again";
+    const auto update = stripe.requests.back();
+    EXPECT_EQ(update.url, "https://stripe.test/v1/customers/cus_1");
+    EXPECT_EQ(FakeStripe::field(update.body, "email"), "billing%40acme.test");
+    EXPECT_EQ(FakeStripe::field(update.body, "name"), "Acme%20GmbH");
+    EXPECT_EQ(FakeStripe::field(update.body, "address%5Bline1%5D"), "Neue%20Strasse%202");
+    EXPECT_NE(("&" + update.body + "&").find("&address%5Bline2%5D=&"), std::string::npos)
+        << update.body;
+    EXPECT_EQ(FakeStripe::header(update, "Idempotency-Key"),
+              "lake-customer-" + rig.customer + "-contact-" +
+                  updated.value["contact"]["updated_at"].get<std::string>());
+
+    // With no name or address: the account's name, and the address cleared.
+    const auto bare =
+        rig.call("set_billing_contact", {{"customer_id", rig.customer}, {"email", "ap@acme.test"}});
+    ASSERT_TRUE(bare.ok) << bare.error.message;
+    EXPECT_EQ(bare.value["provider_update"], "updated");
+    const auto cleared = stripe.requests.back();
+    EXPECT_EQ(FakeStripe::field(cleared.body, "name"), "acme");
+    EXPECT_NE(("&" + cleared.body + "&").find("&address=&"), std::string::npos) << cleared.body;
+    EXPECT_EQ(cleared.body.find("address%5B"), std::string::npos);
+
+    // Stripe refuses an update: the contact stays saved, and the refusal is reported.
+    stripe.fail_customer_update = true;
+    const auto refused = rig.call("set_billing_contact", contact);
+    ASSERT_TRUE(refused.ok) << refused.error.message;
+    EXPECT_EQ(refused.value["provider_update"], "failed");
+    EXPECT_NE(refused.value["provider_error"].get<std::string>().find("no such postal code"),
+              std::string::npos)
+        << refused.value.dump();
+    const auto account = rig.call("billing_account", {{"customer_id", rig.customer}});
+    ASSERT_TRUE(account.ok) << account.error.message;
+    EXPECT_EQ(account.value["contact"]["name"], "Acme GmbH");
+    EXPECT_EQ(account.value["contact"]["line1"], "Hauptstrasse 1");
+    EXPECT_EQ(rig.store->billing_contact(rig.customer)->value().email, "ap@acme.test");
 }
 
 TEST(StripeBilling, ARetryAfterAFailedStepNeverBillsTwice) {

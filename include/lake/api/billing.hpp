@@ -26,14 +26,16 @@
 namespace lake::api {
 
 // The account a payment provider bills: lake's customer id and name, the provider's own id for
-// the account when lake has one (kept in billing_accounts, migration 0074), and which issue of
-// the month this is (0 the first time, 1 after one void invoice, ...), so a provider can make its
-// writes idempotent per attempt.
+// the account when lake has one (kept in billing_accounts, migration 0074), which issue of the
+// month this is (0 the first time, 1 after one void invoice, ...), so a provider can make its
+// writes idempotent per attempt, and the account's billing contact once an owner has set one
+// (lake#857).
 struct PaymentAccount {
     std::string customer_id;
     std::string name;
     std::string provider_customer_id;
     std::uint64_t attempt = 0;
+    std::optional<control::BillingContact> contact;
 };
 
 // The provider's id for an account (PaymentProvider::provider_customer). `replaces` is the kept id
@@ -117,6 +119,12 @@ public:
     // never loses it. The manual provider answers "".
     virtual std::expected<ProviderCustomer, std::string> provider_customer(const PaymentAccount&) {
         return ProviderCustomer{};
+    }
+    // Sends the account's billing contact to the provider's customer it already has
+    // (`provider_customer_id`): its email, name and address (lake#857). An error leaves the
+    // contact lake keeps as it is.
+    virtual std::expected<void, std::string> update_customer(const PaymentAccount&) {
+        return {};
     }
     // Asks for payment of an invoice about to be issued: `invoice` has its account, month, price
     // list (plan_id), currency, lines and total, but no id or number yet. An error leaves the

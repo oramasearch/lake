@@ -155,6 +155,43 @@ void tag(std::vector<std::pair<std::string, std::string>>& fields,
     }
 }
 
+// A customer's billing details (lake#857): the billing contact's name, or else the account's, and,
+// once an owner has set a contact, its email and address. An update sends every address field, so
+// a field the contact no longer has is cleared, and `address=` when it has no address at all; a new
+// customer gets only the fields the contact has.
+std::vector<std::pair<std::string, std::string>> billing_details(const PaymentAccount& account,
+                                                                 bool update) {
+    const std::string& account_name = account.name.empty() ? account.customer_id : account.name;
+    if (!account.contact) {
+        return {{"name", account_name}};
+    }
+    const control::BillingContact& contact = *account.contact;
+    std::vector<std::pair<std::string, std::string>> fields{
+        {"name", contact.name.empty() ? account_name : contact.name}, {"email", contact.email}};
+    const std::array<std::pair<std::string_view, const std::string*>, 6> address{{
+        {"line1", &contact.line1},
+        {"line2", &contact.line2},
+        {"city", &contact.city},
+        {"postal_code", &contact.postal_code},
+        {"state", &contact.state},
+        {"country", &contact.country},
+    }};
+    const bool addressed =
+        std::ranges::any_of(address, [](const auto& field) { return !field.second->empty(); });
+    if (!addressed) {
+        if (update) {
+            fields.emplace_back("address", "");
+        }
+        return fields;
+    }
+    for (const auto& [key, value] : address) {
+        if (update || !value->empty()) {
+            fields.emplace_back(std::format("address[{}]", key), *value);
+        }
+    }
+    return fields;
+}
+
 // Whether an event's invoice or Checkout Session is another app's or another Lake's (lake#855).
 // Lake's `owner` key marks it Lake's: lake_customer_id on an invoice Lake issued, lake_order_id on
 // an order sheet session. Stripe does not copy a subscription's metadata into the invoices it
@@ -219,10 +256,10 @@ public:
             }
             key += "-replaces-" + account.provider_customer_id;
         }
-        std::vector<std::pair<std::string, std::string>> fields{
-            {"name", account.name.empty() ? account.customer_id : account.name},
-            {"description", "Lake account " + account.customer_id},
-            {"metadata[lake_customer_id]", account.customer_id}};
+        std::vector<std::pair<std::string, std::string>> fields = billing_details(account, false);
+        fields.insert(fields.end(),
+                      {{"description", "Lake account " + account.customer_id},
+                       {"metadata[lake_customer_id]", account.customer_id}});
         tag(fields, "metadata", instance_);
         auto created = post("/v1/customers", fields, key, "create the customer");
         if (!created) {
@@ -233,6 +270,25 @@ public:
             return std::unexpected(std::string("Stripe answered a customer without an id"));
         }
         return ProviderCustomer{id, account.provider_customer_id};
+    }
+
+    // POST /v1/customers/<id> with the contact's email, name and address. Each save of the contact
+    // is its own write, keyed by when it was saved.
+    std::expected<void, std::string> update_customer(const PaymentAccount& account) override {
+        if (account.provider_customer_id.empty() || !account.contact) {
+            return std::unexpected(
+                std::string("the account has no Stripe customer or billing contact"));
+        }
+        auto updated = post("/v1/customers/" + account.provider_customer_id,
+                            billing_details(account, true),
+                            std::format("lake-customer-{}-contact-{}",
+                                        account.customer_id,
+                                        account.contact->updated_at),
+                            "update the customer");
+        if (!updated) {
+            return std::unexpected(updated.error());
+        }
+        return {};
     }
 
     std::expected<PaymentRequest, std::string>

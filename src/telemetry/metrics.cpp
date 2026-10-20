@@ -891,6 +891,14 @@ public:
     apply_payment_event(const control::PaymentEvent& event) override {
         return call("apply_payment_event", [&] { return store_->apply_payment_event(event); });
     }
+    control::Result<std::optional<control::BillingContact>>
+    billing_contact(const std::string& customer_id) override {
+        return call("billing_contact", [&] { return store_->billing_contact(customer_id); });
+    }
+    control::Result<control::BillingContact>
+    set_billing_contact(const control::BillingContact& contact) override {
+        return call("set_billing_contact", [&] { return store_->set_billing_contact(contact); });
+    }
     control::Result<control::CloudOrder>
     create_cloud_order(const control::NewCloudOrder& order) override {
         return call("create_cloud_order", [&] { return store_->create_cloud_order(order); });

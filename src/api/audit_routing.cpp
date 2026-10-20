@@ -179,6 +179,8 @@ constexpr std::array central = std::to_array<std::string_view>({
     "search",
     "server_info",
     "set_audit_retention",
+    // An account's billing contact is billing configuration (lake#857).
+    "set_billing_contact",
     "set_customer_credential_policy",
     "set_member_role",
     "set_price_list",
