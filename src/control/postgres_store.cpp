@@ -7094,6 +7094,19 @@ public:
         });
     }
 
+    Result<Invoice> set_invoice_provider_status(const std::string& id,
+                                                const std::string& from,
+                                                const std::string& to) override {
+        return with_tx<Invoice>([&](pqxx::work& tx) -> Result<Invoice> {
+            tx.exec_params("UPDATE billing_invoices SET provider_status = $3 WHERE id = $1::uuid "
+                           "AND state = 'due' AND provider_status = $2",
+                           id,
+                           from,
+                           to);
+            return invoice_in(tx, id);
+        });
+    }
+
     // ---- payment providers (migration 0074, lake#620, docs/api/billing.md#stripe) ----
 
     Result<std::string> billing_provider_customer(const std::string& customer_id,

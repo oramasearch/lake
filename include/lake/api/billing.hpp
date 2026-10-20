@@ -131,6 +131,19 @@ public:
     // invoice unissued.
     virtual std::expected<PaymentRequest, std::string>
     request_payment(const PaymentAccount& account, const control::Invoice& invoice) = 0;
+    // Sends an issued invoice's payment request to the account's billing email (lake#857): Stripe
+    // emails its hosted invoice link. Lake asks only once it has stored the invoice, so a payment
+    // notice never arrives before the invoice it names, and only when the account has a billing
+    // contact and the invoice a `provider_reference`. `resend` is empty for the send at issue and
+    // new for each resend_invoice, so a resend is a new request, never a replay of an earlier
+    // answer. Answers the provider's status of the invoice after the send; an error leaves the
+    // invoice issued. The default sends nothing.
+    virtual std::expected<std::string, std::string> send_payment_request(
+        const PaymentAccount& account, const control::Invoice& invoice, std::string_view resend) {
+        static_cast<void>(account);
+        static_cast<void>(resend);
+        return invoice.provider_status;
+    }
     // Withdraws the request of an invoice lake voids, so it can no longer be paid. An error
     // leaves the invoice due.
     virtual std::expected<void, std::string> cancel_payment(const control::Invoice&) {

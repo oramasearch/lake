@@ -152,6 +152,7 @@ constexpr std::array central = std::to_array<std::string_view>({
     "repository_recovery_status",
     // The operator's volumes are control plane (migration 0069, operator#259, operator#260).
     "request_volume_snapshot",
+    "resend_invoice",
     "resolve_model",
     "revoke_agent_certificate",
     "revoke_agent_session",

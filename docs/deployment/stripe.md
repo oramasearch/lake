@@ -92,7 +92,10 @@ In the Lake service's **Variables**, set `LAKE_STRIPE_SECRET_KEY` and `LAKE_STRI
 2. Signed in as an operator, open **Administration → Billing**: the Payment figure says **Stripe**.
 3. Issue a test invoice for a test account (Administration → Billing, or `issue_invoice`), open it,
    choose **Pay with Stripe**, and pay with Stripe's test card `4242 4242 4242 4242` (any future
-   date, any CVC).
+   date, any CVC). When the test account has a billing contact, Lake also asks Stripe to email the
+   invoice: **Developers → Logs** shows `POST /v1/invoices/<id>/send` answered `200`. Stripe sends
+   no email in test mode or a sandbox, so this proves the request, not delivery
+   ([billing.md](../api/billing.md#emailing-invoices)).
 4. Within a minute the invoice in Lake reads **Paid**. In the Stripe dashboard, **Webhooks → the
    endpoint → Event deliveries** shows `invoice.paid` delivered with Lake's `200`.
 5. In the Stripe dashboard, the invoice's and its customer's **Metadata** show `orama_app` `lake`

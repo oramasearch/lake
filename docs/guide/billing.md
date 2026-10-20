@@ -107,6 +107,9 @@ Orama Cloud takes payment through Stripe.
 3. Pay by card or bank account there.
 4. Come back to the invoice. It shows **paid** once Stripe tells Lake, usually within a minute.
 
+When your account has a billing email, Stripe also emails each invoice to it, with a link to the
+same Stripe page.
+
 The **Stripe** row on the invoice says where the payment stands: **Awaiting payment**, **Payment
 failed** (pay again on Stripe's page with another card or account), **Paid** or **Void**.
 

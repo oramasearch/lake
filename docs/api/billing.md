@@ -82,6 +82,11 @@ interface with:
   price list, lines and total, and which issue of the month it is). It answers the provider's `reference`,
   the `instructions` the invoice shows, the `payment_url` where the account pays and the provider's
   `provider_status`, or an error, which leaves the invoice unissued (`store_unavailable`);
+- `send_payment_request(account, invoice, resend)`: called once lake has stored an issued invoice,
+  when the account has a billing contact and the invoice a `provider_reference`, and by
+  `resend_invoice`; it sends the invoice to the billing email and answers the provider's status
+  after it, or an error, which leaves the invoice issued ([Emailing invoices](#emailing-invoices)).
+  The default sends nothing;
 - `cancel_payment(invoice)`: called by `void_invoice` before lake voids a due invoice, so it can no
   longer be paid; an error leaves it due;
 - `read_notice(body, signature, now)`: checks and reads a payment notice the provider sent;
@@ -187,7 +192,8 @@ with the same secret key and version and no `Idempotency-Key`. The idempotency k
 one that replaces a customer Stripe no longer has (the plain key would replay the first customer
 within Stripe's 24 hours in the same account), `lake-invoice-<customer>-<month>-<n>` for the
 invoice (n is the issue of the month: 0,
-then 1 after a void), with `-line-<i>-p`, `-rounding` and `-finalize` for the steps after it, and
+then 1 after a void), with `-line-<i>-p`, `-rounding` and `-finalize` for the steps after it and
+`-send` for the [email](#emailing-invoices) (`-send-<uuid>` for each resend), and
 `lake-void-<invoice>` for a void. A retry of a failed issue within Stripe's 24 hours therefore gets
 Stripe's first answers back instead of a second invoice; an issue after a void is a new invoice.
 Stripe refuses a key sent again with other parameters, so a retry of an issue that failed under an
@@ -207,8 +213,9 @@ month and attempt send the same keys, so the draft is reused. Stripe may have sa
 under the item's key and replay it for 24 hours; if the same message comes back after the product
 exists, issue again after 24 hours.
 
-**Payment.** The account pays on Stripe's hosted invoice page, by card or bank, from **Pay with
-Stripe** on lake's invoice page. Stripe tells lake through its webhook ([below](#webhooks)).
+**Payment.** The account pays on Stripe's hosted invoice page, by card or bank, from the link in
+Stripe's email ([below](#emailing-invoices)) or **Pay with Stripe** on lake's invoice page. Stripe
+tells lake through its webhook ([below](#webhooks)).
 
 **Voids.** `void_invoice` on a due Stripe invoice voids it in Stripe first (`POST
 /v1/invoices/<id>/void`); if Stripe refuses (it was paid meanwhile), lake's invoice stays due. A
@@ -266,9 +273,52 @@ set, never their values, `provider` and `provider_update`.
   `provider_error`. A refusal never undoes the save: the contact stays stored and is sent again at
   the next save.
 
-The manual provider has no customer, so its accounts always answer `none`. Lake does not yet ask
-Stripe to email an invoice; its invoices are still finalized with `auto_advance=false` and paid from
-lake's invoice page.
+The manual provider has no customer, so its accounts always answer `none`. Stripe emails each
+invoice to the contact's email ([below](#emailing-invoices)).
+
+## Emailing invoices
+
+[lake#857](https://github.com/oramasearch/lake/issues/857): Stripe emails each invoice to the
+account's billing email, so an account that does not open lake that month still learns it owes
+money. Invoices are still finalized with `auto_advance=false`, so Stripe sends nothing by itself;
+lake asks it once.
+
+- **When.** `issue_invoice` asks the provider to send an invoice (`send_payment_request`) only after
+  lake has stored it, and only when the account has a [billing contact](#billing-contact) and the
+  invoice was issued through a provider that has a request to send (Stripe; the manual provider has
+  none). A notice that arrived before lake's invoice existed would be recorded unmatched and its
+  redelivery treated as a duplicate, so the payment would never be applied; sending after the store
+  rules that out. Without a billing contact nothing is sent, and the invoice is paid from lake's
+  invoice page as before.
+- **Stripe.** `POST /v1/invoices/<id>/send` under the key
+  `lake-invoice-<customer>-<month>-<n>-send`. Stripe emails the hosted invoice link to the
+  customer's email, which is the billing contact's. The status in its answer becomes
+  `provider_status` (`open`).
+- **A failed send** does not fail the issue: the invoice is stored, due, and payable on lake's
+  invoice page. Its `provider_status` becomes `send_failed`, and the central audit records
+  `billing.invoice.send_failed` (action `issue_invoice`, outcome `failure`, with the invoice and
+  Stripe's message) beside `billing.invoice.issue`, whose `send` detail is `sent`, `failed` or
+  `none`. The status moves only from the one lake read (`set_invoice_provider_status`), so a
+  payment notice applied meanwhile is kept.
+- **Resending.** `resend_invoice` (operator, instance administrator, as `issue_invoice`) sends a due
+  invoice again, after a failed send or as a reminder; a send that goes through moves `send_failed`
+  back to Stripe's status and leaves any other status, such as `payment_failed`, as it was.
+  Each resend has its own key, `lake-invoice-<customer>-<month>-<n>-send-<uuid>`, because Stripe
+  answers a key's first answer again for 24 hours, a refusal included, so a resend under the
+  first key would only repeat the failure. A refusal answers `store_unavailable` with Stripe's
+  message and leaves the invoice `send_failed`. An invoice that is not due, one issued without a
+  provider request, and an account without a billing contact are `conflict`; an invoice issued
+  through a provider that is not configured now is `store_unavailable`. Audited
+  `billing.invoice.send` or `billing.invoice.send_failed`.
+- **Receipts.** Whether Stripe also emails a receipt when an invoice is paid depends on the Stripe
+  account's customer-email settings, which Lake and Cloud v1 share.
+  [orama-bridge#200](https://github.com/oramasearch/orama-bridge/issues/200) records them; nothing
+  here changes them.
+- **Test mode.** Stripe sends no email for a `send` in test mode or a sandbox, though it still emits
+  `invoice.sent` ([Stripe: send an invoice](https://docs.stripe.com/api/invoices/send)). The `dev`,
+  `testing` and `staging` sandboxes therefore prove that lake made the request, not that mail
+  arrived. Delivery is first seen on the first real live invoice
+  ([orama-operator#643](https://github.com/oramasearch/orama-operator/issues/643), step 3).
 
 ## Webhooks
 
@@ -604,7 +654,8 @@ pre-filled with these rates.
 | `billing_account` | read | `read` on the customer | `customer_id` | `{customer_id, month, price_list, provider, contact, suggested_email}`: the list the account is billed at this month (null before one is published), the payment `provider`, the [billing contact](#billing-contact) (null while there is none) and, until one is saved, the signed-in owner's or admin's email to offer. |
 | `set_billing_contact` | action | `admin` on the customer (owners, admins), operator | `customer_id`, `email`, `name?`, `line1?`, `line2?`, `city?`, `postal_code?`, `state?`, `country?` | Replaces the [billing contact](#billing-contact) and sends it to the account's Stripe customer, if it has one: `{customer_id, contact, provider_update, provider_error?}`, `provider_update` `updated`, `none` or `failed` (the contact stays saved). |
 | `bill_preview` | read | `read` on the customer | `customer_id`, `period?` (`YYYY-MM`; default this month) | The bill for the month worked out now at the list in force for it; nothing is stored. `price_list` is `{id, effective_from}`. `complete` is false when a workspace's usage could not be read (`unread_workspaces`); `not_measured` repeats what `usage_over_time` cannot include; `invoice` is the month's issued invoice that is not void, or null. No list for the month is `conflict`. |
-| `issue_invoice` | action | operator, instance administrator | `customer_id`, `period` | Issues the invoice for a month that has ended (`conflict` before), at the list in force for it, with the lines frozen, then asks the provider for payment. Refused with `store_unavailable` while any workspace's usage cannot be read, never issued short; `conflict` when the month already has an invoice that is not void. Issued by hand today; automatic monthly issue is [lake#621](https://github.com/oramasearch/lake/issues/621). |
+| `issue_invoice` | action | operator, instance administrator | `customer_id`, `period` | Issues the invoice for a month that has ended (`conflict` before), at the list in force for it, with the lines frozen, then asks the provider for payment and, once the invoice is stored and the account has a billing contact, to [email it](#emailing-invoices); a failed send leaves it issued with `provider_status` `send_failed`. Refused with `store_unavailable` while any workspace's usage cannot be read, never issued short; `conflict` when the month already has an invoice that is not void. Issued by hand today; automatic monthly issue is [lake#621](https://github.com/oramasearch/lake/issues/621). |
+| `resend_invoice` | action | operator, instance administrator | `invoice_id` | [Emails](#emailing-invoices) a due invoice to the billing email again, with a key of its own; a send moves `send_failed` back to the provider's status. `conflict` when the invoice is not due, has no provider request (manual) or the account has no billing contact; `store_unavailable` with the provider's message when it refuses, leaving the invoice `send_failed`. |
 | `list_invoices` | read | `read` on the customer | `customer_id` | The account's invoices, newest month first, each with its lines. |
 | `get_invoice` | read | `read` on the customer | `customer_id`, `invoice_id` | One invoice; `not_found` when it is not this account's. |
 | `record_invoice_payment` | action | operator, instance administrator | `invoice_id`, `reference?`, `note?` | Marks a due invoice `paid` with the payment's reference. `conflict` when it is not due, or its provider reports payments itself (a Stripe invoice). |
@@ -613,13 +664,15 @@ pre-filled with these rates.
 The operator-only capabilities answer anyone else `unauthorized` before the handler runs. Audit
 objects are `customer/<id>/billing` (kinds `billing.account.read`, `billing.contact.set`,
 `billing.bill.preview`,
-`billing.invoice.issue`, `billing.invoices.read`, `billing.invoice.read`, `billing.invoice.paid`,
-`billing.invoice.void`, and `billing.account.provider_customer_replaced` beside an issue that
-replaced the account's Stripe customer) except `set_price_list`'s.
+`billing.invoice.issue`, `billing.invoice.send`, `billing.invoice.send_failed`,
+`billing.invoices.read`, `billing.invoice.read`, `billing.invoice.paid`, `billing.invoice.void`, and
+`billing.account.provider_customer_replaced` beside an issue that replaced the account's Stripe
+customer) except `set_price_list`'s.
 
 An invoice is `{id, number, customer_id, period, price_list_id, currency, total_micros, state,
 provider, provider_reference, instructions, note, issued_at, paid_at, voided_at, payment_url,
-provider_status, lines}`; `state` is `due`, `paid` or `void`, and `number` increases across the
+provider_status, lines}`; `state` is `due`, `paid` or `void`, `provider_status` the provider's own
+(`open`, `paid`, `payment_failed`, `void`) or `send_failed`, and `number` increases across the
 instance. A line is `{kind, dimension, class, description, unit, quantity, included, billable,
 unit_micros, per, amount_micros}`, with `kind` `usage`, `class` the GPU class a class rate bills
 (empty otherwise, and on every line issued before lake#643), `included` 0, and `billable` the
@@ -651,6 +704,13 @@ POST /v1/issue_invoice
 ```http
 POST /v1/record_invoice_payment
 {"invoice_id": "<invoice id>", "reference": "WIRE-2026-10-001"}
+```
+
+A Stripe invoice whose email failed (`provider_status` `send_failed`) is sent again:
+
+```http
+POST /v1/resend_invoice
+{"invoice_id": "<invoice id>"}
 ```
 
 ## Verify
@@ -699,7 +759,15 @@ POST /v1/record_invoice_payment
   (`tests/test_stripe.cpp`): no Stripe call before the first invoice, the customer created with
   the contact's email, name and address, a later save updating it with every address field and its
   own key, a bare contact sending the account's name and `address=`, and a refused update reported
-  with the contact kept. `MemoryBilling.BillingContactsFollowTheContract` and
+  with the contact kept. `StripeBilling.AnInvoiceIsSentToTheBillingEmailOnceLakeHasStoredIt` and
+  `StripeBilling.AFailedSendLeavesTheInvoiceIssuedAndResendSendsIt`: no `/send` without a billing
+  contact, the send made only once lake's invoice is stored, after the finalize, under
+  `-send`; a refused send leaving the invoice issued, `send_failed` and audited beside the issue;
+  `resend_invoice` refused again, then sending it with a key of its own each time and moving it
+  back to `open`; a reminder after a failed payment keeping `payment_failed`; a payment applied
+  during a failed send kept; and a paid invoice not resent.
+  `Billing.AMonthsBillIsWorkedOutFromTheUsageOfEveryWorkspace` adds the owner refused
+  `resend_invoice` and a manual invoice's `conflict`. `MemoryBilling.BillingContactsFollowTheContract` and
   `PostgresBilling.BillingContactsFollowTheContract` (`tests/test_postgres.cpp`): the migration's
   table and guard, set, read, replace, refusals, lengths in characters, the table's checks, and the
   cascade with the account.
@@ -707,7 +775,8 @@ POST /v1/record_invoice_payment
   `PostgresBilling.PaymentProviderCustomersAndNoticesFollowTheContract` and
   `PostgresBilling.WorkloadResourcesAndClassRatesFollowTheContract` (`tests/test_postgres.cpp`):
   the migrations' tables and guards (`0073`, `0074`, `0075`), the price key of plan, dimension and
-  class, and the store's contract on PostgreSQL and in memory.
+  class, `set_invoice_provider_status` moving only a due invoice from the status read (lake#857),
+  and the store's contract on PostgreSQL and in memory.
 - `SchemaConformance.EveryToolAndRequiredOutputUsesHttpContract` calls every billing tool over MCP
   and REST with billing on; `AuditRouting.EveryRegisteredCapabilityIsClassified` checks each is
   central.

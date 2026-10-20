@@ -6,10 +6,12 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cstddef>
 #include <cstring>
 #include <format>
+#include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -59,9 +61,10 @@ std::int64_t unix_now() {
         .count();
 }
 
-// Stripe as far as lake uses it: customers and their updates, invoices, invoice items, finalize and
-// void, with Stripe's idempotency (a repeated Idempotency-Key answers the first successful answer),
-// the products the operator created in the account (lake#855), and the customers it has (lake#856).
+// Stripe as far as lake uses it: customers and their updates, invoices, invoice items, finalize,
+// send and void, with Stripe's idempotency (a repeated Idempotency-Key answers the first successful
+// answer), the products the operator created in the account (lake#855), and the customers it has
+// (lake#856).
 struct FakeStripe {
     std::mutex mutex;
     std::vector<lake::api::StripeRequest> requests;
@@ -82,6 +85,12 @@ struct FakeStripe {
     bool fail_finalize = false;
     bool fail_customer_update = false;
     int customer_updates = 0;
+    // Invoices sent to their customer's email (lake#857), each send asked for, and what the test
+    // checks while Stripe handles one.
+    std::vector<std::string> sent;
+    int sends = 0;
+    bool fail_send = false;
+    std::function<void(const std::string&)> on_send;
 
     static std::string field(std::string_view body, std::string_view name) {
         const std::string key = std::string(name) + "=";
@@ -228,6 +237,18 @@ struct FakeStripe {
             const std::string id = path.substr(13, path.size() - 13 - 5);
             status[id] = "void";
             return {200, json{{"id", id}, {"status", "void"}}.dump(), {}};
+        }
+        if (path.ends_with("/send")) {
+            const std::string id = path.substr(13, path.size() - 13 - 5);
+            ++sends;
+            if (on_send) {
+                on_send(id);
+            }
+            if (fail_send) {
+                return {500, R"({"error":{"message":"the email could not be sent"}})", {}};
+            }
+            sent.push_back(id);
+            return {200, json{{"id", id}, {"status", status[id]}}.dump(), {}};
         }
         return {404, R"({"error":{"message":"no such route"}})", {}};
     }
@@ -641,6 +662,156 @@ TEST(StripeBilling, TheBillingContactReachesTheStripeCustomer) {
     EXPECT_EQ(account.value["contact"]["name"], "Acme GmbH");
     EXPECT_EQ(account.value["contact"]["line1"], "Hauptstrasse 1");
     EXPECT_EQ(rig.store->billing_contact(rig.customer)->value().email, "ap@acme.test");
+}
+
+// The central audit events of `kind` about the invoice `invoice_id`.
+std::vector<lake::audit::Event>
+invoice_events(lake::control::Store& store, std::string_view kind, const std::string& invoice_id) {
+    std::vector<lake::audit::Event> found;
+    const auto events = lake::test::audit_events(store, {.limit = 500});
+    EXPECT_TRUE(events) << events.error().message;
+    for (const auto& entry : events.value_or(std::vector<lake::audit::Event>{})) {
+        if (entry.draft.kind == kind && entry.draft.details.value("invoice_id", "") == invoice_id) {
+            found.push_back(entry);
+        }
+    }
+    return found;
+}
+
+// lake#857: Stripe emails an invoice to the billing email only once lake has stored it, so a
+// payment notice that arrives meanwhile finds the invoice it names. Without a billing contact
+// nothing is sent.
+TEST(StripeBilling, AnInvoiceIsSentToTheBillingEmailOnceLakeHasStoredIt) {
+    FakeStripe stripe;
+    StripeRig rig(stripe_providers(stripe));
+    const auto unsent =
+        rig.call("issue_invoice", {{"customer_id", rig.customer}, {"period", rig.period}});
+    ASSERT_TRUE(unsent.ok) << unsent.error.message;
+    EXPECT_EQ(stripe.sends, 0) << "no billing email, nothing to send";
+    EXPECT_EQ(unsent.value["provider_status"], "open");
+    const std::string unsent_id = unsent.value["id"];
+    ASSERT_EQ(invoice_events(*rig.store, "billing.invoice.issue", unsent_id).size(), 1U);
+    EXPECT_EQ(
+        invoice_events(*rig.store, "billing.invoice.issue", unsent_id)[0].draft.details["send"],
+        "none");
+    EXPECT_EQ(rig.call("resend_invoice", {{"invoice_id", unsent_id}}).error.code, "conflict");
+    EXPECT_EQ(stripe.sends, 0);
+    ASSERT_TRUE(
+        rig.call("void_invoice", {{"invoice_id", unsent_id}, {"note", "no billing email"}}).ok);
+
+    ASSERT_TRUE(
+        rig.call("set_billing_contact", {{"customer_id", rig.customer}, {"email", "ap@acme.test"}})
+            .ok);
+    bool stored = false;
+    stripe.on_send = [&](const std::string& id) {
+        const auto invoices = rig.store->list_invoices(rig.customer);
+        stored = invoices && std::ranges::any_of(*invoices, [&](const auto& invoice) {
+                     return invoice.provider_reference == id && invoice.state == "due";
+                 });
+    };
+    const auto issued =
+        rig.call("issue_invoice", {{"customer_id", rig.customer}, {"period", rig.period}});
+    ASSERT_TRUE(issued.ok) << issued.error.message;
+    EXPECT_TRUE(stored) << "sent before lake stored the invoice";
+    EXPECT_EQ(stripe.sent, std::vector<std::string>{"in_2"});
+    EXPECT_EQ(issued.value["state"], "due");
+    EXPECT_EQ(issued.value["provider_status"], "open");
+    // The last request, after the finalize, in the invoice's key family (the month's second issue).
+    const auto& send = stripe.requests.back();
+    EXPECT_EQ(send.url, "https://stripe.test/v1/invoices/in_2/send");
+    EXPECT_EQ(FakeStripe::header(send, "Idempotency-Key"),
+              "lake-invoice-" + rig.customer + "-" + rig.period + "-1-send");
+    EXPECT_TRUE(stripe.requests[stripe.requests.size() - 2].url.ends_with("/in_2/finalize"));
+    const auto events = invoice_events(*rig.store, "billing.invoice.issue", issued.value["id"]);
+    ASSERT_EQ(events.size(), 1U);
+    EXPECT_EQ(events[0].draft.details["send"], "sent");
+}
+
+// lake#857: a send Stripe refuses leaves the invoice issued and payable on its page, send_failed
+// and audited. resend_invoice sends it, each time with a key of its own, since Stripe answers a
+// key's first answer again, a refusal included. A payment that lands during a send is kept.
+TEST(StripeBilling, AFailedSendLeavesTheInvoiceIssuedAndResendSendsIt) {
+    FakeStripe stripe;
+    StripeRig rig(stripe_providers(stripe));
+    ASSERT_TRUE(
+        rig.call("set_billing_contact", {{"customer_id", rig.customer}, {"email", "ap@acme.test"}})
+            .ok);
+    stripe.fail_send = true;
+    const auto issued =
+        rig.call("issue_invoice", {{"customer_id", rig.customer}, {"period", rig.period}});
+    ASSERT_TRUE(issued.ok) << issued.error.message;
+    const std::string invoice_id = issued.value["id"];
+    EXPECT_EQ(issued.value["state"], "due");
+    EXPECT_EQ(issued.value["provider_status"], "send_failed");
+    EXPECT_EQ(issued.value["payment_url"], "https://invoice.stripe.test/i/in_1");
+    EXPECT_EQ(rig.store->get_invoice(invoice_id)->provider_status, "send_failed");
+    EXPECT_EQ(stripe.sends, 1);
+    const auto failed = invoice_events(*rig.store, "billing.invoice.send_failed", invoice_id);
+    ASSERT_EQ(failed.size(), 1U);
+    EXPECT_EQ(failed[0].draft.action, "issue_invoice");
+    EXPECT_EQ(failed[0].draft.outcome, "failure");
+    EXPECT_EQ(failed[0].draft.customer_id, rig.customer);
+    EXPECT_NE(failed[0].draft.details["error"].get<std::string>().find("could not be sent"),
+              std::string::npos);
+    const auto issue = invoice_events(*rig.store, "billing.invoice.issue", invoice_id);
+    ASSERT_EQ(issue.size(), 1U);
+    EXPECT_EQ(issue[0].draft.outcome, "success");
+    EXPECT_EQ(issue[0].draft.details["send"], "failed");
+
+    // Refused again: still send_failed, and the refusal is the answer.
+    const auto refused = rig.call("resend_invoice", {{"invoice_id", invoice_id}});
+    EXPECT_EQ(refused.error.code, "store_unavailable");
+    EXPECT_NE(refused.error.message.find("could not be sent"), std::string::npos)
+        << refused.error.message;
+    EXPECT_EQ(rig.store->get_invoice(invoice_id)->provider_status, "send_failed");
+    EXPECT_EQ(invoice_events(*rig.store, "billing.invoice.send_failed", invoice_id).size(), 2U);
+
+    // Sent: back to Stripe's status, with no new customer or invoice.
+    stripe.fail_send = false;
+    const auto resent = rig.call("resend_invoice", {{"invoice_id", invoice_id}});
+    ASSERT_TRUE(resent.ok) << resent.error.message;
+    EXPECT_EQ(resent.value["provider_status"], "open");
+    EXPECT_EQ(resent.value["state"], "due");
+    EXPECT_EQ(stripe.sent, std::vector<std::string>{"in_1"});
+    EXPECT_EQ(stripe.customers, 1);
+    EXPECT_EQ(stripe.invoices, 1);
+    EXPECT_EQ(invoice_events(*rig.store, "billing.invoice.send", invoice_id).size(), 1U);
+    std::vector<std::string> keys;
+    for (const auto& request : stripe.requests) {
+        if (request.url.ends_with("/send")) {
+            keys.push_back(FakeStripe::header(request, "Idempotency-Key"));
+        }
+    }
+    const std::string family = "lake-invoice-" + rig.customer + "-" + rig.period + "-0-send";
+    ASSERT_EQ(keys.size(), 3U);
+    EXPECT_EQ(keys[0], family);
+    EXPECT_TRUE(keys[1].starts_with(family + "-")) << keys[1];
+    EXPECT_TRUE(keys[2].starts_with(family + "-")) << keys[2];
+    EXPECT_NE(keys[1], keys[2]);
+
+    // A reminder after a failed payment keeps saying the payment failed: a send changes only its
+    // own status.
+    ASSERT_TRUE(rig.store->apply_payment_event(
+        {"stripe", "evt_failed", "invoice.payment_failed", "in_1", "", "payment_failed"}));
+    const auto reminded = rig.call("resend_invoice", {{"invoice_id", invoice_id}});
+    ASSERT_TRUE(reminded.ok) << reminded.error.message;
+    EXPECT_EQ(reminded.value["provider_status"], "payment_failed");
+    EXPECT_EQ(stripe.sent, (std::vector<std::string>{"in_1", "in_1"}));
+
+    // Paid while a send fails: the payment stays, never overwritten by send_failed.
+    stripe.fail_send = true;
+    stripe.on_send = [&](const std::string& id) {
+        ASSERT_TRUE(rig.store->apply_payment_event(
+            {"stripe", "evt_paid_during_send", "invoice.paid", id, "paid", "paid"}));
+    };
+    EXPECT_EQ(rig.call("resend_invoice", {{"invoice_id", invoice_id}}).error.code,
+              "store_unavailable");
+    const auto paid = *rig.store->get_invoice(invoice_id);
+    EXPECT_EQ(paid.state, "paid");
+    EXPECT_EQ(paid.provider_status, "paid");
+    stripe.on_send = nullptr;
+    EXPECT_EQ(rig.call("resend_invoice", {{"invoice_id", invoice_id}}).error.code, "conflict")
+        << "a paid invoice has nothing to send";
 }
 
 TEST(StripeBilling, ARetryAfterAFailedStepNeverBillsTwice) {

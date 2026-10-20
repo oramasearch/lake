@@ -414,6 +414,10 @@ TEST(Billing, AMonthsBillIsWorkedOutFromTheUsageOfEveryWorkspace) {
     EXPECT_EQ(issued.value["lines"].size(), 3U);
     EXPECT_EQ(issued.value["price_list_id"], bill.value["price_list"]["id"]);
     const std::string invoice_id = issued.value["id"];
+    // Only the operator resends an invoice (lake#857), and the manual provider has nothing to send.
+    EXPECT_EQ(rig.call("resend_invoice", {{"invoice_id", invoice_id}}, owner).error.code,
+              "unauthorized");
+    EXPECT_EQ(rig.call("resend_invoice", {{"invoice_id", invoice_id}}).error.code, "conflict");
 
     // The lines are frozen: usage recorded later and a new list for the month do not change the
     // invoice, while a preview of the month now prices at the new list.

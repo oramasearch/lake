@@ -863,6 +863,12 @@ public:
         return call("set_invoice_state",
                     [&] { return store_->set_invoice_state(id, state, provider_reference, note); });
     }
+    control::Result<control::Invoice> set_invoice_provider_status(const std::string& id,
+                                                                  const std::string& from,
+                                                                  const std::string& to) override {
+        return call("set_invoice_provider_status",
+                    [&] { return store_->set_invoice_provider_status(id, from, to); });
+    }
     control::Result<std::string> billing_provider_customer(const std::string& customer_id,
                                                            const std::string& provider) override {
         return call("billing_provider_customer",
