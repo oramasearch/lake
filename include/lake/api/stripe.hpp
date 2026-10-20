@@ -27,6 +27,19 @@ inline constexpr std::string_view stripe_api_version = "2024-06-20";
 // How far a webhook's timestamp may be from lake's clock (Stripe's libraries use five minutes).
 inline constexpr std::chrono::seconds stripe_signature_tolerance{300};
 
+// Lake's products in every Stripe account it bills through (lake#855). Each invoice item and
+// Checkout line names one with an inline price (price_data[product]), so Stripe's reports tell
+// Lake's revenue from Orama Cloud v1's while Lake's price list and order sheet stay the one source
+// of prices. Lake never creates them: the operator does, in each account (spec.payments,
+// orama-operator docs/lake/payments.md).
+inline constexpr std::string_view stripe_usage_product = "lake_usage";
+inline constexpr std::string_view stripe_private_warehouse_product = "lake_private_warehouse";
+inline constexpr std::string_view stripe_dedicated_cluster_product = "lake_dedicated_cluster";
+
+// The product of an order sheet offer paid through Checkout; empty for any other (on_prem is
+// ordered by form).
+std::string_view stripe_offer_product(std::string_view offer);
+
 struct StripeRequest {
     std::string method = "POST";
     std::string url;
@@ -75,8 +88,10 @@ std::expected<PaymentNotice, NoticeRejection> parse_stripe_event(std::string_vie
 bool stripe_secret_key_shape(std::string_view key);
 bool stripe_webhook_secret_shape(std::string_view secret);
 
-// The Stripe provider: customers, invoices with an invoice item per lake line, finalization and
-// the hosted invoice URL, voids, and webhook events. `instance` is this Lake's public host
+// The Stripe provider: customers, invoices with an invoice item of Lake's usage product per lake
+// line, finalization and the hosted invoice URL, voids, Checkout for the order sheet's offers, and
+// webhook events. A request that names a product the account lacks fails with a message saying
+// the operator creates it. `instance` is this Lake's public host
 // (LAKE_PUBLIC_HOST), tagged on every object it creates and checked on every event, since two
 // Lakes can bill through one account. `base` is Stripe's API origin (a fake's in tests).
 std::shared_ptr<PaymentProvider>

@@ -12893,7 +12893,7 @@ struct ApiServer::Impl {
             const std::string origin = order_origin();
             const std::string status = order_status_url(*created);
             CheckoutRequest request{created->id,
-                                    "Lake " + offer->title,
+                                    created->offer,
                                     order_location_label(sheet, options.regions, *created),
                                     offer->monthly_cents,
                                     created->quantity,

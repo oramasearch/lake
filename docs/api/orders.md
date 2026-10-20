@@ -178,18 +178,23 @@ lake-order-<id>-checkout`:
 | Field | Value |
 |---|---|
 | `mode` | `subscription` |
-| `line_items[0][price_data]` | `currency=usd`, `unit_amount` the offer's monthly fee in cents, `recurring[interval]=month`, `product_data[name]` "Lake <offer title>", `product_data[description]` where it runs |
+| `line_items[0][price_data]` | `currency=usd`, `product` the offer's Lake product (`lake_private_warehouse`, `lake_dedicated_cluster`), `unit_amount` the offer's monthly fee in cents, `recurring[interval]=month` |
 | `line_items[0][quantity]` | the order's quantity |
+| `subscription_data[description]` | where it runs ("Microsoft Azure, Canada") |
 | `client_reference_id`, `metadata[lake_order_id]`, `subscription_data[metadata][lake_order_id]` | the order id |
 | `metadata[orama_app]`, `metadata[lake_instance]`, and the same under `subscription_data[metadata]` | `lake` and the Lake's public host, the tags of a shared Stripe account (lake#855, [billing.md](billing.md#stripe)) |
 | `customer_email` | the contact email |
 | `success_url`, `cancel_url` | the status link with `&checkout=done` / `&checkout=cancelled` |
 
 The price is inline (`price_data`), so the configuration stays the one source of prices; no Stripe
-Product or Price is created by hand. The session id is kept on the order, and the person is sent
+Price is created by hand. The line names the offer's Lake product (lake#855,
+[billing.md](billing.md#stripe)), which the operator creates in the account with the name
+Checkout shows ("Lake Private Warehouse", "Lake Dedicated Cluster"); where it runs is the
+subscription's description. The session id is kept on the order, and the person is sent
 to the session's `url`. When the session cannot be created (no Stripe keys, Stripe refuses), the
 order is moved to `cancelled` with the reason as its event's detail, and the form says to send it as
-an order form.
+an order form. An account without the product refuses with the same message as an invoice, "Stripe
+has no product lake_dedicated_cluster in this account; the operator creates it (spec.payments)".
 
 **The webhook** (`POST /billing/stripe/webhook`, [billing.md](billing.md#webhooks)) gains the
 Checkout events, matched by the session id and applied once per event id (the same
@@ -303,7 +308,8 @@ Lake writes every column; the operator reads `paid` rows and writes only `state`
 - `ctest --test-dir build -R 'Orders|Resend'` runs `tests/test_orders.cpp`: the default and the
   merge patch, every startup error, the form's checks for each offer and path, the status token,
   the rate limit, who is emailed about which state and what the emails say, the Resend client
-  against a test double for HTTP (headers, body, idempotency key, refusals), the Checkout request,
+  against a test double for HTTP (headers, body, idempotency key, refusals), the Checkout request
+  with each offer's Lake product and a missing product's message,
   the Checkout events, the webhook moving an order once per event, the `cloud_orders` contract in
   the memory store and in PostgreSQL (with orama-operator#635's own statements), and over HTTP the
   sheet, an order form recorded and emailed, a paid order through Checkout, the webhook and

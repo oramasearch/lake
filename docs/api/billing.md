@@ -117,6 +117,22 @@ one could be taken for Cloud v1's. A Customer is per app: a person who uses both
 and neither app reuses the other's `cus_` id. Events about objects that are not this Lake's are
 acknowledged and ignored ([below](#webhooks)).
 
+**Products** (lake#855). Every line lake sends Stripe names one of Lake's products with an inline
+price (`price_data[product]`), so Stripe's reports tell Lake's revenue from Cloud v1's:
+
+| Product id | Lines |
+|---|---|
+| `lake_usage` | every line of a monthly invoice |
+| `lake_private_warehouse` | the order sheet's private warehouse subscription ([orders.md](orders.md#paying)) |
+| `lake_dedicated_cluster` | the order sheet's dedicated cluster subscription |
+
+The ids are fixed and live in one place, `include/lake/api/stripe.hpp`. Lake never creates the
+products: the operator does, in every account Lake bills through (the Lake's `spec.payments`,
+orama-operator `docs/lake/payments.md`). Prices stay lake's own, the price list and the order
+sheet; no Stripe Price is created by hand. A request naming a product the account lacks fails with
+"Stripe has no product `<id>` in this account; the operator creates it (spec.payments)". A Lake on
+this version must have its products before it bills; one on the manual provider is unaffected.
+
 **Customers.** A lake account becomes one Stripe Customer (`POST /v1/customers`, name and
 `metadata[lake_customer_id]`, with the tags above) the first time one of its invoices is issued, so
 accounts that are never invoiced leave nothing in Stripe. Its id (`cus_...`) is kept in
@@ -127,11 +143,15 @@ PostgreSQL (decision 56), and reused for every later invoice.
 
 1. `POST /v1/invoices`: a draft for the customer, `currency=usd`, `collection_method=send_invoice`,
    `days_until_due=30`, `auto_advance=false`, `pending_invoice_items_behavior=exclude`, described
-   as "Orama Cloud usage, `<month>`", with the month and the price list id
+   as "Lake usage, `<month>`", with the month and the price list id
    (`metadata[lake_price_list_id]`) in its metadata, beside `lake_customer_id` and the tags above;
 2. `POST /v1/invoiceitems`: one item per lake line with an amount, in cents (millionths rounded half
-   up), described as the line is; when the rounded lines do not add up to lake's total rounded to the
-   cent, one more item, **Rounding to the cent**, carries the difference;
+   up), described as the line is and tagged as above, of the `lake_usage` product at an inline
+   price: `quantity=1`, `price_data[currency]=usd`, `price_data[product]=lake_usage`,
+   `price_data[unit_amount]=<cents>`. When the rounded lines do not add up to lake's total rounded
+   to the cent, one more item, **Rounding to the cent**, carries the difference, of the product too
+   when it is positive. A negative one keeps the bare form (`currency=usd`, `amount=<cents>`),
+   because an inline price cannot be negative;
 3. `POST /v1/invoices/<id>/finalize`, whose answer gives `hosted_invoice_url` and `status`.
 
 Lake keeps the Stripe invoice id as `provider_reference`, the hosted page as `payment_url` and
@@ -142,14 +162,25 @@ here; another currency is refused before anything is sent.
 Every request is form-encoded with `Authorization: Bearer <secret key>`, `Stripe-Version:
 2024-06-20` (`stripe_api_version`) and an `Idempotency-Key`: `lake-customer-<customer>` for the
 customer, `lake-invoice-<customer>-<month>-<n>` for the invoice (n is the issue of the month: 0,
-then 1 after a void), with `-line-<i>`, `-rounding` and `-finalize` for the steps after it, and
+then 1 after a void), with `-line-<i>-p`, `-rounding` and `-finalize` for the steps after it, and
 `lake-void-<invoice>` for a void. A retry of a failed issue within Stripe's 24 hours therefore gets
 Stripe's first answers back instead of a second invoice; an issue after a void is a new invoice.
 Stripe refuses a key sent again with other parameters, so a retry of an issue that failed under an
-older Lake whose request was different (lake#855 added the tags to the customer and the invoice) is
-refused with Stripe's idempotency error until the key expires, 24 hours after the first attempt;
-issue it again after that. Nothing is billed twice.
+older Lake whose request was different is refused with Stripe's idempotency error until the key
+expires, 24 hours after the first attempt; issue it again after that. Nothing is billed twice.
+lake#855 changed the customer's and the invoice's fields (the tags, and the invoice's description
+"Lake usage") under the same keys, so this applies to an issue that failed just before the
+upgrade; no Lake billed through Stripe before it. Its lines' keys gained `-p` with their product.
 Stripe's error message is kept, except on 401 and 403, where it can echo part of the key.
+
+**A missing product.** When Stripe answers `resource_missing` on `price_data[product]` (the
+operator has not created `lake_usage` in this account yet), `issue_invoice` fails
+(`store_unavailable`) with "Stripe has no product lake_usage in this account; the operator creates
+it (spec.payments)". Nothing is issued in lake, and the Stripe draft stays a draft. Once the
+operator's `spec.payments` has created the product, the operator issues the invoice again: the same
+month and attempt send the same keys, so the draft is reused. Stripe may have saved the refusal
+under the item's key and replay it for 24 hours; if the same message comes back after the product
+exists, issue again after 24 hours.
 
 **Payment.** The account pays on Stripe's hosted invoice page, by card or bank, from **Pay with
 Stripe** on lake's invoice page. Stripe tells lake through its webhook ([below](#webhooks)).
@@ -259,7 +290,7 @@ lake#831 ([orders.md](orders.md)). The apex order sheet sells monthly subscripti
 private warehouse ($1,000, including $400 of usage credit), a dedicated cluster ($5,000, including
 $2,000), and on-prem from $10,000 (40% of the fee as credit), from the order sheet configuration
 (`LAKE_ORDER_SHEET`), not from this price list. Stripe Checkout bills the fee itself (subscription
-mode, the price inline). Each order records `amount_cents` and `included_credit_cents`.
+mode, the offer's Lake [product](#stripe) at the price inline). Each order records `amount_cents` and `included_credit_cents`.
 
 **Not built yet: the credit on the monthly bill.** The intended rule (Steve, 2026-10-18) is that
 the month's usage is priced at this price list, the included credit is applied first, and only the
@@ -570,8 +601,11 @@ POST /v1/record_invoice_payment
   write with its own idempotency key; a retry after a failed step that bills once; Stripe's total
   equal to lake's to the cent; a void in lake voiding in Stripe; webhooks applying paid, failed and
   void once per event id, refusing bad and stale signatures, acknowledging unknown events, with the
-  central audit; the customer and invoice tagged `orama_app` and `lake_instance` and no Cloud v1
-  bare key sent (lake#855); Cloud v1's, untagged and another Lake's invoices, subscription invoices
+  central audit; the customer, the invoice and its items tagged `orama_app` and `lake_instance` and
+  no Cloud v1 bare key sent (lake#855); the invoice described "Lake usage, `<month>`" and each item
+  of `lake_usage` at an inline price with its `-p` key, a negative rounding line keeping the bare
+  amount and a positive one the product; a missing product failing the issue with the operator's
+  message, nothing issued, and the same issue going through once the product exists; Cloud v1's, untagged and another Lake's invoices, subscription invoices
   included, ignored with no `billing_payment_events` row and no audit event, after the signature
   check, while a Lake-tagged invoice lake did not issue stays `matched: false`; the keys from the
   environment: unset, half set and malformed falling back to manual with a reason that names the
@@ -606,3 +640,6 @@ POST /v1/record_invoice_payment
   to `apply_payment_event` in both stores, and register it in the Stripe dashboard.
 - A new kind of Stripe object lake creates: tag it with `tag` in `src/api/stripe.cpp`
   (`orama_app`, `lake_instance`) and give it a `lake_*` key, never one of Cloud v1's bare keys.
+- A new product (a new paid offer, say): add its id to `include/lake/api/stripe.hpp` (and
+  `stripe_offer_product` for an offer), the [table above](#stripe), and orama-operator's catalog in
+  the same change, so every account has it before a Lake names it.

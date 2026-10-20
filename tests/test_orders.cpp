@@ -93,13 +93,15 @@ std::string field(std::string_view body, std::string_view name) {
     return {};
 }
 
-// Stripe Checkout as far as lake uses it: sessions, with Stripe's idempotency.
+// Stripe Checkout as far as lake uses it: sessions, with Stripe's idempotency, in an account
+// that may lack one of Lake's products (`missing_product`).
 struct FakeCheckout {
     std::mutex mutex;
     std::vector<StripeRequest> requests;
     std::map<std::string, StripeResponse> answered;
     int sessions = 0;
     bool fail = false;
+    std::string missing_product;
 
     static std::string header(const StripeRequest& request, std::string_view name) {
         for (const auto& [key, value] : request.headers) {
@@ -125,6 +127,17 @@ struct FakeCheckout {
         }
         if (!request.url.ends_with("/v1/checkout/sessions")) {
             return {404, R"({"error":{"message":"no such route"}})", {}};
+        }
+        if (!missing_product.empty() &&
+            field(request.body, "line_items%5B0%5D%5Bprice_data%5D%5Bproduct%5D") ==
+                missing_product) {
+            return {400,
+                    json{{"error",
+                          {{"code", "resource_missing"},
+                           {"param", "line_items[0][price_data][product]"},
+                           {"message", "No such product: '" + missing_product + "'"}}}}
+                        .dump(),
+                    {}};
         }
         const std::string id = std::format("cs_test_{}", ++sessions);
         StripeResponse response{
@@ -672,7 +685,7 @@ TEST(OrdersCheckout, ASubscriptionWithTheSheetsPriceInline) {
     const std::shared_ptr<PaymentProvider> provider = **current;
     const auto session =
         provider->create_checkout({"order-1",
-                                   "Lake Dedicated Cluster",
+                                   "dedicated_cluster",
                                    "Microsoft Azure, Canada",
                                    500'000,
                                    2,
@@ -693,6 +706,13 @@ TEST(OrdersCheckout, ASubscriptionWithTheSheetsPriceInline) {
     EXPECT_EQ(field(request.body, "line_items%5B0%5D%5Bprice_data%5D%5Bunit_amount%5D"), "500000");
     EXPECT_EQ(field(request.body, "line_items%5B0%5D%5Bprice_data%5D%5Brecurring%5D%5Binterval%5D"),
               "month");
+    // The line is the offer's Lake product (lake#855), whose name the operator gave it; where it
+    // runs is the subscription's description.
+    EXPECT_EQ(field(request.body, "line_items%5B0%5D%5Bprice_data%5D%5Bproduct%5D"),
+              "lake_dedicated_cluster");
+    EXPECT_EQ(request.body.find("product_data"), std::string::npos) << request.body;
+    EXPECT_EQ(field(request.body, "subscription_data%5Bdescription%5D"),
+              "Microsoft%20Azure%2C%20Canada");
     EXPECT_EQ(field(request.body, "customer_email"), "ada%40example.com");
     EXPECT_EQ(field(request.body, "metadata%5Blake_order_id%5D"), "order-1");
     // The session and its subscription are tagged as this Lake's (lake#855).
@@ -703,6 +723,45 @@ TEST(OrdersCheckout, ASubscriptionWithTheSheetsPriceInline) {
     }
     // The manual provider has no checkout.
     EXPECT_FALSE(manual_payment_provider()->create_checkout({}));
+}
+
+TEST(OrdersCheckout, EachPaidOfferIsItsLakeProduct) {
+    EXPECT_EQ(stripe_offer_product("private_warehouse"), "lake_private_warehouse");
+    EXPECT_EQ(stripe_offer_product("dedicated_cluster"), "lake_dedicated_cluster");
+    EXPECT_EQ(stripe_offer_product("on_prem"), "") << "on-prem is ordered by form";
+
+    FakeCheckout stripe;
+    ApiContext context;
+    const auto providers = stripe.providers();
+    auto current = liquid::runtime::block_on(providers->current(context));
+    ASSERT_TRUE(current && *current);
+    const std::shared_ptr<PaymentProvider> provider = **current;
+    const auto order = [](std::string id, std::string offer) {
+        return CheckoutRequest{std::move(id),
+                               std::move(offer),
+                               "East US",
+                               100'000,
+                               1,
+                               "usd",
+                               "ada@example.com",
+                               "https://lake.live/orders/o?token=t&checkout=done",
+                               "https://lake.live/orders/o?token=t&checkout=cancelled"};
+    };
+    ASSERT_TRUE(provider->create_checkout(order("order-2", "private_warehouse")));
+    EXPECT_EQ(field(stripe.last().body, "line_items%5B0%5D%5Bprice_data%5D%5Bproduct%5D"),
+              "lake_private_warehouse");
+    // An offer with no product is refused before anything is sent.
+    const std::size_t sent = stripe.count();
+    EXPECT_FALSE(provider->create_checkout(order("order-3", "on_prem")));
+    EXPECT_EQ(stripe.count(), sent);
+    // An account the operator has not given the product yet: the same message as an invoice's.
+    stripe.missing_product = "lake_dedicated_cluster";
+    const auto missing = provider->create_checkout(order("order-4", "dedicated_cluster"));
+    ASSERT_FALSE(missing);
+    EXPECT_NE(missing.error().find("Stripe has no product lake_dedicated_cluster in this account; "
+                                   "the operator creates it (spec.payments)"),
+              std::string::npos)
+        << missing.error();
 }
 
 TEST(OrdersCheckout, CheckoutEventsBecomeOrderStates) {
