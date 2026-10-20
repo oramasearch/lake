@@ -3,9 +3,10 @@
  * billed at the one price list, with no plan to choose, no monthly fee and nothing included. The
  * account is the current workspace's (`session.space`); the operator opens one with `?customer_id=`
  * and can issue an invoice for a month that has ended. Reads `billing_account`, `price_list`,
- * `bill_preview` and `list_invoices`; writes only `issue_invoice`, for the operator. The page exists
- * only where the lake bills (`viewer.billing`). */
-import { useState } from "react";
+ * `bill_preview` and `list_invoices`; writes `set_billing_contact` (owners, admins and the
+ * operator, lake#857) and `issue_invoice` (the operator). The page exists only where the lake bills
+ * (`viewer.billing`). */
+import { type ChangeEvent, useMemo, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { FileText, Receipt, Tags } from "lucide-react";
 import { act, useRead } from "@/lib/api";
@@ -14,8 +15,9 @@ import { useTrail } from "@/lib/trail";
 import { useToast } from "@/lib/toast";
 import { Modal } from "@/lib/overlay";
 import { date } from "@/lib/format";
-import { Banner, Button, Card, DataTable, Empty, ErrorBlock, Field, Form, Page, Skeleton, Split, Stat, StatRow, Status } from "@/lib/ui";
-import { billedNote, invoiceTone, lineSentence, monthLabel, months, money, owed, paymentSummary, priceLabel, quantityLabel, type Account, type Bill, type Invoice, type Line, type PriceListAnswer } from "./billing";
+import { Banner, Button, Card, DataTable, Empty, ErrorBlock, Field, fieldError, Form, KeyValue, Page, Skeleton, Split, Stat, StatRow, Status } from "@/lib/ui";
+import { useSpacePermissions } from "@/pages/apps/shared";
+import { addressLines, asksForBillingEmail, billedNote, contactDraft, contactSavedMessage, countryOptions, invoiceTone, lineSentence, monthLabel, months, money, owed, paymentSummary, priceLabel, quantityLabel, type Account, type Bill, type ContactDraft, type ContactSaved, type Invoice, type Line, type PriceListAnswer } from "./billing";
 
 export default function BillingPage() {
   const session = useSession();
@@ -31,6 +33,7 @@ export default function BillingPage() {
   const invoices = useRead<{ invoices: Invoice[] }>(customerId ? "list_invoices" : null, { customer_id: customerId }, { workspace: null });
   const hasList = !!account.data?.price_list;
   const bill = useRead<Bill>(customerId && hasList ? "bill_preview" : null, { customer_id: customerId }, { workspace: null, staleTime: 60_000 });
+  const permissions = useSpacePermissions(customerId);
 
   if (!customerId) {
     return (
@@ -91,7 +94,9 @@ export default function BillingPage() {
           <Split
             side={
               <>
+                {asksForBillingEmail(account.data) && <Banner tone="info">Add a billing email so invoices are emailed to you.</Banner>}
                 <InvoicesCard invoices={invoices} customerId={customerId} operator={operator} />
+                <ContactCard account={account.data} customerId={customerId} canEdit={permissions.canAdmin} checking={permissions.loading} />
                 {bill.data && bill.data.not_measured.length > 0 && (
                   <Banner tone="quiet" title="Not Measured Yet">
                     <ul className="m-0 pl-4">
@@ -210,6 +215,113 @@ function InvoicesCard({ invoices, customerId, operator }: { invoices: ReturnType
           { key: "state", label: "State", render: (i) => <Status value={i.state} tone={invoiceTone(i.state)} /> },
         ]}
       />
+    </Card>
+  );
+}
+
+/** The account's billing contact (lake#857): where invoices go, and the name and address on them.
+ * Members read it; owners, admins and the operator edit it in place, and while none is saved the
+ * form is open, starting from their own email. */
+function ContactCard({ account, customerId, canEdit, checking }: { account: Account; customerId: string; canEdit: boolean; checking: boolean }) {
+  const toast = useToast();
+  const contact = account.contact;
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(() => contactDraft(contact, account.suggested_email));
+  const [error, setError] = useState<unknown>(null);
+  const [busy, setBusy] = useState(false);
+  const countries = useMemo(() => countryOptions(draft.country), [draft.country]);
+  const open = canEdit && (editing || !contact);
+  const set = (key: keyof ContactDraft) => (e: ChangeEvent<HTMLInputElement | HTMLSelectElement>) => setDraft((d) => ({ ...d, [key]: e.target.value }));
+  const submit = async () => {
+    setError(null);
+    setBusy(true);
+    try {
+      const saved = await act<ContactSaved>("set_billing_contact", { customer_id: customerId, ...draft });
+      const message = contactSavedMessage(saved, account.provider.title);
+      toast(message.text, message.tone);
+      setEditing(false);
+    } catch (e) {
+      setError(e);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const errorAt = (key: keyof ContactDraft) => fieldError(error, key);
+  const lines = contact ? addressLines(contact) : [];
+  return (
+    <Card
+      label="Billing Contact"
+      actions={
+        canEdit && contact && !editing ? (
+          <Button
+            variant="ghost"
+            onClick={() => {
+              setDraft(contactDraft(contact, null));
+              setError(null);
+              setEditing(true);
+            }}
+          >
+            Edit
+          </Button>
+        ) : null
+      }
+      footer={contact && !open ? `Updated ${date(contact.updated_at)}` : undefined}
+    >
+      {checking && !canEdit ? (
+        <Skeleton lines={3} />
+      ) : open ? (
+        <Form onSubmit={submit} error={(Object.keys(draft) as (keyof ContactDraft)[]).some(errorAt) ? null : error}>
+          <Field label="Email" required help="Where invoices are sent." error={errorAt("email")}>
+            <input type="email" name="email" autoComplete="email" maxLength={320} placeholder="billing@example.com" value={draft.email} onChange={set("email")} />
+          </Field>
+          <Field label="Name on invoices" help="Your legal or company name. Left empty, the account's name is used." error={errorAt("name")}>
+            <input name="name" autoComplete="organization" maxLength={256} value={draft.name} onChange={set("name")} />
+          </Field>
+          <Field label="Address" error={errorAt("line1")}>
+            <input name="line1" autoComplete="address-line1" maxLength={256} placeholder="Street and number" value={draft.line1} onChange={set("line1")} />
+          </Field>
+          <Field label="Address line 2" error={errorAt("line2")}>
+            <input name="line2" autoComplete="address-line2" maxLength={256} value={draft.line2} onChange={set("line2")} />
+          </Field>
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            <Field label="City" error={errorAt("city")}>
+              <input name="city" autoComplete="address-level2" maxLength={128} value={draft.city} onChange={set("city")} />
+            </Field>
+            <Field label="Postal code" error={errorAt("postal_code")}>
+              <input name="postal_code" autoComplete="postal-code" maxLength={32} value={draft.postal_code} onChange={set("postal_code")} />
+            </Field>
+            <Field label="State or region" error={errorAt("state")}>
+              <input name="state" autoComplete="address-level1" maxLength={128} value={draft.state} onChange={set("state")} />
+            </Field>
+            <Field label="Country" error={errorAt("country")}>
+              <select name="country" autoComplete="country" value={draft.country} onChange={set("country")}>
+                <option value="">Not set</option>
+                {countries.map((c) => (
+                  <option key={c.code} value={c.code}>
+                    {c.name}
+                  </option>
+                ))}
+              </select>
+            </Field>
+          </div>
+          <div className="flex flex-wrap justify-end gap-2">
+            {contact && <Button onClick={() => setEditing(false)}>Cancel</Button>}
+            <Button type="submit" variant="primary" loading={busy}>
+              Save contact
+            </Button>
+          </div>
+        </Form>
+      ) : contact ? (
+        <KeyValue
+          rows={[
+            ["Email", <span className="break-all">{contact.email}</span>],
+            ["Name on invoices", contact.name || <span className="text-ink-3">The account's name</span>],
+            ["Address", lines.length ? lines.map((line, i) => <div key={i}>{line}</div>) : null],
+          ]}
+        />
+      ) : (
+        <p className="muted m-0 text-[13px]">No billing contact yet. An owner or admin of this account adds the email invoices are sent to.</p>
+      )}
     </Card>
   );
 }
