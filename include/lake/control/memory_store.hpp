@@ -401,6 +401,9 @@ public:
                                       const std::string& state,
                                       const std::string& provider_reference,
                                       const std::string& note) override;
+    Result<Invoice> set_invoice_provider_status(const std::string& id,
+                                                const std::string& from,
+                                                const std::string& to) override;
     Result<std::string> billing_provider_customer(const std::string& customer_id,
                                                   const std::string& provider) override;
     Result<std::string>

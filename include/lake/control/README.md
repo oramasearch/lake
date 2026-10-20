@@ -177,7 +177,8 @@ applied once by event id. `CloudOrder`, `NewCloudOrder`, `CloudOrderTransition`,
 lake#620, decision 57): the provider's customer per account and its notices, applied once by event
 id. `BillingContact`, `billing_contact`, `set_billing_contact` and `billing_contact_problem` are each
 account's billing email, name and address (migration `0090_billing_contacts`, lake#857), a billing
-record replaced whole on every save. `CloudOrder`, `NewCloudOrder`, `CloudOrderTransition`, `CloudOrderPayment`, `CloudOrderEvent`
+record replaced whole on every save; `set_invoice_provider_status` records whether an invoice's
+email was sent (`send_failed`), moving a due invoice only from the status its caller read. `CloudOrder`, `NewCloudOrder`, `CloudOrderTransition`, `CloudOrderPayment`, `CloudOrderEvent`
 and `CloudOrderEmailOutcome`, with `create_cloud_order`, `get_cloud_order`,
 `transition_cloud_order`, `apply_cloud_order_payment`, `claim_cloud_order_emails`,
 `record_cloud_order_email`, `unaudited_cloud_order_events` and `mark_cloud_order_events_audited`,

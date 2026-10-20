@@ -301,8 +301,7 @@ public:
         }
         // One key family per issue of a month: a retry of the same issue (a lost answer, a
         // failed step) returns Stripe's first result instead of a second invoice.
-        const std::string key = std::format(
-            "lake-invoice-{}-{}-{}", invoice.customer_id, invoice.period, account.attempt);
+        const std::string key = invoice_key(account, invoice);
         std::vector<std::pair<std::string, std::string>> fields{
             {"customer", account.provider_customer_id},
             {"currency", "usd"},
@@ -378,6 +377,27 @@ public:
         return request;
     }
 
+    // POST /v1/invoices/<id>/send: Stripe emails the hosted invoice link to the customer's email.
+    // The send at issue is keyed in the invoice's family; each resend has its own key, since Stripe
+    // answers a key's first answer again for 24 hours, a refusal included.
+    std::expected<std::string, std::string> send_payment_request(const PaymentAccount& account,
+                                                                 const control::Invoice& invoice,
+                                                                 std::string_view resend) override {
+        if (invoice.provider_reference.empty()) {
+            return std::unexpected(std::string("the invoice has no Stripe invoice"));
+        }
+        std::string key = invoice_key(account, invoice) + "-send";
+        if (!resend.empty()) {
+            key += std::format("-{}", resend);
+        }
+        auto sent = post(
+            "/v1/invoices/" + invoice.provider_reference + "/send", {}, key, "send the invoice");
+        if (!sent) {
+            return std::unexpected(sent.error());
+        }
+        return sent->value("status", invoice.provider_status);
+    }
+
     std::expected<void, std::string> cancel_payment(const control::Invoice& invoice) override {
         if (invoice.provider_reference.empty()) {
             return {};
@@ -449,6 +469,12 @@ public:
     }
 
 private:
+    // The idempotency key family of one issue of an account's month.
+    static std::string invoice_key(const PaymentAccount& account, const control::Invoice& invoice) {
+        return std::format(
+            "lake-invoice-{}-{}-{}", invoice.customer_id, invoice.period, account.attempt);
+    }
+
     // One invoice item of `cents` on a draft invoice, tagged as this Lake's. A positive amount is
     // Lake's usage product at an inline price; a negative one (a rounding difference) keeps the
     // bare amount, because an inline price cannot be negative.

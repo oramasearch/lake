@@ -2895,6 +2895,28 @@ Result<Invoice> InMemoryStore::set_invoice_state(const std::string& id,
     return std::unexpected(StoreError{"not_found", "no invoice " + id});
 }
 
+Result<Invoice> InMemoryStore::set_invoice_provider_status(const std::string& id,
+                                                           const std::string& from,
+                                                           const std::string& to) {
+    // billing_invoices.provider_status: `^[a-z_]{0,32}$`.
+    if (to.size() > 32 ||
+        !std::ranges::all_of(to, [](char c) { return c == '_' || (c >= 'a' && c <= 'z'); })) {
+        return std::unexpected(StoreError{
+            "invalid_input", "a provider status is at most 32 lower-case letters and _"});
+    }
+    std::lock_guard lock(mutex_);
+    for (Invoice& invoice : invoices_) {
+        if (invoice.id != id) {
+            continue;
+        }
+        if (invoice.state == "due" && invoice.provider_status == from) {
+            invoice.provider_status = to;
+        }
+        return invoice;
+    }
+    return std::unexpected(StoreError{"not_found", "no invoice " + id});
+}
+
 Result<std::string> InMemoryStore::billing_provider_customer(const std::string& customer_id,
                                                              const std::string& provider) {
     std::lock_guard lock(mutex_);

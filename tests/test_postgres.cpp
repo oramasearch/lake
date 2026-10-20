@@ -1274,6 +1274,23 @@ TEST(PostgresBilling, PaymentProviderCustomersAndNoticesFollowTheContract) {
     EXPECT_EQ(issued->payment_url, invoice.payment_url);
     EXPECT_EQ(issued->provider_status, "open");
 
+    // A send to the billing email that failed, then succeeded (lake#857): the status moves only
+    // from the one the caller read.
+    const auto unsent = store->set_invoice_provider_status(issued->id, "open", "send_failed");
+    ASSERT_TRUE(unsent) << unsent.error().message;
+    EXPECT_EQ(unsent->provider_status, "send_failed");
+    EXPECT_EQ(store->set_invoice_provider_status(issued->id, "open", "open")->provider_status,
+              "send_failed")
+        << "no longer open: unchanged";
+    EXPECT_EQ(
+        store->set_invoice_provider_status(issued->id, "send_failed", "open")->provider_status,
+        "open");
+    EXPECT_EQ(
+        store->set_invoice_provider_status(lake::control::new_uuid_v4(), "open", "send_failed")
+            .error()
+            .code,
+        "not_found");
+
     const auto apply = [&](std::string id, std::string state, std::string status) {
         return store->apply_payment_event(
             {"stripe", "evt_" + id + suffix, "invoice.x", "in_" + suffix, state, status, ""});
@@ -1289,6 +1306,10 @@ TEST(PostgresBilling, PaymentProviderCustomersAndNoticesFollowTheContract) {
     EXPECT_EQ(paid->invoice.state, "paid");
     EXPECT_FALSE(paid->invoice.paid_at.empty());
     EXPECT_EQ(paid->invoice.provider_reference, "in_" + suffix);
+    EXPECT_EQ(
+        store->set_invoice_provider_status(issued->id, "paid", "send_failed")->provider_status,
+        "paid")
+        << "only a due invoice's status moves";
     const auto duplicate = apply("paid", "paid", "paid");
     ASSERT_TRUE(duplicate);
     EXPECT_TRUE(duplicate->duplicate);
