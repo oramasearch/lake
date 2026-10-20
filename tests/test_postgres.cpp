@@ -1230,6 +1230,26 @@ TEST(PostgresBilling, PaymentProviderCustomersAndNoticesFollowTheContract) {
     EXPECT_EQ(*store->billing_provider_customer(customer->id, "stripe"), "cus_1");
     EXPECT_EQ(store->billing_provider_customer(lake::control::new_uuid_v4(), "stripe").error().code,
               "not_found");
+    // Replaced only while the row holds the id read (lake#856): a concurrent replacement gets the
+    // first one's id back.
+    EXPECT_EQ(*store->replace_billing_provider_customer(customer->id, "stripe", "cus_1", "cus_3"),
+              "cus_3");
+    EXPECT_EQ(*store->replace_billing_provider_customer(customer->id, "stripe", "cus_1", "cus_4"),
+              "cus_3")
+        << "the first replacement stays";
+    EXPECT_EQ(*store->billing_provider_customer(customer->id, "stripe"), "cus_3");
+    EXPECT_EQ(*store->replace_billing_provider_customer(customer->id, "manual", "cus_1", "cus_4"),
+              "")
+        << "nothing is kept to replace";
+    EXPECT_EQ(
+        store->replace_billing_provider_customer(customer->id, "stripe", "", "cus_4").error().code,
+        "invalid_input");
+    EXPECT_EQ(store
+                  ->replace_billing_provider_customer(
+                      lake::control::new_uuid_v4(), "stripe", "cus_3", "cus_4")
+                  .error()
+                  .code,
+              "not_found");
 
     const std::string plan_id = "pay-" + suffix;
     lake::control::BillingPlan plan;

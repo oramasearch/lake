@@ -407,6 +407,11 @@ public:
     set_billing_provider_customer(const std::string& customer_id,
                                   const std::string& provider,
                                   const std::string& provider_customer_id) override;
+    Result<std::string>
+    replace_billing_provider_customer(const std::string& customer_id,
+                                      const std::string& provider,
+                                      const std::string& expected_id,
+                                      const std::string& provider_customer_id) override;
     Result<PaymentEventResult> apply_payment_event(const PaymentEvent& event) override;
     Result<CloudOrder> create_cloud_order(const NewCloudOrder& order) override;
     Result<CloudOrder> get_cloud_order(const std::string& id) override;

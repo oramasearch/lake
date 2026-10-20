@@ -72,8 +72,10 @@ for now"*. Lake collects payment through `PaymentProvider` (`include/lake/api/bi
 interface with:
 
 - `name()` and `title()`: stored on each invoice (`provider`) and shown by `billing_account`;
-- `provider_customer(account)`: the provider's id for the account, created the first time; lake
-  keeps it (`billing_accounts`) before it asks for payment, so a failed request never loses it;
+- `provider_customer(account)`: the provider's id for the account, created the first time, and
+  the kept id it `replaces` when the provider no longer has that customer
+  ([below](#stripe), lake#856); lake keeps it (`billing_accounts`) before it asks for payment, so a
+  failed request never loses it;
 - `request_payment(account, invoice)`: called for an invoice about to be issued (its account, month,
   price list, lines and total, and which issue of the month it is). It answers the provider's `reference`,
   the `instructions` the invoice shows, the `payment_url` where the account pays and the provider's
@@ -139,6 +141,21 @@ accounts that are never invoiced leave nothing in Stripe. Its id (`cus_...`) is 
 `billing_accounts` (customer, provider, provider customer id), the account's billing row in
 PostgreSQL (decision 56), and reused for every later invoice.
 
+**A customer Stripe no longer has** (lake#856). A `cus_` id exists in one Stripe account and mode
+only. Before each invoice lake reads the kept customer (`GET /v1/customers/<id>`). When Stripe
+answers 404 `resource_missing` (the Lake's key now names another sandbox, or live mode instead of
+test mode) or the customer is `deleted: true` (deleted in the Dashboard), lake creates a new
+customer as for the first invoice and keeps it in place of the old one, only while the row still
+holds the old id: of two issues replacing it at once, both use the replacement stored first. The
+central audit records `billing.account.provider_customer_replaced` with the old and new ids. Any
+other failure of the read (401, 403, 429, 5xx, no answer) fails the issue and keeps the customer.
+Invoices issued to the old customer keep their `provider_reference` and `payment_url`; they belong
+to the old account.
+
+Before switching a Lake to another Stripe account or mode, settle or void its open Stripe invoices.
+Lake cannot learn about a payment made in the old account afterwards. New invoices go to a new
+customer.
+
 **Invoices.** `issue_invoice` freezes lake's invoice as before, then:
 
 1. `POST /v1/invoices`: a draft for the customer, `currency=usd`, `collection_method=send_invoice`,
@@ -159,9 +176,13 @@ Stripe's status as `provider_status` (`open`). **Lake's invoice stays the source
 amounts**: Stripe's total is lake's to the cent, and the lines are lake's. Stripe bills USD only
 here; another currency is refused before anything is sent.
 
-Every request is form-encoded with `Authorization: Bearer <secret key>`, `Stripe-Version:
-2024-06-20` (`stripe_api_version`) and an `Idempotency-Key`: `lake-customer-<customer>` for the
-customer, `lake-invoice-<customer>-<month>-<n>` for the invoice (n is the issue of the month: 0,
+Every write is form-encoded with `Authorization: Bearer <secret key>`, `Stripe-Version:
+2024-06-20` (`stripe_api_version`) and an `Idempotency-Key`; the read of a kept customer is a `GET`
+with the same secret key and version and no `Idempotency-Key`. The idempotency keys are
+`lake-customer-<customer>` for the customer, `lake-customer-<customer>-replaces-<old cus_ id>` for
+one that replaces a customer Stripe no longer has (the plain key would replay the first customer
+within Stripe's 24 hours in the same account), `lake-invoice-<customer>-<month>-<n>` for the
+invoice (n is the issue of the month: 0,
 then 1 after a void), with `-line-<i>-p`, `-rounding` and `-finalize` for the steps after it, and
 `lake-void-<invoice>` for a void. A retry of a failed issue within Stripe's 24 hours therefore gets
 Stripe's first answers back instead of a second invoice; an issue after a void is a new invoice.
@@ -535,7 +556,8 @@ pre-filled with these rates.
 The operator-only capabilities answer anyone else `unauthorized` before the handler runs. Audit
 objects are `customer/<id>/billing` (kinds `billing.account.read`, `billing.bill.preview`,
 `billing.invoice.issue`, `billing.invoices.read`, `billing.invoice.read`, `billing.invoice.paid`,
-`billing.invoice.void`) except `set_price_list`'s.
+`billing.invoice.void`, and `billing.account.provider_customer_replaced` beside an issue that
+replaced the account's Stripe customer) except `set_price_list`'s.
 
 An invoice is `{id, number, customer_id, period, price_list_id, currency, total_micros, state,
 provider, provider_reference, instructions, note, issued_at, paid_at, voided_at, payment_url,

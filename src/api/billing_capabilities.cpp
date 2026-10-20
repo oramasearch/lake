@@ -605,7 +605,9 @@ template <class Awaited> ApiResult unresolved(const Awaited& awaited) {
 }
 
 // The account as the provider sees it, with the provider's id for it (created and kept first,
-// so a failed payment request never loses it).
+// so a failed payment request never loses it). A kept id the provider replaced (lake#856) is
+// swapped only while the row still holds it, so of two concurrent replacements both use the one
+// stored first; the swap is in the central audit (billing.account.provider_customer_replaced).
 std::expected<PaymentAccount, ApiResult> payment_account(ApiContext& context,
                                                          PaymentProvider& provider,
                                                          const control::Customer& customer,
@@ -617,13 +619,43 @@ std::expected<PaymentAccount, ApiResult> payment_account(ApiContext& context,
         return std::unexpected(from_store(kept.error()));
     }
     account.provider_customer_id = *kept;
-    auto id = provider.provider_customer(account);
-    if (!id) {
-        return std::unexpected(
-            ApiResult::failure("store_unavailable", "the payment provider refused: " + id.error()));
+    auto found = provider.provider_customer(account);
+    if (!found) {
+        return std::unexpected(ApiResult::failure(
+            "store_unavailable", "the payment provider refused: " + found.error()));
     }
-    if (!id->empty() && *id != account.provider_customer_id) {
-        const auto stored = context.store->set_billing_provider_customer(customer.id, name, *id);
+    if (!found->replaces.empty()) {
+        const auto stored = context.store->replace_billing_provider_customer(
+            customer.id, name, found->replaces, found->id);
+        if (!stored) {
+            return std::unexpected(from_store(stored.error()));
+        }
+        account.provider_customer_id = *stored;
+        if (*stored != found->id) {
+            return account; // another request's replacement, stored first, is its to audit
+        }
+        const audit::EventDraft event{
+            .customer_id = customer.id,
+            .kind = "billing.account.provider_customer_replaced",
+            .principal = context.acting_identity.empty() ? "anonymous" : context.acting_identity,
+            .object = "customer/" + customer.id + "/billing",
+            .action = "issue_invoice",
+            .outcome = "success",
+            .request_id = context.request_id,
+            .method = context.authentication_method,
+            .device = context.device,
+            .details = {{"provider", name},
+                        {"old_provider_customer_id", found->replaces},
+                        {"new_provider_customer_id", found->id}}};
+        const audit::IdentityOptions options{.configured_seed = context.identity_seed,
+                                             .instance_kek = context.instance_kek};
+        if (const auto recorded = audit::record(*context.store, event, options); !recorded) {
+            return std::unexpected(ApiResult::failure(
+                "store_error", "could not record audit event: " + recorded.error().message));
+        }
+    } else if (!found->id.empty() && found->id != account.provider_customer_id) {
+        const auto stored =
+            context.store->set_billing_provider_customer(customer.id, name, found->id);
         if (!stored) {
             return std::unexpected(from_store(stored.error()));
         }

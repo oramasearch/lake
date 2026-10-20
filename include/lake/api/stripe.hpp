@@ -90,7 +90,8 @@ bool stripe_webhook_secret_shape(std::string_view secret);
 
 // The Stripe provider: customers, invoices with an invoice item of Lake's usage product per lake
 // line, finalization and the hosted invoice URL, voids, Checkout for the order sheet's offers, and
-// webhook events. A request that names a product the account lacks fails with a message saying
+// webhook events. A kept customer is read before it is reused and replaced when Stripe no longer
+// has it (lake#856). A request that names a product the account lacks fails with a message saying
 // the operator creates it. `instance` is this Lake's public host
 // (LAKE_PUBLIC_HOST), tagged on every object it creates and checked on every event, since two
 // Lakes can bill through one account. `base` is Stripe's API origin (a fake's in tests).
