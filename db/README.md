@@ -1,5 +1,10 @@
 # Database schema
 
+Migration `0090_billing_contacts` (lake#857) adds `billing_contacts`, each account's billing email,
+name and address, and the guard `billing_contacts_guard`. Additive; apply before the new binary, and
+have the operator vendor the schema and select the guard. See
+[billing.md](../docs/api/billing.md#billing-contact).
+
 Migration `0089_cloud_orders` (lake#831) adds `cloud_orders` and `cloud_order_events`, the apex
 order sheet's orders and their history, with the `updated_at` trigger, the `lake_cloud_orders`
 notification of a paid order and the guard `cloud_orders_guard`. The Orama operator reads paid

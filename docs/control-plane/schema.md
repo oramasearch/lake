@@ -882,7 +882,8 @@ pull request before a lake with this change is rolled.
 
 - `billing_accounts` (customer, `provider`, `provider_customer_id`, created; primary key customer and
   provider; cascading with the customer): the account's billing row, holding its Stripe customer id
-  (`cus_...`). Written once; a second write keeps the first id;
+  (`cus_...`). Written once; a second write keeps the first id. Replaced only when Stripe no
+  longer has that customer, by an update conditional on the id read (lake#856, no migration);
 - `billing_invoices.payment_url` (Stripe's hosted invoice page, at most 2048 characters) and
   `provider_status` (`open`, `paid`, `payment_failed`, `void`), both empty for the manual provider,
   and the partial index `billing_invoices_by_provider_reference` on (`provider`,
@@ -1273,3 +1274,14 @@ Indexes: `cloud_orders_paid_idx` (`created_at` where `state = 'paid'`), `cloud_o
 idempotent; guard `cloud_orders_guard`. The operator vendors this schema and selects that guard
 before a lake with this change is rolled.
 
+## Billing contacts migration
+
+`0090_billing_contacts` (lake#857, [`../api/billing.md#billing-contact`](../api/billing.md#billing-contact))
+adds `billing_contacts`, one row per account (primary key `customer_id`, cascading with the
+customer): `email` (required, `^[^@\s]+@[^@\s]+$`, at most 320 characters), `name` (the legal or
+company name on the invoice, ≤ 256), `line1` and `line2` (≤ 256), `city` and `state` (≤ 128),
+`postal_code` (≤ 32), `country` (an ISO 3166-1 alpha-2 code in capitals or empty) and `updated_at`.
+Every field but `email` defaults to `''`. Lake alone writes it, through `set_billing_contact`, and
+sends it to the account's Stripe customer. A billing record (decision 56): no workspace content.
+Additive and idempotent; guard `billing_contacts_guard`. The operator vendors the schema and selects
+that guard before a lake with this change is rolled.

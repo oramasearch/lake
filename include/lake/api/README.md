@@ -119,8 +119,13 @@ decision 56): the `PaymentProvider` interface and its manual implementation, `bi
 lake's own Stripe client: `stripe_payment_provider` over an injected `StripeHttp`, the
 `Stripe-Signature` check (`verify_stripe_signature`), `parse_stripe_event`, `stripe_form` and
 `stripe_cents`; since lake#831 a provider also starts a Checkout subscription (`create_checkout`,
-`CheckoutRequest`) and a notice can move an order (`PaymentNotice::order_state`). `orders.hpp`
-declares the apex order sheet (lake#831, [orders](../../../docs/api/orders.md)): its configuration
+`CheckoutRequest`) and a notice can move an order (`PaymentNotice::order_state`); since lake#855
+the provider is built with its Lake's public host, tags what it creates with it, names Lake's
+Stripe products on every line (`stripe_usage_product`, `stripe_offer_product`), and marks a notice
+about another app's or another Lake's object `PaymentNotice::foreign`; since lake#856 it reads a
+kept customer first and answers a replacement for one Stripe no longer has
+(`ProviderCustomer::replaces`). `orders.hpp` declares the apex order sheet (lake#831,
+[orders](../../../docs/api/orders.md)): its configuration
 (`OrderSheet`, `order_sheet_from_environment`, `default_order_sheet_json`), the form's checks
 (`validate_order_form`), the status token, the emails (`order_email_recipients_due`,
 `order_email`), `price_list_rows` and `OrderRateLimiter`. `resend.hpp` declares lake's own Resend

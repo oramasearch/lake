@@ -1,9 +1,10 @@
 /** Billing (lake#564, lake#635): amounts from millionths, rates in a person's units, a line as usage ×
  * rate = cost, the months a bill covers, invoice states, what is owed, the price list editor's rows,
- * and the rail that shows Billing only where the lake bills. `npm test`; the build runs it. */
+ * the rail that shows Billing only where the lake bills, and the billing contact (lake#857). `npm
+ * test`; the build runs it. */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { DIMENSIONS, GPU_CLASSES, LIST_RATES, billedNote, invoiceTone, lineSentence, monthLabel, months, money, owed, paymentSummary, payOnline, priceLabel, providerStatus, quantityLabel, rateRows, ratesInput, recordedByHand, rowTitle } from "../src/pages/billing/billing.ts";
+import { DIMENSIONS, GPU_CLASSES, LIST_RATES, addressLines, asksForBillingEmail, billedNote, contactDraft, contactSavedMessage, countryName, countryOptions, invoiceTone, isCountryCode, lineSentence, monthLabel, months, money, owed, paymentSummary, payOnline, priceLabel, providerStatus, quantityLabel, rateRows, ratesInput, recordedByHand, rowTitle, type Contact, type Provider } from "../src/pages/billing/billing.ts";
 import { billingVisible } from "../src/routes/nav.ts";
 
 test("an amount is in its currency, to the cent unless a price has fractions of one", () => {
@@ -160,4 +161,53 @@ test("the Payment figure names the provider and says when card payment is not se
   assert.deepEqual(paymentSummary({ name: "stripe", title: "Stripe", records_payments_by_hand: false, online_payment: true, reason: "" }), { value: "Stripe", sub: "pay each invoice on Stripe's page" });
   assert.deepEqual(paymentSummary({ name: "manual", title: "Invoice only", records_payments_by_hand: true, reason: "Card payment is not set up: no mount." }), { value: "Invoice only", sub: "card payment is not set up" });
   assert.deepEqual(paymentSummary({ name: "manual", title: "Invoice only", records_payments_by_hand: true }), { value: "Invoice only", sub: "Orama records each payment" });
+});
+
+const contact: Contact = { email: "billing@acme.example", name: "Acme GmbH", line1: "Invalidenstraße 1", line2: "", city: "Berlin", postal_code: "10115", state: "", country: "DE", updated_at: "2026-10-19T12:00:00Z" };
+const stripe: Provider = { name: "stripe", title: "Stripe", records_payments_by_hand: false, online_payment: true, reason: "" };
+const manual: Provider = { name: "manual", title: "Invoice only", records_payments_by_hand: true, online_payment: false, reason: "" };
+
+test("the contact's country is an assigned ISO 3166-1 code, offered by name (lake#857)", () => {
+  assert.equal(isCountryCode("DE"), true);
+  assert.equal(isCountryCode("de"), false, "in capitals, as set_billing_contact takes it");
+  assert.equal(isCountryCode("DEU"), false, "alpha-2, not alpha-3");
+  assert.equal(isCountryCode("XK"), false, "not assigned");
+  assert.equal(isCountryCode(""), false);
+  assert.equal(countryName("DE"), "Germany");
+  assert.equal(countryName("12"), "12", "a code no one can name stays a code");
+  const options = countryOptions();
+  assert.equal(options.length, 249);
+  assert.equal(new Set(options.map((c) => c.code)).size, 249);
+  assert.ok(options.every((c) => isCountryCode(c.code) && c.name && c.name !== c.code));
+  const names = options.map((c) => c.name);
+  assert.deepEqual(names, [...names].sort((a, b) => a.localeCompare(b, "en")), "by name");
+  assert.deepEqual(options.find((c) => c.code === "US"), { code: "US", name: "United States" });
+  assert.equal(countryOptions("DE").length, 249);
+  assert.deepEqual(countryOptions("XK").find((c) => c.code === "XK"), { code: "XK", name: "Kosovo" }, "a saved code outside the list stays offered, so a save keeps it");
+});
+
+test("the contact form starts from the saved contact, else empty with the suggested email", () => {
+  const { updated_at: _, ...fields } = contact;
+  assert.deepEqual(contactDraft(contact, "owner@acme.example"), fields);
+  assert.deepEqual(contactDraft(null, "owner@acme.example"), { email: "owner@acme.example", name: "", line1: "", line2: "", city: "", postal_code: "", state: "", country: "" });
+  assert.equal(contactDraft(null, null).email, "", "nothing to suggest to the operator");
+});
+
+test("a contact's address reads as lines, empty parts left out", () => {
+  assert.deepEqual(addressLines(contact), ["Invalidenstraße 1", "Berlin, 10115", "Germany"]);
+  assert.deepEqual(addressLines({ line1: "1 Main St", line2: "Suite 200", city: "Springfield", state: "IL", postal_code: "62701", country: "US" }), ["1 Main St", "Suite 200", "Springfield, IL, 62701", "United States"]);
+  assert.deepEqual(addressLines({ line1: "", line2: "", city: "", state: "", postal_code: "", country: "" }), []);
+});
+
+test("the page asks for a billing email only when there is none and invoices are paid online", () => {
+  assert.equal(asksForBillingEmail({ contact: null, provider: stripe }), true);
+  assert.equal(asksForBillingEmail({ contact, provider: stripe }), false);
+  assert.equal(asksForBillingEmail({ contact: null, provider: manual }), false, "invoice only: Orama sends the invoice");
+  assert.equal(asksForBillingEmail({ contact: null, provider: { ...stripe, online_payment: undefined } }), false);
+});
+
+test("a save says whether the provider took the contact, and that a refused one is kept", () => {
+  assert.deepEqual(contactSavedMessage({ provider_update: "updated" }, "Stripe"), { text: "Billing contact saved and sent to Stripe", tone: "ok" });
+  assert.deepEqual(contactSavedMessage({ provider_update: "none" }, "Stripe"), { text: "Billing contact saved", tone: "ok" });
+  assert.deepEqual(contactSavedMessage({ provider_update: "failed", provider_error: "Invalid email address" }, "Stripe"), { text: "Billing contact saved, but Stripe refused it: Invalid email address. It is sent again at the next save.", tone: "bad" });
 });

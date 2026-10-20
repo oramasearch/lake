@@ -150,7 +150,7 @@ For the full PostgreSQL-backed suite, local database setup, and every run option
 
 ## Releases
 
-The current release is **v0.3.0** (2026-10-19).
+The current release is **v0.3.1** (2026-10-20): [`docs/releases/v0.3.1.md`](docs/releases/v0.3.1.md), billing through a shared Stripe account, billing contacts and emailed invoices. Before it, **v0.3.0** (2026-10-19).
 [`docs/releases/v0.3.0.md`](docs/releases/v0.3.0.md) lists what it adds (the lake.live order sheet
 and the 2026-10-18 UX review's fixes), what it does not include, and its known issues.
 [`docs/releases/v0.2.0.md`](docs/releases/v0.2.0.md) covers secure networking, regions, the managed

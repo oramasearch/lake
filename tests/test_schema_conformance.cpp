@@ -48,6 +48,25 @@ template <class Result> auto checked(Result result) {
     return std::move(*result);
 }
 
+// A payment provider whose invoices have a request to send (lake#857), so resend_invoice answers
+// in the contract; payments are recorded by hand, as the manual provider's are.
+struct SchemaPaymentProvider final : lake::api::PaymentProvider {
+    std::string_view name() const override {
+        return "schema";
+    }
+    std::string_view title() const override {
+        return "Schema";
+    }
+    std::expected<lake::api::PaymentRequest, std::string>
+    request_payment(const lake::api::PaymentAccount&,
+                    const lake::control::Invoice& invoice) override {
+        return lake::api::PaymentRequest{"schema-" + invoice.period, "Pay by wire.", {}, "open"};
+    }
+    bool records_payments_by_hand() const override {
+        return true;
+    }
+};
+
 class HttpEvidence {
 public:
     explicit HttpEvidence(unsigned short port) : url_("http://127.0.0.1:" + std::to_string(port)) {
@@ -526,6 +545,8 @@ TEST(SchemaConformance, EveryToolAndRequiredOutputUsesHttpContract) {
              },
          // Billing on (lake#564), so its capabilities are in the contract too.
          .billing = true,
+         .payment_providers =
+             lake::api::fixed_payment_providers(std::make_shared<SchemaPaymentProvider>()),
          .store_root = root.string()});
     ASSERT_TRUE(server.start()) << server.reason();
     HttpEvidence http(server.port());
@@ -855,6 +876,8 @@ TEST(SchemaConformance, EveryToolAndRequiredOutputUsesHttpContract) {
     http.call("price_list", {{"include_history", true}});
     http.call("billing_account", {{"customer_id", customer.id}});
     http.read("billing_account", "?customer_id=" + customer.id);
+    http.call("set_billing_contact",
+              {{"customer_id", customer.id}, {"email", "billing@example.com"}, {"country", "DE"}});
     http.call("bill_preview", {{"customer_id", customer.id}});
     // January at a list with no rates, so its invoice reads no workspace's usage.
     http.call("set_price_list", {{"effective_from", "2026-01"}, {"prices", json::array()}});
@@ -875,6 +898,7 @@ TEST(SchemaConformance, EveryToolAndRequiredOutputUsesHttpContract) {
     const std::string january = invoices.back().id;
     http.call("get_invoice", {{"customer_id", customer.id}, {"invoice_id", january}});
     http.read("get_invoice", "?customer_id=" + customer.id + "&invoice_id=" + january);
+    http.call("resend_invoice", {{"invoice_id", january}});
     http.call("record_invoice_payment", {{"invoice_id", january}, {"reference", "W1"}});
     http.call("void_invoice", {{"invoice_id", due.id}, {"note", "issued twice"}});
     http.call("list_conflicts", {{"id", repository.id}});

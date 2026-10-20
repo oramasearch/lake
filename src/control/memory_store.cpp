@@ -2895,6 +2895,28 @@ Result<Invoice> InMemoryStore::set_invoice_state(const std::string& id,
     return std::unexpected(StoreError{"not_found", "no invoice " + id});
 }
 
+Result<Invoice> InMemoryStore::set_invoice_provider_status(const std::string& id,
+                                                           const std::string& from,
+                                                           const std::string& to) {
+    // billing_invoices.provider_status: `^[a-z_]{0,32}$`.
+    if (to.size() > 32 ||
+        !std::ranges::all_of(to, [](char c) { return c == '_' || (c >= 'a' && c <= 'z'); })) {
+        return std::unexpected(StoreError{
+            "invalid_input", "a provider status is at most 32 lower-case letters and _"});
+    }
+    std::lock_guard lock(mutex_);
+    for (Invoice& invoice : invoices_) {
+        if (invoice.id != id) {
+            continue;
+        }
+        if (invoice.state == "due" && invoice.provider_status == from) {
+            invoice.provider_status = to;
+        }
+        return invoice;
+    }
+    return std::unexpected(StoreError{"not_found", "no invoice " + id});
+}
+
 Result<std::string> InMemoryStore::billing_provider_customer(const std::string& customer_id,
                                                              const std::string& provider) {
     std::lock_guard lock(mutex_);
@@ -2921,6 +2943,31 @@ InMemoryStore::set_billing_provider_customer(const std::string& customer_id,
     }
     return billing_provider_customers_.try_emplace({customer_id, provider}, provider_customer_id)
         .first->second;
+}
+
+Result<std::string>
+InMemoryStore::replace_billing_provider_customer(const std::string& customer_id,
+                                                 const std::string& provider,
+                                                 const std::string& expected_id,
+                                                 const std::string& provider_customer_id) {
+    if (provider.empty() || expected_id.empty() || provider_customer_id.empty() ||
+        provider_customer_id.size() > 255) {
+        return std::unexpected(StoreError{
+            "invalid_input", "a provider, the kept customer id and its replacement are required"});
+    }
+    std::lock_guard lock(mutex_);
+    if (std::ranges::none_of(
+            customers_, [&](const Customer& customer) { return customer.id == customer_id; })) {
+        return std::unexpected(StoreError{"not_found", "no customer " + customer_id});
+    }
+    const auto found = billing_provider_customers_.find({customer_id, provider});
+    if (found == billing_provider_customers_.end()) {
+        return std::string();
+    }
+    if (found->second == expected_id) {
+        found->second = provider_customer_id;
+    }
+    return found->second;
 }
 
 Result<PaymentEventResult> InMemoryStore::apply_payment_event(const PaymentEvent& event) {
@@ -2967,6 +3014,77 @@ Result<PaymentEventResult> InMemoryStore::apply_payment_event(const PaymentEvent
         break;
     }
     return result;
+}
+
+std::optional<FieldProblem> billing_contact_problem(const BillingContact& contact) {
+    // Characters as PostgreSQL's length() counts them in UTF-8: every byte but a continuation.
+    const auto characters = [](std::string_view text) {
+        return static_cast<std::size_t>(std::ranges::count_if(
+            text, [](char c) { return (static_cast<unsigned char>(c) & 0xC0) != 0x80; }));
+    };
+    // `^[^@\s]+@[^@\s]+$`: one @ with something on each side, and no whitespace.
+    const std::string& email = contact.email;
+    const std::size_t at = email.find('@');
+    const bool shaped =
+        at != std::string::npos && at > 0 && at + 1 < email.size() &&
+        email.find('@', at + 1) == std::string::npos &&
+        std::ranges::none_of(email, [](char c) { return c == ' ' || (c >= '\t' && c <= '\r'); });
+    if (!shaped || characters(email) > 320) {
+        return FieldProblem{"email",
+                            "an email address such as billing@example.com, at most 320 characters"};
+    }
+    struct Bounded {
+        std::string_view field;
+        const std::string& value;
+        std::size_t most;
+    };
+    for (const Bounded& bounded : {Bounded{"name", contact.name, 256},
+                                   Bounded{"line1", contact.line1, 256},
+                                   Bounded{"line2", contact.line2, 256},
+                                   Bounded{"city", contact.city, 128},
+                                   Bounded{"postal_code", contact.postal_code, 32},
+                                   Bounded{"state", contact.state, 128}}) {
+        if (characters(bounded.value) > bounded.most) {
+            return FieldProblem{std::string(bounded.field),
+                                std::format("at most {} characters", bounded.most)};
+        }
+    }
+    const std::string& country = contact.country;
+    const auto capital = [](char c) { return c >= 'A' && c <= 'Z'; };
+    if (!country.empty() && (country.size() != 2 || !std::ranges::all_of(country, capital))) {
+        return FieldProblem{
+            "country", "a two-letter ISO 3166-1 country code in capitals, such as DE, or empty"};
+    }
+    return std::nullopt;
+}
+
+Result<std::optional<BillingContact>>
+InMemoryStore::billing_contact(const std::string& customer_id) {
+    std::lock_guard lock(mutex_);
+    if (std::ranges::none_of(
+            customers_, [&](const Customer& customer) { return customer.id == customer_id; })) {
+        return std::unexpected(StoreError{"not_found", "no customer " + customer_id});
+    }
+    const auto found = billing_contacts_.find(customer_id);
+    return found == billing_contacts_.end() ? std::optional<BillingContact>()
+                                            : std::optional<BillingContact>(found->second);
+}
+
+Result<BillingContact> InMemoryStore::set_billing_contact(const BillingContact& contact) {
+    if (const auto problem = billing_contact_problem(contact)) {
+        return std::unexpected(StoreError{
+            "invalid_input", "billing contact " + problem->field + " must be " + problem->message});
+    }
+    std::lock_guard lock(mutex_);
+    if (std::ranges::none_of(customers_, [&](const Customer& customer) {
+            return customer.id == contact.customer_id;
+        })) {
+        return std::unexpected(StoreError{"not_found", "no customer " + contact.customer_id});
+    }
+    BillingContact stored = contact;
+    stored.updated_at = now_iso8601();
+    billing_contacts_[stored.customer_id] = stored;
+    return stored;
 }
 
 void InMemoryStore::cloud_order_event_locked(const std::string& id,

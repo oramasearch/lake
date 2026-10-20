@@ -392,7 +392,8 @@ struct Invoice {
     std::string issued_at, paid_at, voided_at;
     std::vector<InvoiceLine> lines;
     // Where the account pays (Stripe's hosted invoice page) and the provider's own state of the
-    // invoice (`open`, `paid`, `payment_failed`, `void`), migration 0074. Empty for manual.
+    // invoice (`open`, `paid`, `payment_failed`, `void`), migration 0074, or `send_failed` when
+    // the provider could not send it to the billing email (lake#857). Empty for manual.
     std::string payment_url, provider_status;
 };
 // A payment provider's notice (a Stripe webhook event, migration 0074), applied once per
@@ -407,6 +408,20 @@ struct PaymentEventResult {
     bool changed = false;   // the invoice's state or provider_status changed
     Invoice invoice;        // the invoice after the event, when matched
 };
+// Where an account's invoices go and the name and address they carry (migration 0090, lake#857,
+// docs/api/billing.md#billing-contact). `name` is the legal or company name on the invoice;
+// `country` an ISO 3166-1 alpha-2 code in capitals, or empty.
+struct BillingContact {
+    std::string customer_id, email, name, line1, line2, city, postal_code, state, country;
+    std::string updated_at;
+};
+// A field billing_contacts refuses, and what it must be.
+struct FieldProblem {
+    std::string field, message;
+};
+// The first field of `contact` billing_contacts' checks refuse (lengths in characters, as
+// PostgreSQL counts them), or nullopt when it keeps them all.
+std::optional<FieldProblem> billing_contact_problem(const BillingContact& contact);
 // At most `bytes` bytes of `text`, never cut inside a UTF-8 sequence, so a bounded column is never
 // sent invalid UTF-8 (an order's event detail and email error, lake#833).
 inline std::string utf8_prefix(std::string_view text, std::size_t bytes) {
@@ -1959,7 +1974,10 @@ public:
     // with its prices (lake#635: billing_capabilities.cpp writes one row per publication).
     // create_invoice stores an invoice and its lines, numbering it (conflict when the
     // account already has an invoice for the period that is not void); set_invoice_state moves a
-    // due invoice to paid or void (conflict from any other state).
+    // due invoice to paid or void (conflict from any other state); set_invoice_provider_status
+    // moves a due invoice's provider_status from `from` to `to` (lake#857) and answers the
+    // invoice, unchanged when it is no longer due or its provider_status is no longer `from`, so a
+    // payment notice applied meanwhile is never overwritten.
     virtual Result<std::vector<BillingPlan>> billing_plans() = 0;
     // The resources each workload is scheduled with (migration 0075, lake#643), every row. The
     // Orama operator writes them; put_workload_resources is the same write, for tests and local
@@ -1990,6 +2008,9 @@ public:
                                               const std::string& state,
                                               const std::string& provider_reference,
                                               const std::string& note) = 0;
+    virtual Result<Invoice> set_invoice_provider_status(const std::string& id,
+                                                        const std::string& from,
+                                                        const std::string& to) = 0;
     // Payment providers (migration 0074, lake#620): the provider's id for an account
     // (billing_accounts; "" when it has none, not_found for an unknown customer), kept once:
     // set_billing_provider_customer answers the id already kept when there is one. A payment event
@@ -2001,7 +2022,21 @@ public:
     set_billing_provider_customer(const std::string& customer_id,
                                   const std::string& provider,
                                   const std::string& provider_customer_id) = 0;
+    // Replaces a kept id the provider no longer has (lake#856) only while the row still holds
+    // `expected_id`, and answers what the row holds after: `provider_customer_id`, or another
+    // request's replacement stored first ("" when the account has no row).
+    virtual Result<std::string>
+    replace_billing_provider_customer(const std::string& customer_id,
+                                      const std::string& provider,
+                                      const std::string& expected_id,
+                                      const std::string& provider_customer_id) = 0;
     virtual Result<PaymentEventResult> apply_payment_event(const PaymentEvent& event) = 0;
+    // Billing contacts (migration 0090, lake#857): nullopt while the account has none (not_found
+    // for an unknown customer); set_billing_contact replaces the account's whole contact and
+    // answers it with its updated_at.
+    virtual Result<std::optional<BillingContact>>
+    billing_contact(const std::string& customer_id) = 0;
+    virtual Result<BillingContact> set_billing_contact(const BillingContact& contact) = 0;
     // Cloud orders (lake#831, migration 0089, docs/api/orders.md).
     // Records a new order and its first event (actor lake).
     virtual Result<CloudOrder> create_cloud_order(const NewCloudOrder& order) = 0;

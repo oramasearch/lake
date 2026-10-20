@@ -1230,6 +1230,26 @@ TEST(PostgresBilling, PaymentProviderCustomersAndNoticesFollowTheContract) {
     EXPECT_EQ(*store->billing_provider_customer(customer->id, "stripe"), "cus_1");
     EXPECT_EQ(store->billing_provider_customer(lake::control::new_uuid_v4(), "stripe").error().code,
               "not_found");
+    // Replaced only while the row holds the id read (lake#856): a concurrent replacement gets the
+    // first one's id back.
+    EXPECT_EQ(*store->replace_billing_provider_customer(customer->id, "stripe", "cus_1", "cus_3"),
+              "cus_3");
+    EXPECT_EQ(*store->replace_billing_provider_customer(customer->id, "stripe", "cus_1", "cus_4"),
+              "cus_3")
+        << "the first replacement stays";
+    EXPECT_EQ(*store->billing_provider_customer(customer->id, "stripe"), "cus_3");
+    EXPECT_EQ(*store->replace_billing_provider_customer(customer->id, "manual", "cus_1", "cus_4"),
+              "")
+        << "nothing is kept to replace";
+    EXPECT_EQ(
+        store->replace_billing_provider_customer(customer->id, "stripe", "", "cus_4").error().code,
+        "invalid_input");
+    EXPECT_EQ(store
+                  ->replace_billing_provider_customer(
+                      lake::control::new_uuid_v4(), "stripe", "cus_3", "cus_4")
+                  .error()
+                  .code,
+              "not_found");
 
     const std::string plan_id = "pay-" + suffix;
     lake::control::BillingPlan plan;
@@ -1254,6 +1274,23 @@ TEST(PostgresBilling, PaymentProviderCustomersAndNoticesFollowTheContract) {
     EXPECT_EQ(issued->payment_url, invoice.payment_url);
     EXPECT_EQ(issued->provider_status, "open");
 
+    // A send to the billing email that failed, then succeeded (lake#857): the status moves only
+    // from the one the caller read.
+    const auto unsent = store->set_invoice_provider_status(issued->id, "open", "send_failed");
+    ASSERT_TRUE(unsent) << unsent.error().message;
+    EXPECT_EQ(unsent->provider_status, "send_failed");
+    EXPECT_EQ(store->set_invoice_provider_status(issued->id, "open", "open")->provider_status,
+              "send_failed")
+        << "no longer open: unchanged";
+    EXPECT_EQ(
+        store->set_invoice_provider_status(issued->id, "send_failed", "open")->provider_status,
+        "open");
+    EXPECT_EQ(
+        store->set_invoice_provider_status(lake::control::new_uuid_v4(), "open", "send_failed")
+            .error()
+            .code,
+        "not_found");
+
     const auto apply = [&](std::string id, std::string state, std::string status) {
         return store->apply_payment_event(
             {"stripe", "evt_" + id + suffix, "invoice.x", "in_" + suffix, state, status, ""});
@@ -1269,6 +1306,10 @@ TEST(PostgresBilling, PaymentProviderCustomersAndNoticesFollowTheContract) {
     EXPECT_EQ(paid->invoice.state, "paid");
     EXPECT_FALSE(paid->invoice.paid_at.empty());
     EXPECT_EQ(paid->invoice.provider_reference, "in_" + suffix);
+    EXPECT_EQ(
+        store->set_invoice_provider_status(issued->id, "paid", "send_failed")->provider_status,
+        "paid")
+        << "only a due invoice's status moves";
     const auto duplicate = apply("paid", "paid", "paid");
     ASSERT_TRUE(duplicate);
     EXPECT_TRUE(duplicate->duplicate);
@@ -3298,6 +3339,145 @@ void workload_resources_and_classes_follow_the_contract(lake::control::Store& st
 }
 
 } // namespace
+
+// The billing contact's contract (migration 0090, lake#857), on either store: none, set and read
+// back, replaced whole, a refused contact changing nothing, an unknown customer not_found.
+void billing_contact_contract(lake::control::Store& store, const std::string& customer_id) {
+    const auto none = store.billing_contact(customer_id);
+    ASSERT_TRUE(none) << none.error().message;
+    EXPECT_FALSE(*none);
+
+    lake::control::BillingContact contact{customer_id,
+                                          "billing@example.com",
+                                          "Contact GmbH",
+                                          "Hauptstrasse 1",
+                                          "Hof 2",
+                                          "Berlin",
+                                          "10115",
+                                          "Berlin",
+                                          "DE",
+                                          {}};
+    const auto set = store.set_billing_contact(contact);
+    ASSERT_TRUE(set) << set.error().message;
+    EXPECT_FALSE(set->updated_at.empty());
+    const auto read = store.billing_contact(customer_id);
+    ASSERT_TRUE(read && *read);
+    const lake::control::BillingContact& kept = **read;
+    EXPECT_EQ(kept.email, contact.email);
+    EXPECT_EQ(kept.name, contact.name);
+    EXPECT_EQ(kept.line1, contact.line1);
+    EXPECT_EQ(kept.line2, contact.line2);
+    EXPECT_EQ(kept.city, contact.city);
+    EXPECT_EQ(kept.postal_code, contact.postal_code);
+    EXPECT_EQ(kept.state, contact.state);
+    EXPECT_EQ(kept.country, contact.country);
+    EXPECT_EQ(kept.updated_at, set->updated_at);
+
+    // A save replaces the whole contact: a field left empty is emptied.
+    const auto replaced = store.set_billing_contact({.customer_id = customer_id,
+                                                     .email = "ap@example.com",
+                                                     .name = "Contact AG",
+                                                     .country = "CH"});
+    ASSERT_TRUE(replaced) << replaced.error().message;
+    const auto after = store.billing_contact(customer_id);
+    ASSERT_TRUE(after && *after);
+    EXPECT_EQ((*after)->email, "ap@example.com");
+    EXPECT_EQ((*after)->name, "Contact AG");
+    EXPECT_EQ((*after)->line1, "");
+    EXPECT_EQ((*after)->city, "");
+    EXPECT_EQ((*after)->country, "CH");
+    EXPECT_GE((*after)->updated_at, set->updated_at);
+
+    // What billing_contacts' checks refuse is refused, and changes nothing.
+    for (const lake::control::BillingContact& refused :
+         {lake::control::BillingContact{.customer_id = customer_id, .email = "no-at-sign"},
+          lake::control::BillingContact{.customer_id = customer_id, .email = ""},
+          lake::control::BillingContact{.customer_id = customer_id, .email = "a b@example.com"},
+          lake::control::BillingContact{
+              .customer_id = customer_id, .email = "a@example.com", .country = "de"},
+          lake::control::BillingContact{.customer_id = customer_id,
+                                        .email = "a@example.com",
+                                        .city = std::string(129, 'c')}}) {
+        const auto refusal = store.set_billing_contact(refused);
+        ASSERT_FALSE(refusal) << refused.email << " " << refused.country;
+        EXPECT_EQ(refusal.error().code, "invalid_input");
+    }
+    // Lengths are characters, as PostgreSQL counts them: 256 two-byte characters fit a name.
+    std::string umlauts;
+    for (int index = 0; index < 256; ++index) {
+        umlauts += "\xC3\xA4";
+    }
+    const auto wide = store.set_billing_contact(
+        {.customer_id = customer_id, .email = "ap@example.com", .name = umlauts, .country = "CH"});
+    ASSERT_TRUE(wide) << wide.error().message;
+    EXPECT_EQ((*store.billing_contact(customer_id))->name, umlauts);
+
+    const std::string unknown = lake::control::new_uuid_v4();
+    EXPECT_EQ(store.billing_contact(unknown).error().code, "not_found");
+    EXPECT_EQ(
+        store.set_billing_contact({.customer_id = unknown, .email = "a@example.com"}).error().code,
+        "not_found");
+}
+
+TEST(MemoryBilling, BillingContactsFollowTheContract) {
+    lake::control::InMemoryStore store;
+    const auto user =
+        store.create_user({"taap:1:ed25519:contact", "contact@example.com", "Contact"});
+    ASSERT_TRUE(user) << user.error().message;
+    const auto customer = store.create_customer({"individual", user->id, "", "contact"});
+    ASSERT_TRUE(customer) << customer.error().message;
+    billing_contact_contract(store, customer->id);
+}
+
+TEST(PostgresBilling, BillingContactsFollowTheContract) {
+    const char* uri = lake::test::postgres_uri();
+    if (uri == nullptr || std::string(uri).empty()) {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not set";
+    }
+    auto store = lake::control::make_postgres_store(
+        uri, "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff");
+    ASSERT_TRUE(store->ping()) << store->ping().error().message;
+    {
+        pqxx::connection connection(uri);
+        pqxx::work tx(connection);
+        for (const char* table : {"billing_contacts", "billing_contacts_guard"}) {
+            EXPECT_FALSE(
+                tx.exec_params("SELECT to_regclass($1)", std::string(table))[0][0].is_null())
+                << table;
+        }
+        EXPECT_FALSE(
+            tx.exec("SELECT 1 FROM schema_migrations WHERE version = '0090_billing_contacts'")
+                .empty());
+    }
+    const std::string suffix = lake::control::new_uuid_v4().substr(0, 8);
+    const auto user = store->create_user(
+        {"taap:1:ed25519:contact-" + suffix, "contact-" + suffix + "@example.com", "Contact"});
+    ASSERT_TRUE(user) << user.error().message;
+    const auto customer = store->create_customer({"individual", user->id, "", "contact-" + suffix});
+    ASSERT_TRUE(customer) << customer.error().message;
+    billing_contact_contract(*store, customer->id);
+
+    // The table's own checks hold for a writer other than lake's store.
+    pqxx::connection connection(uri);
+    for (const char* values : {"'no-at-sign', 'DE'", "'a@example.com', 'de'"}) {
+        pqxx::work tx(connection);
+        EXPECT_THROW(
+            tx.exec_params(std::string("UPDATE billing_contacts SET (email, country) = (") +
+                               values + ") WHERE customer_id = $1::uuid",
+                           customer->id),
+            pqxx::check_violation)
+            << values;
+    }
+    // The contact goes with its account.
+    {
+        pqxx::work tx(connection);
+        tx.exec_params("DELETE FROM customers WHERE id = $1::uuid", customer->id);
+        EXPECT_TRUE(tx.exec_params("SELECT 1 FROM billing_contacts WHERE customer_id = $1::uuid",
+                                   customer->id)
+                        .empty());
+        tx.commit();
+    }
+}
 
 TEST(PostgresBilling, WorkloadResourcesAndClassRatesFollowTheContract) {
     {

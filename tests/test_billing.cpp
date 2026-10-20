@@ -10,6 +10,7 @@
 #include <memory>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include <nlohmann/json.hpp>
 
@@ -413,6 +414,10 @@ TEST(Billing, AMonthsBillIsWorkedOutFromTheUsageOfEveryWorkspace) {
     EXPECT_EQ(issued.value["lines"].size(), 3U);
     EXPECT_EQ(issued.value["price_list_id"], bill.value["price_list"]["id"]);
     const std::string invoice_id = issued.value["id"];
+    // Only the operator resends an invoice (lake#857), and the manual provider has nothing to send.
+    EXPECT_EQ(rig.call("resend_invoice", {{"invoice_id", invoice_id}}, owner).error.code,
+              "unauthorized");
+    EXPECT_EQ(rig.call("resend_invoice", {{"invoice_id", invoice_id}}).error.code, "conflict");
 
     // The lines are frozen: usage recorded later and a new list for the month do not change the
     // invoice, while a preview of the month now prices at the new list.
@@ -563,6 +568,131 @@ TEST(Billing, ThePaymentProviderIsAnInterface) {
               false);
 }
 
+// lake#857: an account's owners and admins (and the operator) set its billing contact; its members
+// read it and cannot change it. Until one is saved, billing_account suggests the signed-in owner's
+// email and stores nothing. The audit names the fields set, never their values.
+TEST(Billing, OwnersAndAdminsSetTheBillingContact) {
+    BillingRig rig;
+    lake::control::InMemoryStore& store = *rig.store;
+    const auto organization =
+        store.create_organization({"taap:1:ed25519:billing-org", "Billing Org"});
+    ASSERT_TRUE(organization) << organization.error().message;
+    const auto account =
+        store.create_customer({"organization", "", organization->id, "billing-org"});
+    ASSERT_TRUE(account) << account.error().message;
+    const auto person = [&](const std::string& role) {
+        const auto user = store.create_user(
+            {"taap:1:ed25519:billing-org-" + role, role + "@org.example.test", role});
+        EXPECT_TRUE(user) << user.error().message;
+        EXPECT_TRUE(store.create_membership({organization->id,
+                                             {},
+                                             "user",
+                                             user->id,
+                                             user->taap_id,
+                                             role,
+                                             "sha512-256:" + role,
+                                             "taap:1:ed25519:billing-org-grantor",
+                                             "request-" + role}));
+        auto context = rig.owner_context();
+        context.acting_identity = user->taap_id;
+        context.acting_user_id = user->id;
+        return context;
+    };
+    auto owner = person("owner");
+    auto admin = person("admin");
+    auto member = person("member");
+    const json of_account{{"customer_id", account->id}};
+
+    // No contact yet: the owner is offered their own email, the member nothing, the operator
+    // (no user) nothing; nothing is stored.
+    const auto offered = rig.call("billing_account", of_account, owner);
+    ASSERT_TRUE(offered.ok) << offered.error.message;
+    EXPECT_TRUE(offered.value["contact"].is_null());
+    EXPECT_EQ(offered.value["suggested_email"], "owner@org.example.test");
+    const auto read = rig.call("billing_account", of_account, member);
+    ASSERT_TRUE(read.ok) << read.error.message;
+    EXPECT_TRUE(read.value["suggested_email"].is_null());
+    EXPECT_TRUE(rig.call("billing_account", of_account).value["suggested_email"].is_null());
+    EXPECT_FALSE(*store.billing_contact(account->id));
+
+    // A member cannot set it.
+    json contact{{"customer_id", account->id},
+                 {"email", " billing@org.example.test "},
+                 {"name", "Billing Org GmbH"},
+                 {"line1", "Hauptstrasse 1"},
+                 {"city", "Berlin"},
+                 {"postal_code", "10115"},
+                 {"country", "DE"}};
+    EXPECT_EQ(rig.call("set_billing_contact", contact, member).error.code, "unauthorized");
+    EXPECT_FALSE(*store.billing_contact(account->id));
+
+    // The owner sets it, trimmed; the manual provider has no customer to update.
+    const auto set = rig.call("set_billing_contact", contact, owner);
+    ASSERT_TRUE(set.ok) << set.error.message;
+    EXPECT_EQ(set.value["contact"]["email"], "billing@org.example.test");
+    EXPECT_EQ(set.value["contact"]["line2"], "");
+    EXPECT_EQ(set.value["provider_update"], "none");
+    const auto shown = rig.call("billing_account", of_account, member);
+    ASSERT_TRUE(shown.ok) << shown.error.message;
+    EXPECT_EQ(shown.value["contact"]["name"], "Billing Org GmbH");
+    EXPECT_EQ(shown.value["contact"]["country"], "DE");
+    EXPECT_TRUE(rig.call("billing_account", of_account, owner).value["suggested_email"].is_null())
+        << "a stored contact is not suggested over";
+
+    // An admin replaces it whole, and the operator may too.
+    const auto replaced = rig.call("set_billing_contact",
+                                   {{"customer_id", account->id}, {"email", "ap@org.example.test"}},
+                                   admin);
+    ASSERT_TRUE(replaced.ok) << replaced.error.message;
+    EXPECT_EQ(replaced.value["contact"]["name"], "") << "a field left out is emptied";
+    EXPECT_EQ(rig.call("set_billing_contact", contact).ok, true);
+
+    // What PostgreSQL would refuse is invalid_input on the field.
+    const std::vector<std::pair<std::string, std::string>> refusals{
+        {"email", "no-at-sign"},
+        {"email", "two@at@example.test"},
+        {"country", "de"},
+        {"country", "DEU"},
+        {"postal_code", std::string(33, '1')},
+        {"name", std::string(257, 'n')}};
+    for (const auto& [field, value] : refusals) {
+        auto bad = contact;
+        bad[field] = value;
+        const auto refused = rig.call("set_billing_contact", bad, owner);
+        EXPECT_EQ(refused.error.code, "invalid_input") << field << "=" << value;
+        EXPECT_EQ(refused.error.path, "/" + field) << field << "=" << value;
+    }
+    EXPECT_EQ(store.billing_contact(account->id)->value().name, "Billing Org GmbH")
+        << "a refused contact changes nothing";
+
+    // The audit names the fields that were set, never their values.
+    const auto events = lake::test::audit_events(store, {.limit = 500});
+    ASSERT_TRUE(events) << events.error().message;
+    int recorded = 0;
+    for (const auto& event : *events) {
+        if (event.draft.action != "set_billing_contact" || event.draft.outcome != "success") {
+            continue;
+        }
+        ++recorded;
+        EXPECT_EQ(event.draft.kind, "billing.contact.set");
+        EXPECT_EQ(event.draft.object, "customer/" + account->id + "/billing");
+        const std::string details = event.draft.details.dump();
+        for (const char* value : {"billing@org.example.test", "Hauptstrasse", "Berlin", "10115"}) {
+            EXPECT_EQ(details.find(value), std::string::npos) << details;
+        }
+    }
+    ASSERT_EQ(recorded, 3);
+    bool listed = false;
+    for (const auto& event : *events) {
+        if (event.draft.action == "set_billing_contact" && event.draft.outcome == "success" &&
+            event.draft.details["fields"] ==
+                json::array({"city", "country", "email", "line1", "name", "postal_code"})) {
+            listed = true;
+        }
+    }
+    EXPECT_TRUE(listed);
+}
+
 TEST(Billing, AnEnterpriseInstallHasNoBilling) {
     EXPECT_TRUE(lake::api::billing_enabled("on"));
     EXPECT_TRUE(lake::api::billing_enabled("true"));
@@ -577,6 +707,7 @@ TEST(Billing, AnEnterpriseInstallHasNoBilling) {
         for (const char* name : {"price_list",
                                  "set_price_list",
                                  "billing_account",
+                                 "set_billing_contact",
                                  "bill_preview",
                                  "issue_invoice",
                                  "list_invoices",

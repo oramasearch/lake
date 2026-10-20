@@ -1,19 +1,23 @@
 // Stripe, lake's payment provider (decision 57, lake#620, docs/api/billing.md#stripe): lake's own
 // REST client against a fake Stripe, the webhook signature and its tolerance window, notices
-// applied once per event id, the keys read from lake's secret store with rotation, and the
-// manual provider when they are absent.
+// applied once per event id, other apps' and other Lakes' events ignored in a shared account
+// (lake#855), a kept customer Stripe no longer has replaced (lake#856), the keys read from the
+// environment with rotation, and the manual provider when they are absent.
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cstddef>
 #include <cstring>
 #include <format>
+#include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
 #include <set>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -37,6 +41,9 @@ using nlohmann::json;
 constexpr std::string_view kek = "6c616b652d776f726b73706163652d7265636f7264732d746573742d6b656b31";
 constexpr std::string_view test_key = "sk_test_lake620fakekey0001";
 constexpr std::string_view test_webhook = "whsec_lake620fakesecret0001";
+// This Lake's public host, and another Lake's billing through the same Stripe account.
+constexpr std::string_view this_lake = "shared.lake.test";
+constexpr std::string_view other_lake = "shared-us.lake.test";
 
 std::string month_name(std::chrono::sys_days day) {
     return std::format("{:%Y-%m}", day);
@@ -54,8 +61,10 @@ std::int64_t unix_now() {
         .count();
 }
 
-// Stripe as far as lake uses it: customers, invoices, invoice items, finalize and void, with
-// Stripe's idempotency (a repeated Idempotency-Key answers the first answer).
+// Stripe as far as lake uses it: customers and their updates, invoices, invoice items, finalize,
+// send and void, with Stripe's idempotency (a repeated Idempotency-Key answers the first successful
+// answer), the products the operator created in the account (lake#855), and the customers it has
+// (lake#856).
 struct FakeStripe {
     std::mutex mutex;
     std::vector<lake::api::StripeRequest> requests;
@@ -64,8 +73,24 @@ struct FakeStripe {
     int invoices = 0;
     int items = 0;
     std::map<std::string, std::vector<std::int64_t>> amounts; // invoice -> item amounts
+    std::map<std::string, std::vector<std::string>> products; // invoice -> item products ("": none)
     std::map<std::string, std::string> status;                // invoice -> status
+    std::set<std::string> catalog{std::string(lake::api::stripe_usage_product)};
+    // The customers this account has, and those deleted in the Dashboard, which Stripe still
+    // reads as {id, deleted: true}. Any other cus_ id is missing (another account or mode).
+    std::set<std::string> known_customers;
+    std::set<std::string> deleted_customers;
+    int customer_reads = 0;
+    int customer_read_status = 0; // the status a customer read fails with; 0, none
     bool fail_finalize = false;
+    bool fail_customer_update = false;
+    int customer_updates = 0;
+    // Invoices sent to their customer's email (lake#857), each send asked for, and what the test
+    // checks while Stripe handles one.
+    std::vector<std::string> sent;
+    int sends = 0;
+    bool fail_send = false;
+    std::function<void(const std::string&)> on_send;
 
     static std::string field(std::string_view body, std::string_view name) {
         const std::string key = std::string(name) + "=";
@@ -114,8 +139,39 @@ struct FakeStripe {
 
     lake::api::StripeResponse route(const lake::api::StripeRequest& request) {
         const std::string path = request.url.substr(request.url.find("/v1/"));
+        if (request.method == "GET" && path.starts_with("/v1/customers/")) {
+            ++customer_reads;
+            if (customer_read_status != 0) {
+                return {customer_read_status, R"({"error":{"message":"try again"}})", {}};
+            }
+            const std::string id = path.substr(std::string_view("/v1/customers/").size());
+            if (deleted_customers.contains(id)) {
+                return {
+                    200, json{{"id", id}, {"object", "customer"}, {"deleted", true}}.dump(), {}};
+            }
+            if (!known_customers.contains(id)) {
+                return {404,
+                        json{{"error",
+                              {{"type", "invalid_request_error"},
+                               {"code", "resource_missing"},
+                               {"param", "id"},
+                               {"message", "No such customer: '" + id + "'"}}}}
+                            .dump(),
+                        {}};
+            }
+            return {200, json{{"id", id}, {"object", "customer"}}.dump(), {}};
+        }
         if (path == "/v1/customers") {
-            return {200, json{{"id", std::format("cus_{}", ++customers)}}.dump(), {}};
+            const std::string id = std::format("cus_{}", ++customers);
+            known_customers.insert(id);
+            return {200, json{{"id", id}}.dump(), {}};
+        }
+        if (path.starts_with("/v1/customers/")) {
+            if (fail_customer_update) {
+                return {400, R"({"error":{"message":"Invalid address: no such postal code"}})", {}};
+            }
+            ++customer_updates;
+            return {200, json{{"id", path.substr(14)}}.dump(), {}};
         }
         if (path == "/v1/invoices") {
             const std::string id = std::format("in_{}", ++invoices);
@@ -123,9 +179,45 @@ struct FakeStripe {
             return {200, json{{"id", id}, {"status", "draft"}}.dump(), {}};
         }
         if (path == "/v1/invoiceitems") {
+            // A bare amount, or an inline price of a product in the account, never both; an
+            // inline price is never negative.
+            const std::string product = field(request.body, "price_data%5Bproduct%5D");
+            const std::string amount = field(request.body, "amount");
+            const auto refused = [](std::string_view message) {
+                return lake::api::StripeResponse{
+                    400, json{{"error", {{"message", std::string(message)}}}}.dump(), {}};
+            };
+            std::int64_t cents = 0;
+            if (product.empty()) {
+                if (amount.empty()) {
+                    return refused("Missing required param: amount");
+                }
+                cents = std::stoll(amount);
+            } else {
+                if (!amount.empty()) {
+                    return refused("You may only specify one of these parameters: amount, "
+                                   "price_data");
+                }
+                if (!catalog.contains(product)) {
+                    return {400,
+                            json{{"error",
+                                  {{"type", "invalid_request_error"},
+                                   {"code", "resource_missing"},
+                                   {"param", "price_data[product]"},
+                                   {"message", "No such product: '" + product + "'"}}}}
+                                .dump(),
+                            {}};
+                }
+                const std::string unit = field(request.body, "price_data%5Bunit_amount%5D");
+                const std::string quantity = field(request.body, "quantity");
+                if (unit.empty() || unit.starts_with('-') || quantity.empty()) {
+                    return refused("Invalid non-negative integer");
+                }
+                cents = std::stoll(unit) * std::stoll(quantity);
+            }
             ++items;
-            amounts[field(request.body, "invoice")].push_back(
-                std::stoll(field(request.body, "amount")));
+            amounts[field(request.body, "invoice")].push_back(cents);
+            products[field(request.body, "invoice")].push_back(product);
             return {200, json{{"id", std::format("ii_{}", items)}}.dump(), {}};
         }
         if (path.ends_with("/finalize")) {
@@ -146,6 +238,18 @@ struct FakeStripe {
             status[id] = "void";
             return {200, json{{"id", id}, {"status", "void"}}.dump(), {}};
         }
+        if (path.ends_with("/send")) {
+            const std::string id = path.substr(13, path.size() - 13 - 5);
+            ++sends;
+            if (on_send) {
+                on_send(id);
+            }
+            if (fail_send) {
+                return {500, R"({"error":{"message":"the email could not be sent"}})", {}};
+            }
+            sent.push_back(id);
+            return {200, json{{"id", id}, {"status", status[id]}}.dump(), {}};
+        }
         return {404, R"({"error":{"message":"no such route"}})", {}};
     }
 
@@ -154,12 +258,17 @@ struct FakeStripe {
     }
 };
 
-// A Stripe webhook event for a Stripe invoice.
-std::string event(const std::string& id, const std::string& type, const std::string& invoice) {
-    return json{{"id", id},
-                {"object", "event"},
-                {"type", type},
-                {"data", {{"object", {{"id", invoice}, {"object", "invoice"}}}}}}
+// A Stripe webhook event for a Stripe invoice whose metadata is `metadata`: by default an invoice
+// lake issued (lake_customer_id), and with none, another app's.
+std::string event(const std::string& id,
+                  const std::string& type,
+                  const std::string& invoice,
+                  const json& metadata = {{"lake_customer_id", "c"}}) {
+    return json{
+        {"id", id},
+        {"object", "event"},
+        {"type", type},
+        {"data", {{"object", {{"id", invoice}, {"object", "invoice"}, {"metadata", metadata}}}}}}
         .dump();
 }
 
@@ -246,9 +355,25 @@ struct StripeRig {
     }
 };
 
+// The central audit's events of a kept Stripe customer replaced (lake#856).
+std::vector<lake::audit::Event> replacements(lake::control::Store& store) {
+    const auto events = lake::test::audit_events(store, {.limit = 500});
+    EXPECT_TRUE(events) << events.error().message;
+    std::vector<lake::audit::Event> out;
+    for (const auto& entry : events.value_or(std::vector<lake::audit::Event>{})) {
+        if (entry.draft.kind == "billing.account.provider_customer_replaced") {
+            out.push_back(entry);
+        }
+    }
+    return out;
+}
+
 std::shared_ptr<lake::api::PaymentProviders> stripe_providers(FakeStripe& stripe) {
-    return lake::api::fixed_payment_providers(lake::api::stripe_payment_provider(
-        {std::string(test_key), std::string(test_webhook)}, stripe.http(), "https://stripe.test"));
+    return lake::api::fixed_payment_providers(
+        lake::api::stripe_payment_provider({std::string(test_key), std::string(test_webhook)},
+                                           std::string(this_lake),
+                                           stripe.http(),
+                                           "https://stripe.test"));
 }
 
 TEST(StripeSignature, ChecksTheHmacAndTheToleranceWindow) {
@@ -298,23 +423,66 @@ TEST(StripeClient, FormsCentsAndEvents) {
     EXPECT_TRUE(lake::api::stripe_webhook_secret_shape(test_webhook));
     EXPECT_FALSE(lake::api::stripe_webhook_secret_shape("sk_test_wrongkind0001"));
 
-    const auto paid = lake::api::parse_stripe_event(event("evt_1", "invoice.paid", "in_9"));
+    const auto parse = [](const std::string& body) {
+        return lake::api::parse_stripe_event(body, this_lake);
+    };
+    const auto paid = parse(event("evt_1", "invoice.paid", "in_9"));
     ASSERT_TRUE(paid);
     EXPECT_EQ(paid->reference, "in_9");
     EXPECT_EQ(paid->state, "paid");
-    const auto failed =
-        lake::api::parse_stripe_event(event("evt_2", "invoice.payment_failed", "in_9"));
+    EXPECT_FALSE(paid->foreign);
+    const auto failed = parse(event("evt_2", "invoice.payment_failed", "in_9"));
     ASSERT_TRUE(failed);
     EXPECT_EQ(failed->state, "");
     EXPECT_EQ(failed->provider_status, "payment_failed");
-    const auto voided = lake::api::parse_stripe_event(event("evt_3", "invoice.voided", "in_9"));
+    const auto voided = parse(event("evt_3", "invoice.voided", "in_9"));
     ASSERT_TRUE(voided);
     EXPECT_EQ(voided->state, "void");
-    const auto other = lake::api::parse_stripe_event(event("evt_4", "customer.created", "cus_1"));
+    const auto other = parse(event("evt_4", "customer.created", "cus_1"));
     ASSERT_TRUE(other);
     EXPECT_TRUE(other->state.empty() && other->provider_status.empty());
-    EXPECT_FALSE(lake::api::parse_stripe_event("not json"));
-    EXPECT_FALSE(lake::api::parse_stripe_event(R"({"type":"invoice.paid"})"));
+    EXPECT_FALSE(parse("not json"));
+    EXPECT_FALSE(parse(R"({"type":"invoice.paid"})"));
+}
+
+// Whose invoice an event is about, in a Stripe account shared with Cloud v1 and other Lakes
+// (lake#855): lake_customer_id marks an invoice lake issued, lake_instance which Lake issued it,
+// and an invoice Stripe generated from a subscription carries the subscription's metadata in
+// subscription_details, never in its own.
+TEST(StripeClient, AnInvoiceThatIsNotThisLakesIsForeign) {
+    const auto foreign = [](const json& object) {
+        const json body{{"id", "evt_1"},
+                        {"object", "event"},
+                        {"type", "invoice.paid"},
+                        {"data", {{"object", object}}}};
+        const auto notice = lake::api::parse_stripe_event(body.dump(), this_lake);
+        EXPECT_TRUE(notice);
+        return notice && notice->foreign;
+    };
+    const auto invoice = [](const json& metadata) {
+        return json{{"id", "in_1"}, {"object", "invoice"}, {"metadata", metadata}};
+    };
+    // This Lake's, tagged or from before lake_instance existed.
+    EXPECT_FALSE(foreign(invoice({{"lake_customer_id", "c"}, {"lake_instance", this_lake}})));
+    EXPECT_FALSE(foreign(invoice({{"lake_customer_id", "c"}})));
+    // Cloud v1's (its bare keys, or nothing at all) and another Lake's.
+    EXPECT_TRUE(foreign(invoice({{"team_id", "t"}, {"plan_id", "p"}})));
+    EXPECT_TRUE(foreign(invoice(json::object())));
+    EXPECT_TRUE(foreign({{"id", "in_1"}, {"object", "invoice"}}));
+    EXPECT_TRUE(foreign(invoice({{"lake_customer_id", "c"}, {"lake_instance", other_lake}})));
+    EXPECT_TRUE(foreign(invoice({{"lake_customer_id", 7}})));
+    // An invoice of an order sheet subscription: this Lake's, another Lake's, or Cloud v1's.
+    const auto generated = [](const json& subscription) {
+        return json{{"id", "in_2"},
+                    {"object", "invoice"},
+                    {"metadata", json::object()},
+                    {"subscription_details", {{"metadata", subscription}}}};
+    };
+    EXPECT_FALSE(foreign(generated({{"lake_order_id", "o"}, {"lake_instance", this_lake}})));
+    EXPECT_TRUE(foreign(generated({{"lake_order_id", "o"}, {"lake_instance", other_lake}})));
+    EXPECT_TRUE(foreign(generated({{"team_id", "t"}})));
+    EXPECT_TRUE(
+        foreign({{"id", "in_2"}, {"object", "invoice"}, {"subscription_details", nullptr}}));
 }
 
 TEST(StripeBilling, AnInvoiceBecomesAStripeInvoiceWithItsLines) {
@@ -338,8 +506,10 @@ TEST(StripeBilling, AnInvoiceBecomesAStripeInvoiceWithItsLines) {
     // One customer, kept on the account's billing row.
     EXPECT_EQ(stripe.customers, 1);
     EXPECT_EQ(*rig.store->billing_provider_customer(rig.customer, "stripe"), "cus_1");
-    // The calls line: $20.00 is 2000 cents; lake's total is the same, so no rounding line.
+    // The calls line: $20.00 is 2000 cents, of Lake's usage product; lake's total is the same, so
+    // no rounding line.
     EXPECT_EQ(stripe.amounts["in_1"], std::vector<std::int64_t>{2000});
+    EXPECT_EQ(stripe.products["in_1"], std::vector<std::string>{"lake_usage"});
     EXPECT_EQ(stripe.status["in_1"], "open");
 
     // Every request is a form POST with lake's key, the pinned version and an Idempotency-Key.
@@ -359,6 +529,40 @@ TEST(StripeBilling, AnInvoiceBecomesAStripeInvoiceWithItsLines) {
     EXPECT_EQ(FakeStripe::field(create.body, "collection_method"), "send_invoice");
     EXPECT_EQ(FakeStripe::header(create, "Idempotency-Key"),
               "lake-invoice-" + rig.customer + "-" + rig.period + "-0");
+    EXPECT_EQ(FakeStripe::field(create.body, "description"), "Lake%20usage%2C%20" + rig.period);
+    // The line names Lake's usage product with an inline price, and is tagged like the invoice.
+    const auto& item = stripe.requests[2];
+    ASSERT_TRUE(item.url.ends_with("/v1/invoiceitems"));
+    EXPECT_EQ(FakeStripe::header(item, "Idempotency-Key"),
+              "lake-invoice-" + rig.customer + "-" + rig.period + "-0-line-0-p");
+    EXPECT_EQ(FakeStripe::field(item.body, "customer"), "cus_1");
+    EXPECT_EQ(FakeStripe::field(item.body, "invoice"), "in_1");
+    EXPECT_EQ(FakeStripe::field(item.body, "quantity"), "1");
+    EXPECT_EQ(FakeStripe::field(item.body, "price_data%5Bcurrency%5D"), "usd");
+    EXPECT_EQ(FakeStripe::field(item.body, "price_data%5Bproduct%5D"), "lake_usage");
+    EXPECT_EQ(FakeStripe::field(item.body, "price_data%5Bunit_amount%5D"), "2000");
+    EXPECT_EQ(FakeStripe::field(item.body, "amount"), "");
+    EXPECT_EQ(FakeStripe::field(item.body, "metadata%5Borama_app%5D"), "lake");
+    EXPECT_EQ(FakeStripe::field(item.body, "metadata%5Blake_instance%5D"), this_lake);
+    EXPECT_FALSE(FakeStripe::field(item.body, "description").empty());
+    // The customer and the invoice are tagged as this Lake's (lake#855), beside lake's own keys,
+    // and nothing lake sends carries Cloud v1's bare keys.
+    const auto& customer = stripe.requests[0];
+    ASSERT_TRUE(customer.url.ends_with("/v1/customers"));
+    EXPECT_EQ(FakeStripe::field(customer.body, "name"), "acme") << "the account's name";
+    EXPECT_EQ(FakeStripe::field(customer.body, "email"), "") << "no billing contact, no email";
+    EXPECT_EQ(customer.body.find("address"), std::string::npos);
+    for (const auto* request : {&customer, &create}) {
+        EXPECT_EQ(FakeStripe::field(request->body, "metadata%5Blake_customer_id%5D"), rig.customer);
+        EXPECT_EQ(FakeStripe::field(request->body, "metadata%5Borama_app%5D"), "lake");
+        EXPECT_EQ(FakeStripe::field(request->body, "metadata%5Blake_instance%5D"), this_lake);
+    }
+    for (const auto& request : stripe.requests) {
+        for (const char* bare : {"team_id", "plan_id", "addon_type", "addon_config"}) {
+            EXPECT_EQ(request.body.find(std::format("%5B{}%5D", bare)), std::string::npos)
+                << request.url << " sets " << bare;
+        }
+    }
 
     // Paid through Stripe, never by hand.
     EXPECT_EQ(rig.call("record_invoice_payment", {{"invoice_id", issued.value["id"]}}).error.code,
@@ -377,6 +581,237 @@ TEST(StripeBilling, AnInvoiceBecomesAStripeInvoiceWithItsLines) {
     EXPECT_EQ(stripe.customers, 1) << "the kept customer is reused";
     EXPECT_EQ(FakeStripe::header(stripe.requests[stripe.requests.size() - 3], "Idempotency-Key"),
               "lake-invoice-" + rig.customer + "-" + rig.period + "-1");
+}
+
+// lake#857: the billing contact reaches the Stripe customer, when it is created at the first
+// invoice and at every later save of the contact. A refused update keeps the contact lake stored.
+TEST(StripeBilling, TheBillingContactReachesTheStripeCustomer) {
+    FakeStripe stripe;
+    StripeRig rig(stripe_providers(stripe));
+    const json contact{{"customer_id", rig.customer},
+                       {"email", "ap@acme.test"},
+                       {"name", "Acme GmbH"},
+                       {"line1", "Hauptstrasse 1"},
+                       {"city", "Berlin"},
+                       {"postal_code", "10115"},
+                       {"country", "DE"}};
+    // No Stripe customer before the first invoice: the contact waits for it.
+    const auto saved = rig.call("set_billing_contact", contact);
+    ASSERT_TRUE(saved.ok) << saved.error.message;
+    EXPECT_EQ(saved.value["provider_update"], "none");
+    EXPECT_TRUE(stripe.requests.empty());
+
+    // The customer is created with the contact's email, name and the address fields it has.
+    const auto issued =
+        rig.call("issue_invoice", {{"customer_id", rig.customer}, {"period", rig.period}});
+    ASSERT_TRUE(issued.ok) << issued.error.message;
+    const auto& created = stripe.requests[0];
+    ASSERT_TRUE(created.url.ends_with("/v1/customers")) << created.url;
+    EXPECT_EQ(FakeStripe::field(created.body, "email"), "ap%40acme.test");
+    EXPECT_EQ(FakeStripe::field(created.body, "name"), "Acme%20GmbH");
+    EXPECT_EQ(FakeStripe::field(created.body, "address%5Bline1%5D"), "Hauptstrasse%201");
+    EXPECT_EQ(FakeStripe::field(created.body, "address%5Bcity%5D"), "Berlin");
+    EXPECT_EQ(FakeStripe::field(created.body, "address%5Bpostal_code%5D"), "10115");
+    EXPECT_EQ(FakeStripe::field(created.body, "address%5Bcountry%5D"), "DE");
+    EXPECT_EQ(created.body.find("address%5Bline2%5D"), std::string::npos);
+    EXPECT_EQ(created.body.find("address%5Bstate%5D"), std::string::npos);
+    EXPECT_EQ(FakeStripe::field(created.body, "metadata%5Blake_customer_id%5D"), rig.customer);
+    EXPECT_EQ(FakeStripe::field(created.body, "metadata%5Borama_app%5D"), "lake");
+
+    // A later save updates that customer with every address field, so a removed one is cleared.
+    auto moved = contact;
+    moved["email"] = "billing@acme.test";
+    moved["line1"] = "Neue Strasse 2";
+    const auto updated = rig.call("set_billing_contact", moved);
+    ASSERT_TRUE(updated.ok) << updated.error.message;
+    EXPECT_EQ(updated.value["provider_update"], "updated");
+    EXPECT_FALSE(updated.value.contains("provider_error"));
+    EXPECT_EQ(stripe.customer_updates, 1);
+    EXPECT_EQ(stripe.customers, 1) << "the kept customer is updated, never made again";
+    const auto update = stripe.requests.back();
+    EXPECT_EQ(update.url, "https://stripe.test/v1/customers/cus_1");
+    EXPECT_EQ(FakeStripe::field(update.body, "email"), "billing%40acme.test");
+    EXPECT_EQ(FakeStripe::field(update.body, "name"), "Acme%20GmbH");
+    EXPECT_EQ(FakeStripe::field(update.body, "address%5Bline1%5D"), "Neue%20Strasse%202");
+    EXPECT_NE(("&" + update.body + "&").find("&address%5Bline2%5D=&"), std::string::npos)
+        << update.body;
+    EXPECT_EQ(FakeStripe::header(update, "Idempotency-Key"),
+              "lake-customer-" + rig.customer + "-contact-" +
+                  updated.value["contact"]["updated_at"].get<std::string>());
+
+    // With no name or address: the account's name, and the address cleared.
+    const auto bare =
+        rig.call("set_billing_contact", {{"customer_id", rig.customer}, {"email", "ap@acme.test"}});
+    ASSERT_TRUE(bare.ok) << bare.error.message;
+    EXPECT_EQ(bare.value["provider_update"], "updated");
+    const auto cleared = stripe.requests.back();
+    EXPECT_EQ(FakeStripe::field(cleared.body, "name"), "acme");
+    EXPECT_NE(("&" + cleared.body + "&").find("&address=&"), std::string::npos) << cleared.body;
+    EXPECT_EQ(cleared.body.find("address%5B"), std::string::npos);
+
+    // Stripe refuses an update: the contact stays saved, and the refusal is reported.
+    stripe.fail_customer_update = true;
+    const auto refused = rig.call("set_billing_contact", contact);
+    ASSERT_TRUE(refused.ok) << refused.error.message;
+    EXPECT_EQ(refused.value["provider_update"], "failed");
+    EXPECT_NE(refused.value["provider_error"].get<std::string>().find("no such postal code"),
+              std::string::npos)
+        << refused.value.dump();
+    const auto account = rig.call("billing_account", {{"customer_id", rig.customer}});
+    ASSERT_TRUE(account.ok) << account.error.message;
+    EXPECT_EQ(account.value["contact"]["name"], "Acme GmbH");
+    EXPECT_EQ(account.value["contact"]["line1"], "Hauptstrasse 1");
+    EXPECT_EQ(rig.store->billing_contact(rig.customer)->value().email, "ap@acme.test");
+}
+
+// The central audit events of `kind` about the invoice `invoice_id`.
+std::vector<lake::audit::Event>
+invoice_events(lake::control::Store& store, std::string_view kind, const std::string& invoice_id) {
+    std::vector<lake::audit::Event> found;
+    const auto events = lake::test::audit_events(store, {.limit = 500});
+    EXPECT_TRUE(events) << events.error().message;
+    for (const auto& entry : events.value_or(std::vector<lake::audit::Event>{})) {
+        if (entry.draft.kind == kind && entry.draft.details.value("invoice_id", "") == invoice_id) {
+            found.push_back(entry);
+        }
+    }
+    return found;
+}
+
+// lake#857: Stripe emails an invoice to the billing email only once lake has stored it, so a
+// payment notice that arrives meanwhile finds the invoice it names. Without a billing contact
+// nothing is sent.
+TEST(StripeBilling, AnInvoiceIsSentToTheBillingEmailOnceLakeHasStoredIt) {
+    FakeStripe stripe;
+    StripeRig rig(stripe_providers(stripe));
+    const auto unsent =
+        rig.call("issue_invoice", {{"customer_id", rig.customer}, {"period", rig.period}});
+    ASSERT_TRUE(unsent.ok) << unsent.error.message;
+    EXPECT_EQ(stripe.sends, 0) << "no billing email, nothing to send";
+    EXPECT_EQ(unsent.value["provider_status"], "open");
+    const std::string unsent_id = unsent.value["id"];
+    ASSERT_EQ(invoice_events(*rig.store, "billing.invoice.issue", unsent_id).size(), 1U);
+    EXPECT_EQ(
+        invoice_events(*rig.store, "billing.invoice.issue", unsent_id)[0].draft.details["send"],
+        "none");
+    EXPECT_EQ(rig.call("resend_invoice", {{"invoice_id", unsent_id}}).error.code, "conflict");
+    EXPECT_EQ(stripe.sends, 0);
+    ASSERT_TRUE(
+        rig.call("void_invoice", {{"invoice_id", unsent_id}, {"note", "no billing email"}}).ok);
+
+    ASSERT_TRUE(
+        rig.call("set_billing_contact", {{"customer_id", rig.customer}, {"email", "ap@acme.test"}})
+            .ok);
+    bool stored = false;
+    stripe.on_send = [&](const std::string& id) {
+        const auto invoices = rig.store->list_invoices(rig.customer);
+        stored = invoices && std::ranges::any_of(*invoices, [&](const auto& invoice) {
+                     return invoice.provider_reference == id && invoice.state == "due";
+                 });
+    };
+    const auto issued =
+        rig.call("issue_invoice", {{"customer_id", rig.customer}, {"period", rig.period}});
+    ASSERT_TRUE(issued.ok) << issued.error.message;
+    EXPECT_TRUE(stored) << "sent before lake stored the invoice";
+    EXPECT_EQ(stripe.sent, std::vector<std::string>{"in_2"});
+    EXPECT_EQ(issued.value["state"], "due");
+    EXPECT_EQ(issued.value["provider_status"], "open");
+    // The last request, after the finalize, in the invoice's key family (the month's second issue).
+    const auto& send = stripe.requests.back();
+    EXPECT_EQ(send.url, "https://stripe.test/v1/invoices/in_2/send");
+    EXPECT_EQ(FakeStripe::header(send, "Idempotency-Key"),
+              "lake-invoice-" + rig.customer + "-" + rig.period + "-1-send");
+    EXPECT_TRUE(stripe.requests[stripe.requests.size() - 2].url.ends_with("/in_2/finalize"));
+    const auto events = invoice_events(*rig.store, "billing.invoice.issue", issued.value["id"]);
+    ASSERT_EQ(events.size(), 1U);
+    EXPECT_EQ(events[0].draft.details["send"], "sent");
+}
+
+// lake#857: a send Stripe refuses leaves the invoice issued and payable on its page, send_failed
+// and audited. resend_invoice sends it, each time with a key of its own, since Stripe answers a
+// key's first answer again, a refusal included. A payment that lands during a send is kept.
+TEST(StripeBilling, AFailedSendLeavesTheInvoiceIssuedAndResendSendsIt) {
+    FakeStripe stripe;
+    StripeRig rig(stripe_providers(stripe));
+    ASSERT_TRUE(
+        rig.call("set_billing_contact", {{"customer_id", rig.customer}, {"email", "ap@acme.test"}})
+            .ok);
+    stripe.fail_send = true;
+    const auto issued =
+        rig.call("issue_invoice", {{"customer_id", rig.customer}, {"period", rig.period}});
+    ASSERT_TRUE(issued.ok) << issued.error.message;
+    const std::string invoice_id = issued.value["id"];
+    EXPECT_EQ(issued.value["state"], "due");
+    EXPECT_EQ(issued.value["provider_status"], "send_failed");
+    EXPECT_EQ(issued.value["payment_url"], "https://invoice.stripe.test/i/in_1");
+    EXPECT_EQ(rig.store->get_invoice(invoice_id)->provider_status, "send_failed");
+    EXPECT_EQ(stripe.sends, 1);
+    const auto failed = invoice_events(*rig.store, "billing.invoice.send_failed", invoice_id);
+    ASSERT_EQ(failed.size(), 1U);
+    EXPECT_EQ(failed[0].draft.action, "issue_invoice");
+    EXPECT_EQ(failed[0].draft.outcome, "failure");
+    EXPECT_EQ(failed[0].draft.customer_id, rig.customer);
+    EXPECT_NE(failed[0].draft.details["error"].get<std::string>().find("could not be sent"),
+              std::string::npos);
+    const auto issue = invoice_events(*rig.store, "billing.invoice.issue", invoice_id);
+    ASSERT_EQ(issue.size(), 1U);
+    EXPECT_EQ(issue[0].draft.outcome, "success");
+    EXPECT_EQ(issue[0].draft.details["send"], "failed");
+
+    // Refused again: still send_failed, and the refusal is the answer.
+    const auto refused = rig.call("resend_invoice", {{"invoice_id", invoice_id}});
+    EXPECT_EQ(refused.error.code, "store_unavailable");
+    EXPECT_NE(refused.error.message.find("could not be sent"), std::string::npos)
+        << refused.error.message;
+    EXPECT_EQ(rig.store->get_invoice(invoice_id)->provider_status, "send_failed");
+    EXPECT_EQ(invoice_events(*rig.store, "billing.invoice.send_failed", invoice_id).size(), 2U);
+
+    // Sent: back to Stripe's status, with no new customer or invoice.
+    stripe.fail_send = false;
+    const auto resent = rig.call("resend_invoice", {{"invoice_id", invoice_id}});
+    ASSERT_TRUE(resent.ok) << resent.error.message;
+    EXPECT_EQ(resent.value["provider_status"], "open");
+    EXPECT_EQ(resent.value["state"], "due");
+    EXPECT_EQ(stripe.sent, std::vector<std::string>{"in_1"});
+    EXPECT_EQ(stripe.customers, 1);
+    EXPECT_EQ(stripe.invoices, 1);
+    EXPECT_EQ(invoice_events(*rig.store, "billing.invoice.send", invoice_id).size(), 1U);
+    std::vector<std::string> keys;
+    for (const auto& request : stripe.requests) {
+        if (request.url.ends_with("/send")) {
+            keys.push_back(FakeStripe::header(request, "Idempotency-Key"));
+        }
+    }
+    const std::string family = "lake-invoice-" + rig.customer + "-" + rig.period + "-0-send";
+    ASSERT_EQ(keys.size(), 3U);
+    EXPECT_EQ(keys[0], family);
+    EXPECT_TRUE(keys[1].starts_with(family + "-")) << keys[1];
+    EXPECT_TRUE(keys[2].starts_with(family + "-")) << keys[2];
+    EXPECT_NE(keys[1], keys[2]);
+
+    // A reminder after a failed payment keeps saying the payment failed: a send changes only its
+    // own status.
+    ASSERT_TRUE(rig.store->apply_payment_event(
+        {"stripe", "evt_failed", "invoice.payment_failed", "in_1", "", "payment_failed"}));
+    const auto reminded = rig.call("resend_invoice", {{"invoice_id", invoice_id}});
+    ASSERT_TRUE(reminded.ok) << reminded.error.message;
+    EXPECT_EQ(reminded.value["provider_status"], "payment_failed");
+    EXPECT_EQ(stripe.sent, (std::vector<std::string>{"in_1", "in_1"}));
+
+    // Paid while a send fails: the payment stays, never overwritten by send_failed.
+    stripe.fail_send = true;
+    stripe.on_send = [&](const std::string& id) {
+        ASSERT_TRUE(rig.store->apply_payment_event(
+            {"stripe", "evt_paid_during_send", "invoice.paid", id, "paid", "paid"}));
+    };
+    EXPECT_EQ(rig.call("resend_invoice", {{"invoice_id", invoice_id}}).error.code,
+              "store_unavailable");
+    const auto paid = *rig.store->get_invoice(invoice_id);
+    EXPECT_EQ(paid.state, "paid");
+    EXPECT_EQ(paid.provider_status, "paid");
+    stripe.on_send = nullptr;
+    EXPECT_EQ(rig.call("resend_invoice", {{"invoice_id", invoice_id}}).error.code, "conflict")
+        << "a paid invoice has nothing to send";
 }
 
 TEST(StripeBilling, ARetryAfterAFailedStepNeverBillsTwice) {
@@ -413,8 +848,11 @@ TEST(StripeBilling, ARetryAfterAFailedStepNeverBillsTwice) {
 
 TEST(StripeBilling, StripesTotalIsLakesTotalToTheCent) {
     FakeStripe stripe;
-    auto provider = lake::api::stripe_payment_provider(
-        {std::string(test_key), std::string(test_webhook)}, stripe.http(), "https://stripe.test");
+    auto provider =
+        lake::api::stripe_payment_provider({std::string(test_key), std::string(test_webhook)},
+                                           std::string(this_lake),
+                                           stripe.http(),
+                                           "https://stripe.test");
     lake::control::Invoice invoice;
     invoice.customer_id = "c";
     invoice.period = "2026-09";
@@ -428,6 +866,15 @@ TEST(StripeBilling, StripesTotalIsLakesTotalToTheCent) {
     const auto requested = provider->request_payment({"c", "acme", "cus_9", 0}, invoice);
     ASSERT_TRUE(requested) << requested.error();
     EXPECT_EQ(stripe.amounts["in_1"], (std::vector<std::int64_t>{1, 1, -1}));
+    // The negative rounding line keeps the bare amount, since an inline price cannot be negative.
+    EXPECT_EQ(stripe.products["in_1"], (std::vector<std::string>{"lake_usage", "lake_usage", ""}));
+    const auto& rounding = stripe.requests[stripe.requests.size() - 2]; // before the finalize
+    ASSERT_TRUE(rounding.url.ends_with("/v1/invoiceitems"));
+    EXPECT_EQ(FakeStripe::header(rounding, "Idempotency-Key"), "lake-invoice-c-2026-09-0-rounding");
+    EXPECT_EQ(FakeStripe::field(rounding.body, "amount"), "-1");
+    EXPECT_EQ(FakeStripe::field(rounding.body, "currency"), "usd");
+    EXPECT_EQ(FakeStripe::field(rounding.body, "description"), "Rounding%20to%20the%20cent");
+    EXPECT_EQ(FakeStripe::field(rounding.body, "metadata%5Borama_app%5D"), "lake");
     // USD only, and a customer first.
     invoice.currency = "EUR";
     EXPECT_FALSE(provider->request_payment({"c", "acme", "cus_9", 1}, invoice));
@@ -436,11 +883,190 @@ TEST(StripeBilling, StripesTotalIsLakesTotalToTheCent) {
     // A wrong key is refused without echoing it.
     auto wrong =
         lake::api::stripe_payment_provider({"sk_test_notthekey00000001", std::string(test_webhook)},
+                                           std::string(this_lake),
                                            stripe.http(),
                                            "https://stripe.test");
     const auto refused = wrong->provider_customer({"c", "acme", "", 0});
     ASSERT_FALSE(refused);
     EXPECT_EQ(refused.error().find("sk_test"), std::string::npos) << refused.error();
+    // Three lines under half a cent bill nothing each; lake's total is one cent, a positive
+    // rounding line of Lake's usage product.
+    invoice.lines = {{"usage", "predictions", "Predictions", "calls", 1, 0, 1, 4'000, 1, 4'000},
+                     {"usage", "calls", "Calls", "calls", 1, 0, 1, 4'000, 1, 4'000},
+                     {"usage", "searches", "Searches", "calls", 1, 0, 1, 4'000, 1, 4'000}};
+    invoice.total_micros = 12'000;
+    ASSERT_TRUE(provider->request_payment({"c", "acme", "cus_9", 2}, invoice));
+    EXPECT_EQ(stripe.amounts["in_2"], (std::vector<std::int64_t>{1}));
+    EXPECT_EQ(stripe.products["in_2"], (std::vector<std::string>{"lake_usage"}));
+}
+
+// Lake's products are the operator's to create in each account (lake#855): until it has, an issue
+// fails saying so, nothing is issued in lake, and the same issue goes through once it exists.
+TEST(StripeBilling, AMissingProductSaysTheOperatorCreatesIt) {
+    FakeStripe stripe;
+    stripe.catalog.clear();
+    StripeRig rig(stripe_providers(stripe));
+    const auto failed =
+        rig.call("issue_invoice", {{"customer_id", rig.customer}, {"period", rig.period}});
+    EXPECT_EQ(failed.error.code, "store_unavailable");
+    EXPECT_NE(failed.error.message.find("Stripe has no product lake_usage in this account; the "
+                                        "operator creates it (spec.payments)"),
+              std::string::npos)
+        << failed.error.message;
+    EXPECT_NE(failed.error.message.find("24 hours"), std::string::npos) << failed.error.message;
+    EXPECT_TRUE(rig.store->list_invoices(rig.customer)->empty()) << "nothing is issued";
+    EXPECT_EQ(stripe.items, 0);
+    EXPECT_EQ(stripe.status["in_1"], "draft") << "the Stripe invoice is left as it was";
+
+    // Any other refusal keeps Stripe's own message.
+    auto other = lake::api::stripe_payment_provider(
+        {std::string(test_key), std::string(test_webhook)},
+        std::string(this_lake),
+        [](const lake::api::StripeRequest&) {
+            return lake::api::StripeResponse{
+                400,
+                R"({"error":{"code":"resource_missing","param":"customer","message":"No such customer"}})",
+                {}};
+        },
+        "https://stripe.test");
+    const auto refused = other->provider_customer({"c", "acme", "", 0});
+    ASSERT_FALSE(refused);
+    EXPECT_NE(refused.error().find("No such customer"), std::string::npos) << refused.error();
+
+    // The operator creates the product; issuing again uses the same Stripe invoice.
+    stripe.catalog.insert(std::string(lake::api::stripe_usage_product));
+    const auto issued =
+        rig.call("issue_invoice", {{"customer_id", rig.customer}, {"period", rig.period}});
+    ASSERT_TRUE(issued.ok) << issued.error.message;
+    EXPECT_EQ(issued.value["provider_reference"], "in_1");
+    EXPECT_EQ(stripe.invoices, 1);
+    EXPECT_EQ(stripe.amounts["in_1"], std::vector<std::int64_t>{2000});
+}
+
+// A kept customer is read before it is reused (lake#856): one GET with lake's key and version, and
+// no customer created.
+TEST(StripeBilling, AKeptCustomerStripeStillHasIsReusedAfterOneRead) {
+    FakeStripe stripe;
+    stripe.known_customers.insert("cus_kept");
+    StripeRig rig(stripe_providers(stripe));
+    ASSERT_TRUE(rig.store->set_billing_provider_customer(rig.customer, "stripe", "cus_kept"));
+    const auto issued =
+        rig.call("issue_invoice", {{"customer_id", rig.customer}, {"period", rig.period}});
+    ASSERT_TRUE(issued.ok) << issued.error.message;
+    EXPECT_EQ(stripe.customer_reads, 1);
+    EXPECT_EQ(stripe.customers, 0) << "the kept customer is reused";
+    const auto& read = stripe.requests[0];
+    EXPECT_EQ(read.method, "GET");
+    EXPECT_EQ(read.url, "https://stripe.test/v1/customers/cus_kept");
+    EXPECT_TRUE(read.body.empty());
+    EXPECT_EQ(FakeStripe::header(read, "Authorization"), "Bearer " + std::string(test_key));
+    EXPECT_EQ(FakeStripe::header(read, "Stripe-Version"), lake::api::stripe_api_version);
+    EXPECT_EQ(FakeStripe::header(read, "Idempotency-Key"), "") << "a read takes no key";
+    EXPECT_EQ(FakeStripe::field(stripe.requests[1].body, "customer"), "cus_kept");
+    EXPECT_EQ(*rig.store->billing_provider_customer(rig.customer, "stripe"), "cus_kept");
+    EXPECT_TRUE(replacements(*rig.store).empty());
+}
+
+// A kept customer Stripe does not have (404 resource_missing: a sandbox reset or replaced, a
+// switch from test mode to live) or has deleted is replaced by a new one under its own key; the
+// new id is kept, the invoice is the new customer's, and the replacement is audited (lake#856).
+TEST(StripeBilling, AKeptCustomerStripeNoLongerHasIsReplaced) {
+    for (const bool deleted : {false, true}) {
+        SCOPED_TRACE(deleted ? "deleted" : "missing");
+        FakeStripe stripe;
+        if (deleted) {
+            stripe.deleted_customers.insert("cus_old");
+        }
+        StripeRig rig(stripe_providers(stripe));
+        ASSERT_TRUE(rig.store->set_billing_provider_customer(rig.customer, "stripe", "cus_old"));
+        const auto issued =
+            rig.call("issue_invoice", {{"customer_id", rig.customer}, {"period", rig.period}});
+        ASSERT_TRUE(issued.ok) << issued.error.message;
+        EXPECT_EQ(stripe.customer_reads, 1);
+        EXPECT_EQ(stripe.customers, 1);
+        EXPECT_EQ(*rig.store->billing_provider_customer(rig.customer, "stripe"), "cus_1");
+        // The plain key would replay the first create within Stripe's 24 hours.
+        const auto& created = stripe.requests[1];
+        ASSERT_TRUE(created.url.ends_with("/v1/customers"));
+        EXPECT_EQ(FakeStripe::header(created, "Idempotency-Key"),
+                  "lake-customer-" + rig.customer + "-replaces-cus_old");
+        EXPECT_EQ(FakeStripe::field(created.body, "metadata%5Blake_customer_id%5D"), rig.customer);
+        EXPECT_EQ(FakeStripe::field(created.body, "metadata%5Borama_app%5D"), "lake");
+        EXPECT_EQ(FakeStripe::field(stripe.requests[2].body, "customer"), "cus_1");
+        EXPECT_EQ(FakeStripe::field(stripe.requests[3].body, "customer"), "cus_1");
+        EXPECT_EQ(issued.value["provider_reference"], "in_1");
+
+        const auto replaced = replacements(*rig.store);
+        ASSERT_EQ(replaced.size(), 1U);
+        EXPECT_EQ(replaced[0].draft.customer_id, rig.customer);
+        EXPECT_EQ(replaced[0].draft.object, "customer/" + rig.customer + "/billing");
+        EXPECT_EQ(replaced[0].draft.principal, "admin");
+        EXPECT_EQ(replaced[0].draft.outcome, "success");
+        EXPECT_EQ(replaced[0].draft.details,
+                  (json{{"provider", "stripe"},
+                        {"old_provider_customer_id", "cus_old"},
+                        {"new_provider_customer_id", "cus_1"}}));
+
+        // The replacement is kept and read like any customer: the next issue reuses it.
+        ASSERT_TRUE(
+            rig.call("void_invoice", {{"invoice_id", issued.value["id"]}, {"note", "again"}}).ok);
+        const auto again =
+            rig.call("issue_invoice", {{"customer_id", rig.customer}, {"period", rig.period}});
+        ASSERT_TRUE(again.ok) << again.error.message;
+        EXPECT_EQ(stripe.customer_reads, 2);
+        EXPECT_EQ(stripe.customers, 1);
+        EXPECT_EQ(replacements(*rig.store).size(), 1U);
+    }
+}
+
+// A read that fails for any reason but the customer's absence fails the issue and keeps the kept
+// id: a refused key, a rate limit or Stripe's own failure never replaces a customer (lake#856).
+TEST(StripeBilling, AFailedCustomerReadKeepsTheKeptCustomer) {
+    for (const int status : {500, 401, 403, 429}) {
+        SCOPED_TRACE(status);
+        FakeStripe stripe;
+        stripe.known_customers.insert("cus_kept");
+        stripe.customer_read_status = status;
+        StripeRig rig(stripe_providers(stripe));
+        ASSERT_TRUE(rig.store->set_billing_provider_customer(rig.customer, "stripe", "cus_kept"));
+        const auto failed =
+            rig.call("issue_invoice", {{"customer_id", rig.customer}, {"period", rig.period}});
+        EXPECT_EQ(failed.error.code, "store_unavailable");
+        EXPECT_NE(failed.error.message.find("read the customer"), std::string::npos)
+            << failed.error.message;
+        EXPECT_EQ(stripe.customer_reads, 1);
+        EXPECT_EQ(stripe.customers, 0);
+        EXPECT_EQ(stripe.invoices, 0);
+        EXPECT_TRUE(rig.store->list_invoices(rig.customer)->empty()) << "nothing is issued";
+        EXPECT_EQ(*rig.store->billing_provider_customer(rig.customer, "stripe"), "cus_kept");
+        EXPECT_TRUE(replacements(*rig.store).empty());
+    }
+}
+
+// The memory store replaces a kept customer only while it still holds the id read, so a second,
+// concurrent replacement gets the first one's id back (lake#856).
+TEST(StripeBilling, TheMemoryStoreReplacesOnlyTheIdItWasGiven) {
+    lake::control::InMemoryStore store;
+    const auto user = store.create_user({"taap:1:ed25519:replace", "replace@example.test", "R"});
+    ASSERT_TRUE(user) << user.error().message;
+    const auto customer = store.create_customer({"individual", user->id, "", "replace"});
+    ASSERT_TRUE(customer) << customer.error().message;
+    const std::string id = customer->id;
+    EXPECT_EQ(*store.replace_billing_provider_customer(id, "stripe", "cus_1", "cus_2"), "")
+        << "nothing is kept to replace";
+    EXPECT_EQ(*store.billing_provider_customer(id, "stripe"), "");
+    ASSERT_TRUE(store.set_billing_provider_customer(id, "stripe", "cus_1"));
+    EXPECT_EQ(*store.replace_billing_provider_customer(id, "stripe", "cus_1", "cus_2"), "cus_2");
+    EXPECT_EQ(*store.replace_billing_provider_customer(id, "stripe", "cus_1", "cus_3"), "cus_2")
+        << "the first replacement stays";
+    EXPECT_EQ(*store.billing_provider_customer(id, "stripe"), "cus_2");
+    EXPECT_EQ(store.replace_billing_provider_customer(id, "stripe", "", "cus_3").error().code,
+              "invalid_input");
+    EXPECT_EQ(
+        store.replace_billing_provider_customer("no-such-customer", "stripe", "cus_2", "cus_3")
+            .error()
+            .code,
+        "not_found");
 }
 
 TEST(StripeBilling, WebhooksMoveTheInvoiceOncePerEvent) {
@@ -492,13 +1118,18 @@ TEST(StripeBilling, WebhooksMoveTheInvoiceOncePerEvent) {
     EXPECT_EQ(read().state, "paid");
     EXPECT_EQ(read().provider_status, "paid");
 
-    // Events lake does not act on, and invoices that are not lake's, are acknowledged.
+    // Events lake does not act on, another app's invoice, and an invoice tagged as lake's that it
+    // did not issue, are acknowledged.
     const auto other = rig.signed_notice(event("evt_other", "customer.created", "cus_1"));
     EXPECT_EQ(other.status, 200);
     EXPECT_EQ(other.body["ignored"], true);
-    const auto foreign = rig.signed_notice(event("evt_foreign", "invoice.paid", "in_999"));
+    const auto foreign =
+        rig.signed_notice(event("evt_foreign", "invoice.paid", "in_999", json::object()));
     EXPECT_EQ(foreign.status, 200);
-    EXPECT_EQ(foreign.body["matched"], false);
+    EXPECT_EQ(foreign.body["ignored"], true);
+    const auto unknown = rig.signed_notice(event("evt_unknown", "invoice.paid", "in_999"));
+    EXPECT_EQ(unknown.status, 200);
+    EXPECT_EQ(unknown.body["matched"], false);
 
     // Every notice that moved an invoice, and every refusal, is in the central audit.
     const auto events = lake::test::audit_events(*rig.store, {.limit = 500});
@@ -521,6 +1152,51 @@ TEST(StripeBilling, WebhooksMoveTheInvoiceOncePerEvent) {
     }
     EXPECT_EQ(paid_events, 1);
     EXPECT_EQ(denied, 3);
+}
+
+// One Stripe account, several apps (lake#855): every endpoint receives every event of its types,
+// so an invoice of Cloud v1 or of another Lake is acknowledged before anything is recorded, even
+// one whose Stripe id is one of this Lake's.
+TEST(StripeBilling, AnotherAppsOrAnotherLakesInvoiceRecordsNothing) {
+    FakeStripe stripe;
+    StripeRig rig(stripe_providers(stripe));
+    const auto issued =
+        rig.call("issue_invoice", {{"customer_id", rig.customer}, {"period", rig.period}});
+    ASSERT_TRUE(issued.ok) << issued.error.message;
+    const std::string invoice_id = issued.value["id"];
+
+    const std::vector<std::pair<std::string, json>> foreign = {
+        {"evt_cloud_v1", {{"team_id", "team_1"}, {"plan_id", "plan_1"}}},
+        {"evt_untagged", json::object()},
+        {"evt_other_lake", {{"lake_customer_id", rig.customer}, {"lake_instance", other_lake}}}};
+    for (const auto& [id, metadata] : foreign) {
+        const auto ignored = rig.signed_notice(event(id, "invoice.paid", "in_1", metadata));
+        EXPECT_EQ(ignored.status, 200) << id;
+        EXPECT_EQ(ignored.body, (json{{"received", true}, {"ignored", true}})) << id;
+    }
+    EXPECT_EQ(rig.store->get_invoice(invoice_id)->state, "due");
+    // No billing_payment_events row: each event id is still unused. No audit event names one.
+    for (const auto& [id, metadata] : foreign) {
+        const auto unused = rig.store->apply_payment_event({"stripe", id, "invoice.paid"});
+        ASSERT_TRUE(unused) << unused.error().message;
+        EXPECT_FALSE(unused->duplicate) << id;
+    }
+    const auto events = lake::test::audit_events(*rig.store, {.limit = 500});
+    ASSERT_TRUE(events) << events.error().message;
+    for (const auto& entry : *events) {
+        EXPECT_NE(entry.draft.action, "payment_notice") << entry.draft.details.dump();
+    }
+    // The signature still comes first: an unsigned foreign event is refused.
+    EXPECT_EQ(rig.notice(event("evt_unsigned", "invoice.paid", "in_1", json::object()), "").status,
+              400);
+    // This Lake's own tag is this Lake's.
+    const auto own = rig.signed_notice(
+        event("evt_own",
+              "invoice.paid",
+              "in_1",
+              {{"lake_customer_id", rig.customer}, {"lake_instance", this_lake}}));
+    EXPECT_EQ(own.body["state"], "paid");
+    EXPECT_EQ(rig.store->get_invoice(invoice_id)->state, "paid");
 }
 
 TEST(StripeBilling, AVoidNoticeVoidsADueInvoice) {
@@ -559,7 +1235,8 @@ TEST(StripeBilling, KeysComeFromTheEnvironmentAndAChangeTakesARestart) {
     const lake::api::StripeProviderFactory factory =
         [&](const lake::api::StripeKeys& keys) -> std::shared_ptr<lake::api::PaymentProvider> {
         ++built;
-        return lake::api::stripe_payment_provider(keys, stripe.http(), "https://stripe.test");
+        return lake::api::stripe_payment_provider(
+            keys, std::string(this_lake), stripe.http(), "https://stripe.test");
     };
     const std::string key(test_key);
     const std::string webhook(test_webhook);

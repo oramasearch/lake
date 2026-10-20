@@ -152,6 +152,7 @@ constexpr std::array central = std::to_array<std::string_view>({
     "repository_recovery_status",
     // The operator's volumes are control plane (migration 0069, operator#259, operator#260).
     "request_volume_snapshot",
+    "resend_invoice",
     "resolve_model",
     "revoke_agent_certificate",
     "revoke_agent_session",
@@ -179,6 +180,8 @@ constexpr std::array central = std::to_array<std::string_view>({
     "search",
     "server_info",
     "set_audit_retention",
+    // An account's billing contact is billing configuration (lake#857).
+    "set_billing_contact",
     "set_customer_credential_policy",
     "set_member_role",
     "set_price_list",

@@ -1,6 +1,7 @@
 // Billing (lake#564, decision 56, docs/api/billing.md): price_list, set_price_list,
-// billing_account, bill_preview, issue_invoice, list_invoices, get_invoice, record_invoice_payment
-// and void_invoice, with the manual payment provider. Registered only where LAKE_BILLING is on.
+// billing_account, set_billing_contact, bill_preview, issue_invoice, resend_invoice,
+// list_invoices, get_invoice, record_invoice_payment and void_invoice, with the manual payment
+// provider. Registered only where LAKE_BILLING is on.
 // Lake is priced by usage only (lake#635): one list rate per usage dimension, no plans, no fee and
 // nothing included, so every account is billed on the price list without choosing anything. The
 // records are control-plane rows (each publication of the price list, stored as a billing_plans
@@ -13,6 +14,7 @@
 #include "lake/api/stripe.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <chrono>
 #include <cmath>
@@ -27,6 +29,7 @@
 
 #include "lake/api/usage_recorder.hpp"
 #include "lake/audit/audit.hpp"
+#include "lake/control/policy.hpp"
 
 namespace lake::api {
 namespace {
@@ -481,8 +484,43 @@ json provider_json(const PaymentProvider& provider, const PaymentStatus& status)
             {"reason", provider.records_payments_by_hand() ? status.reason : std::string()}};
 }
 
-// The account's billing: the price list it is billed at this month and how invoices are paid.
-// There is nothing to choose: every account is billed on the price list (lake#635).
+json contact_json(const control::BillingContact& contact) {
+    return {{"email", contact.email},
+            {"name", contact.name},
+            {"line1", contact.line1},
+            {"line2", contact.line2},
+            {"city", contact.city},
+            {"postal_code", contact.postal_code},
+            {"state", contact.state},
+            {"country", contact.country},
+            {"updated_at", contact.updated_at}};
+}
+
+// The email billing_account suggests while the account has no billing contact (lake#857): the
+// signed-in person's, from their user record, when they may set the contact (admin on the account,
+// as its owners and admins hold). Nothing is stored until they save it.
+json suggested_email(ApiContext& context, const std::string& customer_id) {
+    if (context.acting_user_id.empty()) {
+        return nullptr;
+    }
+    const auto object = context.store->find_policy_object("customer", customer_id);
+    if (!object) {
+        return nullptr;
+    }
+    const auto decision = control::authorize(
+        *context.store, context.acting_identity, object->id, "admin", context.authorization_cache);
+    if (!decision || !decision->allowed) {
+        return nullptr;
+    }
+    const auto user = context.store->get_user(context.acting_user_id);
+    if (!user || control::billing_contact_problem({.email = user->email})) {
+        return nullptr;
+    }
+    return user->email;
+}
+
+// The account's billing: the price list it is billed at this month, how invoices are paid, and
+// where they go. There is nothing to choose: every account is billed on the price list (lake#635).
 ApiResult account_of(ApiContext& context,
                      const std::string& customer_id,
                      const PaymentProvider& provider,
@@ -495,20 +533,55 @@ ApiResult account_of(ApiContext& context,
     if (!lists) {
         return lists.error();
     }
+    const auto contact = context.store->billing_contact(customer_id);
+    if (!contact) {
+        return from_store(contact.error());
+    }
     const Month now = this_month();
     return ApiResult::success(
         {{"customer_id", customer_id},
          {"month", now.name()},
          {"price_list", optional_list_json(price_list_for(*lists, now.name()))},
-         {"provider", provider_json(provider, status)}});
+         {"provider", provider_json(provider, status)},
+         {"contact", *contact ? contact_json(**contact) : json(nullptr)},
+         {"suggested_email", *contact ? json(nullptr) : suggested_email(context, customer_id)}});
+}
+
+json nullable_string() {
+    return {{"type", json::array({"string", "null"})}};
+}
+
+json contact_schema() {
+    return output_schema({{"email", string_schema()},
+                          {"name", string_schema()},
+                          {"line1", string_schema()},
+                          {"line2", string_schema()},
+                          {"city", string_schema()},
+                          {"postal_code", string_schema()},
+                          {"state", string_schema()},
+                          {"country", string_schema()},
+                          {"updated_at", string_schema()}},
+                         json::array({"email",
+                                      "name",
+                                      "line1",
+                                      "line2",
+                                      "city",
+                                      "postal_code",
+                                      "state",
+                                      "country",
+                                      "updated_at"}));
 }
 
 json account_schema() {
-    return output_schema({{"customer_id", string_schema()},
-                          {"month", string_schema()},
-                          {"price_list", nullable_object()},
-                          {"provider", {{"type", "object"}}}},
-                         json::array({"customer_id", "month", "price_list", "provider"}));
+    return output_schema(
+        {{"customer_id", string_schema()},
+         {"month", string_schema()},
+         {"price_list", nullable_object()},
+         {"provider", {{"type", "object"}}},
+         {"contact", nullable_object()},
+         {"suggested_email", nullable_string()}},
+        json::array(
+            {"customer_id", "month", "price_list", "provider", "contact", "suggested_email"}));
 }
 
 json bill_schema() {
@@ -604,32 +677,113 @@ template <class Awaited> ApiResult unresolved(const Awaited& awaited) {
     return awaited ? awaited->failure : ApiResult::failure("store_error", awaited.error().message);
 }
 
-// The account as the provider sees it, with the provider's id for it (created and kept first,
-// so a failed payment request never loses it).
+// The account as the provider sees it, with its billing contact and the provider's id for it
+// (created and kept first, so a failed payment request never loses it). A kept id the provider
+// replaced (lake#856) is swapped only while the row still holds it, so of two concurrent
+// replacements both use the one stored first; the swap is in the central audit
+// (billing.account.provider_customer_replaced).
 std::expected<PaymentAccount, ApiResult> payment_account(ApiContext& context,
                                                          PaymentProvider& provider,
                                                          const control::Customer& customer,
                                                          std::uint64_t attempt) {
-    PaymentAccount account{customer.id, customer.name, {}, attempt};
+    PaymentAccount account{customer.id, customer.name, {}, attempt, {}};
+    const auto contact = context.store->billing_contact(customer.id);
+    if (!contact) {
+        return std::unexpected(from_store(contact.error()));
+    }
+    account.contact = *contact;
     const std::string name(provider.name());
     const auto kept = context.store->billing_provider_customer(customer.id, name);
     if (!kept) {
         return std::unexpected(from_store(kept.error()));
     }
     account.provider_customer_id = *kept;
-    auto id = provider.provider_customer(account);
-    if (!id) {
-        return std::unexpected(
-            ApiResult::failure("store_unavailable", "the payment provider refused: " + id.error()));
+    auto found = provider.provider_customer(account);
+    if (!found) {
+        return std::unexpected(ApiResult::failure(
+            "store_unavailable", "the payment provider refused: " + found.error()));
     }
-    if (!id->empty() && *id != account.provider_customer_id) {
-        const auto stored = context.store->set_billing_provider_customer(customer.id, name, *id);
+    if (!found->replaces.empty()) {
+        const auto stored = context.store->replace_billing_provider_customer(
+            customer.id, name, found->replaces, found->id);
+        if (!stored) {
+            return std::unexpected(from_store(stored.error()));
+        }
+        account.provider_customer_id = *stored;
+        if (*stored != found->id) {
+            return account; // another request's replacement, stored first, is its to audit
+        }
+        const audit::EventDraft event{
+            .customer_id = customer.id,
+            .kind = "billing.account.provider_customer_replaced",
+            .principal = context.acting_identity.empty() ? "anonymous" : context.acting_identity,
+            .object = "customer/" + customer.id + "/billing",
+            .action = "issue_invoice",
+            .outcome = "success",
+            .request_id = context.request_id,
+            .method = context.authentication_method,
+            .device = context.device,
+            .details = {{"provider", name},
+                        {"old_provider_customer_id", found->replaces},
+                        {"new_provider_customer_id", found->id}}};
+        const audit::IdentityOptions options{.configured_seed = context.identity_seed,
+                                             .instance_kek = context.instance_kek};
+        if (const auto recorded = audit::record(*context.store, event, options); !recorded) {
+            return std::unexpected(ApiResult::failure(
+                "store_error", "could not record audit event: " + recorded.error().message));
+        }
+    } else if (!found->id.empty() && found->id != account.provider_customer_id) {
+        const auto stored =
+            context.store->set_billing_provider_customer(customer.id, name, found->id);
         if (!stored) {
             return std::unexpected(from_store(stored.error()));
         }
         account.provider_customer_id = *stored;
     }
     return account;
+}
+
+// An invoice after its payment request was sent to the billing email (lake#857), and the
+// provider's refusal, if any.
+struct SentRequest {
+    control::Invoice invoice;
+    std::string error;
+};
+
+// Sends a stored invoice's payment request and keeps the outcome on the invoice: provider_status
+// `send_failed` when the provider refuses, and a send that goes through moves `send_failed` back to
+// the provider's status; any other status is the provider's notices' to change (a reminder keeps
+// `payment_failed`). The status moves only from the one read, so a notice applied meanwhile stays.
+SentRequest send_request(ApiContext& context,
+                         PaymentProvider& provider,
+                         const PaymentAccount& account,
+                         const control::Invoice& invoice,
+                         std::string_view resend) {
+    auto sent = provider.send_payment_request(account, invoice, resend);
+    SentRequest out{invoice, sent ? std::string() : sent.error()};
+    const std::string status = !sent                                      ? "send_failed"
+                               : invoice.provider_status == "send_failed" ? *sent
+                                                                          : invoice.provider_status;
+    if (!status.empty() && status != invoice.provider_status) {
+        if (auto moved = context.store->set_invoice_provider_status(
+                invoice.id, invoice.provider_status, status)) {
+            out.invoice = std::move(*moved);
+        }
+    }
+    return out;
+}
+
+json send_details(const SentRequest& sent) {
+    json details{{"invoice_id", sent.invoice.id},
+                 {"number", sent.invoice.number},
+                 {"period", sent.invoice.period},
+                 {"provider", sent.invoice.provider},
+                 {"provider_reference", sent.invoice.provider_reference},
+                 {"provider_status", sent.invoice.provider_status}};
+    if (!sent.error.empty()) {
+        details["error"] = sent.error;
+    }
+    return details;
 }
 
 } // namespace
@@ -896,6 +1050,12 @@ liquid::runtime::task<NoticeOutcome> receive_payment_notice(PaymentProviders& pr
         co_return answer(notice.error().code == "not_supported" ? 404 : 400,
                          notice.error().code,
                          notice.error().message);
+    }
+    if (notice->foreign) {
+        // Another app's or another Lake's object in a shared Stripe account (lake#855): every
+        // endpoint receives every event of its types, so it is acknowledged with nothing recorded,
+        // neither a payment event row nor an audit event.
+        co_return NoticeOutcome{200, {{"received", true}, {"ignored", true}}};
     }
     if (!notice->order_state.empty()) {
         // An order of the apex order sheet (lake#831, docs/api/orders.md#paying): applied once per
@@ -1220,6 +1380,133 @@ void register_billing_capabilities(Registry& registry,
             co_return result;
         }});
 
+    // set_billing_contact's input: the account and the contact's fields, each with the length
+    // billing_contacts allows. The registry checks neither maxLength nor pattern, so the handler
+    // applies billing_contact_problem.
+    const auto contact_input = [] {
+        static constexpr std::array<std::pair<const char*, int>, 7> bounded{{{"email", 320},
+                                                                             {"name", 256},
+                                                                             {"line1", 256},
+                                                                             {"line2", 256},
+                                                                             {"city", 128},
+                                                                             {"postal_code", 32},
+                                                                             {"state", 128}}};
+        json properties{{"customer_id", string_schema()}};
+        for (const auto& [field, most] : bounded) {
+            properties[field] = {{"type", "string"}, {"maxLength", most}};
+        }
+        properties["country"] = {
+            {"type", "string"},
+            {"pattern", "^([A-Z]{2})?$"},
+            {"description", "an ISO 3166-1 alpha-2 code such as DE, or empty"}};
+        return object_schema(std::move(properties), json::array({"customer_id", "email"}));
+    };
+    registry.add(Capability{
+        .name = "set_billing_contact",
+        .title = "Set the billing contact",
+        .description =
+            "The account's owners and admins, and the operator. Replaces the account's billing "
+            "contact: the `email` invoices go to, and the `name` (the legal or company name) and "
+            "address an invoice carries, each empty when left out; `country` is an ISO 3166-1 "
+            "alpha-2 code such as DE. When the account already has a customer at the payment "
+            "provider (Stripe), Lake sends it the email, name and address (`provider_update` "
+            "`updated`); if the provider refuses, the contact stays saved and `provider_update` "
+            "is `failed` with `provider_error`. `none`: no provider customer yet, and it gets the "
+            "contact when it is created at the account's first invoice.",
+        .input_schema = contact_input(),
+        .output_schema = output_schema(
+            {{"customer_id", string_schema()},
+             {"contact", contact_schema()},
+             {"provider_update", {{"type", "string"}, {"enum", {"updated", "none", "failed"}}}},
+             {"provider_error", string_schema()}},
+            json::array({"customer_id", "contact", "provider_update"})),
+        .kind = CapabilityKind::Action,
+        .object = "customer",
+        .action = "admin",
+        .resolve_object = customer_object,
+        .resolves_operator_audit_target = true,
+        .async_handler = [providers](const json& input,
+                                     ApiContext& context) -> liquid::runtime::task<ApiResult> {
+            if (!context.store) {
+                co_return no_store();
+            }
+            // Each field as typed, without the whitespace a form leaves around it.
+            const auto field = [&](const char* name) {
+                std::string value = input.value(name, "");
+                const auto blank = [](char c) {
+                    return std::isspace(static_cast<unsigned char>(c));
+                };
+                while (!value.empty() && blank(value.back())) {
+                    value.pop_back();
+                }
+                return value.substr(std::ranges::find_if_not(value, blank) - value.begin());
+            };
+            const control::BillingContact contact{input.at("customer_id"),
+                                                  field("email"),
+                                                  field("name"),
+                                                  field("line1"),
+                                                  field("line2"),
+                                                  field("city"),
+                                                  field("postal_code"),
+                                                  field("state"),
+                                                  field("country"),
+                                                  {}};
+            if (const auto problem = control::billing_contact_problem(contact)) {
+                co_return ApiResult::failure("invalid_input",
+                                             problem->field + " must be " + problem->message,
+                                             "/" + problem->field);
+            }
+            const auto customer = context.store->get_customer(contact.customer_id);
+            if (!customer) {
+                co_return ApiResult::failure(
+                    "not_found", "no account " + contact.customer_id, "/customer_id");
+            }
+            auto resolved = co_await resolve(*providers, context);
+            if (!resolved || !resolved->provider) {
+                co_return unresolved(resolved);
+            }
+            PaymentProvider& provider = *resolved->provider;
+            const auto stored = context.store->set_billing_contact(contact);
+            if (!stored) {
+                co_return from_store(stored.error());
+            }
+            // The provider's customer, when the account has one, gets the contact now; one made
+            // later gets it at creation (payment_account). A refusal keeps the saved contact.
+            std::string update = "none";
+            std::string error;
+            const auto kept = context.store->billing_provider_customer(
+                customer->id, std::string(provider.name()));
+            if (!kept) {
+                update = "failed";
+                error = kept.error().message;
+            } else if (!kept->empty()) {
+                const PaymentAccount account{customer->id, customer->name, *kept, 0, *stored};
+                const auto sent = provider.update_customer(account);
+                update = sent ? "updated" : "failed";
+                error = sent ? std::string() : sent.error();
+            }
+            const json saved = contact_json(*stored);
+            // The audit names the fields set, never their values.
+            json fields = json::array();
+            for (const auto& [name, value] : saved.items()) {
+                if (name != "updated_at" && !value.get<std::string>().empty()) {
+                    fields.push_back(name);
+                }
+            }
+            audit(context,
+                  customer->id,
+                  "billing.contact.set",
+                  {{"fields", std::move(fields)},
+                   {"provider", provider.name()},
+                   {"provider_update", update}});
+            json out{
+                {"customer_id", customer->id}, {"contact", saved}, {"provider_update", update}};
+            if (!error.empty()) {
+                out["provider_error"] = error;
+            }
+            co_return ApiResult::success(std::move(out));
+        }});
+
     registry.add(Capability{
         .name = "bill_preview",
         .title = "Bill preview",
@@ -1287,7 +1574,11 @@ void register_billing_capabilities(Registry& registry,
             "for that month, with each line's quantity and rate frozen, then asks the payment "
             "provider to collect "
             "it. Refused while any workspace's usage cannot be read (store_unavailable, try "
-            "again) and when the month already has an invoice that is not void (conflict).",
+            "again) and when the month already has an invoice that is not void (conflict). Once "
+            "the invoice is stored, and when the account has a billing contact, the provider "
+            "sends it to the billing email (Stripe emails its hosted invoice link); a failed "
+            "send leaves the invoice issued with `provider_status` `send_failed`, and "
+            "resend_invoice sends it again.",
         .input_schema = object_schema({{"customer_id", string_schema()}, {"period", period_schema}},
                                       json::array({"customer_id", "period"})),
         .output_schema = invoice_schema(),
@@ -1389,6 +1680,31 @@ void register_billing_capabilities(Registry& registry,
             if (!stored) {
                 co_return from_store(stored.error());
             }
+            // The billing email gets the payment request only now that lake has stored the
+            // invoice, so a payment notice that arrives meanwhile finds it (lake#857). A failed
+            // send leaves the invoice issued and payable on its page, `send_failed` until
+            // resend_invoice sends it.
+            SentRequest sent{*stored, {}};
+            std::string send = "none";
+            if (account->contact && !stored->provider_reference.empty()) {
+                sent = send_request(context, provider, *account, *stored, {});
+                send = sent.error.empty() ? "sent" : "failed";
+            }
+            if (!sent.error.empty()) {
+                // Its own central event beside the issue's: the issue itself succeeded.
+                const audit::EventDraft failure{.customer_id = customer_id,
+                                                .kind = "billing.invoice.send_failed",
+                                                .principal = context.acting_identity,
+                                                .object = "customer/" + customer_id + "/billing",
+                                                .action = "issue_invoice",
+                                                .outcome = "failure",
+                                                .request_id = context.request_id,
+                                                .method = context.authentication_method,
+                                                .details = send_details(sent)};
+                const audit::IdentityOptions options{.configured_seed = context.identity_seed,
+                                                     .instance_kek = context.instance_kek};
+                static_cast<void>(audit::record(*context.store, failure, options));
+            }
             audit(context,
                   customer_id,
                   "billing.invoice.issue",
@@ -1399,8 +1715,95 @@ void register_billing_capabilities(Registry& registry,
                    {"total_micros", stored->total_micros},
                    {"currency", stored->currency},
                    {"provider", stored->provider},
-                   {"provider_reference", stored->provider_reference}});
-            co_return ApiResult::success(invoice_json(*stored));
+                   {"provider_reference", stored->provider_reference},
+                   {"send", send}});
+            co_return ApiResult::success(invoice_json(sent.invoice));
+        }});
+
+    registry.add(Capability{
+        .name = "resend_invoice",
+        .title = "Resend an invoice",
+        .description =
+            "Operator or instance administrator only. Sends a due invoice's payment request to the "
+            "account's billing email again (lake#857): Stripe emails its hosted invoice link. For "
+            "an invoice whose send failed when it was issued (`provider_status` `send_failed`, "
+            "moved back to the provider's status once a send goes through), or as a reminder. "
+            "Refused (conflict) for an invoice that is not due or was issued without a payment "
+            "provider, and while the account has no billing contact; a refusal by the provider "
+            "leaves the invoice `send_failed` (store_unavailable).",
+        .input_schema =
+            object_schema({{"invoice_id", string_schema()}}, json::array({"invoice_id"})),
+        .output_schema = invoice_schema(),
+        .kind = CapabilityKind::Action,
+        .object = "billing invoice",
+        .action = "admin",
+        .resolve_object = administrator_only,
+        .async_handler = [providers](const json& input,
+                                     ApiContext& context) -> liquid::runtime::task<ApiResult> {
+            if (!instance_administrator(context)) {
+                co_return refused();
+            }
+            if (!context.store) {
+                co_return no_store();
+            }
+            auto resolved = co_await resolve(*providers, context);
+            if (!resolved || !resolved->provider) {
+                co_return unresolved(resolved);
+            }
+            PaymentProvider& provider = *resolved->provider;
+            auto invoice = invoice_named(context, input);
+            if (!invoice) {
+                co_return invoice.error();
+            }
+            const std::string named = "invoice " + std::to_string(invoice->number);
+            if (invoice->state != "due") {
+                co_return ApiResult::failure(
+                    "conflict", named + " is " + invoice->state + ", not due", "/invoice_id");
+            }
+            if (invoice->provider_reference.empty()) {
+                co_return ApiResult::failure("conflict",
+                                             named + " has no payment request to send; its "
+                                                     "instructions say how it is paid",
+                                             "/invoice_id");
+            }
+            if (invoice->provider != provider.name()) {
+                co_return ApiResult::failure("store_unavailable",
+                                             named + " was issued through " + invoice->provider +
+                                                 ", which is not configured now");
+            }
+            const auto customer = context.store->get_customer(invoice->customer_id);
+            if (!customer) {
+                co_return from_store(customer.error());
+            }
+            const auto invoices = context.store->list_invoices(invoice->customer_id);
+            if (!invoices) {
+                co_return from_store(invoices.error());
+            }
+            // Which issue of its month the invoice is: the provider's writes are keyed on it.
+            const auto attempt = static_cast<std::uint64_t>(
+                std::ranges::count_if(*invoices, [&](const control::Invoice& other) {
+                    return other.period == invoice->period && other.number < invoice->number;
+                }));
+            auto account = payment_account(context, provider, *customer, attempt);
+            if (!account) {
+                co_return account.error();
+            }
+            if (!account->contact) {
+                co_return ApiResult::failure("conflict",
+                                             "the account has no billing email; its owners set "
+                                             "one with set_billing_contact");
+            }
+            const SentRequest sent =
+                send_request(context, provider, *account, *invoice, control::new_uuid_v4());
+            audit(context,
+                  invoice->customer_id,
+                  sent.error.empty() ? "billing.invoice.send" : "billing.invoice.send_failed",
+                  send_details(sent));
+            if (!sent.error.empty()) {
+                co_return ApiResult::failure("store_unavailable",
+                                             "the payment provider refused: " + sent.error);
+            }
+            co_return ApiResult::success(invoice_json(sent.invoice));
         }});
 
     registry.add(Capability{

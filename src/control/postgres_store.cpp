@@ -7094,6 +7094,19 @@ public:
         });
     }
 
+    Result<Invoice> set_invoice_provider_status(const std::string& id,
+                                                const std::string& from,
+                                                const std::string& to) override {
+        return with_tx<Invoice>([&](pqxx::work& tx) -> Result<Invoice> {
+            tx.exec_params("UPDATE billing_invoices SET provider_status = $3 WHERE id = $1::uuid "
+                           "AND state = 'due' AND provider_status = $2",
+                           id,
+                           from,
+                           to);
+            return invoice_in(tx, id);
+        });
+    }
+
     // ---- payment providers (migration 0074, lake#620, docs/api/billing.md#stripe) ----
 
     Result<std::string> billing_provider_customer(const std::string& customer_id,
@@ -7136,6 +7149,39 @@ public:
                              customer_id,
                              provider)[0][0]
                 .as<std::string>();
+        });
+    }
+
+    Result<std::string>
+    replace_billing_provider_customer(const std::string& customer_id,
+                                      const std::string& provider,
+                                      const std::string& expected_id,
+                                      const std::string& provider_customer_id) override {
+        if (provider.empty() || expected_id.empty() || provider_customer_id.empty() ||
+            provider_customer_id.size() > 255) {
+            return std::unexpected(
+                StoreError{"invalid_input",
+                           "a provider, the kept customer id and its replacement are required"});
+        }
+        return with_tx<std::string>([&](pqxx::work& tx) -> Result<std::string> {
+            if (tx.exec_params("SELECT 1 FROM customers WHERE id = $1::uuid", customer_id)
+                    .empty()) {
+                return std::unexpected(StoreError{"not_found", "no customer " + customer_id});
+            }
+            // The row lock taken by a concurrent update makes this one wait and then match
+            // nothing, so the first replacement stays.
+            tx.exec_params("UPDATE billing_accounts SET provider_customer_id = $4 WHERE "
+                           "customer_id = $1::uuid AND provider = $2 AND provider_customer_id = $3",
+                           customer_id,
+                           provider,
+                           expected_id,
+                           provider_customer_id);
+            const pqxx::result rows = tx.exec_params(
+                "SELECT provider_customer_id FROM billing_accounts WHERE customer_id = $1::uuid "
+                "AND provider = $2",
+                customer_id,
+                provider);
+            return rows.empty() ? std::string() : rows[0][0].as<std::string>();
         });
     }
 
@@ -7209,6 +7255,72 @@ public:
             }
             result.invoice = std::move(*after);
             return result;
+        });
+    }
+
+    // ---- billing contacts (migration 0090, lake#857, docs/api/billing.md#billing-contact) ----
+
+    Result<std::optional<BillingContact>> billing_contact(const std::string& customer_id) override {
+        return with_tx<std::optional<BillingContact>>(
+            [&](pqxx::work& tx) -> Result<std::optional<BillingContact>> {
+                if (tx.exec_params("SELECT 1 FROM customers WHERE id = $1::uuid", customer_id)
+                        .empty()) {
+                    return std::unexpected(StoreError{"not_found", "no customer " + customer_id});
+                }
+                const pqxx::result rows = tx.exec_params(
+                    "SELECT email, name, line1, line2, city, postal_code, state, country, "
+                    "to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') "
+                    "FROM billing_contacts WHERE customer_id = $1::uuid",
+                    customer_id);
+                if (rows.empty()) {
+                    return std::optional<BillingContact>();
+                }
+                const pqxx::row row = rows[0];
+                return BillingContact{customer_id,
+                                      row[0].as<std::string>(),
+                                      row[1].as<std::string>(),
+                                      row[2].as<std::string>(),
+                                      row[3].as<std::string>(),
+                                      row[4].as<std::string>(),
+                                      row[5].as<std::string>(),
+                                      row[6].as<std::string>(),
+                                      row[7].as<std::string>(),
+                                      row[8].as<std::string>()};
+            });
+    }
+
+    Result<BillingContact> set_billing_contact(const BillingContact& contact) override {
+        if (const auto problem = billing_contact_problem(contact)) {
+            return std::unexpected(
+                StoreError{"invalid_input",
+                           "billing contact " + problem->field + " must be " + problem->message});
+        }
+        return with_tx<BillingContact>([&](pqxx::work& tx) -> Result<BillingContact> {
+            if (tx.exec_params("SELECT 1 FROM customers WHERE id = $1::uuid", contact.customer_id)
+                    .empty()) {
+                return std::unexpected(
+                    StoreError{"not_found", "no customer " + contact.customer_id});
+            }
+            const pqxx::result rows = tx.exec_params(
+                "INSERT INTO billing_contacts (customer_id, email, name, line1, line2, city, "
+                "postal_code, state, country) VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, $9) "
+                "ON CONFLICT (customer_id) DO UPDATE SET email = EXCLUDED.email, name = "
+                "EXCLUDED.name, line1 = EXCLUDED.line1, line2 = EXCLUDED.line2, city = "
+                "EXCLUDED.city, postal_code = EXCLUDED.postal_code, state = EXCLUDED.state, "
+                "country = EXCLUDED.country, updated_at = now() RETURNING "
+                "to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"')",
+                contact.customer_id,
+                contact.email,
+                contact.name,
+                contact.line1,
+                contact.line2,
+                contact.city,
+                contact.postal_code,
+                contact.state,
+                contact.country);
+            BillingContact stored = contact;
+            stored.updated_at = rows[0][0].as<std::string>();
+            return stored;
         });
     }
 

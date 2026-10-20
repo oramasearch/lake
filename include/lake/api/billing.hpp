@@ -26,14 +26,24 @@
 namespace lake::api {
 
 // The account a payment provider bills: lake's customer id and name, the provider's own id for
-// the account when lake has one (kept in billing_accounts, migration 0074), and which issue of
-// the month this is (0 the first time, 1 after one void invoice, ...), so a provider can make its
-// writes idempotent per attempt.
+// the account when lake has one (kept in billing_accounts, migration 0074), which issue of the
+// month this is (0 the first time, 1 after one void invoice, ...), so a provider can make its
+// writes idempotent per attempt, and the account's billing contact once an owner has set one
+// (lake#857).
 struct PaymentAccount {
     std::string customer_id;
     std::string name;
     std::string provider_customer_id;
     std::uint64_t attempt = 0;
+    std::optional<control::BillingContact> contact;
+};
+
+// The provider's id for an account (PaymentProvider::provider_customer). `replaces` is the kept id
+// it stands in for when the provider no longer has that customer (lake#856: deleted, or kept from
+// another Stripe account or mode); empty otherwise.
+struct ProviderCustomer {
+    std::string id;
+    std::string replaces;
 };
 
 // What a payment provider answers when lake asks it to collect an invoice.
@@ -63,15 +73,19 @@ struct PaymentNotice {
     std::string customer;
     std::string subscription;
     std::string order_detail;
+    // The object is another app's or another Lake's in a shared Stripe account (lake#855): it is
+    // acknowledged and nothing is recorded.
+    bool foreign = false;
 };
 
 // A subscription to pay for an order through the provider's hosted checkout (lake#831): one line,
-// `amount_cents` a month in `currency`, for `quantity`; where the person returns after paying or
-// giving up; and lake's order id, which comes back on the provider's notice.
+// the order sheet's `offer` (private_warehouse, dedicated_cluster) at `unit_amount_cents` a month
+// in `currency`, for `quantity`; `description`, where it runs; where the person returns after
+// paying or giving up; and lake's order id, which comes back on the provider's notice.
 struct CheckoutRequest {
     std::string order_id;
-    std::string product_name;
-    std::string product_description;
+    std::string offer;
+    std::string description;
     std::int64_t unit_amount_cents = 0; // the monthly fee of one
     int quantity = 1;
     std::string currency = "usd";
@@ -100,16 +114,36 @@ public:
     // A short lower-case name stored on each invoice (`manual`, `stripe`).
     virtual std::string_view name() const = 0;
     virtual std::string_view title() const = 0;
-    // The provider's id for the account, created when it has none. Lake keeps it before it asks
-    // for payment, so a failed request never loses it. The manual provider answers "".
-    virtual std::expected<std::string, std::string> provider_customer(const PaymentAccount&) {
-        return std::string();
+    // The provider's id for the account, created when it has none, or when the provider no longer
+    // has the kept one (`replaces`). Lake keeps it before it asks for payment, so a failed request
+    // never loses it. The manual provider answers "".
+    virtual std::expected<ProviderCustomer, std::string> provider_customer(const PaymentAccount&) {
+        return ProviderCustomer{};
+    }
+    // Sends the account's billing contact to the provider's customer it already has
+    // (`provider_customer_id`): its email, name and address (lake#857). An error leaves the
+    // contact lake keeps as it is.
+    virtual std::expected<void, std::string> update_customer(const PaymentAccount&) {
+        return {};
     }
     // Asks for payment of an invoice about to be issued: `invoice` has its account, month, price
     // list (plan_id), currency, lines and total, but no id or number yet. An error leaves the
     // invoice unissued.
     virtual std::expected<PaymentRequest, std::string>
     request_payment(const PaymentAccount& account, const control::Invoice& invoice) = 0;
+    // Sends an issued invoice's payment request to the account's billing email (lake#857): Stripe
+    // emails its hosted invoice link. Lake asks only once it has stored the invoice, so a payment
+    // notice never arrives before the invoice it names, and only when the account has a billing
+    // contact and the invoice a `provider_reference`. `resend` is empty for the send at issue and
+    // new for each resend_invoice, so a resend is a new request, never a replay of an earlier
+    // answer. Answers the provider's status of the invoice after the send; an error leaves the
+    // invoice issued. The default sends nothing.
+    virtual std::expected<std::string, std::string> send_payment_request(
+        const PaymentAccount& account, const control::Invoice& invoice, std::string_view resend) {
+        static_cast<void>(account);
+        static_cast<void>(resend);
+        return invoice.provider_status;
+    }
     // Withdraws the request of an invoice lake voids, so it can no longer be paid. An error
     // leaves the invoice due.
     virtual std::expected<void, std::string> cancel_payment(const control::Invoice&) {
@@ -195,7 +229,8 @@ struct NoticeOutcome {
 
 // A provider's payment notice (POST /billing/stripe/webhook): checks the signature through the
 // current provider (once more with fresh keys when it fails), applies the event once per event id
-// (billing_payment_events), moves the invoice, and records the outcome in the central audit.
+// (billing_payment_events), moves the invoice, and records the outcome in the central audit. A
+// foreign notice is acknowledged (`ignored`) with nothing recorded.
 // 400 for a bad signature or a stale timestamp, 404 where the provider takes no notices, 503 when
 // the keys or the store cannot be read (the provider tries again), 200 otherwise, a duplicate
 // included.

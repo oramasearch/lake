@@ -15,6 +15,19 @@ key.
   `LAKE_BILLING=on` on the deployment first ([aks.md](aks.md)).
 - **The schema has `0074_payment_provider`** (guard `payment_provider_guard`) or later. It does on
   every Lake built after 2026-10-11.
+- **The account is shared** with Orama Cloud v1 and, in live mode, with the other production Lake
+  (lake#855, [../api/billing.md](../api/billing.md#stripe)). Lake tags every customer, invoice and
+  Checkout Session it creates with `metadata[orama_app]=lake` and `metadata[lake_instance]`, its
+  `LAKE_PUBLIC_HOST`, and answers events about other apps' and other Lakes' objects `200
+  {"received": true, "ignored": true}` without recording them. So `LAKE_PUBLIC_HOST` must be set,
+  different on every Lake that shares the account, and kept: a Lake whose host changes takes the
+  objects it tagged before for another Lake's.
+- **Lake's products are in the account.** Every invoice line names the product `lake_usage`, and an
+  order sheet Checkout `lake_private_warehouse` or `lake_dedicated_cluster`
+  ([../api/billing.md](../api/billing.md#stripe)). The operator creates them in each account from
+  the Lake's `spec.payments` (orama-operator `docs/lake/payments.md`); never create them by hand.
+  Without them every invoice fails with "Stripe has no product lake_usage in this account; the
+  operator creates it (spec.payments)".
 - **Use test mode first.** Do the whole runbook with Stripe's test keys (`sk_test_…`) and a test
   card; switch to live keys only after the check passes.
 - **The keys are Orama's, never a customer's.** They are platform environment variables: a
@@ -79,19 +92,31 @@ In the Lake service's **Variables**, set `LAKE_STRIPE_SECRET_KEY` and `LAKE_STRI
 2. Signed in as an operator, open **Administration → Billing**: the Payment figure says **Stripe**.
 3. Issue a test invoice for a test account (Administration → Billing, or `issue_invoice`), open it,
    choose **Pay with Stripe**, and pay with Stripe's test card `4242 4242 4242 4242` (any future
-   date, any CVC).
+   date, any CVC). When the test account has a billing contact, Lake also asks Stripe to email the
+   invoice: **Developers → Logs** shows `POST /v1/invoices/<id>/send` answered `200`. Stripe sends
+   no email in test mode or a sandbox, so this proves the request, not delivery
+   ([billing.md](../api/billing.md#emailing-invoices)).
 4. Within a minute the invoice in Lake reads **Paid**. In the Stripe dashboard, **Webhooks → the
    endpoint → Event deliveries** shows `invoice.paid` delivered with Lake's `200`.
+5. In the Stripe dashboard, the invoice's and its customer's **Metadata** show `orama_app` `lake`
+   and `lake_instance` this Lake's host, the invoice is described "Lake usage, `<month>`", and each
+   of its lines is of the product `lake_usage`.
 
 If the invoice stays open: a delivery answered `400` means a wrong webhook secret (re-check step 1's
 `whsec_…` and step 2); `404` means Lake has no Stripe keys (step 2 not applied or Lake not
-restarted). Stripe retries failed deliveries for three days, so a fixed key catches up.
+restarted); `200` with `"ignored": true` means the invoice's `lake_instance` is not this Lake's
+`LAKE_PUBLIC_HOST`. Stripe retries failed deliveries for three days, so a fixed key catches up.
+If issuing fails with "Stripe has no product", the account lacks Lake's products: apply the Lake's
+`spec.payments` and issue again, and again after 24 hours if Stripe repeats the answer it saved.
 
 ## 4. Go live
 
 Repeat steps 1–3 with Stripe in **live mode**: a live restricted key (`rk_live_…`), a live webhook
 endpoint with the same three events, and its live signing secret. Invoices issued while on test keys
-stay in Stripe's test data. Record the switch (date, deployment) on lake#620.
+stay in Stripe's test data: settle or void the open ones first, because Lake cannot learn about a
+payment made in test mode afterwards. Each account's test-mode customer is replaced by a live one at
+its next invoice (lake#856, [../api/billing.md](../api/billing.md#stripe)). Record the switch (date,
+deployment) on lake#620.
 
 ## Rotate a key
 

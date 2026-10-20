@@ -27,6 +27,19 @@ inline constexpr std::string_view stripe_api_version = "2024-06-20";
 // How far a webhook's timestamp may be from lake's clock (Stripe's libraries use five minutes).
 inline constexpr std::chrono::seconds stripe_signature_tolerance{300};
 
+// Lake's products in every Stripe account it bills through (lake#855). Each invoice item and
+// Checkout line names one with an inline price (price_data[product]), so Stripe's reports tell
+// Lake's revenue from Orama Cloud v1's while Lake's price list and order sheet stay the one source
+// of prices. Lake never creates them: the operator does, in each account (spec.payments,
+// orama-operator docs/lake/payments.md).
+inline constexpr std::string_view stripe_usage_product = "lake_usage";
+inline constexpr std::string_view stripe_private_warehouse_product = "lake_private_warehouse";
+inline constexpr std::string_view stripe_dedicated_cluster_product = "lake_dedicated_cluster";
+
+// The product of an order sheet offer paid through Checkout; empty for any other (on_prem is
+// ordered by form).
+std::string_view stripe_offer_product(std::string_view offer);
+
 struct StripeRequest {
     std::string method = "POST";
     std::string url;
@@ -64,17 +77,29 @@ std::string stripe_signature_header(std::string_view body,
 
 // What lake does with a verified event: invoice.paid moves a due invoice to paid,
 // invoice.voided to void, invoice.payment_failed keeps it due with provider_status
-// payment_failed; any other event is acknowledged and ignored.
-std::expected<PaymentNotice, NoticeRejection> parse_stripe_event(std::string_view body);
+// payment_failed; any other event is acknowledged and ignored. An invoice or Checkout event whose
+// object is not this Lake's is `foreign` (docs/api/billing.md#webhooks): it has no
+// lake_customer_id (an invoice) or lake_order_id (a session, or an invoice of its subscription),
+// or its lake_instance names a Lake other than `instance`, this Lake's public host.
+std::expected<PaymentNotice, NoticeRejection> parse_stripe_event(std::string_view body,
+                                                                 std::string_view instance);
 
 // Whether a value looks like a Stripe secret key (sk_ or rk_) or a webhook secret (whsec_).
 bool stripe_secret_key_shape(std::string_view key);
 bool stripe_webhook_secret_shape(std::string_view secret);
 
-// The Stripe provider: customers, invoices with an invoice item per lake line, finalization and
-// the hosted invoice URL, voids, and webhook events. `base` is Stripe's API origin (a fake's in
-// tests).
-std::shared_ptr<PaymentProvider> stripe_payment_provider(
-    StripeKeys keys, StripeHttp http, std::string base = std::string(stripe_api_base));
+// The Stripe provider: customers with the billing contact's email, name and address (lake#857),
+// invoices with an invoice item of Lake's usage product per lake line, finalization and the hosted
+// invoice URL, sending it to the billing email, voids, Checkout for the order sheet's offers, and
+// webhook events. A kept customer is read before it is reused and replaced when Stripe no longer
+// has it (lake#856). A request that names a product the account lacks fails with a message saying
+// the operator creates it. `instance` is this Lake's public host
+// (LAKE_PUBLIC_HOST), tagged on every object it creates and checked on every event, since two
+// Lakes can bill through one account. `base` is Stripe's API origin (a fake's in tests).
+std::shared_ptr<PaymentProvider>
+stripe_payment_provider(StripeKeys keys,
+                        std::string instance,
+                        StripeHttp http,
+                        std::string base = std::string(stripe_api_base));
 
 } // namespace lake::api
