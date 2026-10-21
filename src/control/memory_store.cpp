@@ -1791,6 +1791,36 @@ Result<AgentLaunch> InMemoryStore::withdraw_agent_launch(const std::string& id) 
     return *found;
 }
 
+Result<AgentWorkloadsWithdrawn>
+InMemoryStore::withdraw_agent_workloads(const std::string& customer_id,
+                                        const std::string& workspace_id,
+                                        const std::string& agent_id,
+                                        const std::string& reason) {
+    std::lock_guard lock(mutex_);
+    AgentWorkloadsWithdrawn withdrawn;
+    const auto ours = [&](const auto& row) {
+        return row.customer_id == customer_id && row.agent_id == agent_id &&
+               row.desired == "present" &&
+               (row.workspace_id.empty() || row.workspace_id == workspace_id);
+    };
+    for (AgentLaunch& launch : agent_launches_) {
+        if (ours(launch)) {
+            launch.desired = "absent";
+            launch.stop_reason = reason;
+            ++launch.generation;
+            ++withdrawn.launches;
+        }
+    }
+    for (AgentCronSchedule& schedule : agent_cron_schedules_) {
+        if (ours(schedule)) {
+            schedule.desired = "absent";
+            ++schedule.generation;
+            ++withdrawn.schedules;
+        }
+    }
+    return withdrawn;
+}
+
 namespace {
 
 std::optional<std::chrono::sys_seconds> launch_created_at(const std::string& text) {

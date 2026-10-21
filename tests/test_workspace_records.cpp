@@ -4271,6 +4271,137 @@ TEST_P(WorkspaceRecordStores, AStreamStartsItsAgentOncePerMessageAsThePersonWhoS
     EXPECT_TRUE(t.call(first, "list_agent_streams", in(json::object())).value["streams"].empty());
 }
 
+// lake#524: deleting an agent withdraws its present launches (with a stop_reason that names the
+// deletion) and its cron schedules, so the operator removes their pods instead of restarting them
+// against an agent that is gone. Another agent's, another workspace's and a finished launch are
+// left as they are. A launch whose agent was deleted outside lake is withdrawn the first time it
+// reads its agent and the workspace answers not_found.
+TEST_P(WorkspaceRecordStores, DeletingAnAgentStopsItsLaunchesAndSchedules) {
+    auto store = make_store();
+    if (!store) {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
+    }
+    TwoSpaces t(store, database_uri_);
+    const auto& first = t.spaces[0];
+    const std::string home = first.workspaces[0];
+    const std::string other = first.workspaces.size() > 1 ? first.workspaces[1] : std::string();
+    const auto in = [&](json input) {
+        input["customer_id"] = first.customer_id;
+        input["workspace_id"] = home;
+        return input;
+    };
+    std::set<std::string> deleted;
+    t.zetta->responder =
+        [&](const std::string& capability,
+            const json& input) -> std::optional<lake::control::ZettaControlResult<json>> {
+        const std::string id = input.value("id", std::string());
+        if (capability == "get_agent") {
+            if (deleted.contains(id)) {
+                return lake::control::ZettaControlResult<json>(std::unexpected(
+                    lake::control::ZettaControlError{"not_found", "no agent '" + id + "'"}));
+            }
+            return json{{"id", id}, {"name", "Briefer"}, {"runtime", "python"}};
+        }
+        if (capability == "delete_agent") {
+            deleted.insert(id);
+            return json{{"deleted", true}};
+        }
+        return std::nullopt;
+    };
+    const auto launch =
+        [&](const std::string& agent, const std::string& mode, const std::string& workspace) {
+            const auto made =
+                t.store->create_agent_launch({.customer_id = first.customer_id,
+                                              .agent_id = agent,
+                                              .agent_name = "Briefer",
+                                              .mode = mode,
+                                              .trigger = "manual",
+                                              .scopes = lake::control::agent_launch_scopes,
+                                              .created_by_user_id = first.principal.user_id,
+                                              .created_by_taap_id = first.principal.taap_id,
+                                              .workspace_id = workspace});
+            EXPECT_TRUE(made) << made.error().message;
+            return made ? made->id : std::string();
+        };
+    const std::string service = launch("agent-9", "service", home);
+    const std::string job = launch("agent-9", "job", home);
+    const std::string finished = launch("agent-9", "job", home);
+    ASSERT_TRUE(t.store->withdraw_agent_launch(finished));
+    const std::string bystander = launch("agent-8", "service", home);
+    const std::string elsewhere =
+        other.empty() ? std::string() : launch("agent-9", "service", other);
+    const auto schedule =
+        t.store->create_agent_cron_schedule({.customer_id = first.customer_id,
+                                             .agent_id = "agent-9",
+                                             .agent_name = "Briefer",
+                                             .cron = "0 9 * * 1",
+                                             .scopes = lake::control::agent_launch_scopes,
+                                             .created_by_user_id = first.principal.user_id,
+                                             .created_by_taap_id = first.principal.taap_id,
+                                             .workspace_id = home});
+    ASSERT_TRUE(schedule) << schedule.error().message;
+    const auto generation_of = [&](const std::string& id) {
+        return t.store->get_agent_launch(id)->generation;
+    };
+    const std::int64_t finished_generation = generation_of(finished);
+
+    const auto removed = t.call(first, "delete_agent", in({{"id", "agent-9"}}));
+    ASSERT_TRUE(removed.ok) << removed.error.message;
+    EXPECT_EQ(removed.value["launches_stopped"], 2);
+    EXPECT_EQ(removed.value["schedules_removed"], 1);
+    for (const std::string& id : {service, job}) {
+        const auto stopped = t.store->get_agent_launch(id);
+        ASSERT_TRUE(stopped);
+        EXPECT_EQ(stopped->desired, "absent") << "the operator removes its Deployment or Job";
+        EXPECT_NE(stopped->stop_reason.find("agent-9 was deleted"), std::string::npos)
+            << stopped->stop_reason;
+    }
+    EXPECT_EQ(generation_of(finished), finished_generation) << "an absent launch is left alone";
+    EXPECT_EQ(t.store->get_agent_launch(bystander)->desired, "present") << "another agent's";
+    if (!elsewhere.empty()) {
+        EXPECT_EQ(t.store->get_agent_launch(elsewhere)->desired, "present")
+            << "another workspace's agent of the same id";
+    }
+    EXPECT_EQ(t.store->get_agent_cron_schedule(schedule->id)->desired, "absent")
+        << "the operator deletes its CronJob";
+    const auto again = t.call(first, "delete_agent", in({{"id", "agent-9"}}));
+    ASSERT_TRUE(again.ok) << again.error.message;
+    EXPECT_EQ(again.value["launches_stopped"], 0) << "nothing is left to stop";
+
+    // An agent deleted outside lake: its service launch reads it, is told not_found, and stops.
+    const std::string orphan = launch("agent-7", "service", home);
+    const std::string watching = launch("agent-6", "service", home);
+    deleted.insert("agent-7");
+    auto runtime = t.context(first);
+    runtime.session_credential = false;
+    runtime.credential_kind = "agent_launch";
+    runtime.credential_session_id = "launch:" + orphan;
+    runtime.scopes = lake::control::agent_launch_scopes;
+    const auto read_as = [&](lake::api::ApiContext context, const std::string& agent) {
+        const auto completed = liquid::runtime::block_on(
+            t.registry.call_async("get_agent", in({{"id", agent}}), context));
+        EXPECT_TRUE(completed);
+        return *completed;
+    };
+    // Reading another agent that is gone changes nothing: only the launch's own agent counts.
+    deleted.insert("agent-6");
+    EXPECT_FALSE(read_as(runtime, "agent-6").ok);
+    EXPECT_EQ(t.store->get_agent_launch(watching)->desired, "present");
+    deleted.erase("agent-6");
+    const auto missing = read_as(runtime, "agent-7");
+    EXPECT_FALSE(missing.ok);
+    const auto withdrawn = t.store->get_agent_launch(orphan);
+    ASSERT_TRUE(withdrawn);
+    EXPECT_EQ(withdrawn->desired, "absent");
+    EXPECT_NE(withdrawn->stop_reason.find("no longer exists"), std::string::npos)
+        << withdrawn->stop_reason;
+    // A person reading an agent that is gone stops nothing.
+    const std::string kept = launch("agent-5", "service", home);
+    deleted.insert("agent-5");
+    EXPECT_FALSE(t.call(first, "get_agent", in({{"id", "agent-5"}})).ok);
+    EXPECT_EQ(t.store->get_agent_launch(kept)->desired, "present");
+}
+
 // lake#684, lake#685: Lake keeps a dispatch row for each connection that streams or re-exports
 // tools. A re-export, or a change of what it re-exports, changes the workspace endpoint's tool-list
 // digest, so a session that began before is told; the stream worker calls only the workspaces

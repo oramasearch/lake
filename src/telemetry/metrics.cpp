@@ -1006,6 +1006,15 @@ public:
         return call("expire_unstarted_agent_launches",
                     [&] { return store_->expire_unstarted_agent_launches(seconds, reason); });
     }
+    control::Result<control::AgentWorkloadsWithdrawn>
+    withdraw_agent_workloads(const std::string& customer_id,
+                             const std::string& workspace_id,
+                             const std::string& agent_id,
+                             const std::string& reason) override {
+        return call("withdraw_agent_workloads", [&] {
+            return store_->withdraw_agent_workloads(customer_id, workspace_id, agent_id, reason);
+        });
+    }
     control::Result<control::AgentTask>
     create_agent_task(const control::AgentTask& value) override {
         return call("create_agent_task", [&] { return store_->create_agent_task(value); });

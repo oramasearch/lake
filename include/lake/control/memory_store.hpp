@@ -279,6 +279,10 @@ public:
     Result<AgentLaunch> withdraw_agent_launch(const std::string& id) override;
     Result<std::size_t> expire_unstarted_agent_launches(std::int64_t seconds,
                                                         const std::string& reason) override;
+    Result<AgentWorkloadsWithdrawn> withdraw_agent_workloads(const std::string& customer_id,
+                                                             const std::string& workspace_id,
+                                                             const std::string& agent_id,
+                                                             const std::string& reason) override;
     // Moves a launch's creation time back, as if it had been waiting `seconds`; tests only.
     Result<void> age_agent_launch(const std::string& id, std::int64_t seconds);
     // What the operator writes to agent_launch_status; tests and local demos call it directly.

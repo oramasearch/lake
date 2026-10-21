@@ -244,7 +244,9 @@ finished job's result on the output topic; `mcp_connection_internal.hpp` lends i
 bearer, never a capability. `agent_stream_triggers.cpp` (lake#677) registers `set_agent_streams` and
 `list_agent_streams` and is `AgentStreamWorker`, run on the same owner-only pass: one job of an agent
 per new message on a workspace stream it names, as the person who set it, and the trigger's removal
-after `delete_agent` (`remove_agent_stream_triggers`, called by `workspace_capabilities.cpp`). Both
+after `delete_agent` (`remove_agent_stream_triggers`, called by `workspace_capabilities.cpp`, which
+also withdraws the deleted agent's launches and schedules with `withdraw_agent_workloads`, and does
+the same when a launch's or schedule's own `get_agent` answers `not_found`, lake#524). Both
 workers start their jobs through `start_stream_runs` and act through `stream_person`
 (`agent_stream_runs.hpp`).
 `deletion_capabilities.cpp` registers what deletes a workspace's data (lake#645):

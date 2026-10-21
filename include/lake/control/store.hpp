@@ -923,6 +923,10 @@ struct AgentLaunch {
     // When the operator last wrote the launch's status: a finished job's end (lake#643).
     std::string status_updated_at;
 };
+// What withdraw_agent_workloads withdrew for one deleted agent (lake#524).
+struct AgentWorkloadsWithdrawn {
+    std::size_t launches = 0, schedules = 0;
+};
 struct NewAgentLaunch {
     std::string customer_id, agent_id, agent_name, mode, trigger;
     nlohmann::json input = nullptr;
@@ -1853,6 +1857,16 @@ public:
     // creation, recording `reason` as its stop_reason (lake#442). Returns how many it withdrew.
     virtual Result<std::size_t> expire_unstarted_agent_launches(std::int64_t seconds,
                                                                 const std::string& reason) = 0;
+    // Withdraws, in one transaction, every present launch of an agent in a workspace (recording
+    // `reason` as its stop_reason) and every present cron schedule of it, so that the operator
+    // removes their Deployments, Jobs and CronJobs (lake#524). Called when the agent is deleted,
+    // or found gone. A launch or schedule without a workspace (before migration 0043) counts as
+    // the agent's in every workspace. Withdrawing none is not an error.
+    virtual Result<AgentWorkloadsWithdrawn>
+    withdraw_agent_workloads(const std::string& customer_id,
+                             const std::string& workspace_id,
+                             const std::string& agent_id,
+                             const std::string& reason) = 0;
     // Methodology runs (lake#655). Creating or withdrawing one NOTIFYs lake_services.
     virtual Result<MethodologyRun> create_methodology_run(const NewMethodologyRun&) = 0;
     virtual Result<MethodologyRun> get_methodology_run(const std::string& id) = 0;

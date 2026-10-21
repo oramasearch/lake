@@ -52,8 +52,10 @@ An agent's Design page (`/design/agent?id=`) shows its definition and **where it
 pipelines it calls, Lake's schedules for it, the streams that start it (`list_agent_streams`, each
 linked to its stream page and with who set it), its recent unattended runs, and Ask Orama. Its
 actions are **Edit** (a new revision), **Duplicate** (`create_agent` with its definition under a
-new name; streams are not copied), **Delete** (typed name; its schedules go with it, and
-`delete_agent` removes its streams, answering `streams_removed`; its revisions are kept), and **Run
+new name; streams are not copied), **Delete** (typed name; `delete_agent` removes its streams,
+answering `streams_removed`, and stops its runs and schedules, answering `launches_stopped` and
+`schedules_removed` ([agent-launches](agent-launches.md#deleting-an-agent-stops-its-runs), lake#524);
+its revisions are kept), and **Run
 it**, which opens its Train page. Running an agent stays where it was.
 
 ### Definition revisions

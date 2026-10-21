@@ -400,6 +400,53 @@ bool has_scope(const ApiContext& context, std::string_view scope) {
     return std::ranges::find(context.scopes, scope) != context.scopes.end();
 }
 
+// The stop_reason a launch withdrawn with its agent carries (lake#524).
+std::string agent_gone_reason(const std::string& agent_id, bool deleted) {
+    return deleted ? "Stopped: the agent " + agent_id + " was deleted."
+                   : "Stopped: the agent " + agent_id +
+                         " no longer exists in this workspace, so the run cannot start.";
+}
+
+// A launch or schedule whose agent's record the workspace says is gone (lake#524): agent-runtime
+// reads its agent first, and an answer of not_found means it would only exit and be restarted, so
+// lake withdraws the agent's launches and schedules and the operator removes their pods. Only the
+// launch's or schedule's own agent, in its own workspace; any other caller changes nothing.
+void withdraw_workloads_of_missing_agent(ApiContext& context,
+                                         const std::string& customer_id,
+                                         const std::string& workspace_id,
+                                         const std::string& agent_id) {
+    if (context.store == nullptr || agent_id.empty()) {
+        return;
+    }
+    const std::string& session = context.credential_session_id;
+    std::string owner_customer, owner_workspace, owner_agent;
+    if (context.credential_kind == "agent_launch" && session.starts_with("launch:")) {
+        const auto launch = context.store->get_agent_launch(session.substr(7));
+        if (!launch) {
+            return;
+        }
+        owner_customer = launch->customer_id;
+        owner_workspace = launch->workspace_id;
+        owner_agent = launch->agent_id;
+    } else if (context.credential_kind == "agent_schedule" && session.starts_with("schedule:")) {
+        const auto schedule = context.store->get_agent_cron_schedule(session.substr(9));
+        if (!schedule) {
+            return;
+        }
+        owner_customer = schedule->customer_id;
+        owner_workspace = schedule->workspace_id;
+        owner_agent = schedule->agent_id;
+    } else {
+        return;
+    }
+    if (owner_customer != customer_id || owner_agent != agent_id ||
+        (!owner_workspace.empty() && owner_workspace != workspace_id)) {
+        return;
+    }
+    (void)context.store->withdraw_agent_workloads(
+        customer_id, workspace_id, agent_id, agent_gone_reason(agent_id, false));
+}
+
 void set_audit(ApiContext& context, std::string kind, const json& input, std::string capability) {
     context.audit_kind = std::move(kind);
     context.audit_details = {
@@ -915,6 +962,9 @@ liquid::runtime::task<ApiResult> workspace_call(bool read, json input, ApiContex
         // The agent a delete_agent removes: its stream triggers go with it (lake#677).
         const std::string deleted_agent =
             capability == "delete_agent" ? arguments.value("id", std::string()) : std::string();
+        // The agent a get_agent reads: a launch's own agent found gone stops the launch (lake#524).
+        const std::string read_agent =
+            capability == "get_agent" ? arguments.value("id", std::string()) : std::string();
         auto called = co_await call_workspace(context,
                                               input.at("customer_id"),
                                               capability,
@@ -929,6 +979,10 @@ liquid::runtime::task<ApiResult> workspace_call(bool read, json input, ApiContex
                                                                  input.at("customer_id"),
                                                                  input.at("workspace_id"),
                                                                  called->error().details));
+            }
+            if (!read_agent.empty() && called->error().code == "not_found") {
+                withdraw_workloads_of_missing_agent(
+                    context, input.at("customer_id"), input.at("workspace_id"), read_agent);
             }
             if (capability == "create_project" &&
                 called->error().message.starts_with("create_project rejected")) {
@@ -1001,6 +1055,25 @@ liquid::runtime::task<ApiResult> workspace_call(bool read, json input, ApiContex
                 value["streams_removed"] = 0;
                 value["streams_error"] =
                     removed ? (*removed).error().message : removed.error().message;
+            }
+            // Its launches and schedules stop with it, so no pod is left restarting against an
+            // agent that is gone (lake#524). A failure is reported beside the deletion; the
+            // launch's next read of its agent stops it then.
+            auto withdrawn =
+                context.store ? context.store->withdraw_agent_workloads(
+                                    input.at("customer_id"),
+                                    input.at("workspace_id"),
+                                    deleted_agent,
+                                    agent_gone_reason(deleted_agent, true))
+                              : control::Result<control::AgentWorkloadsWithdrawn>(std::unexpected(
+                                    control::StoreError{"store_unavailable", "no control store"}));
+            if (withdrawn) {
+                value["launches_stopped"] = withdrawn->launches;
+                value["schedules_removed"] = withdrawn->schedules;
+            } else {
+                value["launches_stopped"] = 0;
+                value["schedules_removed"] = 0;
+                value["launches_error"] = withdrawn.error().message;
             }
         }
         if (value.is_object() &&

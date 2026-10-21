@@ -101,7 +101,9 @@ See `docs/api/organizations.md`.
 Agent launches and cron schedules carry the workspace that holds their agent (migration
 `0043_agent_launch_workspaces`, lake#442). Both stores filter launch, schedule and scheduled-run
 lists by it. `expire_unstarted_agent_launches` withdraws, with a `stop_reason`, a launch the
-operator has not reported on within the timeout. `agent_runs.cpp` holds that timeout,
+operator has not reported on within the timeout. `withdraw_agent_workloads` withdraws, in one
+transaction, every present launch (with a `stop_reason`) and schedule of an agent in a workspace,
+when the agent is deleted or found gone (lake#524). `agent_runs.cpp` holds that timeout,
 `agent_launch_progress` (what a person is told about a waiting run), and `trigger_cron`, which
 now says why a plain-words schedule is refused. It also holds `checked_time_zone`, which refuses
 a schedule time zone that is not an IANA name (lake#586) against `iana_time_zones` in

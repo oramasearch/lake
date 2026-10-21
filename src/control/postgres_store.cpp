@@ -5475,6 +5475,42 @@ public:
         });
     }
 
+    Result<AgentWorkloadsWithdrawn> withdraw_agent_workloads(const std::string& customer_id,
+                                                             const std::string& workspace_id,
+                                                             const std::string& agent_id,
+                                                             const std::string& reason) override {
+        return with_tx<AgentWorkloadsWithdrawn>(
+            [&](pqxx::work& tx) -> Result<AgentWorkloadsWithdrawn> {
+                AgentWorkloadsWithdrawn withdrawn;
+                const pqxx::result launches = tx.exec_params(
+                    "UPDATE agent_launches SET desired = 'absent', generation = generation + 1, "
+                    "stop_reason = $4, updated_at = now() WHERE customer_id = $1::uuid AND "
+                    "agent_id = $3 AND desired = 'present' AND (workspace_id IS NULL OR "
+                    "workspace_id = NULLIF($2, '')::uuid) RETURNING id::text",
+                    customer_id,
+                    workspace_id,
+                    agent_id,
+                    reason);
+                const pqxx::result schedules = tx.exec_params(
+                    "UPDATE agent_cron_schedules SET desired = 'absent', generation = "
+                    "generation + 1, updated_at = now() WHERE customer_id = $1::uuid AND "
+                    "agent_id = $3 AND desired = 'present' AND (workspace_id IS NULL OR "
+                    "workspace_id = NULLIF($2, '')::uuid) RETURNING id::text",
+                    customer_id,
+                    workspace_id,
+                    agent_id);
+                for (const pqxx::result* rows : {&launches, &schedules}) {
+                    for (const pqxx::row& row : *rows) {
+                        tx.exec_params("SELECT pg_notify('lake_services', $1)",
+                                       row[0].as<std::string>());
+                    }
+                }
+                withdrawn.launches = launches.size();
+                withdrawn.schedules = schedules.size();
+                return withdrawn;
+            });
+    }
+
     // Methodology runs (lake#655, migration 0078).
     static constexpr const char* methodology_run_columns =
         "r.id::text, r.customer_id::text, r.workspace_id::text, r.methodology_id, r.mode, "
