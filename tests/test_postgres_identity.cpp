@@ -946,4 +946,84 @@ TEST(PostgresOfflineRecovery, GrantsRecoveryPathsAndRepositoryKeyCustody) {
     EXPECT_EQ(recovered.value["wrapped_key"], "postgres-client-wrapped-key");
 }
 
+// lake#870: no stored identity may be the operator's. Every creation path refuses `admin`, and a
+// session whose user carries it anyway (a row written outside lake) is not accepted.
+TEST(PostgresIdentity, OperatorPrincipalIsNeverAPersonsIdentity) {
+    const char* uri = lake::test::postgres_uri();
+    if (uri == nullptr || *uri == '\0') {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
+    }
+    std::unique_ptr<lake::control::Store> store =
+        lake::control::make_postgres_store(uri, std::string(test_instance_kek));
+    const std::string suffix = lake::control::new_uuid_v4().substr(0, 8);
+
+    for (const std::string refused : {"admin", "agent-service:ask", "taap:", "taap:has space"}) {
+        const auto user = store->create_user({refused, "", "Refused"});
+        ASSERT_FALSE(user) << refused;
+        EXPECT_EQ(user.error().code, "invalid_input");
+        const auto organization = store->create_organization({refused, "Refused", ""});
+        ASSERT_FALSE(organization) << refused;
+        EXPECT_EQ(organization.error().code, "invalid_input");
+    }
+
+    const auto organization = store->create_organization(
+        {"taap:1:ed25519:operator-org-" + suffix, "Operator principal organization", ""});
+    ASSERT_TRUE(organization) << organization.error().message;
+    const auto provider = store->register_sso_provider({organization->id,
+                                                        "lake",
+                                                        "jit-" + suffix,
+                                                        "oidc",
+                                                        "https://oidc.attacker.example/" + suffix,
+                                                        "",
+                                                        "",
+                                                        "client",
+                                                        "secret",
+                                                        "scim-" + suffix,
+                                                        {{"email", "mail"}},
+                                                        true});
+    ASSERT_TRUE(provider) << provider.error().message;
+
+    const auto scim = store->upsert_scim_user(
+        {provider->id, "scim-admin", "", "Operator", "admin", true, nlohmann::json::object()});
+    ASSERT_FALSE(scim);
+    EXPECT_EQ(scim.error().code, "invalid_input");
+    const auto jit = store->sign_in_sso({provider->id,
+                                         provider->issuer,
+                                         "jit-admin",
+                                         "",
+                                         "Operator",
+                                         "admin",
+                                         "browser",
+                                         nlohmann::json::object()});
+    ASSERT_FALSE(jit);
+    EXPECT_EQ(jit.error().code, "invalid_input");
+
+    // A row written outside lake: the session issues, but no request can use it.
+    std::string user_id;
+    {
+        pqxx::connection connection(uri);
+        pqxx::work tx(connection);
+        user_id = tx.exec("INSERT INTO users (taap_id, display_name) VALUES ('admin', 'Planted') "
+                          "RETURNING id::text")[0][0]
+                      .as<std::string>();
+        tx.exec_params("INSERT INTO scim_users (provider_id, external_id, user_id, attributes) "
+                       "VALUES ($1::uuid, 'planted', $2::uuid, '{}'::jsonb)",
+                       provider->id,
+                       user_id);
+        tx.commit();
+    }
+    const auto planted = store->sign_in_sso({provider->id,
+                                             provider->issuer,
+                                             "planted",
+                                             "",
+                                             "",
+                                             "",
+                                             "browser",
+                                             nlohmann::json::object()});
+    ASSERT_TRUE(planted) << planted.error().message;
+    const auto principal = store->context_for(planted->secret);
+    ASSERT_FALSE(principal);
+    EXPECT_EQ(principal.error().code, "not_found");
+}
+
 } // namespace

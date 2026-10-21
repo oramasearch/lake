@@ -321,6 +321,9 @@ Result<void> InMemoryStore::ping() {
 }
 
 Result<User> InMemoryStore::create_user(const NewUser& in) {
+    if (auto checked = check_principal_id(in.taap_id, "taap_id"); !checked) {
+        return std::unexpected(checked.error());
+    }
     std::lock_guard lock(mutex_);
     for (const auto& u : users_) {
         if (!in.taap_id.empty() && u.taap_id == in.taap_id)
@@ -3338,6 +3341,9 @@ InMemoryStore::principal_names(const std::vector<std::string>& taap_ids) {
 }
 
 Result<Organization> InMemoryStore::create_organization(const NewOrganization& in) {
+    if (auto checked = check_principal_id(in.taap_id, "taap_id"); !checked) {
+        return std::unexpected(checked.error());
+    }
     std::lock_guard lock(mutex_);
     for (const auto& o : organizations_) {
         if (!in.taap_id.empty() && o.taap_id == in.taap_id)
@@ -4606,7 +4612,12 @@ Result<void> InMemoryStore::revoke_device(const std::string& user_id,
     return std::unexpected(StoreError{"not_found", "device not found"});
 }
 
+// Every credential's principal passes accepted_principal (lake#870).
 Result<Principal> InMemoryStore::context_for(const std::string& secret) {
+    return accepted_principal(resolve_principal(secret));
+}
+
+Result<Principal> InMemoryStore::resolve_principal(const std::string& secret) {
     std::lock_guard lock(mutex_);
     const std::string workload_digest = identity_crypto::sha256_hex(secret);
     std::optional<Principal> build_principal;
@@ -5014,6 +5025,9 @@ Result<bool> InMemoryStore::allows_federation_claim(const std::string& organizat
 }
 
 Result<IssuedSession> InMemoryStore::sign_in_sso(const SsoIdentity& input) {
+    if (auto checked = check_principal_id(input.taap_id, "taap_id"); !checked) {
+        return std::unexpected(checked.error());
+    }
     if (input.provider_id.empty() || input.issuer.empty() || input.subject.empty() ||
         !input.claims.is_object()) {
         return std::unexpected(StoreError{"invalid_input", "SSO assertion is incomplete"});
@@ -5157,6 +5171,9 @@ void InMemoryStore::remove_scim_user_access(const ScimUser& user, const std::str
 }
 
 Result<ScimUser> InMemoryStore::upsert_scim_user(const NewScimUser& input) {
+    if (auto checked = check_principal_id(input.taap_id, "taap_id"); !checked) {
+        return std::unexpected(checked.error());
+    }
     if (input.provider_id.empty() || input.external_id.empty() || input.taap_id.empty()) {
         return std::unexpected(
             StoreError{"invalid_input", "provider, external id, and TAAP identity are required"});

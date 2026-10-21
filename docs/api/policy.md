@@ -32,6 +32,32 @@ by the registry. The store retains the issuing session and rejects descendants a
 ancestor or linked device is revoked or expires. The complete derivation and migration contract is
 [`identity.md`](identity.md#token-derivation-and-revocation).
 
+## Principal ids (lake#870)
+
+**What.** The principal `admin` is the operator's: `authorize` allows it everything, and the
+registry skips the policy check for it. Only the admin token acts as it. Every identity a person,
+organization or grant carries is a TAAP id: `taap:` followed by printable ASCII, at most 512
+characters (`valid_principal_id`, `src/control/policy.cpp`).
+
+- **Creation refuses anything else** with `invalid_input`: `create_user`, `create_organization`,
+  `upsert_scim_user` and the just-in-time user of `sign_in_sso`. Before this, those paths stored a
+  caller-chosen `taap_id` as given, so a person who registered their own SSO provider could create a
+  user named `admin` and receive an operator session (lake#870).
+- **Authentication refuses it too.** Each store's `context_for` passes the principal it resolved
+  through `accepted_principal`: a credential whose identity is `admin`, or a person's credential
+  whose identity is not a TAAP id, is answered as an unknown credential (`not_found`). That covers a
+  row written outside lake, such as an old row or a direct database write. Workload credentials
+  (`app_`, `build_`, `methodology_`) name their workload and only the `admin` check applies to them.
+  An agent stream trigger acts as its person only when that person's identity is a TAAP id.
+
+**Why.** Policy decisions are keyed by the principal string, so a stored identity equal to `admin`,
+or to an identity lake sets in code (`agent-service:`, `share-link:`, `sso-provider/`), would inherit
+what that identity may do. The remaining work on unscoped principals is lake#872.
+
+**Verify.** `PrincipalIds.*` (`tests/test_sso.cpp`) and
+`PostgresIdentity.OperatorPrincipalIsNeverAPersonsIdentity` (`tests/test_postgres_identity.cpp`),
+which plants a user named `admin` in the database and shows its session is refused.
+
 ## Objects and grants
 
 | Capability | Authorization | Result |
