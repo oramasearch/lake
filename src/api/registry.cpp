@@ -764,9 +764,33 @@ ApiResult unauthenticated(const ApiContext& context) {
     return result;
 }
 
+// A session of an identity application's pool (lake#912) acts only through the capabilities that
+// serve its user's own sign-in. For those it is the user, for this call; for every other one it is
+// no credential, so its TAAP identity, which a Lake account may share, never meets a grant. Set
+// afresh on every call, so a context reused for a second capability carries nothing over.
+void admit_application_session(const Capability& entry, ApiContext& context) {
+    if (!context.application_session) {
+        return;
+    }
+    const control::Principal& session = *context.application_session;
+    const bool admitted = entry.serves_application_pools;
+    context.authorized = admitted;
+    context.session_credential = admitted;
+    context.acting_user_id = admitted ? session.user_id : std::string();
+    context.acting_identity = admitted ? session.taap_id : std::string();
+    context.credential_device_id = admitted ? session.device_id : std::string();
+    context.credential_session_id = admitted ? session.session_id : std::string();
+    context.credential_kind = admitted ? session.kind : std::string();
+    context.credential_expires_at_unix =
+        admitted ? session.expires_at_unix : std::optional<std::int64_t>{};
+    context.pool_id = admitted ? session.pool_id : std::string("lake");
+    context.scopes = admitted ? session.scopes : std::vector<std::string>{};
+}
+
 CallState prepare_call(std::shared_ptr<const Capability> capability,
                        const nlohmann::json& input,
                        ApiContext& context) {
+    admit_application_session(*capability, context);
     if (context.request_id.empty()) {
         context.request_id = control::new_uuid_v4();
     }
@@ -802,8 +826,17 @@ CallState prepare_call(std::shared_ptr<const Capability> capability,
     const bool rejected_bearer = !context.authorized && !context.credential_rejection.empty() &&
                                  context.authentication_method == "bearer" &&
                                  (entry.object == "server" || entry.allows_anonymous_public_read);
-    if ((entry.requires_auth && !context.authorized && !entry.allows_anonymous_public_read) ||
-        rejected_bearer) {
+    if (context.application_session && !entry.serves_application_pools && entry.requires_auth &&
+        !entry.allows_anonymous_public_read) {
+        state.result = ApiResult::failure(
+            "unauthorized",
+            "an identity application's session reaches only its own sign-in (sessions, devices, "
+            "tokens, MFA and passkeys); " +
+                entry.name + " needs a Lake account's credential");
+        state.proceed = false;
+    } else if ((entry.requires_auth && !context.authorized &&
+                !entry.allows_anonymous_public_read) ||
+               rejected_bearer) {
         state.result = unauthenticated(context);
         state.proceed = false;
     } else if (ApiResult validation = validate_input(entry, input); !validation.ok) {
@@ -1041,9 +1074,10 @@ ApiResult finish_call(const Capability* capability,
                       ApiContext& context,
                       bool handled) {
     // An anonymous caller refused by a capability that otherwise needs a credential (a private
-    // repository read) is refused for want of one.
-    if (capability != nullptr && capability->requires_auth && !context.authorized && !result.ok &&
-        result.error.code == "unauthorized") {
+    // repository read) is refused for want of one. An identity application's session presented
+    // a credential that is valid but grants nothing here (lake#912), and stays `unauthorized`.
+    if (capability != nullptr && capability->requires_auth && !context.authorized &&
+        !context.application_session && !result.ok && result.error.code == "unauthorized") {
         const double duration = result.duration_ms;
         result = unauthenticated(context);
         result.duration_ms = duration;

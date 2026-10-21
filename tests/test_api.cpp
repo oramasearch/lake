@@ -13,6 +13,7 @@
 #include <filesystem>
 #include <format>
 #include <fstream>
+#include <functional>
 #include <initializer_list>
 #include <map>
 #include <memory>
@@ -3198,6 +3199,154 @@ TEST(IdentityHttp, ApiSignUpIssuesAndResolvesHttpOnlySessions) {
     EXPECT_NE(enrolled.find("otpauth://totp/lake:"), std::string::npos);
     EXPECT_NE(enrolled.find("recovery_codes"), std::string::npos);
     server.stop();
+}
+
+// lake#912 (LSR-001): a session of an identity application's pool carries no Lake grants, even
+// when its user's TAAP identity is a Lake account's. `pool_session` mints a session in `pool_id`
+// for a user with `taap_id` (the Lake account `user_id` carries it) the way each store can.
+void expect_application_sessions_carry_no_lake_grants(
+    const std::shared_ptr<lake::control::Store>& store,
+    const std::function<std::string(const std::string& pool_id,
+                                    const std::string& taap_id,
+                                    const std::string& user_id)>& pool_session) {
+    const std::string suffix = lake::control::new_uuid_v4().substr(0, 8);
+    // Any signed-up account may register an application, and so own a pool.
+    const auto owner = store->create_user({"taap:1:ed25519:pool-owner-" + suffix,
+                                           "pool-owner-" + suffix + "@example.test",
+                                           "Pool owner"});
+    ASSERT_TRUE(owner) << owner.error().message;
+    const auto owner_space =
+        store->create_customer({"individual", owner->id, "", "pool-owner-" + suffix});
+    ASSERT_TRUE(owner_space) << owner_space.error().message;
+    const std::string application_id = lake::control::new_uuid_v4();
+    const std::string pool_id = "app:" + application_id;
+    const auto application = store->create_application(
+        {.id = application_id,
+         .customer_id = owner_space->id,
+         .pool_id = pool_id,
+         .workspace_id = lake::test::repository_workspace(*store, owner_space->id)});
+    ASSERT_TRUE(application) << application.error().message;
+    // The Lake account whose identity the application's user carries administers its space.
+    const std::string taap_id = "taap:1:ed25519:pool-victim-" + suffix;
+    const auto victim =
+        store->create_user({taap_id, "pool-victim-" + suffix + "@example.test", "Victim"});
+    ASSERT_TRUE(victim) << victim.error().message;
+    const auto space =
+        store->create_customer({"individual", victim->id, "", "pool-victim-" + suffix});
+    ASSERT_TRUE(space) << space.error().message;
+    const auto space_object = store->find_policy_object("customer", space->id);
+    ASSERT_TRUE(space_object) << space_object.error().message;
+    ASSERT_TRUE(store->create_grant({taap_id,
+                                     space_object->id,
+                                     "admin",
+                                     lake::control::identity_crypto::sha256_hex(taap_id),
+                                     "admin",
+                                     lake::control::new_uuid_v4()}));
+    const auto lake_token =
+        store->create_token({victim->id, "lake", "lake account", "", {"*"}, 3600, false});
+    ASSERT_TRUE(lake_token) << lake_token.error().message;
+    const std::string pool_secret = pool_session(pool_id, taap_id, victim->id);
+    ASSERT_FALSE(pool_secret.empty());
+    const auto resolved = store->context_for(pool_secret);
+    ASSERT_TRUE(resolved) << resolved.error().message;
+    ASSERT_EQ(resolved->pool_id, pool_id);
+    ASSERT_EQ(resolved->taap_id, taap_id);
+
+    ServerOptions options;
+    options.port = 0;
+    options.store = store;
+    options.instance_kek = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+    ApiServer server(options);
+    ASSERT_TRUE(server.start()) << server.reason();
+    const std::string read = "/v1/get_customer?id=" + space->id;
+    const std::string bearer = "Bearer " + pool_secret;
+
+    // The Lake account reads its space.
+    const std::string own = http_request(
+        server.port(), "GET", read, "", "text/plain", {}, "Bearer " + lake_token->secret);
+    EXPECT_NE(own.find(" 200 "), std::string::npos) << own;
+
+    // The application's session does not: as a bearer, as the session cookie, or through MCP.
+    const std::string as_bearer =
+        http_request(server.port(), "GET", read, "", "text/plain", {}, bearer);
+    EXPECT_NE(as_bearer.find(" 403 "), std::string::npos) << as_bearer;
+    EXPECT_EQ(as_bearer.find("pool-victim-" + suffix), std::string::npos) << as_bearer;
+    const std::string as_cookie =
+        http_request(server.port(), "GET", read, "", "text/plain", "lake_session=" + pool_secret);
+    EXPECT_EQ(as_cookie.find(" 200 "), std::string::npos) << as_cookie;
+    EXPECT_EQ(as_cookie.find("pool-victim-" + suffix), std::string::npos) << as_cookie;
+    const std::string listed =
+        http_request(server.port(), "GET", "/v1/list_customers", "", "text/plain", {}, bearer);
+    EXPECT_NE(listed.find(" 403 "), std::string::npos) << listed;
+    const json call = {{"jsonrpc", "2.0"},
+                       {"id", 1},
+                       {"method", "tools/call"},
+                       {"params", {{"name", "get_customer"}, {"arguments", {{"id", space->id}}}}}};
+    const std::string through_mcp =
+        http_request(server.port(), "POST", "/mcp", call.dump(), "application/json", {}, bearer);
+    EXPECT_NE(through_mcp.find("\"isError\":true"), std::string::npos) << through_mcp;
+    EXPECT_EQ(through_mcp.find("pool-victim-" + suffix), std::string::npos) << through_mcp;
+    // The viewer sees a visitor, with none of the account's spaces.
+    const json viewer = response_json(
+        http_request(server.port(), "GET", "/v1/viewer", "", "text/plain", {}, bearer));
+    EXPECT_FALSE(viewer.value("value", json::object()).value("signed_in", true)) << viewer.dump();
+    EXPECT_EQ(viewer.dump().find(space->id), std::string::npos) << viewer.dump();
+    const std::string metrics =
+        http_request(server.port(), "GET", "/metrics", "", "text/plain", {}, bearer);
+    EXPECT_EQ(metrics.find(" 200 "), std::string::npos) << metrics;
+
+    // Its own sign-in in its pool still answers it.
+    const std::string sessions =
+        http_request(server.port(), "GET", "/v1/list_sessions", "", "text/plain", {}, bearer);
+    EXPECT_NE(sessions.find(" 200 "), std::string::npos) << sessions;
+    const json session_items = response_json(sessions).value("value", json::object());
+    ASSERT_TRUE(session_items.contains("items")) << sessions;
+    for (const json& item : session_items.at("items")) {
+        EXPECT_EQ(item.value("pool_id", ""), pool_id) << item.dump();
+    }
+    server.stop();
+}
+
+TEST(ApplicationPoolSessions, MemoryStore) {
+    // The in-memory store keeps one row per person and scopes credentials by pool, so the
+    // application's user is the session in the application's pool for the account's own row.
+    auto store = std::make_shared<lake::control::InMemoryStore>();
+    expect_application_sessions_carry_no_lake_grants(
+        store, [&](const std::string& pool_id, const std::string&, const std::string& user_id) {
+            const auto issued =
+                store->create_token({user_id, pool_id, "pool session", "", {"*"}, 3600, false});
+            EXPECT_TRUE(issued) << issued.error().message;
+            return issued ? issued->secret : std::string();
+        });
+}
+
+TEST(ApplicationPoolSessions, PostgresStore) {
+    const char* database_uri = lake::test::postgres_uri();
+    if (database_uri == nullptr || *database_uri == '\0') {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
+    }
+    std::shared_ptr<lake::control::Store> store = lake::control::make_postgres_store(
+        database_uri, "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff");
+    ASSERT_TRUE(store->ping());
+    // PostgreSQL keeps users per (pool_id, taap_id): the application's user is its own row in the
+    // pool, with the Lake account's identity, as an enrollment with that identity makes it.
+    expect_application_sessions_carry_no_lake_grants(
+        store, [&](const std::string& pool_id, const std::string& taap_id, const std::string&) {
+            pqxx::connection connection(database_uri);
+            pqxx::work tx(connection);
+            const std::string user_id =
+                tx.exec_params("INSERT INTO users (taap_id, email, display_name, pool_id) "
+                               "VALUES ($1, $2, 'Pool user', $3) RETURNING id::text",
+                               taap_id,
+                               "pool-user-" + lake::control::new_uuid_v4() + "@example.test",
+                               pool_id)[0][0]
+                    .as<std::string>();
+            tx.commit();
+            const auto issued =
+                store->create_token({user_id, pool_id, "pool session", "", {"*"}, 3600, false});
+            EXPECT_TRUE(issued) << issued.error().message;
+            return issued ? issued->secret : std::string();
+        });
 }
 
 TEST(ApplicationHttp, HostedAndCustomDomainPagesUseTheApplicationPool) {
