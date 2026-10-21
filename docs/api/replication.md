@@ -2,8 +2,11 @@
 
 Lake replicates customer repositories and the instance transparency log between Lake instances.
 The protocol is pull-based: an operator reconciler invokes the destination, and the destination
-authenticates to the source with `LAKE_REPLICATION_TOKEN`. If that variable is absent, the
-executable uses `LAKE_ADMIN_TOKEN`. Tokens are never returned or written to audit details.
+authenticates to the source with `LAKE_REPLICATION_TOKEN`. There is no fallback: without that
+variable the destination sends no credential, and never the admin token. The credential is sent
+only to a source whose origin is listed in `LAKE_REPLICATION_PEERS`
+([Peers and the replication credential](#peers-and-the-replication-credential)). Tokens are never
+returned or written to audit details.
 
 This is an active-region/standby-region protocol, not multi-writer consensus. The operator routes
 repository writes, transparency appends, and checkpoint publication to one active instance. A
@@ -98,6 +101,56 @@ presenting incompatible histories. A prefix mismatch is not repaired automatical
 must fence both writers, retain the evidence, compare witnessed checkpoints, and select a recovery
 procedure explicitly.
 
+## Peers and the replication credential
+
+Lake issue [#915](https://github.com/oramasearch/lake/issues/915) (security review finding LSR-004):
+`replicate_repository` is authorized as `admin` on the repository, which every sign-up holds on its
+own repositories, and it used to send the instance credential to whatever `source_url` the caller
+named, with the admin token as the default credential. A repository owner could point it at their
+own HTTPS server and read the operator's bearer from the request.
+
+Now:
+
+- **`LAKE_REPLICATION_TOKEN` has no default.** Unset, it is empty and nothing is sent; the
+  executable never substitutes `LAKE_ADMIN_TOKEN`. The startup log says `replication_token_set`.
+- **`LAKE_REPLICATION_PEERS` lists the sources replication may pull from**: origins
+  (`https://region-a.lake.example`, `https://host:8443`) separated by commas or whitespace. Lake
+  lower-cases the host and drops a default port. An entry with a path, query or user name, or plain
+  `http` to anything but loopback, stops startup with exit code 2. The startup log lists the peers.
+- **`replicate_repository` and `replicate_transparency_log` refuse any other source** with
+  `invalid_input` at `/source_url`, before any name lookup or connection, for every caller, the
+  operator included. `source_url` must be an origin (a trailing `/` is accepted). With no peers
+  configured, both refuse every source. So the credential only ever reaches an origin the operator
+  configured, never one a tenant chose.
+- **A refusal is audited**: the `replication` event has outcome `failure` and
+  `details.refused_source_url`, in the repository's customer log for `replicate_repository`.
+- **Only HTTPS to public addresses.** Before liquid's sync client connects, Lake resolves the peer's
+  name and refuses it if any address is loopback, private, link-local (the cloud metadata address
+  included), carrier-grade NAT or otherwise not public, by the rule MCP connections use
+  (`mcp_public_address`). The transparency batch request uses `OutboundRequest::public_only`
+  (lake#876), which checks each address at connect time. Plain `http` is refused.
+  `LAKE_REPLICATION_ALLOW_PRIVATE_ADDRESSES=1` lifts both rules for local development and tests.
+- **Bounded time.** One repository pull, the name lookup, connection and every transfer included,
+  takes at most `LAKE_REPLICATION_TIMEOUT_SECONDS` (default 600) and then answers
+  `store_unavailable` ("did not finish"); the cursor is saved only after a pull succeeds, so the next
+  call resumes from the last one. A transparency batch request waits at most 60 seconds, or the
+  replication timeout if it is shorter. A repository pull runs on the blocking pool, so a slow peer
+  holds only that request.
+
+A tenant-chosen source is therefore not supported. A tenant copying a repository from another Lake
+pulls it with their own credential on that Lake (`liquid pull`, or `import_repository`), not through
+the instance's replication.
+
+To verify: `RepositoryReplication.ASourceThatIsNotAConfiguredPeerNeverReceivesTheCredential`
+(a repository owner and the operator name a recording loopback server; Lake refuses every call,
+the server sees no connection, and six refusals are audited),
+`RepositoryReplication.APeerOnAPrivateAddressOrPlainHttpIsRefusedBeforeConnecting`,
+`RepositoryReplication.APeerThatNeverAnswersTimesOut`,
+`RepositoryReplication.PeersAreOriginsAndOnlyAConfiguredOriginMatches`,
+`ReplicationStartup.TheReplicationCredentialNeverDefaultsToTheAdminToken`, and the existing
+`SyncHttp.TwoLakeInstancesReplicateRepositoryAndResumeFromCursor` and transparency replication
+tests, which now configure their source as a peer.
+
 ## Authorization and audit
 
 All three actions are guarded registry capabilities and pass through `authorize`. They emit one
@@ -105,7 +158,8 @@ signed audit event through `audit::record`, with `kind: replication`. Repository
 customer and `repository/<id>` audit object. Log export and apply use `transparency/log`. Audit
 details include only source identity or URL, high-water marks, counts, and byte totals.
 
-Production peer URLs use HTTPS. Plain HTTP is accepted only for loopback integration tests.
+Peer URLs use HTTPS to public addresses. Plain HTTP and private addresses are accepted only with
+`LAKE_REPLICATION_ALLOW_PRIVATE_ADDRESSES=1`, for local development and loopback integration tests.
 `source_instance` is a path-safe stable name because it namespaces the durable liquid cursor.
 
 The operator mapping, promotion rules, and two-region desired state are in

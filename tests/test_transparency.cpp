@@ -926,8 +926,25 @@ TEST(TransparencyRegistry, ReplicationCapabilityConvergesTwoInstancesAndRecordsA
     };
     const std::string attestation = signed_attestation("taap:1:ed25519:registry-replication", 19);
     ASSERT_TRUE(source_log.append(std::vector<std::string>(1025, attestation)));
+    // lake#915: a source outside LAKE_REPLICATION_PEERS is refused before any request is made.
+    bool requested = false;
+    lake::api::ApiContext unlisted_context = target_context;
+    unlisted_context.replication_peers = {"https://other-peer.example"};
+    unlisted_context.replication_requester =
+        [&](const std::string&, std::uint64_t) -> std::expected<json, lake::api::ApiError> {
+        requested = true;
+        return std::unexpected(lake::api::ApiError{"store_unavailable", "not expected", {}});
+    };
+    const auto refused = registry.call(
+        "replicate_transparency_log", {{"source_url", "https://source.example"}}, unlisted_context);
+    EXPECT_FALSE(refused.ok);
+    EXPECT_EQ(refused.error.code, "invalid_input");
+    EXPECT_EQ(refused.error.path, "/source_url");
+    EXPECT_FALSE(requested) << "a source that is not a configured peer was requested";
+
+    target_context.replication_peers = {"https://source.example"};
     const auto replicated = registry.call(
-        "replicate_transparency_log", {{"source_url", "https://source.example"}}, target_context);
+        "replicate_transparency_log", {{"source_url", "https://source.example/"}}, target_context);
     ASSERT_TRUE(replicated.ok) << replicated.error.message;
     EXPECT_TRUE(replicated.value.at("caught_up"));
     EXPECT_EQ(replicated.value.at("entries_applied"), 1025);
@@ -1901,6 +1918,7 @@ TEST(PostgresTransparency, CapabilitiesPersistSignedAuditOutcomes) {
         }
         return response.value;
     };
+    replica_context.replication_peers = {"https://postgres-source.example"};
     replica_context.request_id = "postgres-transparency-replication-apply";
     const auto replicated = registry.call("replicate_transparency_log",
                                           {{"source_url", "https://postgres-source.example"}},

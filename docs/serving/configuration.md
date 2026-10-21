@@ -30,7 +30,10 @@ selects the Postgres store. `server_info` reports which one as `store` (`memory`
 |---|---|---|
 | `LAKE_CONTROL_DB_URI` | Postgres control-plane URI; the operator injects it from the CNPG Secret. `LAKE_CONTROL_DB_PASSWORD` is injected beside it for the operator's use; lake reads the password from the URI | [`../control-plane/postgres.md`](../control-plane/postgres.md) |
 | `LAKE_ADMIN_TOKEN` | the operator bearer every capability except `server_info` and the documented public entry points requires; also the UI operator sign-in | [`../api/auth.md`](../api/auth.md) |
-| `LAKE_REPLICATION_TOKEN` | bearer presented to peer Lake instances; defaults to the admin token when omitted | [`../api/replication.md`](../api/replication.md) |
+| `LAKE_REPLICATION_TOKEN` | bearer presented to peer Lake instances; no default, never the admin token (lake#915) | [`../api/replication.md`](../api/replication.md) |
+| `LAKE_REPLICATION_PEERS` | the peer Lake origins replication may pull from, comma separated; any other source is refused, so the replication token goes only to these | [`../api/replication.md`](../api/replication.md#peers-and-the-replication-credential) |
+| `LAKE_REPLICATION_TIMEOUT_SECONDS` | the longest one repository pull may take (default 600) | [`../api/replication.md`](../api/replication.md#peers-and-the-replication-credential) |
+| `LAKE_REPLICATION_ALLOW_PRIVATE_ADDRESSES` | `1` lets replication reach loopback and private addresses and plain http; local development and tests only | [`../api/replication.md`](../api/replication.md#peers-and-the-replication-credential) |
 | `LAKE_IDENTITY_SEED` | base64 32-byte seed of lake's TAAP signing identity; when absent lake generates one and stores it encrypted | [`../api/audit.md`](../api/audit.md) |
 | `LAKE_INSTANCE_KEK` | customer-independent key-encryption key for the generated identity and wrapped keys; required wherever a Postgres store runs | [`../api/audit.md`](../api/audit.md), [`../api/encryption.md`](../api/encryption.md) |
 | `LAKE_STORE_ROOT` | root of the per-customer liquid stores (`<customer>/store`), search segments of unswitched workspaces' repositories (`<customer>/index/`; a switched workspace's index is beside its store, lake#381) and the instance log (`<instance>/log/`) | [`../deployment/store-volume.md`](../deployment/store-volume.md), [`../api/search.md`](../api/search.md), [`../api/transparency.md`](../api/transparency.md) |
@@ -81,11 +84,12 @@ selects the Postgres store. `server_info` reports which one as `store` (`memory`
 
 Startup refuses to run when `LAKE_OPERATOR_ZETTA_URL` and `LAKE_OPERATOR_ZETTA_TOKEN` are not set
 together, when the operator client is enabled without `LAKE_PUBLIC_HOST`, when
-`LAKE_PLATFORM_SYNC_SECONDS` is zero, or when the transparency-log configuration is invalid; each
+`LAKE_PLATFORM_SYNC_SECONDS` is zero, when `LAKE_REPLICATION_PEERS` holds an entry that is not an
+origin, when `LAKE_REPLICATION_TIMEOUT_SECONDS` is zero, or when the transparency-log configuration is invalid; each
 case exits with status 2 and one line on stderr. A store root still held by another process after
 `LAKE_STORE_OWNER_WAIT_SECONDS` exits with status 1 and `lake: cannot start: ...` naming the holder. The startup JSON event records `admin_token_set`
-and `replication_token_set` as `yes` or `no`, never a token value
-([`telemetry.md`](telemetry.md)).
+and `replication_token_set` as `yes` or `no`, never a token value, and `replication_peers` as the
+normalized peer origins ([`telemetry.md`](telemetry.md)).
 
 `LAKE_EXTERNAL_ORIGIN` is independent of the bind address. Set it to the origin customers use, for
 example `https://code.example.internal:8443` behind a TLS proxy or `http://127.0.0.1:49127` for a

@@ -1,5 +1,6 @@
 #include "lake/api/capabilities.hpp"
 
+#include <algorithm>
 #include <cstdint>
 #include <expected>
 #include <optional>
@@ -7,6 +8,7 @@
 #include <utility>
 #include <vector>
 
+#include "lake/api/mcp_client.hpp"
 #include "lake/audit/audit.hpp"
 #include "lake/control/store.hpp"
 #include "lake/transparency/checkpoint.hpp"
@@ -164,7 +166,66 @@ json object_schema() {
     return {{"type", "object"}};
 }
 
+// The source origin a replication may pull from (lake#915): a configured peer, or a refusal that
+// names LAKE_REPLICATION_PEERS. Nothing is sent anywhere before this passes, so the instance's
+// replication credential only ever reaches an origin the operator configured.
+std::expected<std::string, ApiError> configured_peer(const json& input, const ApiContext& context) {
+    const auto origin = replication_origin(input.at("source_url").get_ref<const std::string&>());
+    if (!origin) {
+        return std::unexpected(ApiError{"invalid_input", origin.error(), "/source_url"});
+    }
+    if (std::ranges::find(context.replication_peers, *origin) == context.replication_peers.end()) {
+        return std::unexpected(ApiError{"invalid_input",
+                                        "source_url " + *origin +
+                                            " is not a configured replication peer "
+                                            "(LAKE_REPLICATION_PEERS)",
+                                        "/source_url"});
+    }
+    return *origin;
+}
+
 } // namespace
+
+std::expected<std::string, std::string> replication_origin(std::string_view url) {
+    while (url.ends_with('/')) {
+        url.remove_suffix(1);
+    }
+    const auto parsed = parse_mcp_url(url, true);
+    if (!parsed) {
+        return std::unexpected("a replication source is an https origin: " + parsed.error());
+    }
+    if (parsed->path != "/") {
+        return std::unexpected("a replication source is an origin, with no path or query");
+    }
+    return parsed->origin();
+}
+
+std::expected<std::vector<std::string>, std::string>
+parse_replication_peers(std::string_view list) {
+    std::vector<std::string> peers;
+    while (!list.empty()) {
+        const std::size_t end = list.find_first_of(", \t\n");
+        const std::string_view entry = list.substr(0, end);
+        list = end == std::string_view::npos ? std::string_view{} : list.substr(end + 1);
+        if (entry.empty()) {
+            continue;
+        }
+        auto origin = replication_origin(entry);
+        if (!origin) {
+            return std::unexpected("LAKE_REPLICATION_PEERS entry '" + std::string(entry) +
+                                   "': " + origin.error());
+        }
+        if (std::ranges::find(peers, *origin) == peers.end()) {
+            peers.push_back(std::move(*origin));
+        }
+    }
+    return peers;
+}
+
+bool replication_peer_allowed(std::string_view url, const std::vector<std::string>& peers) {
+    const auto origin = replication_origin(url);
+    return origin && std::ranges::find(peers, *origin) != peers.end();
+}
 
 void register_replication_capabilities(Registry& registry) {
     registry.add(
@@ -234,11 +295,17 @@ void register_replication_capabilities(Registry& registry) {
                 return ApiResult::failure("store_unavailable",
                                           "transparency replication is not configured");
             }
+            const auto peer = configured_peer(input, context);
+            if (!peer) {
+                context.audit_details = {{"refused_source_url", input.at("source_url")}};
+                return ApiResult::failure(
+                    peer.error().code, peer.error().message, peer.error().path);
+            }
             const auto local = context.transparency_log->state();
             if (!local) {
                 return from_transparency_error(local.error());
             }
-            const std::string source_url = input.at("source_url").get<std::string>();
+            const std::string& source_url = *peer;
             const auto response = context.replication_requester(source_url, local->tree_size);
             if (!response) {
                 return ApiResult::failure(
@@ -307,11 +374,16 @@ void register_replication_capabilities(Registry& registry) {
             if (!repository->deleted_at.empty()) {
                 return ApiResult::failure("conflict", "repository is tombstoned");
             }
-            std::string source_url = input.at("source_url").get<std::string>();
-            while (source_url.ends_with('/')) {
-                source_url.pop_back();
+            context.audit_customer_id = repository->customer_id;
+            context.audit_object = "repository/" + repository->id;
+            // The replication credential goes only to a configured peer (lake#915).
+            const auto peer = configured_peer(input, context);
+            if (!peer) {
+                context.audit_details = {{"refused_source_url", input.at("source_url")}};
+                return ApiResult::failure(
+                    peer.error().code, peer.error().message, peer.error().path);
             }
-            source_url += "/v1/repositories/" + repository->id;
+            const std::string source_url = *peer + "/v1/repositories/" + repository->id;
             const auto replicated =
                 context.sync_store->replicate_from(repository->customer_id,
                                                    repository->id,
@@ -326,8 +398,6 @@ void register_replication_capabilities(Registry& registry) {
             if (!references) {
                 return from_sync_error(references.error());
             }
-            context.audit_customer_id = repository->customer_id;
-            context.audit_object = "repository/" + repository->id;
             context.audit_details = {{"metadata_items", replicated->metadata_items},
                                      {"received_bytes", replicated->received_bytes},
                                      {"received_objects", replicated->received_objects},

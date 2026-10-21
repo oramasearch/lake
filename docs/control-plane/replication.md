@@ -27,7 +27,14 @@ spec:
 
 The operator creates one Lake deployment and persistent data root in each region. It maps the
 Secret key `token` to `LAKE_REPLICATION_TOKEN` in every deployment. That credential must be an
-operator credential accepted by every peer and must not appear in the custom resource status.
+operator credential accepted by every peer and must not appear in the custom resource status. Lake
+never falls back to the admin token when it is missing (lake#915).
+
+It also sets `LAKE_REPLICATION_PEERS` in each deployment to the other regions' endpoints
+(origins, comma separated). A standby refuses to replicate from any source not in that list, so
+the replication credential is only sent to those endpoints
+([`../api/replication.md`](../api/replication.md#peers-and-the-replication-credential)). Peer
+endpoints are HTTPS on public addresses.
 The instance `--node` value is the stable region name.
 
 The operator also provisions a control-plane topology in which customer, repository, policy, Lake

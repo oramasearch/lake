@@ -468,7 +468,11 @@ struct ApiContext {
     std::string tsa_trust_pem;
     transparency::TimestampPolicy timestamp_policy;
     ReplicationRequester replication_requester;
+    // The instance's replication credential (LAKE_REPLICATION_TOKEN) and the peer origins it may
+    // be sent to (LAKE_REPLICATION_PEERS, normalized by replication_origin). Replication refuses a
+    // source outside the list, so the credential never reaches a server a caller chose (lake#915).
     std::string replication_token;
+    std::vector<std::string> replication_peers;
     bool authorized = false;
     bool operator_credential = false;
     bool session_credential = false;

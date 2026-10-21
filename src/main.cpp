@@ -16,6 +16,7 @@
 #include <nlohmann/json.hpp>
 
 #include "lake/api/billing.hpp"
+#include "lake/api/capabilities.hpp"
 #include "lake/api/server.hpp"
 #include "lake/api/tunnel_clients.hpp"
 #include "lake/control/agent_bus.hpp"
@@ -69,8 +70,14 @@ int usage() {
                  "(default $LAKE_EXTERNAL_ORIGIN, then https://$LAKE_PUBLIC_HOST)");
     std::println("  --admin-token  bearer for /v1 capabilities and MCP tools "
                  "(default $LAKE_ADMIN_TOKEN)");
-    std::println("  LAKE_REPLICATION_TOKEN bearer presented to peer lake instances "
-                 "(default $LAKE_ADMIN_TOKEN)");
+    std::println("  LAKE_REPLICATION_TOKEN bearer presented to peer lake instances (no default; "
+                 "never the admin token)");
+    std::println("  LAKE_REPLICATION_PEERS the peer lake origins replication may pull from, comma "
+                 "separated; any other source is refused");
+    std::println("  LAKE_REPLICATION_TIMEOUT_SECONDS the longest one replication pull may take "
+                 "(default 600)");
+    std::println("  LAKE_REPLICATION_ALLOW_PRIVATE_ADDRESSES=1 lets replication reach loopback and "
+                 "private addresses (local development and tests only)");
     std::println("  LAKE_MAX_REGISTRY_BLOB_BYTES caps streamed OCI blobs (default 4294967296)");
     std::println("  --identity-seed base64 Ed25519 seed for lake's TAAP identity "
                  "(default $LAKE_IDENTITY_SEED)");
@@ -173,7 +180,25 @@ int main(int argc, char** argv) {
     lake::api::ServerOptions opts;
     std::string control_db = env_or("LAKE_CONTROL_DB_URI", "");
     opts.admin_token = env_or("LAKE_ADMIN_TOKEN", "");
+    // The replication credential is its own Secret and never falls back to the admin token, and it
+    // is only ever sent to the configured peers (lake#915, docs/api/replication.md).
     opts.replication_token = env_or("LAKE_REPLICATION_TOKEN", "");
+    if (auto peers = lake::api::parse_replication_peers(env_or("LAKE_REPLICATION_PEERS", ""));
+        peers) {
+        opts.replication_peers = std::move(*peers);
+    } else {
+        std::println(stderr, "lake: {}", peers.error());
+        return 2;
+    }
+    opts.replication_allow_private_addresses =
+        env_or("LAKE_REPLICATION_ALLOW_PRIVATE_ADDRESSES", "") == "1";
+    opts.replication_timeout =
+        std::chrono::seconds{env_u64("LAKE_REPLICATION_TIMEOUT_SECONDS",
+                                     static_cast<std::uint64_t>(opts.replication_timeout.count()))};
+    if (opts.replication_timeout.count() == 0) {
+        std::println(stderr, "lake: LAKE_REPLICATION_TIMEOUT_SECONDS must be positive");
+        return 2;
+    }
     opts.max_registry_blob_bytes =
         env_u64("LAKE_MAX_REGISTRY_BLOB_BYTES", opts.max_registry_blob_bytes);
     opts.identity_seed = env_or("LAKE_IDENTITY_SEED", "");
@@ -393,9 +418,6 @@ int main(int argc, char** argv) {
         return usage();
     }
 
-    if (opts.replication_token.empty()) {
-        opts.replication_token = opts.admin_token;
-    }
     if (operator_zetta_url.empty() != operator_zetta_token.empty()) {
         std::println(stderr,
                      "lake: LAKE_OPERATOR_ZETTA_URL and LAKE_OPERATOR_ZETTA_TOKEN must be set "
@@ -555,6 +577,7 @@ int main(int argc, char** argv) {
             {"tsa_configured", opts.tsa_endpoint.empty() ? "no" : "yes"},
             {"admin_token_set", opts.admin_token.empty() ? "no" : "yes"},
             {"replication_token_set", opts.replication_token.empty() ? "no" : "yes"},
+            {"replication_peers", opts.replication_peers},
             {"operator_zetta_configured", operator_zetta_url.empty() ? "no" : "yes"},
             {"logs_configured", logs_url.empty() ? "no" : "yes"},
             {"region",
