@@ -239,7 +239,7 @@ function HeaderActions({ agent, own, onEdit }: { agent: Row; own: boolean; onEdi
         title="Delete This Agent?"
         confirmLabel="Delete agent"
         typed={text(agent, "name")}
-        confirm={<>The agent {text(agent, "name")} is deleted from this workspace, and its schedules and the streams that start it with it. Its revisions are kept.</>}
+        confirm={<>The agent {text(agent, "name")} is deleted from this workspace, and its schedules and the streams that start it with it. Its running services and jobs are stopped. Its revisions are kept.</>}
         onConfirm={async () => {
           await deleteAgent(scope, id);
           toast(`Deleted ${text(agent, "name")}`);

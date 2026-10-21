@@ -265,7 +265,8 @@ To change what the agent is, choose **Edit its design**.
 ## Delete an Agent
 
 On the agent's Design page choose **Delete**, type its name and confirm. The agent is deleted, and
-its schedules and the streams that start it with it; its revisions are kept.
+its schedules and the streams that start it with it. Its running services and jobs are stopped, and
+each stopped run says why (*Stopped: the agent ... was deleted.*). Its revisions are kept.
 
 - REST: `POST /v1/delete_agent` with
   `{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "id": "<agent id>"}`
