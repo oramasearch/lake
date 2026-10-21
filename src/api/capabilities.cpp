@@ -3555,8 +3555,11 @@ void register_sso_capabilities(Registry& registry) {
                    }});
     registry.add(Capability{
         .name = "sign_in_sso",
-        .title = "Sign in with SSO assertion",
-        .description = "Issue a session after provider verification and federation issuer policy.",
+        .title = "Sign in with SSO assertion (operator only)",
+        .description = "Operator break-glass: issue a session for a provisioned SSO subject under "
+                       "federation issuer policy. The assertion is not verified here, so only the "
+                       "admin token may call it; people sign in through the OIDC callback or "
+                       "sign_in_saml, which verify the provider (lake#562).",
         .input_schema = {{"type", "object"},
                          {"properties",
                           {{"provider_id", {{"type", "string"}}},
@@ -3571,14 +3574,20 @@ void register_sso_capabilities(Registry& registry) {
                          {"additionalProperties", false}},
         .output_schema = {{"type", "object"}},
         .kind = CapabilityKind::Action,
-        .requires_auth = false,
         .object = "authentication",
-        .action = "write",
+        .action = "admin",
         .resolve_object = global_object,
         .async_handler = [](const json& input,
                             ApiContext& context) -> liquid::runtime::task<ApiResult> {
             if (!context.store) {
                 co_return no_store();
+            }
+            // Nothing on this path verifies the assertion: a caller who is not the operator could
+            // name any provisioned subject and receive that person's session (lake#562).
+            if (!context.operator_credential) {
+                co_return ApiResult::failure(
+                    "unauthorized",
+                    "sign_in_sso is operator-only; sign in through the provider (OIDC or SAML)");
             }
             co_return session_answer(co_await issued_result(
                 context.store->sign_in_sso({input.value("provider_id", ""),

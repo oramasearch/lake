@@ -193,11 +193,11 @@ A customer organization brings its own IdP. Its administrator registers it with
 `register_sso_provider` ([`../api/sso.md`](../api/sso.md)). Its required inputs are
 `organization_id`, `name`, `protocol` (`saml` or `oidc`), `issuer` and `scim_token`.
 
-**Do not offer enterprise SSO to a customer yet.** Three gaps stand in the way:
+**Do not offer enterprise SSO to a customer yet.** The gaps below stand in the way. The security
+defect that blocked it, [lake#562](https://github.com/oramasearch/lake/issues/562) (the
+unauthenticated `sign_in_sso` issued a session for an assertion it never verified), is fixed:
+`sign_in_sso` is operator-only.
 
-- [lake#562](https://github.com/oramasearch/lake/issues/562): the unauthenticated `sign_in_sso`
-  capability issues a session for an assertion it never verifies. It is a security defect, and it
-  blocks offering enterprise SSO at all.
 - **SAML has no ACS endpoint** ([lake#836](https://github.com/oramasearch/lake/issues/836)). SAML
   sign-in exists only as the `sign_in_saml` capability, whose input is JSON
   `{provider_id, saml_response}`. No route accepts an identity provider's HTTP-POST `SAMLResponse`,

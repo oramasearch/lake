@@ -168,13 +168,28 @@ TEST(Sso, SamlAndOidcProviderAssertionsRequireFederationPolicy) {
     ASSERT_TRUE(provision(saml, "saml-user").ok);
     ASSERT_TRUE(provision(oidc, "oidc-user").ok);
 
+    // lake#562: the capability verifies no assertion, so nobody but the operator may call it. An
+    // anonymous caller and a signed-in person are both refused before the store is reached.
+    const json assertion{{"provider_id", saml.value.at("id")},
+                         {"issuer", "https://saml.stub.example"},
+                         {"subject", "saml-user"},
+                         {"claims", {{"email", "saml-user@example.com"}}}};
     surface.context.authorized = false;
     surface.context.operator_credential = false;
-    const ApiResult denied = surface.call("sign_in_sso",
-                                          {{"provider_id", saml.value.at("id")},
-                                           {"issuer", "https://saml.stub.example"},
-                                           {"subject", "saml-user"},
-                                           {"claims", {{"email", "saml-user@example.com"}}}});
+    surface.context.acting_identity.clear();
+    const ApiResult anonymous = surface.call("sign_in_sso", assertion);
+    EXPECT_FALSE(anonymous.ok);
+    EXPECT_EQ(anonymous.error.code, "unauthenticated");
+    surface.context.authorized = true;
+    surface.context.acting_identity = "taap:1:ed25519:someone";
+    const ApiResult person = surface.call("sign_in_sso", assertion);
+    EXPECT_FALSE(person.ok);
+    EXPECT_EQ(person.error.code, "unauthorized");
+    surface.context.acting_identity = "admin";
+
+    // The operator is still held to the federation issuer policy.
+    surface.context.operator_credential = true;
+    const ApiResult denied = surface.call("sign_in_sso", assertion);
     const std::string denied_request = surface.context.request_id;
     EXPECT_FALSE(denied.ok);
     EXPECT_EQ(denied.error.code, "unauthorized");
@@ -194,8 +209,6 @@ TEST(Sso, SamlAndOidcProviderAssertionsRequireFederationPolicy) {
                            {"claim", "email"}})
                     .ok);
 
-    surface.context.authorized = false;
-    surface.context.operator_credential = false;
     const ApiResult saml_sign_in = surface.call("sign_in_sso",
                                                 {{"provider_id", saml.value.at("id")},
                                                  {"issuer", "https://saml.stub.example"},
@@ -213,8 +226,6 @@ TEST(Sso, SamlAndOidcProviderAssertionsRequireFederationPolicy) {
     EXPECT_TRUE(surface.store.context_for(saml_sign_in.value.at("secret")).has_value());
     EXPECT_TRUE(surface.store.context_for(oidc_sign_in.value.at("secret")).has_value());
 
-    surface.context.authorized = true;
-    surface.context.operator_credential = true;
     const ApiResult audit = surface.call("audit", {{"request_id", denied_request}, {"limit", 1}});
     ASSERT_TRUE(audit.ok) << audit.error.message;
     EXPECT_TRUE(std::ranges::any_of(audit.value.at("items"), [](const json& event) {
@@ -320,8 +331,6 @@ TEST(Scim, UserUpdateGroupReplacementAndDeactivationRevokeSessions) {
                            {"issuer", "https://scim.stub.example"},
                            {"claim", "email"}})
                     .ok);
-    surface.context.authorized = false;
-    surface.context.operator_credential = false;
     const ApiResult session = surface.call("sign_in_sso",
                                            {{"provider_id", provider_id},
                                             {"issuer", "https://scim.stub.example"},
