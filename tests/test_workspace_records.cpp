@@ -4465,7 +4465,16 @@ TEST_P(WorkspaceRecordStores, McpStdioConnectionsRunAsAWorkspaceApp) {
     EXPECT_EQ(t.call(first, "create_mcp_connection", in({{"name", "Everything"}, {"stdio", stdio}}))
                   .error.code,
               "not_supported");
+    // Nor does one whose runner image is a tag: the operator runs only a digest-pinned image
+    // (lake#783), so nothing is started that could only fail.
     t.mcp_runner_image = "oramasearch/lake-mcp-runner:0.1.0";
+    const auto tagged =
+        t.call(first, "create_mcp_connection", in({{"name", "Everything"}, {"stdio", stdio}}));
+    EXPECT_EQ(tagged.error.code, "not_supported");
+    EXPECT_TRUE(tagged.error.message.contains("pinned by digest")) << tagged.error.message;
+    const std::string runner_image =
+        "oramasearch/lake-mcp-runner:0.1.0@sha256:" + std::string(64, 'c');
+    t.mcp_runner_image = runner_image;
 
     // Refusals before anything starts.
     const auto refused = [&](json changed, const std::string& path) {
@@ -4523,7 +4532,7 @@ TEST_P(WorkspaceRecordStores, McpStdioConnectionsRunAsAWorkspaceApp) {
     EXPECT_EQ(app.id, app_id);
     EXPECT_EQ(app.workspace_id, home);
     EXPECT_EQ(app.mode, "image");
-    EXPECT_EQ(app.image, "oramasearch/lake-mcp-runner:0.1.0");
+    EXPECT_EQ(app.image, runner_image);
     EXPECT_EQ(app.framework, "mcp");
     EXPECT_EQ(app.port, 8080) << "the port the workspace admits Lake to";
     EXPECT_TRUE(app.name.starts_with("mcp-everything-")) << app.name;

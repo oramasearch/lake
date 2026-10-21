@@ -41,6 +41,12 @@ std::optional<control::Customer> space_customer(control::Store& store, std::stri
 std::expected<std::vector<std::string>, std::string>
 manifest_digests(const nlohmann::json& manifest);
 
+// Whether `image` is pinned by digest, `name@sha256:<64 hex digits>`: the only reference the
+// operator runs an image app with (the LakeApp CRD's pattern and orama-operator's
+// lakeAppRowSource, which accept either case of hex). create_app, deploy_app and rollback_app
+// refuse anything else (lake#783).
+bool digest_pinned_image(std::string_view image);
+
 // The image a build target names in `space` (`<authority>/<space>/<image>:<tag>`); empty when it
 // names another space or is malformed. A build's first push may route only `<image>` and
 // `cache/<image>` (lake#383).

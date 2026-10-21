@@ -352,7 +352,9 @@ internet is App traffic, which the operator does not report yet, as for every Ap
 `spec.workspaces.overrides[<workspace>].internetEgress`) for `npx` or `uvx` to install the package
 at start and for the server to reach what it serves; without it the App's logs show the install
 failing. The App has a read-only root and a 1 GiB `/tmp`, where the image keeps every cache. A Lake
-without `LAKE_MCP_RUNNER_IMAGE` answers `not_supported`.
+without `LAKE_MCP_RUNNER_IMAGE`, or whose `LAKE_MCP_RUNNER_IMAGE` is not pinned by digest
+(`name@sha256:<digest>`, the only image the operator runs an App with; lake#783), answers
+`not_supported`.
 
 **The runner** (`oramasearch/lake-mcp-runner`, its `docs/api.md`): one child, initialized once,
 whose answer every HTTP session's `initialize` is given; each forwarded request under an id of the
