@@ -61,7 +61,7 @@ std::string path_external_id(std::string_view repository_id, std::string_view no
 // The policy object of one node of a repository, found by its derived id. The id is unique across
 // every account, so an object holding it that does not sit under the repository's own object was
 // made elsewhere to claim the node (lake#913): it is never the node's object. It is reported as
-// `foreign`, so a reader falls back to the repository's own object and a caller that would create
+// `conflict`, so a reader falls back to the repository's own object and a caller that would create
 // the object refuses instead of adopting it.
 control::Result<control::PolicyObject> repository_path_object(control::Store& store,
                                                               const std::string& repository_object,
@@ -77,7 +77,7 @@ control::Result<control::PolicyObject> repository_path_object(control::Store& st
     }
     if (!*within) {
         return std::unexpected(control::StoreError{
-            "foreign", "the policy object for this folder belongs to another repository"});
+            "conflict", "the policy object for this folder belongs to another repository"});
     }
     return object;
 }
@@ -85,7 +85,7 @@ control::Result<control::PolicyObject> repository_path_object(control::Store& st
 // A node with no object of its own, or only another repository's: either way the folder's
 // authority comes from above it.
 bool no_own_object(const control::StoreError& error) {
-    return error.code == "not_found" || error.code == "foreign";
+    return error.code == "not_found" || error.code == "conflict";
 }
 
 std::string parent_path(std::string path) {
@@ -199,7 +199,7 @@ std::expected<DriveLocation, ApiError> ensure_folder_location(const json& input,
                                          context.request_id,
                                          true});
         }
-        if (!object && object.error().code == "foreign") {
+        if (!object && object.error().code == "conflict") {
             // Another account holds this folder's id. Its object can neither be adopted nor
             // replaced (the id is unique), so the folder cannot be shared until the operator
             // removes it.

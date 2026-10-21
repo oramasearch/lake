@@ -5641,7 +5641,7 @@ void register_policy_capabilities(Registry& registry) {
         .title = "Create object",
         .description = "Add a path object under a repository or one of its folders, to protect "
                        "a folder or a file with its own grants. Its external_id is "
-                       "<repository_id>:<node id>, naming the repository it sits in; lake creates "
+                       "<repository_id>:<node id>, naming the repository it sits in; Lake creates "
                        "every other kind of object itself.",
         .input_schema = {{"type", "object"},
                          {"properties",
