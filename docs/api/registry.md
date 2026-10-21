@@ -32,6 +32,38 @@ manifest is accepted only when it is schema version 2 JSON and every referenced 
 digest is already present. Blob and digest-manifest reads also require that a tag in the requested
 repository references the object, so a known tenant digest cannot be read through a public alias.
 
+## Media types and isolation
+
+The registry answers on the console's origin, so the bytes it serves must never become a page
+there ([lake#930](https://github.com/oramasearch/lake/issues/930)). A manifest that is valid JSON
+can also be markup; served as `text/html`, it would run as the console.
+
+- **Lake chooses a manifest's media type.** A manifest push (`PUT /v2/<repository>/manifests/<reference>`,
+  tenant and instance repositories alike) names one of four types in `Content-Type`:
+  `application/vnd.oci.image.manifest.v1+json`, `application/vnd.oci.image.index.v1+json`,
+  `application/vnd.docker.distribution.manifest.v2+json` or
+  `application/vnd.docker.distribution.manifest.list.v2+json`. The type is compared without case,
+  parameters or surrounding whitespace, and lake stores its own spelling; a push without
+  `Content-Type` is an OCI image manifest. Any other type is refused with OCI `400
+  MANIFEST_INVALID` and nothing is stored.
+- **A manifest is served only as one of those types.** A read (`GET` or `HEAD`, by tag or by
+  digest) answers the stored type when it is one of the four, otherwise
+  `application/vnd.oci.image.manifest.v1+json`. A tag record or instance pointer written before
+  lake#930 with another type is therefore served as an image manifest; no record is rewritten.
+- **Every registry byte response is isolated.** Manifests, blobs (from a workspace store or the
+  instance registry), npm tarballs, Python packages and debuginfod objects carry
+  `X-Content-Type-Options: nosniff` and `Content-Security-Policy: sandbox; default-src 'none'`, so a
+  browser neither sniffs them into another type nor runs or loads anything from them, whatever
+  their type.
+
+To check it, run `RegistryStore.AManifestIsServedAsAnImageManifestNeverAsATypeItsPusherChose`: it
+pushes a manifest that is also markup under HTML, JSON, SVG and XML types to a tenant and an
+instance repository (each refused), pushes it under a Docker type in mixed case with a parameter
+(served with lake's spelling), rewrites the tag record and the instance pointer to name `text/html`
+(served as an image manifest), and checks both headers on every manifest and blob read. To support
+another manifest type, add it to `oci_manifest_media_type` in `src/api/http_server.cpp` only if
+browsers never render it as a document.
+
 ## Where a tenant image lives
 
 The registry splits (decision 54 S4-S6, [lake#383](https://github.com/oramasearch/lake/issues/383)
