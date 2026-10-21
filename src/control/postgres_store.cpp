@@ -731,7 +731,12 @@ verify_taap_sign_in(std::string_view identity_document,
         std::string(pool_id) + "\n" + std::string(nonce) + "\n" + std::to_string(issued_at);
     const std::span<const std::byte> body_bytes(reinterpret_cast<const std::byte*>(body.data()),
                                                 body.size());
-    const auto verified = liquid::verify(*key, "lake_sign_in", body_bytes, signed_value);
+    // The key was bound to the identifier above (bound_taap_key: a self-certifying initial
+    // document, or a chain whose every rotation the replaced key signed), so liquid checks only
+    // that this key made the signature. liquid::verify(actor, ...) would look for a stored chain
+    // and refuse an identity this process does not hold (liquid#383).
+    const auto verified =
+        liquid::verify_key_signature(*key, "lake_sign_in", body_bytes, signed_value);
     if (!verified || !*verified) {
         return std::unexpected("TAAP sign-in signature does not verify");
     }
@@ -11863,6 +11868,15 @@ private:
         if (!verified || !*verified) {
             return std::unexpected(
                 StoreError{"invalid_input", "TAAP identity document signature is invalid"});
+        }
+        // Only an initial document proves which identity it belongs to: its identifier is its own
+        // key's fingerprint. A successor's identifier is proven only by its chain, which this
+        // document does not carry (liquid#383).
+        if (const auto chain = liquid::verify_chain(std::span{&*document, 1}); !chain) {
+            return std::unexpected(StoreError{
+                "invalid_input",
+                "This TAAP identity has been rotated, so its document alone does not prove which "
+                "identity it belongs to. Sign up with the identity's first document."});
         }
         const auto canonical = liquid::encode_identity_document(*document);
         if (!canonical || *canonical != *encoded) {

@@ -25,8 +25,10 @@
 #include <unistd.h>
 
 #include <liquid/attestation.hpp>
+#include <liquid/identity.hpp>
 
 #include "lake/audit/audit.hpp"
+#include "objects/records.hpp"
 
 namespace lake::transparency {
 namespace {
@@ -583,20 +585,32 @@ Result<VerifiedAttestation> verify_attestation(std::span<const std::byte> encode
             Error{"invalid_input",
                   "entry is not a canonical TAAP attestation: " + statement.error().message});
     }
-    liquid::attestation_verification_options options{.now = statement->at};
-    const liquid::attestation_profile* profile =
-        liquid::attestation_profile_registry::global().find(statement->profile);
-    if (profile && profile->status_policy.kind == liquid::attestation_status_kind::revocable) {
-        options.status = liquid::attestation_status{.revoked = false, .checked_at = statement->at};
-    }
-    const auto verified = liquid::verify_attestation(*statement, options);
-    if (!verified) {
-        return std::unexpected(Error{
-            "invalid_input", "could not verify TAAP attestation: " + verified.error().message});
-    }
-    if (!verified->verified) {
+    // The log records statements; it does not attribute them. An entry must be a registered,
+    // well-formed attestation whose signature verifies under the key it carries, the same
+    // integrity bar audit entries meet. Whether that key belongs to the named issuer is decided
+    // by whoever reads the entry, against the issuer's identity chain (liquid#383): Lake holds no
+    // chain for most issuers, and an identity scan must still list statements made in a name so
+    // that its owner can see forged ones. Entries accepted before liquid#383 met the same bar.
+    if (const auto valid = liquid::attestation_profile_registry::global().validate(*statement);
+        !valid) {
         return std::unexpected(
-            Error{"invalid_input", "TAAP attestation is invalid: " + verified->reason});
+            Error{"invalid_input", "TAAP attestation is invalid: " + valid.error().message});
+    }
+    const auto signature = liquid::decode_signature(statement->signature);
+    const auto body = liquid::objects::encode_attestation_body_unchecked(*statement);
+    if (!signature || !body) {
+        return std::unexpected(
+            Error{"invalid_input",
+                  "TAAP attestation is invalid: " +
+                      (signature ? body.error().message : signature.error().message)});
+    }
+    const auto verified =
+        liquid::verify_key_signature(statement->issuer, "attestation", *body, *signature);
+    if (!verified || !*verified) {
+        return std::unexpected(Error{"invalid_input",
+                                     "TAAP attestation is invalid: " +
+                                         (verified ? std::string{"invalid attestation signature"}
+                                                   : verified.error().message)});
     }
     VerifiedAttestation output{
         .profile = statement->profile,

@@ -13,10 +13,18 @@ Asynchronous replication is implemented by lake #38, and logged durable-agent de
 implemented by lake #39 under the [agent-session contract](agents.md).
 
 The log accepts batches of canonical-CBOR TAAP attestations encoded as base64url. Lake decodes each
-entry through libliquid, verifies its registered profile and TAAP signature, hashes it as an RFC
+entry through libliquid, verifies its registered profile and its TAAP signature under the key the
+attestation carries, hashes it as an RFC
 6962-style leaf, and advances the append-only SHA-256 Merkle tree. Entry objects and interior
 Merkle hashes are grouped into immutable tiles of 1,024 values. Partial tiles are versioned by
 their exact width, so a tile object that a monitor has fetched is never replaced.
+
+The log records statements; it does not attribute them (liquid#383). Like an audit entry, an
+attestation entry proves only that it is well formed and was signed by the key it names. Whether that
+key belongs to the named issuer is for whoever reads the entry to decide, against the issuer's
+identity chain (`liquid identity trust`, or a chain carried with the statement). An identity scan
+therefore lists every statement made in a name, including a forged one, which is what lets the
+owner of that name monitor it.
 
 Append validates the signed envelope and registered profile at the attestation's stated time. It
 does not discard a historically valid statement because its freshness window later elapsed or its
