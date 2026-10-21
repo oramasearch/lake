@@ -69,8 +69,23 @@ const RepositoryTreeEntry* find_entry(const std::vector<RepositoryTreeEntry>& en
     return found == entries.end() ? nullptr : &*found;
 }
 
+// A repository nobody has written to yet has no ref at all, so `main` does not resolve; the first
+// change written to `main` creates it (lake#560).
+bool main_is_unborn(const json& input, ApiContext& context, const control::Repository& repository) {
+    if (input.value("ref", "") != "main") {
+        return false;
+    }
+    const auto refs = context.sync_store->repository_refs(repository.customer_id, repository.id);
+    return refs && refs->empty();
+}
+
+// `unborn_main_is_empty`: an upload reads a repository whose `main` is not born yet as an empty
+// tree, since its change creates `main` (lake#560). Every other caller is answered `not_found`.
 std::expected<std::vector<RepositoryTreeEntry>, ApiError>
-repository_tree(const json& input, ApiContext& context, control::Repository& repository) {
+repository_tree(const json& input,
+                ApiContext& context,
+                control::Repository& repository,
+                bool unborn_main_is_empty = false) {
     if (!context.store) {
         return std::unexpected(
             ApiError{"store_unavailable", "no control-plane store is configured", {}});
@@ -91,15 +106,21 @@ repository_tree(const json& input, ApiContext& context, control::Repository& rep
     const auto entries = context.sync_store->repository_tree(
         repository.customer_id, repository.id, input.at("ref").get<std::string>());
     if (!entries) {
+        if (unborn_main_is_empty && entries.error().code == "not_found" &&
+            main_is_unborn(input, context, repository)) {
+            return std::vector<RepositoryTreeEntry>{};
+        }
         return std::unexpected(ApiError{entries.error().code, entries.error().message, "/ref"});
     }
     return *entries;
 }
 
-std::expected<DriveLocation, ApiError>
-nearest_drive_location(const json& input, ApiContext& context, bool require_path = true) {
+std::expected<DriveLocation, ApiError> nearest_drive_location(const json& input,
+                                                              ApiContext& context,
+                                                              bool require_path = true,
+                                                              bool unborn_main_is_empty = false) {
     control::Repository repository;
-    const auto entries = repository_tree(input, context, repository);
+    const auto entries = repository_tree(input, context, repository, unborn_main_is_empty);
     if (!entries) {
         return std::unexpected(entries.error());
     }
@@ -182,6 +203,17 @@ std::expected<DriveLocation, ApiError> ensure_folder_location(const json& input,
 
 std::expected<std::string, ApiError> drive_object(const json& input, ApiContext& context) {
     const auto location = nearest_drive_location(input, context);
+    if (!location) {
+        return std::unexpected(location.error());
+    }
+    return location->object.id;
+}
+
+// An upload's object (lake#560): the target folder when it exists, otherwise its nearest existing
+// folder, so an upload into a folder that does not exist yet creates it under the access of the
+// folder it is made in. A repository with no `main` yet is checked at the repository.
+std::expected<std::string, ApiError> drive_upload_object(const json& input, ApiContext& context) {
+    const auto location = nearest_drive_location(input, context, false, true);
     if (!location) {
         return std::unexpected(location.error());
     }
@@ -1246,7 +1278,8 @@ void register_drive_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "upload_drive_files",
         .title = "Upload drive files",
-        .description = "Upload files into a drive folder as one liquid change.",
+        .description = "Upload files into a drive folder as one liquid change. A folder that does "
+                       "not exist yet is created, and so is `main` in a repository with none.",
         .input_schema =
             {{"type", "object"},
              {"properties",
@@ -1286,7 +1319,7 @@ void register_drive_capabilities(Registry& registry) {
         .kind = CapabilityKind::Action,
         .object = "drive folder",
         .action = "write",
-        .resolve_object = drive_object,
+        .resolve_object = drive_upload_object,
         .handler = [](const json& input, ApiContext& context) {
             if (!input.at("files").is_array() || input.at("files").empty()) {
                 return ApiResult::failure(

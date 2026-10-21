@@ -13,7 +13,7 @@ deduplication remain liquid repository values.
 | `download_drive_file` | `read` on the path | `{path, blob, size, media_type, content_base64, download_url}`: the exact bytes as base64 for a file of at most 16 MiB (`null` above), the media type from the name, and the `GET /drive/download` address that streams any size (lake#587) |
 | `drive_share_people` | `share` on the folder | The people a folder can be shared with by email or handle ([sharing.md](sharing.md#live-grants-and-effective-access)) |
 | `create_drive_folder` | `write` on the containing folder | A new liquid change containing an empty-folder marker |
-| `upload_drive_files` | `write` on the containing folder | One liquid change containing all decoded uploads |
+| `upload_drive_files` | `write` on the containing folder, or its nearest existing folder when it does not exist yet (lake#560) | One liquid change containing all decoded uploads; it creates `main` in a repository with none, and any missing folders |
 | `move_drive_path` | `write` on the source and destination parent | A new liquid move preserving the stable path node |
 | `delete_drive_path` | `write` on the path | A new liquid deletion without history removal |
 | `drive_history` | `read` on the path or nearest retained parent | Changes whose structural diff names `path` as its old or new path, one item per change with the path's state after it (see below) |
@@ -107,6 +107,21 @@ the folder), never both (`invalid_input` at `/files/<n>/path`); `content_type` i
 the item has the same shape as `upload_drive_entries`' (lake#587), and a repository keeps no media
 type. An empty `content` string creates an empty file; additional item fields are rejected. The registry advertises these nested fields and
 `contentEncoding: base64` in both OpenAPI and MCP.
+
+The target folder need not exist (lake#560): an upload into `Reports/2026` when neither folder is
+there creates both, as a file manager would, and the policy check is `write` on the nearest folder
+that does exist (the repository itself at the top). A repository nobody has written to yet (made
+by `create_repository`, with no ref at all) has no `main`; an upload to `ref: main` treats it as
+empty and its change creates `main`. Every other drive capability still answers `not_found` for
+such a repository, and a ref other than `main` is never created. An upload whose `path` names a
+file is refused (`invalid_input`, "path component is not a directory"). Before lake#560 the first case answered `not_found` "no revision main" and the
+second `not_found` "no drive path <path>", both from the policy check, before anything was
+written. The tests are `DrivesHttp.TheFirstUploadCreatesMainAndAMissingFolder` (memory store),
+`DriveScenario.TheFirstUploadCreatesMainAndAMissingFolder` and
+`DriveScenario.AnUploadIntoAMissingFolderCreatesIt` (Postgres, signed in as the owner, which is
+where both failed) and
+`WorkspaceStoreDrive.TheFirstUpload*` (the account store and a switched workspace store), one
+exercise in `tests/drive_history_support.hpp`.
 
 Registry validation rejects wrong item and field types before the handler runs. For example,
 `files: [1]` returns REST `400 invalid_input` with `error.path: "/files/0"`; a missing or
