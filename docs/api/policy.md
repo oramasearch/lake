@@ -50,6 +50,12 @@ characters (`valid_principal_id`, `src/control/policy.cpp`).
   (`app_`, `build_`, `methodology_`) name their workload and only the `admin` check applies to them.
   An agent stream trigger acts as its person only when that person's identity is a TAAP id.
 
+- **Grants and memberships someone writes name TAAP identities** (lake#872): `create_grant`,
+  `create_membership` and imported grants refuse (or, on import, skip) `admin`, bare names and
+  lake's own synthetic principals. `share-link:<id>` is one: a share link's folder is its first
+  grant, so a grant written for another tenant's link id could have repointed it. Lake still creates
+  `share-link:` grants itself when a link is made.
+
 **Why.** Policy decisions are keyed by the principal string, so a stored identity equal to `admin`,
 or to an identity lake sets in code (`agent-service:`, `share-link:`, `sso-provider/`), would inherit
 what that identity may do. The remaining work on unscoped principals is lake#872.

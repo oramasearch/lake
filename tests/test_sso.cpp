@@ -402,4 +402,39 @@ TEST(PrincipalIds, NoCreationPathAcceptsTheOperatorIdentity) {
     EXPECT_EQ(jit.error().code, "invalid_input");
 }
 
+// lake#872: a grant or membership someone writes names a TAAP identity: never `admin`, never lake's
+// own synthetic `share-link:<id>` (whose first grant is a share link's folder), never a bare name.
+TEST(PrincipalIds, GrantsAndMembershipsNameOnlyTaapIdentities) {
+    SsoSurface surface;
+    const ApiResult organization =
+        surface.call("create_organization", {{"display_name", "Grants organization"}});
+    ASSERT_TRUE(organization.ok) << organization.error.message;
+    const auto object =
+        surface.store.find_policy_object("organization", organization.value.at("id"));
+    ASSERT_TRUE(object);
+    for (const std::string refused : {"admin",
+                                      "share-link:00000000-0000-4000-8000-000000000001",
+                                      "reader",
+                                      "agent-service:ask"}) {
+        const ApiResult grant = surface.call(
+            "create_grant",
+            {{"principal_taap_id", refused}, {"object_id", object->id}, {"role", "read"}});
+        EXPECT_FALSE(grant.ok) << refused;
+        EXPECT_EQ(grant.error.code, "invalid_input") << refused;
+        const ApiResult member = surface.call("create_membership",
+                                              {{"organization_id", organization.value.at("id")},
+                                               {"principal_type", "user"},
+                                               {"principal_id", "u-1"},
+                                               {"principal_taap_id", refused},
+                                               {"role", "read"}});
+        EXPECT_FALSE(member.ok) << refused;
+        EXPECT_EQ(member.error.code, "invalid_input") << refused;
+    }
+    const ApiResult granted = surface.call("create_grant",
+                                           {{"principal_taap_id", "taap:1:ed25519:reader"},
+                                            {"object_id", object->id},
+                                            {"role", "read"}});
+    EXPECT_TRUE(granted.ok) << granted.error.message;
+}
+
 } // namespace

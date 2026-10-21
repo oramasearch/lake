@@ -230,6 +230,11 @@ liquid::runtime::task<ApiResult> import_repository(const json& input, ApiContext
         co_return store_error(target_object.error());
     }
     for (const json& grant : payload.at("grants")) {
+        // lake#872: an imported grant names a TAAP identity; `admin` and lake's own synthetic
+        // principals (a share link's `share-link:<id>`, meaningless on this instance) are skipped.
+        if (!control::valid_principal_id(grant.value("principal_taap_id", ""))) {
+            continue;
+        }
         const auto written = context.store->create_grant({grant.value("principal_taap_id", ""),
                                                           target_object->id,
                                                           grant.value("role", ""),
