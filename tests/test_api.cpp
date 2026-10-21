@@ -5011,6 +5011,9 @@ void expect_policy_objects_stay_in_their_account(std::shared_ptr<lake::control::
           std::tuple{"path", branch_id, intruder.repository_object},
           std::tuple{"environment", environment_id, intruder.customer_object},
           std::tuple{"environment", secrets_id, intruder.customer_object}}) {
+        if (store->find_policy_object(type, id)) {
+            continue; // create_object made it above (only without this fix)
+        }
         const auto planted = store->create_policy_object(
             {type, id, parent, intruder.taap, lake::control::new_uuid_v4(), true});
         ASSERT_TRUE(planted) << planted.error().message;
