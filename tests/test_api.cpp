@@ -26,6 +26,7 @@
 #include <vector>
 
 #include <arpa/inet.h>
+#include <fcntl.h>
 #include <netinet/in.h>
 #include <spawn.h>
 #include <sys/socket.h>
@@ -1220,7 +1221,8 @@ public:
     LakeProcess(unsigned short port,
                 const std::string& node,
                 const std::string& database_uri,
-                const std::filesystem::path& store_root) {
+                const std::filesystem::path& store_root,
+                const std::vector<std::string>& environment = {}) {
         std::vector<std::string> arguments{
             LAKE_TEST_SERVER_PATH,
             "--listen",
@@ -1242,7 +1244,25 @@ public:
             raw.push_back(argument.data());
         }
         raw.push_back(nullptr);
-        if (::posix_spawn(&pid_, raw.front(), nullptr, nullptr, raw.data(), environ) != 0) {
+        // The parent's environment, then `environment` (NAME=value), which wins.
+        std::vector<std::string> variables = environment;
+        for (char** entry = environ; *entry != nullptr; ++entry) {
+            const std::string_view variable(*entry);
+            const std::string_view name = variable.substr(0, variable.find('='));
+            if (std::ranges::none_of(environment, [name](const std::string& given) {
+                    return given.starts_with(std::string(name) + "=");
+                })) {
+                variables.emplace_back(variable);
+            }
+        }
+        std::vector<char*> raw_environment;
+        raw_environment.reserve(variables.size() + 1);
+        for (std::string& variable : variables) {
+            raw_environment.push_back(variable.data());
+        }
+        raw_environment.push_back(nullptr);
+        if (::posix_spawn(
+                &pid_, raw.front(), nullptr, nullptr, raw.data(), raw_environment.data()) != 0) {
             pid_ = -1;
             return;
         }
@@ -6744,10 +6764,18 @@ TEST(SyncHttp, TwoLakeInstancesReplicateRepositoryAndResumeFromCursor) {
     const auto pushed = liquid::runtime::block_on(source_endpoint.push(*local_source));
     ASSERT_TRUE(pushed) << pushed.error().message;
 
-    LakeProcess replica(replica_port, "region-b", database_uri, temporary.path() / "region-b");
+    // The replica sends its replication credential only to a configured peer (lake#915); plain
+    // http to loopback is a test-only allowance.
+    const std::string source_origin = "http://127.0.0.1:" + std::to_string(source_port);
+    LakeProcess replica(replica_port,
+                        "region-b",
+                        database_uri,
+                        temporary.path() / "region-b",
+                        {"LAKE_REPLICATION_TOKEN=replication-admin",
+                         "LAKE_REPLICATION_PEERS=" + source_origin,
+                         "LAKE_REPLICATION_ALLOW_PRIVATE_ADDRESSES=1"});
     ASSERT_TRUE(replica.ready());
 
-    const std::string source_origin = "http://127.0.0.1:" + std::to_string(source_port);
     const auto replicate = [&] {
         return http_request(replica_port,
                             "POST",
@@ -6795,6 +6823,117 @@ TEST(SyncHttp, TwoLakeInstancesReplicateRepositoryAndResumeFromCursor) {
     EXPECT_FALSE(std::filesystem::exists(temporary.path() / "region-b" / customer->id /
                                          "repositories" / repository->id / "replication" /
                                          "region-a.cursor"));
+}
+
+// Runs the lake executable with `environment` (NAME=value, replacing the parent's value; a bare
+// NAME removes it) until it is ready or exits, and answers its exit status (-1 while it was still
+// running, then stopped) and what it wrote to stdout.
+std::pair<int, std::string> run_lake_until_ready(const std::vector<std::string>& arguments,
+                                                 const std::vector<std::string>& environment,
+                                                 unsigned short port,
+                                                 const std::filesystem::path& output) {
+    std::vector<std::string> variables;
+    for (const std::string& given : environment) {
+        if (given.find('=') != std::string::npos) {
+            variables.push_back(given);
+        }
+    }
+    for (char** entry = environ; *entry != nullptr; ++entry) {
+        const std::string_view variable(*entry);
+        const std::string name(variable.substr(0, variable.find('=')));
+        if (std::ranges::none_of(environment, [&name](const std::string& given) {
+                return given == name || given.starts_with(name + "=");
+            })) {
+            variables.emplace_back(variable);
+        }
+    }
+    std::vector<std::string> argv{LAKE_TEST_SERVER_PATH};
+    argv.insert(argv.end(), arguments.begin(), arguments.end());
+    std::vector<char*> raw_argv;
+    for (std::string& argument : argv) {
+        raw_argv.push_back(argument.data());
+    }
+    raw_argv.push_back(nullptr);
+    std::vector<char*> raw_environment;
+    for (std::string& variable : variables) {
+        raw_environment.push_back(variable.data());
+    }
+    raw_environment.push_back(nullptr);
+    posix_spawn_file_actions_t actions;
+    posix_spawn_file_actions_init(&actions);
+    posix_spawn_file_actions_addopen(
+        &actions, STDOUT_FILENO, output.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    pid_t pid = -1;
+    const int spawned = ::posix_spawn(
+        &pid, raw_argv.front(), &actions, nullptr, raw_argv.data(), raw_environment.data());
+    posix_spawn_file_actions_destroy(&actions);
+    if (spawned != 0) {
+        return {-2, {}};
+    }
+    int status = 0;
+    int exit_status = -1;
+    for (int attempt = 0; attempt < 200; ++attempt) {
+        if (::waitpid(pid, &status, WNOHANG) == pid) {
+            exit_status = WIFEXITED(status) ? WEXITSTATUS(status) : -3;
+            break;
+        }
+        const std::string ready = http_request(port, "GET", "/readyz", "", "application/json");
+        if (ready.find(" 200 ") != std::string::npos) {
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    if (exit_status == -1) {
+        ::kill(pid, SIGTERM);
+        static_cast<void>(::waitpid(pid, nullptr, 0));
+    }
+    std::ifstream written(output);
+    return {exit_status, std::string(std::istreambuf_iterator<char>(written), {})};
+}
+
+// lake#915 (LSR-004): the replication credential never defaults to the admin token, and a peer list
+// that is not a list of origins stops startup.
+TEST(ReplicationStartup, TheReplicationCredentialNeverDefaultsToTheAdminToken) {
+    TemporarySyncRoot temporary;
+    const unsigned short port = unused_loopback_port();
+    ASSERT_NE(port, 0);
+    const std::vector<std::string> arguments{
+        "--memory-store",
+        "--listen",
+        "127.0.0.1:" + std::to_string(port),
+        "--store-root",
+        (temporary.path() / "root").string(),
+        "--instance-kek",
+        "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"};
+    const auto [status, output] = run_lake_until_ready(
+        arguments,
+        {"LAKE_ADMIN_TOKEN=startup-admin", "LAKE_REPLICATION_TOKEN", "LAKE_REPLICATION_PEERS"},
+        port,
+        temporary.path() / "stdout.log");
+    ASSERT_EQ(status, -1) << "lake exited during startup:\n" << output;
+    std::optional<json> startup;
+    std::istringstream lines(output);
+    for (std::string line; std::getline(lines, line);) {
+        const json parsed = json::parse(line, nullptr, false);
+        if (parsed.is_object() && parsed.value("event", "") == "startup") {
+            startup = parsed;
+        }
+    }
+    ASSERT_TRUE(startup) << output;
+    EXPECT_EQ(startup->at("admin_token_set"), "yes");
+    EXPECT_EQ(startup->at("replication_token_set"), "no") << startup->dump();
+    EXPECT_EQ(startup->at("replication_peers"), json::array());
+
+    const unsigned short refused_port = unused_loopback_port();
+    std::vector<std::string> refused_arguments = arguments;
+    refused_arguments[2] = "127.0.0.1:" + std::to_string(refused_port);
+    const auto [refused_status, refused_output] = run_lake_until_ready(
+        refused_arguments,
+        {"LAKE_ADMIN_TOKEN=startup-admin",
+         "LAKE_REPLICATION_PEERS=https://region-a.lake.example/v1/repositories"},
+        refused_port,
+        temporary.path() / "refused.log");
+    EXPECT_EQ(refused_status, 2) << refused_output;
 }
 
 TEST(SyncHttp, StorageQuotaThrottlesNewWritesAndKeepsExistingContentReadable) {

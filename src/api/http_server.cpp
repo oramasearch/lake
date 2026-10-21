@@ -266,6 +266,82 @@ bool peer_url_is_safe(std::string_view value) {
     return !host.empty() && (secure || loopback);
 }
 
+// lake#915: a replication pull reaches only public addresses unless the operator allows private
+// ones, and the whole pull is bounded in time. liquid's sync client resolves the name again when it
+// connects; the peer origin is one the operator configured (LAKE_REPLICATION_PEERS), so this check
+// is not racing a name a caller controls.
+liquid::runtime::task<void> replication_peer_is_public(std::string host, std::string port) {
+    const auto executor = co_await boost::capy::this_coro::executor;
+    boost::corosio::resolver resolver{executor.context()};
+    auto [resolve_error, results] = co_await resolver.resolve(host, port);
+    if (resolve_error) {
+        co_return std::unexpected(
+            liquid::error{liquid::errc::unavailable,
+                          "could not resolve replication peer: " + resolve_error.message(),
+                          host});
+    }
+    bool any = false;
+    for (const auto& entry : results) {
+        const auto endpoint = entry.get_endpoint();
+        std::vector<std::uint8_t> bytes;
+        if (endpoint.is_v4()) {
+            const auto raw = endpoint.v4_address().to_bytes();
+            bytes.assign(raw.begin(), raw.end());
+        } else {
+            const auto raw = endpoint.v6_address().to_bytes();
+            bytes.assign(raw.begin(), raw.end());
+        }
+        if (!mcp_public_address(bytes)) {
+            co_return std::unexpected(
+                liquid::error{liquid::errc::invalid_argument,
+                              "the replication peer's address is not a public address",
+                              host});
+        }
+        any = true;
+    }
+    if (!any) {
+        co_return std::unexpected(liquid::error{
+            liquid::errc::unavailable, "the replication peer resolved no addresses", host});
+    }
+    co_return liquid::result<void>{};
+}
+
+liquid::runtime::task<liquid::sync_report> checked_replication_pull(liquid::sync_endpoint& endpoint,
+                                                                    liquid::repository& destination,
+                                                                    std::string host,
+                                                                    std::string port,
+                                                                    bool public_only) {
+    if (public_only) {
+        auto checked = co_await replication_peer_is_public(std::move(host), std::move(port));
+        if (!checked) {
+            co_return std::unexpected(checked.error());
+        }
+    }
+    co_return co_await endpoint.pull(destination);
+}
+
+liquid::runtime::task<liquid::sync_report>
+bounded_replication_pull(liquid::sync_endpoint& endpoint,
+                         liquid::repository& destination,
+                         std::string host,
+                         std::string port,
+                         bool public_only,
+                         std::chrono::milliseconds limit) {
+    auto [deadline_error, pulled] = co_await liquid::runtime::timeout(
+        liquid::runtime::as_io(checked_replication_pull(
+            endpoint, destination, std::move(host), std::move(port), public_only)),
+        limit);
+    if (deadline_error) {
+        co_return std::unexpected(liquid::error{
+            liquid::errc::unavailable,
+            "replication pull did not finish within " +
+                std::to_string(std::chrono::duration_cast<std::chrono::seconds>(limit).count()) +
+                " s; a retry resumes from the saved cursor",
+            "replicate_repository"});
+    }
+    co_return std::move(pulled);
+}
+
 std::string base64_encode(std::span<const std::byte> input) {
     if (input.empty()) {
         return {};
@@ -2423,6 +2499,13 @@ public:
         control::ObjectRequestObserver observer;
     };
 
+    // lake#915: whether a replication pull may reach private addresses, and how long one may take.
+    // Set once by the server before it serves.
+    void configure_replication(bool allow_private_addresses, std::chrono::milliseconds timeout) {
+        replication_allow_private_ = allow_private_addresses;
+        replication_timeout_ = timeout;
+    }
+
     void configure_workspace_stores(WorkspaceStoreConfig config) {
         std::lock_guard maps(mutex_);
         workspace_config_ = std::move(config);
@@ -2807,9 +2890,15 @@ public:
                    const std::string& source_instance,
                    const std::string& source_url,
                    const std::string& bearer) override {
-                if (!peer_url_is_safe(source_url)) {
+        if (!peer_url_is_safe(source_url)) {
             return std::unexpected(SyncStoreError{
                 "invalid_input", "replication peer URL must use HTTPS or loopback HTTP"});
+        }
+        // lake#915: only HTTPS to public addresses unless the operator allows private ones.
+        const auto target = parse_mcp_url(source_url, replication_allow_private_);
+        if (!target || (!replication_allow_private_ && target->scheme != "https")) {
+            return std::unexpected(
+                SyncStoreError{"invalid_input", "replication peer URL must use HTTPS"});
         }
         if (!path_component_is_safe(source_instance)) {
             return std::unexpected(
@@ -2843,7 +2932,13 @@ public:
             }
         }
         liquid::sync_endpoint endpoint(source_url, std::move(options));
-        const auto pulled = liquid::runtime::block_on(endpoint.pull(*(*state)->subject));
+        const auto pulled =
+            liquid::runtime::block_on(bounded_replication_pull(endpoint,
+                                                               *(*state)->subject,
+                                                               target->host,
+                                                               target->port,
+                                                               !replication_allow_private_,
+                                                               replication_timeout_));
         if (!pulled) {
             return std::unexpected(error_of(pulled.error()));
         }
@@ -5471,6 +5566,8 @@ private:
 
     std::string root_;
     std::chrono::milliseconds owner_wait_;
+    bool replication_allow_private_ = false;
+    std::chrono::milliseconds replication_timeout_{std::chrono::minutes(10)};
     // Guards the maps below and nothing else (see Lane).
     std::mutex mutex_;
     std::map<std::string, std::shared_ptr<Lane>> lanes_;
@@ -8451,6 +8548,8 @@ struct ApiServer::Impl {
     explicit Impl(ServerOptions opts)
         : options(std::move(opts)), sync_store(options.store_root, options.store_owner_wait),
           artifacts(options.store_root, options.node_name) {
+        sync_store.configure_replication(options.replication_allow_private_addresses,
+                                         options.replication_timeout);
         configure_workspace_stores();
         lend_repositories_to_search();
         if (web_ui_stylesheet_url().empty()) {
@@ -8739,11 +8838,16 @@ struct ApiServer::Impl {
         if (!options.replication_token.empty()) {
             headers.emplace_back("Authorization", "Bearer " + options.replication_token);
         }
-        const OutboundResponse response =
-            outbound_http.request({"POST",
-                                   source_url + "/v1/export_transparency_replication_batch",
-                                   nlohmann::json{{"after_tree_size", after_tree_size}}.dump(),
-                                   std::move(headers)});
+        // lake#915: the capability has already refused a source that is not a configured peer;
+        // the request also reaches only HTTPS on public addresses, and waits a bounded time.
+        OutboundRequest request{"POST",
+                                source_url + "/v1/export_transparency_replication_batch",
+                                nlohmann::json{{"after_tree_size", after_tree_size}}.dump(),
+                                std::move(headers)};
+        request.timeout =
+            std::min<std::chrono::seconds>(options.replication_timeout, std::chrono::seconds(60));
+        request.public_only = !options.replication_allow_private_addresses;
+        const OutboundResponse response = outbound_http.request(std::move(request));
         if (!response.error.empty()) {
             return std::unexpected(ApiError{
                 "store_unavailable", "replication peer request failed: " + response.error, {}});
@@ -9108,6 +9212,7 @@ struct ApiServer::Impl {
             return request_replication_batch(source_url, after_tree_size);
         };
         ctx.replication_token = options.replication_token;
+        ctx.replication_peers = options.replication_peers;
         ctx.node_name = options.node_name;
         ctx.identity_seed = options.identity_seed;
         ctx.instance_kek = options.instance_kek;
