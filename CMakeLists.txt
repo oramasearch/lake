@@ -266,6 +266,7 @@ add_library(lake-core STATIC
   src/api/web_ui.cpp
   src/api/markdown.cpp
   src/api/oauth.cpp
+  src/api/saml.cpp
   src/api/clerk.cpp
   src/api/workspace_capabilities.cpp
   src/api/repository_records_api.cpp

@@ -72,6 +72,15 @@ sessions without erasing anything; every delivery is audited centrally. Not depl
 must vendor the schema, select `clerk_webhooks_guard` and configure the endpoint and secret
 (orama-operator#541). See [`docs/api/clerk.md#webhooks`](docs/api/clerk.md#webhooks).
 
+SAML sign-in has an Assertion Consumer Service (lake#836, migration `0092_saml_sign_in`):
+`GET /v1/saml/<provider>/metadata` (the SP entity id), `GET /v1/saml/<provider>/start` and
+`start_sso_saml` (a one-use AuthnRequest over HTTP-Redirect), `POST /v1/saml/<provider>/acs`
+(HTTP-POST). Verification is Lake's own strict XML reader, Exclusive Canonicalization and XML
+Signature check (`src/control/saml.cpp`, no XML library), with audience, recipient, destination,
+time, `InResponseTo` and once-only assertion checks; unsolicited responses are refused. Not
+deployed; the operator must vendor the schema and select `saml_sign_in_guard`. See
+[`docs/api/sso.md#saml-sign-in`](docs/api/sso.md#saml-sign-in).
+
 Deployments made with `liquid deploy` reach Ship → Deployments (lake#805, migration
 `0088_repository_liquid_ids`): `liquid deploy` sends the id liquid gave the repository, not lake's
 UUID, so `repositories.liquid_id` records it (every push, and the platform sync for repositories it

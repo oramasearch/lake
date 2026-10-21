@@ -33,6 +33,7 @@
 #include "lake/api/apps.hpp"
 #include "lake/api/forge.hpp"
 #include "lake/api/oauth.hpp"
+#include "lake/api/saml.hpp"
 #include "lake/api/sync_store.hpp"
 #include "lake/api/web_ui.hpp"
 #include "lake/control/agent_library.hpp"
@@ -4031,9 +4032,57 @@ void register_sso_capabilities(Registry& registry) {
                 context));
         }});
     registry.add(Capability{
+        .name = "start_sso_saml",
+        .title = "Start enterprise SAML sign-in",
+        .description = "Create a one-use SAML AuthnRequest for an enterprise SAML provider and "
+                       "answer the identity provider's sign-in URL (HTTP-Redirect binding). The "
+                       "provider posts its response to /v1/saml/<provider id>/acs.",
+        .input_schema = {{"type", "object"},
+                         {"properties",
+                          {{"provider_id", {{"type", "string"}}},
+                           {"device_name", {{"type", "string"}}},
+                           {"taap_id", {{"type", "string"}}},
+                           {"return_to", {{"type", "string"}}}}},
+                         {"required", json::array({"provider_id"})},
+                         {"additionalProperties", false}},
+        .output_schema = {{"type", "object"},
+                          {"properties", {{"authorization_url", {{"type", "string"}}}}}},
+        .kind = CapabilityKind::Action,
+        .requires_auth = false,
+        .object = "authentication",
+        .action = "write",
+        .resolve_object = global_object,
+        .handler = [](const json& input, ApiContext& context) {
+            if (!context.store) {
+                return no_store();
+            }
+            const std::string return_to = input.value("return_to", "");
+            if (!return_to.empty() && (!return_to.starts_with('/') || return_to.starts_with("//") ||
+                                       return_to.starts_with("/\\") ||
+                                       std::ranges::any_of(return_to, [](unsigned char c) {
+                                           return c < 0x20 || c == 0x7f;
+                                       }))) {
+                return ApiResult::failure(
+                    "invalid_input", "return_to must be a path on this Lake", "/return_to");
+            }
+            auto started = start_saml_sign_in(*context.store,
+                                              context.public_host,
+                                              input.at("provider_id"),
+                                              input.value("device_name", "browser"),
+                                              input.value("taap_id", ""),
+                                              return_to);
+            if (!started) {
+                return ApiResult::failure(started.error().code, started.error().message);
+            }
+            return ApiResult::success({{"authorization_url", *started}});
+        }});
+    registry.add(Capability{
         .name = "sign_in_saml",
-        .title = "Sign in with signed SAML assertion",
-        .description = "Verify the configured SAML signing certificate before issuing a session.",
+        .title = "Sign in with signed SAML response",
+        .description = "Verify a base64 SAMLResponse that answers a start_sso_saml request: the "
+                       "provider's signature, issuer, audience, recipient, destination and "
+                       "validity window, each request and assertion accepted once. Identity "
+                       "providers post to /v1/saml/<provider id>/acs instead.",
         .input_schema = {{"type", "object"},
                          {"properties",
                           {{"provider_id", {{"type", "string"}}},
@@ -4053,30 +4102,18 @@ void register_sso_capabilities(Registry& registry) {
             if (!context.store) {
                 co_return no_store();
             }
-            auto provider = context.store->get_sso_provider(input.at("provider_id"));
-            if (!provider) {
-                co_return from_store_error(provider.error());
+            auto accepted = accept_saml_response(*context.store,
+                                                 context.public_host,
+                                                 input.at("provider_id"),
+                                                 input.at("saml_response").get<std::string>(),
+                                                 input.value("taap_id", ""),
+                                                 input.value("device_name", ""),
+                                                 saml_now());
+            if (!accepted) {
+                co_return ApiResult::failure(accepted.error().code, accepted.error().message);
             }
-            if (provider->protocol != "saml") {
-                co_return ApiResult::failure("invalid_input", "provider is not a SAML provider");
-            }
-            auto assertion =
-                control::saml::verify_response(input.at("saml_response").get<std::string>(),
-                                               provider->signing_certificate,
-                                               provider->issuer);
-            if (!assertion) {
-                co_return ApiResult::failure("unauthorized", assertion.error());
-            }
-            co_return session_answer(co_await issued_result(
-                context.store->sign_in_sso({provider->id,
-                                            assertion->issuer,
-                                            assertion->subject,
-                                            assertion->email,
-                                            assertion->display_name,
-                                            input.value("taap_id", ""),
-                                            input.value("device_name", "browser"),
-                                            assertion->claims}),
-                context));
+            co_return session_answer(
+                co_await issued_result(context.store->sign_in_sso(accepted->identity), context));
         }});
     registry.add(Capability{
         .name = "upsert_scim_user",

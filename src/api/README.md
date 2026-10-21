@@ -641,3 +641,8 @@ of the workspace secret the store names (read as Lake, kept a minute). `http_ser
 default browser, `control::cloud_store_browser` over its own public-only transport
 (`LAKE_STORE_ALLOW_PRIVATE_ADDRESSES` for local development). See
 [storage.md](../../docs/api/storage.md#browsing-a-store).
+
+SAML sign-in (lake#836, `docs/api/sso.md#saml-sign-in`): `saml.cpp` holds the steps the
+`start_sso_saml` and `sign_in_saml` capabilities and the `/v1/saml/<provider>/metadata`, `/start`
+and `/acs` routes in `http_server.cpp` share: starting a request, and verifying a response, consuming
+its request and recording its assertion once before `sign_in_sso` provisions the person.

@@ -1307,3 +1307,22 @@ and `seed_destroyed_at` set. Of the personal space: `billing_contacts`, `custome
 objects go; `billing_invoices`, their lines, `billing_accounts`, `billing_payment_events` and
 `cloud_orders` are kept as billing records. Additive and idempotent; guard `account_deletion_guard`.
 The operator vendors the schema and selects that guard before a lake with this change is rolled.
+
+## SAML sign-in migration
+
+`0092_saml_sign_in` (lake#836, [`../api/sso.md#saml-sign-in`](../api/sso.md#saml-sign-in)) adds two
+tables for SAML sign-in through the Assertion Consumer Service:
+
+- `sso_saml_requests`: one row per outstanding AuthnRequest. `provider_id` (cascading with the
+  `sso_providers` row), `request_id_hash` (SHA-256 hex of the request's `ID`, unique), `device_name`
+  (≤ 256), `taap_id` (≤ 512, `''` when the sign-in carried none), `return_to` (a same-origin path,
+  ≤ 2048), `expires_at` (ten minutes after `start_sso_saml` or the start route), `used_at`, and
+  `created_at`. Rows expired for a day are removed when the next request is recorded.
+- `sso_saml_assertions`: primary key `(provider_id, assertion_id_hash)`, the SHA-256 hex of each
+  accepted assertion's `ID`, kept until `expires_at` (the assertion's earliest `NotOnOrAfter`), with
+  `used_at`. Expired rows are removed when the next response is accepted.
+
+The ACS consumes the request and inserts the assertion in one transaction, so each is accepted once.
+Sign-in state (decision 50): nothing from a workspace. Indexes `sso_saml_requests_expires_idx` and
+`sso_saml_assertions_expires_idx`. Additive and idempotent; guard `saml_sign_in_guard`. The operator
+vendors the schema and selects that guard before a lake with this change is rolled.

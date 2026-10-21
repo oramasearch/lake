@@ -198,6 +198,7 @@ constexpr std::array central = std::to_array<std::string_view>({
     "sign_up_password",
     "start_oauth",
     "start_sso_oidc",
+    "start_sso_saml",
     "start_workspace",
     "test_sso_provider",
     "timestamp_checkpoint",

@@ -305,3 +305,9 @@ object protocol with two implementations, S3 (SigV4, `ListObjectsV2`, ranged `GE
 Both stores keep served methodology models' `methodology_deployments` rows and the operator's
 `methodology_deployment_status` (lake#690, migration `0083`); `methodologies.cpp` holds
 `methodology_deployment_endpoint_valid`.
+
+`saml.cpp` is SAML's service-provider side (lake#836, `docs/api/sso.md#saml-sign-in`): a strict XML
+reader (no DTDs or entities), Exclusive XML Canonicalization 1.0, XML Signature verification with
+the provider's registered certificate, and the response, assertion and condition checks, with no
+XML library. Both stores keep the outstanding AuthnRequests and the accepted assertion ids
+(`begin_saml`, `consume_saml`; migration `0092_saml_sign_in`), each accepted once.

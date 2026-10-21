@@ -419,6 +419,9 @@ and `Experiments.CompareRunsAnswersItsGetFormWithRepeatedKeysOrACommaList`
 | `register_sso_provider`, `list_sso_providers`, `test_sso_provider` | action/read | organization, protocol configuration, or provider id | secret-free provider configuration | [sso.md](sso.md) |
 | `create_federation_issuer`, `list_federation_issuers` | action/read | organization, issuer, claim | acceptable issuer-claim policy rows | [sso.md](sso.md) |
 | `sign_in_sso` | action, operator only (lake#562) | provider assertion identity and claims | browser session + secret | [sso.md](sso.md) |
+| `sign_in_sso` | action, public entry | provider assertion identity and claims | browser session + secret | [sso.md](sso.md) |
+| `start_sso_saml` | action, public entry | SAML provider id, device name, TAAP id, return path | the IdP's sign-in URL carrying a one-use AuthnRequest | [sso.md](sso.md#saml-sign-in) |
+| `sign_in_saml` | action, public entry | SAML provider id, base64 SAMLResponse answering a `start_sso_saml` request | browser session + secret | [sso.md](sso.md#saml-sign-in) |
 | `upsert_scim_user`, `upsert_scim_group`, `list_sso_provisioning_logs` | action/read | SCIM resource mapping or provider id | SCIM mapping or provisioning outcomes | [sso.md](sso.md) |
 | `scim_list_*`, `scim_get_*`, `scim_upsert_*`, `scim_patch_*`, `scim_delete_*` | action, provider entry | provider bearer plus filter, resource, PATCH operations, or resource id | SCIM user/group resource, list response, or deletion confirmation | [sso.md](sso.md) |
 | `search` | read | `query`, `customer?`, `repository?`, `ref?`, `change?`, `history?`, `limit?` | `{mode, scanned_changes, items: [ranked hit]}` | [search.md](search.md) |
@@ -470,6 +473,11 @@ protection there before it starts ([forge.md](forge.md#where-forge-records-live)
 OAuth providers return the browser to `GET /v1/oauth/<provider>/callback`. This callback is the
 documented provider-facing route outside the registry; it consumes one-use state and issues the
 same `lake_session` cookie returned by the identity capabilities.
+
+SAML identity providers post to the Assertion Consumer Service `POST /v1/saml/<provider id>/acs`,
+and read Lake's metadata at `GET /v1/saml/<provider id>/metadata`; `GET /v1/saml/<provider id>/start`
+starts a sign-in ([sso.md](sso.md#saml-sign-in)). The ACS runs the same verification as
+`sign_in_saml` and issues the same cookie.
 
 SCIM clients use the canonical `/scim/v2` resources. Their adapter translates HTTP methods and
 SCIM envelopes into the `scim_*` capabilities; provider authentication, validation, store calls,

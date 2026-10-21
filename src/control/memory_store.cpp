@@ -4583,6 +4583,50 @@ Result<OAuthFlow> InMemoryStore::consume_oauth(const std::string& provider,
     return std::unexpected(StoreError{"unauthorized", "OAuth state is invalid or expired"});
 }
 
+Result<void> InMemoryStore::begin_saml(const SamlRequest& input) {
+    if (input.provider_id.empty() || input.request_id.empty()) {
+        return std::unexpected(StoreError{"invalid_input", "SAML request material is incomplete"});
+    }
+    std::lock_guard lock(mutex_);
+    if (!std::ranges::any_of(sso_providers_, [&](const SsoProvider& provider) {
+            return provider.id == input.provider_id && provider.protocol == "saml" &&
+                   provider.enabled;
+        })) {
+        return std::unexpected(StoreError{"not_found", "SAML provider is unavailable"});
+    }
+    if (std::ranges::any_of(saml_requests_, [&](const SamlRequestRecord& record) {
+            return record.request.request_id == input.request_id;
+        })) {
+        return std::unexpected(StoreError{"conflict", "SAML request id is already used"});
+    }
+    saml_requests_.push_back(
+        {input, std::chrono::steady_clock::now() + std::chrono::minutes(10), false});
+    return {};
+}
+
+Result<SamlRequest> InMemoryStore::consume_saml(const SamlAnswer& input) {
+    std::lock_guard lock(mutex_);
+    const std::int64_t now = std::chrono::duration_cast<std::chrono::seconds>(
+                                 std::chrono::system_clock::now().time_since_epoch())
+                                 .count();
+    std::erase_if(saml_assertions_, [&](const auto& entry) { return entry.second < now; });
+    const auto key = std::pair{input.provider_id, input.assertion_id};
+    if (input.assertion_id.empty() || saml_assertions_.contains(key)) {
+        return std::unexpected(StoreError{"unauthorized", "SAML assertion was already used"});
+    }
+    for (SamlRequestRecord& record : saml_requests_) {
+        if (record.request.provider_id == input.provider_id &&
+            record.request.request_id == input.request_id && !record.used &&
+            record.expires_at > std::chrono::steady_clock::now()) {
+            record.used = true;
+            saml_assertions_[key] = std::max(input.assertion_expires_at, now);
+            return record.request;
+        }
+    }
+    return std::unexpected(
+        StoreError{"unauthorized", "SAML response answers no outstanding request"});
+}
+
 Result<IssuedSession> InMemoryStore::create_token(const NewToken& input) {
     if (input.name.empty())
         return std::unexpected(StoreError{"invalid_input", "name is required"});
