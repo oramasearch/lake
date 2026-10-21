@@ -870,11 +870,15 @@ int order_email_retry_seconds(int attempts) {
     return std::min(60 << exponent, 3600);
 }
 
-bool OrderRateLimiter::allow(std::string_view client, std::chrono::steady_clock::time_point now) {
+bool OrderRateLimiter::allow(std::string_view client,
+                             std::string_view path,
+                             std::chrono::steady_clock::time_point now) {
     const auto window_start = now - std::chrono::hours(1);
     std::lock_guard lock(mutex_);
-    while (!all_.empty() && all_.front() <= window_start) {
-        all_.pop_front();
+    for (auto& [kind, times] : all_) {
+        while (!times.empty() && times.front() <= window_start) {
+            times.pop_front();
+        }
     }
     for (auto it = clients_.begin(); it != clients_.end();) {
         while (!it->second.empty() && it->second.front() <= window_start) {
@@ -882,7 +886,8 @@ bool OrderRateLimiter::allow(std::string_view client, std::chrono::steady_clock:
         }
         it = it->second.empty() ? clients_.erase(it) : std::next(it);
     }
-    if (static_cast<int>(all_.size()) >= per_hour_) {
+    auto& on_path = all_[std::string(path)];
+    if (static_cast<int>(on_path.size()) >= per_hour_) {
         return false;
     }
     auto found = clients_.find(client);
@@ -902,7 +907,7 @@ bool OrderRateLimiter::allow(std::string_view client, std::chrono::steady_clock:
                 .first;
     }
     found->second.push_back(now);
-    all_.push_back(now);
+    on_path.push_back(now);
     return true;
 }
 

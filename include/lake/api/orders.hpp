@@ -166,21 +166,26 @@ struct PriceListRow {
 };
 std::vector<PriceListRow> price_list_rows(const std::vector<control::BillingPrice>& prices);
 
-// A sliding-hour limit on orders, per client address and in all (the apex is anonymous). Thread
-// safe. Remembers at most 10,000 addresses; past that, the oldest are forgotten.
+// A sliding-hour limit on orders, per client address and in all (the apex is anonymous). The
+// in-all limit is kept per order path (lake#838): order forms, which anyone can send, can never use
+// up the cap that checkout orders, which pay, are counted against, nor the reverse. Thread safe.
+// Remembers at most 10,000 addresses; past that, the oldest are forgotten.
 class OrderRateLimiter {
 public:
     OrderRateLimiter(int per_client_per_hour, int per_hour)
         : per_client_(per_client_per_hour), per_hour_(per_hour) {}
-    // Counts one order from `client` at `now` and answers true, or answers false (and counts
-    // nothing) when the client or everyone has reached the limit within the last hour.
-    bool allow(std::string_view client, std::chrono::steady_clock::time_point now);
+    // Counts one order from `client` on `path` (checkout | order_form) at `now` and answers true,
+    // or answers false (and counts nothing) when the client, or every order on that path, has
+    // reached the limit within the last hour.
+    bool allow(std::string_view client,
+               std::string_view path,
+               std::chrono::steady_clock::time_point now);
 
 private:
     std::mutex mutex_;
     int per_client_;
     int per_hour_;
-    std::deque<std::chrono::steady_clock::time_point> all_;
+    std::map<std::string, std::deque<std::chrono::steady_clock::time_point>, std::less<>> all_;
     std::map<std::string, std::deque<std::chrono::steady_clock::time_point>, std::less<>> clients_;
 };
 
