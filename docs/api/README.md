@@ -221,7 +221,9 @@ in PostgreSQL, so a refused caller reaches no workspace
 [`audit.md`](audit.md) defines the signed audit stream. Since decision 52 (lake#317, lake#318)
 it is two kinds of log: the central chain in PostgreSQL for control-plane and identity events, and
 each workspace's own chain, in its Zetta, for events about its data, written off the request path;
-the audit capabilities read both ([audit.md](audit.md#which-log)).
+the audit capabilities read both ([audit.md](audit.md#which-log)). An account's administrator
+reads and exports its own account's audit; the whole log is the operator's
+([audit.md](audit.md#who-may-read-it), lake#18).
 
 [`registry.md`](registry.md) defines the OCI Distribution, npm, Python, and debuginfod protocol
 routes, build-push credentials, exact-repository app pull credentials, and exact-byte integration
@@ -355,8 +357,8 @@ and `Experiments.CompareRunsAnswersItsGetFormWithRepeatedKeysOrACommaList`
 | `entity_effective_access` | read | `object_type` (`repository`, `organization`, or `team`), `id` | `{object, items: [effective access]}` | [policy.md](policy.md) |
 | `identity` | read, **no auth** | — | lake TAAP identity document | [audit.md](audit.md) |
 | `rotate_identity` | action | — | replacement lake identity document | [audit.md](audit.md) |
-| `audit` | read | `principal?`, `object?`, `outcome?`, `from?`, `to?`, `limit?`, `workspace_id?`, `customer_id?`, `log?` | `{items: [audit event with log], unread_workspaces}`, the central log and the workspaces' audits | [audit.md](audit.md#reading-both-logs) |
-| `export_audit` | read | audit filters | `{jsonl}`, the central log or one workspace's audit | [audit.md](audit.md) |
+| `audit` | read | `principal?`, `object?`, `outcome?`, `from?`, `to?`, `limit?`, `workspace_id?`, `customer_id?`, `log?` | `{items: [audit event with log], unread_workspaces}`, the central log and the workspaces' audits; an account's for its administrator | [audit.md](audit.md#who-may-read-it) |
+| `export_audit` | read | audit filters | `{jsonl}`, the central log (one account's with `customer_id`) or one workspace's audit | [audit.md](audit.md#who-may-read-it) |
 | `verify_audit` | read | `workspace_id?`, `customer_id?` | `{verified: true, log}`, the central chain or one workspace's | [audit.md](audit.md#tamper-evidence) |
 | `set_audit_retention` | action | `customer_id`, `days` (≥400) | `{customer_id, days, workspace_audit_retention}` | [audit.md](audit.md#retention) |
 | `initialize_tuf` | action | threshold-signed root metadata | immutable root metadata version | [transparency.md](transparency.md) |

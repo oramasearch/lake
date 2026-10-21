@@ -493,6 +493,9 @@ struct ApiContext {
     // The workspace a call acted on, for its audit event (decision 52, audit_routing.hpp): the
     // input's `workspace_id` once Registry::call has validated it, or one a handler resolved.
     std::string audit_workspace_id;
+    // The workspace Registry::call validated and its account, kept so the event's attribution
+    // (lake#18) does not read the workspace twice: {workspace id, customer id}.
+    std::pair<std::string, std::string> audit_validated_workspace;
     // The workspace audit's writer (docs/api/audit.md#workspace-audit). Null: this lake has no
     // workspace Zettas, and every event is recorded in the central log.
     AuditRecorder* audit_recorder = nullptr;
@@ -597,6 +600,14 @@ public:
     ApiResult call(const std::string& name, const nlohmann::json& input, ApiContext& context) const;
     liquid::runtime::task<ApiResult>
     call_async(const std::string& name, const nlohmann::json& input, ApiContext& context) const;
+    // A call to capability `name` refused before its input could be read (a body that is not
+    // JSON, lake#18): audited once, as a call would be, with `failure` and `details` (safe
+    // metadata such as the body's size, never its contents), and answered `failure`. The handler
+    // never runs. An unknown name is answered unknown_capability and not audited, as call does.
+    ApiResult refuse(const std::string& name,
+                     ApiResult failure,
+                     const nlohmann::json& details,
+                     ApiContext& context) const;
 
 private:
     std::vector<std::shared_ptr<const Capability>> entries_;

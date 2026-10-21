@@ -3345,6 +3345,7 @@ public:
                         "(SELECT sequence FROM audit_events WHERE id::text = $8)) "
                         "AND NOT (outcome = 'success' AND action IN "
                         "(SELECT jsonb_array_elements_text($9::jsonb))) "
+                        "AND ($10 = '' OR customer_id::text = $10) "
                         "ORDER BY sequence " +
                         (filter.newest_first ? "DESC" : "ASC") + " LIMIT $6",
                     filter.principal,
@@ -3355,7 +3356,8 @@ public:
                     filter.limit,
                     filter.request_id,
                     filter.after_id,
-                    nlohmann::json(filter.omit_successful_actions).dump());
+                    nlohmann::json(filter.omit_successful_actions).dump(),
+                    filter.customer_id);
                 std::vector<audit::Event> events;
                 for (const pqxx::row& row : rows) {
                     events.push_back(audit_event_of(row));
