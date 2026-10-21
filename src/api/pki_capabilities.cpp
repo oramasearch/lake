@@ -563,10 +563,11 @@ void register_pki_capabilities(Registry& registry) {
                    .action = "admin",
                    .resolve_object = customer_object,
                    .handler = [](const json& input, ApiContext& context) {
-                       if (!context.pki) {
+                       if (!context.pki || !context.store) {
                            return no_pki();
                        }
                        auto account = context.pki->create_acme_account(
+                           *context.store,
                            input.at("customer_id").get<std::string>(),
                            {input.at("x").get<std::string>(), input.at("y").get<std::string>()});
                        if (!account) {
