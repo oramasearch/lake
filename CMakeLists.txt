@@ -329,6 +329,9 @@ add_library(lake-core STATIC
   src/api/image_capabilities.cpp
   src/api/volume_capabilities.cpp
   src/api/network_capabilities.cpp
+  # lake#889: beside its one user. In lake-control-postgres, which lake-core precedes on the link
+  # line, GNU ld (one pass over static archives) left PendingNetworkRecords' vtable unresolved.
+  src/control/network_records.cpp
   src/api/tunnel_clients.cpp
   src/api/regions.cpp
   src/api/orders.cpp
@@ -377,7 +380,6 @@ add_library(lake-control-postgres STATIC
   src/control/apps_memory.cpp
   src/control/memory_store.cpp
   src/control/network.cpp
-  src/control/network_records.cpp
   src/control/network_memory.cpp
   src/control/postgres_store.cpp
 )
