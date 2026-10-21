@@ -48,6 +48,11 @@ manifest and whether Git was requested; the returned archive is the download pay
 `workspace_id` records where it came from and is never reused. A missing or unknown workspace is
 `invalid_input` at `/workspace_id`. The source description and visibility are retained. A destination name collision or a failed liquid transfer leaves the import refused.
 
+A review is imported without its `approval` (LSR-077): an approval is lake's record of who approved
+in the repository it was given in, and a signed archive proves only who exported it, so an
+imported review never satisfies a protected branch's `required_review`. Its state is kept as
+history. See [forge](forge.md#who-may-approve-lsr-077).
+
 ## Verify
 
 ```sh

@@ -71,8 +71,9 @@ adds Markdown discussion after confirming that the issue belongs to the reposito
 **Author (lake#598).** `create_issue` and `create_issue_comment` record the caller's TAAP identity
 as the record's `author`. Lake sets it; the input cannot name one (the schemas refuse an `author`
 member), and `update_issue` keeps it. Records written before lake#598 have no `author`, and a GitHub
-import keeps the GitHub login it read. Reviews and review comments are unchanged: liquid's forge
-client reads a review comment's `author` as an actor object.
+import keeps the GitHub login it read. Review comments are unchanged: liquid's forge client reads
+a review comment's `author` as an actor object. A review records its opener as `opened_by`
+([approvals](#who-may-approve-lsr-077)).
 
 **People to assign (lake#598).** `issue_assignees` (`repository_id`) answers
 `{"people": [{taap_id, kind, display_name, email, handle}]}`: the person who owns the repository's
@@ -89,6 +90,21 @@ label's colour from its name (`labelTone`, `frontend/src/pages/repositories/issu
 that review to `approved` or `closed`. `create_review_comment` verifies that its parent review is
 in the same repository and accepts an anchor value with required `change`, `path`, `line`, and
 `column` members.
+
+### Who may approve (LSR-077)
+
+A protected branch's review requirement needs two people, the one who pushes and one who approves.
+Before LSR-077 any repository writer could open a review of their own change, approve it and push
+it, and the branch accepted the approval.
+
+- `create_review` records the caller as `opened_by`; the input cannot name it.
+- `update_review` with `approved` needs `review` on the repository as well as the `write` every
+  review update needs (the `admin` role, directly or inherited, holds both; `write` alone is
+  `unauthorized`) and is `forbidden` to the review's opener, the operator included. Lake writes
+  `approval: {by, change_id}`, the caller and the review's change; the input cannot name either.
+  Any other state sets `approval` to `null`, withdrawing it.
+- `import_repository` drops `approval` from every review it imports, so an archive cannot carry an
+  approval in; an imported review keeps its state as history.
 
 `map_review_anchors` receives a source change, target change, path, and the text hunks between them.
 It updates only matching comment anchors and reports `same`, `shifted`, `approximate`, or
@@ -160,8 +176,13 @@ then changes no reference, and an ordinary one applies none of them. A lake conf
 evaluates no rules.
 
 An approved review is a `review` record whose `change_id` exactly equals the reference's proposed
-head and whose current `state` is `approved`. Approval for an ancestor, a different change, or a
-review in any other state does not satisfy `required_review`.
+head, whose current `state` is `approved`, and whose `approval` lake recorded for that same change
+([who may approve](#who-may-approve-lsr-077)). The approver must not be the pusher or the review's
+opener, and must hold `review` on the rule's `path` object (which inherits the repository's grants)
+when the push is evaluated, so a revoked reviewer's approval stops counting. Approval for an
+ancestor, a different change, a review in any other state, or a review approved before LSR-077
+(which has no `approval`; approve it again) does not satisfy `required_review`. The operator
+credential is one principal: its approval counts for another person's push, never for its own.
 
 Lake records one signed audit event for each protected reference decision. Allowed decisions use
 kind `forge.branch_protection.allowed`; refusals use `forge.branch_protection.refused`. Both retain
@@ -187,8 +208,12 @@ workspaces, conditional updates, least privilege, a repository without a workspa
 that is not ready and workspace deletion, for reads and for branch protection.
 `...TheOneShotCopyMovesForgeRecordsIntoTheirRepositorysWorkspace` and
 `PostgresForgeRecords.MigrationRecordsEachRowsOwnerForTheCopy` cover the copy and migration 0054.
-The `PostgresForgeScenario` case exercises the Liquid forge client, cursor movement, approval,
-publication, and graph evidence through a real Lake server with a workspace Zetta.
+The `PostgresForgeScenario` case exercises the Liquid forge client, cursor movement, approval by a
+second person, publication, and graph evidence through a real Lake server with a workspace Zetta.
+`Forge.ARequiredReviewNeedsASecondPersonWithReview` covers who may approve: the opener's own
+approval, a writer without `review`, the pusher's own approval, a second person's, a withdrawn one
+and a revoked reviewer's; `Export.VerifiesAndRecreatesPortableRepositoryFacts` covers an imported
+review losing its approval.
 
 ## Change
 
