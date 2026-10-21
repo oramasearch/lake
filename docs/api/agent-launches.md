@@ -258,11 +258,20 @@ native agents still answer within the call (a follow-up).
 | **Auto-Suggest Agent** (`agent-autosuggest`) | its service | a read-only turn key and `zetta_base_url` = lake's agent path for the workspace; lake builds no profile (a `context.profile` the caller sends is passed through). The agent builds the profile itself (`list_datasets`, then `get_dataset` for up to twelve) and reads the engine's methodologies and solutions through `workspace_query`. The key carries `workspace_query`, `workspace_openapi`, `get_agent_task` and the App and build reads the agent makes before it suggests: `list_apps`, `get_app`, `receive_app_events`, `list_builds`, `get_build`, `receive_build_events` (lake#795). It carries no action and no log read: App changes are only proposed, for the Application Agent to make after a person confirms |
 | **Agent Creator Agent** (`agent-creator`) | its service | a turn key limited to `workspace_query` / `workspace_openapi` |
 | a **native** agent of the account | the workspace's `chat` (`GET`) | the message |
-| a **Python** agent of the account | its running `service` launch | the message and conversation id; with no running service lake starts one and answers `status: starting` |
+| a **Python** agent of the account | the caller's own running `service` launch | the message and conversation id; with no running service the caller started, lake starts one for them and answers `status: starting` |
 
 A turn key is revoked when the turn ends. Offline library agents and library agents this lake
 does not run are refused. lake presents `LAKE_AGENT_SERVICE_TOKEN` as the bearer to every agent
 service.
+
+**Each person talks to their own service launch** (lake#932). A service launch acts with its
+creator's credential (`lal.`, the creator's grants within the launch's scopes), and agent-runtime keeps
+that client for every conversation. So `agent_turn` sends a person's message only to a present
+`service` launch that person started (`created_by_user_id`); when someone else's launch is running,
+lake starts one for the caller instead. A later writer can never drive an administrator's launch to
+read what only the administrator may read, and each launch's credential resolves to the person who
+talks to it. A turn without a signed-in person is refused (`unauthorized`). Verify with
+`AgentRuns.EachPersonTalksToAPythonAgentThroughTheirOwnLaunch`.
 
 ## Capabilities
 
