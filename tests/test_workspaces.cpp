@@ -3458,7 +3458,6 @@ TEST(AgentRuns, EachPersonTalksToAPythonAgentThroughTheirOwnLaunch) {
     EXPECT_EQ(anonymous.error.code, "unauthorized");
     EXPECT_EQ(r.agents.turns.size(), before + 2);
 }
-}
 
 // Scan my workspace (lake#795): Auto-Suggest Agent's discover turn reads the account's Apps and
 // image builds with its task credential before it suggests (agent-autosuggest's apps.py), so the
