@@ -1,6 +1,9 @@
 /** /protection?repository_id= (web_ui_branch_protection): the branch protection rules and the
  * updates they refused, from the repository's workspace audit (or the central log when the
- * repository has no workspace). Rules are cards; refusals are a table. */
+ * repository has no workspace). Rules are cards; refusals are a table. Anyone who can read the
+ * repository sees its rules; the refusals come from the audit, which the account's administrators
+ * and the operator may read (lake#777, lake#18), so a person who may not read it still gets the
+ * rules and a sentence where the refusals would be, never a failed page. */
 import { useSearchParams } from "react-router-dom";
 import { Ban, ShieldCheck } from "lucide-react";
 import { Card, DataTable, Empty, KeyValue, Section, Stat, StatRow } from "@/lib/ui";
@@ -36,16 +39,23 @@ function Protection({ id }: { id: string }) {
   const workspaceId = repository.data?.workspace_id ?? "";
   const audit = useForgeRead<Items<AuditEvent>>(repository.data ? "audit" : null, workspaceId ? { limit: 500, workspace_id: workspaceId } : { limit: 500, log: "central" });
   useRepositoryTrail(repository.data, "Protection");
-  const wait = pending(repository, rules, audit);
+  const wait = pending(repository, rules);
   if (wait) return wait;
   const r = repository.data!;
   const ruleRows = itemsOf(rules.data);
+  const auditReadable = !audit.isError;
   const refused = itemsOf(audit.data).filter((event) => event.kind === "forge.branch_protection.refused" && event.details?.repository === r.id);
   return (
     <ForgePage title="Branch Protection" repository={r} tab="protection" sub="The rules that guard references, and the updates they refused.">
       <StatRow cols={2}>
         <Stat label="Rules" value={ruleRows.length} icon={ShieldCheck} sub="protected references" />
-        <Stat label="Refused updates" value={refused.length} icon={Ban} tone={refused.length ? "bad" : undefined} sub={workspaceId ? "from the workspace audit" : "from the central log"} />
+        <Stat
+          label="Refused updates"
+          value={auditReadable ? refused.length : "—"}
+          icon={Ban}
+          tone={auditReadable && refused.length ? "bad" : undefined}
+          sub={!auditReadable ? "the account's administrators can see these" : workspaceId ? "from the workspace audit" : "from the central log"}
+        />
       </StatRow>
       <div className="space-y-6">
         <Section title="Rules">
@@ -70,6 +80,11 @@ function Protection({ id }: { id: string }) {
           )}
         </Section>
         <Section title="Refused Updates">
+          {!auditReadable ? (
+            <Empty compact icon={Ban} title="Refused updates are in the audit">
+              The account's administrators can see which updates these rules refused.
+            </Empty>
+          ) : (
           <DataTable<AuditEvent>
             what="refused updates"
             caption="Refused updates"
@@ -102,6 +117,7 @@ function Protection({ id }: { id: string }) {
               },
             ]}
           />
+          )}
         </Section>
       </div>
     </ForgePage>
