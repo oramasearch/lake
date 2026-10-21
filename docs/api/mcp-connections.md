@@ -92,7 +92,7 @@ actions `write`. Each is audited in the workspace's own log ([audit](audit.md#wh
 | `create_mcp_connection` | action | `name`, then `url`, `transport?` (`auto`, `streamable_http`, `sse`), `auth?`; or `stdio` ([stdio servers](#servers-that-speak-only-stdio)) | Adds a connection and discovers the server at once (an OAuth connection waits for a person to sign in; a stdio server is `starting` until its App is ready). No tool is allowed yet. A name used in the workspace, or one whose prefix is, is `conflict` |
 | `list_mcp_connections` | read | — | `{connections}`, by name, each with `status`, `refreshed_at`, `tool_count`, `allowed_count`, `exported` and `calls_this_month` |
 | `get_mcp_connection` | read | `id` | The connection with its `tools`, `resources`, `prompts`, `skipped` and `streams` |
-| `update_mcp_connection` | action | `id`, then any of `name`, `url`, `transport`, `auth`, `tools`, `exported`, `agent_id`, `input_topic`, `output_topic`, `notifications_topic`, `subscribe_resources` | Changes it; a new URL, transport or authentication discovers again |
+| `update_mcp_connection` | action | `id`, then any of `name`, `url`, `transport`, `auth`, `tools`, `exported`, `agent_id`, `input_topic`, `output_topic`, `notifications_topic`, `subscribe_resources` | Changes it; a new URL, transport or authentication discovers again. A new URL keeps no credential ([moving a connection](#moving-a-connection)) |
 | `delete_mcp_connection` | action | `id` | `{deleted: true}`; the secret stays in its mount |
 | `refresh_mcp_connection` | action | `id` | Asks the server again what it offers |
 | `test_mcp_connection` | action | `id`, or `url`, `transport?`, `auth?` | Connects without keeping anything: `{ok, status, server, transport, tools, skipped, milliseconds}` or `{ok: false, status, error}` |
@@ -224,6 +224,24 @@ them, so each OAuth connection signed in before then needs one more sign-in. A *
 is written back as a new version of the same secret. A server that refuses the access token gets
 one more call with a fresh one; a refused refresh token makes the connection `needs_sign_in` and the
 call `sign_in_required`.
+
+### Moving a connection
+
+A credential belongs to the address it was given for (lake#928). `update_mcp_connection` with a
+`url` other than the connection's:
+
+- for a **bearer** connection, needs the same update to name its secret in `auth`, which is checked
+  as on create (the caller must be able to read it, in a mount of the connection's workspace), and
+  is otherwise `invalid_input` at `/auth` with nothing changed;
+- for an **OAuth** connection, drops in the same conditional write its secret, issuer, endpoints,
+  client, sign-in and cached access token, and marks it `needs_sign_in`. A sign-in begun before
+  the move is `conflict` at completion, since the connection no longer names its server, issuer
+  and token endpoint, and moving back restores nothing.
+
+So a person who may change a connection but not read its secret cannot send the bearer, the
+refresh token, a registration's client secret or a pending sign-in's code and verifier to a server
+they run. The same URL again, a new name, tools or streams keep the credential. The audit records
+the new `url`.
 
 ## Lake's MCP re-exports a connection (opt-in)
 
@@ -401,7 +419,12 @@ token renewed with a rotated refresh token. `...McpConnectionSignInIsBoundToTheS
 authorization server metadata naming another issuer or none, stop the sign-in before anything is
 registered; the server's URL with a trailing slash, or its origin, is accepted; a connection moved
 to another server between beginning and completing a sign-in never exchanges the code, and one
-moved after signing in never sends the other server its token. `...McpConnectionStreamsMirrorNotificationsAndDriveTheAgent`:
+moved after signing in never sends the other server its token, nor its own server once moved
+back. `...McpConnectionMovedToAnotherAddressKeepsNoCredential` (lake#928): a bearer connection moved
+without naming its secret is refused and the new address hears nothing, while one moved with its
+secret named again carries it; an OAuth connection moved to a server that a sign-in is then begun at
+sends it neither the refresh token nor a pending sign-in's code and verifier, and after moving back
+neither the old sign-in nor the pending one is used. `...McpConnectionStreamsMirrorNotificationsAndDriveTheAgent`:
 notifications mirrored to their topic after a subscription, one job per input event as the person,
 and its result published once on the output topic.
 `...McpConnectionDispatchNamesExportsAndStreamingWorkspacesOnly`: no row for a connection that

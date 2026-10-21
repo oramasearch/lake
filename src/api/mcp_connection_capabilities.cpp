@@ -1601,6 +1601,7 @@ liquid::runtime::task<ApiResult> update_connection(const json& input, ApiContext
     }
     const std::string person = acting_person(context);
     bool rediscover = false;
+    bool moved = false;
     auto changed = control::settled(co_await control::change_mcp_connection(
         *records,
         customer_id,
@@ -1626,7 +1627,8 @@ liquid::runtime::task<ApiResult> update_connection(const json& input, ApiContext
             }
             if (input.contains("url")) {
                 const std::string url = trimmed(input.at("url"));
-                rediscover = rediscover || url != next.url;
+                moved = url != next.url;
+                rediscover = rediscover || moved;
                 next.url = url;
             }
             if (input.contains("transport")) {
@@ -1641,6 +1643,25 @@ liquid::runtime::task<ApiResult> update_connection(const json& input, ApiContext
                 next.auth_kind = auth->kind;
                 next.secret_ref = auth->secret_ref;
                 if (auth->kind == "oauth") {
+                    next.status = "needs_sign_in";
+                }
+                forget_token(next.id);
+            }
+            // A credential belongs to the address it was given for (lake#928): a new address keeps
+            // no OAuth sign-in, metadata or cached token, so a pending sign-in no longer matches
+            // the connection and its code is never exchanged; a bearer connection moves only when
+            // the same update names its secret, which auth_choice checked the caller may read.
+            // Otherwise a writer who cannot read the secret could send it to a server they run.
+            if (moved) {
+                if (next.auth_kind == "bearer" && !auth) {
+                    return control::ZettaControlError{
+                        "invalid_input",
+                        "a bearer connection moved to another URL names its secret again in auth",
+                        "/auth"};
+                }
+                next.oauth = json::object();
+                if (next.auth_kind == "oauth") {
+                    next.secret_ref.clear();
                     next.status = "needs_sign_in";
                 }
                 forget_token(next.id);
@@ -1694,6 +1715,9 @@ liquid::runtime::task<ApiResult> update_connection(const json& input, ApiContext
         co_return failed(changed.error());
     }
     dispatch(context, workspace_id, *changed);
+    if (moved) {
+        context.audit_details["url"] = changed->url;
+    }
     if (input.contains("exported")) {
         context.audit_details["exported"] = changed->exported;
     }
