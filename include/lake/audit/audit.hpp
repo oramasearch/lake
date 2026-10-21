@@ -63,6 +63,9 @@ struct Filter {
     // Leave out the successful events of these actions: the reads a browser polls, so a
     // person's activity shows what changed (lake#445). Failed and denied reads still appear.
     std::vector<std::string> omit_successful_actions;
+    // Only the events attributed to this account (lake#18): what an account's administrator may
+    // read of the central log.
+    std::string customer_id;
 };
 
 struct Identity {

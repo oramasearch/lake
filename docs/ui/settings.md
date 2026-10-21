@@ -7,7 +7,7 @@ and forms. Files are under `frontend/src/pages/organizations/` and `frontend/src
 
 | Area | Route and tabs | File | Content and actions |
 |---|---|---|---|
-| Organization | `/organization?id=<id>&tab=` `overview`, `teams`, `members`, `invitations`, `access`, `sso`, `applications`, `metering` (labelled Usage), `audit` | `OrganizationPage.tsx` | `get_organization`, `list_teams`, `list_memberships`, `list_invitations`, `entity_effective_access`, `list_sso_providers`, `list_applications`, `metering_usage` (Usage tab only, because it reads the account's workspaces) and `audit` reads; invite (`create_invitation`), create a team (`create_team`), configure a provider (`register_sso_provider`) |
+| Organization | `/organization?id=<id>&tab=` `overview`, `teams`, `members`, `invitations`, `access`, `sso`, `applications`, `metering` (labelled Usage), `audit` | `OrganizationPage.tsx` | `get_organization`, `list_teams`, `list_memberships`, `list_invitations`, `entity_effective_access`, `list_sso_providers`, `list_applications`, `metering_usage` (Usage tab only, because it reads the account's workspaces) and `audit {customer_id}` (the account's audit, its administrators only, lake#18) reads; invite (`create_invitation`), create a team (`create_team`), configure a provider (`register_sso_provider`) |
 | Team | `/team?id=<id>` | `TeamPage.tsx` | the team's memberships and effective access |
 | Member | `/member?id=<id>` | `MemberPage.tsx` | role, attestation evidence, effective access, `set_member_role`, and confirmed `remove_member` |
 | Usage | `/usage` | `../usage/UsagePage.tsx` | usage over time across the chosen workspaces, limits and CSV ([usage.md](usage.md), lake#564) |

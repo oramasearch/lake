@@ -775,6 +775,7 @@ CallState prepare_call(std::shared_ptr<const Capability> capability,
     context.audit_object.clear();
     context.audit_details = nlohmann::json::object();
     context.audit_workspace_id.clear();
+    context.audit_validated_workspace = {};
     CallState state{.capability = std::move(capability)};
     if (context.authorized && context.credential_kind == "agent_task" &&
         context.credential_session_id.starts_with("task:") && context.store) {
@@ -904,6 +905,7 @@ CallState prepare_call(std::shared_ptr<const Capability> capability,
         }
         if (state.proceed) {
             context.audit_workspace_id = workspace->id;
+            context.audit_validated_workspace = {workspace->id, workspace->customer_id};
         }
     }
     if (state.proceed && !context.path_workspace_id.empty() &&
@@ -991,6 +993,45 @@ void attribute_request(const ApiContext& context,
     }
 }
 
+// The account an event is about (lake#18), so the account's administrator finds it in the
+// account's audit: the one a capability named itself, else the workspace the call acted on, the
+// account (`customer_id`) or organization (`organization_id`) its input named, or the
+// organization its event names. A name that is not an account's stays unattributed: the column is
+// a reference, and a refused guess must not fail its own audit.
+std::string audit_customer_of(const nlohmann::json& input, const ApiContext& context) {
+    if (!context.audit_customer_id.empty()) {
+        return context.audit_customer_id;
+    }
+    const auto text = [&input](const char* field) {
+        return input.is_object() && input.contains(field) && input.at(field).is_string()
+                   ? input.at(field).get<std::string>()
+                   : std::string();
+    };
+    if (!context.audit_workspace_id.empty()) {
+        if (context.audit_validated_workspace.first == context.audit_workspace_id) {
+            return context.audit_validated_workspace.second;
+        }
+        if (const auto workspace = context.store->get_workspace(context.audit_workspace_id)) {
+            return workspace->customer_id;
+        }
+    }
+    if (const std::string customer_id = text("customer_id"); !customer_id.empty()) {
+        if (const auto customer = context.store->get_customer(customer_id)) {
+            return customer->id;
+        }
+    }
+    std::string organization_id = text("organization_id");
+    if (organization_id.empty() && context.audit_object.starts_with("organization/")) {
+        organization_id = context.audit_object.substr(std::string_view("organization/").size());
+    }
+    if (!organization_id.empty()) {
+        if (const auto customer = context.store->organization_customer(organization_id)) {
+            return customer->id;
+        }
+    }
+    return {};
+}
+
 ApiResult finish_call(const Capability* capability,
                       const std::string& name,
                       const nlohmann::json& input,
@@ -1018,7 +1059,7 @@ ApiResult finish_call(const Capability* capability,
         details["acting_agent"] = agent;
     }
     const audit::EventDraft event{
-        .customer_id = context.audit_customer_id,
+        .customer_id = audit_customer_of(input, context),
         .kind = kind,
         .principal = context.acting_identity.empty() ? "anonymous" : context.acting_identity,
         .object = context.audit_object.empty() ? "capability/" + name : context.audit_object,
@@ -1212,6 +1253,29 @@ Registry::call(const std::string& name, const nlohmann::json& input, ApiContext&
     }
     return finish_call(
         capability.get(), name, call_input, std::move(state.result), context, state.proceed);
+}
+
+ApiResult Registry::refuse(const std::string& name,
+                           ApiResult failure,
+                           const nlohmann::json& details,
+                           ApiContext& context) const {
+    context.registry = this;
+    const AttributionDepth depth(context);
+    const auto capability = find(name);
+    if (!capability) {
+        return ApiResult::failure("unknown_capability", "no capability named " + name);
+    }
+    if (context.request_id.empty()) {
+        context.request_id = control::new_uuid_v4();
+    }
+    context.audit_customer_id.clear();
+    context.audit_kind.clear();
+    context.audit_object.clear();
+    context.audit_workspace_id.clear();
+    context.audit_validated_workspace = {};
+    context.audit_details = details.is_object() ? details : nlohmann::json::object();
+    const nlohmann::json no_input = nlohmann::json::object();
+    return finish_call(capability.get(), name, no_input, std::move(failure), context, false);
 }
 
 liquid::runtime::task<ApiResult> Registry::call_async(const std::string& name,

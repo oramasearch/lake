@@ -2328,6 +2328,17 @@ nlohmann::json to_nlohmann(const boost::json::value& value) {
     return nlohmann::json::parse(boost::json::serialize(value), nullptr, false);
 };
 
+// A request body as JSON, or a discarded value when it is not JSON: the parser throws on a body
+// that ends inside a value (`{"name":"x`), which must be the caller's 400, not lake's 500
+// (lake#18).
+nlohmann::json body_json(JsonBodySink& sink) {
+    try {
+        return to_nlohmann(sink.release());
+    } catch (const std::exception&) {
+        return nlohmann::json(nlohmann::json::value_t::discarded);
+    }
+}
+
 // RFC 6750's challenge for a refused bearer, naming why and where a new key is made (lake#450).
 std::string bearer_challenge(const ApiResult& result) {
     std::string challenge = "Bearer realm=\"lake\"";
@@ -13793,14 +13804,24 @@ struct ApiServer::Impl {
             if (read_error || bytes_read == 0) {
                 co_return co_await send_scim(
                     route,
-                    ApiResult::failure("invalid_input", "SCIM resource body is required"),
+                    refuse_unread_body(
+                        route,
+                        capability,
+                        ApiResult::failure("invalid_input", "SCIM resource body is required"),
+                        read_error ? "unreadable" : "empty",
+                        bytes_read),
                     success_status);
             }
-            nlohmann::json resource = to_nlohmann(sink.release());
+            nlohmann::json resource = body_json(sink);
             if (resource.is_discarded() || !resource.is_object()) {
                 co_return co_await send_scim(
                     route,
-                    ApiResult::failure("invalid_input", "SCIM resource body is not valid JSON"),
+                    refuse_unread_body(
+                        route,
+                        capability,
+                        ApiResult::failure("invalid_input", "SCIM resource body is not valid JSON"),
+                        resource.is_discarded() ? "not_json" : "not_an_object",
+                        bytes_read),
                     success_status);
             }
             input["resource"] = std::move(resource);
@@ -13835,14 +13856,24 @@ struct ApiServer::Impl {
             if (read_error || bytes_read == 0) {
                 co_return co_await send_scim(
                     route,
-                    ApiResult::failure("invalid_input", "SCIM PATCH body is required"),
+                    refuse_unread_body(
+                        route,
+                        capability,
+                        ApiResult::failure("invalid_input", "SCIM PATCH body is required"),
+                        read_error ? "unreadable" : "empty",
+                        bytes_read),
                     success_status);
             }
-            nlohmann::json patch = to_nlohmann(sink.release());
+            nlohmann::json patch = body_json(sink);
             if (patch.is_discarded() || !patch.is_object()) {
                 co_return co_await send_scim(
                     route,
-                    ApiResult::failure("invalid_input", "SCIM PATCH body is not valid JSON"),
+                    refuse_unread_body(
+                        route,
+                        capability,
+                        ApiResult::failure("invalid_input", "SCIM PATCH body is not valid JSON"),
+                        patch.is_discarded() ? "not_json" : "not_an_object",
+                        bytes_read),
                     success_status);
             }
             input["patch"] = std::move(patch);
@@ -13959,15 +13990,33 @@ struct ApiServer::Impl {
             } else {
                 JsonBodySink sink;
                 auto [read_error, bytes_read] = co_await boost::capy::push_to(route.req_body, sink);
+                std::string reason;
+                std::string message;
                 if (read_error) {
-                    status = http::status::bad_request;
-                    body = error_body("invalid_input", "could not read the request body as JSON");
+                    reason = "unreadable";
+                    message = "could not read the request body as JSON";
                 } else if (bytes_read > 0) {
-                    input = to_nlohmann(sink.release());
+                    input = body_json(sink);
                     if (input.is_discarded() || !input.is_object()) {
-                        status = http::status::bad_request;
-                        body = error_body("invalid_input", "the request body is not a JSON object");
+                        reason = input.is_discarded() ? "not_json" : "not_an_object";
+                        message = "the request body is not a JSON object";
                     }
+                }
+                if (!reason.empty()) {
+                    // Audited as the workspace action it was meant to be (lake#18): the reason
+                    // and the body's size, never its contents.
+                    status = http::status::bad_request;
+                    const ApiResult refused =
+                        registry.refuse(read ? "workspace_query" : "workspace_act",
+                                        ApiResult::failure("invalid_input", message),
+                                        {{"capability", capability},
+                                         {"input", reason},
+                                         {"body_bytes", static_cast<std::uint64_t>(bytes_read)}},
+                                        context);
+                    if (refused.error.code != "invalid_input") {
+                        status = http::int_to_status(static_cast<unsigned>(rest_status(refused)));
+                    }
+                    body = error_body(refused.error.code, refused.error.message);
                 }
             }
             if (body.empty()) {
@@ -14111,18 +14160,32 @@ struct ApiServer::Impl {
         nlohmann::json request;
         JsonBodySink sink;
         auto [read_error, bytes_read] = co_await boost::capy::push_to(route.req_body, sink);
+        // A body lake cannot read is audited as a failed model_completion (lake#18).
+        const auto refused = [&](ApiResult failure, std::string_view reason) {
+            const ApiResult result = refuse_unread_body(
+                route, "model_completion", std::move(failure), reason, bytes_read);
+            if (result.error.code == "store_error") {
+                status = http::status::internal_server_error;
+            }
+            return openai_error(result);
+        };
         if (read_error || bytes_read == 0) {
             status = read_error && body_is_too_large(read_error) ? http::status::payload_too_large
                                                                  : http::status::bad_request;
-            body = openai_error(ApiResult::failure(
-                status == http::status::payload_too_large ? "size_invalid" : "invalid_input",
-                "the request body must be the endpoint's JSON request"));
+            body = refused(
+                ApiResult::failure(status == http::status::payload_too_large ? "size_invalid"
+                                                                             : "invalid_input",
+                                   "the request body must be the endpoint's JSON request"),
+                !read_error                                 ? "empty"
+                : status == http::status::payload_too_large ? "too_large"
+                                                            : "unreadable");
         } else {
-            request = to_nlohmann(sink.release());
+            request = body_json(sink);
             if (request.is_discarded() || !request.is_object()) {
                 status = http::status::bad_request;
-                body = openai_error(
-                    ApiResult::failure("invalid_input", "the request body is not a JSON object"));
+                body = refused(
+                    ApiResult::failure("invalid_input", "the request body is not a JSON object"),
+                    request.is_discarded() ? "not_json" : "not_an_object");
             }
         }
         if (body.empty()) {
@@ -14201,6 +14264,22 @@ struct ApiServer::Impl {
         co_return http::route_done;
     }
 
+    // A call to `capability` whose body lake could not read (lake#18): audited once, as any failed
+    // call is, with the reason and the body's size, never its contents. Answers the refusal, or
+    // the audit's own failure when the event could not be recorded.
+    ApiResult refuse_unread_body(const boost::http::route_params& route,
+                                 const std::string& capability,
+                                 ApiResult failure,
+                                 std::string_view reason,
+                                 std::size_t bytes) const {
+        ApiContext ctx = context_for(route);
+        return registry.refuse(
+            capability,
+            std::move(failure),
+            {{"input", std::string(reason)}, {"body_bytes", static_cast<std::uint64_t>(bytes)}},
+            ctx);
+    }
+
     boost::http::route_task serve_capability(boost::http::route_params& route,
                                              std::shared_ptr<const Capability> capability) {
         namespace http = boost::http;
@@ -14218,21 +14297,34 @@ struct ApiServer::Impl {
         } else {
             JsonBodySink sink;
             auto [read_error, bytes_read] = co_await boost::capy::push_to(route.req_body, sink);
+            std::optional<ApiResult> unread;
+            std::string reason;
             if (read_error) {
                 status = body_is_too_large(read_error) ? http::status::payload_too_large
                                                        : http::status::bad_request;
-                body =
-                    body_is_too_large(read_error)
-                        ? error_body("size_invalid", "request body exceeds the 67108864 byte limit")
-                        : error_body("invalid_input",
-                                     "could not read the request body as JSON: " +
-                                         read_error.message());
+                reason = body_is_too_large(read_error) ? "too_large" : "unreadable";
+                unread = body_is_too_large(read_error)
+                             ? ApiResult::failure("size_invalid",
+                                                  "request body exceeds the 67108864 byte limit")
+                             : ApiResult::failure("invalid_input",
+                                                  "could not read the request body as JSON: " +
+                                                      read_error.message());
             } else if (bytes_read > 0) {
-                input = to_nlohmann(sink.release());
+                input = body_json(sink);
                 if (input.is_discarded()) {
                     status = http::status::bad_request;
-                    body = error_body("invalid_input", "the request body is not valid JSON");
+                    reason = "not_json";
+                    unread =
+                        ApiResult::failure("invalid_input", "the request body is not valid JSON");
                 }
+            }
+            if (unread) {
+                const ApiResult refused =
+                    refuse_unread_body(route, capability->name, *unread, reason, bytes_read);
+                if (refused.error.code != unread->error.code) {
+                    status = http::int_to_status(static_cast<unsigned>(rest_status(refused)));
+                }
+                body = error_body(refused.error.code, refused.error.message);
             }
         }
         if (body.empty()) {
@@ -14317,8 +14409,7 @@ struct ApiServer::Impl {
                                    {{"code", -32700},
                                     {"message", "request body exceeds the 67108864 byte limit"}}}}
                        .dump();
-        } else if (read_error || bytes_read == 0 ||
-                   (request = to_nlohmann(sink.release())).is_discarded()) {
+        } else if (read_error || bytes_read == 0 || (request = body_json(sink)).is_discarded()) {
             status = http::status::bad_request;
             body = nlohmann::json{{"jsonrpc", "2.0"},
                                   {"id", nullptr},

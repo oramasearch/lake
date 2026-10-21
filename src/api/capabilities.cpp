@@ -1320,6 +1320,8 @@ audit_filter_of(const json& input, const ApiContext& context, AuditDefaults defa
         .request_id = input.value("request_id", ""),
         .after_id = input.value("after_id", ""),
     };
+    // An account named: the central log's events attributed to it (lake#18).
+    filter.customer_id = input.value("customer_id", "");
     // after_id continues a page in append order; an explicit order always wins.
     filter.newest_first = input.contains("order")
                               ? input.at("order") == "newest"
@@ -6084,14 +6086,51 @@ audit_scope(const json& input, ApiContext& context, const std::vector<std::strin
     return scope;
 }
 
+// Whose audit a read covers (lake#18, docs/api/audit.md#who-may-read-it). Naming no account, the
+// whole instance's log, which only the operator reads (the empty object). Naming one, by
+// `customer_id` or through `workspace_id`, that account's events, for a principal with `admin`
+// on it: an organization's administrator reads its own evidence. Every other case, an unknown
+// account included, is the same refusal, so a guess learns nothing.
+std::expected<std::string, ApiError> audit_log_object(const json& input, ApiContext& context) {
+    const ApiError refused{"unauthorized",
+                           "principal is not allowed to read this audit log: an account's audit "
+                           "needs admin on the account, the whole log the operator",
+                           input.contains("customer_id") ? "/customer_id" : ""};
+    std::string customer_id = input.value("customer_id", "");
+    if (customer_id.empty() && input.contains("workspace_id")) {
+        const auto workspace = context.store->get_workspace(input.at("workspace_id"));
+        if (!workspace) {
+            return std::unexpected(refused);
+        }
+        customer_id = workspace->customer_id;
+    }
+    if (customer_id.empty()) {
+        return std::string{};
+    }
+    const auto object = context.store->find_policy_object("customer", customer_id);
+    if (!object) {
+        return std::unexpected(refused);
+    }
+    const auto decision = control::authorize(
+        *context.store, context.acting_identity, object->id, "admin", context.authorization_cache);
+    if (!decision) {
+        return std::unexpected(ApiError{decision.error().code, decision.error().message, {}});
+    }
+    if (!decision->allowed) {
+        return std::unexpected(refused);
+    }
+    return object->id;
+}
+
 // The synchronous form of the audit reads: the central log, the only log a lake without
 // workspace Zettas has. A lake with workspaces reads through Registry::call_async.
 ApiResult central_audit_only(const json& input, ApiContext& context, const audit::Filter& filter) {
     if (!context.store) {
         return no_store();
     }
-    if (context.workspaces && (input.contains("workspace_id") ||
-                               input.value("log", "all") != "central")) {
+    // A workspace's audit is never answered with the central log in its place (lake#18).
+    if (input.contains("workspace_id") ||
+        (context.workspaces && input.value("log", "all") != "central")) {
         return ApiResult::failure("store_error",
                                   "the workspaces' audits are read through call_async");
     }
@@ -6177,15 +6216,17 @@ void register_audit_capabilities(Registry& registry) {
                        "first unless `order` is `oldest` or `after_id` continues a page. Each "
                        "event names its principal (`principal_name`) and, for a workspace call, "
                        "the inner `capability`. Reads the central log and every workspace's audit "
-                       "(decision 52): `workspace_id` reads one workspace's, `customer_id` limits "
-                       "the workspaces to one account's, and `log: central` reads the central log "
-                       "alone. Each event says its `log`.",
+                       "(decision 52): `workspace_id` reads one workspace's, `customer_id` reads "
+                       "one account's (its workspaces and the central events attributed to it), "
+                       "and `log: central` reads the central log alone. Each event says its "
+                       "`log`. An account's administrator reads its own account's audit by "
+                       "naming it; the whole log is the operator's (lake#18).",
         .input_schema = audit_filter_input(),
         .output_schema = list_schema(audit_event_schema()),
         .kind = CapabilityKind::Read,
         .object = "audit log",
         .action = "read",
-        .resolve_object = global_object,
+        .resolve_object = audit_log_object,
         .handler = [](const json& input, ApiContext& context) {
             return central_audit_only(input, context, audit_filter_of(input, context));
         },
@@ -6265,14 +6306,16 @@ void register_audit_capabilities(Registry& registry) {
         .name = "export_audit",
         .title = "Export audit events",
         .description = "Export matching signed audit events as JSON lines: the central log in "
-                       "append order, or with `workspace_id` that workspace's whole audit (copied "
-                       "central events, then its chain by place), each line naming its `log`.",
+                       "append order (with `customer_id`, the events attributed to that account), "
+                       "or with `workspace_id` that workspace's whole audit (copied central "
+                       "events, then its chain by place), each line naming its `log`. An "
+                       "account's administrator exports its own account's audit (lake#18).",
         .input_schema = audit_filter_input(),
         .output_schema = {{"type", "object"}, {"properties", {{"jsonl", {{"type", "string"}}}}}},
         .kind = CapabilityKind::Read,
         .object = "audit log",
         .action = "read",
-        .resolve_object = global_object,
+        .resolve_object = audit_log_object,
         .handler = [](const json& input, ApiContext& context) {
             if (!context.store) {
                 return no_store();

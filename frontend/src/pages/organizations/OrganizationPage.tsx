@@ -708,29 +708,41 @@ function UsageTab({ organizationId }: { organizationId: string }) {
 }
 
 function AuditTab({ organizationId }: { organizationId: string }) {
-  // Organization events are control-plane events: the central log alone (decision 52).
-  const audit = useList<Row>("audit", { object: `organization/${organizationId}`, limit: 100, log: "central" }, { pick: "items" });
+  // The organization's account audit (lake#18): the central events attributed to its account and
+  // its workspaces' audits, which the organization's administrators may read. Anyone else is shown
+  // the refusal in the table.
+  const { customers, space } = useOrganizationSpace(organizationId);
+  const audit = useList<Row>(space ? "audit" : null, { customer_id: space?.id, limit: 200 }, { pick: "items" });
   const [outcome, setOutcome] = useState<string | null>(null);
   const [search, setSearch] = useState("");
+  if (customers.isLoading) return <Skeleton />;
+  if (customers.isError) return <ErrorBlock error={customers.error} retry={() => void customers.refetch()} what="the organization's account" />;
+  if (!space) return <PanelEmpty title="No account">This organization has no account, so it has no audit of its own.</PanelEmpty>;
   const shown = audit.data?.filter((e) => (!outcome || e.outcome === outcome) && matches(search, e.action, e.capability, e.principal, e.principal_name));
   return (
     <>
       <Toolbar>
         <SearchInput value={search} onChange={setSearch} placeholder="Search actions…" />
         <FilterChips options={countBy(audit.data, (e) => e.outcome)} value={outcome} onChange={setOutcome} allLabel="Any outcome" />
+        <div className="ml-auto flex flex-wrap items-center gap-2">
+          <Button href={`/v1/export_audit?limit=1000&customer_id=${encodeURIComponent(space.id)}`} title="The account's events as JSON lines (export_audit)">
+            Export
+          </Button>
+        </div>
       </Toolbar>
       <DataTable
         q={audit}
         what="audit events"
         rows={shown}
         rowKey={(e) => e.id}
-        empty={<PanelEmpty title="No matching audit events">Changes to this organization are recorded here.</PanelEmpty>}
+        empty={<PanelEmpty title="No matching audit events">Changes to this organization and its workspaces are recorded here.</PanelEmpty>}
         columns={[
           { key: "when", label: "When", sort: (e) => e.occurred_at, render: (e) => <When value={e.occurred_at} /> },
           { key: "action", label: "Action", render: (e) => <NameCell name={<code>{e.action}</code>} sub={e.capability} /> },
           { key: "principal", label: "By", render: (e) => (e.principal_name && e.principal_name !== e.principal ? <span title={e.principal}>{e.principal_name}</span> : <Mono short={24}>{e.principal}</Mono>) },
           { key: "object", label: "Object", render: (e) => <ObjectChip value={e.object} /> },
           { key: "outcome", label: "Outcome", render: (e) => <Status value={e.outcome} /> },
+          { key: "log", label: "Log", render: (e) => (e.log === "workspace" ? <Mono short={12}>{e.workspace_id}</Mono> : "Central") },
         ]}
       />
     </>

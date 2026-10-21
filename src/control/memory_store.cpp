@@ -419,6 +419,9 @@ Result<std::vector<audit::Event>> InMemoryStore::list_audit_events(const audit::
         if (!filter.principal.empty() && event.draft.principal != filter.principal) {
             continue;
         }
+        if (!filter.customer_id.empty() && event.draft.customer_id != filter.customer_id) {
+            continue;
+        }
         if (!filter.object.empty() && event.draft.object != filter.object) {
             continue;
         }

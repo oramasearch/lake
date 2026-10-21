@@ -1,3 +1,4 @@
+#include "audit_test_support.hpp"
 #include "postgres_fixture.hpp"
 #include <gtest/gtest.h>
 
@@ -1174,6 +1175,124 @@ TEST_P(HttpResponseIsolation, ATokenIsIssuedAndRevokedWithTheBrowserSession) {
     const std::string after =
         connection->request("GET", "/v1/list_sessions", {}, "lake_session=" + token);
     EXPECT_FALSE(after.starts_with("HTTP/1.1 200")) << "a revoked token no longer authenticates";
+}
+
+// lake#18: every call to a capability route is audited, a body lake cannot read included. A
+// malformed body and a well-formed one each leave exactly one signed failure event under their
+// request id, with the error and the body's size but never its contents.
+TEST_P(HttpResponseIsolation, AMalformedBodyIsAuditedLikeAnyFailedCall) {
+    auto connection = connect();
+    const std::string cookie = sign_in(*connection);
+    const std::string secret = "body-canary-" + lake::control::new_uuid_v4();
+    const auto post =
+        [&](const std::string& path, const std::string& body, const std::string& request_id) {
+            return connection->request("POST",
+                                       path,
+                                       body,
+                                       cookie,
+                                       "HTTP/1.1",
+                                       {},
+                                       "application/json",
+                                       {{"Origin", "http://localhost"},
+                                        {"Sec-Fetch-Site", "same-origin"},
+                                        {"X-Request-Id", request_id}});
+        };
+    const std::string suffix = lake::control::new_uuid_v4();
+    struct Case {
+        std::string request_id, body;
+    };
+    for (const Case& sent : {Case{"valid-json-" + suffix, "{}"},
+                             Case{"malformed-json-" + suffix, "{\"name\":\"" + secret},
+                             Case{"not-an-object-" + suffix, "[\"" + secret + "\"]"}}) {
+        const std::string response = post("/v1/create_token", sent.body, sent.request_id);
+        EXPECT_TRUE(response.starts_with("HTTP/1.1 400")) << response.substr(0, 300);
+        const auto events = store_->list_audit_events({.request_id = sent.request_id});
+        ASSERT_TRUE(events) << events.error().message;
+        ASSERT_EQ(events->size(), 1U) << sent.request_id;
+        const lake::audit::Event& event = events->front();
+        EXPECT_EQ(event.draft.action, "create_token");
+        EXPECT_EQ(event.draft.outcome, "failure");
+        EXPECT_FALSE(event.draft.principal.empty());
+        EXPECT_NE(event.draft.principal, "anonymous") << "the signed-in person is named";
+        EXPECT_EQ(event.draft.details.value("error_code", ""), "invalid_input");
+        EXPECT_FALSE(event.signature.empty());
+        EXPECT_EQ(lake::audit::to_json(event).dump().find(secret), std::string::npos)
+            << "the body never reaches the audit";
+    }
+    const auto malformed = store_->list_audit_events({.request_id = "malformed-json-" + suffix});
+    ASSERT_TRUE(malformed);
+    ASSERT_EQ(malformed->size(), 1U);
+    EXPECT_EQ(malformed->front().draft.details.value("input", ""), "not_json");
+    EXPECT_EQ(malformed->front().draft.details.value("body_bytes", 0),
+              static_cast<int>(std::string("{\"name\":\"").size() + secret.size()));
+
+    // An unauthenticated caller's malformed body is recorded too, as anonymous.
+    const std::string anonymous_id = "anonymous-malformed-" + suffix;
+    const std::string anonymous = connection->request("POST",
+                                                      "/v1/create_token",
+                                                      "{",
+                                                      "",
+                                                      "HTTP/1.1",
+                                                      {},
+                                                      "application/json",
+                                                      {{"X-Request-Id", anonymous_id}});
+    EXPECT_TRUE(anonymous.starts_with("HTTP/1.1 400")) << anonymous.substr(0, 300);
+    const auto anonymous_events = store_->list_audit_events({.request_id = anonymous_id});
+    ASSERT_TRUE(anonymous_events);
+    ASSERT_EQ(anonymous_events->size(), 1U);
+    EXPECT_EQ(anonymous_events->front().draft.principal, "anonymous");
+
+    // Audit verification still holds after the refusals were signed in.
+    const auto all = lake::test::audit_events(*store_);
+    ASSERT_TRUE(all) << all.error().message;
+    EXPECT_TRUE(lake::audit::verify(*store_, *all));
+}
+
+// lake#18: the administrator of an account reads its audit over REST and MCP; the whole instance's
+// log stays the operator's.
+TEST_P(HttpResponseIsolation, AnAccountAdministratorReadsItsAuditOverRestAndMcp) {
+    auto connection = connect();
+    const std::string cookie = sign_in(*connection);
+    const auto customers = get_v1(*connection, cookie, "list_customers");
+    ASSERT_TRUE(customers.at("ok")) << customers.dump();
+    ASSERT_FALSE(customers.at("value").at("items").empty());
+    const std::string customer_id = customers.at("value").at("items").at(0).at("id");
+
+    const auto own = get_v1(*connection, cookie, "audit?limit=50&customer_id=" + customer_id);
+    ASSERT_TRUE(own.value("ok", false)) << own.dump();
+    for (const auto& event : own.at("value").at("items")) {
+        if (event.value("log", "") == "central") {
+            EXPECT_EQ(event.value("customer_id", nlohmann::json()), customer_id) << event.dump();
+        }
+    }
+    const auto exported =
+        get_v1(*connection, cookie, "export_audit?limit=50&customer_id=" + customer_id);
+    EXPECT_TRUE(exported.value("ok", false)) << exported.dump();
+    const std::string whole = connection->request("GET", "/v1/audit?limit=2", "", cookie);
+    EXPECT_TRUE(whole.starts_with("HTTP/1.1 403")) << whole.substr(0, 300);
+    const std::string other = connection->request(
+        "GET", "/v1/audit?limit=2&customer_id=" + lake::control::new_uuid_v4(), "", cookie);
+    EXPECT_TRUE(other.starts_with("HTTP/1.1 403")) << other.substr(0, 300);
+
+    const auto [created_response, created] =
+        post_v1(*connection, cookie, "create_token", {{"name", "auditor"}, {"scopes", {"*"}}});
+    ASSERT_TRUE(created.value("ok", false)) << created_response.substr(0, 300);
+    const std::string key = created["value"]["secret"];
+    const std::string mcp = connection->request(
+        "POST",
+        "/mcp",
+        nlohmann::json{
+            {"jsonrpc", "2.0"},
+            {"id", 1},
+            {"method", "tools/call"},
+            {"params",
+             {{"name", "audit"}, {"arguments", {{"limit", 10}, {"customer_id", customer_id}}}}}}
+            .dump(),
+        "",
+        "HTTP/1.1",
+        key,
+        "application/json");
+    EXPECT_NE(mcp.find("\"isError\":false"), std::string::npos) << mcp.substr(0, 600);
 }
 
 // Developer → MCP (docs/api/mcp.md): llms.txt is public and names every tool; a read-only MCP key
