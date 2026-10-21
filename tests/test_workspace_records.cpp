@@ -4144,13 +4144,146 @@ TEST_P(WorkspaceRecordStores, McpConnectionSignInIsBoundToTheServerItIsFor) {
     EXPECT_FALSE(moved_call.ok);
     EXPECT_EQ(moved_call.error.code, "sign_in_required");
     EXPECT_FALSE(other_saw_a_bearer()) << "the token signed in for one server went to another";
-    // Back at its own server, the same sign-in still serves.
+    // Back at its own server, the move has already dropped the sign-in (lake#928).
     move_to(server.url());
     const auto back =
         t.call(first,
                "read_mcp_tool",
                in({{"connection_id", id}, {"tool", "echo"}, {"arguments", {{"text", "hi"}}}}));
-    EXPECT_TRUE(back.ok) << back.error.message;
+    EXPECT_EQ(back.error.code, "sign_in_required");
+}
+
+// A connection moved to another address keeps no credential it had (lake#928): a writer who moves
+// it to a server they run gets no bearer, refresh token, cached access token or pending sign-in's
+// code sent there, and moving it back restores none of them. A bearer connection moves only when
+// the same update names its secret again, as someone who may read it.
+TEST_P(WorkspaceRecordStores, McpConnectionMovedToAnotherAddressKeepsNoCredential) {
+    auto store = make_store();
+    if (!store) {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
+    }
+    TwoSpaces t(store, database_uri_);
+    lake::test::McpTestServer server;
+    server.required_bearer = "the-plaintext-bearer-token";
+    lake::test::McpTestServer other;   // a server the writer runs
+    lake::test::McpTestServer granted; // a server the secret's reader chose
+    t.mcp_http = lake::api::make_mcp_http(true);
+    const auto& first = t.spaces[0];
+    const auto in = [&](json input) {
+        input["customer_id"] = first.customer_id;
+        input["workspace_id"] = first.workspaces[0];
+        return input;
+    };
+    const auto mount = t.call(first, "create_secret_mount", in({{"name", "mcp-tokens"}}));
+    ASSERT_TRUE(mount.ok) << mount.error.message;
+    const std::string mount_id = mount.value["id"];
+    ASSERT_TRUE(t.call(first,
+                       "put_secret",
+                       {{"mount_id", mount_id},
+                        {"name", "desk"},
+                        {"value", {{"token", "the-plaintext-bearer-token"}}}})
+                    .ok);
+    const json secret{{"mount_id", mount_id}, {"name", "desk"}, {"field", "token"}};
+    const auto other_saw_a_credential = [&] {
+        return std::ranges::any_of(other.seen(), [](const auto& request) {
+            return request.headers.contains("authorization") ||
+                   request.body.find("grant_type=") != std::string::npos ||
+                   request.body.find("code_verifier=") != std::string::npos;
+        });
+    };
+    const auto echo = [&](const std::string& id) {
+        return t.call(
+            first,
+            "read_mcp_tool",
+            in({{"connection_id", id}, {"tool", "echo"}, {"arguments", {{"text", "hi"}}}}));
+    };
+    const auto update = [&](json change) {
+        return t.call(first, "update_mcp_connection", in(change));
+    };
+
+    // A bearer connection, working at its own server.
+    const auto created = t.call(first,
+                                "create_mcp_connection",
+                                in({{"name", "Desk"},
+                                    {"url", server.url()},
+                                    {"auth", {{"kind", "bearer"}, {"secret", secret}}}}));
+    ASSERT_TRUE(created.ok) << created.error.message;
+    const std::string bearer_id = created.value["id"];
+    ASSERT_TRUE(update({{"id", bearer_id}, {"tools", {{"echo", {{"allowed", true}}}}}}).ok);
+    ASSERT_TRUE(echo(bearer_id).ok);
+
+    // Moved without naming the secret: refused before anything changes or reaches the new address.
+    const auto moved = update({{"id", bearer_id}, {"url", other.url()}});
+    EXPECT_FALSE(moved.ok);
+    EXPECT_EQ(moved.error.path, "/auth") << moved.error.message;
+    EXPECT_EQ(t.call(first, "get_mcp_connection", in({{"id", bearer_id}})).value["url"],
+              server.url());
+    EXPECT_TRUE(echo(bearer_id).ok);
+    EXPECT_TRUE(other.seen().empty()) << "the move reached the new address";
+    // The same address again is not a move.
+    EXPECT_TRUE(update({{"id", bearer_id}, {"name", "Desk 2"}, {"url", server.url()}}).ok);
+    EXPECT_TRUE(echo(bearer_id).ok);
+    // Moved while naming the secret again, by someone who may read it, carries it over.
+    const auto carried = update({{"id", bearer_id},
+                                 {"url", granted.url()},
+                                 {"auth", {{"kind", "bearer"}, {"secret", secret}}}});
+    ASSERT_TRUE(carried.ok) << carried.error.message;
+    EXPECT_EQ(carried.value["auth"]["secret"], secret);
+    EXPECT_TRUE(std::ranges::any_of(granted.seen(), [](const auto& request) {
+        return request.headers.contains("authorization");
+    }));
+
+    // An OAuth connection signed in at its own server, with a pending sign-in of someone else.
+    server.required_bearer = "nobody-has-this-yet";
+    const auto oauth = t.call(first,
+                              "create_mcp_connection",
+                              in({{"name", "Docs"},
+                                  {"url", server.url()},
+                                  {"auth", {{"kind", "oauth"}}}}));
+    ASSERT_TRUE(oauth.ok) << oauth.error.message;
+    const std::string id = oauth.value["id"];
+    const auto begin = [&] {
+        return t.call(
+            first, "begin_mcp_connection_sign_in", in({{"id", id}, {"mount_id", mount_id}}));
+    };
+    const auto code_for = [&](const json& begun) {
+        const std::string url = begun["authorization_url"];
+        const auto query = lake::test::McpTestServer::form(url.substr(url.find('?') + 1));
+        return server.issue_code(query.at("client_id"),
+                                 query.at("redirect_uri"),
+                                 query.at("code_challenge"),
+                                 query.at("resource"));
+    };
+    const auto complete = [&](const json& begun, const std::string& code) {
+        return t.call(first,
+                      "complete_mcp_connection_sign_in",
+                      in({{"state", begun["state"]}, {"code", code}}));
+    };
+    auto begun = begin();
+    ASSERT_TRUE(begun.ok) << begun.error.message;
+    ASSERT_TRUE(complete(begun.value, code_for(begun.value)).ok);
+    ASSERT_TRUE(update({{"id", id}, {"tools", {{"echo", {{"allowed", true}}}}}}).ok);
+    ASSERT_TRUE(echo(id).ok);
+    const auto pending = begin();
+    ASSERT_TRUE(pending.ok) << pending.error.message;
+    const std::string pending_code = code_for(pending.value);
+    const std::size_t grants = server.token_grants().size();
+
+    // Moved to the writer's server, which they then begin a sign-in at, so its metadata names
+    // their token endpoint: nothing the first sign-in or the pending one holds goes there.
+    const auto moved_oauth = update({{"id", id}, {"url", other.url()}});
+    ASSERT_TRUE(moved_oauth.ok) << moved_oauth.error.message;
+    EXPECT_EQ(moved_oauth.value["status"], "needs_sign_in");
+    EXPECT_TRUE(moved_oauth.value["auth"]["secret"].is_null()) << moved_oauth.value.dump();
+    ASSERT_TRUE(begin().ok);
+    EXPECT_EQ(echo(id).error.code, "sign_in_required");
+    EXPECT_FALSE(complete(pending.value, pending_code).ok);
+    EXPECT_FALSE(other_saw_a_credential()) << "a token or code went to the new address";
+    // Moved back: the first sign-in and the pending one are both gone.
+    ASSERT_TRUE(update({{"id", id}, {"url", server.url()}}).ok);
+    EXPECT_EQ(echo(id).error.code, "sign_in_required");
+    EXPECT_FALSE(complete(pending.value, pending_code).ok);
+    EXPECT_EQ(server.token_grants().size(), grants) << "nothing exchanged after the move";
 }
 
 // A connection's streams (lake#652): the store root's owner mirrors the server's notifications to a
