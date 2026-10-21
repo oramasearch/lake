@@ -738,6 +738,43 @@ boost::http::route_task send_bytes(boost::http::route_params& route,
     }
 }
 
+// Registry bytes are what a tenant pushed, answered on the console's origin (lake#930): a browser
+// never sniffs them into another type, and a page opened there runs nothing and loads nothing.
+void isolate_registry_response(boost::http::route_params& route) {
+    route.res.set("X-Content-Type-Options", "nosniff");
+    route.res.set("Content-Security-Policy", "sandbox; default-src 'none'");
+}
+
+constexpr std::string_view oci_image_manifest_type = "application/vnd.oci.image.manifest.v1+json";
+
+// The manifest media types the registry stores and serves (lake#930): OCI and Docker schema 2
+// image manifests and indexes. `content_type` is compared without case, parameters or surrounding
+// whitespace, and the answer is lake's own spelling, so a tenant never chooses the type a browser
+// reads; anything else is nullopt.
+std::optional<std::string_view> oci_manifest_media_type(std::string_view content_type) {
+    static constexpr auto types = std::to_array<std::string_view>(
+        {oci_image_manifest_type,
+         "application/vnd.oci.image.index.v1+json",
+         "application/vnd.docker.distribution.manifest.v2+json",
+         "application/vnd.docker.distribution.manifest.list.v2+json"});
+    std::string_view essence = content_type.substr(0, content_type.find(';'));
+    const auto blank = [](char c) { return c == ' ' || c == '\t'; };
+    while (!essence.empty() && blank(essence.front())) {
+        essence.remove_prefix(1);
+    }
+    while (!essence.empty() && blank(essence.back())) {
+        essence.remove_suffix(1);
+    }
+    for (const std::string_view type : types) {
+        if (std::ranges::equal(essence, type, [](unsigned char a, unsigned char b) {
+                return std::tolower(a) == b;
+            })) {
+            return type;
+        }
+    }
+    return std::nullopt;
+}
+
 boost::capy::task<std::expected<std::vector<unsigned char>, std::error_code>>
 read_sync_body(boost::http::route_params& route) {
     auto body = std::vector<unsigned char>{};
@@ -12028,6 +12065,7 @@ struct ApiServer::Impl {
             route.res.set("X-Content-Type-Options", "nosniff");
         } else {
             route.res.set("Docker-Content-Digest", digest);
+            isolate_registry_response(route);
         }
         route.res.set_payload_size(size);
         if (head || size == 0) {
@@ -12221,6 +12259,7 @@ struct ApiServer::Impl {
                 }
                 if (*stored) {
                     route.res.set("Docker-Content-Digest", digest);
+                    isolate_registry_response(route);
                     const std::span<const char> characters((*stored)->document.data(),
                                                            (*stored)->document.size());
                     const auto bytes = std::as_bytes(characters);
@@ -12269,6 +12308,7 @@ struct ApiServer::Impl {
                 route, boost::http::status::not_found, object.error(), true);
         }
         route.res.set("Docker-Content-Digest", object->digest);
+        isolate_registry_response(route);
         co_return co_await send_bytes(route,
                                       boost::http::status::ok,
                                       object->content_type,
@@ -12332,13 +12372,15 @@ struct ApiServer::Impl {
                                               "MANIFEST_UNKNOWN");
         }
         route.res.set("Docker-Content-Digest", digest);
+        isolate_registry_response(route);
         const std::span<const char> characters((*manifest)->document.data(),
                                                (*manifest)->document.size());
         const auto bytes = std::as_bytes(characters);
+        // A record written before lake#930 may name any type: it is served as an image manifest.
         co_return co_await send_bytes(
             route,
             boost::http::status::ok,
-            content_type.empty() ? "application/vnd.oci.image.manifest.v1+json" : content_type,
+            oci_manifest_media_type(content_type).value_or(oci_image_manifest_type),
             bytes,
             digest,
             {},
@@ -12458,13 +12500,15 @@ struct ApiServer::Impl {
                     route, boost::http::status::not_found, object.error(), true);
             }
             route.res.set("Docker-Content-Digest", object->digest);
-            co_return co_await send_bytes(route,
-                                          boost::http::status::ok,
-                                          object->content_type,
-                                          object->bytes,
-                                          object->digest,
-                                          {},
-                                          head);
+            isolate_registry_response(route);
+            co_return co_await send_bytes(
+                route,
+                boost::http::status::ok,
+                oci_manifest_media_type(object->content_type).value_or(oci_image_manifest_type),
+                object->bytes,
+                object->digest,
+                {},
+                head);
         }
         const RegistryGrant grant = registry_access(route, repository, true);
         if (grant.access != RegistryAccess::Allowed) {
@@ -12483,10 +12527,18 @@ struct ApiServer::Impl {
             co_return co_await registry_error(
                 route, boost::http::status::bad_request, "OCI manifest body is required", true);
         }
-        const std::string content_type =
+        const auto media_type =
             route.req.count(boost::http::field::content_type) == 0
-                ? "application/vnd.oci.image.manifest.v1+json"
-                : std::string(route.req.at(boost::http::field::content_type));
+                ? std::optional(oci_image_manifest_type)
+                : oci_manifest_media_type(route.req.at(boost::http::field::content_type));
+        if (!media_type) {
+            co_return co_await registry_error(route,
+                                              boost::http::status::bad_request,
+                                              "OCI manifest media type is not supported",
+                                              true,
+                                              "MANIFEST_INVALID");
+        }
+        const std::string content_type(*media_type);
         if (tenant) {
             co_return co_await serve_tenant_manifest_write(
                 route, std::move(*tenant), repository, reference, content_type, std::move(body));
@@ -12548,6 +12600,7 @@ struct ApiServer::Impl {
             co_return co_await registry_error(
                 route, boost::http::status::not_found, tarball.error());
         }
+        isolate_registry_response(route);
         co_return co_await send_bytes(
             route, boost::http::status::ok, "application/octet-stream", *tarball);
     }
@@ -12597,6 +12650,7 @@ struct ApiServer::Impl {
             co_return co_await registry_error(
                 route, boost::http::status::not_found, package.error());
         }
+        isolate_registry_response(route);
         co_return co_await send_bytes(
             route, boost::http::status::ok, "application/octet-stream", *package, {}, {}, head);
     }
@@ -12632,6 +12686,7 @@ struct ApiServer::Impl {
             co_return co_await registry_error(
                 route, boost::http::status::not_found, artifact.error());
         }
+        isolate_registry_response(route);
         co_return co_await send_bytes(route,
                                       boost::http::status::ok,
                                       kind == "source" ? "text/plain; charset=utf-8"
