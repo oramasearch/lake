@@ -59,6 +59,7 @@ struct Lake {
     struct Person {
         lake::control::Principal principal;
         std::string customer_id; // their personal space
+        std::string secret;      // their session's bearer
     };
 
     Lake(std::shared_ptr<lake::control::Store> backing, std::string uri)
@@ -72,6 +73,7 @@ struct Lake {
         EXPECT_TRUE(session) << session.error().message;
         Person someone;
         someone.principal = *store->context_for(session->secret);
+        someone.secret = session->secret;
         someone.customer_id = store->list_customers(10, someone.principal.user_id)->front().id;
         return someone;
     }
@@ -655,3 +657,285 @@ INSTANTIATE_TEST_SUITE_P(Stores,
                          [](const testing::TestParamInfo<bool>& info) {
                              return info.param ? "Postgres" : "Memory";
                          });
+
+// ---- deleting an account (lake#810, docs/api/identity.md#deleting-an-account) ----
+
+namespace {
+
+// `who` joins `organization` with `role`, organization-wide.
+void join(lake::control::Store& store,
+          const std::string& organization,
+          const lake::control::Principal& who,
+          const std::string& role,
+          const lake::control::Principal& by) {
+    const auto joined = store.create_membership({organization,
+                                                 {},
+                                                 "user",
+                                                 who.user_id,
+                                                 who.taap_id,
+                                                 role,
+                                                 "sha512-256:" + role + "-" + who.user_id,
+                                                 by.taap_id,
+                                                 lake::control::new_uuid_v4()});
+    ASSERT_TRUE(joined) << joined.error().message;
+}
+
+lake::control::OrganizationSpace organization_of(lake::control::Store& store,
+                                                 const std::string& name,
+                                                 const lake::control::Principal& owner) {
+    const auto space = store.create_organization_space(
+        {name,
+         name + "-" + lake::control::new_uuid_v4().substr(0, 8),
+         owner.user_id,
+         owner.taap_id,
+         lake::control::new_uuid_v4()});
+    EXPECT_TRUE(space) << space.error().message;
+    return *space;
+}
+
+std::string handle_of(lake::control::Store& store, const std::string& customer_id) {
+    return store.get_customer(customer_id)->name;
+}
+
+bool live(lake::control::Store& store, const std::string& workspace_id) {
+    const auto workspace = store.get_workspace(workspace_id);
+    return workspace && workspace->desired != "deleted";
+}
+
+} // namespace
+
+TEST(Deletions, AnAccountDeletionIsAuditedCentrally) {
+    EXPECT_EQ(lake::api::audit_log_of("delete_account"), lake::api::AuditLog::Central);
+}
+
+TEST_P(Deletions, OneAccountCannotDeleteAnother) {
+    LAKE_STORE_OR_SKIP(store);
+    Lake lake(store, database_uri_);
+    const auto alice = lake.person("alice");
+    const auto bob = lake.person("bob");
+    const std::string bobs = handle_of(*store, bob.customer_id);
+
+    for (const bool dry_run : {true, false}) {
+        const auto refused = lake.call(
+            alice,
+            "delete_account",
+            {{"user_id", bob.principal.user_id}, {"confirm", bobs}, {"dry_run", dry_run}});
+        ASSERT_FALSE(refused.ok);
+        EXPECT_EQ(refused.error.code, "unauthorized") << refused.error.message;
+    }
+    EXPECT_TRUE(store->get_user(bob.principal.user_id));
+    EXPECT_TRUE(store->get_customer(bob.customer_id));
+    EXPECT_TRUE(store->context_for(bob.secret));
+
+    // A token, however new, is not a sign-in: it cannot delete its own account either.
+    const auto token = store->create_token({alice.principal.user_id,
+                                            "lake",
+                                            "cleanup",
+                                            "",
+                                            {"*"},
+                                            3600,
+                                            false,
+                                            alice.principal.session_id});
+    ASSERT_TRUE(token) << token.error().message;
+    auto with_token = lake.context(alice);
+    with_token.credential_session_id = token->session.id;
+    const auto by_token = lake.call(with_token,
+                                    "delete_account",
+                                    {{"confirm", handle_of(*store, alice.customer_id)}});
+    ASSERT_FALSE(by_token.ok);
+    EXPECT_EQ(by_token.error.code, "unauthorized");
+    EXPECT_TRUE(store->get_user(alice.principal.user_id));
+    // Nor does a wrong MFA code stand in for a sign-in.
+    const auto wrong_code = lake.call(with_token,
+                                      "delete_account",
+                                      {{"confirm", handle_of(*store, alice.customer_id)},
+                                       {"code", "000000"}});
+    ASSERT_FALSE(wrong_code.ok);
+    EXPECT_EQ(wrong_code.error.path, "/code");
+    EXPECT_TRUE(store->get_user(alice.principal.user_id));
+}
+
+TEST_P(Deletions, AnAccountDeletionRemovesExactlyWhatItShould) {
+    LAKE_STORE_OR_SKIP(store);
+    Lake lake(store, database_uri_);
+    const auto alice = lake.person("alice");
+    const auto bob = lake.person("bob");
+    const std::string handle = handle_of(*store, alice.customer_id);
+
+    // Alice: a workspace of her own, an organization she alone owns (with a workspace), one she
+    // owns with Bob, and a seat in Bob's organization. Bob: his own workspace and organization.
+    const std::string own_workspace = lake.workspaces.create(alice.customer_id, "alice-dev");
+    const auto solo = organization_of(*store, "solo", alice.principal);
+    const std::string solo_workspace = lake.workspaces.create(solo.customer.id, "solo-dev");
+    const auto shared = organization_of(*store, "shared", alice.principal);
+    join(*store, shared.organization.id, bob.principal, "owner", alice.principal);
+    const std::string shared_workspace = lake.workspaces.create(shared.customer.id, "shared-dev");
+    const auto bobs_org = organization_of(*store, "bobs", bob.principal);
+    join(*store, bobs_org.organization.id, alice.principal, "member", bob.principal);
+    const std::string bob_workspace = lake.workspaces.create(bob.customer_id, "bob-dev");
+    ASSERT_TRUE(store->set_billing_contact(
+        {.customer_id = alice.customer_id, .email = "billing@alice.example.test"}));
+    ASSERT_TRUE(store->set_billing_contact(
+        {.customer_id = bob.customer_id, .email = "billing@bob.example.test"}));
+
+    // The dry run lists what goes and changes nothing.
+    const auto plan = lake.call(alice, "delete_account", {{"dry_run", true}});
+    ASSERT_TRUE(plan.ok) << plan.error.message;
+    EXPECT_EQ(plan.value["deleted"], false);
+    EXPECT_EQ(plan.value["handle"], handle);
+    ASSERT_EQ(plan.value["workspaces"].size(), 1U);
+    EXPECT_EQ(plan.value["workspaces"][0]["name"], "alice-dev");
+    std::map<std::string, std::string> actions;
+    for (const json& organization : plan.value["organizations"]) {
+        actions[organization["organization_id"]] = organization["action"];
+    }
+    EXPECT_EQ(actions[solo.organization.id], "delete");
+    EXPECT_EQ(actions[shared.organization.id], "leave");
+    EXPECT_EQ(actions[bobs_org.organization.id], "leave");
+    EXPECT_EQ(plan.value["counts"]["memberships"], 3);
+    EXPECT_EQ(plan.value["counts"]["billing_contacts"], 1);
+    EXPECT_GE(plan.value["counts"]["sessions"].get<int>(), 1);
+    EXPECT_TRUE(live(*store, own_workspace));
+    EXPECT_TRUE(store->get_user(alice.principal.user_id));
+
+    // A wrong confirmation changes nothing.
+    EXPECT_EQ(lake.call(alice, "delete_account", {{"confirm", "alice"}}).error.path, "/confirm");
+    EXPECT_TRUE(live(*store, own_workspace));
+
+    const auto deleted = lake.call(alice, "delete_account", {{"confirm", handle}});
+    ASSERT_TRUE(deleted.ok) << deleted.error.message;
+    EXPECT_EQ(deleted.value["deleted"], true);
+    EXPECT_FALSE(deleted.value["deleted_at"].is_null());
+    EXPECT_EQ(deleted.value["deleted_workspaces"].size(), 2U);
+    ASSERT_EQ(deleted.value["deleted_organizations"].size(), 1U);
+    EXPECT_EQ(deleted.value["deleted_organizations"][0]["organization_id"], solo.organization.id);
+
+    // Alice's account, space, sessions, memberships and grants are gone; her workspaces are
+    // deleted through the operator's desired state, and her organization with its workspace.
+    EXPECT_EQ(store->get_user(alice.principal.user_id).error().code, "not_found");
+    for (const auto& user : *store->list_users(1000)) {
+        EXPECT_NE(user.id, alice.principal.user_id);
+    }
+    EXPECT_EQ(store->get_customer(alice.customer_id).error().code, "not_found");
+    EXPECT_FALSE(store->find_policy_object("customer", alice.customer_id));
+    EXPECT_FALSE(store->context_for(alice.secret));
+    EXPECT_TRUE(store->list_sessions(alice.principal.user_id, "lake")->empty());
+    EXPECT_TRUE(store->list_user_memberships(alice.principal.user_id, 100)->empty());
+    EXPECT_FALSE(live(*store, own_workspace));
+    EXPECT_FALSE(live(*store, solo_workspace));
+    EXPECT_EQ(store->get_organization(solo.organization.id).error().code, "not_found");
+    EXPECT_FALSE(store->billing_contact(alice.customer_id) &&
+                 store->billing_contact(alice.customer_id)->has_value());
+    EXPECT_TRUE(store->principal_names({alice.principal.taap_id})->empty());
+
+    // What is shared is left to its other owners, and Bob is untouched.
+    ASSERT_TRUE(store->get_organization(shared.organization.id));
+    EXPECT_TRUE(live(*store, shared_workspace));
+    const auto shared_members = store->list_memberships(shared.organization.id, "", 100);
+    ASSERT_EQ(shared_members->size(), 1U);
+    EXPECT_EQ(shared_members->front().principal_taap_id, bob.principal.taap_id);
+    EXPECT_EQ(shared_members->front().role, "owner");
+    ASSERT_TRUE(store->get_organization(bobs_org.organization.id));
+    EXPECT_EQ(store->list_memberships(bobs_org.organization.id, "", 100)->size(), 1U);
+    EXPECT_TRUE(store->get_user(bob.principal.user_id));
+    EXPECT_TRUE(store->get_customer(bob.customer_id));
+    EXPECT_TRUE(store->context_for(bob.secret));
+    EXPECT_TRUE(live(*store, bob_workspace));
+    EXPECT_TRUE(store->billing_contact(bob.customer_id)->has_value());
+    const auto bob_still = lake.call(
+        bob, "list_workspaces", {{"customer_id", shared.customer.id}});
+    EXPECT_TRUE(bob_still.ok) << bob_still.error.message;
+
+    // The central log keeps one event for the deletion, naming the account by its id only.
+    const auto events = store->list_audit_events(
+        lake::audit::Filter{.object = "user/" + alice.principal.user_id, .limit = 10});
+    ASSERT_TRUE(events);
+    const auto event = std::ranges::find_if(*events, [](const lake::audit::Event& value) {
+        return value.draft.kind == "account.delete" && value.draft.outcome == "success";
+    });
+    ASSERT_NE(event, events->end());
+    EXPECT_EQ(event->draft.customer_id, alice.customer_id);
+    EXPECT_EQ(event->draft.details.dump().find("@example.test"), std::string::npos);
+
+    // A second delete finds nothing.
+    EXPECT_EQ(lake.call(lake.operator_context(),
+                        "delete_account",
+                        {{"user_id", alice.principal.user_id}, {"confirm", handle}})
+                  .error.code,
+              "not_found");
+}
+
+TEST_P(Deletions, AnOrganizationIsNeverLeftWithoutAnOwner) {
+    LAKE_STORE_OR_SKIP(store);
+    Lake lake(store, database_uri_);
+    const auto alice = lake.person("alice");
+    const auto bob = lake.person("bob");
+    const std::string handle = handle_of(*store, alice.customer_id);
+    const std::string own_workspace = lake.workspaces.create(alice.customer_id, "alice-dev");
+    const auto acme = organization_of(*store, "acme", alice.principal);
+    join(*store, acme.organization.id, bob.principal, "member", alice.principal);
+    const std::string acme_workspace = lake.workspaces.create(acme.customer.id, "acme-dev");
+
+    // Alice is Acme's only owner and Bob belongs to it: refused, naming it, and nothing changed.
+    const auto plan = lake.call(alice, "delete_account", {{"dry_run", true}});
+    ASSERT_TRUE(plan.ok) << plan.error.message;
+    ASSERT_EQ(plan.value["organizations"].size(), 1U);
+    EXPECT_EQ(plan.value["organizations"][0]["action"], "blocked");
+    EXPECT_EQ(plan.value["organizations"][0]["other_members"], 1);
+    const auto refused = lake.call(alice, "delete_account", {{"confirm", handle}});
+    ASSERT_FALSE(refused.ok);
+    EXPECT_EQ(refused.error.code, "conflict");
+    EXPECT_NE(refused.error.message.find("acme"), std::string::npos) << refused.error.message;
+    EXPECT_TRUE(store->get_user(alice.principal.user_id));
+    EXPECT_TRUE(live(*store, own_workspace)) << "nothing is deleted before the refusal";
+    EXPECT_TRUE(live(*store, acme_workspace));
+    EXPECT_EQ(store->list_memberships(acme.organization.id, "", 100)->size(), 2U);
+
+    // The store refuses too, whoever asks it: the last owner is never removed on its own.
+    ASSERT_TRUE(store->update_workspace(own_workspace, {.desired = "deleted"}));
+    const auto direct = store->delete_account(alice.principal.user_id, false);
+    ASSERT_FALSE(direct);
+    EXPECT_EQ(direct.error().code, "conflict");
+    EXPECT_TRUE(store->get_user(alice.principal.user_id));
+
+    // Once Bob is an owner too, Alice can go and Acme stays with him.
+    for (const auto& membership : *store->list_memberships(acme.organization.id, "", 100)) {
+        if (membership.principal_taap_id == bob.principal.taap_id) {
+            ASSERT_TRUE(store->set_member_role(membership.id, "owner", alice.principal.taap_id));
+        }
+    }
+    const auto after_promotion = lake.call(alice, "delete_account", {{"dry_run", true}});
+    ASSERT_TRUE(after_promotion.ok);
+    EXPECT_EQ(after_promotion.value["organizations"][0]["action"], "leave");
+}
+
+TEST_P(Deletions, TheOperatorDeletesAnAccountAndItsSoleOrganizationsWhenAsked) {
+    LAKE_STORE_OR_SKIP(store);
+    Lake lake(store, database_uri_);
+    const auto alice = lake.person("alice");
+    const auto bob = lake.person("bob");
+    const std::string handle = handle_of(*store, alice.customer_id);
+    const auto acme = organization_of(*store, "acme", alice.principal);
+    join(*store, acme.organization.id, bob.principal, "member", alice.principal);
+    const std::string acme_workspace = lake.workspaces.create(acme.customer.id, "acme-dev");
+
+    const auto unnamed = lake.call(lake.operator_context(), "delete_account", {{"confirm", handle}});
+    EXPECT_EQ(unnamed.error.code, "invalid_input");
+    EXPECT_EQ(lake.call(lake.operator_context(),
+                        "delete_account",
+                        {{"user_id", alice.principal.user_id}, {"confirm", handle}})
+                  .error.code,
+              "conflict");
+    const auto deleted = lake.call(lake.operator_context(),
+                                   "delete_account",
+                                   {{"user_id", alice.principal.user_id},
+                                    {"confirm", handle},
+                                    {"delete_organizations", true}});
+    ASSERT_TRUE(deleted.ok) << deleted.error.message;
+    EXPECT_EQ(store->get_user(alice.principal.user_id).error().code, "not_found");
+    EXPECT_EQ(store->get_organization(acme.organization.id).error().code, "not_found");
+    EXPECT_FALSE(live(*store, acme_workspace));
+    EXPECT_TRUE(store->list_user_memberships(bob.principal.user_id, 100)->empty());
+    EXPECT_TRUE(store->get_user(bob.principal.user_id));
+    EXPECT_TRUE(store->get_customer(bob.customer_id));
+}

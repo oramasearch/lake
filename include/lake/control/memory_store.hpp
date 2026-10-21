@@ -82,6 +82,7 @@ public:
     Result<std::vector<Organization>> list_organizations(int limit) override;
     Result<Organization> get_organization(const std::string& id) override;
     Result<OrganizationDeletion> delete_organization(const std::string& id, bool dry_run) override;
+    Result<AccountDeletion> delete_account(const std::string& user_id, bool dry_run) override;
     Result<Customer> create_customer(const NewCustomer&) override;
     Result<std::vector<Customer>> list_customers(int limit,
                                                  const std::string& user_id = {}) override;
@@ -498,6 +499,9 @@ public:
                              const std::string& pool_id,
                              const std::string& code) override;
     Result<bool> mfa_enrolled(const std::string& user_id, const std::string& pool_id) override;
+    Result<void> verify_mfa_code(const std::string& user_id,
+                                 const std::string& pool_id,
+                                 const std::string& code) override;
     Result<IssuedSession> sign_in_totp(const PasswordSignIn&) override;
     Result<WebAuthnChallenge> begin_passkey_registration(const std::string& user_id,
                                                          const std::string& pool_id,
@@ -635,6 +639,8 @@ private:
     std::vector<Organization> organizations_;
     // Organizations deleted by delete_organization and their spaces (lake#645): kept, never read.
     std::set<std::string> deleted_organizations_, deleted_customers_;
+    // Accounts deleted by delete_account (lake#810): kept, email and name erased, never read.
+    std::set<std::string> deleted_users_;
     std::vector<Customer> customers_;
     std::vector<Repository> repositories_; // routing rows: no description (lake#315 part 2)
     // Audit event id -> (workspace, outcome), as workspace_assignments holds them (lake#317).

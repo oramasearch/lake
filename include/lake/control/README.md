@@ -27,6 +27,11 @@ search index (lake#381).
 with `dry_run`, would remove: the organization, its account's id and handle, the live workspaces that
 refuse it, and counts per kind. `Store` also gains `revoke_invitation`, `get_grant`,
 `revoke_grant` and `delete_secret_mount_route` ([deletion.md](../../../docs/api/deletion.md)).
+`AccountDeletion` and `AccountOrganization` (lake#810) are what `Store::delete_account` removes or
+would remove: the user, its personal space and live workspaces, each organization it is in with its
+role and how many other owners and members it has, counts per kind, and the invoices kept.
+`Store::verify_mfa_code` checks a TOTP or recovery code without changing anything
+([identity.md](../../../docs/api/identity.md#deleting-an-account)).
 
 `StreamOwner` is a topic's creator; `stream_owners.hpp` keeps it as a sealed record in the
 topic's workspace Zetta (lake#379); `Store` has no reads of the retired `stream_owners` table,

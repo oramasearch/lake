@@ -62,6 +62,7 @@ constexpr std::array central = std::to_array<std::string_view>({
     "create_token",
     "create_user",
     "create_workspace",
+    "delete_account",
     "delete_organization",
     "delete_workspace",
     "disable_mfa",

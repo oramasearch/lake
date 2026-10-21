@@ -55,6 +55,20 @@ shows and paste the output (`use_own_identity`); a refused signature starts agai
 `list_sessions` and `list_devices`; Passkeys and Tokens link to `/passkeys` and `/tokens`, where the capability forms
 are ([identity.md](identity.md)); Notifications says no delivery preferences are configured.
 
+### Deleting your account
+
+Profile ends with **Delete account** (lake#810): the shared confirmation
+([deletion.md](deletion.md)) over `delete_account` with no `user_id`, so it is always the signed-in
+person's own account. The dry run lists what goes (`accountLines` in `frontend/src/lib/deletion.ts`:
+workspaces with those of the organizations going, the organizations deleted and those left to their
+other owners, sessions and tokens, credentials and devices, grants, the billing contact) and says
+that invoices and the audit log are kept. While you are the only owner of an organization other
+people belong to, the action is disabled and each such organization is linked, with how many others
+are in it (`accountBlockers`); the page never sends `delete_organizations`. Typing your handle enables
+it; Lake refuses it unless you signed in within the last 15 minutes (the dialog shows the refusal,
+which says to sign in again). Once it is done the page signs out (`POST /logout`), since every
+session went with the account. The capability is [identity.md](../api/identity.md#deleting-an-account).
+
 **What changed.** Every form posted to a server adapter (`/organization/invitations`,
 `/organization/teams`, `/organization/sso`, `/organizations/create`, `/organizations/convert`,
 `/invitations/accept`, `/member/role`, `/member/remove`, `/metering/quota`) is now the page

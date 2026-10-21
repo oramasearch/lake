@@ -17,6 +17,7 @@ OpenAPI, MCP), and each:
 | Capability | Input | What goes | Log | Contract |
 |---|---|---|---|---|
 | `delete_organization` | `organization_id`, `confirm` (its handle), `dry_run?` | its teams, members, invitations, SSO providers, federation issuers, secret mount routes, and every grant on it and its account; refused while its account has workspaces, which the refusal names | central | [organizations.md](organizations.md#deleting-an-organization) |
+| `delete_account` (lake#810) | `user_id?` (the operator; omit for your own), `confirm` (its handle), `code?`, `delete_organizations?`, `dry_run?` | its personal account's workspaces and the organizations it alone owns (through `delete_workspace` and `delete_organization`), then its sessions, tokens, devices, credentials, memberships, grants and billing contact; the account is marked deleted with its email and name erased; refused while it alone owns an organization others belong to, unless `delete_organizations` | central | [identity.md](identity.md#deleting-an-account) |
 | `revoke_invitation` | `invitation_id`, `dry_run?` | a pending invitation, which becomes `revoked` | central | [organizations.md](organizations.md#revoking-an-invitation) |
 | `revoke_grant` | `grant_id`, `dry_run?` | one grant; not one a membership carries, nor an account's last admin grant | central | [policy.md](policy.md#revoking-a-grant) |
 | `delete_secret_mount` | `mount_id`, `confirm` (its name), `dry_run?` | every secret and version, named key, data key and lease of the mount, its name claim and its record, then its route and policy object | workspace | [secrets.md](secrets.md#deleting-a-mount) |
@@ -25,6 +26,9 @@ OpenAPI, MCP), and each:
 | `delete_run` | … `id` (or `run_id`) | a finished run and its report; the models it trained are kept | workspace | [models.md](models.md#deleting-from-a-workspace) |
 | `delete_index` | … `id` (or `index_id`) | a search index, no longer served; its dataset is kept | workspace | [models.md](models.md#deleting-from-a-workspace) |
 | `delete_ask_conversation` | `customer_id`, `workspace_id`, `conversation_id`, `dry_run?` | every message of one of the caller's conversations, and the agent tasks it started (their records and dispatch rows, lake#673) | workspace | [ask-orama.md](ask-orama.md#deleting-a-conversation) |
+
+An account is marked, not erased, for the same reason: the audit chain names its TAAP identity and
+its personal account ([identity.md](identity.md#what-is-kept-and-why)).
 
 ## Why an organization is marked, not erased
 

@@ -330,3 +330,121 @@ Lake-pool password sign-up atomically provisions the user-owned customer, policy
 quotas, zero-byte metering, transaction failure, and retry behavior are specified in
 [provisioning.md](provisioning.md). The public identity export command is
 `liquid identity show --document`; the private signing key stays with the client.
+
+## Deleting an account
+
+Before lake#810 Lake could create an account but not remove one: every end-to-end run left its
+sign-up accounts behind. `delete_account` deletes one, for the person themselves or for the
+operator. It is in the one registry (REST `POST /v1/delete_account`, OpenAPI, MCP) and audited in
+the central log, as every identity event is (decision 52).
+
+### Who can delete an account
+
+| Caller | What it needs |
+|---|---|
+| The account itself | Its own session (omit `user_id`, or give its own), and proof that it is the person now: a sign-in (`browser` or `taap` session) started in the last 15 minutes, or `code`, a fresh TOTP code or unused recovery code when MFA is enrolled. A token, however new, is not a sign-in. |
+| The operator (principal `admin`) | `user_id`. No step-up: the operator credential is the instance's own. |
+
+Anyone else naming another account is refused `401 unauthorized` before the handler runs, and so is
+an agent, app or build credential. `confirm` must be the account's handle (its user id when it has
+no personal account); `dry_run: true` deletes nothing and answers the plan below.
+
+### What goes, in order
+
+1. **The workspaces of its personal account**, each through `delete_workspace`, so each is one
+   transaction that marks the workspace `deleted` (the Orama operator removes its Zetta from that
+   desired state, decision 51), tombstones its repositories and deletes its apps, with its own
+   central audit events ([workspaces.md](workspaces.md#deletion)).
+2. **The organizations it alone owns** (it is their only organization-wide `owner`): first their
+   workspaces, then each organization through `delete_organization`
+   ([organizations.md](organizations.md#deleting-an-organization)). One with nobody else in it goes
+   with the account. One that other people belong to is deleted only with
+   `delete_organizations: true`; otherwise the deletion is **refused** (`409`, naming it, path
+   `/delete_organizations`) before anything is deleted, so an organization is never left without an
+   owner. An organization with another owner is left to them (`action: "leave"`); the account's
+   membership is removed.
+3. **The account**, in one store transaction that is refused if a workspace of its personal account is still
+   live or it is still an organization's only owner (whoever asks the store):
+   - every session and token, device, credential (password, TOTP, recovery codes, passkeys, OAuth,
+     SSO and Clerk links), identity document, TAAP assertion, WebAuthn challenge, recovery attempt
+     and offline grant, identity link, SCIM mapping and app hand-off code;
+   - the recovery custody it holds for other people's repositories;
+   - every membership and every grant naming its TAAP identity;
+   - the seed of an identity Lake minted for it (a Clerk sign-in's, decision 44) is destroyed; the
+     public key stays so the signatures it made still verify, as after lake#762's rotation;
+   - of its personal account: the billing contact, usage limits, storage quota override, secret mount
+     routes and its policy objects (with every grant on them);
+   - the user row and its personal account are marked deleted (migration `0091_account_deletion`), the email
+     erased to null and the display name to `''`.
+
+### What is kept, and why
+
+- **The central audit log.** `audit_events` is append-only and hash-chained, and its rows name the
+  account by its TAAP identity (`principal`) and its personal account (`customer_id`, `ON DELETE
+  RESTRICT`). So the user and account rows stay, marked deleted and never listed or read again, and
+  the handle and TAAP identity stay retired; the email and name are erased, and principal names no
+  longer resolve the identity to a person. Events already written keep what they recorded; see
+  *Open questions* below. Each workspace's own audit chain goes with its workspace Zetta.
+- **Invoices, their lines and payment records, the Stripe customer link, and orders.** They are
+  billing records Lake issued (decision 56; orders by `0089`), kept for as long as the invoice. An
+  unpaid invoice stays collectable; the plan says how many are kept (`kept.invoices`) and how many
+  are still due (`kept.open_invoices`).
+
+### The answer
+
+```json
+{
+  "user_id": "…", "handle": "brave-otter-7",
+  "workspaces": [{"id": "…", "name": "dev", "environment": "dev"}],
+  "organizations": [{"organization_id": "…", "display_name": "Acme", "handle": "acme",
+                     "role": "owner", "other_owners": 0, "other_members": 3,
+                     "workspaces": [], "action": "delete | leave | blocked"}],
+  "counts": {"sessions": 2, "credentials": 1, "memberships": 2, "grants": 4, "billing_contacts": 1, "…": 0},
+  "kept": {"invoices": 0, "open_invoices": 0, "audit": "…"},
+  "dry_run": false, "deleted": true, "deleted_at": "…",
+  "deleted_workspaces": [{"id": "…", "name": "dev"}],
+  "deleted_organizations": [{"organization_id": "…", "display_name": "Acme"}]
+}
+```
+
+It also carries `customer_id` (the personal account) and each workspace's `customer_id`. The central
+audit event is `account.delete` (a dry run, `account.delete.plan`) on `user/<id>`, with
+the handle, the counts and the deleted workspaces and organizations; never the email. If a step
+fails, the call answers that step's error with what it was deleting; the steps already done stay
+done, and calling again resumes (a deleted workspace or organization is no longer in the plan).
+
+### End-to-end cleanup
+
+An end-to-end run signs up, works, then deletes its own accounts:
+
+```sh
+curl -sS -X POST "$LAKE/v1/delete_account" -H "Authorization: Bearer $SESSION" \
+  -H 'Content-Type: application/json' \
+  -d '{"confirm": "'"$HANDLE"'", "delete_organizations": true}'
+```
+
+`$SESSION` is the session its sign-up or sign-in answered (fresh, so no MFA code is needed) and
+`$HANDLE` is `viewer.handle`. With the operator credential, `user_id` names the account instead.
+
+### Open questions
+
+The decisions (50–56) say where identity, audit and billing live; none says how long a deleted
+person's identity may stay in events already written, or what GDPR erasure requires of them. Lake
+pseudonymises going forward (the TAAP identity no longer resolves to an email or name) but does not
+rewrite the signed, append-only chain, whose `details` can carry an email recorded at the time (an
+invitation, a sign-up). Redacting those needs a decision first.
+
+### Verify
+
+```sh
+LAKE_TEST_DB_URI=… ./build/tests/lake-tests --gtest_filter='*Deletions*'
+```
+
+`Stores/Deletions.OneAccountCannotDeleteAnother` (another account, a token and a wrong MFA code are
+refused), `AnAccountDeletionRemovesExactlyWhatItShould` (workspaces, the sole organization, sessions,
+memberships, grants and billing contact gone; the shared organization, its workspace and every other
+account untouched; one central event without the email),
+`AnOrganizationIsNeverLeftWithoutAnOwner` (refused before anything is deleted, by the capability and
+by the store) and `TheOperatorDeletesAnAccountAndItsSoleOrganizationsWhenAsked`, each over the
+in-memory store and PostgreSQL. The confirmation in Lake Console is
+[`../ui/settings.md`](../ui/settings.md#deleting-your-account).

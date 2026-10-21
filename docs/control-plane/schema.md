@@ -1285,3 +1285,25 @@ Every field but `email` defaults to `''`. Lake alone writes it, through `set_bil
 sends it to the account's Stripe customer. A billing record (decision 56): no workspace content.
 Additive and idempotent; guard `billing_contacts_guard`. The operator vendors the schema and selects
 that guard before a lake with this change is rolled.
+
+## Account deletion migration
+
+`0091_account_deletion` (lake#810, [`../api/identity.md#deleting-an-account`](../api/identity.md#deleting-an-account))
+adds `users.deleted_at` (`timestamptz`, null for a live account). `delete_account` sets it, erases the
+row's `email` (to null, which frees the address for a new account) and `display_name` (to `''`), and
+sets `disabled_at` if it was not set. The row itself stays, like a deleted organization's (`0076`),
+because the central audit chain names the account: `audit_events.principal` is its TAAP identity,
+which stays on the row and stays retired, and `audit_events.customer_id` names its personal space
+(`ON DELETE RESTRICT`), which is marked `deleted_at` too. Lake never lists or reads a deleted user
+again (`get_user`, `list_users` and the principal names behind the audit pages leave it out). The
+rows that let anyone sign in or act as the account are deleted in the same transaction: `sessions`,
+`devices`, `credentials`, `identity_documents`, `identity_taap_assertions`,
+`identity_webauthn_challenges`, `identity_link_challenges`, `identity_links`, `scim_users`,
+`offline_recovery_attempts`, `offline_recovery_grants`, `offline_recovery_notifications`,
+`app_authorization_codes`, the `offline_recovery_contacts` naming it, every `memberships` and
+`grants` row naming it; a `custodial_identities` row keeps its public key with `wrapped_seed` null
+and `seed_destroyed_at` set. Of the personal space: `billing_contacts`, `customer_usage_limits`,
+`customer_storage_quotas`, `secret_mount_routes` (with their `secret_lease_routes`) and its policy
+objects go; `billing_invoices`, their lines, `billing_accounts`, `billing_payment_events` and
+`cloud_orders` are kept as billing records. Additive and idempotent; guard `account_deletion_guard`.
+The operator vendors the schema and selects that guard before a lake with this change is rolled.

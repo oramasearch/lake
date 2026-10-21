@@ -1,5 +1,10 @@
 # Database schema
 
+Migration `0091_account_deletion` (lake#810) adds `users.deleted_at`, set by `delete_account` when
+an account is deleted (its email and display name are erased in the same statement), and the guard
+`account_deletion_guard`. Additive; apply before the new binary, and have the operator vendor the
+schema and select the guard. See [identity.md](../docs/api/identity.md#deleting-an-account).
+
 Migration `0090_billing_contacts` (lake#857) adds `billing_contacts`, each account's billing email,
 name and address, and the guard `billing_contacts_guard`. Additive; apply before the new binary, and
 have the operator vendor the schema and select the guard. See

@@ -255,6 +255,10 @@ workspace engine's own deletes that answer `not_supported` from an older engine,
 `delete_ask_conversation`, which removes one person's message records from the workspace Zetta and
 the agent tasks the conversation started (their `lake_agent_tasks` records, then their dispatch
 rows through `Store::delete_agent_tasks`, lake#673).
+`delete_account` (lake#810) sits beside `delete_organization` in `capabilities.cpp`: it checks the
+caller (the account after a recent sign-in or MFA, or the operator), then calls `delete_workspace`
+and `delete_organization` through the registry as the same caller before `Store::delete_account`
+([identity.md](../../docs/api/identity.md#deleting-an-account)).
 `delete_organization`, `revoke_invitation` and `revoke_grant` sit beside their siblings in
 `capabilities.cpp`, and `delete_secret_mount` in `secrets_capabilities.cpp` over
 `MountSecrets::remove_all` (`secret_records_api.cpp`). Each takes `dry_run`. See

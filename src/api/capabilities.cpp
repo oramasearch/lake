@@ -15,11 +15,13 @@
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <cstdio>
 #include <ctime>
 #include <expected>
 #include <format>
 #include <limits>
 #include <map>
+#include <optional>
 #include <ranges>
 #include <string>
 #include <string_view>
@@ -1874,6 +1876,297 @@ ApiResult delete_organization(const json& in, ApiContext& ctx) {
     return ApiResult::success(std::move(value));
 }
 
+// ---- deleting an account (lake#810, docs/api/identity.md#deleting-an-account) ----
+
+// How recent a sign-in must be for a person to delete their own account without an MFA code.
+constexpr std::int64_t account_deletion_sign_in_seconds = 15 * 60;
+
+// Seconds since the epoch of the memory store's ISO 8601 timestamps or PostgreSQL's text form
+// (`YYYY-MM-DD HH:MM:SS[.ffffff]±HH[:MM]`); nullopt when unreadable.
+std::optional<std::int64_t> timestamp_seconds(std::string_view value) {
+    std::tm parts{};
+    if (value.size() < 19 ||
+        std::sscanf(std::string(value.substr(0, 19)).c_str(),
+                    "%4d-%2d-%2d%*c%2d:%2d:%2d",
+                    &parts.tm_year,
+                    &parts.tm_mon,
+                    &parts.tm_mday,
+                    &parts.tm_hour,
+                    &parts.tm_min,
+                    &parts.tm_sec) != 6) {
+        return std::nullopt;
+    }
+    parts.tm_year -= 1900;
+    parts.tm_mon -= 1;
+    std::int64_t seconds = timegm(&parts);
+    std::string_view zone = value.substr(19);
+    while (!zone.empty() &&
+           (zone.front() == '.' || std::isdigit(static_cast<unsigned char>(zone.front())))) {
+        zone.remove_prefix(1);
+    }
+    if (!zone.empty() && (zone.front() == '+' || zone.front() == '-')) {
+        const int sign = zone.front() == '+' ? 1 : -1;
+        int hours = 0;
+        int minutes = 0;
+        std::sscanf(std::string(zone.substr(1)).c_str(), "%2d:%2d", &hours, &minutes);
+        seconds -= sign * (hours * 3600 + minutes * 60);
+    }
+    return seconds;
+}
+
+// The account delete_account acts on: `user_id`, or the caller's own.
+std::string account_deletion_target(const json& in, const ApiContext& ctx) {
+    return in.contains("user_id") ? in.at("user_id").get<std::string>() : ctx.acting_user_id;
+}
+
+// The account's own principal: a person may act only on themselves, so naming anyone else is
+// refused before the handler runs. The operator passes every check.
+std::expected<std::string, ApiError> account_deletion_object(const json& in, ApiContext& ctx) {
+    const std::string user_id = account_deletion_target(in, ctx);
+    if (ctx.acting_identity == "admin") {
+        return "principal/admin";
+    }
+    if (user_id.empty() || user_id != ctx.acting_user_id || ctx.acting_identity.empty()) {
+        return std::unexpected(ApiError{
+            "unauthorized", "only the account itself or the operator can delete an account", {}});
+    }
+    return "principal/" + ctx.acting_identity;
+}
+
+// What the account deletion does with each organization the account is in: `delete` (it is the
+// only owner and nobody else is a member, or delete_organizations was asked for), `leave` (other
+// owners keep it), or `blocked` (the only owner, with other members, and not asked to delete it).
+std::string organization_action(const control::AccountOrganization& organization,
+                                bool delete_organizations) {
+    if (!organization.sole_owner()) {
+        return "leave";
+    }
+    return organization.other_members == 0 || delete_organizations ? "delete" : "blocked";
+}
+
+json account_deletion_json(const control::AccountDeletion& plan,
+                           bool delete_organizations,
+                           bool dry_run) {
+    const auto workspace_items = [](const std::vector<control::Workspace>& workspaces) {
+        json items = json::array();
+        for (const control::Workspace& workspace : workspaces) {
+            items.push_back({{"id", workspace.id},
+                             {"name", workspace.name},
+                             {"environment", workspace.environment},
+                             {"customer_id", workspace.customer_id}});
+        }
+        return items;
+    };
+    json organizations = json::array();
+    for (const control::AccountOrganization& organization : plan.organizations) {
+        organizations.push_back(
+            {{"organization_id", organization.organization.id},
+             {"display_name", organization.organization.display_name},
+             {"customer_id",
+              organization.customer_id.empty() ? json(nullptr) : json(organization.customer_id)},
+             {"handle",
+              organization.customer_name.empty() ? json(nullptr)
+                                                 : json(organization.customer_name)},
+             {"role", organization.role.empty() ? json(nullptr) : json(organization.role)},
+             {"other_owners", organization.other_owners},
+             {"other_members", organization.other_members},
+             {"workspaces", workspace_items(organization.live_workspaces)},
+             {"action", organization_action(organization, delete_organizations)}});
+    }
+    json counts = json::object();
+    for (const auto& [kind, count] : plan.counts) {
+        counts[kind] = count;
+    }
+    return {{"user_id", plan.user.id},
+            {"customer_id", plan.customer_id.empty() ? json(nullptr) : json(plan.customer_id)},
+            {"handle", plan.customer_name.empty() ? json(nullptr) : json(plan.customer_name)},
+            {"workspaces", workspace_items(plan.live_workspaces)},
+            {"organizations", std::move(organizations)},
+            {"counts", std::move(counts)},
+            {"kept",
+             {{"invoices", plan.invoices_kept},
+              {"open_invoices", plan.open_invoices},
+              {"audit",
+               "the central audit log keeps its events, which name the account by its TAAP "
+               "identity and its personal account's id; Lake no longer maps them to an email or a name"}}},
+            {"dry_run", dry_run},
+            {"deleted", !dry_run},
+            {"deleted_at", plan.deleted_at.empty() ? json(nullptr) : json(plan.deleted_at)}};
+}
+
+// A person deleting their own account proves it is them now: a sign-in session started in the
+// last fifteen minutes, or a fresh TOTP or recovery code when MFA is enrolled. A token, however
+// new, is not a sign-in.
+ApiResult account_deletion_step_up(const json& in, ApiContext& ctx) {
+    const std::string pool = ctx.pool_id.empty() ? "lake" : ctx.pool_id;
+    const auto sessions = ctx.store->list_sessions(ctx.acting_user_id, pool);
+    if (!sessions) {
+        return from_store_error(sessions.error());
+    }
+    const auto session =
+        std::ranges::find(*sessions, ctx.credential_session_id, &control::Session::id);
+    if (session == sessions->end()) {
+        return ApiResult::failure("unauthorized",
+                                  "an account is deleted by a person signed in to it");
+    }
+    if (in.contains("code")) {
+        const auto verified =
+            ctx.store->verify_mfa_code(ctx.acting_user_id, pool, in.at("code").get<std::string>());
+        if (!verified) {
+            auto failed = from_store_error(verified.error());
+            failed.error.path = "/code";
+            return failed;
+        }
+        return ApiResult::success(nullptr);
+    }
+    if (session->kind == "browser" || session->kind == "taap") {
+        const auto started = timestamp_seconds(session->created_at);
+        const auto now = std::chrono::duration_cast<std::chrono::seconds>(
+                             std::chrono::system_clock::now().time_since_epoch())
+                             .count();
+        if (started && now - *started <= account_deletion_sign_in_seconds) {
+            return ApiResult::success(nullptr);
+        }
+    }
+    return ApiResult::failure("unauthorized",
+                              "sign in again (within the last 15 minutes), or give a fresh MFA "
+                              "code, to delete your account");
+}
+
+// What another capability, called as the same caller on a copy of the context (so this call's
+// own audit record is left as it is), answered.
+ApiResult completed_call(std::expected<ApiResult, liquid::error> done) {
+    return done ? std::move(*done) : ApiResult::failure("store_error", done.error().message);
+}
+
+// delete_account: the account itself (after a recent sign-in or MFA) or the operator deletes an
+// account. The workspaces of its personal account and the organizations it alone owns go first,
+// each through delete_workspace and delete_organization (so each workspace Zetta is removed
+// through the operator's desired state and each step is audited on its own); then the store
+// removes the account's identity, memberships and grants and marks it deleted.
+liquid::runtime::task<ApiResult> delete_account(const json& in, ApiContext& ctx) {
+    if (!ctx.store) {
+        co_return no_store();
+    }
+    if (ctx.registry == nullptr) {
+        co_return ApiResult::failure("store_unavailable", "no registry to delete the account");
+    }
+    const std::string user_id = account_deletion_target(in, ctx);
+    const bool dry_run = in.value("dry_run", false);
+    const bool delete_organizations = in.value("delete_organizations", false);
+    const bool operator_call = ctx.acting_identity == "admin";
+    ctx.audit_kind = dry_run ? "account.delete.plan" : "account.delete";
+    ctx.audit_object = "user/" + user_id;
+    ctx.audit_details = {{"user_id", user_id}};
+    if (user_id.empty()) {
+        co_return ApiResult::failure(
+            "invalid_input", "user_id is required with the operator credential", "/user_id");
+    }
+    if (!operator_call && user_id != ctx.acting_user_id) {
+        co_return ApiResult::failure("unauthorized", "only the account itself or the operator "
+                                                     "can delete an account");
+    }
+    if (!operator_call && !ctx.session_credential) {
+        co_return ApiResult::failure("unauthorized", "a signed-in account is required");
+    }
+    auto plan = ctx.store->delete_account(user_id, true);
+    if (!plan) {
+        auto failed = from_store_error(plan.error());
+        failed.error.path = in.contains("user_id") ? "/user_id" : "";
+        co_return failed;
+    }
+    ctx.audit_customer_id = plan->customer_id;
+    ctx.audit_details["handle"] = plan->customer_name;
+    const std::string expected = plan->customer_name.empty() ? user_id : plan->customer_name;
+    const bool confirmed = in.contains("confirm") && in.at("confirm") == expected;
+    if (!confirmed && (!dry_run || in.contains("confirm"))) {
+        co_return ApiResult::failure(
+            "invalid_input", "confirm must match the account's handle", "/confirm");
+    }
+    json value = account_deletion_json(*plan, delete_organizations, true);
+    ctx.audit_details["counts"] = value["counts"];
+    if (dry_run) {
+        co_return ApiResult::success(std::move(value));
+    }
+    std::string blocked;
+    for (const control::AccountOrganization& organization : plan->organizations) {
+        if (organization_action(organization, delete_organizations) == "blocked") {
+            blocked += (blocked.empty() ? "" : ", ") + organization.organization.display_name;
+        }
+    }
+    if (!blocked.empty()) {
+        co_return ApiResult::failure(
+            "conflict",
+            "the account is the only owner of organizations other people belong to: " + blocked +
+                ". Make another member an owner, or pass delete_organizations: true to delete "
+                "them too",
+            "/delete_organizations");
+    }
+    if (!operator_call) {
+        if (const ApiResult proved = account_deletion_step_up(in, ctx); !proved.ok) {
+            co_return proved;
+        }
+    }
+    // The workspaces and organizations that go with the account, each by its own capability:
+    // every workspace first, then the organizations, whose deletion needs their workspaces gone.
+    std::vector<control::Workspace> workspaces = plan->live_workspaces;
+    std::vector<const control::AccountOrganization*> organizations;
+    for (const control::AccountOrganization& organization : plan->organizations) {
+        if (organization_action(organization, delete_organizations) == "delete") {
+            organizations.push_back(&organization);
+            workspaces.insert(workspaces.end(),
+                              organization.live_workspaces.begin(),
+                              organization.live_workspaces.end());
+        }
+    }
+    json deleted_workspaces = json::array();
+    json deleted_organizations = json::array();
+    for (const control::Workspace& workspace : workspaces) {
+        ApiContext inner = ctx;
+        ApiResult done = completed_call(
+            co_await ctx.registry->call_async("delete_workspace",
+                                              {{"customer_id", workspace.customer_id},
+                                               {"workspace_id", workspace.id},
+                                               {"confirm", workspace.name}},
+                                              inner));
+        if (!done.ok) {
+            done.error.message = "deleting workspace " + workspace.name + ": " + done.error.message;
+            co_return done;
+        }
+        deleted_workspaces.push_back({{"id", workspace.id}, {"name", workspace.name}});
+    }
+    for (const control::AccountOrganization* organization : organizations) {
+        ApiContext inner = ctx;
+        ApiResult done = completed_call(co_await ctx.registry->call_async(
+            "delete_organization",
+            {{"organization_id", organization->organization.id},
+             {"confirm",
+              organization->customer_name.empty() ? organization->organization.id
+                                                  : organization->customer_name}},
+            inner));
+        if (!done.ok) {
+            done.error.message = "deleting organization " +
+                                 organization->organization.display_name + ": " +
+                                 done.error.message;
+            co_return done;
+        }
+        deleted_organizations.push_back(
+            {{"organization_id", organization->organization.id},
+             {"display_name", organization->organization.display_name}});
+    }
+    auto deleted = ctx.store->delete_account(user_id, false);
+    if (!deleted) {
+        co_return from_store_error(deleted.error());
+    }
+    value = account_deletion_json(*deleted, delete_organizations, false);
+    value["deleted_workspaces"] = std::move(deleted_workspaces);
+    value["deleted_organizations"] = std::move(deleted_organizations);
+    ctx.audit_details["counts"] = value["counts"];
+    ctx.audit_details["deleted_workspaces"] = value["deleted_workspaces"];
+    ctx.audit_details["deleted_organizations"] = value["deleted_organizations"];
+    co_return ApiResult::success(std::move(value));
+}
+
 // A grant or membership written with the attestation lake signed for it (lake#602): the answer is
 // the row plus `attestation: {statement, signer, signature, digest}`, and the audit event carries
 // the same.
@@ -2606,6 +2899,42 @@ void register_identity_capabilities(Registry& registry) {
         .action = "admin",
         .resolve_object = entity_object("organization", "organization_id"),
         .handler = delete_organization});
+    registry.add(Capability{
+        .name = "delete_account",
+        .title = "Delete an account",
+        .description =
+            "Delete an account, which cannot be undone. Only the account itself (signed in within "
+            "the last 15 minutes, or with a fresh MFA `code`) or the operator can delete it. The "
+            "workspaces of its personal account are deleted first (each by delete_workspace), then "
+            "the organizations it is the only owner of, with their workspaces (by "
+            "delete_organization); organizations other owners share are left to them. Then its "
+            "sessions, tokens, devices, passkeys, passwords and other credentials, memberships, "
+            "grants and billing contact go, and the account is marked deleted with its email and "
+            "name erased. It is refused while it is the only owner of an organization other "
+            "people belong to, unless `delete_organizations: true`. Invoices and the central "
+            "audit log are kept. `confirm` must be its handle (its user id when it has none). "
+            "`dry_run: true` deletes nothing and lists what would go.",
+        .input_schema = {{"type", "object"},
+                         {"properties",
+                          {{"user_id",
+                            {{"type", "string"},
+                             {"description",
+                              "the account to delete; omitted, your own (the operator must name "
+                              "one)"}}},
+                           {"confirm", {{"type", "string"}}},
+                           {"code",
+                            {{"type", "string"},
+                             {"description",
+                              "a TOTP or recovery code, instead of a recent sign-in"}}},
+                           {"delete_organizations", {{"type", "boolean"}}},
+                           {"dry_run", {{"type", "boolean"}}}}},
+                         {"additionalProperties", false}},
+        .output_schema = {{"type", "object"}},
+        .kind = CapabilityKind::Action,
+        .object = "principal",
+        .action = "admin",
+        .resolve_object = account_deletion_object,
+        .async_handler = delete_account});
 
     // ---- customers ----
     registry.add(Capability{

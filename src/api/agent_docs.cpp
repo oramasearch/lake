@@ -293,10 +293,10 @@ constexpr std::array group_rules{
                          n == "sign" || n == "verify";
               }},
     GroupRule{"Identity and sessions",
-              "Sign-in, passkeys, multi-factor authentication, sessions, tokens, devices and "
-              "recovery.",
+              "Sign-in, passkeys, multi-factor authentication, sessions, tokens, devices, "
+              "recovery, and deleting your account (delete_account, `dry_run: true` first).",
               [](std::string_view n) {
-                  return contains_any(n,
+                  return n == "delete_account" || contains_any(n,
                                       {"sign_in",
                                        "sign_up",
                                        "passkey",

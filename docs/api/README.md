@@ -55,6 +55,9 @@ lake#645: [deletion.md](deletion.md) documents deleting and revoking what could 
 before, each with `dry_run: true` first and a typed confirmation in Lake Console:
 `delete_organization`, `revoke_invitation`, `revoke_grant`, `delete_secret_mount`, `delete_dataset`,
 `delete_model`, `delete_run`, `delete_index` and `delete_ask_conversation`.
+lake#810: [identity.md](identity.md#deleting-an-account) documents `delete_account`, which the
+account itself (after a recent sign-in or MFA) or the operator calls to delete an account with its
+workspaces and the organizations it alone owns, never leaving an organization without an owner.
 lake#561: [drives.md](drives.md) documents drives (repository, workspace files, virtual) and workspace files in the workspace Zetta. [transcripts.md](transcripts.md) documents speech-to-text (`transcribe`) and the
 workspace transcripts kept in the workspace Zetta (`create_transcript`, `list_transcripts`,
 `get_transcript`, `update_transcript`, `delete_transcript`), the audio never kept.
@@ -306,6 +309,7 @@ and `Experiments.CompareRunsAnswersItsGetFormWithRepeatedKeysOrACommaList`
 | `list_organizations` | read | `limit` | `{items: [organization]}` | [customers.md](customers.md) |
 | `get_organization` | read | `id` | organization, with its own account's `customer_id` (null when none) | [customers.md](customers.md) |
 | `create_organization` | action | `taap_id?`, `display_name?`, `customer_id?` | organization | [organizations.md](organizations.md) |
+| `delete_account` | action, the account itself (signed in within 15 minutes, or `code`) or the operator | `user_id?`, `confirm` (its handle), `code?`, `delete_organizations?`, `dry_run?` | what went, with counts and the workspaces and organizations deleted; `409` naming an organization it alone owns that others belong to | [identity.md](identity.md#deleting-an-account) |
 | `delete_organization` | action, an owner | `organization_id`, `confirm` (its handle), `dry_run?` | what went, with counts; `409` naming the workspaces it still owns | [organizations.md](organizations.md#deleting-an-organization) |
 | `revoke_invitation`, `revoke_grant` | action, `admin` on the scope or object | `invitation_id` or `grant_id`, `dry_run?` | the invitation (now `revoked`) or the grant removed | [organizations.md](organizations.md#revoking-an-invitation), [policy.md](policy.md#revoking-a-grant) |
 | `list_customers` | read | `limit` | `{items: [customer]}` | [customers.md](customers.md) |

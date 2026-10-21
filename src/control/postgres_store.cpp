@@ -1787,7 +1787,8 @@ public:
         return with_tx<std::vector<User>>([&](pqxx::work& tx) -> Result<std::vector<User>> {
             const pqxx::result rows =
                 tx.exec_params(std::string("SELECT ") + user_columns +
-                                   " FROM users ORDER BY created_at DESC LIMIT $1",
+                                   " FROM users WHERE deleted_at IS NULL ORDER BY created_at DESC "
+                                   "LIMIT $1",
                                limit);
             std::vector<User> out;
             for (const auto& r : rows)
@@ -1798,7 +1799,9 @@ public:
     Result<User> get_user(const std::string& id) override {
         return with_tx<User>([&](pqxx::work& tx) -> Result<User> {
             const pqxx::result rows = tx.exec_params(
-                std::string("SELECT ") + user_columns + " FROM users WHERE id = $1::uuid", id);
+                std::string("SELECT ") + user_columns +
+                    " FROM users WHERE id = $1::uuid AND deleted_at IS NULL",
+                id);
             if (rows.empty())
                 return std::unexpected(StoreError{"not_found", "no user " + id});
             return user_of(rows[0]);
@@ -1815,7 +1818,7 @@ public:
                 const pqxx::result rows = tx.exec_params(
                     "WITH wanted AS (SELECT jsonb_array_elements_text($1::jsonb) AS taap_id) "
                     "SELECT users.taap_id, COALESCE(NULLIF(users.display_name, ''), users.email) "
-                    "FROM users JOIN wanted USING (taap_id) "
+                    "FROM users JOIN wanted USING (taap_id) WHERE users.deleted_at IS NULL "
                     "UNION ALL SELECT organizations.taap_id, organizations.display_name "
                     "FROM organizations JOIN wanted USING (taap_id) "
                     "WHERE organizations.display_name <> ''",
@@ -7911,6 +7914,41 @@ public:
             return enrollment;
         });
     }
+    Result<void> verify_mfa_code(const std::string& user_id,
+                                 const std::string& pool_id,
+                                 const std::string& code) override {
+        return with_tx<void>([&](pqxx::work& tx) -> Result<void> {
+            const pqxx::result rows =
+                tx.exec_params("SELECT public_data->>'encrypted_seed' FROM credentials "
+                               "WHERE user_id = $1::uuid AND pool_id = $2 AND kind = 'totp' "
+                               "AND revoked_at IS NULL",
+                               user_id,
+                               pool_id);
+            if (rows.empty()) {
+                return std::unexpected(StoreError{"not_found", "MFA is not enrolled"});
+            }
+            const Result<std::string> seed =
+                decrypt_secret(tx, "identity.totp", rows[0][0].as<std::string>());
+            if (!seed) {
+                return std::unexpected(seed.error());
+            }
+            if (identity_crypto::verify_totp(*seed, code)) {
+                return {};
+            }
+            const pqxx::result recovery_rows =
+                tx.exec_params("SELECT secret_hash FROM credentials WHERE user_id = $1::uuid "
+                               "AND pool_id = $2 AND kind = 'recovery' AND revoked_at IS NULL",
+                               user_id,
+                               pool_id);
+            if (std::any_of(recovery_rows.begin(), recovery_rows.end(), [&](const pqxx::row& row) {
+                    return identity_crypto::verify_secret(row[0].as<std::string>(), code);
+                })) {
+                return {};
+            }
+            return std::unexpected(
+                StoreError{"unauthorized", "a fresh MFA verification is required"});
+        });
+    }
     Result<void> disable_mfa(const std::string& user_id,
                              const std::string& pool_id,
                              const std::string& code) override {
@@ -10139,6 +10177,227 @@ public:
                 tx.exec_params("UPDATE customers SET deleted_at = now() WHERE id = $1::uuid",
                                plan.customer_id);
             }
+            plan.deleted_at = deleted[0][0].as<std::string>();
+            return plan;
+        });
+    }
+
+    // ---- account deletion (lake#810) ----
+
+    Result<AccountDeletion> delete_account(const std::string& user_id, bool dry_run) override {
+        return with_tx<AccountDeletion>([&](pqxx::work& tx) -> Result<AccountDeletion> {
+            const pqxx::result rows = tx.exec_params(
+                std::string("SELECT ") + user_columns +
+                    " FROM users WHERE id = $1::uuid AND deleted_at IS NULL FOR UPDATE",
+                user_id);
+            if (rows.empty()) {
+                return std::unexpected(StoreError{"not_found", "no account " + user_id});
+            }
+            AccountDeletion plan{.user = user_of(rows[0])};
+            const std::string taap = plan.user.taap_id;
+            const auto live_workspaces = [&](const std::string& customer_id) {
+                std::vector<Workspace> live;
+                const pqxx::result found = tx.exec_params(
+                    std::string("SELECT ") + workspace_columns +
+                        " FROM workspaces WHERE customer_id = $1::uuid AND desired <> 'deleted' "
+                        "ORDER BY created_at, id",
+                    customer_id);
+                for (const auto& row : found) {
+                    live.push_back(workspace_from(row));
+                }
+                return live;
+            };
+            const pqxx::result customers =
+                tx.exec_params("SELECT id::text, name FROM customers WHERE user_id = $1::uuid AND "
+                               "deleted_at IS NULL FOR UPDATE",
+                               user_id);
+            if (!customers.empty()) {
+                plan.customer_id = customers[0][0].as<std::string>();
+                plan.customer_name = customers[0][1].as<std::string>();
+                plan.live_workspaces = live_workspaces(plan.customer_id);
+            }
+            // The account's memberships: by its user id, or by its TAAP identity.
+            const std::string mine = "((principal_type = 'user' AND principal_id = $1) OR "
+                                     "($2 <> '' AND principal_taap_id = $2))";
+            const pqxx::result organizations = tx.exec_params(
+                std::string("SELECT DISTINCT o.id::text FROM memberships m JOIN organizations o "
+                            "ON o.id = m.organization_id WHERE o.deleted_at IS NULL AND ") +
+                    "((m.principal_type = 'user' AND m.principal_id = $1) OR ($2 <> '' AND "
+                    "m.principal_taap_id = $2)) ORDER BY 1",
+                user_id,
+                taap);
+            for (const auto& organization_row : organizations) {
+                const std::string organization_id = organization_row[0].as<std::string>();
+                const pqxx::result found = tx.exec_params(
+                    std::string("SELECT ") + organization_columns +
+                        " FROM organizations WHERE id = $1::uuid FOR UPDATE",
+                    organization_id);
+                AccountOrganization entry{.organization = organization_of(found[0])};
+                const pqxx::result role = tx.exec_params(
+                    "SELECT role FROM memberships WHERE organization_id = $3::uuid AND team_id IS "
+                    "NULL AND " +
+                        mine + " ORDER BY (role = 'owner') DESC LIMIT 1",
+                    user_id,
+                    taap,
+                    organization_id);
+                if (!role.empty()) {
+                    entry.role = role[0][0].as<std::string>();
+                }
+                entry.other_owners =
+                    tx.exec_params("SELECT count(DISTINCT principal_taap_id) FROM memberships "
+                                   "WHERE organization_id = $3::uuid AND team_id IS NULL AND "
+                                   "role = 'owner' AND NOT " +
+                                       mine,
+                                   user_id,
+                                   taap,
+                                   organization_id)[0][0]
+                        .as<std::int64_t>();
+                entry.other_members =
+                    tx.exec_params("SELECT count(DISTINCT principal_taap_id) FROM memberships "
+                                   "WHERE organization_id = $3::uuid AND NOT " +
+                                       mine,
+                                   user_id,
+                                   taap,
+                                   organization_id)[0][0]
+                        .as<std::int64_t>();
+                const pqxx::result space =
+                    tx.exec_params("SELECT id::text, name FROM customers WHERE organization_id = "
+                                   "$1::uuid AND deleted_at IS NULL",
+                                   organization_id);
+                if (!space.empty()) {
+                    entry.customer_id = space[0][0].as<std::string>();
+                    entry.customer_name = space[0][1].as<std::string>();
+                    entry.live_workspaces = live_workspaces(entry.customer_id);
+                }
+                plan.organizations.push_back(std::move(entry));
+            }
+            const pqxx::result roots = tx.exec_params(
+                "SELECT coalesce(array_agg(id::text), '{}') FROM objects WHERE $1 <> '' AND "
+                "object_type = 'customer' AND external_id = $1",
+                plan.customer_id);
+            const std::string root_ids = roots[0][0].as<std::string>();
+            const auto count = [&](const std::string& sql) -> std::int64_t {
+                return tx.exec_params(sql, user_id, taap, plan.customer_id)[0][0]
+                    .as<std::int64_t>();
+            };
+            const std::string by_user = " WHERE user_id = $1::uuid AND $2 = $2 AND $3 = $3";
+            const std::string of_space = " WHERE $1 = $1 AND $2 = $2 AND customer_id::text = $3";
+            for (const char* table : {"sessions",
+                                      "devices",
+                                      "credentials",
+                                      "identity_documents",
+                                      "identity_taap_assertions",
+                                      "identity_webauthn_challenges",
+                                      "identity_link_challenges",
+                                      "identity_links",
+                                      "offline_recovery_attempts",
+                                      "offline_recovery_grants",
+                                      "app_authorization_codes",
+                                      "scim_users"}) {
+                plan.counts[table] = count(std::string("SELECT count(*) FROM ") + table + by_user);
+            }
+            plan.counts["custodial_seeds"] =
+                count("SELECT count(*) FROM custodial_identities" + by_user +
+                      " AND wrapped_seed IS NOT NULL");
+            plan.counts["recovery_custody"] =
+                count("SELECT count(*) FROM offline_recovery_contacts WHERE $1 = $1 AND $2 <> '' "
+                      "AND contact_taap_id = $2 AND $3 = $3");
+            plan.counts["memberships"] =
+                count("SELECT count(*) FROM memberships WHERE $3 = $3 AND " + mine);
+            plan.counts["grants"] =
+                count("SELECT count(*) FROM grants WHERE $1 = $1 AND $3 = $3 AND $2 <> '' AND "
+                      "principal_taap_id = $2");
+            for (const char* table :
+                 {"billing_contacts", "customer_usage_limits", "customer_storage_quotas"}) {
+                plan.counts[table] = count(std::string("SELECT count(*) FROM ") + table + of_space);
+            }
+            plan.counts["secret_mount_routes"] =
+                count("SELECT count(*) FROM secret_mount_routes" + of_space);
+            plan.counts["policy_objects"] =
+                tx.exec_params(std::string(policy_subtree_cte) + "SELECT count(*) FROM subtree",
+                               root_ids)[0][0]
+                    .as<std::int64_t>();
+            plan.counts["space_grants"] =
+                tx.exec_params(std::string(policy_subtree_cte) +
+                                   "SELECT count(*) FROM grants WHERE object_id IN "
+                                   "(SELECT id FROM subtree)",
+                               root_ids)[0][0]
+                    .as<std::int64_t>();
+            plan.invoices_kept = count("SELECT count(*) FROM billing_invoices" + of_space);
+            plan.open_invoices =
+                count("SELECT count(*) FROM billing_invoices" + of_space + " AND state = 'due'");
+            if (dry_run) {
+                return plan;
+            }
+            if (!plan.live_workspaces.empty()) {
+                std::string names;
+                for (const Workspace& workspace : plan.live_workspaces) {
+                    names += (names.empty() ? "" : ", ") + workspace.name;
+                }
+                return std::unexpected(StoreError{
+                    "conflict", "the account still has workspaces; delete them first: " + names});
+            }
+            for (const AccountOrganization& organization : plan.organizations) {
+                if (organization.sole_owner()) {
+                    return std::unexpected(StoreError{
+                        "conflict",
+                        "the account is the only owner of the organization " +
+                            organization.organization.display_name +
+                            "; make another member an owner or delete the organization first"});
+                }
+            }
+            // Identity: every way to sign in or act as the account.
+            tx.exec_params("DELETE FROM memberships WHERE $3 = $3 AND " + mine,
+                           user_id,
+                           taap,
+                           plan.customer_id);
+            if (!taap.empty()) {
+                tx.exec_params("DELETE FROM grants WHERE principal_taap_id = $1", taap);
+                tx.exec_params("DELETE FROM offline_recovery_contacts WHERE contact_taap_id = $1",
+                               taap);
+            }
+            for (const char* table : {"scim_users",
+                                      "offline_recovery_attempts",
+                                      "offline_recovery_grants",
+                                      "offline_recovery_notifications",
+                                      "app_authorization_codes",
+                                      "identity_link_challenges",
+                                      "identity_links",
+                                      "identity_webauthn_challenges",
+                                      "identity_taap_assertions",
+                                      "identity_documents",
+                                      "sessions",
+                                      "credentials",
+                                      "devices"}) {
+                tx.exec_params(std::string("DELETE FROM ") + table + " WHERE user_id = $1::uuid",
+                               user_id);
+            }
+            tx.exec_params("UPDATE custodial_identities SET wrapped_seed = NULL, "
+                           "seed_destroyed_at = coalesce(seed_destroyed_at, now()) "
+                           "WHERE user_id = $1::uuid",
+                           user_id);
+            // The personal space: what it holds outside its (already deleted) workspaces.
+            if (!plan.customer_id.empty()) {
+                tx.exec_params("DELETE FROM secret_lease_routes WHERE mount_id IN (SELECT "
+                               "mount_id FROM secret_mount_routes WHERE customer_id = $1::uuid)",
+                               plan.customer_id);
+                for (const char* table : {"secret_mount_routes",
+                                          "billing_contacts",
+                                          "customer_usage_limits",
+                                          "customer_storage_quotas"}) {
+                    tx.exec_params(std::string("DELETE FROM ") + table +
+                                       " WHERE customer_id = $1::uuid",
+                                   plan.customer_id);
+                }
+                tx.exec_params("DELETE FROM objects WHERE id = ANY($1::uuid[])", root_ids);
+                tx.exec_params("UPDATE customers SET deleted_at = now() WHERE id = $1::uuid",
+                               plan.customer_id);
+            }
+            const pqxx::result deleted = tx.exec_params(
+                "UPDATE users SET email = NULL, display_name = '', deleted_at = now(), "
+                "disabled_at = coalesce(disabled_at, now()) WHERE id = $1::uuid "
+                "RETURNING deleted_at::text",
+                user_id);
             plan.deleted_at = deleted[0][0].as<std::string>();
             return plan;
         });

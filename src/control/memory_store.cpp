@@ -338,7 +338,12 @@ Result<User> InMemoryStore::create_user(const NewUser& in) {
 
 Result<std::vector<User>> InMemoryStore::list_users(int limit) {
     std::lock_guard lock(mutex_);
-    std::vector<User> out(users_.rbegin(), users_.rend());
+    std::vector<User> out;
+    for (auto user = users_.rbegin(); user != users_.rend(); ++user) {
+        if (!deleted_users_.contains(user->id)) {
+            out.push_back(*user);
+        }
+    }
     if (limit > 0 && out.size() > static_cast<std::size_t>(limit))
         out.resize(static_cast<std::size_t>(limit));
     return out;
@@ -3348,7 +3353,7 @@ Result<void> InMemoryStore::mark_cloud_order_events_audited(const std::vector<st
 Result<User> InMemoryStore::get_user(const std::string& id) {
     std::lock_guard lock(mutex_);
     for (const auto& u : users_)
-        if (u.id == id)
+        if (u.id == id && !deleted_users_.contains(u.id))
             return u;
     return std::unexpected(StoreError{"not_found", "no user " + id});
 }
@@ -3359,7 +3364,7 @@ InMemoryStore::principal_names(const std::vector<std::string>& taap_ids) {
     std::map<std::string, std::string> names;
     for (const std::string& taap_id : taap_ids) {
         for (const User& user : users_) {
-            if (!taap_id.empty() && user.taap_id == taap_id) {
+            if (!taap_id.empty() && user.taap_id == taap_id && !deleted_users_.contains(user.id)) {
                 names[taap_id] = user.display_name.empty() ? user.email : user.display_name;
             }
         }
@@ -3926,6 +3931,26 @@ Result<bool> InMemoryStore::mfa_enrolled(const std::string& user_id, const std::
         }
     }
     return false;
+}
+
+Result<void> InMemoryStore::verify_mfa_code(const std::string& user_id,
+                                            const std::string& pool_id,
+                                            const std::string& code) {
+    std::lock_guard lock(mutex_);
+    for (const auto& credential : passwords_) {
+        if (credential.user_id != user_id || credential.pool_id != pool_id ||
+            credential.totp_secret.empty()) {
+            continue;
+        }
+        if (identity_crypto::verify_totp(credential.totp_secret, code) ||
+            std::ranges::any_of(credential.recovery_hashes, [&](const std::string& hash) {
+                return identity_crypto::verify_secret(hash, code);
+            })) {
+            return {};
+        }
+        return std::unexpected(StoreError{"unauthorized", "a fresh MFA verification is required"});
+    }
+    return std::unexpected(StoreError{"not_found", "MFA is not enrolled"});
 }
 
 Result<void> InMemoryStore::disable_mfa(const std::string& user_id,
@@ -7825,6 +7850,222 @@ Result<OrganizationDeletion> InMemoryStore::delete_organization(const std::strin
         deleted_customers_.insert(plan.customer_id);
     }
     plan.deleted_at = now_iso8601();
+    return plan;
+}
+
+Result<AccountDeletion> InMemoryStore::delete_account(const std::string& user_id, bool dry_run) {
+    std::lock_guard lock(mutex_);
+    const auto user = std::ranges::find(users_, user_id, &User::id);
+    if (user == users_.end() || deleted_users_.contains(user_id)) {
+        return std::unexpected(StoreError{"not_found", "no account " + user_id});
+    }
+    AccountDeletion plan{.user = *user};
+    const std::string taap = user->taap_id;
+    const auto live_workspaces = [&](const std::string& customer_id) {
+        std::vector<Workspace> live;
+        for (const Workspace& workspace : workspaces_) {
+            if (workspace.customer_id == customer_id && workspace.desired != "deleted") {
+                live.push_back(workspace);
+            }
+        }
+        return live;
+    };
+    const auto personal = std::ranges::find_if(customers_, [&](const Customer& value) {
+        return value.user_id == user_id && !deleted_customers_.contains(value.id);
+    });
+    if (personal != customers_.end()) {
+        plan.customer_id = personal->id;
+        plan.customer_name = personal->name;
+        plan.live_workspaces = live_workspaces(personal->id);
+    }
+    // The account's memberships: by its user id, or by its TAAP identity.
+    const auto mine = [&](const Membership& membership) {
+        return (membership.principal_type == "user" && membership.principal_id == user_id) ||
+               (!taap.empty() && membership.principal_taap_id == taap);
+    };
+    std::set<std::string> organization_ids;
+    for (const Membership& membership : memberships_) {
+        if (mine(membership) && !deleted_organizations_.contains(membership.organization_id)) {
+            organization_ids.insert(membership.organization_id);
+        }
+    }
+    for (const std::string& organization_id : organization_ids) {
+        const auto organization = std::ranges::find(organizations_, organization_id, &Organization::id);
+        if (organization == organizations_.end()) {
+            continue;
+        }
+        AccountOrganization entry{.organization = *organization};
+        std::set<std::string> owners, members;
+        for (const Membership& membership : memberships_) {
+            if (membership.organization_id != organization_id) {
+                continue;
+            }
+            if (mine(membership)) {
+                if (membership.team_id.empty() && (entry.role.empty() || membership.role == "owner")) {
+                    entry.role = membership.role;
+                }
+                continue;
+            }
+            members.insert(membership.principal_taap_id);
+            if (membership.team_id.empty() && membership.role == "owner") {
+                owners.insert(membership.principal_taap_id);
+            }
+        }
+        entry.other_owners = static_cast<std::int64_t>(owners.size());
+        entry.other_members = static_cast<std::int64_t>(members.size());
+        const auto space = std::ranges::find_if(customers_, [&](const Customer& value) {
+            return value.organization_id == organization_id && !deleted_customers_.contains(value.id);
+        });
+        if (space != customers_.end()) {
+            entry.customer_id = space->id;
+            entry.customer_name = space->name;
+            entry.live_workspaces = live_workspaces(space->id);
+        }
+        plan.organizations.push_back(std::move(entry));
+    }
+    std::set<std::string> roots;
+    for (const PolicyObject& object : policy_objects_) {
+        if (!plan.customer_id.empty() && object.object_type == "customer" &&
+            object.external_id == plan.customer_id) {
+            roots.insert(object.id);
+        }
+    }
+    const std::set<std::string> objects = policy_subtree(policy_objects_, roots);
+    const auto by_user = [&](const auto& value) { return value.user_id == user_id; };
+    const auto of_space = [&](const auto& value) {
+        return !plan.customer_id.empty() && value.customer_id == plan.customer_id;
+    };
+    const auto webauthn_of = [&](const WebAuthnChallengeRecord& record) {
+        return record.challenge.user_id == user_id;
+    };
+    const auto link_challenge_of = [&](const IdentityLinkChallengeRecord& record) {
+        return record.challenge.user_id == user_id;
+    };
+    const auto attempt_of = [&](const RecoveryRecord& record) {
+        return record.attempt.user_id == user_id;
+    };
+    const auto custody_of = [&](const RecoveryContact& contact) {
+        return !taap.empty() && contact.contact_taap_id == taap;
+    };
+    const auto grant_of = [&](const Grant& grant) {
+        return !taap.empty() && grant.principal_taap_id == taap;
+    };
+    const auto credential_count = std::ranges::count_if(passwords_, by_user) +
+                                  std::ranges::count_if(passkeys_, by_user) +
+                                  std::ranges::count_if(oauth_credentials_, by_user) +
+                                  std::ranges::count_if(sso_credentials_, by_user);
+    const auto custodial = custodial_identities_.find(user_id);
+    std::int64_t usage_limits = 0;
+    for (const auto& [key, limit] : usage_limits_) {
+        usage_limits += !plan.customer_id.empty() && key.first == plan.customer_id ? 1 : 0;
+    }
+    plan.counts = {
+        {"sessions", std::ranges::count_if(sessions_, by_user)},
+        {"devices", std::ranges::count_if(devices_, by_user)},
+        {"credentials", credential_count},
+        {"identity_documents", 0},
+        {"identity_taap_assertions", 0},
+        {"identity_webauthn_challenges", std::ranges::count_if(webauthn_challenges_, webauthn_of)},
+        {"identity_link_challenges",
+         std::ranges::count_if(identity_link_challenges_, link_challenge_of)},
+        {"identity_links", identity_links_.contains(user_id) ? 1 : 0},
+        {"offline_recovery_attempts", std::ranges::count_if(recovery_attempts_, attempt_of)},
+        {"offline_recovery_grants", std::ranges::count_if(offline_grants_, by_user)},
+        {"app_authorization_codes", 0},
+        {"scim_users", std::ranges::count_if(scim_users_, by_user)},
+        {"custodial_seeds",
+         custodial != custodial_identities_.end() &&
+                 !custodial->second.custodial_wrapped_seed.empty()
+             ? 1
+             : 0},
+        {"recovery_custody", std::ranges::count_if(recovery_contacts_, custody_of)},
+        {"memberships", std::ranges::count_if(memberships_, mine)},
+        {"grants", std::ranges::count_if(grants_, grant_of)},
+        {"billing_contacts", billing_contacts_.contains(plan.customer_id) ? 1 : 0},
+        {"customer_usage_limits", usage_limits},
+        {"customer_storage_quotas", storage_quotas_.contains(plan.customer_id) ? 1 : 0},
+        {"secret_mount_routes", std::ranges::count_if(secret_mount_routes_, of_space)},
+        {"policy_objects", static_cast<std::int64_t>(objects.size())},
+        {"space_grants", std::ranges::count_if(grants_, [&](const Grant& grant) {
+             return objects.contains(grant.object_id);
+         })}};
+    plan.invoices_kept = std::ranges::count_if(invoices_, of_space);
+    plan.open_invoices = std::ranges::count_if(
+        invoices_, [&](const Invoice& invoice) { return of_space(invoice) && invoice.state == "due"; });
+    if (dry_run) {
+        return plan;
+    }
+    if (!plan.live_workspaces.empty()) {
+        std::string names;
+        for (const Workspace& workspace : plan.live_workspaces) {
+            names += (names.empty() ? "" : ", ") + workspace.name;
+        }
+        return std::unexpected(
+            StoreError{"conflict", "the account still has workspaces; delete them first: " + names});
+    }
+    for (const AccountOrganization& organization : plan.organizations) {
+        if (organization.sole_owner()) {
+            return std::unexpected(StoreError{
+                "conflict",
+                "the account is the only owner of the organization " +
+                    organization.organization.display_name +
+                    "; make another member an owner or delete the organization first"});
+        }
+    }
+    const std::string now = now_iso8601();
+    std::set<std::string> membership_ids;
+    for (const Membership& membership : memberships_) {
+        if (mine(membership)) {
+            membership_ids.insert(membership.id);
+        }
+    }
+    std::erase_if(scim_group_members_, [&](const ScimGroupMember& member) {
+        return membership_ids.contains(member.membership_id);
+    });
+    std::erase_if(memberships_, mine);
+    std::erase_if(grants_, grant_of);
+    std::erase_if(recovery_contacts_, custody_of);
+    std::erase_if(scim_users_, by_user);
+    std::erase_if(recovery_attempts_, attempt_of);
+    std::erase_if(recovery_notifications_, by_user);
+    std::erase_if(offline_grants_, by_user);
+    std::erase_if(identity_link_challenges_, link_challenge_of);
+    identity_links_.erase(user_id);
+    identity_linked_at_.erase(user_id);
+    std::erase_if(webauthn_challenges_, webauthn_of);
+    std::erase_if(sessions_, by_user);
+    std::erase_if(passwords_, by_user);
+    std::erase_if(passkeys_, by_user);
+    std::erase_if(oauth_credentials_, by_user);
+    std::erase_if(sso_credentials_, by_user);
+    std::erase_if(devices_, by_user);
+    if (custodial != custodial_identities_.end() &&
+        !custodial->second.custodial_wrapped_seed.empty()) {
+        custodial->second.custodial_wrapped_seed.clear();
+        managed_seed_destroyed_at_.try_emplace(user_id, now);
+    }
+    if (!plan.customer_id.empty()) {
+        std::erase_if(secret_lease_routes_, [&](const SecretLeaseRoute& lease) {
+            return std::ranges::any_of(secret_mount_routes_, [&](const SecretMountRoute& route) {
+                return route.mount_id == lease.mount_id && of_space(route);
+            });
+        });
+        std::erase_if(secret_mount_routes_, of_space);
+        billing_contacts_.erase(plan.customer_id);
+        storage_quotas_.erase(plan.customer_id);
+        std::erase_if(usage_limits_,
+                      [&](const auto& entry) { return entry.first.first == plan.customer_id; });
+        std::erase_if(grants_, [&](const Grant& grant) { return objects.contains(grant.object_id); });
+        std::erase_if(policy_objects_,
+                      [&](const PolicyObject& object) { return objects.contains(object.id); });
+        deleted_customers_.insert(plan.customer_id);
+    }
+    user->email.clear();
+    user->display_name.clear();
+    user->updated_at = now;
+    deleted_users_.insert(user_id);
+    disabled_users_.insert(user_id);
+    plan.deleted_at = now;
     return plan;
 }
 
