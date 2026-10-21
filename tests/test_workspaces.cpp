@@ -4474,6 +4474,37 @@ TEST(Workspaces, CreateProjectSaysWhetherTheNameIsMissingOrTaken) {
     EXPECT_NE(other.error.code, "conflict") << "only the engine's name refusal is a clash";
 }
 
+// lake#246, lake#799: a native agent created without a model runs on the Orama base model at the
+// path the Orama operator copies it to on every workspace Zetta's data volume, and when the
+// checkpoint is not there its chat says what is missing instead of the engine's tokenizer error.
+TEST(Workspaces, ANativeAgentRunsTheBaseModelWhereTheOperatorPutsIt) {
+    EXPECT_EQ(lake::control::WorkspaceConfig{}.base_agent_model, "/data/models/base-agent")
+        << "the operator's data volume is /data; it copies the base model to models/base-agent";
+    ReadyWorkspace r;
+    r.w.caller->answers["create_agent"] = {{"id", "a-1"}, {"runtime", "native"}};
+    ASSERT_TRUE(r.call("create_agent", {{"name", "Renewal watcher"}, {"runtime", "native"}}).ok);
+    EXPECT_EQ(r.sent("create_agent").value("model", std::string()), "/data/models/base-agent");
+
+    r.w.caller->failure = lake::control::ZettaControlError{
+        "engine_error",
+        "bpe: no tokenizer.json or vocab.json+merges.txt in /data/models/base-agent"};
+    for (const auto& [capability, input] :
+         {std::pair{std::string("chat"), json{{"agent", "a-1"}, {"message", "hello"}}},
+          std::pair{std::string("agent_run"), json{{"agent", "a-1"}, {"input", "hello"}}}}) {
+        const auto refused =
+            r.call("workspace_act", {{"capability", capability}, {"input", input}});
+        ASSERT_FALSE(refused.ok) << capability;
+        EXPECT_EQ(refused.error.code, "engine_error") << capability;
+        EXPECT_EQ(refused.error.message,
+                  "the agent's model checkpoint is not in this workspace: /data/models/base-agent "
+                  "has no tokenizer.json (or vocab.json and merges.txt). The Orama base model is "
+                  "copied to the workspace's volume when its Zetta starts; until it is there, an "
+                  "agent on it cannot chat or run")
+            << capability;
+    }
+    r.w.caller->failure.reset();
+}
+
 // An agent's definition is versioned (lake#653): the engine keeps one record per agent and
 // overwrites it, so every create_agent and update_agent Lake makes, through workspace_act or the
 // named capability, keeps the definition it set as a sealed revision in the agent's workspace, and

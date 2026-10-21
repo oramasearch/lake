@@ -124,7 +124,8 @@ int usage() {
         "  LAKE_APP_REPLICAS_PER_CUSTOMER caps desired app replicas (default 0: no limit)");
     std::println(
         "  LAKE_AGENT_ENDPOINTS lists the Agent Library agents this lake runs (key=url,...)");
-    std::println("  LAKE_BASE_AGENT_MODEL is the base-agent checkpoint inside a workspace");
+    std::println("  LAKE_BASE_AGENT_MODEL is the base-agent checkpoint inside a workspace "
+                 "(default /data/models/base-agent)");
     std::println("  LAKE_AGENT_MODEL is the frontier model Python agents run on (default gpt-4o)");
     std::println(
         "  LAKE_ALLOW_NON_EXPIRING_CREDENTIALS=false refuses never-expiring keys and tokens");
