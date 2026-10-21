@@ -25,6 +25,15 @@ reachable content-addressed object. liquid verifies every object digest and sign
 during import. The archive records #166's result, attestation, trace, and SBOM enumeration as
 artifact evidence alongside the restored history.
 
+`payload.history` (`liquid_portable_history/1`) holds `items`, the signed drips, changes,
+directories and references in liquid's sync shape, then `roots` and `objects`. An item's
+`reference` is the change it names as a liquid digest (`blake3:<hex>`), or `""` when it names none,
+as every drip, change and directory item does (lake#776). Until lake#776 an item that named no
+change was written as `unknown:` and 64 zeros, the text liquid gives its empty value, which no
+digest parser accepts, so `import_repository` refused every archive `export_repository` had made
+with `invalid_input` "invalid sync item reference". Import reads both spellings as the empty
+value, so an archive made before the fix imports too.
+
 When `include_git` is true, `git` contains the loose-object Git repository emitted by liquid's
 `export_git`, encoded as path/content pairs, its selected ref, and any Git fidelity degradations.
 An import into lake uses the liquid portable history as authoritative; the Git projection is for a
@@ -58,7 +67,12 @@ ctest --test-dir build --output-on-failure
 The API fixture exports a repository with an issue, review, release, and direct grant into a
 second control plane, verifies the manifest signature, and compares the portable history,
 artifacts, forge values, and grants. It also changes a payload member and proves import rejects
-the digest mismatch.
+the digest mismatch. That fixture uses a fake repository store, so it never wrote a real history
+item; `WorkspaceStoreExport.AnArchiveExportJustMadeImportsIntoTheSpaceStoreAndAWorkspaceStore`
+(`tests/test_workspace_store.cpp`, lake#776) runs both capabilities over lake's real liquid store.
+It pushes a history with liquid, writes a binary file, an empty file and an edit, deletes the empty
+file with `commit_repository_files`, exports, then imports the archive into the account store and
+into a switched workspace store, and compares the tree and the edited file.
 
 ## Change
 

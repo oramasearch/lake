@@ -331,6 +331,23 @@ SyncStoreResult<liquid::node_id> parse_node_id(std::string_view input) {
     return output;
 }
 
+// A drip, change or directory item names no change: its `reference` is liquid's empty value, no
+// algorithm and 32 zero bytes. The archive writes that as "" (lake#776). Before, it was written
+// with liquid::to_string as "unknown:" and 64 zeros, which parse_digest refuses, so every archive
+// export_repository made was refused by import_repository; both spellings now read back as the
+// empty value.
+constexpr std::string_view empty_reference_before_776 =
+    "unknown:0000000000000000000000000000000000000000000000000000000000000000";
+
+bool is_empty_reference(const liquid::change_id& reference) {
+    return reference.value.alg == liquid::algorithm{} &&
+           std::ranges::all_of(reference.value.bytes, [](std::byte b) { return b == std::byte{}; });
+}
+
+std::string sync_item_reference_text(const liquid::change_id& reference) {
+    return is_empty_reference(reference) ? std::string() : liquid::to_string(reference.value);
+}
+
 nlohmann::json sync_item_json(const liquid::sync_item& item) {
     return {{"kind", static_cast<unsigned>(item.kind)},
             {"author",
@@ -343,7 +360,7 @@ nlohmann::json sync_item_json(const liquid::sync_item& item) {
             {"directory", node_id_text(item.directory)},
             {"root", item.root},
             {"name", item.name},
-            {"reference", liquid::to_string(item.reference.value)},
+            {"reference", sync_item_reference_text(item.reference)},
             {"body", base64_encode(item.body)},
             {"signature", base64_encode(item.signature)}};
 }
@@ -386,7 +403,7 @@ SyncStoreResult<liquid::sync_item> sync_item_from_json(const nlohmann::json& val
     output.root = value.value("root", false);
     output.name = value.value("name", "");
     const std::string reference = value.value("reference", "");
-    if (!reference.empty()) {
+    if (!reference.empty() && reference != empty_reference_before_776) {
         const auto parsed = liquid::parse_digest(reference);
         if (!parsed) {
             return std::unexpected(
