@@ -3221,7 +3221,10 @@ void expect_application_sessions_carry_no_lake_grants(
     const std::string application_id = lake::control::new_uuid_v4();
     const std::string pool_id = "app:" + application_id;
     const auto application = store->create_application(
-        {.id = application_id, .customer_id = owner_space->id, .pool_id = pool_id});
+        {.id = application_id,
+         .customer_id = owner_space->id,
+         .pool_id = pool_id,
+         .workspace_id = lake::test::repository_workspace(*store, owner_space->id)});
     ASSERT_TRUE(application) << application.error().message;
     // The Lake account whose identity the application's user carries administers its space.
     const std::string taap_id = "taap:1:ed25519:pool-victim-" + suffix;

@@ -1074,9 +1074,10 @@ ApiResult finish_call(const Capability* capability,
                       ApiContext& context,
                       bool handled) {
     // An anonymous caller refused by a capability that otherwise needs a credential (a private
-    // repository read) is refused for want of one.
-    if (capability != nullptr && capability->requires_auth && !context.authorized && !result.ok &&
-        result.error.code == "unauthorized") {
+    // repository read) is refused for want of one. An identity application's session presented
+    // a credential that is valid but grants nothing here (lake#912), and stays `unauthorized`.
+    if (capability != nullptr && capability->requires_auth && !context.authorized &&
+        !context.application_session && !result.ok && result.error.code == "unauthorized") {
         const double duration = result.duration_ms;
         result = unauthenticated(context);
         result.duration_ms = duration;
