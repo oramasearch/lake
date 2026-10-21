@@ -59,6 +59,7 @@ namespace lake::api {
 
 struct WorkspaceContent;
 class McpHttp; // lake/api/mcp_client.hpp
+class OidcDiscovery; // lake/api/oauth.hpp
 
 struct ApiError {
     std::string code;    // one of error_codes() (docs/api/errors.md)
@@ -519,6 +520,9 @@ struct ApiContext {
     // Lake's MCP client transport (decision 60, docs/api/mcp-connections.md): the server's outbound
     // transport, or a test's. Null: a workspace's MCP connections cannot reach their servers.
     std::shared_ptr<McpHttp> mcp_http;
+    // OpenID Connect discovery for generic OAuth and enterprise OIDC providers (lake#837): the
+    // server's, over its outbound client. Null: such a provider cannot be started.
+    std::shared_ptr<OidcDiscovery> oidc_discovery;
     // Whether an MCP connection may name a loopback or private address (tests, and local
     // development with LAKE_MCP_ALLOW_PRIVATE_ADDRESSES=1). Never on a deployed Lake.
     bool mcp_allow_private_addresses = false;

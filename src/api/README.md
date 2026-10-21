@@ -646,3 +646,8 @@ SAML sign-in (lake#836, `docs/api/sso.md#saml-sign-in`): `saml.cpp` holds the st
 `start_sso_saml` and `sign_in_saml` capabilities and the `/v1/saml/<provider>/metadata`, `/start`
 and `/acs` routes in `http_server.cpp` share: starting a request, and verifying a response, consuming
 its request and recording its assertion once before `sign_in_sso` provisions the person.
+OpenID Connect discovery (lake#837, `docs/api/identity.md#openid-connect-discovery`): `oauth.cpp`
+holds `OidcDiscovery`, which reads and caches each issuer's `/.well-known/openid-configuration` over
+a fetch `http_server.cpp` injects (the outbound client, public addresses only unless
+`LAKE_OIDC_ALLOW_PRIVATE_ADDRESSES`). `ApiContext::oidc_discovery` carries it to `start_oauth` and
+`start_sso_oidc`, which read it on the blocking pool, and the OAuth callback uses it directly.

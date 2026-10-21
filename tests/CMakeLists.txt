@@ -75,6 +75,8 @@ target_sources(lake-tests PRIVATE test_tunnel_clients.cpp)
 target_sources(lake-tests PRIVATE test_regions.cpp)
 # SAML sign-in through the Assertion Consumer Service (lake#836).
 target_sources(lake-tests PRIVATE test_saml.cpp)
+# OpenID Connect discovery for Lake OAuth and enterprise OIDC (lake#837).
+target_sources(lake-tests PRIVATE test_oidc_discovery.cpp)
 # The apex order sheet, its orders, Stripe Checkout and Resend (lake#831).
 target_sources(lake-tests PRIVATE test_orders.cpp)
 # The version and its release page (root CLAUDE.md, *Cutting a release*).
