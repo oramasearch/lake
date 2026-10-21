@@ -505,6 +505,42 @@ TEST(ModelCompletion, CountsALaunchedAgentsCallsAndRefusesEveryOtherCaller) {
     EXPECT_EQ(rig.call(chat(), unconfigured).error.code, "not_supported");
 }
 
+// orama-operator#779: a launched agent's LAKE_URL is lake followed by /w/<its workspace>, so its
+// gateway calls name a workspace in the path. A call naming another workspace than its run's is
+// refused before the provider is called; the run's own workspace is answered.
+TEST(ModelCompletion, ACallUnderAWorkspacePathMustNameItsRunsWorkspace) {
+    GatewayRig rig;
+    const auto owner = rig.store->get_customer(rig.customer);
+    ASSERT_TRUE(owner);
+    const auto launch = rig.store->create_agent_launch({.customer_id = rig.customer,
+                                                        .agent_id = "agent-1",
+                                                        .agent_name = "Churn Watcher",
+                                                        .mode = "job",
+                                                        .trigger = "manual",
+                                                        .scopes = {"workspace_query"},
+                                                        .created_by_user_id = owner->user_id,
+                                                        .workspace_id = rig.home});
+    ASSERT_TRUE(launch) << launch.error().message;
+    auto launched = rig.admin();
+    launched.acting_identity = "taap:launch-person";
+    launched.operator_credential = false;
+    launched.credential_kind = "agent_launch";
+    launched.credential_session_id = "launch:" + launch->id;
+
+    auto elsewhere = launched;
+    elsewhere.path_workspace_id = rig.lab;
+    elsewhere.workspace_id = rig.lab;
+    EXPECT_EQ(rig.call(chat(), elsewhere).error.code, "unauthorized");
+    EXPECT_EQ(rig.fake.calls(), 0U) << "a call naming another workspace never reaches the provider";
+
+    auto own = launched;
+    own.path_workspace_id = rig.home;
+    own.workspace_id = rig.home;
+    const auto answered = rig.call(chat(), own);
+    ASSERT_TRUE(answered.ok) << answered.error.message;
+    EXPECT_EQ(rig.fake.calls(), 1U);
+}
+
 TEST(ModelCompletion, PassesOnTheProvidersRefusalAndCountsNothing) {
     GatewayRig rig;
     rig.fake.answer = {400,
@@ -623,6 +659,27 @@ TEST(ModelGatewayRoute, AnswersTheOpenAIShapeForATaskCredential) {
     EXPECT_EQ(invalid_status, 400U);
     EXPECT_EQ(invalid["error"]["param"], "/request/model");
     EXPECT_EQ(fake.calls(), 1U);
+
+    // orama-operator#779: an agent in a workspace namespace has LAKE_URL = <lake>/w/<workspace>,
+    // and its SDK calls <LAKE_URL>/openai/v1. Under its own workspace the gateway answers; under
+    // another it refuses before the provider; under a workspace that does not exist it is not
+    // found.
+    const auto [scoped_status, scoped] =
+        post("/w/" + home + "/openai/v1/chat/completions", credential, chat()["request"]);
+    EXPECT_EQ(scoped_status, 200U) << scoped.dump();
+    EXPECT_EQ(scoped["object"], "chat.completion");
+    EXPECT_EQ(fake.calls(), 2U);
+    const std::string other = workspaces.create(customer, "other");
+    const auto [other_status, other_answer] =
+        post("/w/" + other + "/openai/v1/chat/completions", credential, chat()["request"]);
+    EXPECT_EQ(other_status, 403U) << other_answer.dump();
+    EXPECT_EQ(other_answer["error"]["code"], "unauthorized");
+    const auto [missing_status, missing] =
+        post("/w/" + lake::control::new_uuid_v4() + "/openai/v1/chat/completions",
+             credential,
+             chat()["request"]);
+    EXPECT_EQ(missing_status, 404U);
+    EXPECT_EQ(fake.calls(), 2U) << "neither refused call reached the provider";
     server.stop();
 }
 

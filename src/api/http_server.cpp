@@ -10489,14 +10489,16 @@ struct ApiServer::Impl {
     }
 
     // A workspace-scoped server route names a live workspace, or answers 404: /w/<id>/v1/...,
-    // /w/<id>/mcp, /w/<id>/v1/openapi.json and a workspace's Zetta under
+    // /w/<id>/mcp, /w/<id>/v1/openapi.json, the model gateway under /w/<id>/openai/v1/, and a
+    // workspace's Zetta under
     // /w/<id>/workspaces/<space>/zetta/. Every other /w/<id>/ path belongs to the web app
     // (docs/ui/web-app.md), which a browser already has; anything else falls through to the 404.
     boost::http::route_task workspace_route(boost::http::route_params& route) {
         namespace http = boost::http;
         const std::string path(route.url.path());
         const std::string local = workspace_prefixed_local_path(path);
-        if ((!workspace_api_path(local) && !local.starts_with("/workspaces/")) ||
+        if ((!workspace_api_path(local) && !local.starts_with("/workspaces/") &&
+             !local.starts_with("/openai/v1/")) ||
             local == "/v1/apps/auth") {
             co_return http::route_next;
         }
@@ -15160,14 +15162,19 @@ bool ApiServer::start() {
                                                    impl.serve_workspace_zetta(route, false));
                    });
     }
+    // The gateway also answers under /w/<workspace>/: an agent launched in a workspace namespace
+    // has LAKE_URL = <lake>/w/<workspace>, and its SDK calls <LAKE_URL>/openai/v1
+    // (orama-operator#779). model_completion refuses a run whose workspace is not the one the path
+    // names.
     for (const std::string_view endpoint : model_gateway_endpoints) {
         const std::string path = "/openai/v1/" + std::string(endpoint);
-        add_route(http::method::post,
-                   path,
-                   [&impl, path, endpoint](http::route_params& route) -> http::route_task {
-                       return impl.observe_request(
-                           route, path, impl.serve_model_gateway(route, std::string(endpoint)));
-                   });
+        add_workspace_api_route(
+            http::method::post,
+            path,
+            [&impl, path, endpoint](http::route_params& route) -> http::route_task {
+                return impl.observe_request(
+                    route, path, impl.serve_model_gateway(route, std::string(endpoint)));
+            });
     }
     for (const auto& capability : impl.registry.list()) {
         if (capability->transport != CapabilityTransport::Json) {
