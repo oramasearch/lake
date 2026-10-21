@@ -488,6 +488,12 @@ struct ApiContext {
     std::string request_origin;
     std::string caller_origin;
     std::string pool_id = "lake";
+    // A session of an identity application's pool, as the store resolved it (lake#912). The HTTP
+    // server leaves the call unauthenticated and keeps the session here; the registry admits it
+    // only to a capability that serves application pools (Capability::serves_application_pools),
+    // setting the identity fields above for that call alone, and refuses it everywhere else. Its
+    // TAAP identity is never an acting identity elsewhere: a Lake account may hold the same one.
+    std::optional<control::Principal> application_session;
     std::vector<std::string> scopes;
     control::AuthorizationCache authorization_cache;
     std::string audit_customer_id;
@@ -567,6 +573,12 @@ struct Capability {
     // workspace_query may call each named engine read, and one that may call workspace_act each
     // named engine action (lake#650). The handler still applies an agent turn's own scopes.
     std::string granted_by_scope;
+    // An identity application's user may call it with a session of the application's pool
+    // (lake#912): it acts only on that user's own sign-in in that pool (its sessions, devices,
+    // tokens, MFA and passkeys), never through grants. Every other capability treats such a
+    // session as no credential at all, because grants name a bare TAAP identity, which an
+    // application pool may share with a Lake account.
+    bool serves_application_pools = false;
 };
 
 // The input with every deprecated alias moved onto its canonical field, or invalid_input when a

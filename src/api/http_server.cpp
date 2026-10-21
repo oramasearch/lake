@@ -9319,7 +9319,15 @@ struct ApiServer::Impl {
             ctx.credential_kind = "agent_service";
             ctx.agent_service = agent;
         } else if (!bearer.empty() && options.store) {
-            if (auto principal = options.store->context_for(bearer)) {
+            auto principal = options.store->context_for(bearer);
+            if (principal && principal->pool_id != "lake") {
+                // An identity application's session (lake#912). Grants name a bare TAAP identity,
+                // and an application pool may hold a user whose identity is a Lake account's, so
+                // this session is no credential here: not for the API, MCP, the cookie routes,
+                // downloads or /metrics. The registry admits it only to the capabilities that act
+                // on the user's own sign-in in its pool (Capability::serves_application_pools).
+                ctx.application_session = *principal;
+            } else if (principal) {
                 ctx.authorized = true;
                 ctx.session_credential = true;
                 ctx.acting_user_id = principal->user_id;
@@ -9940,15 +9948,23 @@ struct ApiServer::Impl {
             (void)options.store->revoke_session(context.acting_user_id,
                                                 context.credential_session_id);
         }
-        if (!record_direct_event(context,
-                                 audit::EventDraft{
-                                     .kind = "session",
-                                     .object = "lake_session",
-                                     .action = "revoke",
-                                     .outcome = context.authorized ? "revoked" : "denied",
-                                     .method = context.authentication_method,
-                                     .device = context.device,
-                                 })) {
+        // An identity application's session signs out too, though it is no credential here
+        // (lake#912). It is named by its user id, never by a TAAP identity a Lake account may hold.
+        const auto& application = context.application_session;
+        if (application && options.store) {
+            (void)options.store->revoke_session(application->user_id, application->session_id);
+        }
+        if (!record_direct_event(
+                context,
+                audit::EventDraft{
+                    .kind = "session",
+                    .principal = application ? "user/" + application->user_id : std::string(),
+                    .object = "lake_session",
+                    .action = "revoke",
+                    .outcome = context.authorized || application ? "revoked" : "denied",
+                    .method = context.authentication_method,
+                    .device = context.device,
+                })) {
             return send_text(route,
                              boost::http::status::service_unavailable,
                              error_body("store_error", "could not record session revocation"),
@@ -10608,10 +10624,17 @@ struct ApiServer::Impl {
         }
         ApiContext context = context_for(route);
         context.authentication_method = "oauth";
-        if (const auto principal = options.store->context_for(issued->secret)) {
+        if (const auto principal = options.store->context_for(issued->secret);
+            principal && principal->pool_id == "lake") {
             context.authorized = true;
             context.acting_user_id = principal->user_id;
             context.acting_identity = principal->taap_id;
+        } else if (principal) {
+            // An application pool's user acts as no Lake identity (lake#912); the audit names
+            // it by its user id.
+            context.authorized = false;
+            context.acting_user_id = principal->user_id;
+            context.acting_identity = "user/" + principal->user_id;
         }
         const std::string issued_pool = issued->session.pool_id;
         const ApiResult application_result = unwrap(
@@ -11061,7 +11084,9 @@ struct ApiServer::Impl {
             return {RegistryAccess::Denied};
         }
         const auto principal = options.store->context_for(credential.token);
-        if (!principal) {
+        // An identity application's session pulls nothing (lake#912): its TAAP identity may be a
+        // Lake account's, and pulls are authorized by that account's grants.
+        if (!principal || principal->pool_id != "lake") {
             return {RegistryAccess::Denied};
         }
         if (principal->kind == "build_push") {

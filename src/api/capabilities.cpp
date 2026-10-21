@@ -3320,7 +3320,8 @@ void register_identity_capabilities(Registry& registry) {
                   "otpauth://totp/lake:" + context.acting_user_id +
                       "?secret=" + otpauth_secret(result->secret) + "&issuer=lake"},
                  {"recovery_codes", result->recovery_codes}});
-        }});
+        },
+        .serves_application_pools = true});
     registry.add(Capability{
         .name = "disable_mfa",
         .title = "Disable MFA",
@@ -3347,7 +3348,8 @@ void register_identity_capabilities(Registry& registry) {
             const ApiResult event = session_answer(
                 co_await emit_application_mfa_change(context, context.pool_id, "totp", false));
             co_return event.ok ? ApiResult::success({{"disabled", true}}) : event;
-        }});
+        },
+        .serves_application_pools = true});
     registry.add(Capability{
         .name = "begin_passkey_registration",
         .title = "Begin passkey registration",
@@ -3400,7 +3402,8 @@ void register_identity_capabilities(Registry& registry) {
                    {"pubKeyCredParams", json::array({{{"type", "public-key"}, {"alg", -7}}})},
                    {"timeout", 300000},
                    {"attestation", "none"}}}});
-        }});
+        },
+        .serves_application_pools = true});
     registry.add(Capability{
         .name = "register_passkey",
         .title = "Register passkey",
@@ -3440,7 +3443,8 @@ void register_identity_capabilities(Registry& registry) {
             const ApiResult event = session_answer(
                 co_await emit_application_mfa_change(context, pool_id, "passkey", true));
             co_return event.ok ? ApiResult::success({{"registered", true}}) : event;
-        }});
+        },
+        .serves_application_pools = true});
     registry.add(Capability{
         .name = "begin_passkey_sign_in",
         .title = "Begin passkey sign-in",
@@ -3727,7 +3731,8 @@ void register_identity_capabilities(Registry& registry) {
             }
             co_return session_answer(
                 co_await issued_result(context.store->create_token(*token), context));
-        }});
+        },
+        .serves_application_pools = true});
     registry.add(Capability{.name = "list_sessions",
                             .title = "List sessions",
                             .description = "List the authenticated user's sessions and tokens.",
@@ -3748,7 +3753,8 @@ void register_identity_capabilities(Registry& registry) {
                                 }
                                 return list_result(context.store->list_sessions(
                                     context.acting_user_id, context.pool_id));
-                            }});
+                            },
+                            .serves_application_pools = true});
     registry.add(Capability{
         .name = "revoke_session",
         .title = "Revoke session",
@@ -3765,7 +3771,8 @@ void register_identity_capabilities(Registry& registry) {
             auto result = context.store->revoke_session(context.acting_user_id, input["id"]);
             return result ? ApiResult::success({{"revoked", true}})
                           : from_store_error(result.error());
-        }});
+        },
+        .serves_application_pools = true});
     registry.add(Capability{
         .name = "revoke_user_sessions",
         .title = "Revoke a user's sessions",
@@ -3825,7 +3832,8 @@ void register_identity_capabilities(Registry& registry) {
                            return authorization_failure(authorization);
                        }
                        return list_result(context.store->list_devices(context.acting_user_id));
-                   }});
+                   },
+                   .serves_application_pools = true});
     registry.add(Capability{
         .name = "revoke_device",
         .title = "Revoke device",
@@ -3842,7 +3850,8 @@ void register_identity_capabilities(Registry& registry) {
             auto result = context.store->revoke_device(context.acting_user_id, input["id"]);
             return result ? ApiResult::success({{"revoked", true}})
                           : from_store_error(result.error());
-        }});
+        },
+        .serves_application_pools = true});
     register_own_identity_capabilities(registry);
 }
 

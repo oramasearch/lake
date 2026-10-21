@@ -52,6 +52,37 @@ application JWT. Its `session.started` lifecycle event is retained. The derivati
 PostgreSQL coverage are in [identity.md](identity.md#token-derivation-and-revocation). Suspending a user revokes that user's sessions in this pool immediately;
 deleting one removes this pool's credentials and sessions. Neither action touches another pool.
 
+### What an application's session may do in Lake (lake#912)
+
+**What.** A session issued in an application's pool reaches only its own user's sign-in in that
+pool: `list_sessions`, `revoke_session`, `list_devices`, `revoke_device`, `create_token`,
+`enroll_mfa`, `disable_mfa`, `begin_passkey_registration` and `register_passkey` (the capabilities
+marked `serves_application_pools`). Every other capability answers it `unauthorized`, or treats it
+as a visitor where a visitor may read (`viewer`, a public repository). On every other route it is no
+credential at all: the cookie routes, downloads, `/metrics` and image pulls from Lake's registry.
+Signing out (`/logout`) still ends it.
+
+**Why.** Grants name a bare TAAP identity, and users are unique per `(pool_id, taap_id)`, so an
+application's pool may hold a user whose identity is a Lake account's: anyone can register an
+application and enroll such a user. Before this change the HTTP server copied that identity into
+the acting identity, and the session carried every grant of the Lake account (finding LSR-001 of the
+2026-10 security review). Whether grants should name a user and pool instead is lake#872.
+
+**How.** `ApiServer::context_for` keeps a pool session apart (`ApiContext::application_session`) and
+leaves the request unauthenticated. `Registry::call` admits it, for one call, only to a capability
+with `serves_application_pools`, setting the user, session and pool from it; the OCI registry's
+credential check refuses it, and the OAuth callback never gives an application user a Lake
+identity.
+
+**Verify.** `ApplicationPoolSessions.MemoryStore` and `ApplicationPoolSessions.PostgresStore` give
+an application-pool user the TAAP identity of a Lake account that administers a space, and check
+over HTTP that its session, as a bearer, as the `lake_session` cookie and through `/mcp`, reads
+nothing of that space, while its own `list_sessions` still answers and the Lake account's own
+token still reads the space.
+
+**Change.** A new capability for application users sets `serves_application_pools` only when it
+acts on `acting_user_id` and `pool_id` alone, never through a grant or `acting_identity`.
+
 ### Where settings live (lake#351)
 
 An application's settings, its display name, allowed origins, redirect URIs and hosted-page theme,
