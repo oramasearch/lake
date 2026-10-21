@@ -261,6 +261,9 @@ Supported event names are `user.created`, `user.updated`, `user.deleted`,
 {"id":"event UUID","application_id":"application UUID","event":"session.started","created_at":"timestamp","data":{}}
 ```
 
+Deliveries follow the same rules as repository webhooks ([forge.md](forge.md#webhooks)): off the
+server's thread, 10 s in all, and HTTPS to public addresses only (lake#772, lake#876).
+
 Lake sends `Content-Type`, `X-Lake-Event`, `X-Lake-Event-Id`, and `X-Lake-Signature`. The signature
 is lowercase hex `v1=HMAC-SHA256(secret, event_id + "." + exact_body)`. Compare it in constant
 time before parsing or acting on the event. A non-2xx response or transport failure is retained

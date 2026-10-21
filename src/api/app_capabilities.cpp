@@ -304,12 +304,15 @@ liquid::runtime::task<ApiResult> deliver_to_webhook(control::WorkspaceRecords& r
         }
         WebhookDeliveryResult sent;
         if (context.webhook_sender) {
-            sent = context.webhook_sender(webhook.url,
-                                          {{"Content-Type", "application/json"},
-                                           {"X-Lake-Event", event.event},
-                                           {"X-Lake-Event-Id", event.id},
-                                           {"X-Lake-Signature", signature}},
-                                          payload);
+            // On the blocking pool, never on the server's own thread (lake#772).
+            auto ran = co_await run_blocking([sender = context.webhook_sender,
+                                              url = webhook.url,
+                                              headers = json{{"Content-Type", "application/json"},
+                                                             {"X-Lake-Event", event.event},
+                                                             {"X-Lake-Event-Id", event.id},
+                                                             {"X-Lake-Signature", signature}},
+                                              payload] { return sender(url, headers, payload); });
+            sent = ran ? std::move(*ran) : WebhookDeliveryResult{.error = ran.error().message};
         } else {
             sent.error = "webhook sender is not configured";
         }
