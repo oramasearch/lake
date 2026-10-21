@@ -163,6 +163,10 @@ The same rules apply to [application lifecycle webhooks](apps.md#lifecycle-webho
 `WebhookDelivery.ASilentEndpointDoesNotStopLakeAndTimesOut` and
 `WebhookDelivery.PrivateAddressesAndPlainHttpAreRefused` (`tests/test_http_server.cpp`).
 
+The secret is never answered after `create_webhook`: `list_webhooks` and `export_repository` leave
+it out, and a webhook imported from an archive without one signs with a new random secret
+([export](export.md#what-an-archive-never-carries), LSR-024).
+
 The sender is an injected service at the API boundary so the registry and its tests do not perform
 network I/O. The HTTP service supplies that sender in deployment. If a sender is unavailable, the
 attempt is retained as a failed delivery and can be retried when delivery is configured.
