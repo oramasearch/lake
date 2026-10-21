@@ -698,6 +698,45 @@ ApiResult search_result(search::Result<search::QueryResult> result) {
                                {"items", std::move(values)}});
 }
 
+// The key of a TOTP secret, stored as hexadecimal, written as RFC 4648 base32 without padding:
+// what the Key Uri Format's `secret` parameter is and what authenticator apps decode (lake#773).
+// The stored value is unchanged, so earlier enrollments keep verifying.
+std::string otpauth_secret(std::string_view hex) {
+    constexpr std::string_view alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+    const auto nibble = [](char c) -> int {
+        if (c >= '0' && c <= '9') {
+            return c - '0';
+        }
+        if (c >= 'a' && c <= 'f') {
+            return c - 'a' + 10;
+        }
+        if (c >= 'A' && c <= 'F') {
+            return c - 'A' + 10;
+        }
+        return -1;
+    };
+    std::string output;
+    std::uint32_t buffer = 0;
+    int bits = 0;
+    for (std::size_t i = 0; i + 1 < hex.size(); i += 2) {
+        const int high = nibble(hex[i]);
+        const int low = nibble(hex[i + 1]);
+        if (high < 0 || low < 0) {
+            return {};
+        }
+        buffer = (buffer << 8) | static_cast<std::uint32_t>((high << 4) | low);
+        bits += 8;
+        while (bits >= 5) {
+            bits -= 5;
+            output += alphabet[(buffer >> bits) & 0x1f];
+        }
+    }
+    if (bits > 0) {
+        output += alphabet[(buffer << (5 - bits)) & 0x1f];
+    }
+    return output;
+}
+
 std::expected<std::string, ApiError> global_object(const json&, ApiContext&) {
     return std::string{};
 }
@@ -2886,10 +2925,11 @@ void register_identity_capabilities(Registry& registry) {
             if (!event.ok) {
                 co_return event;
             }
-            co_return ApiResult::success({{"otpauth_uri",
-                                           "otpauth://totp/lake:" + context.acting_user_id +
-                                               "?secret=" + result->secret + "&issuer=lake"},
-                                          {"recovery_codes", result->recovery_codes}});
+            co_return ApiResult::success(
+                {{"otpauth_uri",
+                  "otpauth://totp/lake:" + context.acting_user_id +
+                      "?secret=" + otpauth_secret(result->secret) + "&issuer=lake"},
+                 {"recovery_codes", result->recovery_codes}});
         }});
     registry.add(Capability{
         .name = "disable_mfa",

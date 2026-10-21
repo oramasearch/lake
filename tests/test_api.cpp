@@ -7390,6 +7390,44 @@ TEST(SyncHttp, AtomicProtectedRefusalReportsEveryReferenceAndLandsNothing) {
     server.stop();
 }
 
+// The six-digit code an authenticator app shows for a base32 secret now (RFC 6238: HMAC-SHA1,
+// 30-second steps), as a person would type it (lake#773).
+std::string authenticator_code(const std::string& base32_secret) {
+    std::vector<unsigned char> key;
+    std::uint32_t buffer = 0;
+    int bits = 0;
+    for (const char c : base32_secret) {
+        const auto at = std::string_view("ABCDEFGHIJKLMNOPQRSTUVWXYZ234567").find(c);
+        buffer = (buffer << 5) | static_cast<std::uint32_t>(at);
+        bits += 5;
+        if (bits >= 8) {
+            bits -= 8;
+            key.push_back(static_cast<unsigned char>((buffer >> bits) & 0xff));
+        }
+    }
+    std::uint64_t counter = static_cast<std::uint64_t>(std::time(nullptr)) / 30;
+    unsigned char message[8];
+    for (int i = 7; i >= 0; --i) {
+        message[i] = static_cast<unsigned char>(counter & 0xff);
+        counter >>= 8;
+    }
+    unsigned char digest[EVP_MAX_MD_SIZE];
+    unsigned int size = 0;
+    HMAC(EVP_sha1(),
+         key.data(),
+         static_cast<int>(key.size()),
+         message,
+         sizeof(message),
+         digest,
+         &size);
+    const int offset = digest[size - 1] & 0x0f;
+    const std::uint32_t binary = (static_cast<std::uint32_t>(digest[offset] & 0x7f) << 24) |
+                                 (static_cast<std::uint32_t>(digest[offset + 1]) << 16) |
+                                 (static_cast<std::uint32_t>(digest[offset + 2]) << 8) |
+                                 static_cast<std::uint32_t>(digest[offset + 3]);
+    return std::format("{:06}", binary % 1000000);
+}
+
 TEST(Identity, PasswordSessionsTokensAndRevocation) {
     Surface s;
     const ApiResult sign_up = s.call("sign_up_password",
@@ -7426,8 +7464,20 @@ TEST(Identity, PasswordSessionsTokensAndRevocation) {
     const ApiResult enrollment = *liquid::runtime::block_on(
         s.registry.call_async("enroll_mfa", json::object(), user_context));
     ASSERT_TRUE(enrollment.ok) << enrollment.error.message;
-    EXPECT_TRUE(
-        enrollment.value["otpauth_uri"].get<std::string>().starts_with("otpauth://totp/lake:"));
+    const std::string uri = enrollment.value["otpauth_uri"];
+    EXPECT_TRUE(uri.starts_with("otpauth://totp/lake:"));
+    // lake#773: the URI's secret is base32, and the code an authenticator computes from it signs
+    // in.
+    const std::size_t secret_at = uri.find("secret=") + 7;
+    const std::string secret = uri.substr(secret_at, uri.find('&', secret_at) - secret_at);
+    ASSERT_FALSE(secret.empty());
+    EXPECT_EQ(secret.find_first_not_of("ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"), std::string::npos)
+        << secret;
+    const ApiResult with_authenticator = s.call("verify_mfa",
+                                                {{"email", "ada@example.com"},
+                                                 {"password", "correct horse battery"},
+                                                 {"code", authenticator_code(secret)}});
+    ASSERT_TRUE(with_authenticator.ok) << with_authenticator.error.message;
     ASSERT_EQ(enrollment.value["recovery_codes"].size(), 8);
     EXPECT_FALSE(enrollment.value.contains("secret"));
     const std::string first_recovery = enrollment.value["recovery_codes"][0];
