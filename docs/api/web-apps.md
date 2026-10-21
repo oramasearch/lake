@@ -77,6 +77,13 @@ names with the comma-separated `LAKE_APPS_RESERVED_NAMES`; surrounding whitespac
 state. An omitted, null, or empty `host` remains the default `<name>.<LAKE_APPS_WILDCARD>`, so
 `reports` with `LAKE_APPS_WILDCARD=oramadev.net` becomes `reports.oramadev.net`.
 
+An explicit `host` is held to the same names (lake#947): its label, the part before
+`.<LAKE_APPS_WILDCARD>`, may not be a reserved name, so `{name: "ok", host: "app.oramadev.net"}` is
+refused with `invalid_input`, `<host> is reserved: <label> is a reserved name`, at `/host`. Nor may it
+be one of the Lake's own hosts: its `LAKE_PUBLIC_HOST`, its `LAKE_APEX_HOST` or the host of any region in
+`LAKE_REGIONS` (`<host> is a host of the Lake itself`, at `/host`). Those sit one label beneath the
+wildcard when the wildcard is the zone itself, as `oramadev.net` is on the managing cluster.
+
 Application Agent must propose a non-reserved name and should leave `host` unset unless the person
 asked for a specific address. Its `create_app` tool description identifies platform-host names as
 reserved, and the confirmed turn receives the same validation as every other caller.

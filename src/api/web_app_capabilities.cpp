@@ -222,6 +222,25 @@ app_host(const json& input, const std::string& name, const ApiContext& context) 
         return std::unexpected(ApiResult::failure(
             "invalid_input", "host must be below the Lake apps wildcard " + wildcard, "/host"));
     }
+    // An explicit host is held to the same reserved names as an app's name (lake#947): its label
+    // is the name it takes beneath the wildcard. And it may never be one of the Lake's own hosts:
+    // its public host, the apex host of its region picker or a region's host, which sit beneath
+    // the wildcard when the wildcard is the zone itself (oramadev.net on the managing cluster).
+    const std::string label = host.substr(0, host.size() - wildcard.size() - 1);
+    if (reserved_name(label, context.apps_reserved_names)) {
+        return std::unexpected(ApiResult::failure(
+            "invalid_input", host + " is reserved: " + label + " is a reserved name", "/host"));
+    }
+    bool lake_host = host == context.public_host;
+    if (context.regions != nullptr) {
+        lake_host = lake_host || host == context.regions->apex_host ||
+                    std::ranges::any_of(context.regions->list,
+                                        [&](const Region& region) { return region.host == host; });
+    }
+    if (lake_host) {
+        return std::unexpected(
+            ApiResult::failure("invalid_input", host + " is a host of the Lake itself", "/host"));
+    }
     return host;
 }
 
