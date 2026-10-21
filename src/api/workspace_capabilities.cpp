@@ -6950,6 +6950,23 @@ std::string engine_words_in_lake_terms(std::string text) {
     replace_all("load the table first with add_dataset",
                 "load the table first with workspace_act upload_dataset");
     replace_all("(approve_plan)", "(workspace_act with capability approve_plan)");
+    // A native agent whose checkpoint is not in the workspace (lake#246, lake#799): the engine's
+    // tokenizer error, said as what is missing and how the base model gets there.
+    constexpr std::string_view no_tokenizer = "bpe: no tokenizer.json or vocab.json+merges.txt in ";
+    if (const std::size_t at = text.find(no_tokenizer); at != std::string::npos) {
+        const std::size_t begin = at + no_tokenizer.size();
+        std::size_t end = begin;
+        while (end < text.size() && std::isspace(static_cast<unsigned char>(text[end])) == 0) {
+            ++end;
+        }
+        const std::string directory = text.substr(begin, end - begin);
+        text.replace(at,
+                     end - at,
+                     "the agent's model checkpoint is not in this workspace: " + directory +
+                         " has no tokenizer.json (or vocab.json and merges.txt). The Orama base "
+                         "model is copied to the workspace's volume when its Zetta starts; until "
+                         "it is there, an agent on it cannot chat or run");
+    }
     return text;
 }
 

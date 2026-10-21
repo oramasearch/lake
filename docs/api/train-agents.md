@@ -173,13 +173,32 @@ lake allows it only through `workspace_act` (`write`) and calls it with `GET`
 | Variable | Set by | Meaning |
 |---|---|---|
 | `LAKE_AGENT_ENDPOINTS` | operator | `key=url` pairs for the library agents this lake runs, e.g. `agent-ask-orama=http://agent-ask-orama.lake:8080` |
-| `LAKE_BASE_AGENT_MODEL` | operator | The base-agent checkpoint path inside a workspace |
+| `LAKE_BASE_AGENT_MODEL` | operator | The base-agent checkpoint path inside a workspace. Default `/data/models/base-agent`, where the Orama operator copies the base model onto every workspace Zetta's data volume (below) |
 | `LAKE_AGENT_MODEL` | operator | The frontier model new Python agents run on |
+
+### Where the base model comes from (lake#246)
+
+A native agent created without a model is given `LAKE_BASE_AGENT_MODEL` as its `model`, and the
+workspace Zetta loads the checkpoint from that directory when the agent chats or runs. The Orama
+operator puts it there: every workspace Zetta carries the base model as a model image
+(`spec.workspaces.baseModelImage`, default `oramasearch/base-agent-0.6b:v16`, built by zetta's
+`images/base-agent/`), which an init container copies to `/data/models/base-agent` on the workspace
+volume before the Zetta starts, and the operator sets `LAKE_BASE_AGENT_MODEL` to that path
+(orama-operator `docs/zetta-models.md`). It arrives as an image because a workspace namespace
+denies egress by default. It runs on CPU; the workspace Zetta's default memory limit leaves room
+for it.
+
+When the checkpoint is not there (the image is not yet pulled, could not be copied, or an agent
+names a directory that holds no checkpoint), `chat` and `agent_run` answer `engine_error` with
+*the agent's model checkpoint is not in this workspace: `<dir>` has no tokenizer.json …* instead
+of the engine's tokenizer error ([#799](https://github.com/oramasearch/lake/issues/799)). An agent
+created before the default moved from `/var/lib/zetta/models/base-agent` keeps that path; update it
+to `runtime: native` with an empty `model` to move it to the base model's place.
 
 ## Verify
 
 ```sh
-ctest --test-dir build -R 'Workspaces.Agent|Workspaces.TheAgentLibrary|Workspaces.EveryAgentDefinition|CreateAgent'
+ctest --test-dir build -R 'Workspaces.Agent|Workspaces.TheAgentLibrary|Workspaces.EveryAgentDefinition|Workspaces.ANativeAgentRunsTheBaseModel|CreateAgent'
 cd frontend && npm test
 ```
 

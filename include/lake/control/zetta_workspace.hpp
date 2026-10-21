@@ -30,8 +30,9 @@ struct WorkspaceConfig {
     // repository name (agent_library.hpp).
     std::map<std::string, std::string> agent_endpoints;
     // The checkpoint a native agent built on "the Orama base model" loads inside a workspace
-    // (LAKE_BASE_AGENT_MODEL; docs/api/train-agents.md).
-    std::string base_agent_model = "/var/lib/zetta/models/base-agent";
+    // (LAKE_BASE_AGENT_MODEL; docs/api/train-agents.md): where the Orama operator copies the base
+    // model onto every workspace Zetta's data volume, /data (lake#246).
+    std::string base_agent_model = "/data/models/base-agent";
     // The frontier model a Python agent built from the form runs on (LAKE_AGENT_MODEL).
     std::string frontier_model = "gpt-5.5";
     // lake's in-cluster address, handed to agents so they reach it without leaving the cluster
