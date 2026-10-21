@@ -1694,6 +1694,12 @@ liquid::runtime::task<ApiResult> model_completion(const json& input, ApiContext&
     if (caller->workspace_id.empty()) {
         co_return ApiResult::failure("conflict", "this run belongs to no workspace");
     }
+    // Called under /w/<workspace>/openai/v1 (an agent's LAKE_URL names its workspace,
+    // orama-operator#779): the path must name the run's own workspace.
+    if (!context.path_workspace_id.empty() && context.path_workspace_id != caller->workspace_id) {
+        co_return ApiResult::failure("unauthorized",
+                                     "this credential's run belongs to another workspace");
+    }
     const std::string endpoint = input.at("endpoint");
     context.audit_workspace_id = caller->workspace_id;
     context.audit_object = "agent_usage/" + caller->launch_id;

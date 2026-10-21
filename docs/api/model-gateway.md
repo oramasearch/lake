@@ -54,6 +54,14 @@ credential are `unauthorized` (403), and so is a library agent's bus credential,
 No credential is `unauthenticated` (401). A task credential stops working when its task finishes, and
 each call renews the task's lease, as every call with it does.
 
+**Under a workspace path.** The same routes answer at `/w/<workspace>/openai/v1/<endpoint>`. An agent
+launched on agent-runtime runs in its workspace's namespace with `LAKE_URL` set to lake followed by
+`/w/<workspace>` (orama-operator `docs/lake/agents.md`), so its SDK's base URL `<LAKE_URL>/openai/v1`
+lands there. The workspace in the path must be the run's own: a call naming another is `unauthorized`
+(403) before the provider is called, and one naming a workspace that does not exist is `not_found`
+(404). That is the only way such an agent reaches a model: its pod holds no provider key
+([orama-operator#779](https://github.com/oramasearch/orama-operator/issues/779)).
+
 The path is `/openai/v1/`, not `/v1/`, because `/v1/<name>` is the capability registry's
 ([README](README.md)). Like the OCI registry at `/v2/` and the Hub routes at `/api/models/`, the
 gateway is a protocol route named for its protocol.
@@ -93,7 +101,8 @@ and `code`, and the JSON pointer of the field at fault as `param`:
 | Code | Status | When |
 |---|---|---|
 | `invalid_input` | 400 | the body is not a JSON object, names no `model`, or streams an embedding |
-| `unauthenticated`, `unauthorized` | 401, 403 | no credential, or one that is not a run's (above) |
+| `unauthenticated`, `unauthorized` | 401, 403 | no credential, or one that is not a run's (above), or a `/w/<workspace>/` path naming another workspace than the run's |
+| `not_found` | 404 | a `/w/<workspace>/` path naming a workspace that does not exist |
 | `usage_limit_reached` | 429 | the account's monthly `model_tokens` limit is used up ([Limits](#limits)) |
 | `engine_error` | 422 | the provider refused the request; the message is the provider's own |
 | `rate_limited` | 429 | the provider is busy or over its quota |

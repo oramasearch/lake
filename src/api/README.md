@@ -133,7 +133,7 @@ agent's model call, sent through `ApiContext::model_provider` on the blocking po
 to the run's workspace usage and refused past the monthly `model_tokens` limit. `model_gateway.cpp`
 holds the gateway's pure parts (the request as forwarded, the usage of every answer shape, the
 provider's refusals, `openai_model_provider`), and `http_server.cpp` serves the OpenAI-compatible
-`POST /openai/v1/<endpoint>` over `model_completion` and builds the provider over its outbound client
+`POST /openai/v1/<endpoint>` (and the same under `/w/<workspace>/`, which must be the run's own workspace) over `model_completion` and builds the provider over its outbound client
 when `LAKE_OPENAI_API_KEY` is set (`docs/api/model-gateway.md`). A streamed call is relayed as it
 arrives (lake#665): the outbound client's `on_body` hands the provider's body on piece by piece, the
 route sets `ApiContext::model_stream` to queue each piece, and its relay writes them to the caller in
