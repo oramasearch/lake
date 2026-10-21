@@ -76,14 +76,19 @@ piece, and the route writes each piece to the caller in chunked transfer, so an 
 tokens as they come gets them as the provider sends them, not all at once at the end.
 
 - Lake reads the usage from the events as they pass and counts it from the event that carries it,
-  once the stream ends. A stream that ends without one is counted as zero and audited
-  `usage_reported: false`, as an answer without `usage` is.
+  once the stream ends. A stream that ends without one is counted by
+  [estimate](#an-answer-without-usage) and audited `usage_reported: false`, as an answer without
+  `usage` is.
 - A refusal before the first event (Lake's or the provider's) is answered as any other, with its
   status and [OpenAI's error shape](#errors). Once the first event is sent the status is 200, so a
   failure after it (the provider drops the connection, the deadline passes) ends the stream early;
-  the call is audited with its failure and counts nothing.
-- A caller that stops reading stops the provider: its stream ends when it takes no bytes for the
-  server's stream idle timeout, or falls more than 8 MiB behind the provider.
+  the call is audited with its failure and counted by estimate, since the provider charges for what
+  it generated (lake#939).
+- A caller that stops reading is sent nothing more: its stream ends when it takes no bytes for the
+  server's stream idle timeout, or falls more than 8 MiB behind the provider, or when it drops the
+  connection. The provider is not stopped. Lake reads the rest of its stream, without relaying it,
+  up to the provider's 600-second deadline, and counts the usage in its last event (lake#939). The
+  whole answer is billed to the account, so ending a stream early never makes its tokens free.
 
 `POST /v1/model_completion` and the MCP tool answer the whole stream at once, as `events`, after the
 provider has finished it. None of the agents stream today.
@@ -100,7 +105,7 @@ and `code`, and the JSON pointer of the field at fault as `param`:
 
 | Code | Status | When |
 |---|---|---|
-| `invalid_input` | 400 | the body is not a JSON object, names no `model`, or streams an embedding |
+| `invalid_input` | 400 | the body is not a JSON object, names no `model`, streams an embedding, or sets `background` |
 | `unauthenticated`, `unauthorized` | 401, 403 | no credential, or one that is not a run's (above), or a `/w/<workspace>/` path naming another workspace than the run's |
 | `not_found` | 404 | a `/w/<workspace>/` path naming a workspace that does not exist |
 | `usage_limit_reached` | 429 | the account's monthly `model_tokens` limit is used up ([Limits](#limits)) |
@@ -123,7 +128,7 @@ The routes are a rendering of one registry capability, as `/workspaces/<customer
 | `workspace_id`, `agent`, `launch_id` | string | the run the call was counted for |
 | `model` | string | the model the provider says answered (else the one asked for) |
 | `input_tokens`, `output_tokens` | integer | the provider's `usage` |
-| `usage_reported` | boolean | false when the provider's answer carried no `usage` (counted as zero, and audited so) |
+| `usage_reported` | boolean | false when the provider's answer carried no `usage`: the tokens are an [estimate](#an-answer-without-usage), and audited so |
 | `recorded` | boolean | the tokens were added to the workspace's usage |
 | `streamed` | boolean | the request streamed |
 | `response` | object | the provider's answer, when not streamed |
@@ -140,6 +145,27 @@ Each answered call adds two values to the run's workspace's `lake_usage` counter
 are the labels `usage_over_time` breaks `model_tokens` down by (`by_agent`, `by_launch`, `by_model`),
 which the Usage dashboard and an agent's page show, and the bill prices `model_tokens` at one rate
 ([billing.md](billing.md#price-list)). A refused call, by Lake or by the provider, counts nothing.
+A call the provider answered counts even when its answer did not arrive whole (lake#939).
+
+### An answer without usage
+
+The provider has charged for every answer it began, so Lake never counts one as zero. When the
+answer reports no `usage` (it failed part way, its stream ended before its last event, or an
+OpenAI-compatible provider sends none), Lake counts one token for every four bytes, rounded up: the
+request as sent to the provider as `input`, and the answer's bytes that arrived as `output`. That is
+about what OpenAI's tokenizer makes of English text; an answer's bytes include its JSON and, for a
+stream, each event's framing, so the estimate of an answer is above the text it carried. The audit
+says `usage_reported: false` (`estimated_model_tokens` in `model_gateway.hpp`).
+
+A Responses request with `background` set is refused `invalid_input` before the provider is called:
+its answer would come back before the model has generated anything and report no usage, and the
+gateway has no route to read the result.
+
+Verify: `ModelGatewayRoute.CountsAStreamItsCallerAbandoned` drops a caller's connection after the
+first event over the real server and finds the provider's usage counted;
+`ModelCompletion.CountsAStreamWhoseCallerStoppedReading`, `CountsAnAnswerThatFailedPartWay`,
+`CountsARelayedStreamWithoutUsageByEstimate`, `HoldsAnEstimateOfTheInputWhileTheProviderAnswers` and
+`ModelGateway.RefusesABackgroundAnswer` cover the rest (`tests/test_model_gateway.cpp`).
 
 ## Limits
 
@@ -148,7 +174,10 @@ the gateway enforces it: once this UTC month's `model_tokens` across the account
 the limit, every model call is refused with `usage_limit_reached` before the provider is called.
 `usage_limits` reports the limit as `enforced: true`. The month's use is read from the workspaces at
 most once a minute per account and Lake process, and the tokens a process counts in between are added
-to it, so a limit can be passed by about a minute of the account's calls on each Lake replica.
+to it, so a limit can be passed by about a minute of the account's calls on each Lake replica. While a
+call waits on the provider, an [estimate](#an-answer-without-usage) of its input is held against the
+limit, so calls made together cannot all pass a limit only the first should reach (lake#939); the
+call's own count replaces it when it ends.
 
 ## Audit
 

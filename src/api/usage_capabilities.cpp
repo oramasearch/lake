@@ -1596,6 +1596,9 @@ std::expected<Reporter, ApiResult> model_caller(const json& input, ApiContext& c
 struct ModelTokenAllowance {
     std::uint64_t limit = 0; // 0: no limit
     double used = 0;
+    // The estimated input of the calls still waiting on the provider (HeldModelTokens), kept
+    // across reads, which never see them.
+    double held = 0;
     std::chrono::steady_clock::time_point read_at;
 };
 constexpr std::chrono::seconds allowance_refresh{60};
@@ -1610,7 +1613,8 @@ std::map<std::string, ModelTokenAllowance>& allowances() {
 }
 
 std::optional<ApiResult> over_model_limit(const ModelTokenAllowance& allowance) {
-    if (allowance.limit == 0 || allowance.used < static_cast<double>(allowance.limit)) {
+    if (allowance.limit == 0 ||
+        allowance.used + allowance.held < static_cast<double>(allowance.limit)) {
         return std::nullopt;
     }
     return ApiResult::failure(
@@ -1672,7 +1676,9 @@ liquid::runtime::task<std::optional<ApiResult>> model_limit_refusal(const std::s
         }
     }
     std::lock_guard lock(allowance_mutex());
-    allowances()[customer_id] = allowance;
+    ModelTokenAllowance& kept = allowances()[customer_id];
+    allowance.held = kept.held;
+    kept = allowance;
     co_return over_model_limit(allowance);
 }
 
@@ -1682,6 +1688,38 @@ void count_model_tokens(const std::string& customer_id, std::uint64_t tokens) {
         found->second.used += static_cast<double>(tokens);
     }
 }
+
+// The estimated input of one call, held against its account's limit from before the provider is
+// called until the call ends (lake#939), so calls made together cannot all pass a limit that only
+// the first should reach. The call's own count replaces it when it ends. The limit is checked and
+// the tokens held under one lock; an account already at its limit holds nothing, and `refusal`
+// says so.
+class HeldModelTokens {
+public:
+    HeldModelTokens(std::string customer_id, std::uint64_t tokens)
+        : customer_id_(std::move(customer_id)), tokens_(static_cast<double>(tokens)) {
+        std::lock_guard lock(allowance_mutex());
+        ModelTokenAllowance& allowance = allowances()[customer_id_];
+        refusal = over_model_limit(allowance);
+        if (!refusal) {
+            allowance.held += tokens_;
+        }
+    }
+    HeldModelTokens(const HeldModelTokens&) = delete;
+    HeldModelTokens& operator=(const HeldModelTokens&) = delete;
+    ~HeldModelTokens() {
+        if (!refusal) {
+            std::lock_guard lock(allowance_mutex());
+            allowances()[customer_id_].held -= tokens_;
+        }
+    }
+
+    std::optional<ApiResult> refusal;
+
+private:
+    std::string customer_id_;
+    double tokens_;
+};
 
 liquid::runtime::task<ApiResult> model_completion(const json& input, ApiContext& context) {
     if (!context.store) {
@@ -1730,15 +1768,25 @@ liquid::runtime::task<ApiResult> model_completion(const json& input, ApiContext&
         co_return std::move(**refusal);
     }
     ModelProviderRequest request{endpoint, prepared->dump(), stream};
+    const HeldModelTokens held(caller->customer_id, estimated_model_tokens(request.body.size()));
+    if (held.refusal) {
+        context.audit_details["refused"] = "usage_limit";
+        co_return *held.refusal;
+    }
     // A stream the caller reads as it arrives (the `/openai/v1/*` route, lake#665): each piece goes
-    // on to the caller, and the usage is read from the events as they pass.
+    // on to the caller, and the usage is read from the events as they pass. A caller that stops
+    // reading is sent nothing more, but the provider's stream is still read to its end (within the
+    // provider's timeout), so the usage in its last event is counted: ending a stream early never
+    // leaves its tokens uncounted (lake#939).
     const bool relayed = stream && static_cast<bool>(context.model_stream);
     auto passing = std::make_shared<ModelStreamUsage>();
     if (relayed) {
-        request.on_body = [passing, sink = context.model_stream](std::string_view piece) {
-            passing->feed(piece);
-            return sink(piece);
-        };
+        request.on_body =
+            [passing, sink = context.model_stream, open = true](std::string_view piece) mutable {
+                passing->feed(piece);
+                open = open && sink(piece);
+                return true;
+            };
     }
     auto ran = co_await run_blocking(
         [provider = context.model_provider, request]() { return provider(request); });
@@ -1747,17 +1795,25 @@ liquid::runtime::task<ApiResult> model_completion(const json& input, ApiContext&
     }
     const ModelProviderResponse& response = *ran;
     context.audit_details["provider_status"] = response.status;
-    if (!response.error.empty() || response.status < 200 || response.status >= 300) {
+    if (response.status < 200 || response.status >= 300) {
         const ApiError failure =
             model_provider_failure(response.status, response.body, response.error);
         co_return ApiResult::failure(failure.code, failure.message);
     }
+    // The provider has answered, and charges for it, whether or not its answer arrived whole: the
+    // tokens are counted before a failure part way is answered (lake#939). They are the provider's
+    // usage when it reported it, else an estimate from the request and the answer's bytes.
     if (relayed) {
         passing->finish();
     }
-    const ModelUsage usage = relayed ? passing->usage() : model_usage(response.body, stream);
+    ModelUsage usage = relayed ? passing->usage() : model_usage(response.body, stream);
+    if (!usage.reported) {
+        usage.input_tokens = estimated_model_tokens(request.body.size());
+        usage.output_tokens =
+            estimated_model_tokens(relayed ? passing->bytes() : response.body.size());
+    }
     const std::string model = usage.model.empty() ? requested : usage.model;
-    const bool recorded = usage.reported && context.usage_recorder != nullptr;
+    const bool recorded = context.usage_recorder != nullptr;
     if (recorded) {
         const Labels labels{
             {"agent", caller->agent}, {"launch_id", caller->launch_id}, {"model", model}};
@@ -1774,6 +1830,11 @@ liquid::runtime::task<ApiResult> model_completion(const json& input, ApiContext&
     context.audit_details["input_tokens"] = usage.input_tokens;
     context.audit_details["output_tokens"] = usage.output_tokens;
     context.audit_details["usage_reported"] = usage.reported;
+    if (!response.error.empty()) {
+        const ApiError failure =
+            model_provider_failure(response.status, response.body, response.error);
+        co_return ApiResult::failure(failure.code, failure.message);
+    }
     json out{{"workspace_id", caller->workspace_id},
              {"agent", caller->agent},
              {"launch_id", caller->launch_id},

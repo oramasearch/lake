@@ -388,8 +388,10 @@ struct ApiContext {
     ModelProvider model_provider;
     // The caller's event stream (lake#665): set by the `/openai/v1/*` route, a streamed
     // model_completion hands it each piece of the provider's event stream as it arrives, instead of
-    // answering the whole stream as `events`. Called on the outbound client's thread; false stops
-    // the stream (the caller has gone). Empty: REST and MCP, which answer `events` whole.
+    // answering the whole stream as `events`. Called on the outbound client's thread; false says
+    // the caller has gone, and it is offered nothing more, while model_completion still reads the
+    // provider's stream to its end to count its usage (lake#939). Empty: REST and MCP, which answer
+    // `events` whole.
     ModelBodySink model_stream;
     // Predictions of a workspace methodology's served model (lake#690); empty when this lake
     // serves none.

@@ -126,6 +126,15 @@ std::expected<nlohmann::json, ApiError> prepare_model_request(std::string_view e
             ApiError{"invalid_input", "stream: must be true or false", "/request/stream"});
     }
     const bool streamed = stream != request.end() && stream->is_boolean() && stream->get<bool>();
+    // Anything but false or null: a background answer is generated after it is answered, so its
+    // usage never passes the gateway (lake#939).
+    const auto background = request.find("background");
+    if (background != request.end() && !background->is_null() && *background != false) {
+        return std::unexpected(ApiError{
+            "invalid_input",
+            "background: the gateway counts an answer's tokens as it is made; leave it out",
+            "/request/background"});
+    }
     if (streamed && endpoint == "embeddings") {
         return std::unexpected(
             ApiError{"invalid_input", "stream: embeddings do not stream", "/request/stream"});
@@ -153,7 +162,12 @@ ModelUsage model_usage(std::string_view body, bool stream) {
     return reader.usage();
 }
 
+std::uint64_t estimated_model_tokens(std::size_t bytes) {
+    return (static_cast<std::uint64_t>(bytes) + 3) / 4;
+}
+
 void ModelStreamUsage::feed(std::string_view piece) {
+    bytes_ += piece.size();
     std::size_t start = 0;
     for (;;) {
         const std::size_t end = piece.find('\n', start);

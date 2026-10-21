@@ -14549,7 +14549,7 @@ struct ApiServer::Impl {
         static constexpr std::size_t queue_limit = 8 * 1024 * 1024;
         std::mutex mutex;
         std::string queued;
-        std::atomic<bool> gone{false};   // the caller stopped reading: the provider is stopped
+        std::atomic<bool> gone{false};   // the caller stopped reading: it is sent nothing more
         std::atomic<bool> closed{false}; // the call has finished: nothing more is offered
 
         bool offer(std::string_view piece) {
@@ -14584,7 +14584,8 @@ struct ApiServer::Impl {
 
     // Writes each piece the provider has sent since the last look, starting the chunked response
     // with the first; returns once the call has finished and everything offered is written. A
-    // write that fails leaves the relay `gone`, so the provider is stopped, and is answered in
+    // write that fails leaves the relay `gone`, so nothing more is offered (model_completion still
+    // reads the provider's stream to its end to count it, lake#939), and is answered in
     // `failed` once the call has finished.
     boost::capy::io_task<> relay_model_stream(boost::http::route_params& route,
                                               std::shared_ptr<ModelStreamRelay> relay,

@@ -138,7 +138,9 @@ when `LAKE_OPENAI_API_KEY` is set (`docs/api/model-gateway.md`). A streamed call
 arrives (lake#665): the outbound client's `on_body` hands the provider's body on piece by piece, the
 route sets `ApiContext::model_stream` to queue each piece, and its relay writes them to the caller in
 chunked transfer while `model_completion` reads the usage from the events as they pass
-(`ModelStreamUsage`). `metering_capabilities.cpp`'s
+(`ModelStreamUsage`). A caller that goes is sent nothing more, but the provider's stream is read to
+its end and counted, and an answer without usage, or one that failed part way, is counted by
+`estimated_model_tokens` (lake#939). `metering_capabilities.cpp`'s
 `queue_repository_builds` is the build-record queueing the sample shares with `metering_usage`. See
 [metering](../../docs/api/metering.md#usage-over-time).
 

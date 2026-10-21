@@ -31,7 +31,8 @@ its OpenAI-compatible routes `POST /openai/v1/chat/completions`, `/responses` an
 every agent model call goes through Lake with Orama's own key and is counted as the run's workspace's
 `model_tokens`, the monthly `model_tokens` limit is enforced (`usage_limit_reached`, 429), and agents
 hold no provider key. A `stream: true` call is relayed event by event as the provider sends it
-(lake#665, [Streaming](model-gateway.md#streaming)).
+(lake#665, [Streaming](model-gateway.md#streaming)); a caller that drops the stream is still
+billed for the whole answer, and an answer without usage is counted by estimate (lake#939).
 
 lake#564 (decision 56, migration `0073_billing`): [billing.md](billing.md) documents billing, on only
 where `LAKE_BILLING` is (Orama Cloud): `price_list`, `set_price_list`, `billing_account`,
