@@ -7663,6 +7663,16 @@ TEST(ApiErrors, RestSaysWhetherACredentialIsMissingInvalidOrExpired) {
     EXPECT_EQ(body(bad_viewer)["error"]["reason"], "invalid");
     const std::string visitor = http_get(server.port(), "/v1/viewer");
     EXPECT_NE(visitor.find(" 200 "), std::string::npos) << visitor;
+    // lake#775: the same on a capability a visitor may call: a rejected key is 401, not a
+    // visitor's empty answer; no key at all is still a visitor.
+    for (const char* bearer : {"Bearer not-a-lake-credential",
+                               "Bearer ls1.00000000-0000-4000-8000-000000000000.not-a-secret"}) {
+        const std::string listed = http_get(server.port(), "/v1/list_repositories", bearer);
+        EXPECT_NE(listed.find(" 401 "), std::string::npos) << bearer << "\n" << listed;
+        EXPECT_EQ(body(listed)["error"]["reason"], "invalid");
+    }
+    const std::string public_list = http_get(server.port(), "/v1/list_repositories");
+    EXPECT_NE(public_list.find(" 200 "), std::string::npos) << public_list;
     EXPECT_EQ(body(visitor)["value"]["signed_in"], false);
     EXPECT_FALSE(body(visitor)["value"]["config"].contains("base_agent_model"));
 

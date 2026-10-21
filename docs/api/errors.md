@@ -99,11 +99,14 @@ WWW-Authenticate: Bearer realm="lake", error="invalid_token",
 
 A capability that lets anonymous callers read public repositories answers the same 401 when it
 refuses an anonymous caller. A **bearer** key lake rejects (invalid or expired) is refused with this
-401 on lake's own public reads too, those whose object is the server (`viewer`, `server_info`,
-`list_docs`, `get_doc`; lake#594): a script with a mistyped key learns so instead of reading `signed_in: false`. A
-browser's stale `lake_session` cookie is not refused there; `viewer` answers it as a visitor, so
-the web app shows its sign-in page. Capabilities that verify their own bearer (the agent bus, SCIM
-providers) keep their own answers. MCP answers the same error object in a `tools/call` result with
+401 on every capability a visitor may call: lake's own public reads, those whose object is the
+server (`viewer`, `server_info`, `list_docs`, `get_doc`; lake#594), and the public reads of
+repositories and their content (`list_repositories` and every capability that allows an anonymous
+public read; lake#775). A script with a mistyped or revoked key learns so instead of reading a
+visitor's answer, such as `signed_in: false` or an empty repository list. A browser's stale
+`lake_session` cookie is not refused; it is answered as a visitor, so the web app shows its sign-in
+page. Capabilities that verify their own bearer (SCIM providers, sign-in, the agents' calls) keep
+their own answers. MCP answers the same error object in a `tools/call` result with
 `isError: true` over HTTP 200, as it does every capability failure. A credential that is valid but
 lacks a scope or a grant is still 403 `unauthorized`.
 
