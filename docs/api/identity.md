@@ -63,9 +63,46 @@ and pass signature, issuer, audience, expiry, not-before, nonce, subject, and ke
 documents are fetched through Corosio with TLS peer and hostname verification, cached for one hour,
 and refreshed once when verification fails so key rotation is picked up. GitHub instead verifies
 the returned access token through `https://api.github.com/user`. Google and GitHub use their fixed
-public endpoints; another registered provider uses `<issuer>/authorize`, `<issuer>/token`, and
-`<issuer>/jwks`. Plain HTTP provider URLs are rejected except on loopback for integration tests.
-Provider registration and each OAuth callback create one signed registry-compatible audit event.
+public endpoints; every other provider's endpoints come from its OpenID Connect discovery document
+(below). Provider registration and each OAuth callback create one signed registry-compatible audit
+event.
+
+### OpenID Connect discovery
+
+A generic Lake OAuth provider (`register_oauth_provider` with a `provider` other than `google` or
+`github`) and every enterprise OIDC provider (`register_sso_provider`, `protocol: oidc`) are read
+from OpenID Connect Discovery 1.0 (lake#837):
+
+- Lake fetches `<issuer>/.well-known/openid-configuration` (the issuer's trailing `/` removed first)
+  when a sign-in starts (`start_oauth`, `start_sso_oidc`) and again in the callback, and uses its
+  `authorization_endpoint`, `token_endpoint` and `jwks_uri`. So Microsoft Entra
+  (`https://login.microsoftonline.com/<tenant>/v2.0`), Okta (`https://<org>.okta.com` or
+  `https://<org>.okta.com/oauth2/<server>`) and Google Workspace (`https://accounts.google.com`)
+  work, although their endpoints are not under `<issuer>/`.
+- **The document's `issuer` must equal the configured issuer exactly**, trailing slash included
+  (Discovery §4.3); a document naming another issuer is refused (`invalid_input`). Entra's
+  multi-tenant `common` and `organizations` documents name a `{tenantid}` template, so they are
+  refused: register the tenant's own v2.0 issuer.
+- All three endpoints must be present and HTTPS. When the document lists
+  `id_token_signing_alg_values_supported`, it must include `RS256`, the one algorithm Lake
+  verifies.
+- Documents are cached per issuer for one hour, in memory; a failed fetch is not cached. A document
+  that cannot be fetched answers `engine_error`.
+- **Outbound protections.** The discovery document, the token exchange and the keys are fetched
+  through the server's outbound client within 10 seconds, HTTPS to public addresses only: every
+  address the host resolves to is checked at connect time, as webhooks and MCP connections are
+  (lake#876). `LAKE_OIDC_ALLOW_PRIVATE_ADDRESSES=1` lifts that, and allows plain HTTP to loopback,
+  for tests, local development, or an install whose identity provider is on its own network. The
+  discovery read runs on the blocking pool, so a slow issuer holds up only its own request.
+- ID tokens are verified against the discovered `jwks_uri` as above: RS256 only, `iss` equal to the
+  configured issuer, `aud` containing the client id (and `azp` when there are several audiences),
+  `exp`, `nbf`, `iat`, `sub` and the flow's `nonce`.
+
+The tests are `OidcDiscovery.*` and `OidcSignIn*` in `tests/test_oidc_discovery.cpp`. Local providers
+shaped like Entra and Okta serve their documents, endpoints and keys at their own paths. Against
+them, valid tokens sign in once through the discovered endpoints; tampered, wrong-audience, expired
+and wrong-nonce tokens and replayed callbacks are refused; a document naming another issuer is
+refused; and private addresses are never contacted without the setting.
 
 Passkeys use a two-capability WebAuthn ceremony. `begin_passkey_registration` binds a random
 challenge to the authenticated user and pool, then `register_passkey` accepts only attestation
@@ -237,8 +274,9 @@ enrollment, recovery-code sign-in and one-use enforcement, fresh-verification di
 resolution, narrowed token scope, static-token reason validation and refusal from an expiring
 issuer, and next-request parent revocation.
 `OAuth.AuthorizationCodePkceOidcAndCachedJwks` runs the browser redirects against a stub OpenID
-Connect provider, verifies PKCE at its token endpoint, signs an id token, serves JWKS, checks the
-session cookie, proves cache reuse, and rejects state replay.
+Connect provider (its endpoints from its discovery document), verifies PKCE at its token endpoint,
+signs an id token, serves JWKS, checks the session cookie, proves cache reuse, and rejects state
+replay.
 The Postgres identity test repeats the MFA recovery and disable flow, reads back the encrypted
 provider secret, and proves that persisted OAuth state returns its verifier once and only once.
 `WebAuthn.PersistedRegistrationAssertionAndSignCount` uses a software ES256 authenticator to

@@ -80,6 +80,11 @@ Signature check (`src/control/saml.cpp`, no XML library), with audience, recipie
 time, `InResponseTo` and once-only assertion checks; unsolicited responses are refused. Not
 deployed; the operator must vendor the schema and select `saml_sign_in_guard`. See
 [`docs/api/sso.md#saml-sign-in`](docs/api/sso.md#saml-sign-in).
+Generic Lake OAuth and enterprise OIDC providers are read through OpenID Connect discovery
+(lake#837, no migration): `<issuer>/.well-known/openid-configuration`, whose `issuer` must equal the
+configured one, gives the authorization, token and JWKS endpoints, cached an hour; the fetches are
+HTTPS to public addresses within 10 s unless `LAKE_OIDC_ALLOW_PRIVATE_ADDRESSES=1`. Not deployed. See
+[`docs/api/identity.md#openid-connect-discovery`](docs/api/identity.md#openid-connect-discovery).
 
 Deployments made with `liquid deploy` reach Ship → Deployments (lake#805, migration
 `0088_repository_liquid_ids`): `liquid deploy` sends the id liquid gave the repository, not lake's

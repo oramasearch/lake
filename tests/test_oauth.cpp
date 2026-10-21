@@ -371,6 +371,18 @@ private:
                           json{{"token_type", "Bearer"}, {"id_token", sign_token(nonce)}}.dump());
             return;
         }
+        if (target == "/.well-known/openid-configuration") {
+            // The generic provider's endpoints come from its discovery document (lake#837).
+            send_response(descriptor,
+                          200,
+                          json{{"issuer", issuer()},
+                               {"authorization_endpoint", issuer() + "/authorize"},
+                               {"token_endpoint", issuer() + "/token"},
+                               {"jwks_uri", issuer() + "/jwks"},
+                               {"id_token_signing_alg_values_supported", json::array({"RS256"})}}
+                              .dump());
+            return;
+        }
         if (target == "/jwks") {
             jwks_requests_.fetch_add(1);
             send_response(descriptor, 200, jwks());
@@ -443,6 +455,8 @@ TEST(OAuth, AuthorizationCodePkceOidcAndCachedJwks) {
     options.port = lake_port;
     options.public_host = "127.0.0.1:" + std::to_string(lake_port);
     options.store = store;
+    // The stub provider is plain HTTP on loopback (lake#837).
+    options.oidc_allow_private_addresses = true;
     lake::api::ApiServer server(options);
     ASSERT_TRUE(server.start()) << server.reason();
 
@@ -515,6 +529,8 @@ TEST(OAuth, EnterpriseOidcAuthorizationCodeCallback) {
     options.port = lake_port;
     options.public_host = "127.0.0.1:" + std::to_string(lake_port);
     options.store = store;
+    // The stub provider is plain HTTP on loopback (lake#837).
+    options.oidc_allow_private_addresses = true;
     lake::api::ApiServer server(options);
     ASSERT_TRUE(server.start()) << server.reason();
     const std::string started = request(

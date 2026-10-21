@@ -207,6 +207,11 @@ struct ServerOptions {
     // Repository and application webhooks reach only HTTPS on public addresses (lake#876) unless
     // this is set (LAKE_WEBHOOK_ALLOW_PRIVATE_ADDRESSES=1, local development and tests only).
     bool webhook_allow_private_addresses = false;
+    // OpenID Connect discovery, token and JWKS requests for generic OAuth and enterprise OIDC
+    // providers reach only HTTPS on public addresses (lake#837, lake#876) unless this is set
+    // (LAKE_OIDC_ALLOW_PRIVATE_ADDRESSES=1: tests, local development, or an install whose
+    // identity provider is on its own network).
+    bool oidc_allow_private_addresses = false;
     // How a customer's own bucket is browsed as a drive (lake#664, docs/api/storage.md): an
     // injected browser (tests' fakes), else control::cloud_store_browser over the server's own
     // public-only transport. `store_allow_private_addresses` (LAKE_STORE_ALLOW_PRIVATE_ADDRESSES=1,

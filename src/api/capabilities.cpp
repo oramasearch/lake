@@ -2789,6 +2789,37 @@ void register_own_identity_capabilities(Registry& registry) {
         }});
 }
 
+// A provider's endpoints (lake#837): Google's and GitHub's fixed ones, any other's from its OIDC
+// discovery document, fetched on the blocking pool (the issuer may be slow; lake#772).
+struct DiscoveredEndpoints {
+    bool ok = false;
+    OAuthEndpoints value;
+    ApiResult failure;
+};
+
+liquid::runtime::task<DiscoveredEndpoints>
+discovered_endpoints(const control::OAuthProvider& provider, ApiContext& context) {
+    const std::shared_ptr<OidcDiscovery> discovery = context.oidc_discovery;
+    std::expected<OAuthEndpoints, ApiError> endpoints;
+    if (provider.provider == "google" || provider.provider == "github" || !discovery) {
+        endpoints = oauth_endpoints(provider, discovery.get());
+    } else {
+        auto ran = co_await run_blocking(
+            [discovery, provider] { return oauth_endpoints(provider, discovery.get()); });
+        endpoints = ran ? std::move(*ran)
+                        : std::unexpected(ApiError{.code = "busy", .message = ran.error().message});
+    }
+    if (!endpoints) {
+        co_return DiscoveredEndpoints{
+            .failure = ApiResult::failure(endpoints.error().code, endpoints.error().message)};
+    }
+    if (!oauth_endpoints_allowed(*endpoints, discovery && discovery->allows_private_addresses())) {
+        co_return DiscoveredEndpoints{
+            .failure = ApiResult::failure("invalid_input", "OAuth endpoints must use HTTPS")};
+    }
+    co_return DiscoveredEndpoints{.ok = true, .value = std::move(*endpoints)};
+}
+
 void register_identity_capabilities(Registry& registry) {
     // ---- users ----
     registry.add(Capability{
@@ -3615,9 +3646,13 @@ void register_identity_capabilities(Registry& registry) {
             if (!provider) {
                 co_return from_store_error(provider.error());
             }
-            if (!oauth_endpoints_allowed(oauth_endpoints(*provider))) {
-                co_return ApiResult::failure("invalid_input",
-                                          "OAuth endpoints must use HTTPS outside loopback tests");
+            auto awaited = co_await discovered_endpoints(*provider, context);
+            if (!awaited) {
+                co_return ApiResult::failure("store_error", awaited.error().message);
+            }
+            const DiscoveredEndpoints& endpoints = *awaited;
+            if (!endpoints.ok) {
+                co_return endpoints.failure;
             }
             control::OAuthFlow flow{pool_id,
                                     provider_name,
@@ -3635,7 +3670,7 @@ void register_identity_capabilities(Registry& registry) {
             }
             co_return ApiResult::success(
                 {{"authorization_url",
-                  oauth_authorization_url(*provider, flow, context.public_host)}});
+                  oauth_authorization_url(*provider, endpoints.value, flow, context.public_host)}});
         }});
     registry.add(Capability{
         .name = "start_sso_oidc",
@@ -3654,20 +3689,25 @@ void register_identity_capabilities(Registry& registry) {
         .object = "authentication",
         .action = "write",
         .resolve_object = global_object,
-        .handler = [](const json& input, ApiContext& context) {
+        .async_handler = [](const json& input,
+                            ApiContext& context) -> liquid::runtime::task<ApiResult> {
             if (!context.store)
-                return no_store();
+                co_return no_store();
             if (context.public_host.empty()) {
-                return ApiResult::failure("store_unavailable",
-                                          "LAKE_PUBLIC_HOST is required for OIDC sign-in");
+                co_return ApiResult::failure("store_unavailable",
+                                             "LAKE_PUBLIC_HOST is required for OIDC sign-in");
             }
             const std::string provider_id = input.at("provider_id");
             const auto provider = context.store->get_sso_oidc_provider(provider_id);
             if (!provider)
-                return from_store_error(provider.error());
-            if (!oauth_endpoints_allowed(oauth_endpoints(*provider))) {
-                return ApiResult::failure("invalid_input",
-                                          "OIDC endpoints must use HTTPS outside loopback tests");
+                co_return from_store_error(provider.error());
+            auto awaited = co_await discovered_endpoints(*provider, context);
+            if (!awaited) {
+                co_return ApiResult::failure("store_error", awaited.error().message);
+            }
+            const DiscoveredEndpoints& endpoints = *awaited;
+            if (!endpoints.ok) {
+                co_return endpoints.failure;
             }
             control::OAuthFlow flow{provider->pool_id,
                                     provider->provider,
@@ -3677,14 +3717,15 @@ void register_identity_capabilities(Registry& registry) {
                                     input.value("device_name", "browser"),
                                     input.value("taap_id", "")};
             if (flow.state.empty() || flow.code_verifier.empty() || flow.nonce.empty()) {
-                return ApiResult::failure("store_error", "could not generate OIDC flow material");
+                co_return ApiResult::failure("store_error",
+                                             "could not generate OIDC flow material");
             }
             const auto started = context.store->begin_oauth(flow);
             if (!started)
-                return from_store_error(started.error());
-            return ApiResult::success(
+                co_return from_store_error(started.error());
+            co_return ApiResult::success(
                 {{"authorization_url",
-                  oauth_authorization_url(*provider, flow, context.public_host)}});
+                  oauth_authorization_url(*provider, endpoints.value, flow, context.public_host)}});
         }});
     registry.add(Capability{
         .name = "create_token",

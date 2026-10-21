@@ -220,6 +220,9 @@ int main(int argc, char** argv) {
     // development against a receiver on the same machine.
     opts.webhook_allow_private_addresses =
         env_or("LAKE_WEBHOOK_ALLOW_PRIVATE_ADDRESSES", "") == "1";
+    // OIDC discovery, token and JWKS requests reach only HTTPS on public addresses unless this is
+    // set (lake#837), for an identity provider on the install's own network or local development.
+    opts.oidc_allow_private_addresses = env_or("LAKE_OIDC_ALLOW_PRIVATE_ADDRESSES", "") == "1";
     // Billing (docs/api/billing.md): on only where LAKE_BILLING=on, as on Orama Cloud; an
     // enterprise install leaves it unset and has no billing capability or page.
     opts.billing = lake::api::billing_enabled(env_or("LAKE_BILLING", ""));

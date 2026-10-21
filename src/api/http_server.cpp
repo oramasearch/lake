@@ -6861,6 +6861,9 @@ struct OutboundRequest {
     bool public_only = false;
 };
 
+// An identity provider's discovery document, token endpoint and keys (lake#837) answer within this.
+constexpr std::chrono::seconds oidc_timeout{10};
+
 struct OutboundResponse {
     int status = 0;
     std::string body;
@@ -7776,6 +7779,8 @@ struct ApiServer::Impl {
     // MCP connections' transport (docs/api/mcp-connections.md#the-client): the injected one, else
     // the server's own, which refuses private addresses unless the options allow them.
     std::shared_ptr<McpHttp> mcp_http;
+    // OpenID Connect discovery (lake#837), over outbound_http.
+    std::shared_ptr<OidcDiscovery> oidc_discovery;
     // A customer's own buckets (lake#664): their transport, public addresses only, and the
     // browser over it.
     std::shared_ptr<McpHttp> store_transport;
@@ -8629,6 +8634,23 @@ struct ApiServer::Impl {
         }
         mcp_http = options.mcp_http ? options.mcp_http
                                     : make_mcp_http(options.mcp_allow_private_addresses);
+        // Discovery documents come over the outbound client, HTTPS to public addresses only unless
+        // LAKE_OIDC_ALLOW_PRIVATE_ADDRESSES is set (lake#837, lake#876), within 10 s.
+        oidc_discovery = std::make_shared<OidcDiscovery>(
+            [this](const std::string& url) {
+                OutboundRequest request{
+                    "GET",
+                    url,
+                    "",
+                    {{"Accept", "application/json"}, {"User-Agent", "lake-oauth/1"}},
+                    oidc_timeout};
+                request.body_limit = 256 * 1024;
+                request.public_only = !options.oidc_allow_private_addresses;
+                OutboundResponse response = outbound_http.request(request);
+                return OidcFetchResponse{
+                    response.status, std::move(response.body), std::move(response.error)};
+            },
+            options.oidc_allow_private_addresses);
         store_browser = options.store_browser;
         if (!store_browser) {
             // Its own transport, on its own io thread, so a slow bucket never holds up an MCP
@@ -9269,6 +9291,7 @@ struct ApiServer::Impl {
         ctx.transcriber = transcriber;
         ctx.mcp_http = mcp_http;
         ctx.mcp_allow_private_addresses = options.mcp_allow_private_addresses;
+        ctx.oidc_discovery = oidc_discovery;
         ctx.store_browser = store_browser;
         ctx.model_provider = model_provider;
         ctx.payments = payments;
@@ -10270,14 +10293,23 @@ struct ApiServer::Impl {
                          "public, max-age=300");
     }
 
-    std::optional<std::string> jwks_for(const std::string& url, bool refresh) {
+    // `public_only` for an identity provider's keys (lake#837): HTTPS to public addresses only,
+    // unless LAKE_OIDC_ALLOW_PRIVATE_ADDRESSES is set. Clerk's, which the operator configures, is
+    // not limited.
+    std::optional<std::string>
+    jwks_for(const std::string& url, bool refresh, bool public_only = false) {
         const auto found = jwks_cache.find(url);
         if (!refresh && found != jwks_cache.end() &&
             std::chrono::steady_clock::now() - found->second.fetched_at < std::chrono::hours(1)) {
             return found->second.document;
         }
-        OutboundResponse response = outbound_http.request(
-            {"GET", url, "", {{"Accept", "application/json"}, {"User-Agent", "lake-oauth/1"}}});
+        OutboundRequest request{
+            "GET", url, "", {{"Accept", "application/json"}, {"User-Agent", "lake-oauth/1"}}};
+        if (public_only) {
+            request.timeout = oidc_timeout;
+            request.public_only = true;
+        }
+        OutboundResponse response = outbound_http.request(request);
         if (!response.error.empty() || response.status < 200 || response.status >= 300) {
             return std::nullopt;
         }
@@ -10537,7 +10569,21 @@ struct ApiServer::Impl {
             co_return co_await oauth_error(
                 route, http::status::forbidden, "OAuth provider is not registered");
         }
-        const OAuthEndpoints endpoints = oauth_endpoints(*provider);
+        // The endpoints are the provider's discovery document's (lake#837), read on the blocking
+        // pool: an issuer that does not answer holds up only this request.
+        auto discovered = co_await run_blocking([discovery = oidc_discovery, provider = *provider] {
+            return oauth_endpoints(provider, discovery.get());
+        });
+        if (!discovered || !*discovered ||
+            !oauth_endpoints_allowed(**discovered, options.oidc_allow_private_addresses)) {
+            co_return co_await oauth_error(route,
+                                           http::status::service_unavailable,
+                                           !discovered    ? discovered.error().message
+                                           : !*discovered ? (*discovered).error().message
+                                                          : "OAuth endpoints must use HTTPS");
+        }
+        const OAuthEndpoints endpoints = std::move(**discovered);
+        const bool public_only = !options.oidc_allow_private_addresses;
         const std::string callback = oauth_callback_url(options.public_host, provider_name);
         std::string token_body = "grant_type=authorization_code";
         token_body += "&code=" + oauth_url_encode(code);
@@ -10545,13 +10591,15 @@ struct ApiServer::Impl {
         token_body += "&client_id=" + oauth_url_encode(provider->client_id);
         token_body += "&client_secret=" + oauth_url_encode(provider->client_secret);
         token_body += "&code_verifier=" + oauth_url_encode(flow->code_verifier);
-        const OutboundResponse token_response =
-            outbound_http.request({"POST",
-                                   endpoints.token,
-                                   token_body,
-                                   {{"Accept", "application/json"},
-                                    {"Content-Type", "application/x-www-form-urlencoded"},
-                                    {"User-Agent", "lake-oauth/1"}}});
+        OutboundRequest token_request{"POST",
+                                      endpoints.token,
+                                      token_body,
+                                      {{"Accept", "application/json"},
+                                       {"Content-Type", "application/x-www-form-urlencoded"},
+                                       {"User-Agent", "lake-oauth/1"}},
+                                      oidc_timeout};
+        token_request.public_only = public_only;
+        const OutboundResponse token_response = outbound_http.request(token_request);
         if (!token_response.error.empty() || token_response.status < 200 ||
             token_response.status >= 300) {
             co_return co_await oauth_error(
@@ -10594,13 +10642,13 @@ struct ApiServer::Impl {
             identity.display_name = user.value("name", user.value("login", std::string()));
         } else {
             const std::string id_token = token.value("id_token", "");
-            std::optional<std::string> jwks = jwks_for(endpoints.jwks, false);
+            std::optional<std::string> jwks = jwks_for(endpoints.jwks, false, public_only);
             auto claims =
                 jwks ? control::identity_crypto::verify_oidc_id_token(
                            id_token, *jwks, provider->issuer, provider->client_id, flow->nonce)
                      : std::nullopt;
             if (!claims) {
-                jwks = jwks_for(endpoints.jwks, true);
+                jwks = jwks_for(endpoints.jwks, true, public_only);
                 claims =
                     jwks ? control::identity_crypto::verify_oidc_id_token(
                                id_token, *jwks, provider->issuer, provider->client_id, flow->nonce)
