@@ -3144,11 +3144,21 @@ void register_identity_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "sign_in_taap",
         .title = "Sign in with TAAP key",
-        .description = "Verify a fresh liquid identity assertion and issue a Lake session.",
+        .description = "Verify a fresh liquid identity assertion and issue a Lake session. The "
+                       "assertion must be signed with the key the identity document's identifier "
+                       "was derived from, or, after `liquid identity rotate`, with the current key "
+                       "of `identity_chain`, every rotation signed by the key it replaced.",
         .input_schema = {{"type", "object"},
                          {"properties",
                           {{"pool_id", {{"type", "string"}}},
                            {"identity_document", {{"type", "string"}}},
+                           {"identity_chain",
+                            {{"type", "array"},
+                             {"items", {{"type", "string"}}},
+                             {"maxItems", 64},
+                             {"description",
+                              "after a rotation: every identity document from the identity's "
+                              "first, oldest first, ending with identity_document (lake#917)"}}},
                            {"nonce", {{"type", "string"}}},
                            {"issued_at", {{"type", "integer"}}},
                            {"signature", {{"type", "object"}}},
@@ -3173,13 +3183,22 @@ void register_identity_capabilities(Registry& registry) {
                 !origin.ok) {
                 co_return origin;
             }
+            const auto identity_chain = input.value("identity_chain", std::vector<std::string>{});
             auto verified = control::identity_crypto::verify_taap_sign_in(
                 input.at("identity_document").get<std::string>(),
                 pool_id,
                 input.at("nonce").get<std::string>(),
                 input.at("issued_at").get<std::int64_t>(),
-                input.at("signature"));
+                input.at("signature"),
+                0,
+                identity_chain);
             if (!verified) {
+                // lake#917: a refused sign-in is audited with the identity it claimed and why.
+                context.audit_details = {{"claimed_taap_id",
+                                          control::identity_crypto::claimed_taap_id(
+                                              input.at("identity_document").get<std::string>())},
+                                         {"reason", verified.error()},
+                                         {"identity_chain_documents", identity_chain.size()}};
                 co_return ApiResult::failure("unauthorized", verified.error());
             }
             context.authentication_method = "taap";

@@ -103,6 +103,57 @@ verifies the canonical document and `lake_sign_in` signature through libliquid, 
 minute freshness window, and records the assertion digest before issuing a one-day session.
 Assertion digests are one-use, so replay fails while the timestamp remains fresh.
 
+### Signing in with a TAAP key: the key must be the identity's
+
+Lake issue [#917](https://github.com/oramasearch/lake/issues/917) (security review finding
+LSR-006): liquid's `verify_document` checks only that a document is signed by the key it carries
+and that its identifier ends with the fingerprint it claims. A document carrying a registered
+person's identifier with the caller's own key passed, its assertion verified with that key, and
+Lake issued a session for the person's account. Anyone who knew a TAAP id could sign in as its
+owner.
+
+Now the assertion must be signed with the key **bound** to the identifier
+(`identity_crypto::bound_taap_key`):
+
+- **The identity's first document.** An initial document (no predecessor) whose identifier is the
+  one its own key derives, `taap:1:<algorithm>:<key fingerprint>` (its fingerprint equals its key
+  fingerprint). Only that key can produce it, so it proves the identifier, the rule own-identity
+  linking already applied.
+- **A rotation the replaced key signed.** After `liquid identity rotate`, the client sends
+  `identity_chain`: every document from the identity's first, oldest first, ending with
+  `identity_document` (at most 64). Lake requires the first to be bound as above, the chain to pass
+  liquid's `verify_chain`, and **every** rotation in it to carry the replaced key's signature. liquid
+  also accepts a successor that declares the previous key compromised and is signed by the new key
+  alone; Lake refuses that, because anyone could have made it. The assertion is verified with the
+  chain's current key, and its `signing_key_identifier` must name that key.
+- **Anything else is refused** with `unauthorized`: a document naming another identifier with a
+  different key, a rotated successor sent without its chain, a chain that does not start at a
+  bound document, an unbound rotation, or an assertion signed by any other key. No session is
+  issued. A person who has lost their key returns through account recovery
+  ([`recovery.md`](recovery.md)), which does not register a new TAAP key.
+- **Each refusal is audited**: the `sign_in_taap` event has outcome `denied` and details
+  `claimed_taap_id` (the identifier the document named), `reason`, and `identity_chain_documents`.
+
+The same rule binds the document registered at sign-up. PostgreSQL password and OAuth sign-up with
+an `identity_document` take only an identity's first document, bound as above, so nobody can
+register an account under another person's identifier. The in-memory store (demos and
+tests) now gives an account the identifier of a bound document, as PostgreSQL does; any other
+document still gets the account an identifier of its own, never the one it claims.
+
+Related: liquid's own `verify()` fell back to whatever key the caller supplied when no chain was
+stored locally ([liquid#383](https://github.com/oramasearch/liquid/issues/383), fixed in
+[liquid#448](https://github.com/oramasearch/liquid/pull/448)). This check does not depend on it:
+Lake binds the key itself before calling `verify`. Lake's companion change for liquid#448,
+[lake#1021](https://github.com/oramasearch/lake/pull/1021), moves this call to liquid's carried-chain
+`verify(actor, chain, ...)`, passing the same documents.
+
+To verify: `TaapSignIn.MemoryStoreBindsTheKeyToTheRegisteredIdentity` and
+`TaapSignIn.PostgresStoreBindsTheKeyToTheRegisteredIdentity` register a real liquid identity, sign
+in with it, and then show that a forged document with the victim's identifier and the attacker's
+key (which liquid's `verify_document` accepts) is refused and audited, that registering it is
+refused, that the rotated key signs in with its chain and not without it, and that a compromise
+rotation signed only by the new key (which liquid's `verify_chain` accepts) is refused.
+
 ## What the exit scenario proves
 
 `IdentityExit.PostgresProvesIdentityPkiAndDynamicSecrets` creates a real identity with the pinned
@@ -297,8 +348,10 @@ principal is the account and whose details name `previous` and `next`;
 
 - A person whose liquid identity has already been rotated cannot link it yet: the current document
   alone does not prove its identifier. Accepting the whole chain (`verify_chain`) is the follow-up.
-- Rotating the own key afterwards (`liquid identity rotate`) is not tracked by Lake: `sign_in_taap`
-  verifies the document presented, as before.
+- Rotating the own key afterwards (`liquid identity rotate`) is not recorded by Lake. `sign_in_taap`
+  accepts the rotated key only with the identity chain from the first document, every rotation
+  signed by the key it replaced ([above](#signing-in-with-a-taap-key-the-key-must-be-the-identitys));
+  the first key also still signs in, because Lake keeps no record that it was replaced.
 - The link is one-way. An account that uses its own identity cannot return to a managed key.
 - Postgres keeps old row versions until vacuum; the wiped seed was wrapped under the instance key
   throughout.

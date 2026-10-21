@@ -3757,7 +3757,22 @@ Result<IssuedSession> InMemoryStore::sign_up_password(const NewPasswordUser& inp
         if (credential.pool_id == pool && lower(credential.email) == lower(input.email))
             return std::unexpected(StoreError{"conflict", "email already exists"});
     }
-    const bool managed = !input.custodial_taap_id.empty();
+    // A document bound to its identifier (lake#917) gives the account that identifier, as in the
+    // PostgreSQL store, so its key can sign in with TAAP. Any other document is not trusted for an
+    // identifier: as before, the account gets one of its own, never the identifier it claims.
+    std::string documented_identity;
+    if (const auto key = input.identity_document.empty()
+                             ? std::expected<liquid::actor, std::string>(std::unexpected(""))
+                             : identity_crypto::bound_taap_key(input.identity_document, {});
+        key) {
+        documented_identity = key->taap_id;
+        if (std::ranges::any_of(
+                users_, [&](const User& value) { return value.taap_id == documented_identity; })) {
+            return std::unexpected(
+                StoreError{"conflict", "this TAAP identity is already registered"});
+        }
+    }
+    const bool managed = documented_identity.empty() && !input.custodial_taap_id.empty();
     if (managed && (input.custodial_public_key.empty() || input.custodial_wrapped_seed.empty())) {
         return std::unexpected(StoreError{"invalid_input", "a managed key is incomplete"});
     }
@@ -3768,8 +3783,9 @@ Result<IssuedSession> InMemoryStore::sign_up_password(const NewPasswordUser& inp
     const std::string identity_secret = identity_crypto::random_secret();
     if (identity_secret.empty())
         return std::unexpected(StoreError{"store_error", "could not create identity"});
-    const std::string identity =
-        managed ? input.custodial_taap_id : "taap:1:ed25519:" + identity_secret;
+    const std::string identity = !documented_identity.empty() ? documented_identity
+                                 : managed                    ? input.custodial_taap_id
+                                                              : "taap:1:ed25519:" + identity_secret;
     const std::string now = now_iso8601();
     if (!input.user_id.empty() &&
         std::ranges::any_of(users_, [&](const User& value) { return value.id == input.user_id; })) {

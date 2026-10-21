@@ -578,13 +578,122 @@ std::string base64url_encode(std::string_view value) {
     return base64url(reinterpret_cast<const unsigned char*>(value.data()), value.size());
 }
 
+namespace {
+
+std::vector<std::byte> as_bytes_of(const std::vector<unsigned char>& value) {
+    std::vector<std::byte> output(value.size());
+    std::ranges::transform(value, output.begin(), [](auto byte) { return std::byte{byte}; });
+    return output;
+}
+
+// The identifier a key derives, as liquid writes it: `taap:1:<algorithm>:<fingerprint>`, and the
+// identifier its signatures name.
+std::string derived_taap_id(const liquid::actor& subject, const std::string& fingerprint) {
+    return "taap:1:" + subject.algorithm + ":" + fingerprint;
+}
+
+} // namespace
+
+bool identity_document_is_self_certifying(const liquid::identity_document& document) {
+    // lake#917: an initial document whose identifier is the one its own key derives. liquid's
+    // verify_document checks only that the document is self-signed by the key it carries and that
+    // the identifier ends with the claimed fingerprint, so a document naming someone else's
+    // identifier with the caller's key verifies too. Only this check binds key and identifier.
+    return !document.previous_document_hash && !document.subject.key_fingerprint.empty() &&
+           document.subject.fingerprint == document.subject.key_fingerprint &&
+           document.subject.taap_id ==
+               derived_taap_id(document.subject, document.subject.key_fingerprint);
+}
+
+std::expected<liquid::actor, std::string>
+bound_taap_key(std::string_view identity_document, std::span<const std::string> identity_chain) {
+    // The documents, oldest first: the chain when one is given (it must end with the presented
+    // document), else the presented document alone.
+    std::vector<std::string_view> encoded_documents;
+    if (identity_chain.empty()) {
+        encoded_documents.push_back(identity_document);
+    } else {
+        if (identity_chain.size() > 64) {
+            return std::unexpected("TAAP identity chain has more than 64 documents");
+        }
+        if (identity_chain.back() != identity_document) {
+            return std::unexpected(
+                "TAAP identity chain must end with the presented identity document");
+        }
+        for (const std::string& encoded : identity_chain) {
+            encoded_documents.push_back(encoded);
+        }
+    }
+    std::vector<liquid::identity_document> documents;
+    documents.reserve(encoded_documents.size());
+    for (const std::string_view encoded : encoded_documents) {
+        const std::vector<unsigned char> bytes = from_base64url(encoded);
+        if (bytes.empty()) {
+            return std::unexpected("TAAP identity document is not base64url");
+        }
+        const std::vector<std::byte> canonical_input = as_bytes_of(bytes);
+        auto document = liquid::decode_identity_document(canonical_input);
+        if (!document) {
+            return std::unexpected("TAAP identity document is invalid canonical CBOR");
+        }
+        const auto canonical = liquid::encode_identity_document(*document);
+        if (!canonical || *canonical != canonical_input) {
+            return std::unexpected("TAAP identity document does not verify canonically");
+        }
+        documents.push_back(std::move(*document));
+    }
+    const liquid::identity_document& root = documents.front();
+    const auto verified_root = liquid::verify_document(root);
+    if (!verified_root || !*verified_root) {
+        return std::unexpected("TAAP identity document does not verify canonically");
+    }
+    if (!identity_document_is_self_certifying(root)) {
+        return std::unexpected(
+            documents.size() == 1 && root.previous_document_hash
+                ? "TAAP identity document is a rotated successor: send the identity chain from "
+                  "the identity's first document (identity_chain)"
+                : "TAAP identity document's key is not the key its identifier was derived from");
+    }
+    if (documents.size() == 1) {
+        return root.subject;
+    }
+    const auto chain = liquid::verify_chain(documents);
+    if (!chain) {
+        return std::unexpected("TAAP identity chain does not verify: " + chain.error().message);
+    }
+    // Every rotation must be signed by the key it replaces. liquid also accepts a successor that
+    // declares the previous key compromised and is signed by the new key alone; a new key bound
+    // that way could have been made by anyone, so it is refused here. A person who lost their key
+    // returns through account recovery (docs/api/recovery.md).
+    for (std::size_t index = 1; index < documents.size(); ++index) {
+        const liquid::actor& previous = documents[index - 1].subject;
+        const std::string previous_key = derived_taap_id(previous, previous.key_fingerprint);
+        if (std::ranges::none_of(documents[index].signatures, [&](const liquid::signature& value) {
+                return value.signing_key_identifier == previous_key;
+            })) {
+            return std::unexpected("TAAP identity rotation is not signed by the key it replaces");
+        }
+    }
+    return chain->subject;
+}
+
+std::string claimed_taap_id(std::string_view identity_document) {
+    const std::vector<unsigned char> bytes = from_base64url(identity_document);
+    if (bytes.empty()) {
+        return {};
+    }
+    const auto document = liquid::decode_identity_document(as_bytes_of(bytes));
+    return document ? document->subject.taap_id : std::string{};
+}
+
 std::expected<VerifiedTaapSignIn, std::string>
 verify_taap_sign_in(std::string_view identity_document,
                     std::string_view pool_id,
                     std::string_view nonce,
                     std::int64_t issued_at,
                     const nlohmann::json& signature,
-                    std::int64_t now_unix) {
+                    std::int64_t now_unix,
+                    std::span<const std::string> identity_chain) {
     if (pool_id.empty() || nonce.size() < 16 || !signature.is_object()) {
         return std::unexpected("TAAP sign-in fields are incomplete");
     }
@@ -596,47 +705,37 @@ verify_taap_sign_in(std::string_view identity_document,
     if (issued_at < now_unix - 300 || issued_at > now_unix + 60) {
         return std::unexpected("TAAP sign-in assertion is outside its validity window");
     }
-    const std::vector<unsigned char> document_bytes = from_base64url(identity_document);
     const std::vector<unsigned char> signature_bytes = from_base64url(signature.value("bytes", ""));
-    if (document_bytes.empty() || signature_bytes.empty()) {
+    if (signature_bytes.empty()) {
         return std::unexpected("TAAP sign-in document or signature is not base64url");
     }
-    std::vector<std::byte> encoded_document(document_bytes.size());
-    std::vector<std::byte> encoded_signature(signature_bytes.size());
-    std::transform(document_bytes.begin(),
-                   document_bytes.end(),
-                   encoded_document.begin(),
-                   [](auto value) { return std::byte{value}; });
-    std::transform(signature_bytes.begin(),
-                   signature_bytes.end(),
-                   encoded_signature.begin(),
-                   [](auto value) { return std::byte{value}; });
-    const auto document = liquid::decode_identity_document(encoded_document);
-    if (!document) {
-        return std::unexpected("TAAP identity document is invalid canonical CBOR");
-    }
-    const auto verified_document = liquid::verify_document(*document);
-    const auto canonical = liquid::encode_identity_document(*document);
-    if (!verified_document || !*verified_document || !canonical || *canonical != encoded_document) {
-        return std::unexpected("TAAP identity document does not verify canonically");
+    // lake#917: the key the assertion must be signed with is the one bound to the identifier: an
+    // initial document's own key, or the current key of a chain from that document whose every
+    // rotation the replaced key signed.
+    const auto key = bound_taap_key(identity_document, identity_chain);
+    if (!key) {
+        return std::unexpected(key.error());
     }
     liquid::signature signed_value{signature.value("algorithm", ""),
                                    signature.value("signing_key_identifier", ""),
                                    signature.value("signing_key_label", ""),
                                    signature.value("signature_purpose", ""),
                                    signature.value("signed_at", ""),
-                                   std::move(encoded_signature)};
+                                   as_bytes_of(signature_bytes)};
+    // The assertion names the bound key, so liquid verifies it with that key and no other.
+    if (signed_value.signing_key_identifier != derived_taap_id(*key, key->key_fingerprint)) {
+        return std::unexpected("TAAP sign-in signature is not made with the identity's key");
+    }
     const std::string body =
         std::string(pool_id) + "\n" + std::string(nonce) + "\n" + std::to_string(issued_at);
     const std::span<const std::byte> body_bytes(reinterpret_cast<const std::byte*>(body.data()),
                                                 body.size());
-    const auto verified =
-        liquid::verify(document->subject, "lake_sign_in", body_bytes, signed_value);
+    const auto verified = liquid::verify(*key, "lake_sign_in", body_bytes, signed_value);
     if (!verified || !*verified) {
         return std::unexpected("TAAP sign-in signature does not verify");
     }
     return VerifiedTaapSignIn{
-        document->subject.taap_id,
+        key->taap_id,
         sha256_hex(std::string(identity_document) + "\n" + body + "\n" + signature.dump())};
 }
 
@@ -11436,6 +11535,16 @@ private:
         if (!canonical || *canonical != *encoded) {
             return std::unexpected(
                 StoreError{"invalid_input", "TAAP identity document is not canonical"});
+        }
+        // lake#917: the account is bound to the identifier this document's own key derives. A
+        // document naming another identifier with a different key verifies in liquid but proves
+        // nothing about that identifier, and a rotated successor needs its chain.
+        if (!identity_crypto::identity_document_is_self_certifying(*document)) {
+            return std::unexpected(StoreError{
+                "invalid_input",
+                "TAAP identity document must be the identity's first document, whose key derives "
+                "its identifier. Register before rotating, or run liquid identity show "
+                "--document on the identity you created."});
         }
         {
             EVP_MD* algorithm = EVP_MD_fetch(nullptr, "SHA512-256", nullptr);

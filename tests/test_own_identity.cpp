@@ -22,6 +22,8 @@
 
 #include <liquid/liquid.hpp>
 
+#include "identity/taap.hpp"
+
 #include "lake/api/capabilities.hpp"
 #include "lake/api/registry.hpp"
 #include "lake/api/server.hpp"
@@ -575,4 +577,227 @@ TEST(OwnIdentity, APushFromTheLinkedKeyIsAttributedToTheAccount) {
     EXPECT_EQ(change->draft.details.at("author"), own.signer.identity().taap_id);
     EXPECT_EQ(change->draft.details.at("author_account"), account);
     EXPECT_EQ(change->draft.details.at("author_is_caller"), true);
+}
+
+namespace {
+
+std::vector<std::byte> base64url_bytes(const std::string& encoded) {
+    static constexpr std::string_view alphabet =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    std::vector<std::byte> output;
+    unsigned buffer = 0;
+    int bits = 0;
+    for (const char c : encoded) {
+        const auto index = alphabet.find(c);
+        if (index == std::string_view::npos) {
+            return {};
+        }
+        buffer = (buffer << 6U) | static_cast<unsigned>(index);
+        bits += 6;
+        if (bits >= 8) {
+            bits -= 8;
+            output.push_back(std::byte((buffer >> bits) & 0xffU));
+        }
+    }
+    return output;
+}
+
+std::string encoded_document(const liquid::identity_document& document) {
+    const auto encoded = liquid::encode_identity_document(document);
+    EXPECT_TRUE(encoded);
+    return encoded ? base64url(*encoded) : std::string{};
+}
+
+liquid::identity_document decoded_document(const std::string& encoded) {
+    const auto document = liquid::decode_identity_document(base64url_bytes(encoded));
+    EXPECT_TRUE(document);
+    return document ? *document : liquid::identity_document{};
+}
+
+// Replaces a document's signatures with one self-signature by `signer`'s current key.
+liquid::identity_document signed_by(liquid::identity_document document, liquid::signer& signer) {
+    document.signatures.clear();
+    auto body = liquid::identity_detail::canonical_document(document, false);
+    EXPECT_TRUE(body);
+    auto signature = liquid::runtime::block_on(signer.sign("identity_document", std::move(*body)));
+    EXPECT_TRUE(signature) << (signature ? "" : signature.error().message);
+    document.signatures.push_back(std::move(*signature));
+    return document;
+}
+
+// The attack of lake#917 (LSR-006): the attacker's own key and document, with the victim's
+// identifier written in and self-signed again with the attacker's key.
+std::string forged_document(Person& attacker, const std::string& victim_taap_id) {
+    liquid::identity_document document = decoded_document(attacker.document);
+    document.subject.taap_id = victim_taap_id;
+    document.subject.fingerprint = victim_taap_id.substr(victim_taap_id.rfind(':') + 1);
+    return encoded_document(signed_by(std::move(document), attacker.signer));
+}
+
+json sign_in_taap_input(liquid::signer& signer,
+                        const std::string& document,
+                        const std::vector<std::string>& chain = {}) {
+    const std::int64_t issued_at = std::chrono::duration_cast<std::chrono::seconds>(
+                                       std::chrono::system_clock::now().time_since_epoch())
+                                       .count();
+    const std::string nonce = "taap-binding-" + lake::control::new_uuid_v4();
+    const std::string body = "lake\n" + nonce + "\n" + std::to_string(issued_at);
+    std::vector<std::byte> bytes(body.size());
+    std::ranges::transform(body, bytes.begin(), [](char c) { return std::byte(c); });
+    auto signature = liquid::runtime::block_on(signer.sign("lake_sign_in", std::move(bytes)));
+    EXPECT_TRUE(signature);
+    json input{{"identity_document", document},
+               {"nonce", nonce},
+               {"issued_at", issued_at},
+               {"signature",
+                {{"algorithm", signature->algorithm},
+                 {"signing_key_identifier", signature->signing_key_identifier},
+                 {"signing_key_label", signature->signing_key_label},
+                 {"signature_purpose", signature->signature_purpose},
+                 {"signed_at", signature->signed_at},
+                 {"bytes", base64url(signature->bytes)}}}};
+    if (!chain.empty()) {
+        input["identity_chain"] = chain;
+    }
+    return input;
+}
+
+// lake#917 (LSR-006), against either store: a TAAP sign-in succeeds only with the key bound to the
+// registered identity, its own first key or a rotation that key signed. A document naming the
+// victim's identifier with the attacker's key is refused, issues no session, and is audited.
+void expect_taap_sign_in_binds_the_key(lake::control::Store& store,
+                                       const std::string& suffix,
+                                       bool refuses_unbound_registration) {
+    Harness harness(store);
+    const auto home = lake::test::fixture_path("taap-binding-" + suffix);
+    Person victim = person_at(home / "victim");
+    Person attacker = person_at(home / "attacker");
+    const std::string victim_id = victim.signer.identity().taap_id;
+
+    // The victim registers their identity at sign-up.
+    ApiContext anonymous;
+    const ApiResult registered = harness.call("sign_up_password",
+                                              {{"email", "victim-" + suffix + "@example.test"},
+                                               {"password", "correct horse battery staple"},
+                                               {"identity_document", victim.document}},
+                                              anonymous);
+    ASSERT_TRUE(registered.ok) << registered.error.message;
+    const ApiContext victim_session = harness.signed_in(registered.value.value("secret", ""));
+    ASSERT_EQ(victim_session.acting_identity, victim_id);
+
+    // Their own key signs in.
+    ApiContext visitor;
+    const ApiResult own_key =
+        harness.call("sign_in_taap", sign_in_taap_input(victim.signer, victim.document), visitor);
+    ASSERT_TRUE(own_key.ok) << own_key.error.message;
+    EXPECT_EQ(store.context_for(own_key.value.value("secret", ""))->user_id,
+              victim_session.acting_user_id);
+
+    // The forged document verifies in liquid, which is the root cause; Lake refuses it.
+    const std::string forged = forged_document(attacker, victim_id);
+    const auto liquid_accepts = liquid::verify_document(decoded_document(forged));
+    EXPECT_TRUE(liquid_accepts && *liquid_accepts)
+        << "the forged document should pass liquid's self-signature check";
+    ApiContext intruder;
+    const ApiResult impersonated =
+        harness.call("sign_in_taap", sign_in_taap_input(attacker.signer, forged), intruder);
+    EXPECT_FALSE(impersonated.ok) << "a replacement key signed in as the victim";
+    EXPECT_EQ(impersonated.error.code, "unauthorized");
+    EXPECT_FALSE(impersonated.value.contains("secret"));
+    // The victim's document with the attacker's signature, and the forged document behind the
+    // victim's real one as a chain, are refused too.
+    ApiContext intruder_again;
+    EXPECT_FALSE(harness
+                     .call("sign_in_taap",
+                           sign_in_taap_input(attacker.signer, victim.document),
+                           intruder_again)
+                     .ok);
+    EXPECT_FALSE(harness
+                     .call("sign_in_taap",
+                           sign_in_taap_input(attacker.signer, forged, {victim.document, forged}),
+                           intruder_again)
+                     .ok);
+    // Registering the forged document never gives an account the victim's identifier: PostgreSQL
+    // refuses it, and the in-memory store, which never trusted a document's claim, gives the new
+    // account an identifier of its own.
+    const ApiResult claimed = harness.call("sign_up_password",
+                                           {{"email", "claimer-" + suffix + "@example.test"},
+                                            {"password", "correct horse battery staple"},
+                                            {"identity_document", forged}},
+                                           anonymous);
+    EXPECT_EQ(claimed.ok, !refuses_unbound_registration) << claimed.error.message;
+    if (claimed.ok) {
+        EXPECT_NE(harness.signed_in(claimed.value.value("secret", "")).acting_identity, victim_id);
+    } else {
+        EXPECT_EQ(claimed.error.code, "invalid_input") << claimed.error.message;
+    }
+
+    // A rotation the old key signed is bound: the new key signs in with the chain, not without.
+    liquid::identity_document successor;
+    {
+        LiquidHome scope(home / "victim");
+        auto rotated = liquid::runtime::block_on(victim.signer.rotate());
+        ASSERT_TRUE(rotated) << rotated.error().message;
+        successor = *rotated;
+    }
+    const std::string successor_document = encoded_document(successor);
+    ApiContext rotated_visitor;
+    const ApiResult successor_alone = harness.call(
+        "sign_in_taap", sign_in_taap_input(victim.signer, successor_document), rotated_visitor);
+    EXPECT_FALSE(successor_alone.ok);
+    EXPECT_NE(successor_alone.error.message.find("identity_chain"), std::string::npos)
+        << successor_alone.error.message;
+    const ApiResult with_chain =
+        harness.call("sign_in_taap",
+                     sign_in_taap_input(
+                         victim.signer, successor_document, {victim.document, successor_document}),
+                     rotated_visitor);
+    ASSERT_TRUE(with_chain.ok) << with_chain.error.message;
+    EXPECT_EQ(store.context_for(with_chain.value.value("secret", ""))->user_id,
+              victim_session.acting_user_id);
+
+    // A successor that declares the old key compromised and is signed only by the new key passes
+    // liquid's verify_chain, but nothing the old key signed binds it: refused.
+    liquid::identity_document declared = successor;
+    declared.compromised_keys = {
+        {decoded_document(victim.document).subject.key_fingerprint, successor.updated_at, "lost"}};
+    const std::string declared_document = encoded_document(signed_by(declared, victim.signer));
+    const std::vector<liquid::identity_document> declared_chain{
+        decoded_document(victim.document), decoded_document(declared_document)};
+    EXPECT_TRUE(liquid::verify_chain(declared_chain))
+        << "liquid accepts a compromise rotation without the old key";
+    const ApiResult unbound_rotation = harness.call(
+        "sign_in_taap",
+        sign_in_taap_input(victim.signer, declared_document, {victim.document, declared_document}),
+        rotated_visitor);
+    EXPECT_FALSE(unbound_rotation.ok);
+    EXPECT_NE(unbound_rotation.error.message.find("not signed by the key it replaces"),
+              std::string::npos)
+        << unbound_rotation.error.message;
+
+    // Each refusal is in the audit log (outcome `denied`), naming the identity it claimed.
+    const auto events = lake::test::audit_events(store, {.limit = 500});
+    ASSERT_TRUE(events) << events.error().message;
+    const auto refusals = std::ranges::count_if(*events, [&](const lake::audit::Event& event) {
+        return event.draft.action == "sign_in_taap" && event.draft.outcome == "denied" &&
+               event.draft.details.value("claimed_taap_id", "") == victim_id &&
+               !event.draft.details.value("reason", "").empty();
+    });
+    EXPECT_GE(refusals, 4);
+}
+
+} // namespace
+
+TEST(TaapSignIn, MemoryStoreBindsTheKeyToTheRegisteredIdentity) {
+    lake::control::InMemoryStore store;
+    expect_taap_sign_in_binds_the_key(store, lake::control::new_uuid_v4().substr(0, 8), false);
+}
+
+TEST(TaapSignIn, PostgresStoreBindsTheKeyToTheRegisteredIdentity) {
+    const char* uri = lake::test::postgres_uri();
+    if (uri == nullptr || *uri == '\0') {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
+    }
+    auto store = lake::control::make_postgres_store(uri, std::string(instance_kek));
+    expect_taap_sign_in_binds_the_key(*store, lake::control::new_uuid_v4().substr(0, 8), true);
 }
