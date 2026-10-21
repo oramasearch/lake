@@ -3385,6 +3385,81 @@ TEST(AgentRuns, AgentTurnReachesLibraryNativeAndPythonAgents) {
     EXPECT_EQ(std::get<2>(r.agents.turns.back())["message"], "hello again");
 }
 
+// lake#932: a service launch acts with its creator's credential, so a second person talking to the
+// same Python agent never reaches the first person's launch; each is served by a launch they
+// started, whose credential resolves to them.
+TEST(AgentRuns, EachPersonTalksToAPythonAgentThroughTheirOwnLaunch) {
+    AgentRuns r;
+    auto& config = const_cast<lake::control::WorkspaceConfig&>(r.w.service->config());
+    config.agent_service_token = "service-token";
+    r.w.caller->answers["get_agent"] = {{"id", "p-1"}, {"name", "Py"}, {"runtime", "python"}};
+
+    // The administrator starts the agent's service and talks to it.
+    const auto started = r.call("agent_turn", {{"agent", "p-1"}, {"message", "hello"}});
+    ASSERT_TRUE(started.ok) << started.error.message;
+    const std::string admin_launch = started.value["launch_id"];
+    ASSERT_TRUE(
+        r.store.set_agent_launch_status(admin_launch, "Ready", "", "http://al-admin:8080", "x"));
+
+    // A later writer in the same workspace is not handed the administrator's launch.
+    const auto writer_user =
+        r.store.create_user({"taap:1:ed25519:writer", "writer@example.test", "Writer"});
+    ASSERT_TRUE(writer_user) << writer_user.error().message;
+    const auto space = r.store.find_policy_object("customer", r.w.customer_id);
+    ASSERT_TRUE(space) << space.error().message;
+    ASSERT_TRUE(r.store.create_grant(
+        {writer_user->taap_id, space->id, "write", "writer-attestation", "admin", "writer-grant"}));
+    lake::control::Principal writer = r.principal;
+    writer.user_id = writer_user->id;
+    writer.taap_id = writer_user->taap_id;
+    writer.session_id.clear();
+    const std::size_t before = r.agents.turns.size();
+    const auto refused =
+        r.call_as(writer, "agent_turn", {{"agent", "p-1"}, {"message", "read the admin's repos"}});
+    ASSERT_TRUE(refused.ok) << refused.error.message;
+    EXPECT_EQ(refused.value["status"], "starting");
+    const std::string writer_launch = refused.value["launch_id"];
+    EXPECT_NE(writer_launch, admin_launch);
+    EXPECT_EQ(r.agents.turns.size(), before) << "the administrator's launch is never called";
+    const auto writers = r.store.get_agent_launch(writer_launch);
+    ASSERT_TRUE(writers);
+    EXPECT_EQ(writers->mode, "service");
+    EXPECT_EQ(writers->created_by_user_id, writer_user->id);
+
+    // Once ready, each person's turn goes to their own launch.
+    const std::string writer_credential =
+        "lal." + writer_launch + ".0123456789abcdef0123456789abcdef";
+    ASSERT_TRUE(r.store.set_agent_launch_status(
+        writer_launch,
+        "Ready",
+        "",
+        "http://al-writer:8080",
+        lake::control::identity_crypto::sha256_hex(writer_credential)));
+    const auto mine = r.call_as(writer, "agent_turn", {{"agent", "p-1"}, {"message", "mine"}});
+    ASSERT_TRUE(mine.ok) << mine.error.message;
+    ASSERT_EQ(r.agents.turns.size(), before + 1);
+    EXPECT_EQ(std::get<0>(r.agents.turns.back()), "http://al-writer:8080");
+    const auto theirs = r.call("agent_turn", {{"agent", "p-1"}, {"message", "theirs"}});
+    ASSERT_TRUE(theirs.ok) << theirs.error.message;
+    ASSERT_EQ(r.agents.turns.size(), before + 2);
+    EXPECT_EQ(std::get<0>(r.agents.turns.back()), "http://al-admin:8080");
+
+    // The writer's launch acts as the writer, never as the administrator.
+    const auto acting = r.store.context_for(writer_credential);
+    ASSERT_TRUE(acting) << acting.error().message;
+    EXPECT_EQ(acting->user_id, writer_user->id);
+    EXPECT_NE(acting->user_id, r.principal.user_id);
+
+    // Without a person there is no launch to choose.
+    lake::control::Principal nobody = r.principal;
+    nobody.user_id.clear();
+    const auto anonymous = r.call_as(nobody, "agent_turn", {{"agent", "p-1"}, {"message", "x"}});
+    EXPECT_FALSE(anonymous.ok);
+    EXPECT_EQ(anonymous.error.code, "unauthorized");
+    EXPECT_EQ(r.agents.turns.size(), before + 2);
+}
+}
+
 // Scan my workspace (lake#795): Auto-Suggest Agent's discover turn reads the account's Apps and
 // image builds with its task credential before it suggests (agent-autosuggest's apps.py), so the
 // credential grants those reads, and nothing that changes an App or a build.

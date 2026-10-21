@@ -6636,13 +6636,21 @@ void register_agent_run_capabilities(Registry& registry) {
             if (runtime != "python") {
                 co_return ApiResult::failure("invalid_input", "this agent is not talked to here");
             }
+            // A service launch acts with its creator's credential (lal.), so a person talks only
+            // to a launch they started and never drives another's with that one's authority
+            // (lake#932); without a person there is no launch to choose.
+            if (context.acting_user_id.empty()) {
+                co_return ApiResult::failure("unauthorized",
+                                             "talking to " + agent + " needs a signed-in person");
+            }
             auto launches = context.store->list_agent_launches(
                 customer_id, agent, 20, input.at("workspace_id").get<std::string>());
             if (!launches) {
                 co_return ApiResult::failure(launches.error().code, launches.error().message);
             }
-            const auto live = std::ranges::find_if(*launches, [](const control::AgentLaunch& l) {
-                return l.mode == "service" && l.desired == "present";
+            const auto live = std::ranges::find_if(*launches, [&](const control::AgentLaunch& l) {
+                return l.mode == "service" && l.desired == "present" &&
+                       l.created_by_user_id == context.acting_user_id;
             });
             if (live == launches->end()) {
                 auto started = context.store->create_agent_launch(
