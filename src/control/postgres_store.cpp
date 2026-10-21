@@ -1769,6 +1769,9 @@ public:
     }
 
     Result<User> create_user(const NewUser& in) override {
+        if (auto checked = check_principal_id(in.taap_id, "taap_id"); !checked) {
+            return std::unexpected(checked.error());
+        }
         return with_tx<User>([&](pqxx::work& tx) -> Result<User> {
             const pqxx::result rows = tx.exec_params(
                 std::string("INSERT INTO users (taap_id, email, display_name) VALUES "
@@ -1828,6 +1831,9 @@ public:
     }
 
     Result<Organization> create_organization(const NewOrganization& in) override {
+        if (auto checked = check_principal_id(in.taap_id, "taap_id"); !checked) {
+            return std::unexpected(checked.error());
+        }
         return with_tx<Organization>([&](pqxx::work& tx) -> Result<Organization> {
             std::optional<std::string> parent_id;
             if (!in.customer_id.empty()) {
@@ -8723,7 +8729,13 @@ public:
                              digest};
         });
     }
+    // Every credential's principal passes accepted_principal (lake#870): no credential acts as
+    // the operator, and a person's credential names a TAAP identity.
     Result<Principal> context_for(const std::string& secret) override {
+        return accepted_principal(resolve_principal(secret));
+    }
+
+    Result<Principal> resolve_principal(const std::string& secret) {
         if (auto principal = build_principal(secret)) {
             return principal;
         }
@@ -9006,6 +9018,9 @@ public:
     }
 
     Result<IssuedSession> sign_in_sso(const SsoIdentity& input) override {
+        if (auto checked = check_principal_id(input.taap_id, "taap_id"); !checked) {
+            return std::unexpected(checked.error());
+        }
         if (input.provider_id.empty() || input.issuer.empty() || input.subject.empty() ||
             !input.claims.is_object()) {
             return std::unexpected(StoreError{"invalid_input", "SSO assertion is incomplete"});
@@ -9124,6 +9139,9 @@ public:
     }
 
     Result<ScimUser> upsert_scim_user(const NewScimUser& input) override {
+        if (auto checked = check_principal_id(input.taap_id, "taap_id"); !checked) {
+            return std::unexpected(checked.error());
+        }
         if (input.provider_id.empty() || input.external_id.empty() || input.taap_id.empty()) {
             return std::unexpected(StoreError{
                 "invalid_input", "provider, external id, and TAAP identity are required"});

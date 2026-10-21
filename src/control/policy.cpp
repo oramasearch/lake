@@ -102,6 +102,36 @@ AuthorizationDecision decide(const std::string& object_id,
 
 } // namespace
 
+bool valid_principal_id(std::string_view value) {
+    constexpr std::string_view prefix = "taap:";
+    if (!value.starts_with(prefix) || value.size() == prefix.size() || value.size() > 512) {
+        return false;
+    }
+    return std::ranges::all_of(value, [](char c) { return c > ' ' && c < 0x7f; });
+}
+
+Result<void> check_principal_id(std::string_view value, std::string_view field) {
+    if (value.empty() || valid_principal_id(value)) {
+        return {};
+    }
+    return std::unexpected(
+        StoreError{"invalid_input", std::string(field) + " must be a TAAP identity (taap:...)"});
+}
+
+Result<Principal> accepted_principal(Result<Principal> principal) {
+    if (!principal) {
+        return principal;
+    }
+    const bool workload = principal->kind.starts_with("app_") ||
+                          principal->kind.starts_with("build_") ||
+                          principal->kind.starts_with("methodology_");
+    if (principal->taap_id == operator_principal ||
+        (!workload && !principal->taap_id.empty() && !valid_principal_id(principal->taap_id))) {
+        return std::unexpected(StoreError{"not_found", "session is not active"});
+    }
+    return principal;
+}
+
 bool role_allows(std::string_view role, std::string_view action) {
     if (role == "admin") {
         return std::ranges::find(actions, action) != actions.end();

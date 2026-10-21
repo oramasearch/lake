@@ -535,6 +535,7 @@ public:
     Result<std::vector<Device>> list_devices(const std::string& user_id) override;
     Result<void> revoke_device(const std::string& user_id, const std::string& device_id) override;
     Result<Principal> context_for(const std::string& secret) override;
+    Result<Principal> resolve_principal(const std::string& secret);
     Result<OfflineGrant> issue_offline_grant(const NewOfflineGrant& grant) override;
     Result<std::vector<OfflineGrant>> list_offline_grants(const std::string& user_id) override;
     Result<OfflineGrant> get_offline_grant(const std::string& id) override;

@@ -11,6 +11,7 @@
 #include "lake/api/capabilities.hpp"
 #include "lake/api/registry.hpp"
 #include "lake/control/memory_store.hpp"
+#include "lake/control/policy.hpp"
 #include "lake/control/saml.hpp"
 
 namespace {
@@ -347,6 +348,58 @@ TEST(Scim, UserUpdateGroupReplacementAndDeactivationRevokeSessions) {
     ASSERT_EQ(logs.value.at("items").size(), 1U);
     EXPECT_EQ(logs.value.at("items").front().at("resource"), "user");
     EXPECT_EQ(logs.value.at("items").front().at("operation"), "deactivate");
+}
+
+// lake#870: principal ids are TAAP ids; `admin` belongs to the admin token alone.
+TEST(PrincipalIds, OnlyTaapIdentitiesAreValid) {
+    using lake::control::valid_principal_id;
+    EXPECT_TRUE(valid_principal_id("taap:1:ed25519:abc"));
+    EXPECT_FALSE(valid_principal_id("admin"));
+    EXPECT_FALSE(valid_principal_id(""));
+    EXPECT_FALSE(valid_principal_id("taap:"));
+    EXPECT_FALSE(valid_principal_id("agent-service:ask"));
+    EXPECT_FALSE(valid_principal_id("share-link:1"));
+    EXPECT_FALSE(valid_principal_id("taap:1:\nadmin"));
+    EXPECT_FALSE(valid_principal_id("taap:" + std::string(508, 'a')));
+    EXPECT_TRUE(valid_principal_id("taap:" + std::string(507, 'a')));
+}
+
+TEST(PrincipalIds, NoCreationPathAcceptsTheOperatorIdentity) {
+    SsoSurface surface;
+    EXPECT_FALSE(surface.store.create_user({"admin", "", "Operator"}));
+    const ApiResult organization =
+        surface.call("create_organization", {{"display_name", "Org"}, {"taap_id", "admin"}});
+    EXPECT_FALSE(organization.ok);
+    EXPECT_EQ(organization.error.code, "invalid_input");
+
+    const ApiResult created =
+        surface.call("create_organization", {{"display_name", "JIT organization"}});
+    ASSERT_TRUE(created.ok) << created.error.message;
+    json provider =
+        provider_input(created.value.at("id"), "jit", "oidc", "https://oidc.attacker.example");
+    provider["jit_provisioning"] = true;
+    const ApiResult registered = surface.call("register_sso_provider", provider);
+    ASSERT_TRUE(registered.ok) << registered.error.message;
+
+    const ApiResult scim = surface.call("upsert_scim_user",
+                                        {{"provider_id", registered.value.at("id")},
+                                         {"external_id", "scim-admin"},
+                                         {"display_name", "Operator"},
+                                         {"taap_id", "admin"},
+                                         {"active", true}});
+    EXPECT_FALSE(scim.ok);
+    EXPECT_EQ(scim.error.code, "invalid_input");
+
+    const auto jit = surface.store.sign_in_sso({registered.value.at("id"),
+                                                "https://oidc.attacker.example",
+                                                "jit-admin",
+                                                "",
+                                                "Operator",
+                                                "admin",
+                                                "browser",
+                                                json::object()});
+    ASSERT_FALSE(jit);
+    EXPECT_EQ(jit.error().code, "invalid_input");
 }
 
 } // namespace
