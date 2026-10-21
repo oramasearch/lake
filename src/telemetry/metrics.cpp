@@ -500,6 +500,11 @@ public:
         return call("get_policy_object", [&] { return store_->get_policy_object(id); });
     }
     control::Result<control::PolicyObject>
+    set_policy_object_parent(const std::string& id, const std::string& parent_id) override {
+        return call("set_policy_object_parent",
+                    [&] { return store_->set_policy_object_parent(id, parent_id); });
+    }
+    control::Result<control::PolicyObject>
     find_policy_object(const std::string& object_type, const std::string& external_id) override {
         return call("find_policy_object",
                     [&] { return store_->find_policy_object(object_type, external_id); });

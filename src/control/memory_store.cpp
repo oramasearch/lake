@@ -6655,6 +6655,44 @@ Result<PolicyObject> InMemoryStore::get_policy_object(const std::string& id) {
     return std::unexpected(StoreError{"not_found", "no policy object " + id});
 }
 
+Result<PolicyObject> InMemoryStore::set_policy_object_parent(const std::string& id,
+                                                             const std::string& parent_id) {
+    std::lock_guard lock(mutex_);
+    const auto by_id = [&](const std::string& wanted) {
+        return std::ranges::find_if(
+            policy_objects_, [&](const PolicyObject& object) { return object.id == wanted; });
+    };
+    const auto object = by_id(id);
+    if (object == policy_objects_.end()) {
+        return std::unexpected(StoreError{"not_found", "no policy object " + id});
+    }
+    if (object->object_type != "path") {
+        return std::unexpected(
+            StoreError{"invalid_input", "only a path policy object changes its parent"});
+    }
+    const auto parent = by_id(parent_id);
+    if (parent == policy_objects_.end()) {
+        return std::unexpected(
+            StoreError{"invalid_input", "parent_id does not reference a policy object"});
+    }
+    if (!object_parent_allowed(object->object_type, parent->object_type)) {
+        return std::unexpected(
+            StoreError{"invalid_input", "object type is not valid under this parent"});
+    }
+    std::set<std::string> visited;
+    for (std::string current = parent_id; !current.empty() && visited.insert(current).second;) {
+        if (current == id) {
+            return std::unexpected(
+                StoreError{"invalid_input", "a policy object cannot be put under itself"});
+        }
+        const auto ancestor = by_id(current);
+        current = ancestor == policy_objects_.end() ? std::string{} : ancestor->parent_id;
+    }
+    object->parent_id = parent_id;
+    object->updated_at = now_iso8601();
+    return *object;
+}
+
 Result<PolicyObject> InMemoryStore::find_policy_object(const std::string& object_type,
                                                        const std::string& external_id) {
     std::lock_guard lock(mutex_);

@@ -135,6 +135,8 @@ public:
                                                              int limit) override;
     Result<PolicyObject> create_policy_object(const NewPolicyObject&) override;
     Result<PolicyObject> get_policy_object(const std::string& id) override;
+    Result<PolicyObject> set_policy_object_parent(const std::string& id,
+                                                  const std::string& parent_id) override;
     Result<PolicyObject> find_policy_object(const std::string& object_type,
                                             const std::string& external_id) override;
     Result<std::vector<PolicyObject>> list_policy_objects(const std::string& parent_id,
