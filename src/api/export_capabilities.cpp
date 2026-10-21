@@ -258,6 +258,11 @@ liquid::runtime::task<ApiResult> import_repository(const json& input, ApiContext
             continue;
         }
         json value = record.value("value", json::object());
+        // An approval is lake's record of who approved in this repository (LSR-077); one carried
+        // in an archive is not, so an imported review never satisfies a required review.
+        if (kind == "review" && value.is_object()) {
+            value.erase("approval");
+        }
         if (kind == "branch_protection") {
             const auto policy =
                 context.store->create_policy_object({"path",

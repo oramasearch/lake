@@ -4671,6 +4671,22 @@ TEST(Export, VerifiesAndRecreatesPortableRepositoryFacts) {
             .create_grant(
                 {"taap:1:ed25519:reader", object->id, "read", "grant-proof", "admin", "test"})
             .has_value());
+    // An approved review travels as history, without its approval (LSR-077).
+    const ApiResult review = source.call(
+        "create_review", {{"repository_id", repository.value["id"]}, {"change_id", "change-1"}});
+    ASSERT_TRUE(review.ok) << review.error.message;
+    ASSERT_TRUE(source.store.create_grant(
+        {"taap:1:ed25519:reviewer", object->id, "admin", "reviewer-proof", "admin", "test"}));
+    source.ctx.acting_identity = "taap:1:ed25519:reviewer";
+    source.ctx.operator_credential = false;
+    ASSERT_TRUE(source
+                    .call("update_review",
+                          {{"repository_id", repository.value["id"]},
+                           {"review_id", review.value["id"]},
+                           {"state", "approved"}})
+                    .ok);
+    source.ctx.acting_identity = "admin";
+    source.ctx.operator_credential = true;
 
     const ApiResult exported = source.call(
         "export_repository", {{"repository_id", repository.value["id"]}, {"include_git", true}});
@@ -4704,6 +4720,11 @@ TEST(Export, VerifiesAndRecreatesPortableRepositoryFacts) {
                   .value["items"]
                   .size(),
               1);
+    const ApiResult reviews =
+        destination.call("list_reviews", {{"repository_id", imported.value["id"]}});
+    ASSERT_EQ(reviews.value["items"].size(), 1);
+    EXPECT_EQ(reviews.value["items"][0]["value"]["state"], "approved");
+    EXPECT_FALSE(reviews.value["items"][0]["value"].contains("approval"));
 
     json altered = exported.value["archive"];
     altered["payload"]["history"]["changes"][0]["message"] = "changed";
@@ -4877,17 +4898,140 @@ TEST(Forge, BranchProtectionRequiresAnApprovedReview) {
     const ApiResult review = surface.call(
         "create_review", {{"repository_id", repository_id}, {"change_id", "change-1"}});
     ASSERT_TRUE(review.ok) << review.error.message;
-    ASSERT_TRUE(surface
-                    .call("update_review",
-                          {{"repository_id", repository_id},
-                           {"review_id", review.value["id"]},
-                           {"state", "approved"}})
-                    .ok);
+    // Someone other than the pusher, with review on the repository, approves (LSR-077).
+    const auto object = surface.store.find_policy_object("repository", repository_id);
+    ASSERT_TRUE(object);
+    ASSERT_TRUE(surface.store.create_grant({"taap:1:ed25519:reviewer",
+                                            object->id,
+                                            "admin",
+                                            "attestation-reviewer",
+                                            "admin",
+                                            "request-reviewer"}));
+    surface.ctx.acting_identity = "taap:1:ed25519:reviewer";
+    surface.ctx.operator_credential = false;
+    const ApiResult approval = surface.call("update_review",
+                                            {{"repository_id", repository_id},
+                                             {"review_id", review.value["id"]},
+                                             {"state", "approved"}});
+    ASSERT_TRUE(approval.ok) << approval.error.message;
+    surface.ctx.acting_identity = "admin";
+    surface.ctx.operator_credential = true;
     const auto approved = load();
     ASSERT_EQ(approved.reviews.size(), 1u);
     EXPECT_TRUE(evaluate_branch_protection(
         surface.store, "admin", surface.ctx.authorization_cache, approved, update));
     EXPECT_TRUE(approved.releases.empty()) << "no rule asks for verification";
+}
+
+// LSR-077: a required review is satisfied only by someone other than the pusher who holds `review`
+// when the push is evaluated, and never by the person who opened the review.
+TEST(Forge, ARequiredReviewNeedsASecondPersonWithReview) {
+    Surface surface;
+    const ApiResult user = surface.call("create_user", {{"display_name", "Ada"}});
+    ASSERT_TRUE(user.ok) << user.error.message;
+    const ApiResult customer = surface.call(
+        "create_customer",
+        {{"customer_type", "individual"}, {"user_id", user.value["id"]}, {"name", "ada"}});
+    ASSERT_TRUE(customer.ok) << customer.error.message;
+    const ApiResult repository =
+        surface.call("create_repository",
+                     {{"customer_id", customer.value["id"]},
+                      {"workspace_id", surface.workspace(customer.value["id"])},
+                      {"name", "two-person"}});
+    ASSERT_TRUE(repository.ok) << repository.error.message;
+    const std::string repository_id = repository.value["id"];
+    ASSERT_TRUE(surface
+                    .call("set_branch_protection",
+                          {{"repository_id", repository_id},
+                           {"ref", "refs/heads/main"},
+                           {"required_review", true}})
+                    .ok);
+    const auto object = surface.store.find_policy_object("repository", repository_id);
+    ASSERT_TRUE(object);
+    const std::string author = "taap:1:ed25519:review-author";
+    const std::string peer = "taap:1:ed25519:review-peer";
+    const std::string writer = "taap:1:ed25519:review-writer";
+    std::string peer_grant;
+    for (const auto& [principal, role] :
+         {std::pair{author, "admin"}, std::pair{peer, "admin"}, std::pair{writer, "write"}}) {
+        const auto grant = surface.store.create_grant(
+            {principal, object->id, role, "attestation-" + principal, "admin", "request"});
+        ASSERT_TRUE(grant) << grant.error().message;
+        if (principal == peer) {
+            peer_grant = grant->id;
+        }
+    }
+    const auto as = [&](const std::string& identity) {
+        surface.ctx.acting_identity = identity;
+        surface.ctx.operator_credential = false;
+        surface.ctx.authorization_cache = {};
+    };
+    const auto review_state = [&](const json& review, const std::string& state) {
+        return surface.call(
+            "update_review",
+            {{"repository_id", repository_id}, {"review_id", review["id"]}, {"state", state}});
+    };
+    const auto stored = surface.store.get_repository(repository_id);
+    ASSERT_TRUE(stored);
+    const BranchRefUpdate update{
+        .name = "refs/heads/main", .new_head = "change-1", .fast_forward = true};
+    const auto push_as = [&](const std::string& pusher) {
+        auto loaded = liquid::runtime::block_on(load_branch_protection(surface.ctx, *stored));
+        EXPECT_TRUE(loaded && *loaded);
+        lake::control::AuthorizationCache cache;
+        return evaluate_branch_protection(surface.store, pusher, cache, **loaded, update);
+    };
+
+    // One person opens, approves and pushes: the approval is refused and the push with it.
+    as(author);
+    const ApiResult own = surface.call(
+        "create_review", {{"repository_id", repository_id}, {"change_id", "change-1"}});
+    ASSERT_TRUE(own.ok) << own.error.message;
+    EXPECT_EQ(own.value["value"]["opened_by"], author);
+    EXPECT_EQ(review_state(own.value, "approved").error.code, "forbidden");
+    const auto alone = push_as(author);
+    ASSERT_FALSE(alone);
+    EXPECT_EQ(alone.error().rule, "required_review");
+
+    // A writer without `review` cannot approve at all.
+    as(writer);
+    const ApiResult opened_by_writer = surface.call(
+        "create_review", {{"repository_id", repository_id}, {"change_id", "change-1"}});
+    ASSERT_TRUE(opened_by_writer.ok) << opened_by_writer.error.message;
+    EXPECT_EQ(review_state(opened_by_writer.value, "approved").error.code, "unauthorized");
+
+    // The author approves the writer's review: it names them, and counts for the writer's push
+    // but never for the author's own.
+    as(author);
+    const ApiResult approved_by_author = review_state(opened_by_writer.value, "approved");
+    ASSERT_TRUE(approved_by_author.ok) << approved_by_author.error.message;
+    EXPECT_EQ(approved_by_author.value["value"]["approval"]["by"], author);
+    EXPECT_EQ(approved_by_author.value["value"]["approval"]["change_id"], "change-1");
+    EXPECT_TRUE(push_as(writer));
+    const auto self_approved = push_as(author);
+    ASSERT_FALSE(self_approved);
+    EXPECT_EQ(self_approved.error().rule, "required_review");
+
+    // A second person's approval lets the author's push through.
+    as(peer);
+    ASSERT_TRUE(review_state(own.value, "approved").ok);
+    EXPECT_TRUE(push_as(author));
+
+    // Reopening withdraws an approval.
+    as(author);
+    const ApiResult reopened = review_state(own.value, "open");
+    ASSERT_TRUE(reopened.ok) << reopened.error.message;
+    EXPECT_TRUE(reopened.value["value"]["approval"].is_null());
+    EXPECT_FALSE(push_as(author));
+
+    // Approval is checked when the push is: once the peer loses `review`, theirs no longer counts.
+    as(peer);
+    ASSERT_TRUE(review_state(own.value, "approved").ok);
+    EXPECT_TRUE(push_as(author));
+    ASSERT_TRUE(surface.store.revoke_grant(peer_grant, false));
+    const auto revoked = push_as(author);
+    ASSERT_FALSE(revoked);
+    EXPECT_EQ(revoked.error().rule, "required_review");
 }
 
 TEST(Repositories, AnonymousCallersOnlySeePublicRepositories) {
@@ -7666,7 +7810,21 @@ TEST(PostgresSync, EnforcesBranchProtectionAtReferenceUpdates) {
     EXPECT_EQ(review_refusal->reason,
               "branch protection rejects main: an approved review is required");
 
-    workspaces.forge(*repository, "review", {{"change_id", reviewed_id}, {"state", "approved"}},
+    // An approval lake recorded, by a reviewer who is not the pusher (LSR-077).
+    const auto repository_object = control->find_policy_object("repository", repository->id);
+    ASSERT_TRUE(repository_object) << repository_object.error().message;
+    const std::string reviewer = "taap:1:ed25519:branch-reviewer-" + suffix;
+    ASSERT_TRUE(control->create_grant({reviewer,
+                                       repository_object->id,
+                                       "review",
+                                       "attestation-" + reviewer,
+                                       "admin",
+                                       "request-" + suffix}));
+    workspaces.forge(*repository,
+                     "review",
+                     {{"change_id", reviewed_id},
+                      {"state", "approved"},
+                      {"approval", {{"by", reviewer}, {"change_id", reviewed_id}}}},
                      instance_kek);
     ASSERT_TRUE(liquid::runtime::block_on(owner_endpoint.push(*source)));
 

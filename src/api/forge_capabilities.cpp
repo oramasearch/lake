@@ -227,13 +227,18 @@ ForgeTask<ApiResult> update_record(RepositoryForge& forge, const control::ForgeR
     co_return ApiResult::success(control::to_json(**updated));
 }
 
-// Who wrote an issue or an issue comment (lake#598): the caller's TAAP identity, set by lake and
-// never taken from the input (the schemas refuse an `author` member). A GitHub import keeps the
-// GitHub login it read instead. Reviews and review comments are left as they were: liquid's forge
-// client reads a review comment's `author` as an actor object.
+// Who wrote an issue or an issue comment (lake#598), or opened a review (LSR-077): the caller's
+// TAAP identity, set by lake and never taken from the input (the schemas refuse those members). A
+// GitHub import keeps the GitHub login it read instead. A review records its opener as `opened_by`,
+// not `author`: liquid's forge client reads a review comment's `author` as an actor object.
 void stamp_author(const std::string& kind, json& value, const ApiContext& context) {
-    if ((kind == "issue" || kind == "issue_comment") && !context.acting_identity.empty()) {
+    if (context.acting_identity.empty()) {
+        return;
+    }
+    if (kind == "issue" || kind == "issue_comment") {
         value["author"] = context.acting_identity;
+    } else if (kind == "review") {
+        value["opened_by"] = context.acting_identity;
     }
 }
 
@@ -276,6 +281,59 @@ ForgeTask<ApiResult> update_kind(std::string kind, std::string id_name, const js
     changes.erase(id_name);
     co_return settled_result(
         co_await update_record(*forge, *record, std::move(changes), context));
+}
+
+// A string member of a record's value, or empty when it is missing or not a string.
+std::string string_member(const json& value, const char* key) {
+    const auto found = value.find(key);
+    return found != value.end() && found->is_string() ? found->get<std::string>() : std::string{};
+}
+
+// update_review (LSR-077). An approval is lake's record of who gave it and for which change,
+// `approval: {by, change_id}`, never the caller's input. Approving needs `review` on the
+// repository and is refused to the person who opened the review; any other state withdraws it.
+// Branch protection counts only such an approval, checked again when the push is
+// (evaluate_branch_protection).
+ForgeTask<ApiResult> update_review(const json& input, ApiContext& context) {
+    auto forge = open_forge(input, context);
+    if (!forge) {
+        co_return forge.error();
+    }
+    const auto record =
+        settled_record(co_await get_kind(*forge, input.at("review_id"), "review", "review_id"));
+    if (!record) {
+        co_return record.error();
+    }
+    const std::string state = input.at("state").get<std::string>();
+    json changes = {{"state", state}, {"approval", nullptr}};
+    if (state == "approved") {
+        const std::string& approver = context.acting_identity;
+        if (approver.empty()) {
+            co_return ApiResult::failure("unauthorized", "approving a review needs a principal");
+        }
+        if (approver != "admin") {
+            const auto object = repository_object(input, context);
+            if (!object) {
+                co_return failure(object.error());
+            }
+            const auto decision = control::authorize(
+                *context.store, approver, *object, "review", context.authorization_cache);
+            if (!decision) {
+                co_return from_store_error(decision.error());
+            }
+            if (!decision->allowed) {
+                co_return ApiResult::failure("unauthorized",
+                                             "approving a review needs review on the repository");
+            }
+        }
+        if (string_member(record->value, "opened_by") == approver) {
+            co_return ApiResult::failure(
+                "forbidden", "a review cannot be approved by the person who opened it", "/state");
+        }
+        changes["approval"] = {{"by", approver},
+                               {"change_id", string_member(record->value, "change_id")}};
+    }
+    co_return settled_result(co_await update_record(*forge, *record, std::move(changes), context));
 }
 
 // A comment on this repository's issue or review: the parent must exist here.
@@ -707,12 +765,42 @@ bool allowed_pusher(const json& rule, const std::string& identity) {
     });
 }
 
-bool approved_review(const std::vector<control::ForgeRecord>& records,
-                     const std::string& change_id) {
-    return std::ranges::any_of(records, [&change_id](const control::ForgeRecord& review) {
-        return review.value.value("change_id", "") == change_id &&
-               review.value.value("state", "") == "approved";
-    });
+// Whether an approved review of exactly `change_id` counts for this push (LSR-077): its approval
+// is lake's record for that change, given by someone other than the pusher and the review's
+// opener, who still holds `review` on the rule's object now. An approval lake did not record
+// (one written before LSR-077, or carried in by an import) never counts.
+control::Result<bool> approved_review(control::Store& store,
+                                      const std::string& pusher,
+                                      control::AuthorizationCache& authorization_cache,
+                                      const std::string& object_id,
+                                      const std::vector<control::ForgeRecord>& records,
+                                      const std::string& change_id) {
+    for (const control::ForgeRecord& review : records) {
+        const json& value = review.value;
+        if (!value.is_object() || string_member(value, "change_id") != change_id ||
+            string_member(value, "state") != "approved" || !value.contains("approval") ||
+            !value["approval"].is_object()) {
+            continue;
+        }
+        const json& approval = value["approval"];
+        const std::string approver = string_member(approval, "by");
+        if (approver.empty() || string_member(approval, "change_id") != change_id ||
+            approver == pusher || approver == string_member(value, "opened_by")) {
+            continue;
+        }
+        if (approver == "admin") {
+            return true;
+        }
+        const auto decision =
+            control::authorize(store, approver, object_id, "review", authorization_cache);
+        if (!decision) {
+            return std::unexpected(decision.error());
+        }
+        if (decision->allowed) {
+            return true;
+        }
+    }
+    return false;
 }
 
 bool verified_release(const std::vector<control::ForgeRecord>& records,
@@ -862,13 +950,40 @@ evaluate_branch_protection(control::Store& store,
                                                       "write_policy"});
             }
         }
-        if (rule.value.value("required_review", false) &&
-            !approved_review(records.reviews, update.new_head)) {
-            return std::unexpected(SyncStoreError{"conflict",
-                                                  "branch protection rejects " + update.name +
-                                                      ": an approved review is required",
-                                                  update.name,
-                                                  "required_review"});
+        if (rule.value.value("required_review", false)) {
+            // Reviewers are checked on the rule's own object, which inherits the repository's
+            // grants; a rule without one (written outside set_branch_protection) uses the
+            // repository's object.
+            std::string review_object = policy_object_id;
+            if (review_object.empty()) {
+                const auto repository = store.find_policy_object("repository", rule.repository_id);
+                if (!repository) {
+                    return std::unexpected(SyncStoreError{repository.error().code,
+                                                          repository.error().message,
+                                                          update.name,
+                                                          "required_review"});
+                }
+                review_object = repository->id;
+            }
+            const auto approved = approved_review(store,
+                                                  acting_identity,
+                                                  authorization_cache,
+                                                  review_object,
+                                                  records.reviews,
+                                                  update.new_head);
+            if (!approved) {
+                return std::unexpected(SyncStoreError{approved.error().code,
+                                                      approved.error().message,
+                                                      update.name,
+                                                      "required_review"});
+            }
+            if (!*approved) {
+                return std::unexpected(SyncStoreError{"conflict",
+                                                      "branch protection rejects " + update.name +
+                                                          ": an approved review is required",
+                                                      update.name,
+                                                      "required_review"});
+            }
         }
         if (rule.value.value("required_verification", false) &&
             !verified_release(records.releases, update.new_head)) {
@@ -1011,7 +1126,9 @@ void register_forge_capabilities(Registry& registry) {
         .name = "update_review",
         .title = "Update change review",
         .description = "Approve a change review, ask for changes, or close it, which decides "
-                       "whether the change may land.",
+                       "whether the change may land. Approving needs review on the repository "
+                       "and is refused to the person who opened the review; Lake records the "
+                       "approver, and a protected branch never counts the pusher's own approval.",
         .input_schema = repository_input(
             {{"review_id", {{"type", "string"}}},
              {"state",
@@ -1023,7 +1140,7 @@ void register_forge_capabilities(Registry& registry) {
         .action = "write",
         .resolve_object = repository_object,
         .async_handler = [](const json& input, ApiContext& context) {
-            return update_kind("review", "review_id", input, context);
+            return update_review(input, context);
         }});
     registry.add(
         Capability{.name = "create_review_comment",
