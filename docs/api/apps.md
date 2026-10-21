@@ -75,10 +75,10 @@ credential check refuses it, and the OAuth callback never gives an application u
 identity.
 
 **Verify.** `ApplicationPoolSessions.MemoryStore` and `ApplicationPoolSessions.PostgresStore` give
-an application-pool user the TAAP identity of a Lake account that administers a space, and check
+an application-pool user the TAAP identity of a Lake account that administers an account, and check
 over HTTP that its session, as a bearer, as the `lake_session` cookie and through `/mcp`, reads
-nothing of that space, while its own `list_sessions` still answers and the Lake account's own
-token still reads the space.
+nothing of that account, while its own `list_sessions` still answers and the Lake account's own
+token still reads it.
 
 **Change.** A new capability for application users sets `serves_application_pools` only when it
 acts on `acting_user_id` and `pool_id` alone, never through a grant or `acting_identity`.
