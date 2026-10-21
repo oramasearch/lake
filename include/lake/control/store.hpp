@@ -1678,6 +1678,11 @@ public:
     virtual Result<std::vector<PolicyObject>> list_policy_objects(const std::string& parent_id,
                                                                   const std::string& object_type,
                                                                   int limit) = 0;
+    // Puts a `path` object under another parent, for a drive folder that moved (lake#929): its
+    // inherited access is then its new place's. Refuses any other object type, a parent the type
+    // may not have, and a parent inside the object's own subtree.
+    virtual Result<PolicyObject> set_policy_object_parent(const std::string& id,
+                                                          const std::string& parent_id) = 0;
     virtual Result<std::vector<ObjectPathEntry>>
     policy_paths(const std::vector<std::string>& requested_object_ids) = 0;
 

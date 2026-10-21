@@ -653,6 +653,161 @@ TEST_F(DriveScenario, UserSyncsSharesAndSeesHistoryEndToEnd) {
     EXPECT_EQ(history_api.at("value").at("items").at(0).at("path"), "shared-project/notes.txt");
 }
 
+// lake#929: a folder moved under a folder its old folder's readers cannot read leaves them behind.
+// Its own grants move with it, and a stored parent that is not the folder above it is not followed.
+class MovedFolderScenario : public DriveScenario {
+protected:
+    void SetUp() override {
+        DriveScenario::SetUp();
+        if (IsSkipped() || HasFatalFailure()) {
+            return;
+        }
+        fixture_ = provision("move-owner");
+        ASSERT_FALSE(fixture_.owner.secret.empty());
+        bob_ = sign_up("bob");
+        carol_ = sign_up("carol");
+        ASSERT_FALSE(bob_.secret.empty());
+        ASSERT_FALSE(carol_.secret.empty());
+        const std::filesystem::path folder = root_.path() / "move-drive";
+        write_text(folder / "Projects" / "overview.txt", "projects\n");
+        write_text(folder / "Projects" / "Alpha" / "plan.txt", "alpha plan\n");
+        write_text(folder / "Confidential" / "budget.txt", "confidential\n");
+        auto client = liquid::runtime::block_on(
+            liquid::drive_client::open(folder,
+                                       repository_url(fixture_.repository),
+                                       {.bearer_token = fixture_.owner.secret, .durable = false}));
+        ASSERT_TRUE(client) << client.error().message;
+        const auto synced = liquid::runtime::block_on(client->sync());
+        ASSERT_TRUE(synced) << synced.error().message;
+    }
+
+    json call(const SignedUpUser& user, std::string_view name, const json& input) {
+        return response_json(http_request(
+            server_->port(), "POST", "/v1/" + std::string(name), input.dump(), bearer(user)));
+    }
+
+    json share(std::string_view path, const SignedUpUser& recipient) {
+        return call(fixture_.owner,
+                    "share_drive_folder",
+                    {{"repository_id", fixture_.repository.id},
+                     {"ref", "main"},
+                     {"path", path},
+                     {"principal_taap_id", recipient.taap_id},
+                     {"role", "read"}});
+    }
+
+    json read(const SignedUpUser& user, std::string_view name, std::string_view path) {
+        return response_json(http_request(
+            server_->port(),
+            "GET",
+            std::format(
+                "/v1/{}?repository_id={}&ref=main&path={}", name, fixture_.repository.id, path),
+            {},
+            bearer(user)));
+    }
+
+    json browse(const SignedUpUser& user, std::string_view path) {
+        return read(user, "drive_browse", path);
+    }
+
+    json download(const SignedUpUser& user, std::string_view path) {
+        return read(user, "download_drive_file", path);
+    }
+
+    static std::string error_code(const json& result) {
+        return result.contains("error") ? result["error"].value("code", "") : "";
+    }
+
+    ProvisionedRepository fixture_;
+    SignedUpUser bob_;
+    SignedUpUser carol_;
+};
+
+TEST_F(MovedFolderScenario, AMovedFolderTakesItsAccessFromWhereItNowIs) {
+    ASSERT_TRUE(share("Projects", bob_).value("ok", false));
+    ASSERT_TRUE(share("Projects/Alpha", carol_).value("ok", false));
+    ASSERT_TRUE(browse(bob_, "Projects/Alpha").value("ok", false))
+        << "a reader of Projects reads the folders in it";
+
+    const json moved = call(fixture_.owner,
+                            "move_drive_path",
+                            {{"repository_id", fixture_.repository.id},
+                             {"ref", "main"},
+                             {"path", "Projects/Alpha"},
+                             {"destination", "Confidential/Alpha"}});
+    ASSERT_TRUE(moved.value("ok", false)) << moved.dump();
+
+    EXPECT_EQ(error_code(browse(bob_, "Confidential")), "unauthorized");
+    EXPECT_EQ(error_code(browse(bob_, "Confidential/Alpha")), "unauthorized");
+    EXPECT_EQ(error_code(download(bob_, "Confidential/Alpha/plan.txt")), "unauthorized");
+    const json projects = browse(bob_, "Projects");
+    ASSERT_TRUE(projects.value("ok", false)) << projects.dump();
+    for (const json& item : projects["value"]["items"]) {
+        EXPECT_NE(item["path"], "Projects/Alpha");
+    }
+
+    const json carols = browse(carol_, "Confidential/Alpha");
+    ASSERT_TRUE(carols.value("ok", false)) << "a folder's own grants move with it: " << carols;
+    ASSERT_EQ(carols["value"]["items"].size(), 1U);
+    EXPECT_EQ(carols["value"]["items"][0]["path"], "Confidential/Alpha/plan.txt");
+    EXPECT_TRUE(download(carol_, "Confidential/Alpha/plan.txt").value("ok", false));
+    EXPECT_EQ(error_code(browse(carol_, "Confidential")), "unauthorized");
+
+    // Moved back, it is Projects' again.
+    const json back = call(fixture_.owner,
+                           "move_drive_path",
+                           {{"repository_id", fixture_.repository.id},
+                            {"ref", "main"},
+                            {"path", "Confidential/Alpha"},
+                            {"destination", "Projects/Alpha"}});
+    ASSERT_TRUE(back.value("ok", false)) << back.dump();
+    EXPECT_TRUE(browse(bob_, "Projects/Alpha").value("ok", false));
+    EXPECT_TRUE(browse(carol_, "Projects/Alpha").value("ok", false));
+}
+
+TEST_F(MovedFolderScenario, AStoredParentThatIsNotTheFolderAboveIsNotFollowed) {
+    const json shared = share("Projects", bob_);
+    ASSERT_TRUE(shared.value("ok", false)) << shared.dump();
+    const std::string projects_object = shared["value"]["object"]["id"];
+    // Alpha has no object of its own when it moves. One made since under Projects' object, as a
+    // move before lake#929 left one and as `create_object` can, names a parent that is not the
+    // folder above it.
+    const json moved = call(fixture_.owner,
+                            "move_drive_path",
+                            {{"repository_id", fixture_.repository.id},
+                             {"ref", "main"},
+                             {"path", "Projects/Alpha"},
+                             {"destination", "Confidential/Alpha"}});
+    ASSERT_TRUE(moved.value("ok", false)) << moved.dump();
+    const json confidential = browse(fixture_.owner, "Confidential");
+    ASSERT_TRUE(confidential.value("ok", false)) << confidential.dump();
+    std::string alpha_node;
+    for (const json& item : confidential["value"]["items"]) {
+        if (item["path"] == "Confidential/Alpha") {
+            alpha_node = item["node_id"];
+        }
+    }
+    ASSERT_FALSE(alpha_node.empty());
+    const auto stale = store_->create_policy_object({"path",
+                                                     fixture_.repository.id + ":" + alpha_node,
+                                                     projects_object,
+                                                     fixture_.owner.taap_id,
+                                                     "stale-parent-proof",
+                                                     true});
+    ASSERT_TRUE(stale) << stale.error().message;
+
+    EXPECT_EQ(error_code(browse(bob_, "Confidential/Alpha")), "unauthorized");
+    EXPECT_EQ(error_code(download(bob_, "Confidential/Alpha/plan.txt")), "unauthorized");
+
+    // Sharing the folder puts its object back under the folder above it.
+    ASSERT_TRUE(share("Confidential/Alpha", carol_).value("ok", false));
+    const auto relinked = store_->get_policy_object(stale->id);
+    ASSERT_TRUE(relinked) << relinked.error().message;
+    EXPECT_NE(relinked->parent_id, projects_object);
+    EXPECT_TRUE(browse(carol_, "Confidential/Alpha").value("ok", false));
+    EXPECT_EQ(error_code(browse(bob_, "Confidential/Alpha")), "unauthorized");
+}
+
 // lake#123: an ordinary overwrite through the Postgres-backed upload route keeps the previous
 // version as a normal, comparable and restorable prior version, on the API and the page.
 TEST_F(DriveScenario, ReplacingAnUploadedFileKeepsThePreviousVersionRestorable) {

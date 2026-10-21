@@ -5231,6 +5231,20 @@ void expect_policy_objects_stay_in_their_account(std::shared_ptr<lake::control::
     EXPECT_EQ(mount.error().code, "conflict");
     EXPECT_FALSE(store->get_secret_mount_route(mount_id));
     EXPECT_EQ(store->find_policy_object("secret_mount", mount_id).error().code, "not_found");
+
+    // Moving the owner's folder carries only the folder's own object (lake#929); the planted
+    // object holding its id stays under the intruder's repository and is never moved into the
+    // owner's, where it would then count as the folder's (lake#913).
+    const ApiResult moved = call_as(owner.taap,
+                                    "move_drive_path",
+                                    {{"repository_id", owner.repository},
+                                     {"ref", "main"},
+                                     {"path", "shared"},
+                                     {"destination", "moved-shared"}});
+    EXPECT_TRUE(moved.ok) << moved.error.message;
+    const auto planted_folder = store->find_policy_object("path", folder_id);
+    ASSERT_TRUE(planted_folder) << planted_folder.error().message;
+    EXPECT_EQ(planted_folder->parent_id, intruder.repository_object);
 }
 
 TEST(PolicyObjectOwnership, MemoryStore) {

@@ -28,6 +28,38 @@ folder object, so repository policy remains the default. Move authorization chec
 source and destination location. Every mutation calls `commit_repository_files`; the HTTP forms
 do not write the store directly.
 
+## A Moved Folder's Access (lake#929)
+
+A folder's access is the access of the folders it is in now, plus its own grants. Its policy object
+is found by its stable node id, so its own grants follow it wherever it goes; its stored parent is
+where it was when it was shared, so lake does not trust that parent on its own:
+
+- **Every read and write checks the stored parents against the path.** The path's folders at the
+  requested ref are read top down, and an object that inherits counts only when its parent is the
+  object of the folder above it (the repository's for a top folder) and that object counted too. An
+  object that does not inherit stands alone. Authorization uses the nearest object that counts. A
+  parent left from where a folder used to be (a move through a pushed change or Data → Drives, or
+  one made before lake#929), or one the folder never had, therefore costs the grants below it and
+  never lends its own. `drive_browse` decides a child with its own object the same way: that object
+  decides only when its parent is the folder's, otherwise the folder's object does.
+- **`move_drive_path` moves the object.** When the source has its own object, every folder of the
+  destination's parent gets one under the folder above it, and the source's object is put under the
+  destination parent's (`Store::set_policy_object_parent`) before the change is written. If the
+  change fails the object goes back. The source's direct grants stay; grants on its former folders
+  stop applying and the destination's apply.
+- **Sharing puts objects back.** `share_drive_folder` and `create_drive_share_link` give every
+  folder on the path an object under the folder above it, putting back any whose stored parent is
+  another, so a folder whose access fell back after an outside move is shared as it is now.
+
+A policy object holds one parent for every ref, so a folder that sits in different places on two
+refs is decided by the stored parent only where it matches; elsewhere its access falls back to the
+nearest folder above whose object does match. `set_policy_object_parent` moves only `path` objects,
+never under themselves (PostgreSQL takes one advisory lock for every such change, so two moves
+cannot close a cycle).
+
+To verify: `MovedFolderScenario.*` in `tests/scenarios/drive_test.cpp` (needs `LAKE_TEST_DB_URI`) and
+`Policy.APathObjectMovesUnderAnotherParent`.
+
 ## Search Follows Every Drive Write (lake#584)
 
 A drive write is a change like a push's, so search follows it the same way:

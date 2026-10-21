@@ -25,6 +25,10 @@ the shared test fixture loads the schema and removes only its own database after
   exercise runs on the memory store, the account store and a switched workspace store.
 - `DriveScenario.SyncedFolderPullsAsRepositoryAndBuildsProject` synchronizes a CMake project,
   pulls and materializes the same repository with Liquid's public client, and builds and runs it.
+- `MovedFolderScenario.*` (lake#929) shares `Projects` with one person and `Projects/Alpha` with
+  another, moves `Alpha` under `Confidential`, and checks that the first can no longer browse or
+  download it while the second still can; and that an object whose stored parent is not the folder
+  above it is not followed, until sharing the folder puts it back.
 
 `SharedLinkScenario.*` in `drive_test.cpp` signs up a regular owner and syncs a private repository.
 It opens the share without a session, traverses a child folder, previews supported text, checks

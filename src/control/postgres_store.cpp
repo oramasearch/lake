@@ -3049,6 +3049,53 @@ public:
         });
     }
 
+    Result<PolicyObject> set_policy_object_parent(const std::string& id,
+                                                  const std::string& parent_id) override {
+        return with_tx<PolicyObject>([&](pqxx::work& tx) -> Result<PolicyObject> {
+            // One parent change at a time, so two concurrent moves cannot close a cycle that
+            // policy_paths would then walk forever.
+            tx.exec("SELECT pg_advisory_xact_lock(hashtext('lake_policy_object_parents'))");
+            const pqxx::result objects = tx.exec_params(
+                "SELECT object_type FROM objects WHERE id = $1::uuid FOR UPDATE", id);
+            if (objects.empty()) {
+                return std::unexpected(StoreError{"not_found", "no policy object " + id});
+            }
+            if (objects[0][0].as<std::string>() != "path") {
+                return std::unexpected(
+                    StoreError{"invalid_input", "only a path policy object changes its parent"});
+            }
+            const pqxx::result parents =
+                tx.exec_params("SELECT object_type FROM objects WHERE id = $1::uuid", parent_id);
+            if (parents.empty()) {
+                return std::unexpected(
+                    StoreError{"invalid_input", "parent_id does not reference a policy object"});
+            }
+            if (!object_parent_allowed("path", parents[0][0].as<std::string>())) {
+                return std::unexpected(
+                    StoreError{"invalid_input", "object type is not valid under this parent"});
+            }
+            const pqxx::result cycle =
+                tx.exec_params("WITH RECURSIVE up(id, parent_id) AS ("
+                               "SELECT id, parent_id FROM objects WHERE id = $2::uuid "
+                               "UNION SELECT objects.id, objects.parent_id FROM objects "
+                               "JOIN up ON objects.id = up.parent_id) "
+                               "SELECT 1 FROM up WHERE id = $1::uuid",
+                               id,
+                               parent_id);
+            if (!cycle.empty()) {
+                return std::unexpected(
+                    StoreError{"invalid_input", "a policy object cannot be put under itself"});
+            }
+            const pqxx::result rows = tx.exec_params(
+                std::string("UPDATE objects SET parent_id = $2::uuid WHERE id = $1::uuid "
+                            "RETURNING ") +
+                    object_columns,
+                id,
+                parent_id);
+            return object_of(rows[0]);
+        });
+    }
+
     Result<PolicyObject> find_policy_object(const std::string& object_type,
                                             const std::string& external_id) override {
         return with_tx<PolicyObject>([&](pqxx::work& tx) -> Result<PolicyObject> {
