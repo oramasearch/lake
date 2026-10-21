@@ -25,6 +25,15 @@ reachable content-addressed object. liquid verifies every object digest and sign
 during import. The archive records #166's result, attestation, trace, and SBOM enumeration as
 artifact evidence alongside the restored history.
 
+`payload.history` (`liquid_portable_history/1`) holds `items`, the signed drips, changes,
+directories and references in liquid's sync shape, then `roots` and `objects`. An item's
+`reference` is the change it names as a liquid digest (`blake3:<hex>`), or `""` when it names none,
+as every drip, change and directory item does (lake#776). Until lake#776 an item that named no
+change was written as `unknown:` and 64 zeros, the text liquid gives its empty value, which no
+digest parser accepts, so `import_repository` refused every archive `export_repository` had made
+with `invalid_input` "invalid sync item reference". Import reads both spellings as the empty
+value, so an archive made before the fix imports too.
+
 When `include_git` is true, `git` contains the loose-object Git repository emitted by liquid's
 `export_git`, encoded as path/content pairs, its selected ref, and any Git fidelity degradations.
 An import into lake uses the liquid portable history as authoritative; the Git projection is for a
@@ -36,10 +45,28 @@ identifiers. Direct grants are recreated on the destination repository policy ob
 records themselves are not copied, preventing an export from recursively containing prior
 exports.
 
+## What an archive never carries
+
+Export needs only read on the repository, so the archive carries nothing a reader cannot read
+otherwise (LSR-024, lake#933):
+
+- **No webhook signing secret.** A `webhook` record keeps its `url` and `events` and loses
+  `secret`, as `list_webhooks` answers it. Whoever held the secret could sign deliveries the
+  receiver accepts as lake's.
+- **Grants only for an administrator.** `list_grants` needs `admin`, so `grants` is the
+  repository's direct grants only when the caller has admin on the repository (the operator
+  credential included); for any other caller it is an empty array.
+
+Import gives a webhook that arrives without a secret a new random one that nobody holds, so its
+deliveries are signed but never verify at the old receiver. To deliver again, create the webhook
+on the new repository with the receiver's secret. An archive made before this change still carries
+its secrets and keeps them on import.
+
 ## API
 
 `POST /v1/export_repository` accepts `repository_id` and optional `include_git`. It requires
-repository read access and returns `{archive, record}`. The durable `export` record retains the
+repository read access and returns `{archive, record}`, with webhook secrets left out and grants
+only for a repository administrator (see above). The durable `export` record retains the
 manifest and whether Git was requested; the returned archive is the download payload.
 
 `POST /v1/import_repository` accepts `customer_id`, `workspace_id`, destination `name`, and
@@ -47,6 +74,11 @@ manifest and whether Git was requested; the returned archive is the download pay
 `workspace_id`, a live workspace of that customer's account (lake#315); the archive's own
 `workspace_id` records where it came from and is never reused. A missing or unknown workspace is
 `invalid_input` at `/workspace_id`. The source description and visibility are retained. A destination name collision or a failed liquid transfer leaves the import refused.
+
+A review is imported without its `approval` (LSR-077): an approval is lake's record of who approved
+in the repository it was given in, and a signed archive proves only who exported it, so an
+imported review never satisfies a protected branch's `required_review`. Its state is kept as
+history. See [forge](forge.md#who-may-approve-lsr-077).
 
 ## Verify
 
@@ -58,7 +90,16 @@ ctest --test-dir build --output-on-failure
 The API fixture exports a repository with an issue, review, release, and direct grant into a
 second control plane, verifies the manifest signature, and compares the portable history,
 artifacts, forge values, and grants. It also changes a payload member and proves import rejects
-the digest mismatch.
+the digest mismatch. That fixture uses a fake repository store, so it never wrote a real history
+item; `WorkspaceStoreExport.AnArchiveExportJustMadeImportsIntoTheSpaceStoreAndAWorkspaceStore`
+(`tests/test_workspace_store.cpp`, lake#776) runs both capabilities over lake's real liquid store.
+It pushes a history with liquid, writes a binary file, an empty file and an edit, deletes the empty
+file with `commit_repository_files`, exports, then imports the archive into the account store and
+into a switched workspace store, and compares the tree and the edited file.
+`Export.AnArchiveCarriesNoWebhookSecretAndGrantsOnlyForAnAdministrator`
+exports a repository with a webhook as a reader and as the operator, finds the secret nowhere in
+either archive and grants only in the operator's, then imports the reader's archive and checks the
+webhook's next delivery is signed neither with the source secret nor with an empty key.
 
 ## Change
 

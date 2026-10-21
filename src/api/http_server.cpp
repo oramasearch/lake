@@ -107,6 +107,7 @@
 #include "lake/api/oauth.hpp"
 #include "lake/api/registry.hpp"
 #include "lake/api/rest.hpp"
+#include "lake/api/saml.hpp"
 #include "lake/api/store_owner.hpp"
 #include "lake/api/sync_store.hpp"
 #include "lake/api/transcription.hpp"
@@ -122,6 +123,7 @@
 #include "lake/control/pki.hpp"
 #include "lake/control/platform.hpp"
 #include "lake/control/policy.hpp"
+#include "lake/control/saml.hpp"
 #include "lake/control/store.hpp"
 #include "lake/control/workspace_store.hpp"
 #include "lake/control/zetta_workspace.hpp"
@@ -266,6 +268,82 @@ bool peer_url_is_safe(std::string_view value) {
     return !host.empty() && (secure || loopback);
 }
 
+// lake#915: a replication pull reaches only public addresses unless the operator allows private
+// ones, and the whole pull is bounded in time. liquid's sync client resolves the name again when it
+// connects; the peer origin is one the operator configured (LAKE_REPLICATION_PEERS), so this check
+// is not racing a name a caller controls.
+liquid::runtime::task<void> replication_peer_is_public(std::string host, std::string port) {
+    const auto executor = co_await boost::capy::this_coro::executor;
+    boost::corosio::resolver resolver{executor.context()};
+    auto [resolve_error, results] = co_await resolver.resolve(host, port);
+    if (resolve_error) {
+        co_return std::unexpected(
+            liquid::error{liquid::errc::unavailable,
+                          "could not resolve replication peer: " + resolve_error.message(),
+                          host});
+    }
+    bool any = false;
+    for (const auto& entry : results) {
+        const auto endpoint = entry.get_endpoint();
+        std::vector<std::uint8_t> bytes;
+        if (endpoint.is_v4()) {
+            const auto raw = endpoint.v4_address().to_bytes();
+            bytes.assign(raw.begin(), raw.end());
+        } else {
+            const auto raw = endpoint.v6_address().to_bytes();
+            bytes.assign(raw.begin(), raw.end());
+        }
+        if (!mcp_public_address(bytes)) {
+            co_return std::unexpected(
+                liquid::error{liquid::errc::invalid_argument,
+                              "the replication peer's address is not a public address",
+                              host});
+        }
+        any = true;
+    }
+    if (!any) {
+        co_return std::unexpected(liquid::error{
+            liquid::errc::unavailable, "the replication peer resolved no addresses", host});
+    }
+    co_return liquid::result<void>{};
+}
+
+liquid::runtime::task<liquid::sync_report> checked_replication_pull(liquid::sync_endpoint& endpoint,
+                                                                    liquid::repository& destination,
+                                                                    std::string host,
+                                                                    std::string port,
+                                                                    bool public_only) {
+    if (public_only) {
+        auto checked = co_await replication_peer_is_public(std::move(host), std::move(port));
+        if (!checked) {
+            co_return std::unexpected(checked.error());
+        }
+    }
+    co_return co_await endpoint.pull(destination);
+}
+
+liquid::runtime::task<liquid::sync_report>
+bounded_replication_pull(liquid::sync_endpoint& endpoint,
+                         liquid::repository& destination,
+                         std::string host,
+                         std::string port,
+                         bool public_only,
+                         std::chrono::milliseconds limit) {
+    auto [deadline_error, pulled] = co_await liquid::runtime::timeout(
+        liquid::runtime::as_io(checked_replication_pull(
+            endpoint, destination, std::move(host), std::move(port), public_only)),
+        limit);
+    if (deadline_error) {
+        co_return std::unexpected(liquid::error{
+            liquid::errc::unavailable,
+            "replication pull did not finish within " +
+                std::to_string(std::chrono::duration_cast<std::chrono::seconds>(limit).count()) +
+                " s; a retry resumes from the saved cursor",
+            "replicate_repository"});
+    }
+    co_return std::move(pulled);
+}
+
 std::string base64_encode(std::span<const std::byte> input) {
     if (input.empty()) {
         return {};
@@ -331,6 +409,23 @@ SyncStoreResult<liquid::node_id> parse_node_id(std::string_view input) {
     return output;
 }
 
+// A drip, change or directory item names no change: its `reference` is liquid's empty value, no
+// algorithm and 32 zero bytes. The archive writes that as "" (lake#776). Before, it was written
+// with liquid::to_string as "unknown:" and 64 zeros, which parse_digest refuses, so every archive
+// export_repository made was refused by import_repository; both spellings now read back as the
+// empty value.
+constexpr std::string_view empty_reference_before_776 =
+    "unknown:0000000000000000000000000000000000000000000000000000000000000000";
+
+bool is_empty_reference(const liquid::change_id& reference) {
+    return reference.value.alg == liquid::algorithm{} &&
+           std::ranges::all_of(reference.value.bytes, [](std::byte b) { return b == std::byte{}; });
+}
+
+std::string sync_item_reference_text(const liquid::change_id& reference) {
+    return is_empty_reference(reference) ? std::string() : liquid::to_string(reference.value);
+}
+
 nlohmann::json sync_item_json(const liquid::sync_item& item) {
     return {{"kind", static_cast<unsigned>(item.kind)},
             {"author",
@@ -343,7 +438,7 @@ nlohmann::json sync_item_json(const liquid::sync_item& item) {
             {"directory", node_id_text(item.directory)},
             {"root", item.root},
             {"name", item.name},
-            {"reference", liquid::to_string(item.reference.value)},
+            {"reference", sync_item_reference_text(item.reference)},
             {"body", base64_encode(item.body)},
             {"signature", base64_encode(item.signature)}};
 }
@@ -386,7 +481,7 @@ SyncStoreResult<liquid::sync_item> sync_item_from_json(const nlohmann::json& val
     output.root = value.value("root", false);
     output.name = value.value("name", "");
     const std::string reference = value.value("reference", "");
-    if (!reference.empty()) {
+    if (!reference.empty() && reference != empty_reference_before_776) {
         const auto parsed = liquid::parse_digest(reference);
         if (!parsed) {
             return std::unexpected(
@@ -641,6 +736,43 @@ boost::http::route_task send_bytes(boost::http::route_params& route,
             co_return http::route_error(send_error);
         }
     }
+}
+
+// Registry bytes are what a tenant pushed, answered on the console's origin (lake#930): a browser
+// never sniffs them into another type, and a page opened there runs nothing and loads nothing.
+void isolate_registry_response(boost::http::route_params& route) {
+    route.res.set("X-Content-Type-Options", "nosniff");
+    route.res.set("Content-Security-Policy", "sandbox; default-src 'none'");
+}
+
+constexpr std::string_view oci_image_manifest_type = "application/vnd.oci.image.manifest.v1+json";
+
+// The manifest media types the registry stores and serves (lake#930): OCI and Docker schema 2
+// image manifests and indexes. `content_type` is compared without case, parameters or surrounding
+// whitespace, and the answer is lake's own spelling, so a tenant never chooses the type a browser
+// reads; anything else is nullopt.
+std::optional<std::string_view> oci_manifest_media_type(std::string_view content_type) {
+    static constexpr auto types = std::to_array<std::string_view>(
+        {oci_image_manifest_type,
+         "application/vnd.oci.image.index.v1+json",
+         "application/vnd.docker.distribution.manifest.v2+json",
+         "application/vnd.docker.distribution.manifest.list.v2+json"});
+    std::string_view essence = content_type.substr(0, content_type.find(';'));
+    const auto blank = [](char c) { return c == ' ' || c == '\t'; };
+    while (!essence.empty() && blank(essence.front())) {
+        essence.remove_prefix(1);
+    }
+    while (!essence.empty() && blank(essence.back())) {
+        essence.remove_suffix(1);
+    }
+    for (const std::string_view type : types) {
+        if (std::ranges::equal(essence, type, [](unsigned char a, unsigned char b) {
+                return std::tolower(a) == b;
+            })) {
+            return type;
+        }
+    }
+    return std::nullopt;
 }
 
 boost::capy::task<std::expected<std::vector<unsigned char>, std::error_code>>
@@ -933,6 +1065,20 @@ std::string form_field(std::string_view body, std::string_view name) {
         pos = amp + 1;
     }
     return {};
+}
+
+// identity_proof from a hosted form's second step (lake#931); null when the form carries none.
+nlohmann::json identity_proof_form(std::string_view body) {
+    const std::string signature = form_field(body, "identity_signature");
+    if (signature.empty()) {
+        return nullptr;
+    }
+    const std::string expires = form_field(body, "identity_expires_at");
+    std::int64_t expires_at = 0;
+    std::from_chars(expires.data(), expires.data() + expires.size(), expires_at);
+    return {{"nonce", form_field(body, "identity_nonce")},
+            {"expires_at", expires_at},
+            {"signature", signature}};
 }
 
 struct MultipartFile {
@@ -2328,6 +2474,17 @@ nlohmann::json to_nlohmann(const boost::json::value& value) {
     return nlohmann::json::parse(boost::json::serialize(value), nullptr, false);
 };
 
+// A request body as JSON, or a discarded value when it is not JSON: the parser throws on a body
+// that ends inside a value (`{"name":"x`), which must be the caller's 400, not lake's 500
+// (lake#18).
+nlohmann::json body_json(JsonBodySink& sink) {
+    try {
+        return to_nlohmann(sink.release());
+    } catch (const std::exception&) {
+        return nlohmann::json(nlohmann::json::value_t::discarded);
+    }
+}
+
 // RFC 6750's challenge for a refused bearer, naming why and where a new key is made (lake#450).
 std::string bearer_challenge(const ApiResult& result) {
     std::string challenge = "Bearer realm=\"lake\"";
@@ -2422,6 +2579,13 @@ public:
         // Each request to a workspace Zetta's object routes, for the process metrics (lake#527).
         control::ObjectRequestObserver observer;
     };
+
+    // lake#915: whether a replication pull may reach private addresses, and how long one may take.
+    // Set once by the server before it serves.
+    void configure_replication(bool allow_private_addresses, std::chrono::milliseconds timeout) {
+        replication_allow_private_ = allow_private_addresses;
+        replication_timeout_ = timeout;
+    }
 
     void configure_workspace_stores(WorkspaceStoreConfig config) {
         std::lock_guard maps(mutex_);
@@ -2807,9 +2971,15 @@ public:
                    const std::string& source_instance,
                    const std::string& source_url,
                    const std::string& bearer) override {
-                if (!peer_url_is_safe(source_url)) {
+        if (!peer_url_is_safe(source_url)) {
             return std::unexpected(SyncStoreError{
                 "invalid_input", "replication peer URL must use HTTPS or loopback HTTP"});
+        }
+        // lake#915: only HTTPS to public addresses unless the operator allows private ones.
+        const auto target = parse_mcp_url(source_url, replication_allow_private_);
+        if (!target || (!replication_allow_private_ && target->scheme != "https")) {
+            return std::unexpected(
+                SyncStoreError{"invalid_input", "replication peer URL must use HTTPS"});
         }
         if (!path_component_is_safe(source_instance)) {
             return std::unexpected(
@@ -2843,7 +3013,13 @@ public:
             }
         }
         liquid::sync_endpoint endpoint(source_url, std::move(options));
-        const auto pulled = liquid::runtime::block_on(endpoint.pull(*(*state)->subject));
+        const auto pulled =
+            liquid::runtime::block_on(bounded_replication_pull(endpoint,
+                                                               *(*state)->subject,
+                                                               target->host,
+                                                               target->port,
+                                                               !replication_allow_private_,
+                                                               replication_timeout_));
         if (!pulled) {
             return std::unexpected(error_of(pulled.error()));
         }
@@ -5471,6 +5647,8 @@ private:
 
     std::string root_;
     std::chrono::milliseconds owner_wait_;
+    bool replication_allow_private_ = false;
+    std::chrono::milliseconds replication_timeout_{std::chrono::minutes(10)};
     // Guards the maps below and nothing else (see Lane).
     std::mutex mutex_;
     std::map<std::string, std::shared_ptr<Lane>> lanes_;
@@ -6728,7 +6906,14 @@ struct OutboundRequest {
     // Plain http to a cluster Service (`<name>.<namespace>.svc.cluster.local`): a served
     // methodology's model (lake#690), whose Service only Lake's pods can reach.
     bool cluster_http = false;
+    // Only HTTPS to public addresses (lake#876): every address the host resolves to is checked at
+    // connect time with mcp_public_address, as MCP connections are, so a webhook a tenant points at
+    // a private, loopback or link-local address never reaches Lake's own network.
+    bool public_only = false;
 };
+
+// An identity provider's discovery document, token endpoint and keys (lake#837) answer within this.
+constexpr std::chrono::seconds oidc_timeout{10};
 
 struct OutboundResponse {
     int status = 0;
@@ -6985,8 +7170,18 @@ private:
             finish(pending);
             co_return;
         }
+        if (pending->request.public_only && !target.secure) {
+            pending->response.error = "outbound URL must use HTTPS";
+            finish(pending);
+            co_return;
+        }
+        // Every step is bounded by the request's timeout (lake#772): the name lookup, the
+        // connection and the TLS handshake, as well as the exchange. An endpoint that accepts a
+        // connection and never answers cannot hold the request.
+        const auto deadline = pending->request.timeout;
         boost::corosio::resolver resolver(io_context_);
-        auto [resolve_error, results] = co_await resolver.resolve(target.host, target.port);
+        auto [resolve_error, results] =
+            co_await boost::capy::timeout(resolver.resolve(target.host, target.port), deadline);
         if (resolve_error) {
             pending->response.error = "could not resolve outbound host: " + resolve_error.message();
             finish(pending);
@@ -6997,7 +7192,22 @@ private:
         bool connected = false;
         std::string connect_error = "outbound host resolved no addresses";
         for (const auto& entry : results) {
-            auto [error] = co_await socket.connect(entry.get_endpoint());
+            const auto endpoint = entry.get_endpoint();
+            if (pending->request.public_only) {
+                std::vector<std::uint8_t> bytes;
+                if (endpoint.is_v4()) {
+                    const auto raw = endpoint.v4_address().to_bytes();
+                    bytes.assign(raw.begin(), raw.end());
+                } else {
+                    const auto raw = endpoint.v6_address().to_bytes();
+                    bytes.assign(raw.begin(), raw.end());
+                }
+                if (!mcp_public_address(bytes)) {
+                    connect_error = "the outbound host's address is not a public address";
+                    continue;
+                }
+            }
+            auto [error] = co_await boost::capy::timeout(socket.connect(endpoint), deadline);
             if (!error) {
                 connected = true;
                 break;
@@ -7020,7 +7230,8 @@ private:
                 co_return;
             }
             boost::corosio::openssl_stream secure(&socket, *context);
-            auto [handshake_error] = co_await secure.handshake(boost::corosio::tls_stream::client);
+            auto [handshake_error] = co_await boost::capy::timeout(
+                secure.handshake(boost::corosio::tls_stream::client), deadline);
             if (handshake_error) {
                 pending->response.error =
                     "outbound TLS handshake failed: " + handshake_error.message();
@@ -7619,6 +7830,8 @@ struct ApiServer::Impl {
     // MCP connections' transport (docs/api/mcp-connections.md#the-client): the injected one, else
     // the server's own, which refuses private addresses unless the options allow them.
     std::shared_ptr<McpHttp> mcp_http;
+    // OpenID Connect discovery (lake#837), over outbound_http.
+    std::shared_ptr<OidcDiscovery> oidc_discovery;
     // A customer's own buckets (lake#664): their transport, public addresses only, and the
     // browser over it.
     std::shared_ptr<McpHttp> store_transport;
@@ -8421,6 +8634,8 @@ struct ApiServer::Impl {
     explicit Impl(ServerOptions opts)
         : options(std::move(opts)), sync_store(options.store_root, options.store_owner_wait),
           artifacts(options.store_root, options.node_name) {
+        sync_store.configure_replication(options.replication_allow_private_addresses,
+                                         options.replication_timeout);
         configure_workspace_stores();
         lend_repositories_to_search();
         if (web_ui_stylesheet_url().empty()) {
@@ -8470,6 +8685,23 @@ struct ApiServer::Impl {
         }
         mcp_http = options.mcp_http ? options.mcp_http
                                     : make_mcp_http(options.mcp_allow_private_addresses);
+        // Discovery documents come over the outbound client, HTTPS to public addresses only unless
+        // LAKE_OIDC_ALLOW_PRIVATE_ADDRESSES is set (lake#837, lake#876), within 10 s.
+        oidc_discovery = std::make_shared<OidcDiscovery>(
+            [this](const std::string& url) {
+                OutboundRequest request{
+                    "GET",
+                    url,
+                    "",
+                    {{"Accept", "application/json"}, {"User-Agent", "lake-oauth/1"}},
+                    oidc_timeout};
+                request.body_limit = 256 * 1024;
+                request.public_only = !options.oidc_allow_private_addresses;
+                OutboundResponse response = outbound_http.request(request);
+                return OidcFetchResponse{
+                    response.status, std::move(response.body), std::move(response.error)};
+            },
+            options.oidc_allow_private_addresses);
         store_browser = options.store_browser;
         if (!store_browser) {
             // Its own transport, on its own io thread, so a slow bucket never holds up an MCP
@@ -8709,11 +8941,16 @@ struct ApiServer::Impl {
         if (!options.replication_token.empty()) {
             headers.emplace_back("Authorization", "Bearer " + options.replication_token);
         }
-        const OutboundResponse response =
-            outbound_http.request({"POST",
-                                   source_url + "/v1/export_transparency_replication_batch",
-                                   nlohmann::json{{"after_tree_size", after_tree_size}}.dump(),
-                                   std::move(headers)});
+        // lake#915: the capability has already refused a source that is not a configured peer;
+        // the request also reaches only HTTPS on public addresses, and waits a bounded time.
+        OutboundRequest request{"POST",
+                                source_url + "/v1/export_transparency_replication_batch",
+                                nlohmann::json{{"after_tree_size", after_tree_size}}.dump(),
+                                std::move(headers)};
+        request.timeout =
+            std::min<std::chrono::seconds>(options.replication_timeout, std::chrono::seconds(60));
+        request.public_only = !options.replication_allow_private_addresses;
+        const OutboundResponse response = outbound_http.request(std::move(request));
         if (!response.error.empty()) {
             return std::unexpected(ApiError{
                 "store_unavailable", "replication peer request failed: " + response.error, {}});
@@ -8997,6 +9234,13 @@ struct ApiServer::Impl {
         if (path.starts_with("/v1/oauth/") && path.ends_with("/callback")) {
             return "/v1/oauth/:provider/callback";
         }
+        if (path.starts_with("/v1/saml/")) {
+            for (const std::string_view leaf : {"/metadata", "/start", "/acs"}) {
+                if (path.ends_with(leaf)) {
+                    return "/v1/saml/:provider" + std::string(leaf);
+                }
+            }
+        }
         if (path.starts_with("/scim/v2/Users/")) {
             return "/scim/v2/Users/:id";
         }
@@ -9078,6 +9322,7 @@ struct ApiServer::Impl {
             return request_replication_batch(source_url, after_tree_size);
         };
         ctx.replication_token = options.replication_token;
+        ctx.replication_peers = options.replication_peers;
         ctx.node_name = options.node_name;
         ctx.identity_seed = options.identity_seed;
         ctx.instance_kek = options.instance_kek;
@@ -9097,6 +9342,7 @@ struct ApiServer::Impl {
         ctx.transcriber = transcriber;
         ctx.mcp_http = mcp_http;
         ctx.mcp_allow_private_addresses = options.mcp_allow_private_addresses;
+        ctx.oidc_discovery = oidc_discovery;
         ctx.store_browser = store_browser;
         ctx.model_provider = model_provider;
         ctx.payments = payments;
@@ -9119,8 +9365,13 @@ struct ApiServer::Impl {
                     outbound_headers.emplace_back(name, value.get<std::string>());
                 }
             }
-            const OutboundResponse response =
-                outbound_http.request({"POST", url, payload, std::move(outbound_headers)});
+            // A delivery waits at most 10 s in all (lake#772), and reaches only HTTPS on public
+            // addresses (lake#876). The capability calls this through run_blocking, never on the
+            // server's own thread.
+            OutboundRequest request{"POST", url, payload, std::move(outbound_headers)};
+            request.timeout = std::chrono::seconds(10);
+            request.public_only = !options.webhook_allow_private_addresses;
+            const OutboundResponse response = outbound_http.request(std::move(request));
             return WebhookDeliveryResult{response.status, response.error};
         };
         if (route.req.count(boost::http::field::user_agent) != 0) {
@@ -9151,7 +9402,15 @@ struct ApiServer::Impl {
             ctx.credential_kind = "agent_service";
             ctx.agent_service = agent;
         } else if (!bearer.empty() && options.store) {
-            if (auto principal = options.store->context_for(bearer)) {
+            auto principal = options.store->context_for(bearer);
+            if (principal && principal->pool_id != "lake") {
+                // An identity application's session (lake#912). Grants name a bare TAAP identity,
+                // and an application pool may hold a user whose identity is a Lake account's, so
+                // this session is no credential here: not for the API, MCP, the cookie routes,
+                // downloads or /metrics. The registry admits it only to the capabilities that act
+                // on the user's own sign-in in its pool (Capability::serves_application_pools).
+                ctx.application_session = *principal;
+            } else if (principal) {
                 ctx.authorized = true;
                 ctx.session_credential = true;
                 ctx.acting_user_id = principal->user_id;
@@ -9772,15 +10031,23 @@ struct ApiServer::Impl {
             (void)options.store->revoke_session(context.acting_user_id,
                                                 context.credential_session_id);
         }
-        if (!record_direct_event(context,
-                                 audit::EventDraft{
-                                     .kind = "session",
-                                     .object = "lake_session",
-                                     .action = "revoke",
-                                     .outcome = context.authorized ? "revoked" : "denied",
-                                     .method = context.authentication_method,
-                                     .device = context.device,
-                                 })) {
+        // An identity application's session signs out too, though it is no credential here
+        // (lake#912). It is named by its user id, never by a TAAP identity a Lake account may hold.
+        const auto& application = context.application_session;
+        if (application && options.store) {
+            (void)options.store->revoke_session(application->user_id, application->session_id);
+        }
+        if (!record_direct_event(
+                context,
+                audit::EventDraft{
+                    .kind = "session",
+                    .principal = application ? "user/" + application->user_id : std::string(),
+                    .object = "lake_session",
+                    .action = "revoke",
+                    .outcome = context.authorized || application ? "revoked" : "denied",
+                    .method = context.authentication_method,
+                    .device = context.device,
+                })) {
             return send_text(route,
                              boost::http::status::service_unavailable,
                              error_body("store_error", "could not record session revocation"),
@@ -9910,6 +10177,9 @@ struct ApiServer::Impl {
         if (capability == "sign_up_password") {
             input["display_name"] = form_field(body, "display_name");
             input["identity_document"] = form_field(body, "identity_document");
+            if (nlohmann::json proof = identity_proof_form(body); !proof.is_null()) {
+                input["identity_proof"] = std::move(proof);
+            }
         }
         if (capability == "verify_mfa") {
             input["code"] = form_field(body, "code");
@@ -9918,6 +10188,19 @@ struct ApiServer::Impl {
             unwrap(co_await registry.call_async(std::string(capability), input, context));
         if (!result.ok && result.error.code == "mfa_required") {
             co_return co_await redirect(route, "/apps/" + application->id + "/mfa");
+        }
+        if (!result.ok && result.error.code == "identity_proof_required") {
+            co_return co_await send_identity_proof_step(
+                route,
+                *application,
+                context,
+                "sign-up",
+                {.action = "/identity/sign-up",
+                 .fields = {{"email", input.value("email", "")},
+                            {"display_name", input.value("display_name", "")},
+                            {"device_name", input.value("device_name", "")},
+                            {"identity_document", input.value("identity_document", "")}},
+                 .password = true});
         }
         if (!result.ok) {
             const std::string page = capability == "sign_up_password"
@@ -9929,6 +10212,38 @@ struct ApiServer::Impl {
         const std::string destination = application_redirect_location(*application, result);
         co_return co_await redirect(
             route, destination, browser_session_cookie(route, result.value.value("secret", "")));
+    }
+
+    // A hosted sign-up or OAuth start whose identity document needs a proof of its key (lake#931):
+    // the page with begin_identity_proof's challenge, or `page` with the reason it could not issue
+    // one.
+    boost::http::route_task send_identity_proof_step(boost::http::route_params& route,
+                                                     const control::Application& application,
+                                                     ApiContext& context,
+                                                     std::string_view page,
+                                                     WebUiIdentityProof proof) {
+        std::string document;
+        for (const auto& [name, value] : proof.fields) {
+            if (name == "identity_document") {
+                document = value;
+            }
+        }
+        const ApiResult issued = unwrap(co_await registry.call_async(
+            "begin_identity_proof",
+            {{"pool_id", application.pool_id}, {"identity_document", document}},
+            context));
+        if (!issued.ok) {
+            co_return co_await send_application_identity_page(
+                route, application, page, issued.error.message);
+        }
+        proof.challenge = issued.value.value("challenge", "");
+        proof.nonce = issued.value.value("nonce", "");
+        proof.expires_at = issued.value.value("expires_at", std::int64_t{0});
+        co_return co_await send_text(route,
+                                     boost::http::status::ok,
+                                     web_ui_application_identity_proof(application, proof, {}),
+                                     "text/html; charset=utf-8",
+                                     "no-store");
     }
 
     boost::http::route_task serve_application_passkey(boost::http::route_params& route,
@@ -9994,13 +10309,32 @@ struct ApiServer::Impl {
         }
         ApiContext context = context_for(route);
         context.public_host = request_host(route);
-        const ApiResult result = unwrap(co_await registry.call_async(
-            "start_oauth",
-            {{"pool_id", application->pool_id},
-             {"provider", form_field(body, "provider")},
-             {"device_name", form_field(body, "device_name")},
-             {"identity_document", form_field(body, "identity_document")}},
-            context));
+        nlohmann::json input = {{"pool_id", application->pool_id},
+                                {"provider", form_field(body, "provider")},
+                                {"device_name", form_field(body, "device_name")},
+                                {"identity_document", form_field(body, "identity_document")}};
+        if (nlohmann::json proof = identity_proof_form(body); !proof.is_null()) {
+            input["identity_proof"] = std::move(proof);
+        }
+        const ApiResult result =
+            unwrap(co_await registry.call_async("start_oauth", input, context));
+        if (!result.ok && result.error.code == "identity_proof_required") {
+            // The page renders in the application's settings (lake#351).
+            const auto configured =
+                configured_result(co_await configured_for(application_for_route(route), route));
+            if (!configured) {
+                co_return co_await send_application_error(route, configured.error());
+            }
+            co_return co_await send_identity_proof_step(
+                route,
+                *configured,
+                context,
+                "sign-in",
+                {.action = "/identity/oauth",
+                 .fields = {{"provider", input.value("provider", "")},
+                            {"device_name", input.value("device_name", "")},
+                            {"identity_document", input.value("identity_document", "")}}});
+        }
         if (!result.ok) {
             co_return co_await serve_application_identity_page(
                 route, "sign-in", result.error.message);
@@ -10077,14 +10411,23 @@ struct ApiServer::Impl {
                          "public, max-age=300");
     }
 
-    std::optional<std::string> jwks_for(const std::string& url, bool refresh) {
+    // `public_only` for an identity provider's keys (lake#837): HTTPS to public addresses only,
+    // unless LAKE_OIDC_ALLOW_PRIVATE_ADDRESSES is set. Clerk's, which the operator configures, is
+    // not limited.
+    std::optional<std::string>
+    jwks_for(const std::string& url, bool refresh, bool public_only = false) {
         const auto found = jwks_cache.find(url);
         if (!refresh && found != jwks_cache.end() &&
             std::chrono::steady_clock::now() - found->second.fetched_at < std::chrono::hours(1)) {
             return found->second.document;
         }
-        OutboundResponse response = outbound_http.request(
-            {"GET", url, "", {{"Accept", "application/json"}, {"User-Agent", "lake-oauth/1"}}});
+        OutboundRequest request{
+            "GET", url, "", {{"Accept", "application/json"}, {"User-Agent", "lake-oauth/1"}}};
+        if (public_only) {
+            request.timeout = oidc_timeout;
+            request.public_only = true;
+        }
+        OutboundResponse response = outbound_http.request(request);
         if (!response.error.empty() || response.status < 200 || response.status >= 300) {
             return std::nullopt;
         }
@@ -10344,7 +10687,21 @@ struct ApiServer::Impl {
             co_return co_await oauth_error(
                 route, http::status::forbidden, "OAuth provider is not registered");
         }
-        const OAuthEndpoints endpoints = oauth_endpoints(*provider);
+        // The endpoints are the provider's discovery document's (lake#837), read on the blocking
+        // pool: an issuer that does not answer holds up only this request.
+        auto discovered = co_await run_blocking([discovery = oidc_discovery, provider = *provider] {
+            return oauth_endpoints(provider, discovery.get());
+        });
+        if (!discovered || !*discovered ||
+            !oauth_endpoints_allowed(**discovered, options.oidc_allow_private_addresses)) {
+            co_return co_await oauth_error(route,
+                                           http::status::service_unavailable,
+                                           !discovered    ? discovered.error().message
+                                           : !*discovered ? (*discovered).error().message
+                                                          : "OAuth endpoints must use HTTPS");
+        }
+        const OAuthEndpoints endpoints = std::move(**discovered);
+        const bool public_only = !options.oidc_allow_private_addresses;
         const std::string callback = oauth_callback_url(options.public_host, provider_name);
         std::string token_body = "grant_type=authorization_code";
         token_body += "&code=" + oauth_url_encode(code);
@@ -10352,13 +10709,15 @@ struct ApiServer::Impl {
         token_body += "&client_id=" + oauth_url_encode(provider->client_id);
         token_body += "&client_secret=" + oauth_url_encode(provider->client_secret);
         token_body += "&code_verifier=" + oauth_url_encode(flow->code_verifier);
-        const OutboundResponse token_response =
-            outbound_http.request({"POST",
-                                   endpoints.token,
-                                   token_body,
-                                   {{"Accept", "application/json"},
-                                    {"Content-Type", "application/x-www-form-urlencoded"},
-                                    {"User-Agent", "lake-oauth/1"}}});
+        OutboundRequest token_request{"POST",
+                                      endpoints.token,
+                                      token_body,
+                                      {{"Accept", "application/json"},
+                                       {"Content-Type", "application/x-www-form-urlencoded"},
+                                       {"User-Agent", "lake-oauth/1"}},
+                                      oidc_timeout};
+        token_request.public_only = public_only;
+        const OutboundResponse token_response = outbound_http.request(token_request);
         if (!token_response.error.empty() || token_response.status < 200 ||
             token_response.status >= 300) {
             co_return co_await oauth_error(
@@ -10401,13 +10760,13 @@ struct ApiServer::Impl {
             identity.display_name = user.value("name", user.value("login", std::string()));
         } else {
             const std::string id_token = token.value("id_token", "");
-            std::optional<std::string> jwks = jwks_for(endpoints.jwks, false);
+            std::optional<std::string> jwks = jwks_for(endpoints.jwks, false, public_only);
             auto claims =
                 jwks ? control::identity_crypto::verify_oidc_id_token(
                            id_token, *jwks, provider->issuer, provider->client_id, flow->nonce)
                      : std::nullopt;
             if (!claims) {
-                jwks = jwks_for(endpoints.jwks, true);
+                jwks = jwks_for(endpoints.jwks, true, public_only);
                 claims =
                     jwks ? control::identity_crypto::verify_oidc_id_token(
                                id_token, *jwks, provider->issuer, provider->client_id, flow->nonce)
@@ -10440,10 +10799,17 @@ struct ApiServer::Impl {
         }
         ApiContext context = context_for(route);
         context.authentication_method = "oauth";
-        if (const auto principal = options.store->context_for(issued->secret)) {
+        if (const auto principal = options.store->context_for(issued->secret);
+            principal && principal->pool_id == "lake") {
             context.authorized = true;
             context.acting_user_id = principal->user_id;
             context.acting_identity = principal->taap_id;
+        } else if (principal) {
+            // An application pool's user acts as no Lake identity (lake#912); the audit names
+            // it by its user id.
+            context.authorized = false;
+            context.acting_user_id = principal->user_id;
+            context.acting_identity = "user/" + principal->user_id;
         }
         const std::string issued_pool = issued->session.pool_id;
         const ApiResult application_result = unwrap(
@@ -10488,15 +10854,205 @@ struct ApiServer::Impl {
         co_return co_await redirect(route, destination, cookie);
     }
 
+    // SAML sign-in (docs/api/sso.md#saml-sign-in, lake#836). The provider id comes from the
+    // route; these three routes need no credential.
+    static std::string saml_provider(const boost::http::route_params& route) {
+        for (const auto& [name, value] : route.params) {
+            if (name == "provider") {
+                return value;
+            }
+        }
+        return {};
+    }
+
+    static boost::http::status saml_status(std::string_view code) {
+        namespace http = boost::http;
+        if (code == "invalid_input") {
+            return http::status::bad_request;
+        }
+        if (code == "not_found") {
+            return http::status::not_found;
+        }
+        if (code == "unauthorized" || code == "conflict") {
+            return http::status::forbidden;
+        }
+        return http::status::service_unavailable;
+    }
+
+    boost::http::route_task saml_error(boost::http::route_params& route,
+                                       const std::string& provider_id,
+                                       const ApiError& error) {
+        ApiContext context = context_for(route);
+        context.authentication_method = "saml";
+        if (!record_direct_event(context,
+                                 audit::EventDraft{
+                                     .kind = "authentication",
+                                     .object = "saml/" + provider_id,
+                                     .action = "sign_in",
+                                     .outcome = error.code == "unauthorized" ? "denied" : "failure",
+                                     .method = "saml",
+                                     .device = context.device,
+                                     .details = {{"message", error.message}},
+                                 })) {
+            return send_text(route,
+                             boost::http::status::service_unavailable,
+                             error_body("store_error", "could not record the SAML failure"),
+                             "application/json; charset=utf-8",
+                             "no-store");
+        }
+        return send_text(route,
+                         saml_status(error.code),
+                         error_body(error.code, error.message),
+                         "application/json; charset=utf-8",
+                         "no-store");
+    }
+
+    // GET /v1/saml/<provider id>/metadata: Lake's service-provider metadata; its URL is the SP
+    // entity id.
+    boost::http::route_task serve_saml_metadata(boost::http::route_params& route) {
+        namespace http = boost::http;
+        const std::string provider_id = saml_provider(route);
+        const auto provider = options.store && !options.public_host.empty()
+                                  ? options.store->get_sso_provider(provider_id)
+                                  : control::Result<control::SsoProvider>(std::unexpected(
+                                        control::StoreError{"not_found", "no SAML provider"}));
+        if (!provider || provider->protocol != "saml" || !provider->enabled) {
+            co_return co_await send_text(route,
+                                         http::status::not_found,
+                                         error_body("not_found", "SAML provider is unavailable"),
+                                         "application/json; charset=utf-8",
+                                         "no-store");
+        }
+        co_return co_await send_text(route,
+                                     http::status::ok,
+                                     control::saml::sp_metadata(options.public_host, provider->id),
+                                     "application/samlmetadata+xml; charset=utf-8",
+                                     "public, max-age=300");
+    }
+
+    // GET /v1/saml/<provider id>/start[?return_to=/path]: records a one-use AuthnRequest and
+    // redirects to the identity provider. The provider's sign-on URL for its app tile.
+    boost::http::route_task serve_saml_start(boost::http::route_params& route) {
+        const std::string provider_id = saml_provider(route);
+        if (!options.store) {
+            co_return co_await saml_error(
+                route, provider_id, ApiError{.code = "store_unavailable", .message = "no store"});
+        }
+        const auto started = start_saml_sign_in(*options.store,
+                                                options.public_host,
+                                                provider_id,
+                                                "browser",
+                                                "",
+                                                same_origin_next(query_value(route, "return_to")));
+        if (!started) {
+            co_return co_await saml_error(route, provider_id, started.error());
+        }
+        co_return co_await redirect(route, *started);
+    }
+
+    // POST /v1/saml/<provider id>/acs: the Assertion Consumer Service (HTTP-POST binding). The
+    // form's SAMLResponse is verified like sign_in_saml; RelayState is not used. It sets
+    // lake_session and redirects to the page the request named, else the home.
+    boost::http::route_task serve_saml_acs(boost::http::route_params& route) {
+        namespace http = boost::http;
+        const std::string provider_id = saml_provider(route);
+        if (!options.store) {
+            co_return co_await saml_error(
+                route, provider_id, ApiError{.code = "store_unavailable", .message = "no store"});
+        }
+        auto [read_error, body] =
+            co_await read_string_body(route, control::saml::maximum_document_bytes * 2);
+        if (read_error) {
+            if (body_is_too_large(read_error)) {
+                co_return co_await saml_error(
+                    route,
+                    provider_id,
+                    ApiError{.code = "invalid_input", .message = "the SAML response is too large"});
+            }
+            co_return http::route_error(read_error);
+        }
+        auto accepted = accept_saml_response(*options.store,
+                                             options.public_host,
+                                             provider_id,
+                                             form_field(body, "SAMLResponse"),
+                                             "",
+                                             "browser",
+                                             saml_now());
+        if (!accepted) {
+            co_return co_await saml_error(route, provider_id, accepted.error());
+        }
+        control::Result<control::IssuedSession> issued =
+            options.store->sign_in_sso(accepted->identity);
+        if (!issued) {
+            co_return co_await saml_error(route,
+                                          provider_id,
+                                          ApiError{.code = issued.error().code == "unauthorized"
+                                                               ? "unauthorized"
+                                                               : "store_error",
+                                                   .message = issued.error().message});
+        }
+        ApiContext context = context_for(route);
+        context.authentication_method = "saml";
+        if (const auto principal = options.store->context_for(issued->secret)) {
+            context.authorized = true;
+            context.acting_user_id = principal->user_id;
+            context.acting_identity = principal->taap_id;
+        }
+        const std::string issued_pool = issued->session.pool_id;
+        const ApiResult session_result = unwrap(
+            co_await application_session_result(std::move(issued), context, "session.started"));
+        if (!session_result.ok) {
+            co_return co_await saml_error(route, provider_id, session_result.error);
+        }
+        if (!record_direct_event(context,
+                                 audit::EventDraft{
+                                     .kind = "authentication",
+                                     .object = "saml/" + provider_id,
+                                     .action = "sign_in",
+                                     .outcome = "success",
+                                     .method = "saml",
+                                     .device = accepted->identity.device_name,
+                                 })) {
+            co_return co_await send_text(route,
+                                         http::status::service_unavailable,
+                                         error_body("store_error", "SAML audit recording failed"),
+                                         "application/json; charset=utf-8",
+                                         "no-store");
+        }
+        std::string cookie = "lake_session=" + session_result.value.value("secret", "") +
+                             "; HttpOnly; SameSite=Lax; Path=/";
+        if (request_is_https(route)) {
+            cookie += "; Secure";
+        }
+        std::string destination = same_origin_next(accepted->return_to);
+        if (destination.empty()) {
+            destination = std::string(account_landing);
+        }
+        if (issued_pool != "lake") {
+            // An application's pool returns to the application, as the OIDC callback does.
+            if (auto routing = options.store->get_application_by_pool(issued_pool)) {
+                const std::string fallback = "/apps/" + routing->id + "/sign-in";
+                const auto application =
+                    configured_result(co_await configured_for(std::move(routing), route));
+                destination = application
+                                  ? application_redirect_location(*application, session_result)
+                                  : fallback;
+            }
+        }
+        co_return co_await redirect(route, destination, cookie);
+    }
+
     // A workspace-scoped server route names a live workspace, or answers 404: /w/<id>/v1/...,
-    // /w/<id>/mcp, /w/<id>/v1/openapi.json and a workspace's Zetta under
+    // /w/<id>/mcp, /w/<id>/v1/openapi.json, the model gateway under /w/<id>/openai/v1/, and a
+    // workspace's Zetta under
     // /w/<id>/workspaces/<space>/zetta/. Every other /w/<id>/ path belongs to the web app
     // (docs/ui/web-app.md), which a browser already has; anything else falls through to the 404.
     boost::http::route_task workspace_route(boost::http::route_params& route) {
         namespace http = boost::http;
         const std::string path(route.url.path());
         const std::string local = workspace_prefixed_local_path(path);
-        if ((!workspace_api_path(local) && !local.starts_with("/workspaces/")) ||
+        if ((!workspace_api_path(local) && !local.starts_with("/workspaces/") &&
+             !local.starts_with("/openai/v1/")) ||
             local == "/v1/apps/auth") {
             co_return http::route_next;
         }
@@ -10891,7 +11447,9 @@ struct ApiServer::Impl {
             return {RegistryAccess::Denied};
         }
         const auto principal = options.store->context_for(credential.token);
-        if (!principal) {
+        // An identity application's session pulls nothing (lake#912): its TAAP identity may be a
+        // Lake account's, and pulls are authorized by that account's grants.
+        if (!principal || principal->pool_id != "lake") {
             return {RegistryAccess::Denied};
         }
         if (principal->kind == "build_push") {
@@ -11588,6 +12146,7 @@ struct ApiServer::Impl {
             route.res.set("X-Content-Type-Options", "nosniff");
         } else {
             route.res.set("Docker-Content-Digest", digest);
+            isolate_registry_response(route);
         }
         route.res.set_payload_size(size);
         if (head || size == 0) {
@@ -11781,6 +12340,7 @@ struct ApiServer::Impl {
                 }
                 if (*stored) {
                     route.res.set("Docker-Content-Digest", digest);
+                    isolate_registry_response(route);
                     const std::span<const char> characters((*stored)->document.data(),
                                                            (*stored)->document.size());
                     const auto bytes = std::as_bytes(characters);
@@ -11829,6 +12389,7 @@ struct ApiServer::Impl {
                 route, boost::http::status::not_found, object.error(), true);
         }
         route.res.set("Docker-Content-Digest", object->digest);
+        isolate_registry_response(route);
         co_return co_await send_bytes(route,
                                       boost::http::status::ok,
                                       object->content_type,
@@ -11892,13 +12453,15 @@ struct ApiServer::Impl {
                                               "MANIFEST_UNKNOWN");
         }
         route.res.set("Docker-Content-Digest", digest);
+        isolate_registry_response(route);
         const std::span<const char> characters((*manifest)->document.data(),
                                                (*manifest)->document.size());
         const auto bytes = std::as_bytes(characters);
+        // A record written before lake#930 may name any type: it is served as an image manifest.
         co_return co_await send_bytes(
             route,
             boost::http::status::ok,
-            content_type.empty() ? "application/vnd.oci.image.manifest.v1+json" : content_type,
+            oci_manifest_media_type(content_type).value_or(oci_image_manifest_type),
             bytes,
             digest,
             {},
@@ -12018,13 +12581,15 @@ struct ApiServer::Impl {
                     route, boost::http::status::not_found, object.error(), true);
             }
             route.res.set("Docker-Content-Digest", object->digest);
-            co_return co_await send_bytes(route,
-                                          boost::http::status::ok,
-                                          object->content_type,
-                                          object->bytes,
-                                          object->digest,
-                                          {},
-                                          head);
+            isolate_registry_response(route);
+            co_return co_await send_bytes(
+                route,
+                boost::http::status::ok,
+                oci_manifest_media_type(object->content_type).value_or(oci_image_manifest_type),
+                object->bytes,
+                object->digest,
+                {},
+                head);
         }
         const RegistryGrant grant = registry_access(route, repository, true);
         if (grant.access != RegistryAccess::Allowed) {
@@ -12043,10 +12608,18 @@ struct ApiServer::Impl {
             co_return co_await registry_error(
                 route, boost::http::status::bad_request, "OCI manifest body is required", true);
         }
-        const std::string content_type =
+        const auto media_type =
             route.req.count(boost::http::field::content_type) == 0
-                ? "application/vnd.oci.image.manifest.v1+json"
-                : std::string(route.req.at(boost::http::field::content_type));
+                ? std::optional(oci_image_manifest_type)
+                : oci_manifest_media_type(route.req.at(boost::http::field::content_type));
+        if (!media_type) {
+            co_return co_await registry_error(route,
+                                              boost::http::status::bad_request,
+                                              "OCI manifest media type is not supported",
+                                              true,
+                                              "MANIFEST_INVALID");
+        }
+        const std::string content_type(*media_type);
         if (tenant) {
             co_return co_await serve_tenant_manifest_write(
                 route, std::move(*tenant), repository, reference, content_type, std::move(body));
@@ -12108,6 +12681,7 @@ struct ApiServer::Impl {
             co_return co_await registry_error(
                 route, boost::http::status::not_found, tarball.error());
         }
+        isolate_registry_response(route);
         co_return co_await send_bytes(
             route, boost::http::status::ok, "application/octet-stream", *tarball);
     }
@@ -12157,6 +12731,7 @@ struct ApiServer::Impl {
             co_return co_await registry_error(
                 route, boost::http::status::not_found, package.error());
         }
+        isolate_registry_response(route);
         co_return co_await send_bytes(
             route, boost::http::status::ok, "application/octet-stream", *package, {}, {}, head);
     }
@@ -12192,6 +12767,7 @@ struct ApiServer::Impl {
             co_return co_await registry_error(
                 route, boost::http::status::not_found, artifact.error());
         }
+        isolate_registry_response(route);
         co_return co_await send_bytes(route,
                                       boost::http::status::ok,
                                       kind == "source" ? "text/plain; charset=utf-8"
@@ -12729,16 +13305,23 @@ struct ApiServer::Impl {
             route, status, std::move(html), "text/html; charset=utf-8", "no-store");
     }
 
-    // The address an anonymous order is counted against: Cloudflare's CF-Connecting-IP, else the
-    // first X-Forwarded-For hop, else one bucket for every direct client.
+    // The address an anonymous order is counted against (lake#838): X-Real-IP, which the ingress
+    // (ingress-nginx) always sets itself, overwriting any the sender sent; else the last
+    // X-Forwarded-For hop, the one the nearest proxy appended; else one bucket for every direct
+    // client. Never CF-Connecting-IP or the first X-Forwarded-For hop: a sender that reaches the
+    // ingress without passing Cloudflare can write either, and would land in a fresh bucket with
+    // each request. The ingress decides which client address to trust (Cloudflare's ranges), and
+    // lake counts what it decided.
     static std::string order_client_address(const boost::http::route_params& route) {
-        if (route.req.count("cf-connecting-ip") != 0) {
-            return std::string(route.req.at("cf-connecting-ip")).substr(0, 64);
+        if (route.req.count("x-real-ip") != 0) {
+            return std::string(route.req.at("x-real-ip")).substr(0, 64);
         }
         if (route.req.count("x-forwarded-for") != 0) {
             std::string forwarded(route.req.at("x-forwarded-for"));
-            forwarded = forwarded.substr(0, forwarded.find(','));
-            return forwarded.substr(0, 64);
+            const auto comma = forwarded.rfind(',');
+            forwarded = comma == std::string::npos ? forwarded : forwarded.substr(comma + 1);
+            const auto first = forwarded.find_first_not_of(' ');
+            return first == std::string::npos ? "direct" : forwarded.substr(first, 64);
         }
         return "direct";
     }
@@ -12852,7 +13435,8 @@ struct ApiServer::Impl {
                 web_ui_order_form(
                     sheet, options.regions, *offer, input, order.error(), checkout_available));
         }
-        if (!order_limiter->allow(order_client_address(route), std::chrono::steady_clock::now())) {
+        if (!order_limiter->allow(
+                order_client_address(route), order->path, std::chrono::steady_clock::now())) {
             metrics.increment_counter("lake_cloud_orders_refused_total", {{"reason", "rate"}});
             co_return co_await send_order_html(
                 route,
@@ -13662,6 +14246,12 @@ struct ApiServer::Impl {
         if (!unsafe_method(route) || !session_cookie_request(route)) {
             return {};
         }
+        // The SAML Assertion Consumer Service takes the identity provider's cross-site form post
+        // (lake#836); it never reads the session the cookie carries, it replaces it.
+        if (const std::string path(route.url.path());
+            path.starts_with("/v1/saml/") && path.ends_with("/acs")) {
+            return {};
+        }
         if (!from_own_origin(route)) {
             return "Cross-site requests cannot use the browser session.";
         }
@@ -13793,14 +14383,24 @@ struct ApiServer::Impl {
             if (read_error || bytes_read == 0) {
                 co_return co_await send_scim(
                     route,
-                    ApiResult::failure("invalid_input", "SCIM resource body is required"),
+                    refuse_unread_body(
+                        route,
+                        capability,
+                        ApiResult::failure("invalid_input", "SCIM resource body is required"),
+                        read_error ? "unreadable" : "empty",
+                        bytes_read),
                     success_status);
             }
-            nlohmann::json resource = to_nlohmann(sink.release());
+            nlohmann::json resource = body_json(sink);
             if (resource.is_discarded() || !resource.is_object()) {
                 co_return co_await send_scim(
                     route,
-                    ApiResult::failure("invalid_input", "SCIM resource body is not valid JSON"),
+                    refuse_unread_body(
+                        route,
+                        capability,
+                        ApiResult::failure("invalid_input", "SCIM resource body is not valid JSON"),
+                        resource.is_discarded() ? "not_json" : "not_an_object",
+                        bytes_read),
                     success_status);
             }
             input["resource"] = std::move(resource);
@@ -13835,14 +14435,24 @@ struct ApiServer::Impl {
             if (read_error || bytes_read == 0) {
                 co_return co_await send_scim(
                     route,
-                    ApiResult::failure("invalid_input", "SCIM PATCH body is required"),
+                    refuse_unread_body(
+                        route,
+                        capability,
+                        ApiResult::failure("invalid_input", "SCIM PATCH body is required"),
+                        read_error ? "unreadable" : "empty",
+                        bytes_read),
                     success_status);
             }
-            nlohmann::json patch = to_nlohmann(sink.release());
+            nlohmann::json patch = body_json(sink);
             if (patch.is_discarded() || !patch.is_object()) {
                 co_return co_await send_scim(
                     route,
-                    ApiResult::failure("invalid_input", "SCIM PATCH body is not valid JSON"),
+                    refuse_unread_body(
+                        route,
+                        capability,
+                        ApiResult::failure("invalid_input", "SCIM PATCH body is not valid JSON"),
+                        patch.is_discarded() ? "not_json" : "not_an_object",
+                        bytes_read),
                     success_status);
             }
             input["patch"] = std::move(patch);
@@ -13959,15 +14569,33 @@ struct ApiServer::Impl {
             } else {
                 JsonBodySink sink;
                 auto [read_error, bytes_read] = co_await boost::capy::push_to(route.req_body, sink);
+                std::string reason;
+                std::string message;
                 if (read_error) {
-                    status = http::status::bad_request;
-                    body = error_body("invalid_input", "could not read the request body as JSON");
+                    reason = "unreadable";
+                    message = "could not read the request body as JSON";
                 } else if (bytes_read > 0) {
-                    input = to_nlohmann(sink.release());
+                    input = body_json(sink);
                     if (input.is_discarded() || !input.is_object()) {
-                        status = http::status::bad_request;
-                        body = error_body("invalid_input", "the request body is not a JSON object");
+                        reason = input.is_discarded() ? "not_json" : "not_an_object";
+                        message = "the request body is not a JSON object";
                     }
+                }
+                if (!reason.empty()) {
+                    // Audited as the workspace action it was meant to be (lake#18): the reason
+                    // and the body's size, never its contents.
+                    status = http::status::bad_request;
+                    const ApiResult refused =
+                        registry.refuse(read ? "workspace_query" : "workspace_act",
+                                        ApiResult::failure("invalid_input", message),
+                                        {{"capability", capability},
+                                         {"input", reason},
+                                         {"body_bytes", static_cast<std::uint64_t>(bytes_read)}},
+                                        context);
+                    if (refused.error.code != "invalid_input") {
+                        status = http::int_to_status(static_cast<unsigned>(rest_status(refused)));
+                    }
+                    body = error_body(refused.error.code, refused.error.message);
                 }
             }
             if (body.empty()) {
@@ -14002,7 +14630,7 @@ struct ApiServer::Impl {
         static constexpr std::size_t queue_limit = 8 * 1024 * 1024;
         std::mutex mutex;
         std::string queued;
-        std::atomic<bool> gone{false};   // the caller stopped reading: the provider is stopped
+        std::atomic<bool> gone{false};   // the caller stopped reading: it is sent nothing more
         std::atomic<bool> closed{false}; // the call has finished: nothing more is offered
 
         bool offer(std::string_view piece) {
@@ -14037,7 +14665,8 @@ struct ApiServer::Impl {
 
     // Writes each piece the provider has sent since the last look, starting the chunked response
     // with the first; returns once the call has finished and everything offered is written. A
-    // write that fails leaves the relay `gone`, so the provider is stopped, and is answered in
+    // write that fails leaves the relay `gone`, so nothing more is offered (model_completion still
+    // reads the provider's stream to its end to count it, lake#939), and is answered in
     // `failed` once the call has finished.
     boost::capy::io_task<> relay_model_stream(boost::http::route_params& route,
                                               std::shared_ptr<ModelStreamRelay> relay,
@@ -14111,18 +14740,32 @@ struct ApiServer::Impl {
         nlohmann::json request;
         JsonBodySink sink;
         auto [read_error, bytes_read] = co_await boost::capy::push_to(route.req_body, sink);
+        // A body lake cannot read is audited as a failed model_completion (lake#18).
+        const auto refused = [&](ApiResult failure, std::string_view reason) {
+            const ApiResult result = refuse_unread_body(
+                route, "model_completion", std::move(failure), reason, bytes_read);
+            if (result.error.code == "store_error") {
+                status = http::status::internal_server_error;
+            }
+            return openai_error(result);
+        };
         if (read_error || bytes_read == 0) {
             status = read_error && body_is_too_large(read_error) ? http::status::payload_too_large
                                                                  : http::status::bad_request;
-            body = openai_error(ApiResult::failure(
-                status == http::status::payload_too_large ? "size_invalid" : "invalid_input",
-                "the request body must be the endpoint's JSON request"));
+            body = refused(
+                ApiResult::failure(status == http::status::payload_too_large ? "size_invalid"
+                                                                             : "invalid_input",
+                                   "the request body must be the endpoint's JSON request"),
+                !read_error                                 ? "empty"
+                : status == http::status::payload_too_large ? "too_large"
+                                                            : "unreadable");
         } else {
-            request = to_nlohmann(sink.release());
+            request = body_json(sink);
             if (request.is_discarded() || !request.is_object()) {
                 status = http::status::bad_request;
-                body = openai_error(
-                    ApiResult::failure("invalid_input", "the request body is not a JSON object"));
+                body = refused(
+                    ApiResult::failure("invalid_input", "the request body is not a JSON object"),
+                    request.is_discarded() ? "not_json" : "not_an_object");
             }
         }
         if (body.empty()) {
@@ -14201,6 +14844,22 @@ struct ApiServer::Impl {
         co_return http::route_done;
     }
 
+    // A call to `capability` whose body lake could not read (lake#18): audited once, as any failed
+    // call is, with the reason and the body's size, never its contents. Answers the refusal, or
+    // the audit's own failure when the event could not be recorded.
+    ApiResult refuse_unread_body(const boost::http::route_params& route,
+                                 const std::string& capability,
+                                 ApiResult failure,
+                                 std::string_view reason,
+                                 std::size_t bytes) const {
+        ApiContext ctx = context_for(route);
+        return registry.refuse(
+            capability,
+            std::move(failure),
+            {{"input", std::string(reason)}, {"body_bytes", static_cast<std::uint64_t>(bytes)}},
+            ctx);
+    }
+
     boost::http::route_task serve_capability(boost::http::route_params& route,
                                              std::shared_ptr<const Capability> capability) {
         namespace http = boost::http;
@@ -14218,21 +14877,34 @@ struct ApiServer::Impl {
         } else {
             JsonBodySink sink;
             auto [read_error, bytes_read] = co_await boost::capy::push_to(route.req_body, sink);
+            std::optional<ApiResult> unread;
+            std::string reason;
             if (read_error) {
                 status = body_is_too_large(read_error) ? http::status::payload_too_large
                                                        : http::status::bad_request;
-                body =
-                    body_is_too_large(read_error)
-                        ? error_body("size_invalid", "request body exceeds the 67108864 byte limit")
-                        : error_body("invalid_input",
-                                     "could not read the request body as JSON: " +
-                                         read_error.message());
+                reason = body_is_too_large(read_error) ? "too_large" : "unreadable";
+                unread = body_is_too_large(read_error)
+                             ? ApiResult::failure("size_invalid",
+                                                  "request body exceeds the 67108864 byte limit")
+                             : ApiResult::failure("invalid_input",
+                                                  "could not read the request body as JSON: " +
+                                                      read_error.message());
             } else if (bytes_read > 0) {
-                input = to_nlohmann(sink.release());
+                input = body_json(sink);
                 if (input.is_discarded()) {
                     status = http::status::bad_request;
-                    body = error_body("invalid_input", "the request body is not valid JSON");
+                    reason = "not_json";
+                    unread =
+                        ApiResult::failure("invalid_input", "the request body is not valid JSON");
                 }
+            }
+            if (unread) {
+                const ApiResult refused =
+                    refuse_unread_body(route, capability->name, *unread, reason, bytes_read);
+                if (refused.error.code != unread->error.code) {
+                    status = http::int_to_status(static_cast<unsigned>(rest_status(refused)));
+                }
+                body = error_body(refused.error.code, refused.error.message);
             }
         }
         if (body.empty()) {
@@ -14317,8 +14989,7 @@ struct ApiServer::Impl {
                                    {{"code", -32700},
                                     {"message", "request body exceeds the 67108864 byte limit"}}}}
                        .dump();
-        } else if (read_error || bytes_read == 0 ||
-                   (request = to_nlohmann(sink.release())).is_discarded()) {
+        } else if (read_error || bytes_read == 0 || (request = body_json(sink)).is_discarded()) {
             status = http::status::bad_request;
             body = nlohmann::json{{"jsonrpc", "2.0"},
                                   {"id", nullptr},
@@ -15022,6 +15693,24 @@ bool ApiServer::start() {
                       route, "/api/lfs/:repository/:oid", impl.serve_hub_lfs_upload(route));
               });
     add_route(http::method::get,
+              "/v1/saml/:provider/metadata",
+              [&impl](http::route_params& route) -> http::route_task {
+                  return impl.observe_request(
+                      route, "/v1/saml/:provider/metadata", impl.serve_saml_metadata(route));
+              });
+    add_route(http::method::get,
+              "/v1/saml/:provider/start",
+              [&impl](http::route_params& route) -> http::route_task {
+                  return impl.observe_request(
+                      route, "/v1/saml/:provider/start", impl.serve_saml_start(route));
+              });
+    add_route(http::method::post,
+              "/v1/saml/:provider/acs",
+              [&impl](http::route_params& route) -> http::route_task {
+                  return impl.observe_request(
+                      route, "/v1/saml/:provider/acs", impl.serve_saml_acs(route));
+              });
+    add_route(http::method::get,
                "/v1/oauth/:provider/callback",
                [&impl](http::route_params& route) -> http::route_task {
                    return impl.observe_request(
@@ -15160,14 +15849,19 @@ bool ApiServer::start() {
                                                    impl.serve_workspace_zetta(route, false));
                    });
     }
+    // The gateway also answers under /w/<workspace>/: an agent launched in a workspace namespace
+    // has LAKE_URL = <lake>/w/<workspace>, and its SDK calls <LAKE_URL>/openai/v1
+    // (orama-operator#779). model_completion refuses a run whose workspace is not the one the path
+    // names.
     for (const std::string_view endpoint : model_gateway_endpoints) {
         const std::string path = "/openai/v1/" + std::string(endpoint);
-        add_route(http::method::post,
-                   path,
-                   [&impl, path, endpoint](http::route_params& route) -> http::route_task {
-                       return impl.observe_request(
-                           route, path, impl.serve_model_gateway(route, std::string(endpoint)));
-                   });
+        add_workspace_api_route(
+            http::method::post,
+            path,
+            [&impl, path, endpoint](http::route_params& route) -> http::route_task {
+                return impl.observe_request(
+                    route, path, impl.serve_model_gateway(route, std::string(endpoint)));
+            });
     }
     for (const auto& capability : impl.registry.list()) {
         if (capability->transport != CapabilityTransport::Json) {

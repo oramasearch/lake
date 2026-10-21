@@ -83,10 +83,15 @@ calls, which need no credential:
 - **OIDC:** `POST /v1/start_sso_oidc` with `{"provider_id": "<provider id>"}` answers the provider's
   authorization address. The person signs in there, the provider redirects back to Lake, and Lake
   exchanges the code, verifies the ID token, applies the issuer policy and creates the session.
-- **SAML:** `POST /v1/sign_in_saml` with
-  `{"provider_id": "<provider id>", "saml_response": "<base64 SAML response>"}`. Lake verifies the
-  response's RSA-SHA256 signature and digest against the provider's certificate before it issues a
-  session.
+- **SAML:** give your identity provider Lake's metadata URL
+  `https://<your lake>/v1/saml/<provider id>/metadata` (it is also the entity id), the ACS URL
+  `https://<your lake>/v1/saml/<provider id>/acs`, and as the app's sign-on URL
+  `https://<your lake>/v1/saml/<provider id>/start`. A person opens the sign-on URL (or `POST
+  /v1/start_sso_saml` with `{"provider_id": "<provider id>"}` answers it), signs in at the provider,
+  and the provider posts its response back to Lake. Lake verifies the signature with the provider's
+  certificate, the audience, recipient, destination and time, and that the response answers a
+  request Lake made, once, before it issues a session. A response the provider sends on its own
+  (IdP-initiated) is refused. The details: [SAML sign-in](../api/sso.md#saml-sign-in).
 
 The session is an ordinary Lake session of kind `saml` or `oidc`. It is bound to a SCIM user; the
 first sign-in creates that user only when just-in-time provisioning is on and the provider supplies

@@ -392,8 +392,25 @@ TEST(PostgresForgeScenario, DripsReviewRebaseAndGraphEvidenceLandEndToEnd) {
     EXPECT_EQ(mapped->front().anchor.line, 3U);
     ASSERT_TRUE(mapped->front().mapped);
     EXPECT_TRUE(mapped->front().mapped->moved);
+    // The operator opened the review, so a second person approves it (LSR-077).
+    const auto reviewer_user = control->create_user({"taap:1:ed25519:forge-reviewer-" + suffix,
+                                                     "forge-reviewer-" + suffix + "@example.test",
+                                                     "Forge Reviewer"});
+    ASSERT_TRUE(reviewer_user) << reviewer_user.error().message;
+    const auto repository_object = control->find_policy_object("repository", repository->id);
+    ASSERT_TRUE(repository_object) << repository_object.error().message;
+    ASSERT_TRUE(control->create_grant({reviewer_user->taap_id,
+                                       repository_object->id,
+                                       "admin",
+                                       "attestation-reviewer-" + suffix,
+                                       "admin",
+                                       "request-reviewer-" + suffix}));
+    const auto reviewer_token = control->create_token(
+        {reviewer_user->id, "lake", "forge-reviewer", "test", {"*"}, 600, false});
+    ASSERT_TRUE(reviewer_token) << reviewer_token.error().message;
+    liquid::forge_client approver(rebased_repository_url, {.bearer_token = reviewer_token->secret});
     const auto approved = liquid::runtime::block_on(
-        rebased_reviewer.set_review_state(review->id, liquid::forge_review_state::approved));
+        approver.set_review_state(review->id, liquid::forge_review_state::approved));
     ASSERT_TRUE(approved) << approved.error().message;
 
     ASSERT_TRUE(liquid::runtime::block_on(author->set_ref("main", *rebased)));

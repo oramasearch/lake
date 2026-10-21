@@ -13,6 +13,7 @@
 #include <filesystem>
 #include <format>
 #include <fstream>
+#include <functional>
 #include <initializer_list>
 #include <map>
 #include <memory>
@@ -26,6 +27,7 @@
 #include <vector>
 
 #include <arpa/inet.h>
+#include <fcntl.h>
 #include <netinet/in.h>
 #include <spawn.h>
 #include <sys/socket.h>
@@ -58,6 +60,7 @@
 #include "lake/control/identity_crypto.hpp"
 #include "lake/control/memory_store.hpp"
 #include "lake/control/metering.hpp"
+#include "lake/control/platform_records.hpp"
 #include "lake/control/policy.hpp"
 #include "lake/control/postgres_store.hpp"
 #include "lake/control/workspace_audit.hpp"
@@ -1220,7 +1223,8 @@ public:
     LakeProcess(unsigned short port,
                 const std::string& node,
                 const std::string& database_uri,
-                const std::filesystem::path& store_root) {
+                const std::filesystem::path& store_root,
+                const std::vector<std::string>& environment = {}) {
         std::vector<std::string> arguments{
             LAKE_TEST_SERVER_PATH,
             "--listen",
@@ -1242,7 +1246,25 @@ public:
             raw.push_back(argument.data());
         }
         raw.push_back(nullptr);
-        if (::posix_spawn(&pid_, raw.front(), nullptr, nullptr, raw.data(), environ) != 0) {
+        // The parent's environment, then `environment` (NAME=value), which wins.
+        std::vector<std::string> variables = environment;
+        for (char** entry = environ; *entry != nullptr; ++entry) {
+            const std::string_view variable(*entry);
+            const std::string_view name = variable.substr(0, variable.find('='));
+            if (std::ranges::none_of(environment, [name](const std::string& given) {
+                    return given.starts_with(std::string(name) + "=");
+                })) {
+                variables.emplace_back(variable);
+            }
+        }
+        std::vector<char*> raw_environment;
+        raw_environment.reserve(variables.size() + 1);
+        for (std::string& variable : variables) {
+            raw_environment.push_back(variable.data());
+        }
+        raw_environment.push_back(nullptr);
+        if (::posix_spawn(
+                &pid_, raw.front(), nullptr, nullptr, raw.data(), raw_environment.data()) != 0) {
             pid_ = -1;
             return;
         }
@@ -3179,6 +3201,154 @@ TEST(IdentityHttp, ApiSignUpIssuesAndResolvesHttpOnlySessions) {
     server.stop();
 }
 
+// lake#912 (LSR-001): a session of an identity application's pool carries no Lake grants, even
+// when its user's TAAP identity is a Lake account's. `pool_session` mints a session in `pool_id`
+// for a user with `taap_id` (the Lake account `user_id` carries it) the way each store can.
+void expect_application_sessions_carry_no_lake_grants(
+    const std::shared_ptr<lake::control::Store>& store,
+    const std::function<std::string(const std::string& pool_id,
+                                    const std::string& taap_id,
+                                    const std::string& user_id)>& pool_session) {
+    const std::string suffix = lake::control::new_uuid_v4().substr(0, 8);
+    // Any signed-up account may register an application, and so own a pool.
+    const auto owner = store->create_user({"taap:1:ed25519:pool-owner-" + suffix,
+                                           "pool-owner-" + suffix + "@example.test",
+                                           "Pool owner"});
+    ASSERT_TRUE(owner) << owner.error().message;
+    const auto owner_space =
+        store->create_customer({"individual", owner->id, "", "pool-owner-" + suffix});
+    ASSERT_TRUE(owner_space) << owner_space.error().message;
+    const std::string application_id = lake::control::new_uuid_v4();
+    const std::string pool_id = "app:" + application_id;
+    const auto application = store->create_application(
+        {.id = application_id,
+         .customer_id = owner_space->id,
+         .pool_id = pool_id,
+         .workspace_id = lake::test::repository_workspace(*store, owner_space->id)});
+    ASSERT_TRUE(application) << application.error().message;
+    // The Lake account whose identity the application's user carries administers its space.
+    const std::string taap_id = "taap:1:ed25519:pool-victim-" + suffix;
+    const auto victim =
+        store->create_user({taap_id, "pool-victim-" + suffix + "@example.test", "Victim"});
+    ASSERT_TRUE(victim) << victim.error().message;
+    const auto space =
+        store->create_customer({"individual", victim->id, "", "pool-victim-" + suffix});
+    ASSERT_TRUE(space) << space.error().message;
+    const auto space_object = store->find_policy_object("customer", space->id);
+    ASSERT_TRUE(space_object) << space_object.error().message;
+    ASSERT_TRUE(store->create_grant({taap_id,
+                                     space_object->id,
+                                     "admin",
+                                     lake::control::identity_crypto::sha256_hex(taap_id),
+                                     "admin",
+                                     lake::control::new_uuid_v4()}));
+    const auto lake_token =
+        store->create_token({victim->id, "lake", "lake account", "", {"*"}, 3600, false});
+    ASSERT_TRUE(lake_token) << lake_token.error().message;
+    const std::string pool_secret = pool_session(pool_id, taap_id, victim->id);
+    ASSERT_FALSE(pool_secret.empty());
+    const auto resolved = store->context_for(pool_secret);
+    ASSERT_TRUE(resolved) << resolved.error().message;
+    ASSERT_EQ(resolved->pool_id, pool_id);
+    ASSERT_EQ(resolved->taap_id, taap_id);
+
+    ServerOptions options;
+    options.port = 0;
+    options.store = store;
+    options.instance_kek = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+    ApiServer server(options);
+    ASSERT_TRUE(server.start()) << server.reason();
+    const std::string read = "/v1/get_customer?id=" + space->id;
+    const std::string bearer = "Bearer " + pool_secret;
+
+    // The Lake account reads its space.
+    const std::string own = http_request(
+        server.port(), "GET", read, "", "text/plain", {}, "Bearer " + lake_token->secret);
+    EXPECT_NE(own.find(" 200 "), std::string::npos) << own;
+
+    // The application's session does not: as a bearer, as the session cookie, or through MCP.
+    const std::string as_bearer =
+        http_request(server.port(), "GET", read, "", "text/plain", {}, bearer);
+    EXPECT_NE(as_bearer.find(" 403 "), std::string::npos) << as_bearer;
+    EXPECT_EQ(as_bearer.find("pool-victim-" + suffix), std::string::npos) << as_bearer;
+    const std::string as_cookie =
+        http_request(server.port(), "GET", read, "", "text/plain", "lake_session=" + pool_secret);
+    EXPECT_EQ(as_cookie.find(" 200 "), std::string::npos) << as_cookie;
+    EXPECT_EQ(as_cookie.find("pool-victim-" + suffix), std::string::npos) << as_cookie;
+    const std::string listed =
+        http_request(server.port(), "GET", "/v1/list_customers", "", "text/plain", {}, bearer);
+    EXPECT_NE(listed.find(" 403 "), std::string::npos) << listed;
+    const json call = {{"jsonrpc", "2.0"},
+                       {"id", 1},
+                       {"method", "tools/call"},
+                       {"params", {{"name", "get_customer"}, {"arguments", {{"id", space->id}}}}}};
+    const std::string through_mcp =
+        http_request(server.port(), "POST", "/mcp", call.dump(), "application/json", {}, bearer);
+    EXPECT_NE(through_mcp.find("\"isError\":true"), std::string::npos) << through_mcp;
+    EXPECT_EQ(through_mcp.find("pool-victim-" + suffix), std::string::npos) << through_mcp;
+    // The viewer sees a visitor, with none of the account's spaces.
+    const json viewer = response_json(
+        http_request(server.port(), "GET", "/v1/viewer", "", "text/plain", {}, bearer));
+    EXPECT_FALSE(viewer.value("value", json::object()).value("signed_in", true)) << viewer.dump();
+    EXPECT_EQ(viewer.dump().find(space->id), std::string::npos) << viewer.dump();
+    const std::string metrics =
+        http_request(server.port(), "GET", "/metrics", "", "text/plain", {}, bearer);
+    EXPECT_EQ(metrics.find(" 200 "), std::string::npos) << metrics;
+
+    // Its own sign-in in its pool still answers it.
+    const std::string sessions =
+        http_request(server.port(), "GET", "/v1/list_sessions", "", "text/plain", {}, bearer);
+    EXPECT_NE(sessions.find(" 200 "), std::string::npos) << sessions;
+    const json session_items = response_json(sessions).value("value", json::object());
+    ASSERT_TRUE(session_items.contains("items")) << sessions;
+    for (const json& item : session_items.at("items")) {
+        EXPECT_EQ(item.value("pool_id", ""), pool_id) << item.dump();
+    }
+    server.stop();
+}
+
+TEST(ApplicationPoolSessions, MemoryStore) {
+    // The in-memory store keeps one row per person and scopes credentials by pool, so the
+    // application's user is the session in the application's pool for the account's own row.
+    auto store = std::make_shared<lake::control::InMemoryStore>();
+    expect_application_sessions_carry_no_lake_grants(
+        store, [&](const std::string& pool_id, const std::string&, const std::string& user_id) {
+            const auto issued =
+                store->create_token({user_id, pool_id, "pool session", "", {"*"}, 3600, false});
+            EXPECT_TRUE(issued) << issued.error().message;
+            return issued ? issued->secret : std::string();
+        });
+}
+
+TEST(ApplicationPoolSessions, PostgresStore) {
+    const char* database_uri = lake::test::postgres_uri();
+    if (database_uri == nullptr || *database_uri == '\0') {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
+    }
+    std::shared_ptr<lake::control::Store> store = lake::control::make_postgres_store(
+        database_uri, "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff");
+    ASSERT_TRUE(store->ping());
+    // PostgreSQL keeps users per (pool_id, taap_id): the application's user is its own row in the
+    // pool, with the Lake account's identity, as an enrollment with that identity makes it.
+    expect_application_sessions_carry_no_lake_grants(
+        store, [&](const std::string& pool_id, const std::string& taap_id, const std::string&) {
+            pqxx::connection connection(database_uri);
+            pqxx::work tx(connection);
+            const std::string user_id =
+                tx.exec_params("INSERT INTO users (taap_id, email, display_name, pool_id) "
+                               "VALUES ($1, $2, 'Pool user', $3) RETURNING id::text",
+                               taap_id,
+                               "pool-user-" + lake::control::new_uuid_v4() + "@example.test",
+                               pool_id)[0][0]
+                    .as<std::string>();
+            tx.commit();
+            const auto issued =
+                store->create_token({user_id, pool_id, "pool session", "", {"*"}, 3600, false});
+            EXPECT_TRUE(issued) << issued.error().message;
+            return issued ? issued->secret : std::string();
+        });
+}
+
 TEST(ApplicationHttp, HostedAndCustomDomainPagesUseTheApplicationPool) {
     auto store = std::make_shared<lake::control::InMemoryStore>();
     const auto owner = store->create_user(
@@ -4501,6 +4671,22 @@ TEST(Export, VerifiesAndRecreatesPortableRepositoryFacts) {
             .create_grant(
                 {"taap:1:ed25519:reader", object->id, "read", "grant-proof", "admin", "test"})
             .has_value());
+    // An approved review travels as history, without its approval (LSR-077).
+    const ApiResult review = source.call(
+        "create_review", {{"repository_id", repository.value["id"]}, {"change_id", "change-1"}});
+    ASSERT_TRUE(review.ok) << review.error.message;
+    ASSERT_TRUE(source.store.create_grant(
+        {"taap:1:ed25519:reviewer", object->id, "admin", "reviewer-proof", "admin", "test"}));
+    source.ctx.acting_identity = "taap:1:ed25519:reviewer";
+    source.ctx.operator_credential = false;
+    ASSERT_TRUE(source
+                    .call("update_review",
+                          {{"repository_id", repository.value["id"]},
+                           {"review_id", review.value["id"]},
+                           {"state", "approved"}})
+                    .ok);
+    source.ctx.acting_identity = "admin";
+    source.ctx.operator_credential = true;
 
     const ApiResult exported = source.call(
         "export_repository", {{"repository_id", repository.value["id"]}, {"include_git", true}});
@@ -4534,6 +4720,11 @@ TEST(Export, VerifiesAndRecreatesPortableRepositoryFacts) {
                   .value["items"]
                   .size(),
               1);
+    const ApiResult reviews =
+        destination.call("list_reviews", {{"repository_id", imported.value["id"]}});
+    ASSERT_EQ(reviews.value["items"].size(), 1);
+    EXPECT_EQ(reviews.value["items"][0]["value"]["state"], "approved");
+    EXPECT_FALSE(reviews.value["items"][0]["value"].contains("approval"));
 
     json altered = exported.value["archive"];
     altered["payload"]["history"]["changes"][0]["message"] = "changed";
@@ -4546,6 +4737,125 @@ TEST(Export, VerifiesAndRecreatesPortableRepositoryFacts) {
          {"archive", altered}})
                   .error.code,
               "invalid_digest");
+}
+
+// A webhook's signing secret never leaves lake in an archive, and only a repository administrator's
+// archive names who holds access (LSR-024, lake#933). An imported webhook signs with a new secret.
+TEST(Export, AnArchiveCarriesNoWebhookSecretAndGrantsOnlyForAnAdministrator) {
+    Surface source;
+    RepositoryFixtureStore source_store;
+    source.ctx.sync_store = &source_store;
+    const ApiResult user = source.call("create_user", {{"display_name", "Ada"}});
+    ASSERT_TRUE(user.ok) << user.error.message;
+    const ApiResult customer = source.call(
+        "create_customer",
+        {{"customer_type", "individual"}, {"user_id", user.value["id"]}, {"name", "ada"}});
+    ASSERT_TRUE(customer.ok) << customer.error.message;
+    const ApiResult repository = source.call(
+        "create_repository",
+        {{"customer_id", customer.value["id"]},
+         {"workspace_id", source.workspace(customer.value["id"])},
+         {"name", "hooked"}});
+    ASSERT_TRUE(repository.ok) << repository.error.message;
+    const std::string repository_id = repository.value["id"];
+    const std::string secret = "lsr-024-webhook-signing-secret";
+    ASSERT_TRUE(source
+                    .call("create_webhook",
+                          {{"repository_id", repository_id},
+                           {"url", "https://example.test/lake"},
+                           {"events", json::array({"issue"})},
+                           {"secret", secret}})
+                    .ok);
+    const auto object = source.store.find_policy_object("repository", repository_id);
+    ASSERT_TRUE(object) << object.error().message;
+    const std::string reader = "taap:1:ed25519:export-reader";
+    ASSERT_TRUE(source.store
+                    .create_grant({reader, object->id, "read", "reader-proof", "admin", "test"})
+                    .has_value());
+
+    const auto webhooks_of = [](const json& archive) {
+        json found = json::array();
+        for (const json& record : archive["payload"]["forge"]) {
+            if (record.value("kind", "") == "webhook") {
+                found.push_back(record);
+            }
+        }
+        return found;
+    };
+
+    // A reader's archive: the webhook's endpoint and events, never its secret, and no grants.
+    source.ctx.acting_identity = reader;
+    source.ctx.operator_credential = false;
+    const ApiResult read_export =
+        source.call("export_repository", {{"repository_id", repository_id}});
+    ASSERT_TRUE(read_export.ok) << read_export.error.message;
+    const json& read_archive = read_export.value["archive"];
+    EXPECT_EQ(read_export.value.dump().find(secret), std::string::npos);
+    const json read_webhooks = webhooks_of(read_archive);
+    ASSERT_EQ(read_webhooks.size(), 1u);
+    EXPECT_EQ(read_webhooks[0]["value"]["url"], "https://example.test/lake");
+    EXPECT_FALSE(read_webhooks[0]["value"].contains("secret"));
+    EXPECT_EQ(read_archive["payload"]["grants"], json::array());
+
+    // An administrator's archive keeps the grants, still without the secret.
+    source.ctx.acting_identity = "admin";
+    source.ctx.operator_credential = true;
+    const ApiResult admin_export =
+        source.call("export_repository", {{"repository_id", repository_id}});
+    ASSERT_TRUE(admin_export.ok) << admin_export.error.message;
+    const json& admin_archive = admin_export.value["archive"];
+    EXPECT_EQ(admin_export.value.dump().find(secret), std::string::npos);
+    EXPECT_FALSE(webhooks_of(admin_archive)[0]["value"].contains("secret"));
+    EXPECT_TRUE(std::ranges::any_of(admin_archive["payload"]["grants"], [&](const json& grant) {
+        return grant.value("principal_taap_id", "") == reader;
+    }));
+
+    // The imported webhook signs with a secret of its own: neither the source's nor an empty one.
+    Surface destination;
+    RepositoryFixtureStore destination_store;
+    destination.ctx.sync_store = &destination_store;
+    const ApiResult target_user = destination.call("create_user", {{"display_name", "Grace"}});
+    ASSERT_TRUE(target_user.ok) << target_user.error.message;
+    const ApiResult target_customer = destination.call(
+        "create_customer",
+        {{"customer_type", "individual"}, {"user_id", target_user.value["id"]}, {"name", "grace"}});
+    ASSERT_TRUE(target_customer.ok) << target_customer.error.message;
+    const ApiResult imported =
+        destination.call("import_repository",
+                         {{"customer_id", target_customer.value["id"]},
+                          {"workspace_id", destination.workspace(target_customer.value["id"])},
+                          {"name", "hooked-copy"},
+                          {"archive", read_archive}});
+    ASSERT_TRUE(imported.ok) << imported.error.message;
+    std::string delivered_payload;
+    std::string delivered_signature;
+    destination.ctx.webhook_sender = [&](const std::string&,
+                                         const json& headers,
+                                         const std::string& payload) -> WebhookDeliveryResult {
+        delivered_payload = payload;
+        delivered_signature = headers.at("x-lake-signature-256").get<std::string>();
+        return {.status = 204};
+    };
+    ASSERT_TRUE(destination
+                    .call("create_issue",
+                          {{"repository_id", imported.value["id"]}, {"title", "Trigger hook"}})
+                    .ok);
+    ASSERT_FALSE(delivered_payload.empty());
+    const auto signed_with = [&](std::string_view key) {
+        unsigned char digest[EVP_MAX_MD_SIZE];
+        unsigned int size = 0;
+        HMAC(EVP_sha256(),
+             key.data(),
+             static_cast<int>(key.size()),
+             reinterpret_cast<const unsigned char*>(delivered_payload.data()),
+             delivered_payload.size(),
+             digest,
+             &size);
+        return "sha256=" + lake::control::identity_crypto::base64url_encode(
+                               std::string_view(reinterpret_cast<const char*>(digest), size));
+    };
+    EXPECT_NE(delivered_signature, signed_with(""));
+    EXPECT_NE(delivered_signature, signed_with(secret));
 }
 
 TEST(GitHubImport, MapsRecordedIssuesReviewsAndWorkflowReport) {
@@ -4707,17 +5017,140 @@ TEST(Forge, BranchProtectionRequiresAnApprovedReview) {
     const ApiResult review = surface.call(
         "create_review", {{"repository_id", repository_id}, {"change_id", "change-1"}});
     ASSERT_TRUE(review.ok) << review.error.message;
-    ASSERT_TRUE(surface
-                    .call("update_review",
-                          {{"repository_id", repository_id},
-                           {"review_id", review.value["id"]},
-                           {"state", "approved"}})
-                    .ok);
+    // Someone other than the pusher, with review on the repository, approves (LSR-077).
+    const auto object = surface.store.find_policy_object("repository", repository_id);
+    ASSERT_TRUE(object);
+    ASSERT_TRUE(surface.store.create_grant({"taap:1:ed25519:reviewer",
+                                            object->id,
+                                            "admin",
+                                            "attestation-reviewer",
+                                            "admin",
+                                            "request-reviewer"}));
+    surface.ctx.acting_identity = "taap:1:ed25519:reviewer";
+    surface.ctx.operator_credential = false;
+    const ApiResult approval = surface.call("update_review",
+                                            {{"repository_id", repository_id},
+                                             {"review_id", review.value["id"]},
+                                             {"state", "approved"}});
+    ASSERT_TRUE(approval.ok) << approval.error.message;
+    surface.ctx.acting_identity = "admin";
+    surface.ctx.operator_credential = true;
     const auto approved = load();
     ASSERT_EQ(approved.reviews.size(), 1u);
     EXPECT_TRUE(evaluate_branch_protection(
         surface.store, "admin", surface.ctx.authorization_cache, approved, update));
     EXPECT_TRUE(approved.releases.empty()) << "no rule asks for verification";
+}
+
+// LSR-077: a required review is satisfied only by someone other than the pusher who holds `review`
+// when the push is evaluated, and never by the person who opened the review.
+TEST(Forge, ARequiredReviewNeedsASecondPersonWithReview) {
+    Surface surface;
+    const ApiResult user = surface.call("create_user", {{"display_name", "Ada"}});
+    ASSERT_TRUE(user.ok) << user.error.message;
+    const ApiResult customer = surface.call(
+        "create_customer",
+        {{"customer_type", "individual"}, {"user_id", user.value["id"]}, {"name", "ada"}});
+    ASSERT_TRUE(customer.ok) << customer.error.message;
+    const ApiResult repository =
+        surface.call("create_repository",
+                     {{"customer_id", customer.value["id"]},
+                      {"workspace_id", surface.workspace(customer.value["id"])},
+                      {"name", "two-person"}});
+    ASSERT_TRUE(repository.ok) << repository.error.message;
+    const std::string repository_id = repository.value["id"];
+    ASSERT_TRUE(surface
+                    .call("set_branch_protection",
+                          {{"repository_id", repository_id},
+                           {"ref", "refs/heads/main"},
+                           {"required_review", true}})
+                    .ok);
+    const auto object = surface.store.find_policy_object("repository", repository_id);
+    ASSERT_TRUE(object);
+    const std::string author = "taap:1:ed25519:review-author";
+    const std::string peer = "taap:1:ed25519:review-peer";
+    const std::string writer = "taap:1:ed25519:review-writer";
+    std::string peer_grant;
+    for (const auto& [principal, role] :
+         {std::pair{author, "admin"}, std::pair{peer, "admin"}, std::pair{writer, "write"}}) {
+        const auto grant = surface.store.create_grant(
+            {principal, object->id, role, "attestation-" + principal, "admin", "request"});
+        ASSERT_TRUE(grant) << grant.error().message;
+        if (principal == peer) {
+            peer_grant = grant->id;
+        }
+    }
+    const auto as = [&](const std::string& identity) {
+        surface.ctx.acting_identity = identity;
+        surface.ctx.operator_credential = false;
+        surface.ctx.authorization_cache = {};
+    };
+    const auto review_state = [&](const json& review, const std::string& state) {
+        return surface.call(
+            "update_review",
+            {{"repository_id", repository_id}, {"review_id", review["id"]}, {"state", state}});
+    };
+    const auto stored = surface.store.get_repository(repository_id);
+    ASSERT_TRUE(stored);
+    const BranchRefUpdate update{
+        .name = "refs/heads/main", .new_head = "change-1", .fast_forward = true};
+    const auto push_as = [&](const std::string& pusher) {
+        auto loaded = liquid::runtime::block_on(load_branch_protection(surface.ctx, *stored));
+        EXPECT_TRUE(loaded && *loaded);
+        lake::control::AuthorizationCache cache;
+        return evaluate_branch_protection(surface.store, pusher, cache, **loaded, update);
+    };
+
+    // One person opens, approves and pushes: the approval is refused and the push with it.
+    as(author);
+    const ApiResult own = surface.call(
+        "create_review", {{"repository_id", repository_id}, {"change_id", "change-1"}});
+    ASSERT_TRUE(own.ok) << own.error.message;
+    EXPECT_EQ(own.value["value"]["opened_by"], author);
+    EXPECT_EQ(review_state(own.value, "approved").error.code, "forbidden");
+    const auto alone = push_as(author);
+    ASSERT_FALSE(alone);
+    EXPECT_EQ(alone.error().rule, "required_review");
+
+    // A writer without `review` cannot approve at all.
+    as(writer);
+    const ApiResult opened_by_writer = surface.call(
+        "create_review", {{"repository_id", repository_id}, {"change_id", "change-1"}});
+    ASSERT_TRUE(opened_by_writer.ok) << opened_by_writer.error.message;
+    EXPECT_EQ(review_state(opened_by_writer.value, "approved").error.code, "unauthorized");
+
+    // The author approves the writer's review: it names them, and counts for the writer's push
+    // but never for the author's own.
+    as(author);
+    const ApiResult approved_by_author = review_state(opened_by_writer.value, "approved");
+    ASSERT_TRUE(approved_by_author.ok) << approved_by_author.error.message;
+    EXPECT_EQ(approved_by_author.value["value"]["approval"]["by"], author);
+    EXPECT_EQ(approved_by_author.value["value"]["approval"]["change_id"], "change-1");
+    EXPECT_TRUE(push_as(writer));
+    const auto self_approved = push_as(author);
+    ASSERT_FALSE(self_approved);
+    EXPECT_EQ(self_approved.error().rule, "required_review");
+
+    // A second person's approval lets the author's push through.
+    as(peer);
+    ASSERT_TRUE(review_state(own.value, "approved").ok);
+    EXPECT_TRUE(push_as(author));
+
+    // Reopening withdraws an approval.
+    as(author);
+    const ApiResult reopened = review_state(own.value, "open");
+    ASSERT_TRUE(reopened.ok) << reopened.error.message;
+    EXPECT_TRUE(reopened.value["value"]["approval"].is_null());
+    EXPECT_FALSE(push_as(author));
+
+    // Approval is checked when the push is: once the peer loses `review`, theirs no longer counts.
+    as(peer);
+    ASSERT_TRUE(review_state(own.value, "approved").ok);
+    EXPECT_TRUE(push_as(author));
+    ASSERT_TRUE(surface.store.revoke_grant(peer_grant, false));
+    const auto revoked = push_as(author);
+    ASSERT_FALSE(revoked);
+    EXPECT_EQ(revoked.error().rule, "required_review");
 }
 
 TEST(Repositories, AnonymousCallersOnlySeePublicRepositories) {
@@ -4900,6 +5333,197 @@ TEST(Repositories, PublicRepositoryContentCapabilitiesUseTheRepositoryStore) {
     EXPECT_EQ(artifact.value["outputs"][0]["path"], "build/app");
     EXPECT_EQ(artifact.value["attestations"][0]["profile"], "slsa_provenance/1");
     EXPECT_EQ(artifact.value["trace"]["id"], "trace-1");
+}
+
+// lake#913 (LSR-002): a policy object counts only inside its own account. One account cannot
+// create objects carrying another account's resource identifiers (a folder, an environment, the
+// account's secret mounts), and objects already in the store that carry them, made before the
+// fix, are never adopted: the account the identifiers name keeps its resources.
+void expect_policy_objects_stay_in_their_account(std::shared_ptr<lake::control::Store> store,
+                                                 const std::string& database_uri) {
+    Registry registry;
+    register_core_capabilities(registry, "0.0.1");
+    RepositoryFixtureStore repository_store;
+    lake::test::RecordWorkspaces workspaces(store, database_uri);
+    const std::string suffix = lake::control::new_uuid_v4().substr(0, 8);
+    const auto call_as = [&](const std::string& taap, const std::string& name, json input) {
+        ApiContext context;
+        context.store = store.get();
+        context.sync_store = &repository_store;
+        context.workspaces = workspaces.service.get();
+        context.instance_kek = std::string(drive_kek);
+        context.node_name = "test";
+        context.authorized = true;
+        context.acting_identity = taap;
+        const auto capability = registry.find(name);
+        if (capability && capability->async_handler) {
+            auto completed = liquid::runtime::block_on(registry.call_async(name, input, context));
+            return completed ? std::move(*completed)
+                             : ApiResult::failure("store_error", completed.error().message);
+        }
+        return registry.call(name, input, context);
+    };
+    struct Account {
+        std::string taap, customer, customer_object, workspace, repository, repository_object;
+    };
+    // An account: its person, its customer with the person as admin, and a repository.
+    const auto account = [&](const std::string& name) {
+        Account made{.taap = "taap:1:ed25519:" + name + "-" + suffix};
+        const auto user =
+            store->create_user({made.taap, name + "-" + suffix + "@example.test", name});
+        if (!user) {
+            throw std::runtime_error("create_user: " + user.error().message);
+        }
+        const auto customer =
+            store->create_customer({"individual", user->id, "", name + "-" + suffix});
+        if (!customer) {
+            throw std::runtime_error("create_customer: " + customer.error().message);
+        }
+        made.customer = customer->id;
+        made.customer_object = store->find_policy_object("customer", customer->id)->id;
+        const auto granted =
+            store->create_grant({made.taap,
+                                 made.customer_object,
+                                 "admin",
+                                 lake::control::identity_crypto::sha256_hex(made.taap),
+                                 "admin",
+                                 lake::control::new_uuid_v4()});
+        if (!granted) {
+            throw std::runtime_error("create_grant: " + granted.error().message);
+        }
+        made.workspace = workspaces.create(customer->id, "home");
+        const auto repository =
+            store->create_repository({customer->id, "drive", "", "private", made.workspace});
+        if (!repository) {
+            throw std::runtime_error("create_repository: " + repository.error().message);
+        }
+        made.repository = repository->id;
+        made.repository_object = store->find_policy_object("repository", repository->id)->id;
+        return made;
+    };
+    const Account owner = account("owner");
+    const Account intruder = account("intruder");
+    // The fixture tree's `shared` folder; repository_tree answers its node id to any reader.
+    const std::string node = "22222222222222222222222222222222";
+    const std::string folder_id = owner.repository + ":" + node;
+    const std::string branch_id = owner.repository + ":refs/heads/main";
+    const std::string environment_id =
+        lake::control::platform_environment_id(owner.repository, "production");
+    const std::string secrets_id = "secrets/" + owner.customer;
+
+    // create_object refuses every identifier of the owner's, under the intruder's own objects.
+    const auto create =
+        [&](const std::string& type, const std::string& external_id, const std::string& parent) {
+            return call_as(
+                intruder.taap,
+                "create_object",
+                {{"object_type", type}, {"external_id", external_id}, {"parent_id", parent}});
+        };
+    EXPECT_EQ(create("path", folder_id, intruder.repository_object).error.code, "invalid_input");
+    EXPECT_EQ(create("path", branch_id, intruder.repository_object).error.code, "invalid_input");
+    EXPECT_EQ(create("environment", environment_id, intruder.repository_object).error.code,
+              "invalid_input");
+    EXPECT_EQ(create("environment", secrets_id, intruder.customer_object).error.code,
+              "invalid_input");
+    for (const auto& [type, id] : {std::pair{"path", folder_id},
+                                   std::pair{"path", branch_id},
+                                   std::pair{"environment", environment_id},
+                                   std::pair{"environment", secrets_id}}) {
+        EXPECT_EQ(store->find_policy_object(type, id).error().code, "not_found") << id;
+    }
+    // A path object in its own repository is still made.
+    const ApiResult own =
+        create("path", intruder.repository + ":" + node, intruder.repository_object);
+    EXPECT_TRUE(own.ok) << own.error.message;
+
+    // Objects that already carry the owner's identifiers under the intruder's objects, as
+    // create_object made them before this fix.
+    for (const auto& [type, id, parent] :
+         {std::tuple{"path", folder_id, intruder.repository_object},
+          std::tuple{"path", branch_id, intruder.repository_object},
+          std::tuple{"environment", environment_id, intruder.customer_object},
+          std::tuple{"environment", secrets_id, intruder.customer_object}}) {
+        if (store->find_policy_object(type, id)) {
+            continue; // create_object made it above (only without this fix)
+        }
+        const auto planted = store->create_policy_object(
+            {type, id, parent, intruder.taap, lake::control::new_uuid_v4(), true});
+        ASSERT_TRUE(planted) << planted.error().message;
+    }
+    // The intruder's admin does not reach the owner's folder: it cannot upload into it.
+    const ApiResult upload =
+        call_as(intruder.taap,
+                "upload_drive_files",
+                {{"repository_id", owner.repository},
+                 {"ref", "main"},
+                 {"path", "shared"},
+                 {"files", json::array({{{"name", "planted.txt"}, {"content", "aGk="}}})}});
+    EXPECT_EQ(upload.error.code, "unauthorized") << upload.error.message;
+    EXPECT_TRUE(repository_store.committed_operations.empty());
+    // The owner still reads it, and sharing it refuses to adopt the planted object.
+    const ApiResult browsed =
+        call_as(owner.taap,
+                "drive_browse",
+                {{"repository_id", owner.repository}, {"ref", "main"}, {"path", "shared"}});
+    EXPECT_TRUE(browsed.ok) << browsed.error.message;
+    EXPECT_EQ(call_as(owner.taap,
+                      "share_drive_folder",
+                      {{"repository_id", owner.repository},
+                       {"ref", "main"},
+                       {"path", "shared"},
+                       {"principal_taap_id", owner.taap},
+                       {"role", "read"}})
+                  .error.code,
+              "conflict");
+    // The branch rule, the environment and the account's secret mounts are not adopted either.
+    EXPECT_EQ(call_as(owner.taap,
+                      "set_branch_protection",
+                      {{"repository_id", owner.repository},
+                       {"ref", "refs/heads/main"},
+                       {"required_review", true}})
+                  .error.code,
+              "conflict");
+    EXPECT_EQ(lake::control::environment_policy_object(*store, owner.repository, "production")
+                  .error()
+                  .code,
+              "conflict");
+    const std::string mount_id = lake::control::new_uuid_v4();
+    const auto mount =
+        store->create_secret_mount_route({mount_id, owner.customer, "", owner.workspace});
+    ASSERT_FALSE(mount);
+    EXPECT_EQ(mount.error().code, "conflict");
+    EXPECT_FALSE(store->get_secret_mount_route(mount_id));
+    EXPECT_EQ(store->find_policy_object("secret_mount", mount_id).error().code, "not_found");
+
+    // Moving the owner's folder carries only the folder's own object (lake#929); the planted
+    // object holding its id stays under the intruder's repository and is never moved into the
+    // owner's, where it would then count as the folder's (lake#913).
+    const ApiResult moved = call_as(owner.taap,
+                                    "move_drive_path",
+                                    {{"repository_id", owner.repository},
+                                     {"ref", "main"},
+                                     {"path", "shared"},
+                                     {"destination", "moved-shared"}});
+    EXPECT_TRUE(moved.ok) << moved.error.message;
+    const auto planted_folder = store->find_policy_object("path", folder_id);
+    ASSERT_TRUE(planted_folder) << planted_folder.error().message;
+    EXPECT_EQ(planted_folder->parent_id, intruder.repository_object);
+}
+
+TEST(PolicyObjectOwnership, MemoryStore) {
+    expect_policy_objects_stay_in_their_account(std::make_shared<lake::control::InMemoryStore>(),
+                                                {});
+}
+
+TEST(PolicyObjectOwnership, PostgresStore) {
+    const char* database_uri = lake::test::postgres_uri();
+    if (database_uri == nullptr || *database_uri == '\0') {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
+    }
+    std::shared_ptr<lake::control::Store> store = lake::control::make_postgres_store(
+        database_uri, "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff");
+    ASSERT_TRUE(store->ping());
+    expect_policy_objects_stay_in_their_account(store, database_uri);
 }
 
 TEST(Drive, FolderSharingMatchesAuthorizeAndLinksExpire) {
@@ -6744,10 +7368,18 @@ TEST(SyncHttp, TwoLakeInstancesReplicateRepositoryAndResumeFromCursor) {
     const auto pushed = liquid::runtime::block_on(source_endpoint.push(*local_source));
     ASSERT_TRUE(pushed) << pushed.error().message;
 
-    LakeProcess replica(replica_port, "region-b", database_uri, temporary.path() / "region-b");
+    // The replica sends its replication credential only to a configured peer (lake#915); plain
+    // http to loopback is a test-only allowance.
+    const std::string source_origin = "http://127.0.0.1:" + std::to_string(source_port);
+    LakeProcess replica(replica_port,
+                        "region-b",
+                        database_uri,
+                        temporary.path() / "region-b",
+                        {"LAKE_REPLICATION_TOKEN=replication-admin",
+                         "LAKE_REPLICATION_PEERS=" + source_origin,
+                         "LAKE_REPLICATION_ALLOW_PRIVATE_ADDRESSES=1"});
     ASSERT_TRUE(replica.ready());
 
-    const std::string source_origin = "http://127.0.0.1:" + std::to_string(source_port);
     const auto replicate = [&] {
         return http_request(replica_port,
                             "POST",
@@ -6795,6 +7427,117 @@ TEST(SyncHttp, TwoLakeInstancesReplicateRepositoryAndResumeFromCursor) {
     EXPECT_FALSE(std::filesystem::exists(temporary.path() / "region-b" / customer->id /
                                          "repositories" / repository->id / "replication" /
                                          "region-a.cursor"));
+}
+
+// Runs the lake executable with `environment` (NAME=value, replacing the parent's value; a bare
+// NAME removes it) until it is ready or exits, and answers its exit status (-1 while it was still
+// running, then stopped) and what it wrote to stdout.
+std::pair<int, std::string> run_lake_until_ready(const std::vector<std::string>& arguments,
+                                                 const std::vector<std::string>& environment,
+                                                 unsigned short port,
+                                                 const std::filesystem::path& output) {
+    std::vector<std::string> variables;
+    for (const std::string& given : environment) {
+        if (given.find('=') != std::string::npos) {
+            variables.push_back(given);
+        }
+    }
+    for (char** entry = environ; *entry != nullptr; ++entry) {
+        const std::string_view variable(*entry);
+        const std::string name(variable.substr(0, variable.find('=')));
+        if (std::ranges::none_of(environment, [&name](const std::string& given) {
+                return given == name || given.starts_with(name + "=");
+            })) {
+            variables.emplace_back(variable);
+        }
+    }
+    std::vector<std::string> argv{LAKE_TEST_SERVER_PATH};
+    argv.insert(argv.end(), arguments.begin(), arguments.end());
+    std::vector<char*> raw_argv;
+    for (std::string& argument : argv) {
+        raw_argv.push_back(argument.data());
+    }
+    raw_argv.push_back(nullptr);
+    std::vector<char*> raw_environment;
+    for (std::string& variable : variables) {
+        raw_environment.push_back(variable.data());
+    }
+    raw_environment.push_back(nullptr);
+    posix_spawn_file_actions_t actions;
+    posix_spawn_file_actions_init(&actions);
+    posix_spawn_file_actions_addopen(
+        &actions, STDOUT_FILENO, output.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    pid_t pid = -1;
+    const int spawned = ::posix_spawn(
+        &pid, raw_argv.front(), &actions, nullptr, raw_argv.data(), raw_environment.data());
+    posix_spawn_file_actions_destroy(&actions);
+    if (spawned != 0) {
+        return {-2, {}};
+    }
+    int status = 0;
+    int exit_status = -1;
+    for (int attempt = 0; attempt < 200; ++attempt) {
+        if (::waitpid(pid, &status, WNOHANG) == pid) {
+            exit_status = WIFEXITED(status) ? WEXITSTATUS(status) : -3;
+            break;
+        }
+        const std::string ready = http_request(port, "GET", "/readyz", "", "application/json");
+        if (ready.find(" 200 ") != std::string::npos) {
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    if (exit_status == -1) {
+        ::kill(pid, SIGTERM);
+        static_cast<void>(::waitpid(pid, nullptr, 0));
+    }
+    std::ifstream written(output);
+    return {exit_status, std::string(std::istreambuf_iterator<char>(written), {})};
+}
+
+// lake#915 (LSR-004): the replication credential never defaults to the admin token, and a peer list
+// that is not a list of origins stops startup.
+TEST(ReplicationStartup, TheReplicationCredentialNeverDefaultsToTheAdminToken) {
+    TemporarySyncRoot temporary;
+    const unsigned short port = unused_loopback_port();
+    ASSERT_NE(port, 0);
+    const std::vector<std::string> arguments{
+        "--memory-store",
+        "--listen",
+        "127.0.0.1:" + std::to_string(port),
+        "--store-root",
+        (temporary.path() / "root").string(),
+        "--instance-kek",
+        "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"};
+    const auto [status, output] = run_lake_until_ready(
+        arguments,
+        {"LAKE_ADMIN_TOKEN=startup-admin", "LAKE_REPLICATION_TOKEN", "LAKE_REPLICATION_PEERS"},
+        port,
+        temporary.path() / "stdout.log");
+    ASSERT_EQ(status, -1) << "lake exited during startup:\n" << output;
+    std::optional<json> startup;
+    std::istringstream lines(output);
+    for (std::string line; std::getline(lines, line);) {
+        const json parsed = json::parse(line, nullptr, false);
+        if (parsed.is_object() && parsed.value("event", "") == "startup") {
+            startup = parsed;
+        }
+    }
+    ASSERT_TRUE(startup) << output;
+    EXPECT_EQ(startup->at("admin_token_set"), "yes");
+    EXPECT_EQ(startup->at("replication_token_set"), "no") << startup->dump();
+    EXPECT_EQ(startup->at("replication_peers"), json::array());
+
+    const unsigned short refused_port = unused_loopback_port();
+    std::vector<std::string> refused_arguments = arguments;
+    refused_arguments[2] = "127.0.0.1:" + std::to_string(refused_port);
+    const auto [refused_status, refused_output] = run_lake_until_ready(
+        refused_arguments,
+        {"LAKE_ADMIN_TOKEN=startup-admin",
+         "LAKE_REPLICATION_PEERS=https://region-a.lake.example/v1/repositories"},
+        refused_port,
+        temporary.path() / "refused.log");
+    EXPECT_EQ(refused_status, 2) << refused_output;
 }
 
 TEST(SyncHttp, StorageQuotaThrottlesNewWritesAndKeepsExistingContentReadable) {
@@ -7186,7 +7929,21 @@ TEST(PostgresSync, EnforcesBranchProtectionAtReferenceUpdates) {
     EXPECT_EQ(review_refusal->reason,
               "branch protection rejects main: an approved review is required");
 
-    workspaces.forge(*repository, "review", {{"change_id", reviewed_id}, {"state", "approved"}},
+    // An approval lake recorded, by a reviewer who is not the pusher (LSR-077).
+    const auto repository_object = control->find_policy_object("repository", repository->id);
+    ASSERT_TRUE(repository_object) << repository_object.error().message;
+    const std::string reviewer = "taap:1:ed25519:branch-reviewer-" + suffix;
+    ASSERT_TRUE(control->create_grant({reviewer,
+                                       repository_object->id,
+                                       "review",
+                                       "attestation-" + reviewer,
+                                       "admin",
+                                       "request-" + suffix}));
+    workspaces.forge(*repository,
+                     "review",
+                     {{"change_id", reviewed_id},
+                      {"state", "approved"},
+                      {"approval", {{"by", reviewer}, {"change_id", reviewed_id}}}},
                      instance_kek);
     ASSERT_TRUE(liquid::runtime::block_on(owner_endpoint.push(*source)));
 
@@ -7390,6 +8147,44 @@ TEST(SyncHttp, AtomicProtectedRefusalReportsEveryReferenceAndLandsNothing) {
     server.stop();
 }
 
+// The six-digit code an authenticator app shows for a base32 secret now (RFC 6238: HMAC-SHA1,
+// 30-second steps), as a person would type it (lake#773).
+std::string authenticator_code(const std::string& base32_secret) {
+    std::vector<unsigned char> key;
+    std::uint32_t buffer = 0;
+    int bits = 0;
+    for (const char c : base32_secret) {
+        const auto at = std::string_view("ABCDEFGHIJKLMNOPQRSTUVWXYZ234567").find(c);
+        buffer = (buffer << 5) | static_cast<std::uint32_t>(at);
+        bits += 5;
+        if (bits >= 8) {
+            bits -= 8;
+            key.push_back(static_cast<unsigned char>((buffer >> bits) & 0xff));
+        }
+    }
+    std::uint64_t counter = static_cast<std::uint64_t>(std::time(nullptr)) / 30;
+    unsigned char message[8];
+    for (int i = 7; i >= 0; --i) {
+        message[i] = static_cast<unsigned char>(counter & 0xff);
+        counter >>= 8;
+    }
+    unsigned char digest[EVP_MAX_MD_SIZE];
+    unsigned int size = 0;
+    HMAC(EVP_sha1(),
+         key.data(),
+         static_cast<int>(key.size()),
+         message,
+         sizeof(message),
+         digest,
+         &size);
+    const int offset = digest[size - 1] & 0x0f;
+    const std::uint32_t binary = (static_cast<std::uint32_t>(digest[offset] & 0x7f) << 24) |
+                                 (static_cast<std::uint32_t>(digest[offset + 1]) << 16) |
+                                 (static_cast<std::uint32_t>(digest[offset + 2]) << 8) |
+                                 static_cast<std::uint32_t>(digest[offset + 3]);
+    return std::format("{:06}", binary % 1000000);
+}
+
 TEST(Identity, PasswordSessionsTokensAndRevocation) {
     Surface s;
     const ApiResult sign_up = s.call("sign_up_password",
@@ -7426,8 +8221,20 @@ TEST(Identity, PasswordSessionsTokensAndRevocation) {
     const ApiResult enrollment = *liquid::runtime::block_on(
         s.registry.call_async("enroll_mfa", json::object(), user_context));
     ASSERT_TRUE(enrollment.ok) << enrollment.error.message;
-    EXPECT_TRUE(
-        enrollment.value["otpauth_uri"].get<std::string>().starts_with("otpauth://totp/lake:"));
+    const std::string uri = enrollment.value["otpauth_uri"];
+    EXPECT_TRUE(uri.starts_with("otpauth://totp/lake:"));
+    // lake#773: the URI's secret is base32, and the code an authenticator computes from it signs
+    // in.
+    const std::size_t secret_at = uri.find("secret=") + 7;
+    const std::string secret = uri.substr(secret_at, uri.find('&', secret_at) - secret_at);
+    ASSERT_FALSE(secret.empty());
+    EXPECT_EQ(secret.find_first_not_of("ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"), std::string::npos)
+        << secret;
+    const ApiResult with_authenticator = s.call("verify_mfa",
+                                                {{"email", "ada@example.com"},
+                                                 {"password", "correct horse battery"},
+                                                 {"code", authenticator_code(secret)}});
+    ASSERT_TRUE(with_authenticator.ok) << with_authenticator.error.message;
     ASSERT_EQ(enrollment.value["recovery_codes"].size(), 8);
     EXPECT_FALSE(enrollment.value.contains("secret"));
     const std::string first_recovery = enrollment.value["recovery_codes"][0];
@@ -7663,6 +8470,16 @@ TEST(ApiErrors, RestSaysWhetherACredentialIsMissingInvalidOrExpired) {
     EXPECT_EQ(body(bad_viewer)["error"]["reason"], "invalid");
     const std::string visitor = http_get(server.port(), "/v1/viewer");
     EXPECT_NE(visitor.find(" 200 "), std::string::npos) << visitor;
+    // lake#775: the same on a capability a visitor may call: a rejected key is 401, not a
+    // visitor's empty answer; no key at all is still a visitor.
+    for (const char* bearer : {"Bearer not-a-lake-credential",
+                               "Bearer ls1.00000000-0000-4000-8000-000000000000.not-a-secret"}) {
+        const std::string listed = http_get(server.port(), "/v1/list_repositories", bearer);
+        EXPECT_NE(listed.find(" 401 "), std::string::npos) << bearer << "\n" << listed;
+        EXPECT_EQ(body(listed)["error"]["reason"], "invalid");
+    }
+    const std::string public_list = http_get(server.port(), "/v1/list_repositories");
+    EXPECT_NE(public_list.find(" 200 "), std::string::npos) << public_list;
     EXPECT_EQ(body(visitor)["value"]["signed_in"], false);
     EXPECT_FALSE(body(visitor)["value"]["config"].contains("base_agent_model"));
 

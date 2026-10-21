@@ -15,11 +15,13 @@
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <cstdio>
 #include <ctime>
 #include <expected>
 #include <format>
 #include <limits>
 #include <map>
+#include <optional>
 #include <ranges>
 #include <string>
 #include <string_view>
@@ -31,6 +33,7 @@
 #include "lake/api/apps.hpp"
 #include "lake/api/forge.hpp"
 #include "lake/api/oauth.hpp"
+#include "lake/api/saml.hpp"
 #include "lake/api/sync_store.hpp"
 #include "lake/api/web_ui.hpp"
 #include "lake/control/agent_library.hpp"
@@ -38,6 +41,7 @@
 #include "lake/control/identity_crypto.hpp"
 #include "lake/control/own_identity.hpp"
 #include "lake/control/pki.hpp"
+#include "lake/control/policy.hpp"
 #include "lake/control/saml.hpp"
 #include "lake/control/store.hpp"
 #include "lake/search/index.hpp"
@@ -136,6 +140,15 @@ liquid::runtime::task<ApiResult> authorize_application_origin(ApiContext& contex
 ApiResult origin_answer(std::expected<ApiResult, liquid::error> completed) {
     return completed ? std::move(*completed)
                      : ApiResult::failure("store_error", completed.error().message);
+}
+
+// The identity_proof of sign_up_password and start_oauth (lake#931); empty when absent, which the
+// store refuses beside a document.
+control::IdentityProof identity_proof_input(const json& input) {
+    const json proof = input.value("identity_proof", json::object());
+    return {proof.value("nonce", ""),
+            proof.value("expires_at", std::int64_t{0}),
+            proof.value("signature", "")};
 }
 
 ApiResult from_sync_store_error(const SyncStoreError& error) {
@@ -698,8 +711,86 @@ ApiResult search_result(search::Result<search::QueryResult> result) {
                                {"items", std::move(values)}});
 }
 
+// The key of a TOTP secret, stored as hexadecimal, written as RFC 4648 base32 without padding:
+// what the Key Uri Format's `secret` parameter is and what authenticator apps decode (lake#773).
+// The stored value is unchanged, so earlier enrollments keep verifying.
+std::string otpauth_secret(std::string_view hex) {
+    constexpr std::string_view alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+    const auto nibble = [](char c) -> int {
+        if (c >= '0' && c <= '9') {
+            return c - '0';
+        }
+        if (c >= 'a' && c <= 'f') {
+            return c - 'a' + 10;
+        }
+        if (c >= 'A' && c <= 'F') {
+            return c - 'A' + 10;
+        }
+        return -1;
+    };
+    std::string output;
+    std::uint32_t buffer = 0;
+    int bits = 0;
+    for (std::size_t i = 0; i + 1 < hex.size(); i += 2) {
+        const int high = nibble(hex[i]);
+        const int low = nibble(hex[i + 1]);
+        if (high < 0 || low < 0) {
+            return {};
+        }
+        buffer = (buffer << 8) | static_cast<std::uint32_t>((high << 4) | low);
+        bits += 8;
+        while (bits >= 5) {
+            bits -= 5;
+            output += alphabet[(buffer >> bits) & 0x1f];
+        }
+    }
+    if (bits > 0) {
+        output += alphabet[(buffer << (5 - bits)) & 0x1f];
+    }
+    return output;
+}
+
 std::expected<std::string, ApiError> global_object(const json&, ApiContext&) {
     return std::string{};
+}
+
+// Why `create_object` refuses this object, or success when it may be made (lake#913). Every
+// consumer finds an object by its type and external id, which is unique across all accounts, so
+// an object a caller names with another account's identifiers would govern that account's
+// resource from the caller's own part of the graph. A caller therefore creates only path
+// objects, and only under its own repository: the external id begins with the id of the
+// repository the parent sits in. Environments, secret mounts, secrets and the account objects
+// are created by lake itself, from the entity they belong to. The operator keeps the other
+// types for repair, held to the same rule for paths.
+ApiResult caller_object_refusal(const json& in, ApiContext& ctx) {
+    const std::string object_type = in.at("object_type");
+    const std::string external_id = in.at("external_id");
+    if (object_type != "path") {
+        if (!ctx.operator_credential) {
+            return ApiResult::failure("invalid_input",
+                                      "create_object adds only path objects; lake creates " +
+                                          object_type + " objects itself",
+                                      "/object_type");
+        }
+        return ApiResult::success(json::object());
+    }
+    const auto repository =
+        control::nearest_object_of_type(*ctx.store, in.at("parent_id"), "repository");
+    if (!repository) {
+        if (repository.error().code == "not_found") {
+            return ApiResult::failure(
+                "invalid_input", "a path object sits under a repository or a path", "/parent_id");
+        }
+        return ApiResult::failure(repository.error().code, repository.error().message);
+    }
+    const std::string prefix = repository->external_id + ":";
+    if (external_id.size() <= prefix.size() || !external_id.starts_with(prefix)) {
+        return ApiResult::failure("invalid_input",
+                                  "a path object's external_id is " + prefix +
+                                      "<node id>, in the repository it sits in",
+                                  "/external_id");
+    }
+    return ApiResult::success(json::object());
 }
 
 std::expected<std::string, ApiError> self_object(const json&, ApiContext& context) {
@@ -1320,6 +1411,8 @@ audit_filter_of(const json& input, const ApiContext& context, AuditDefaults defa
         .request_id = input.value("request_id", ""),
         .after_id = input.value("after_id", ""),
     };
+    // An account named: the central log's events attributed to it (lake#18).
+    filter.customer_id = input.value("customer_id", "");
     // after_id continues a page in append order; an explicit order always wins.
     filter.newest_first = input.contains("order")
                               ? input.at("order") == "newest"
@@ -1830,6 +1923,297 @@ ApiResult delete_organization(const json& in, ApiContext& ctx) {
     value = organization_deletion_json(*deleted, false);
     ctx.audit_details["counts"] = value["counts"];
     return ApiResult::success(std::move(value));
+}
+
+// ---- deleting an account (lake#810, docs/api/identity.md#deleting-an-account) ----
+
+// How recent a sign-in must be for a person to delete their own account without an MFA code.
+constexpr std::int64_t account_deletion_sign_in_seconds = 15 * 60;
+
+// Seconds since the epoch of the memory store's ISO 8601 timestamps or PostgreSQL's text form
+// (`YYYY-MM-DD HH:MM:SS[.ffffff]±HH[:MM]`); nullopt when unreadable.
+std::optional<std::int64_t> timestamp_seconds(std::string_view value) {
+    std::tm parts{};
+    if (value.size() < 19 ||
+        std::sscanf(std::string(value.substr(0, 19)).c_str(),
+                    "%4d-%2d-%2d%*c%2d:%2d:%2d",
+                    &parts.tm_year,
+                    &parts.tm_mon,
+                    &parts.tm_mday,
+                    &parts.tm_hour,
+                    &parts.tm_min,
+                    &parts.tm_sec) != 6) {
+        return std::nullopt;
+    }
+    parts.tm_year -= 1900;
+    parts.tm_mon -= 1;
+    std::int64_t seconds = timegm(&parts);
+    std::string_view zone = value.substr(19);
+    while (!zone.empty() &&
+           (zone.front() == '.' || std::isdigit(static_cast<unsigned char>(zone.front())))) {
+        zone.remove_prefix(1);
+    }
+    if (!zone.empty() && (zone.front() == '+' || zone.front() == '-')) {
+        const int sign = zone.front() == '+' ? 1 : -1;
+        int hours = 0;
+        int minutes = 0;
+        std::sscanf(std::string(zone.substr(1)).c_str(), "%2d:%2d", &hours, &minutes);
+        seconds -= sign * (hours * 3600 + minutes * 60);
+    }
+    return seconds;
+}
+
+// The account delete_account acts on: `user_id`, or the caller's own.
+std::string account_deletion_target(const json& in, const ApiContext& ctx) {
+    return in.contains("user_id") ? in.at("user_id").get<std::string>() : ctx.acting_user_id;
+}
+
+// The account's own principal: a person may act only on themselves, so naming anyone else is
+// refused before the handler runs. The operator passes every check.
+std::expected<std::string, ApiError> account_deletion_object(const json& in, ApiContext& ctx) {
+    const std::string user_id = account_deletion_target(in, ctx);
+    if (ctx.acting_identity == "admin") {
+        return "principal/admin";
+    }
+    if (user_id.empty() || user_id != ctx.acting_user_id || ctx.acting_identity.empty()) {
+        return std::unexpected(ApiError{
+            "unauthorized", "only the account itself or the operator can delete an account", {}});
+    }
+    return "principal/" + ctx.acting_identity;
+}
+
+// What the account deletion does with each organization the account is in: `delete` (it is the
+// only owner and nobody else is a member, or delete_organizations was asked for), `leave` (other
+// owners keep it), or `blocked` (the only owner, with other members, and not asked to delete it).
+std::string organization_action(const control::AccountOrganization& organization,
+                                bool delete_organizations) {
+    if (!organization.sole_owner()) {
+        return "leave";
+    }
+    return organization.other_members == 0 || delete_organizations ? "delete" : "blocked";
+}
+
+json account_deletion_json(const control::AccountDeletion& plan,
+                           bool delete_organizations,
+                           bool dry_run) {
+    const auto workspace_items = [](const std::vector<control::Workspace>& workspaces) {
+        json items = json::array();
+        for (const control::Workspace& workspace : workspaces) {
+            items.push_back({{"id", workspace.id},
+                             {"name", workspace.name},
+                             {"environment", workspace.environment},
+                             {"customer_id", workspace.customer_id}});
+        }
+        return items;
+    };
+    json organizations = json::array();
+    for (const control::AccountOrganization& organization : plan.organizations) {
+        organizations.push_back(
+            {{"organization_id", organization.organization.id},
+             {"display_name", organization.organization.display_name},
+             {"customer_id",
+              organization.customer_id.empty() ? json(nullptr) : json(organization.customer_id)},
+             {"handle",
+              organization.customer_name.empty() ? json(nullptr)
+                                                 : json(organization.customer_name)},
+             {"role", organization.role.empty() ? json(nullptr) : json(organization.role)},
+             {"other_owners", organization.other_owners},
+             {"other_members", organization.other_members},
+             {"workspaces", workspace_items(organization.live_workspaces)},
+             {"action", organization_action(organization, delete_organizations)}});
+    }
+    json counts = json::object();
+    for (const auto& [kind, count] : plan.counts) {
+        counts[kind] = count;
+    }
+    return {{"user_id", plan.user.id},
+            {"customer_id", plan.customer_id.empty() ? json(nullptr) : json(plan.customer_id)},
+            {"handle", plan.customer_name.empty() ? json(nullptr) : json(plan.customer_name)},
+            {"workspaces", workspace_items(plan.live_workspaces)},
+            {"organizations", std::move(organizations)},
+            {"counts", std::move(counts)},
+            {"kept",
+             {{"invoices", plan.invoices_kept},
+              {"open_invoices", plan.open_invoices},
+              {"audit",
+               "the central audit log keeps its events, which name the account by its TAAP "
+               "identity and its personal account's id; Lake no longer maps them to an email or a name"}}},
+            {"dry_run", dry_run},
+            {"deleted", !dry_run},
+            {"deleted_at", plan.deleted_at.empty() ? json(nullptr) : json(plan.deleted_at)}};
+}
+
+// A person deleting their own account proves it is them now: a sign-in session started in the
+// last fifteen minutes, or a fresh TOTP or recovery code when MFA is enrolled. A token, however
+// new, is not a sign-in.
+ApiResult account_deletion_step_up(const json& in, ApiContext& ctx) {
+    const std::string pool = ctx.pool_id.empty() ? "lake" : ctx.pool_id;
+    const auto sessions = ctx.store->list_sessions(ctx.acting_user_id, pool);
+    if (!sessions) {
+        return from_store_error(sessions.error());
+    }
+    const auto session =
+        std::ranges::find(*sessions, ctx.credential_session_id, &control::Session::id);
+    if (session == sessions->end()) {
+        return ApiResult::failure("unauthorized",
+                                  "an account is deleted by a person signed in to it");
+    }
+    if (in.contains("code")) {
+        const auto verified =
+            ctx.store->verify_mfa_code(ctx.acting_user_id, pool, in.at("code").get<std::string>());
+        if (!verified) {
+            auto failed = from_store_error(verified.error());
+            failed.error.path = "/code";
+            return failed;
+        }
+        return ApiResult::success(nullptr);
+    }
+    if (session->kind == "browser" || session->kind == "taap") {
+        const auto started = timestamp_seconds(session->created_at);
+        const auto now = std::chrono::duration_cast<std::chrono::seconds>(
+                             std::chrono::system_clock::now().time_since_epoch())
+                             .count();
+        if (started && now - *started <= account_deletion_sign_in_seconds) {
+            return ApiResult::success(nullptr);
+        }
+    }
+    return ApiResult::failure("unauthorized",
+                              "sign in again (within the last 15 minutes), or give a fresh MFA "
+                              "code, to delete your account");
+}
+
+// What another capability, called as the same caller on a copy of the context (so this call's
+// own audit record is left as it is), answered.
+ApiResult completed_call(std::expected<ApiResult, liquid::error> done) {
+    return done ? std::move(*done) : ApiResult::failure("store_error", done.error().message);
+}
+
+// delete_account: the account itself (after a recent sign-in or MFA) or the operator deletes an
+// account. The workspaces of its personal account and the organizations it alone owns go first,
+// each through delete_workspace and delete_organization (so each workspace Zetta is removed
+// through the operator's desired state and each step is audited on its own); then the store
+// removes the account's identity, memberships and grants and marks it deleted.
+liquid::runtime::task<ApiResult> delete_account(const json& in, ApiContext& ctx) {
+    if (!ctx.store) {
+        co_return no_store();
+    }
+    if (ctx.registry == nullptr) {
+        co_return ApiResult::failure("store_unavailable", "no registry to delete the account");
+    }
+    const std::string user_id = account_deletion_target(in, ctx);
+    const bool dry_run = in.value("dry_run", false);
+    const bool delete_organizations = in.value("delete_organizations", false);
+    const bool operator_call = ctx.acting_identity == "admin";
+    ctx.audit_kind = dry_run ? "account.delete.plan" : "account.delete";
+    ctx.audit_object = "user/" + user_id;
+    ctx.audit_details = {{"user_id", user_id}};
+    if (user_id.empty()) {
+        co_return ApiResult::failure(
+            "invalid_input", "user_id is required with the operator credential", "/user_id");
+    }
+    if (!operator_call && user_id != ctx.acting_user_id) {
+        co_return ApiResult::failure("unauthorized", "only the account itself or the operator "
+                                                     "can delete an account");
+    }
+    if (!operator_call && !ctx.session_credential) {
+        co_return ApiResult::failure("unauthorized", "a signed-in account is required");
+    }
+    auto plan = ctx.store->delete_account(user_id, true);
+    if (!plan) {
+        auto failed = from_store_error(plan.error());
+        failed.error.path = in.contains("user_id") ? "/user_id" : "";
+        co_return failed;
+    }
+    ctx.audit_customer_id = plan->customer_id;
+    ctx.audit_details["handle"] = plan->customer_name;
+    const std::string expected = plan->customer_name.empty() ? user_id : plan->customer_name;
+    const bool confirmed = in.contains("confirm") && in.at("confirm") == expected;
+    if (!confirmed && (!dry_run || in.contains("confirm"))) {
+        co_return ApiResult::failure(
+            "invalid_input", "confirm must match the account's handle", "/confirm");
+    }
+    json value = account_deletion_json(*plan, delete_organizations, true);
+    ctx.audit_details["counts"] = value["counts"];
+    if (dry_run) {
+        co_return ApiResult::success(std::move(value));
+    }
+    std::string blocked;
+    for (const control::AccountOrganization& organization : plan->organizations) {
+        if (organization_action(organization, delete_organizations) == "blocked") {
+            blocked += (blocked.empty() ? "" : ", ") + organization.organization.display_name;
+        }
+    }
+    if (!blocked.empty()) {
+        co_return ApiResult::failure(
+            "conflict",
+            "the account is the only owner of organizations other people belong to: " + blocked +
+                ". Make another member an owner, or pass delete_organizations: true to delete "
+                "them too",
+            "/delete_organizations");
+    }
+    if (!operator_call) {
+        if (const ApiResult proved = account_deletion_step_up(in, ctx); !proved.ok) {
+            co_return proved;
+        }
+    }
+    // The workspaces and organizations that go with the account, each by its own capability:
+    // every workspace first, then the organizations, whose deletion needs their workspaces gone.
+    std::vector<control::Workspace> workspaces = plan->live_workspaces;
+    std::vector<const control::AccountOrganization*> organizations;
+    for (const control::AccountOrganization& organization : plan->organizations) {
+        if (organization_action(organization, delete_organizations) == "delete") {
+            organizations.push_back(&organization);
+            workspaces.insert(workspaces.end(),
+                              organization.live_workspaces.begin(),
+                              organization.live_workspaces.end());
+        }
+    }
+    json deleted_workspaces = json::array();
+    json deleted_organizations = json::array();
+    for (const control::Workspace& workspace : workspaces) {
+        ApiContext inner = ctx;
+        ApiResult done = completed_call(
+            co_await ctx.registry->call_async("delete_workspace",
+                                              {{"customer_id", workspace.customer_id},
+                                               {"workspace_id", workspace.id},
+                                               {"confirm", workspace.name}},
+                                              inner));
+        if (!done.ok) {
+            done.error.message = "deleting workspace " + workspace.name + ": " + done.error.message;
+            co_return done;
+        }
+        deleted_workspaces.push_back({{"id", workspace.id}, {"name", workspace.name}});
+    }
+    for (const control::AccountOrganization* organization : organizations) {
+        ApiContext inner = ctx;
+        ApiResult done = completed_call(co_await ctx.registry->call_async(
+            "delete_organization",
+            {{"organization_id", organization->organization.id},
+             {"confirm",
+              organization->customer_name.empty() ? organization->organization.id
+                                                  : organization->customer_name}},
+            inner));
+        if (!done.ok) {
+            done.error.message = "deleting organization " +
+                                 organization->organization.display_name + ": " +
+                                 done.error.message;
+            co_return done;
+        }
+        deleted_organizations.push_back(
+            {{"organization_id", organization->organization.id},
+             {"display_name", organization->organization.display_name}});
+    }
+    auto deleted = ctx.store->delete_account(user_id, false);
+    if (!deleted) {
+        co_return from_store_error(deleted.error());
+    }
+    value = account_deletion_json(*deleted, delete_organizations, false);
+    value["deleted_workspaces"] = std::move(deleted_workspaces);
+    value["deleted_organizations"] = std::move(deleted_organizations);
+    ctx.audit_details["counts"] = value["counts"];
+    ctx.audit_details["deleted_workspaces"] = value["deleted_workspaces"];
+    ctx.audit_details["deleted_organizations"] = value["deleted_organizations"];
+    co_return ApiResult::success(std::move(value));
 }
 
 // A grant or membership written with the attestation lake signed for it (lake#602): the answer is
@@ -2414,6 +2798,37 @@ void register_own_identity_capabilities(Registry& registry) {
         }});
 }
 
+// A provider's endpoints (lake#837): Google's and GitHub's fixed ones, any other's from its OIDC
+// discovery document, fetched on the blocking pool (the issuer may be slow; lake#772).
+struct DiscoveredEndpoints {
+    bool ok = false;
+    OAuthEndpoints value;
+    ApiResult failure;
+};
+
+liquid::runtime::task<DiscoveredEndpoints>
+discovered_endpoints(const control::OAuthProvider& provider, ApiContext& context) {
+    const std::shared_ptr<OidcDiscovery> discovery = context.oidc_discovery;
+    std::expected<OAuthEndpoints, ApiError> endpoints;
+    if (provider.provider == "google" || provider.provider == "github" || !discovery) {
+        endpoints = oauth_endpoints(provider, discovery.get());
+    } else {
+        auto ran = co_await run_blocking(
+            [discovery, provider] { return oauth_endpoints(provider, discovery.get()); });
+        endpoints = ran ? std::move(*ran)
+                        : std::unexpected(ApiError{.code = "busy", .message = ran.error().message});
+    }
+    if (!endpoints) {
+        co_return DiscoveredEndpoints{
+            .failure = ApiResult::failure(endpoints.error().code, endpoints.error().message)};
+    }
+    if (!oauth_endpoints_allowed(*endpoints, discovery && discovery->allows_private_addresses())) {
+        co_return DiscoveredEndpoints{
+            .failure = ApiResult::failure("invalid_input", "OAuth endpoints must use HTTPS")};
+    }
+    co_return DiscoveredEndpoints{.ok = true, .value = std::move(*endpoints)};
+}
+
 void register_identity_capabilities(Registry& registry) {
     // ---- users ----
     registry.add(Capability{
@@ -2564,6 +2979,42 @@ void register_identity_capabilities(Registry& registry) {
         .action = "admin",
         .resolve_object = entity_object("organization", "organization_id"),
         .handler = delete_organization});
+    registry.add(Capability{
+        .name = "delete_account",
+        .title = "Delete an account",
+        .description =
+            "Delete an account, which cannot be undone. Only the account itself (signed in within "
+            "the last 15 minutes, or with a fresh MFA `code`) or the operator can delete it. The "
+            "workspaces of its personal account are deleted first (each by delete_workspace), then "
+            "the organizations it is the only owner of, with their workspaces (by "
+            "delete_organization); organizations other owners share are left to them. Then its "
+            "sessions, tokens, devices, passkeys, passwords and other credentials, memberships, "
+            "grants and billing contact go, and the account is marked deleted with its email and "
+            "name erased. It is refused while it is the only owner of an organization other "
+            "people belong to, unless `delete_organizations: true`. Invoices and the central "
+            "audit log are kept. `confirm` must be its handle (its user id when it has none). "
+            "`dry_run: true` deletes nothing and lists what would go.",
+        .input_schema = {{"type", "object"},
+                         {"properties",
+                          {{"user_id",
+                            {{"type", "string"},
+                             {"description",
+                              "the account to delete; omitted, your own (the operator must name "
+                              "one)"}}},
+                           {"confirm", {{"type", "string"}}},
+                           {"code",
+                            {{"type", "string"},
+                             {"description",
+                              "a TOTP or recovery code, instead of a recent sign-in"}}},
+                           {"delete_organizations", {{"type", "boolean"}}},
+                           {"dry_run", {{"type", "boolean"}}}}},
+                         {"additionalProperties", false}},
+        .output_schema = {{"type", "object"}},
+        .kind = CapabilityKind::Action,
+        .object = "principal",
+        .action = "admin",
+        .resolve_object = account_deletion_object,
+        .async_handler = delete_account});
 
     // ---- customers ----
     registry.add(Capability{
@@ -2669,6 +3120,64 @@ void register_identity_capabilities(Registry& registry) {
                                          {"access_token", {{"type", "string"}}},
                                          {"token_type", {{"type", "string"}}},
                                          {"expires_in", {{"type", "integer"}}}}}};
+    // The proof that the person holds an identity document's key (lake#931): the nonce and expiry
+    // begin_identity_proof issued and what `liquid sign artifact <challenge>` printed.
+    const json identity_proof_schema = {
+        {"type", "object"},
+        {"properties",
+         {{"nonce", {{"type", "string"}}},
+          {"expires_at", {{"type", "integer"}}},
+          {"signature", {{"type", "string"}}}}},
+        {"required", json::array({"nonce", "expires_at", "signature"})},
+        {"additionalProperties", false}};
+    registry.add(Capability{
+        .name = "begin_identity_proof",
+        .title = "Begin identity proof",
+        .description = "Issue a five-minute challenge proving you hold the key of an identity "
+                       "document, which sign_up_password and a first start_oauth need before "
+                       "they bind the document to a new account. Sign it with `liquid sign "
+                       "artifact <challenge>` and send its nonce and expires_at with what that "
+                       "printed as identity_proof, in the same pool.",
+        .input_schema = {{"type", "object"},
+                         {"properties",
+                          {{"pool_id", {{"type", "string"}}},
+                           {"identity_document", {{"type", "string"}}}}},
+                         {"required", json::array({"identity_document"})},
+                         {"additionalProperties", false}},
+        .output_schema = {{"type", "object"},
+                          {"properties",
+                           {{"challenge", {{"type", "string"}}},
+                            {"nonce", {{"type", "string"}}},
+                            {"expires_at", {{"type", "integer"}}},
+                            {"command", {{"type", "string"}}}}}},
+        .kind = CapabilityKind::Action,
+        .requires_auth = false,
+        .object = "authentication",
+        .action = "write",
+        .resolve_object = global_object,
+        .async_handler = [](const json& input,
+                            ApiContext& context) -> liquid::runtime::task<ApiResult> {
+            if (!context.store) {
+                co_return no_store();
+            }
+            const std::string pool_id = input.value("pool_id", "lake");
+            if (const ApiResult origin =
+                    origin_answer(co_await authorize_application_origin(context, pool_id));
+                !origin.ok) {
+                co_return origin;
+            }
+            const auto issued = context.store->begin_identity_proof(
+                pool_id, input.at("identity_document").get<std::string>());
+            if (!issued) {
+                co_return ApiResult::failure(
+                    issued.error().code, issued.error().message, "/identity_document");
+            }
+            co_return ApiResult::success(
+                {{"challenge", issued->challenge},
+                 {"nonce", issued->nonce},
+                 {"expires_at", issued->expires_at},
+                 {"command", "liquid sign artifact " + issued->challenge}});
+        }});
     registry.add(Capability{
         .name = "sign_up_password",
         .title = "Sign up with password",
@@ -2679,7 +3188,9 @@ void register_identity_capabilities(Registry& registry) {
                        "Duplicate email or identity returns conflict; sign in to resume. In the "
                        "Lake pool identity_document is optional: without it Lake creates a "
                        "managed key for the account, which the person can later replace with "
-                       "their own identity (use_own_identity).",
+                       "their own identity (use_own_identity). With it, identity_proof is "
+                       "required: a signature by the document's key over begin_identity_proof's "
+                       "challenge.",
         .input_schema = {{"type", "object"},
                          {"properties",
                           {{"pool_id", {{"type", "string"}}},
@@ -2687,7 +3198,8 @@ void register_identity_capabilities(Registry& registry) {
                            {"password", {{"type", "string"}}},
                            {"display_name", {{"type", "string"}}},
                            {"device_name", {{"type", "string"}}},
-                           {"identity_document", {{"type", "string"}}}}},
+                           {"identity_document", {{"type", "string"}}},
+                           {"identity_proof", identity_proof_schema}}},
                          {"required", json::array({"email", "password"})},
                          {"additionalProperties", false}},
         .output_schema = session_issue_schema,
@@ -2712,6 +3224,7 @@ void register_identity_capabilities(Registry& registry) {
                                           input.value("display_name", ""),
                                           input.value("device_name", "browser"),
                                           input.value("identity_document", "")};
+            user.identity_proof = identity_proof_input(input);
             // Lake's own sign-up without a document gets a managed key (lake#762, decision 65).
             if (pool_id == "lake" &&
                 user.identity_document.find_first_not_of(" \t\r\n") == std::string::npos) {
@@ -2773,11 +3286,21 @@ void register_identity_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "sign_in_taap",
         .title = "Sign in with TAAP key",
-        .description = "Verify a fresh liquid identity assertion and issue a Lake session.",
+        .description = "Verify a fresh liquid identity assertion and issue a Lake session. The "
+                       "assertion must be signed with the key the identity document's identifier "
+                       "was derived from, or, after `liquid identity rotate`, with the current key "
+                       "of `identity_chain`, every rotation signed by the key it replaced.",
         .input_schema = {{"type", "object"},
                          {"properties",
                           {{"pool_id", {{"type", "string"}}},
                            {"identity_document", {{"type", "string"}}},
+                           {"identity_chain",
+                            {{"type", "array"},
+                             {"items", {{"type", "string"}}},
+                             {"maxItems", 64},
+                             {"description",
+                              "after a rotation: every identity document from the identity's "
+                              "first, oldest first, ending with identity_document (lake#917)"}}},
                            {"nonce", {{"type", "string"}}},
                            {"issued_at", {{"type", "integer"}}},
                            {"signature", {{"type", "object"}}},
@@ -2802,13 +3325,22 @@ void register_identity_capabilities(Registry& registry) {
                 !origin.ok) {
                 co_return origin;
             }
+            const auto identity_chain = input.value("identity_chain", std::vector<std::string>{});
             auto verified = control::identity_crypto::verify_taap_sign_in(
                 input.at("identity_document").get<std::string>(),
                 pool_id,
                 input.at("nonce").get<std::string>(),
                 input.at("issued_at").get<std::int64_t>(),
-                input.at("signature"));
+                input.at("signature"),
+                0,
+                identity_chain);
             if (!verified) {
+                // lake#917: a refused sign-in is audited with the identity it claimed and why.
+                context.audit_details = {{"claimed_taap_id",
+                                          control::identity_crypto::claimed_taap_id(
+                                              input.at("identity_document").get<std::string>())},
+                                         {"reason", verified.error()},
+                                         {"identity_chain_documents", identity_chain.size()}};
                 co_return ApiResult::failure("unauthorized", verified.error());
             }
             context.authentication_method = "taap";
@@ -2886,11 +3418,13 @@ void register_identity_capabilities(Registry& registry) {
             if (!event.ok) {
                 co_return event;
             }
-            co_return ApiResult::success({{"otpauth_uri",
-                                           "otpauth://totp/lake:" + context.acting_user_id +
-                                               "?secret=" + result->secret + "&issuer=lake"},
-                                          {"recovery_codes", result->recovery_codes}});
-        }});
+            co_return ApiResult::success(
+                {{"otpauth_uri",
+                  "otpauth://totp/lake:" + context.acting_user_id +
+                      "?secret=" + otpauth_secret(result->secret) + "&issuer=lake"},
+                 {"recovery_codes", result->recovery_codes}});
+        },
+        .serves_application_pools = true});
     registry.add(Capability{
         .name = "disable_mfa",
         .title = "Disable MFA",
@@ -2917,7 +3451,8 @@ void register_identity_capabilities(Registry& registry) {
             const ApiResult event = session_answer(
                 co_await emit_application_mfa_change(context, context.pool_id, "totp", false));
             co_return event.ok ? ApiResult::success({{"disabled", true}}) : event;
-        }});
+        },
+        .serves_application_pools = true});
     registry.add(Capability{
         .name = "begin_passkey_registration",
         .title = "Begin passkey registration",
@@ -2970,7 +3505,8 @@ void register_identity_capabilities(Registry& registry) {
                    {"pubKeyCredParams", json::array({{{"type", "public-key"}, {"alg", -7}}})},
                    {"timeout", 300000},
                    {"attestation", "none"}}}});
-        }});
+        },
+        .serves_application_pools = true});
     registry.add(Capability{
         .name = "register_passkey",
         .title = "Register passkey",
@@ -3010,7 +3546,8 @@ void register_identity_capabilities(Registry& registry) {
             const ApiResult event = session_answer(
                 co_await emit_application_mfa_change(context, pool_id, "passkey", true));
             co_return event.ok ? ApiResult::success({{"registered", true}}) : event;
-        }});
+        },
+        .serves_application_pools = true});
     registry.add(Capability{
         .name = "begin_passkey_sign_in",
         .title = "Begin passkey sign-in",
@@ -3144,13 +3681,16 @@ void register_identity_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "start_oauth",
         .title = "Start OAuth sign-in",
-        .description = "Create a one-use OAuth authorization flow with PKCE and state.",
+        .description = "Create a one-use OAuth authorization flow with PKCE and state. A first "
+                       "sign-in's identity_document needs identity_proof: a signature by its key "
+                       "over begin_identity_proof's challenge.",
         .input_schema = {{"type", "object"},
                          {"properties",
                           {{"pool_id", {{"type", "string"}}},
                            {"provider", {{"type", "string"}}},
                            {"device_name", {{"type", "string"}}},
-                           {"identity_document", {{"type", "string"}}}}},
+                           {"identity_document", {{"type", "string"}}},
+                           {"identity_proof", identity_proof_schema}}},
                          {"required", json::array({"provider"})},
                          {"additionalProperties", false}},
         .output_schema = {{"type", "object"},
@@ -3180,9 +3720,13 @@ void register_identity_capabilities(Registry& registry) {
             if (!provider) {
                 co_return from_store_error(provider.error());
             }
-            if (!oauth_endpoints_allowed(oauth_endpoints(*provider))) {
-                co_return ApiResult::failure("invalid_input",
-                                          "OAuth endpoints must use HTTPS outside loopback tests");
+            auto awaited = co_await discovered_endpoints(*provider, context);
+            if (!awaited) {
+                co_return ApiResult::failure("store_error", awaited.error().message);
+            }
+            const DiscoveredEndpoints& endpoints = *awaited;
+            if (!endpoints.ok) {
+                co_return endpoints.failure;
             }
             control::OAuthFlow flow{pool_id,
                                     provider_name,
@@ -3190,7 +3734,8 @@ void register_identity_capabilities(Registry& registry) {
                                     control::identity_crypto::random_secret(),
                                     control::identity_crypto::random_secret(),
                                     input.value("device_name", "browser"),
-                                    input.value("identity_document", "")};
+                                    input.value("identity_document", ""),
+                                    identity_proof_input(input)};
             if (flow.state.empty() || flow.code_verifier.empty() || flow.nonce.empty()) {
                 co_return ApiResult::failure("store_error", "could not generate OAuth flow material");
             }
@@ -3200,7 +3745,7 @@ void register_identity_capabilities(Registry& registry) {
             }
             co_return ApiResult::success(
                 {{"authorization_url",
-                  oauth_authorization_url(*provider, flow, context.public_host)}});
+                  oauth_authorization_url(*provider, endpoints.value, flow, context.public_host)}});
         }});
     registry.add(Capability{
         .name = "start_sso_oidc",
@@ -3219,20 +3764,25 @@ void register_identity_capabilities(Registry& registry) {
         .object = "authentication",
         .action = "write",
         .resolve_object = global_object,
-        .handler = [](const json& input, ApiContext& context) {
+        .async_handler = [](const json& input,
+                            ApiContext& context) -> liquid::runtime::task<ApiResult> {
             if (!context.store)
-                return no_store();
+                co_return no_store();
             if (context.public_host.empty()) {
-                return ApiResult::failure("store_unavailable",
-                                          "LAKE_PUBLIC_HOST is required for OIDC sign-in");
+                co_return ApiResult::failure("store_unavailable",
+                                             "LAKE_PUBLIC_HOST is required for OIDC sign-in");
             }
             const std::string provider_id = input.at("provider_id");
             const auto provider = context.store->get_sso_oidc_provider(provider_id);
             if (!provider)
-                return from_store_error(provider.error());
-            if (!oauth_endpoints_allowed(oauth_endpoints(*provider))) {
-                return ApiResult::failure("invalid_input",
-                                          "OIDC endpoints must use HTTPS outside loopback tests");
+                co_return from_store_error(provider.error());
+            auto awaited = co_await discovered_endpoints(*provider, context);
+            if (!awaited) {
+                co_return ApiResult::failure("store_error", awaited.error().message);
+            }
+            const DiscoveredEndpoints& endpoints = *awaited;
+            if (!endpoints.ok) {
+                co_return endpoints.failure;
             }
             control::OAuthFlow flow{provider->pool_id,
                                     provider->provider,
@@ -3242,14 +3792,15 @@ void register_identity_capabilities(Registry& registry) {
                                     input.value("device_name", "browser"),
                                     input.value("taap_id", "")};
             if (flow.state.empty() || flow.code_verifier.empty() || flow.nonce.empty()) {
-                return ApiResult::failure("store_error", "could not generate OIDC flow material");
+                co_return ApiResult::failure("store_error",
+                                             "could not generate OIDC flow material");
             }
             const auto started = context.store->begin_oauth(flow);
             if (!started)
-                return from_store_error(started.error());
-            return ApiResult::success(
+                co_return from_store_error(started.error());
+            co_return ApiResult::success(
                 {{"authorization_url",
-                  oauth_authorization_url(*provider, flow, context.public_host)}});
+                  oauth_authorization_url(*provider, endpoints.value, flow, context.public_host)}});
         }});
     registry.add(Capability{
         .name = "create_token",
@@ -3297,7 +3848,8 @@ void register_identity_capabilities(Registry& registry) {
             }
             co_return session_answer(
                 co_await issued_result(context.store->create_token(*token), context));
-        }});
+        },
+        .serves_application_pools = true});
     registry.add(Capability{.name = "list_sessions",
                             .title = "List sessions",
                             .description = "List the authenticated user's sessions and tokens.",
@@ -3318,7 +3870,8 @@ void register_identity_capabilities(Registry& registry) {
                                 }
                                 return list_result(context.store->list_sessions(
                                     context.acting_user_id, context.pool_id));
-                            }});
+                            },
+                            .serves_application_pools = true});
     registry.add(Capability{
         .name = "revoke_session",
         .title = "Revoke session",
@@ -3335,7 +3888,8 @@ void register_identity_capabilities(Registry& registry) {
             auto result = context.store->revoke_session(context.acting_user_id, input["id"]);
             return result ? ApiResult::success({{"revoked", true}})
                           : from_store_error(result.error());
-        }});
+        },
+        .serves_application_pools = true});
     registry.add(Capability{
         .name = "revoke_user_sessions",
         .title = "Revoke a user's sessions",
@@ -3395,7 +3949,8 @@ void register_identity_capabilities(Registry& registry) {
                            return authorization_failure(authorization);
                        }
                        return list_result(context.store->list_devices(context.acting_user_id));
-                   }});
+                   },
+                   .serves_application_pools = true});
     registry.add(Capability{
         .name = "revoke_device",
         .title = "Revoke device",
@@ -3412,7 +3967,8 @@ void register_identity_capabilities(Registry& registry) {
             auto result = context.store->revoke_device(context.acting_user_id, input["id"]);
             return result ? ApiResult::success({{"revoked", true}})
                           : from_store_error(result.error());
-        }});
+        },
+        .serves_application_pools = true});
     register_own_identity_capabilities(registry);
 }
 
@@ -3555,8 +4111,11 @@ void register_sso_capabilities(Registry& registry) {
                    }});
     registry.add(Capability{
         .name = "sign_in_sso",
-        .title = "Sign in with SSO assertion",
-        .description = "Issue a session after provider verification and federation issuer policy.",
+        .title = "Sign in with SSO assertion (operator only)",
+        .description = "Operator break-glass: issue a session for a provisioned SSO subject under "
+                       "federation issuer policy. The assertion is not verified here, so only the "
+                       "admin token may call it; people sign in through the OIDC callback or "
+                       "sign_in_saml, which verify the provider (lake#562).",
         .input_schema = {{"type", "object"},
                          {"properties",
                           {{"provider_id", {{"type", "string"}}},
@@ -3571,14 +4130,20 @@ void register_sso_capabilities(Registry& registry) {
                          {"additionalProperties", false}},
         .output_schema = {{"type", "object"}},
         .kind = CapabilityKind::Action,
-        .requires_auth = false,
         .object = "authentication",
-        .action = "write",
+        .action = "admin",
         .resolve_object = global_object,
         .async_handler = [](const json& input,
                             ApiContext& context) -> liquid::runtime::task<ApiResult> {
             if (!context.store) {
                 co_return no_store();
+            }
+            // Nothing on this path verifies the assertion: a caller who is not the operator could
+            // name any provisioned subject and receive that person's session (lake#562).
+            if (!context.operator_credential) {
+                co_return ApiResult::failure(
+                    "unauthorized",
+                    "sign_in_sso is operator-only; sign in through the provider (OIDC or SAML)");
             }
             co_return session_answer(co_await issued_result(
                 context.store->sign_in_sso({input.value("provider_id", ""),
@@ -3592,9 +4157,57 @@ void register_sso_capabilities(Registry& registry) {
                 context));
         }});
     registry.add(Capability{
+        .name = "start_sso_saml",
+        .title = "Start enterprise SAML sign-in",
+        .description = "Create a one-use SAML AuthnRequest for an enterprise SAML provider and "
+                       "answer the identity provider's sign-in URL (HTTP-Redirect binding). The "
+                       "provider posts its response to /v1/saml/<provider id>/acs.",
+        .input_schema = {{"type", "object"},
+                         {"properties",
+                          {{"provider_id", {{"type", "string"}}},
+                           {"device_name", {{"type", "string"}}},
+                           {"taap_id", {{"type", "string"}}},
+                           {"return_to", {{"type", "string"}}}}},
+                         {"required", json::array({"provider_id"})},
+                         {"additionalProperties", false}},
+        .output_schema = {{"type", "object"},
+                          {"properties", {{"authorization_url", {{"type", "string"}}}}}},
+        .kind = CapabilityKind::Action,
+        .requires_auth = false,
+        .object = "authentication",
+        .action = "write",
+        .resolve_object = global_object,
+        .handler = [](const json& input, ApiContext& context) {
+            if (!context.store) {
+                return no_store();
+            }
+            const std::string return_to = input.value("return_to", "");
+            if (!return_to.empty() && (!return_to.starts_with('/') || return_to.starts_with("//") ||
+                                       return_to.starts_with("/\\") ||
+                                       std::ranges::any_of(return_to, [](unsigned char c) {
+                                           return c < 0x20 || c == 0x7f;
+                                       }))) {
+                return ApiResult::failure(
+                    "invalid_input", "return_to must be a path on this Lake", "/return_to");
+            }
+            auto started = start_saml_sign_in(*context.store,
+                                              context.public_host,
+                                              input.at("provider_id"),
+                                              input.value("device_name", "browser"),
+                                              input.value("taap_id", ""),
+                                              return_to);
+            if (!started) {
+                return ApiResult::failure(started.error().code, started.error().message);
+            }
+            return ApiResult::success({{"authorization_url", *started}});
+        }});
+    registry.add(Capability{
         .name = "sign_in_saml",
-        .title = "Sign in with signed SAML assertion",
-        .description = "Verify the configured SAML signing certificate before issuing a session.",
+        .title = "Sign in with signed SAML response",
+        .description = "Verify a base64 SAMLResponse that answers a start_sso_saml request: the "
+                       "provider's signature, issuer, audience, recipient, destination and "
+                       "validity window, each request and assertion accepted once. Identity "
+                       "providers post to /v1/saml/<provider id>/acs instead.",
         .input_schema = {{"type", "object"},
                          {"properties",
                           {{"provider_id", {{"type", "string"}}},
@@ -3614,30 +4227,18 @@ void register_sso_capabilities(Registry& registry) {
             if (!context.store) {
                 co_return no_store();
             }
-            auto provider = context.store->get_sso_provider(input.at("provider_id"));
-            if (!provider) {
-                co_return from_store_error(provider.error());
+            auto accepted = accept_saml_response(*context.store,
+                                                 context.public_host,
+                                                 input.at("provider_id"),
+                                                 input.at("saml_response").get<std::string>(),
+                                                 input.value("taap_id", ""),
+                                                 input.value("device_name", ""),
+                                                 saml_now());
+            if (!accepted) {
+                co_return ApiResult::failure(accepted.error().code, accepted.error().message);
             }
-            if (provider->protocol != "saml") {
-                co_return ApiResult::failure("invalid_input", "provider is not a SAML provider");
-            }
-            auto assertion =
-                control::saml::verify_response(input.at("saml_response").get<std::string>(),
-                                               provider->signing_certificate,
-                                               provider->issuer);
-            if (!assertion) {
-                co_return ApiResult::failure("unauthorized", assertion.error());
-            }
-            co_return session_answer(co_await issued_result(
-                context.store->sign_in_sso({provider->id,
-                                            assertion->issuer,
-                                            assertion->subject,
-                                            assertion->email,
-                                            assertion->display_name,
-                                            input.value("taap_id", ""),
-                                            input.value("device_name", "browser"),
-                                            assertion->claims}),
-                context));
+            co_return session_answer(
+                co_await issued_result(context.store->sign_in_sso(accepted->identity), context));
         }});
     registry.add(Capability{
         .name = "upsert_scim_user",
@@ -5145,6 +5746,12 @@ void register_organization_capabilities(Registry& registry) {
             if (!ctx.store) {
                 return no_store();
             }
+            // lake#872: a member is a TAAP identity, never a reserved principal.
+            if (!control::valid_principal_id(in.at("principal_taap_id").get<std::string>())) {
+                return ApiResult::failure("invalid_input",
+                                          "principal_taap_id must be a TAAP identity (taap:...)",
+                                          "/principal_taap_id");
+            }
             const auto attestation =
                 sign_lake_attestation(ctx,
                                       {{"type", "lake.org_membership/1"},
@@ -5600,8 +6207,10 @@ void register_policy_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "create_object",
         .title = "Create object",
-        .description = "Add a path, environment, secret mount, or secret to the "
-                       "object graph.",
+        .description = "Add a path object under a repository or one of its folders, to protect "
+                       "a folder or a file with its own grants. Its external_id is "
+                       "<repository_id>:<node id>, naming the repository it sits in; Lake creates "
+                       "every other kind of object itself.",
         .input_schema = {{"type", "object"},
                          {"properties",
                           {{"object_type", {{"type", "string"}}},
@@ -5616,6 +6225,9 @@ void register_policy_capabilities(Registry& registry) {
         .action = "admin",
         .resolve_object = direct_object("parent_id"),
         .handler = [](const json& in, ApiContext& ctx) {
+            if (ApiResult refused = caller_object_refusal(in, ctx); !refused.ok) {
+                return refused;
+            }
             return one_result(ctx.store->create_policy_object(
                 control::NewPolicyObject{in.at("object_type"),
                                          in.at("external_id"),
@@ -5675,6 +6287,16 @@ void register_policy_capabilities(Registry& registry) {
         .handler = [](const json& in, ApiContext& ctx) {
             if (!ctx.store) {
                 return no_store();
+            }
+            // lake#872: a grant someone writes names a TAAP identity. `admin` and the identities
+            // lake creates itself (`share-link:<id>`, whose first grant is the link's folder) are
+            // never granted through here: one tenant could otherwise repoint another's share link.
+            if (auto checked = control::check_principal_id(
+                    in.at("principal_taap_id").get<std::string>(), "principal_taap_id");
+                !checked || in.at("principal_taap_id").get<std::string>().empty()) {
+                return ApiResult::failure("invalid_input",
+                                          "principal_taap_id must be a TAAP identity (taap:...)",
+                                          "/principal_taap_id");
             }
             const auto attestation =
                 sign_lake_attestation(ctx,
@@ -6084,14 +6706,51 @@ audit_scope(const json& input, ApiContext& context, const std::vector<std::strin
     return scope;
 }
 
+// Whose audit a read covers (lake#18, docs/api/audit.md#who-may-read-it). Naming no account, the
+// whole instance's log, which only the operator reads (the empty object). Naming one, by
+// `customer_id` or through `workspace_id`, that account's events, for a principal with `admin`
+// on it: an organization's administrator reads its own evidence. Every other case, an unknown
+// account included, is the same refusal, so a guess learns nothing.
+std::expected<std::string, ApiError> audit_log_object(const json& input, ApiContext& context) {
+    const ApiError refused{"unauthorized",
+                           "principal is not allowed to read this audit log: an account's audit "
+                           "needs admin on the account, the whole log the operator",
+                           input.contains("customer_id") ? "/customer_id" : ""};
+    std::string customer_id = input.value("customer_id", "");
+    if (customer_id.empty() && input.contains("workspace_id")) {
+        const auto workspace = context.store->get_workspace(input.at("workspace_id"));
+        if (!workspace) {
+            return std::unexpected(refused);
+        }
+        customer_id = workspace->customer_id;
+    }
+    if (customer_id.empty()) {
+        return std::string{};
+    }
+    const auto object = context.store->find_policy_object("customer", customer_id);
+    if (!object) {
+        return std::unexpected(refused);
+    }
+    const auto decision = control::authorize(
+        *context.store, context.acting_identity, object->id, "admin", context.authorization_cache);
+    if (!decision) {
+        return std::unexpected(ApiError{decision.error().code, decision.error().message, {}});
+    }
+    if (!decision->allowed) {
+        return std::unexpected(refused);
+    }
+    return object->id;
+}
+
 // The synchronous form of the audit reads: the central log, the only log a lake without
 // workspace Zettas has. A lake with workspaces reads through Registry::call_async.
 ApiResult central_audit_only(const json& input, ApiContext& context, const audit::Filter& filter) {
     if (!context.store) {
         return no_store();
     }
-    if (context.workspaces && (input.contains("workspace_id") ||
-                               input.value("log", "all") != "central")) {
+    // A workspace's audit is never answered with the central log in its place (lake#18).
+    if (input.contains("workspace_id") ||
+        (context.workspaces && input.value("log", "all") != "central")) {
         return ApiResult::failure("store_error",
                                   "the workspaces' audits are read through call_async");
     }
@@ -6177,15 +6836,17 @@ void register_audit_capabilities(Registry& registry) {
                        "first unless `order` is `oldest` or `after_id` continues a page. Each "
                        "event names its principal (`principal_name`) and, for a workspace call, "
                        "the inner `capability`. Reads the central log and every workspace's audit "
-                       "(decision 52): `workspace_id` reads one workspace's, `customer_id` limits "
-                       "the workspaces to one account's, and `log: central` reads the central log "
-                       "alone. Each event says its `log`.",
+                       "(decision 52): `workspace_id` reads one workspace's, `customer_id` reads "
+                       "one account's (its workspaces and the central events attributed to it), "
+                       "and `log: central` reads the central log alone. Each event says its "
+                       "`log`. An account's administrator reads its own account's audit by "
+                       "naming it; the whole log is the operator's (lake#18).",
         .input_schema = audit_filter_input(),
         .output_schema = list_schema(audit_event_schema()),
         .kind = CapabilityKind::Read,
         .object = "audit log",
         .action = "read",
-        .resolve_object = global_object,
+        .resolve_object = audit_log_object,
         .handler = [](const json& input, ApiContext& context) {
             return central_audit_only(input, context, audit_filter_of(input, context));
         },
@@ -6265,14 +6926,16 @@ void register_audit_capabilities(Registry& registry) {
         .name = "export_audit",
         .title = "Export audit events",
         .description = "Export matching signed audit events as JSON lines: the central log in "
-                       "append order, or with `workspace_id` that workspace's whole audit (copied "
-                       "central events, then its chain by place), each line naming its `log`.",
+                       "append order (with `customer_id`, the events attributed to that account), "
+                       "or with `workspace_id` that workspace's whole audit (copied central "
+                       "events, then its chain by place), each line naming its `log`. An "
+                       "account's administrator exports its own account's audit (lake#18).",
         .input_schema = audit_filter_input(),
         .output_schema = {{"type", "object"}, {"properties", {{"jsonl", {{"type", "string"}}}}}},
         .kind = CapabilityKind::Read,
         .object = "audit log",
         .action = "read",
-        .resolve_object = global_object,
+        .resolve_object = audit_log_object,
         .handler = [](const json& input, ApiContext& context) {
             if (!context.store) {
                 return no_store();

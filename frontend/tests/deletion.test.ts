@@ -3,6 +3,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  accountBlockers,
+  accountLines,
+  accountTyped,
   conversationLines,
   datasetLines,
   grantLines,
@@ -80,4 +83,36 @@ test("a conversation counts the agent tasks that go with it (lake#673)", () => {
 test("revokes name who and what", () => {
   assert.match(invitationLines({ invitee: "a@example.test", role: "admin" })[0].text, /a@example.test can no longer accept .* as admin/);
   assert.match(grantLines({ role: "read" })[0].text, /^The read role/);
+});
+
+test("an account's plan counts what goes, names the organizations in the way, and confirms with the handle", () => {
+  const plan = {
+    user_id: "u-1",
+    handle: "brave-otter-7",
+    workspaces: [{ id: "w-1", name: "dev" }],
+    organizations: [
+      { organization_id: "o-1", display_name: "Solo", action: "delete", workspaces: [{ id: "w-2" }], other_members: 0 },
+      { organization_id: "o-2", display_name: "Shared", action: "leave", workspaces: [{ id: "w-3" }], other_members: 2 },
+      { organization_id: "o-3", display_name: "Acme", handle: "acme", action: "blocked", workspaces: [], other_members: 4 },
+    ],
+    counts: { sessions: 2, credentials: 1, devices: 1, grants: 0, billing_contacts: 1 },
+  };
+  assert.deepEqual(accountBlockers(plan), [{ id: "o-3", name: "Acme", handle: "acme", members: 4 }]);
+  const lines = accountLines(plan);
+  assert.equal(lines[0].count, null);
+  assert.equal(lines[lines.length - 1].count, null);
+  assert.deepEqual(
+    lines.slice(1, -1).map((line) => [line.count, line.text]),
+    [
+      [2, "workspaces, with everything in them"],
+      [1, "organization you alone own, with their members and invitations"],
+      [1, "organization you leave to their other owners"],
+      [2, "sessions and tokens, signed out at once"],
+      [2, "credentials and devices (passwords, passkeys, MFA)"],
+      [1, "billing contact"],
+    ],
+  );
+  assert.equal(accountTyped(plan), "brave-otter-7");
+  assert.equal(accountTyped({ user_id: "u-2", handle: null }), "u-2", "without a handle, its id");
+  assert.deepEqual(accountBlockers({}), []);
 });

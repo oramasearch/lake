@@ -1,7 +1,7 @@
 /** The writes Design → Agents and Design → Agent make (lake#653), through Lake's named engine
  * capabilities (`create_agent`, `update_agent`, `delete_agent`, lake#650) and Lake's own
  * schedules and the streams that start an agent (`set_agent_streams`, lake#677). */
-import { ApiError, act, read, type Row } from "@/lib/api";
+import { ApiError, act, type Row } from "@/lib/api";
 import { agentInput, formProblem, streamsToSet, text, type AgentForm } from "@/lib/agents";
 import type { Scope } from "./api";
 
@@ -79,12 +79,9 @@ export async function restoreRevision(scope: Scope, agentId: string, definition:
   return act<Row>("update_agent", { customer_id: scope.customerId, workspace_id: scope.workspaceId, id: agentId, ...definition });
 }
 
-/** Delete an agent and every schedule Lake keeps for it, so no CronJob outlives its agent. Lake
- * removes the streams that start it with the agent itself (delete_agent, lake#677). */
+/** Delete an agent. Lake stops what runs it with the agent itself (delete_agent): the streams
+ * that start it (lake#677), and its runs and schedules, so no Deployment, Job or CronJob outlives
+ * it (lake#524). */
 export async function deleteAgent(scope: Scope, agentId: string): Promise<void> {
   await act("delete_agent", { customer_id: scope.customerId, workspace_id: scope.workspaceId, id: agentId });
-  const listed = await read<{ schedules?: Row[] }>("list_agent_schedules", { customer_id: scope.customerId, workspace_id: scope.workspaceId, agent_id: agentId }).catch(() => ({ schedules: [] as Row[] }));
-  for (const schedule of listed.schedules ?? []) {
-    await act("unschedule_agent", { customer_id: scope.customerId, workspace_id: scope.workspaceId, schedule_id: text(schedule, "id") }).catch(() => undefined);
-  }
 }

@@ -120,7 +120,7 @@ void log_database_diagnostic(std::string_view code, std::string_view message) {
     std::println(stderr, "{}", entry.dump());
 }
 
-constexpr std::array<ErrorCode, 33> documented_error_codes{{
+constexpr std::array<ErrorCode, 34> documented_error_codes{{
     {"invalid_input", 400, "The input is at fault; `path` points at the field."},
     {"secret_required",
      400,
@@ -136,6 +136,10 @@ constexpr std::array<ErrorCode, 33> documented_error_codes{{
      "`help` links to the page that makes a new key."},
     {"unauthorized", 403, "The credential is valid but does not grant this call on this object."},
     {"mfa_required", 403, "The account must finish multi-factor verification first."},
+    {"identity_proof_required",
+     403,
+     "An identity document becomes an account's identity only with a fresh signature by its key: "
+     "sign begin_identity_proof's challenge and send identity_proof."},
     {"forbidden",
      403,
      "The object is read-only for everyone, such as one of Orama's catalogue solutions; the "
@@ -764,9 +768,33 @@ ApiResult unauthenticated(const ApiContext& context) {
     return result;
 }
 
+// A session of an identity application's pool (lake#912) acts only through the capabilities that
+// serve its user's own sign-in. For those it is the user, for this call; for every other one it is
+// no credential, so its TAAP identity, which a Lake account may share, never meets a grant. Set
+// afresh on every call, so a context reused for a second capability carries nothing over.
+void admit_application_session(const Capability& entry, ApiContext& context) {
+    if (!context.application_session) {
+        return;
+    }
+    const control::Principal& session = *context.application_session;
+    const bool admitted = entry.serves_application_pools;
+    context.authorized = admitted;
+    context.session_credential = admitted;
+    context.acting_user_id = admitted ? session.user_id : std::string();
+    context.acting_identity = admitted ? session.taap_id : std::string();
+    context.credential_device_id = admitted ? session.device_id : std::string();
+    context.credential_session_id = admitted ? session.session_id : std::string();
+    context.credential_kind = admitted ? session.kind : std::string();
+    context.credential_expires_at_unix =
+        admitted ? session.expires_at_unix : std::optional<std::int64_t>{};
+    context.pool_id = admitted ? session.pool_id : std::string("lake");
+    context.scopes = admitted ? session.scopes : std::vector<std::string>{};
+}
+
 CallState prepare_call(std::shared_ptr<const Capability> capability,
                        const nlohmann::json& input,
                        ApiContext& context) {
+    admit_application_session(*capability, context);
     if (context.request_id.empty()) {
         context.request_id = control::new_uuid_v4();
     }
@@ -775,6 +803,7 @@ CallState prepare_call(std::shared_ptr<const Capability> capability,
     context.audit_object.clear();
     context.audit_details = nlohmann::json::object();
     context.audit_workspace_id.clear();
+    context.audit_validated_workspace = {};
     CallState state{.capability = std::move(capability)};
     if (context.authorized && context.credential_kind == "agent_task" &&
         context.credential_session_id.starts_with("task:") && context.store) {
@@ -791,16 +820,27 @@ CallState prepare_call(std::shared_ptr<const Capability> capability,
         context.workspace_id = input.at("workspace_id").is_string()
             ? input.at("workspace_id").get<std::string>() : std::string();
     }
-    // A bearer key lake rejected is refused on lake's own public reads too (`viewer`,
-    // `server_info`, the Docs, the capabilities whose object is the server): a script with a
-    // mistyped key learns so at once instead of reading `signed_in: false` (lake#594). A
-    // browser's stale session cookie is still a visitor, and the capabilities that verify their
-    // own bearer (the agent bus, SCIM providers) are left to do so.
+    // A bearer key lake rejected (unknown, revoked, expired, mistyped) is refused on every
+    // capability a visitor may call: lake's own public reads (object `server`: `viewer`,
+    // `server_info`, the Docs; lake#594) and the public reads of repositories and their content
+    // (`allows_anonymous_public_read`, lake#775). A client whose key was revoked learns so instead
+    // of reading a visitor's answer, such as an empty repository list. A browser's stale session
+    // cookie is still a visitor, and the capabilities that verify their own bearer (SCIM
+    // providers, sign-in, the agents' calls) are left to do so.
     const bool rejected_bearer = !context.authorized && !context.credential_rejection.empty() &&
                                  context.authentication_method == "bearer" &&
-                                 entry.object == "server";
-    if ((entry.requires_auth && !context.authorized && !entry.allows_anonymous_public_read) ||
-        rejected_bearer) {
+                                 (entry.object == "server" || entry.allows_anonymous_public_read);
+    if (context.application_session && !entry.serves_application_pools && entry.requires_auth &&
+        !entry.allows_anonymous_public_read) {
+        state.result = ApiResult::failure(
+            "unauthorized",
+            "an identity application's session reaches only its own sign-in (sessions, devices, "
+            "tokens, MFA and passkeys); " +
+                entry.name + " needs a Lake account's credential");
+        state.proceed = false;
+    } else if ((entry.requires_auth && !context.authorized &&
+                !entry.allows_anonymous_public_read) ||
+               rejected_bearer) {
         state.result = unauthenticated(context);
         state.proceed = false;
     } else if (ApiResult validation = validate_input(entry, input); !validation.ok) {
@@ -904,6 +944,7 @@ CallState prepare_call(std::shared_ptr<const Capability> capability,
         }
         if (state.proceed) {
             context.audit_workspace_id = workspace->id;
+            context.audit_validated_workspace = {workspace->id, workspace->customer_id};
         }
     }
     if (state.proceed && !context.path_workspace_id.empty() &&
@@ -991,6 +1032,45 @@ void attribute_request(const ApiContext& context,
     }
 }
 
+// The account an event is about (lake#18), so the account's administrator finds it in the
+// account's audit: the one a capability named itself, else the workspace the call acted on, the
+// account (`customer_id`) or organization (`organization_id`) its input named, or the
+// organization its event names. A name that is not an account's stays unattributed: the column is
+// a reference, and a refused guess must not fail its own audit.
+std::string audit_customer_of(const nlohmann::json& input, const ApiContext& context) {
+    if (!context.audit_customer_id.empty()) {
+        return context.audit_customer_id;
+    }
+    const auto text = [&input](const char* field) {
+        return input.is_object() && input.contains(field) && input.at(field).is_string()
+                   ? input.at(field).get<std::string>()
+                   : std::string();
+    };
+    if (!context.audit_workspace_id.empty()) {
+        if (context.audit_validated_workspace.first == context.audit_workspace_id) {
+            return context.audit_validated_workspace.second;
+        }
+        if (const auto workspace = context.store->get_workspace(context.audit_workspace_id)) {
+            return workspace->customer_id;
+        }
+    }
+    if (const std::string customer_id = text("customer_id"); !customer_id.empty()) {
+        if (const auto customer = context.store->get_customer(customer_id)) {
+            return customer->id;
+        }
+    }
+    std::string organization_id = text("organization_id");
+    if (organization_id.empty() && context.audit_object.starts_with("organization/")) {
+        organization_id = context.audit_object.substr(std::string_view("organization/").size());
+    }
+    if (!organization_id.empty()) {
+        if (const auto customer = context.store->organization_customer(organization_id)) {
+            return customer->id;
+        }
+    }
+    return {};
+}
+
 ApiResult finish_call(const Capability* capability,
                       const std::string& name,
                       const nlohmann::json& input,
@@ -998,9 +1078,10 @@ ApiResult finish_call(const Capability* capability,
                       ApiContext& context,
                       bool handled) {
     // An anonymous caller refused by a capability that otherwise needs a credential (a private
-    // repository read) is refused for want of one.
-    if (capability != nullptr && capability->requires_auth && !context.authorized && !result.ok &&
-        result.error.code == "unauthorized") {
+    // repository read) is refused for want of one. An identity application's session presented
+    // a credential that is valid but grants nothing here (lake#912), and stays `unauthorized`.
+    if (capability != nullptr && capability->requires_auth && !context.authorized &&
+        !context.application_session && !result.ok && result.error.code == "unauthorized") {
         const double duration = result.duration_ms;
         result = unauthenticated(context);
         result.duration_ms = duration;
@@ -1018,7 +1099,7 @@ ApiResult finish_call(const Capability* capability,
         details["acting_agent"] = agent;
     }
     const audit::EventDraft event{
-        .customer_id = context.audit_customer_id,
+        .customer_id = audit_customer_of(input, context),
         .kind = kind,
         .principal = context.acting_identity.empty() ? "anonymous" : context.acting_identity,
         .object = context.audit_object.empty() ? "capability/" + name : context.audit_object,
@@ -1212,6 +1293,29 @@ Registry::call(const std::string& name, const nlohmann::json& input, ApiContext&
     }
     return finish_call(
         capability.get(), name, call_input, std::move(state.result), context, state.proceed);
+}
+
+ApiResult Registry::refuse(const std::string& name,
+                           ApiResult failure,
+                           const nlohmann::json& details,
+                           ApiContext& context) const {
+    context.registry = this;
+    const AttributionDepth depth(context);
+    const auto capability = find(name);
+    if (!capability) {
+        return ApiResult::failure("unknown_capability", "no capability named " + name);
+    }
+    if (context.request_id.empty()) {
+        context.request_id = control::new_uuid_v4();
+    }
+    context.audit_customer_id.clear();
+    context.audit_kind.clear();
+    context.audit_object.clear();
+    context.audit_workspace_id.clear();
+    context.audit_validated_workspace = {};
+    context.audit_details = details.is_object() ? details : nlohmann::json::object();
+    const nlohmann::json no_input = nlohmann::json::object();
+    return finish_call(capability.get(), name, no_input, std::move(failure), context, false);
 }
 
 liquid::runtime::task<ApiResult> Registry::call_async(const std::string& name,

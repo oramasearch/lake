@@ -1,7 +1,11 @@
+#include "audit_test_support.hpp"
+#include "identity_proof_test_support.hpp"
 #include "postgres_fixture.hpp"
 #include <gtest/gtest.h>
 
 #include <functional>
+#include <future>
+#include <thread>
 
 #include "lake/control/identity_crypto.hpp"
 
@@ -46,6 +50,7 @@
 #include <boost/url.hpp>
 
 #include "api/route_guard.hpp"
+#include "audit_test_support.hpp"
 #include "lake/api/capabilities.hpp"
 #include "lake/api/clerk_webhooks.hpp"
 #include "lake/api/oauth.hpp"
@@ -619,8 +624,10 @@ protected:
             identity_document_ = "{}";
         }
         email_ = "response-isolation-" + lake::control::new_uuid_v4() + "@example.test";
-        const auto account = store_->sign_up_password(
-            {"lake", email_, password_, "Isolation test", "fixture", identity_document_});
+        lake::control::NewPasswordUser account_input{
+            "lake", email_, password_, "Isolation test", "fixture", identity_document_};
+        account_input.identity_proof = identity_proof_;
+        const auto account = store_->sign_up_password(account_input);
         ASSERT_TRUE(account.has_value());
         lake::api::ServerOptions options;
         options.port = 0;
@@ -817,36 +824,21 @@ protected:
         return *found;
     }
 
+    // A new identity's document and a proof of its key for a Lake-pool sign-up (lake#931).
     void create_identity_document() {
-        const auto home =
-            lake::test::fixture_path("response-identity-" + lake::control::new_uuid_v4());
-        const char* previous = std::getenv("LIQUID_HOME");
-        const bool had_previous_home = previous != nullptr;
-        const std::string previous_home = previous == nullptr ? "" : previous;
-        ASSERT_EQ(setenv("LIQUID_HOME", home.c_str(), 1), 0);
-        auto signer = liquid::runtime::block_on(liquid::identity_detail::local_signer());
-        if (!had_previous_home) {
-            unsetenv("LIQUID_HOME");
-        } else {
-            setenv("LIQUID_HOME", previous_home.c_str(), 1);
+        lake::test::TestIdentity identity =
+            lake::test::test_identity("response-identity-" + lake::control::new_uuid_v4());
+        identity_document_ = identity.document;
+        identity_proof_ = lake::test::prove_identity(*store_, "lake", identity);
+    }
+
+    // A sign-up body with the identity document, and its proof on PostgreSQL.
+    std::string with_identity(nlohmann::json body) const {
+        body["identity_document"] = identity_document_;
+        if (std::get<0>(GetParam())) {
+            body["identity_proof"] = lake::test::identity_proof_json(identity_proof_);
         }
-        ASSERT_TRUE(signer.has_value());
-        const auto path = home / "identity" / (signer->identity().fingerprint + ".identity.cbor");
-        std::ifstream input(path, std::ios::binary);
-        ASSERT_TRUE(input);
-        const std::string bytes((std::istreambuf_iterator<char>(input)),
-                                std::istreambuf_iterator<char>());
-        identity_document_.resize(((bytes.size() + 2) / 3) * 4);
-        const int encoded_size =
-            EVP_EncodeBlock(reinterpret_cast<unsigned char*>(identity_document_.data()),
-                            reinterpret_cast<const unsigned char*>(bytes.data()),
-                            static_cast<int>(bytes.size()));
-        ASSERT_EQ(encoded_size, identity_document_.size());
-        while (identity_document_.ends_with('=')) {
-            identity_document_.pop_back();
-        }
-        std::replace(identity_document_.begin(), identity_document_.end(), '+', '-');
-        std::replace(identity_document_.begin(), identity_document_.end(), '/', '_');
+        return body.dump();
     }
 
     std::unique_ptr<HttpConnection> connect() {
@@ -940,6 +932,7 @@ protected:
     std::string database_uri_;
     std::string email_;
     std::string identity_document_;
+    lake::control::IdentityProof identity_proof_;
     const std::string password_ = "correct horse battery staple";
     const std::string instance_kek_ =
         "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
@@ -952,19 +945,16 @@ TEST_P(HttpResponseIsolation, FreshSignUpOwnsFirstRepositoryWithZeroInitialMeter
     const std::string email = "first-repository-" + lake::control::new_uuid_v4() + "@example.test";
     auto client = connect();
     // Signing up through the API sets the browser session, as the web app's form does.
-    const std::string signup =
-        client->request("POST",
-                        "/v1/sign_up_password",
-                        nlohmann::json{{"email", email},
-                                       {"display_name", "Newcomer"},
-                                       {"password", password_},
-                                       {"device_name", "browser"},
-                                       {"identity_document", identity_document_}}
-                            .dump(),
-                        "",
-                        "HTTP/1.1",
-                        {},
-                        "application/json");
+    const std::string signup = client->request("POST",
+                                               "/v1/sign_up_password",
+                                               with_identity({{"email", email},
+                                                              {"display_name", "Newcomer"},
+                                                              {"password", password_},
+                                                              {"device_name", "browser"}}),
+                                               "",
+                                               "HTTP/1.1",
+                                               {},
+                                               "application/json");
     ASSERT_TRUE(signup.starts_with("HTTP/1.1 200")) << signup;
     const std::string cookie = response_cookie_pair(signup);
     ASSERT_TRUE(cookie.starts_with("lake_session=")) << signup;
@@ -1046,19 +1036,16 @@ TEST_P(HttpResponseIsolation, PersonCreatesAnOrganizationInvitesAndAColleagueJoi
     }
     const std::string colleague_email =
         "colleague-" + lake::control::new_uuid_v4() + "@example.test";
-    const std::string signup =
-        client->request("POST",
-                        "/v1/sign_up_password",
-                        nlohmann::json{{"email", colleague_email},
-                                       {"display_name", "Colleague"},
-                                       {"password", password_},
-                                       {"device_name", "browser"},
-                                       {"identity_document", identity_document_}}
-                            .dump(),
-                        "",
-                        "HTTP/1.1",
-                        {},
-                        "application/json");
+    const std::string signup = client->request("POST",
+                                               "/v1/sign_up_password",
+                                               with_identity({{"email", colleague_email},
+                                                              {"display_name", "Colleague"},
+                                                              {"password", password_},
+                                                              {"device_name", "browser"}}),
+                                               "",
+                                               "HTTP/1.1",
+                                               {},
+                                               "application/json");
     ASSERT_TRUE(signup.starts_with("HTTP/1.1 200")) << signup;
     const std::string colleague = response_cookie_pair(signup);
 
@@ -1174,6 +1161,124 @@ TEST_P(HttpResponseIsolation, ATokenIsIssuedAndRevokedWithTheBrowserSession) {
     const std::string after =
         connection->request("GET", "/v1/list_sessions", {}, "lake_session=" + token);
     EXPECT_FALSE(after.starts_with("HTTP/1.1 200")) << "a revoked token no longer authenticates";
+}
+
+// lake#18: every call to a capability route is audited, a body lake cannot read included. A
+// malformed body and a well-formed one each leave exactly one signed failure event under their
+// request id, with the error and the body's size but never its contents.
+TEST_P(HttpResponseIsolation, AMalformedBodyIsAuditedLikeAnyFailedCall) {
+    auto connection = connect();
+    const std::string cookie = sign_in(*connection);
+    const std::string secret = "body-canary-" + lake::control::new_uuid_v4();
+    const auto post =
+        [&](const std::string& path, const std::string& body, const std::string& request_id) {
+            return connection->request("POST",
+                                       path,
+                                       body,
+                                       cookie,
+                                       "HTTP/1.1",
+                                       {},
+                                       "application/json",
+                                       {{"Origin", "http://localhost"},
+                                        {"Sec-Fetch-Site", "same-origin"},
+                                        {"X-Request-Id", request_id}});
+        };
+    const std::string suffix = lake::control::new_uuid_v4();
+    struct Case {
+        std::string request_id, body;
+    };
+    for (const Case& sent : {Case{"valid-json-" + suffix, "{}"},
+                             Case{"malformed-json-" + suffix, "{\"name\":\"" + secret},
+                             Case{"not-an-object-" + suffix, "[\"" + secret + "\"]"}}) {
+        const std::string response = post("/v1/create_token", sent.body, sent.request_id);
+        EXPECT_TRUE(response.starts_with("HTTP/1.1 400")) << response.substr(0, 300);
+        const auto events = store_->list_audit_events({.request_id = sent.request_id});
+        ASSERT_TRUE(events) << events.error().message;
+        ASSERT_EQ(events->size(), 1U) << sent.request_id;
+        const lake::audit::Event& event = events->front();
+        EXPECT_EQ(event.draft.action, "create_token");
+        EXPECT_EQ(event.draft.outcome, "failure");
+        EXPECT_FALSE(event.draft.principal.empty());
+        EXPECT_NE(event.draft.principal, "anonymous") << "the signed-in person is named";
+        EXPECT_EQ(event.draft.details.value("error_code", ""), "invalid_input");
+        EXPECT_FALSE(event.signature.empty());
+        EXPECT_EQ(lake::audit::to_json(event).dump().find(secret), std::string::npos)
+            << "the body never reaches the audit";
+    }
+    const auto malformed = store_->list_audit_events({.request_id = "malformed-json-" + suffix});
+    ASSERT_TRUE(malformed);
+    ASSERT_EQ(malformed->size(), 1U);
+    EXPECT_EQ(malformed->front().draft.details.value("input", ""), "not_json");
+    EXPECT_EQ(malformed->front().draft.details.value("body_bytes", 0),
+              static_cast<int>(std::string("{\"name\":\"").size() + secret.size()));
+
+    // An unauthenticated caller's malformed body is recorded too, as anonymous.
+    const std::string anonymous_id = "anonymous-malformed-" + suffix;
+    const std::string anonymous = connection->request("POST",
+                                                      "/v1/create_token",
+                                                      "{",
+                                                      "",
+                                                      "HTTP/1.1",
+                                                      {},
+                                                      "application/json",
+                                                      {{"X-Request-Id", anonymous_id}});
+    EXPECT_TRUE(anonymous.starts_with("HTTP/1.1 400")) << anonymous.substr(0, 300);
+    const auto anonymous_events = store_->list_audit_events({.request_id = anonymous_id});
+    ASSERT_TRUE(anonymous_events);
+    ASSERT_EQ(anonymous_events->size(), 1U);
+    EXPECT_EQ(anonymous_events->front().draft.principal, "anonymous");
+
+    // Audit verification still holds after the refusals were signed in.
+    const auto all = lake::test::audit_events(*store_);
+    ASSERT_TRUE(all) << all.error().message;
+    EXPECT_TRUE(lake::audit::verify(*store_, *all));
+}
+
+// lake#18: the administrator of an account reads its audit over REST and MCP; the whole instance's
+// log stays the operator's.
+TEST_P(HttpResponseIsolation, AnAccountAdministratorReadsItsAuditOverRestAndMcp) {
+    auto connection = connect();
+    const std::string cookie = sign_in(*connection);
+    const auto customers = get_v1(*connection, cookie, "list_customers");
+    ASSERT_TRUE(customers.at("ok")) << customers.dump();
+    ASSERT_FALSE(customers.at("value").at("items").empty());
+    const std::string customer_id = customers.at("value").at("items").at(0).at("id");
+
+    const auto own = get_v1(*connection, cookie, "audit?limit=50&customer_id=" + customer_id);
+    ASSERT_TRUE(own.value("ok", false)) << own.dump();
+    for (const auto& event : own.at("value").at("items")) {
+        if (event.value("log", "") == "central") {
+            EXPECT_EQ(event.value("customer_id", nlohmann::json()), customer_id) << event.dump();
+        }
+    }
+    const auto exported =
+        get_v1(*connection, cookie, "export_audit?limit=50&customer_id=" + customer_id);
+    EXPECT_TRUE(exported.value("ok", false)) << exported.dump();
+    const std::string whole = connection->request("GET", "/v1/audit?limit=2", "", cookie);
+    EXPECT_TRUE(whole.starts_with("HTTP/1.1 403")) << whole.substr(0, 300);
+    const std::string other = connection->request(
+        "GET", "/v1/audit?limit=2&customer_id=" + lake::control::new_uuid_v4(), "", cookie);
+    EXPECT_TRUE(other.starts_with("HTTP/1.1 403")) << other.substr(0, 300);
+
+    const auto [created_response, created] =
+        post_v1(*connection, cookie, "create_token", {{"name", "auditor"}, {"scopes", {"*"}}});
+    ASSERT_TRUE(created.value("ok", false)) << created_response.substr(0, 300);
+    const std::string key = created["value"]["secret"];
+    const std::string mcp = connection->request(
+        "POST",
+        "/mcp",
+        nlohmann::json{
+            {"jsonrpc", "2.0"},
+            {"id", 1},
+            {"method", "tools/call"},
+            {"params",
+             {{"name", "audit"}, {"arguments", {{"limit", 10}, {"customer_id", customer_id}}}}}}
+            .dump(),
+        "",
+        "HTTP/1.1",
+        key,
+        "application/json");
+    EXPECT_NE(mcp.find("\"isError\":false"), std::string::npos) << mcp.substr(0, 600);
 }
 
 // Developer → MCP (docs/api/mcp.md): llms.txt is public and names every tool; a read-only MCP key
@@ -3920,4 +4025,464 @@ TEST(HttpServer, RequestLogsNameRoutesAndEachWorkspaceGetsItsOwnRequestSeries) {
     // Every capability call routed to the workspace is one call: the two reads and the sync pull.
     EXPECT_EQ(home_series.metric_total("lake_usage", {{"dimension", "calls"}, {"kind", "api"}}), 3);
     EXPECT_EQ(home_series.metric_total("lake_usage", {{"dimension", "calls"}, {"kind", "mcp"}}), 0);
+}
+
+// A TCP endpoint on loopback that accepts every connection and never answers: the slow customer
+// endpoint of lake#772. It counts the connections it took.
+class SilentEndpoint {
+public:
+    SilentEndpoint() {
+        descriptor_ = ::socket(AF_INET, SOCK_STREAM, 0);
+        sockaddr_in address{};
+        address.sin_family = AF_INET;
+        address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        socklen_t size = sizeof(address);
+        ::bind(descriptor_, reinterpret_cast<sockaddr*>(&address), sizeof(address));
+        ::listen(descriptor_, 16);
+        ::getsockname(descriptor_, reinterpret_cast<sockaddr*>(&address), &size);
+        port_ = ntohs(address.sin_port);
+        thread_ = std::thread([this] {
+            for (;;) {
+                const int accepted = ::accept(descriptor_, nullptr, nullptr);
+                if (accepted < 0) {
+                    return;
+                }
+                std::lock_guard lock(mutex_);
+                held_.push_back(accepted);
+            }
+        });
+    }
+    ~SilentEndpoint() {
+        ::shutdown(descriptor_, SHUT_RDWR);
+        ::close(descriptor_);
+        thread_.join();
+        for (const int held : held_) {
+            ::close(held);
+        }
+    }
+    unsigned short port() const {
+        return port_;
+    }
+    std::size_t accepted() {
+        std::lock_guard lock(mutex_);
+        return held_.size();
+    }
+
+private:
+    int descriptor_ = -1;
+    unsigned short port_ = 0;
+    std::thread thread_;
+    std::mutex mutex_;
+    std::vector<int> held_;
+};
+
+// One request on its own connection with a receive timeout longer than a webhook delivery's.
+std::string slow_request(unsigned short port,
+                         const std::string& path,
+                         const std::string& body,
+                         const std::string& bearer) {
+    const int socket_fd = connect_loopback(port);
+    timeval timeout{};
+    timeout.tv_sec = 30;
+    static_cast<void>(::setsockopt(socket_fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)));
+    const std::string wire =
+        "POST " + path + " HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n" +
+        "Content-Type: application/json\r\nAuthorization: Bearer " + bearer +
+        "\r\nContent-Length: " + std::to_string(body.size()) + "\r\n\r\n" + body;
+    std::string response;
+    if (send_all(socket_fd, wire)) {
+        response = read_response(socket_fd, true);
+    }
+    ::close(socket_fd);
+    return response;
+}
+
+struct WebhookServer {
+    std::shared_ptr<lake::control::InMemoryStore> store =
+        std::make_shared<lake::control::InMemoryStore>();
+    lake::test::RecordWorkspaces workspaces{store};
+    std::unique_ptr<lake::api::ApiServer> server;
+    std::string repository_id;
+
+    explicit WebhookServer(bool allow_private) {
+        lake::api::ServerOptions options;
+        options.port = 0;
+        options.store = store;
+        options.admin_token = "webhook-operator";
+        options.instance_kek = std::string(64, '7');
+        options.store_root =
+            lake::test::fixture_path("webhook-store-" + lake::control::new_uuid_v4()).string();
+        options.workspaces = workspaces.service;
+        options.webhook_allow_private_addresses = allow_private;
+        server = std::make_unique<lake::api::ApiServer>(options);
+        if (!server->start()) {
+            throw std::runtime_error(server->reason());
+        }
+        const auto user = store->create_user({"taap:1:ed25519:webhook-owner", "", "Owner"});
+        const auto customer = store->create_customer({"individual", user->id, "", "hooks"});
+        const std::string workspace = workspaces.create(customer->id, "home");
+        const auto created =
+            call("create_repository",
+                 {{"customer_id", customer->id}, {"workspace_id", workspace}, {"name", "hooks"}});
+        if (!created.value("ok", false)) {
+            throw std::runtime_error("create_repository: " + created.dump());
+        }
+        repository_id = created["value"]["id"];
+    }
+
+    nlohmann::json call(const std::string& capability, const nlohmann::json& input) {
+        const std::string response =
+            slow_request(server->port(), "/v1/" + capability, input.dump(), "webhook-operator");
+        const std::string body = response_body(response);
+        if (body.empty()) {
+            throw std::runtime_error(capability + " answered no body: " + response);
+        }
+        return nlohmann::json::parse(body);
+    }
+
+    std::string webhook(const std::string& url) {
+        const auto created = call("create_webhook",
+                                  {{"repository_id", repository_id},
+                                   {"url", url},
+                                   {"events", nlohmann::json::array({"ping"})},
+                                   {"secret", "hook-secret"}});
+        if (!created.value("ok", false)) {
+            throw std::runtime_error("create_webhook: " + created.dump());
+        }
+        return created["value"]["id"];
+    }
+};
+
+// lake#772: a delivery to an endpoint that never answers runs off the server's own thread, so lake
+// keeps answering everything else while it waits, and the delivery gives up after its 10 s limit
+// with the attempt recorded.
+TEST(WebhookDelivery, ASilentEndpointDoesNotStopLakeAndTimesOut) {
+    SilentEndpoint endpoint;
+    WebhookServer lake_server(true);
+    const std::string webhook =
+        lake_server.webhook("https://127.0.0.1:" + std::to_string(endpoint.port()) + "/hook");
+
+    const auto started = std::chrono::steady_clock::now();
+    auto delivery = std::async(std::launch::async, [&] {
+        return lake_server.call("deliver_webhook",
+                                {{"repository_id", lake_server.repository_id},
+                                 {"webhook_id", webhook},
+                                 {"event", "ping"},
+                                 {"payload", {{"hello", "world"}}}});
+    });
+    for (int i = 0; i < 50 && endpoint.accepted() == 0; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    ASSERT_GE(endpoint.accepted(), 1U) << "the delivery never reached the endpoint";
+    for (int probe = 0; probe < 3; ++probe) {
+        const auto asked = std::chrono::steady_clock::now();
+        HttpConnection connection(lake_server.server->port());
+        const std::string health = connection.request("GET", "/healthz");
+        const std::string info = connection.request("GET", "/v1/server_info");
+        EXPECT_TRUE(health.starts_with("HTTP/1.1 200")) << health;
+        EXPECT_TRUE(info.starts_with("HTTP/1.1 200")) << info;
+        EXPECT_LT(std::chrono::steady_clock::now() - asked, std::chrono::seconds(2))
+            << "lake stopped answering while a webhook delivery waited";
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    }
+    const nlohmann::json answered = delivery.get();
+    const auto waited = std::chrono::steady_clock::now() - started;
+    ASSERT_TRUE(answered["ok"]) << answered.dump();
+    EXPECT_FALSE(answered["value"]["value"]["delivered"]);
+    EXPECT_NE(answered["value"]["value"]["error"].get<std::string>(), "");
+    EXPECT_LT(waited, std::chrono::seconds(15)) << "the delivery outlived its limit";
+}
+
+// lake#876: without the operator setting, a webhook reaches only HTTPS on public addresses. A
+// loopback target is refused before any connection is made, and plain HTTP is refused outright.
+TEST(WebhookDelivery, PrivateAddressesAndPlainHttpAreRefused) {
+    SilentEndpoint endpoint;
+    WebhookServer lake_server(false);
+    for (const std::string url :
+         {"https://127.0.0.1:" + std::to_string(endpoint.port()) + "/hook",
+          "https://localhost:" + std::to_string(endpoint.port()) + "/hook",
+          "http://127.0.0.1:" + std::to_string(endpoint.port()) + "/hook"}) {
+        const std::string webhook = lake_server.webhook(url);
+        const nlohmann::json answered =
+            lake_server.call("deliver_webhook",
+                             {{"repository_id", lake_server.repository_id},
+                              {"webhook_id", webhook},
+                              {"event", "ping"},
+                              {"payload", nlohmann::json::object()}});
+        ASSERT_TRUE(answered["ok"]) << url << ": " << answered.dump();
+        const auto& attempt = answered["value"]["value"];
+        EXPECT_FALSE(attempt["delivered"]) << url;
+        const std::string error = attempt["error"];
+        EXPECT_TRUE(error.find("not a public address") != std::string::npos ||
+                    error.find("must use HTTPS") != std::string::npos)
+            << url << ": " << error;
+    }
+    EXPECT_EQ(endpoint.accepted(), 0U) << "a refused webhook still connected";
+}
+
+// lake#915: a loopback HTTP endpoint that records the request head of every connection it takes,
+// then answers 500. It stands in for a server a caller controls.
+class RecordingEndpoint {
+public:
+    RecordingEndpoint() {
+        descriptor_ = ::socket(AF_INET, SOCK_STREAM, 0);
+        sockaddr_in address{};
+        address.sin_family = AF_INET;
+        address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        socklen_t size = sizeof(address);
+        ::bind(descriptor_, reinterpret_cast<sockaddr*>(&address), sizeof(address));
+        ::listen(descriptor_, 16);
+        ::getsockname(descriptor_, reinterpret_cast<sockaddr*>(&address), &size);
+        port_ = ntohs(address.sin_port);
+        thread_ = std::thread([this] {
+            for (;;) {
+                const int accepted = ::accept(descriptor_, nullptr, nullptr);
+                if (accepted < 0) {
+                    return;
+                }
+                timeval timeout{};
+                timeout.tv_sec = 3;
+                static_cast<void>(
+                    ::setsockopt(accepted, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)));
+                std::string head;
+                char buffer[4096];
+                while (head.find("\r\n\r\n") == std::string::npos) {
+                    const auto got = ::recv(accepted, buffer, sizeof(buffer), 0);
+                    if (got <= 0) {
+                        break;
+                    }
+                    head.append(buffer, static_cast<std::size_t>(got));
+                }
+                static_cast<void>(send_all(
+                    accepted, "HTTP/1.1 500 x\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"));
+                ::close(accepted);
+                std::lock_guard lock(mutex_);
+                heads_.push_back(std::move(head));
+            }
+        });
+    }
+    ~RecordingEndpoint() {
+        ::shutdown(descriptor_, SHUT_RDWR);
+        ::close(descriptor_);
+        thread_.join();
+    }
+    unsigned short port() const {
+        return port_;
+    }
+    std::string origin() const {
+        return "http://127.0.0.1:" + std::to_string(port_);
+    }
+    std::vector<std::string> heads() {
+        std::lock_guard lock(mutex_);
+        return heads_;
+    }
+
+private:
+    int descriptor_ = -1;
+    unsigned short port_ = 0;
+    std::thread thread_;
+    std::mutex mutex_;
+    std::vector<std::string> heads_;
+};
+
+constexpr auto replication_secret = "instance-replication-credential";
+
+// A Lake with a repository whose owner holds admin on it (as every sign-up does on its own
+// repositories), and the operator's replication credential configured.
+struct ReplicationServer {
+    std::shared_ptr<lake::control::InMemoryStore> store =
+        std::make_shared<lake::control::InMemoryStore>();
+    lake::test::RecordWorkspaces workspaces{store};
+    std::unique_ptr<lake::api::ApiServer> server;
+    std::string repository_id;
+    std::string customer_id;
+    std::string owner_token;
+
+    ReplicationServer(std::vector<std::string> peers,
+                      bool allow_private,
+                      std::chrono::seconds timeout = std::chrono::seconds(600)) {
+        lake::api::ServerOptions options;
+        options.port = 0;
+        options.store = store;
+        options.admin_token = "replication-operator";
+        options.replication_token = replication_secret;
+        options.replication_peers = std::move(peers);
+        options.replication_allow_private_addresses = allow_private;
+        options.replication_timeout = timeout;
+        options.instance_kek = std::string(64, '7');
+        options.store_root =
+            lake::test::fixture_path("replication-store-" + lake::control::new_uuid_v4()).string();
+        options.workspaces = workspaces.service;
+        server = std::make_unique<lake::api::ApiServer>(options);
+        if (!server->start()) {
+            throw std::runtime_error(server->reason());
+        }
+        const auto user =
+            store->create_user({"taap:1:ed25519:replication-owner", "", "Repository Owner"});
+        const auto customer = store->create_customer({"individual", user->id, "", "replicas"});
+        customer_id = customer->id;
+        const std::string workspace = workspaces.create(customer->id, "home");
+        const auto created = call(
+            "create_repository",
+            {{"customer_id", customer->id}, {"workspace_id", workspace}, {"name", "replicated"}},
+            "replication-operator");
+        if (!created.value("ok", false)) {
+            throw std::runtime_error("create_repository: " + created.dump());
+        }
+        repository_id = created["value"]["id"];
+        const auto object = store->find_policy_object("repository", repository_id);
+        if (!object || !store->create_grant({user->taap_id,
+                                             object->id,
+                                             "admin",
+                                             "attestation-owner",
+                                             "admin",
+                                             "request-owner"})) {
+            throw std::runtime_error("could not grant the owner admin on the repository");
+        }
+        const auto token =
+            store->create_token({user->id, "lake", "owner", "test", {"*"}, 300, false});
+        if (!token) {
+            throw std::runtime_error(token.error().message);
+        }
+        owner_token = token->secret;
+    }
+
+    nlohmann::json
+    call(const std::string& capability, const nlohmann::json& input, const std::string& bearer) {
+        const std::string response =
+            slow_request(server->port(), "/v1/" + capability, input.dump(), bearer);
+        const std::string body = response_body(response);
+        if (body.empty()) {
+            throw std::runtime_error(capability + " answered no body: " + response);
+        }
+        return nlohmann::json::parse(body);
+    }
+
+    nlohmann::json replicate(const std::string& source_url, const std::string& bearer) {
+        return call("replicate_repository",
+                    {{"repository_id", repository_id},
+                     {"source_instance", "region-a"},
+                     {"source_url", source_url}},
+                    bearer);
+    }
+};
+
+// lake#915 (LSR-004): a repository owner points replicate_repository at a server they run. Lake
+// refuses it before connecting, so the instance's replication credential is never sent there. The
+// operator is refused the same way: only configured peers receive the credential. The refusal is
+// audited in the customer's log with the source it named.
+TEST(RepositoryReplication, ASourceThatIsNotAConfiguredPeerNeverReceivesTheCredential) {
+    RecordingEndpoint endpoint;
+    ReplicationServer lake_server({"https://region-a.lake.example"}, true);
+
+    for (const std::string& bearer :
+         {lake_server.owner_token, std::string("replication-operator")}) {
+        for (const std::string& source :
+             {endpoint.origin(), endpoint.origin() + "/", endpoint.origin() + "/elsewhere"}) {
+            const nlohmann::json answered = lake_server.replicate(source, bearer);
+            ASSERT_FALSE(answered.value("ok", true)) << source << ": " << answered.dump();
+            EXPECT_EQ(answered["error"]["code"], "invalid_input") << answered.dump();
+            EXPECT_EQ(answered["error"]["path"], "/source_url") << answered.dump();
+        }
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    EXPECT_TRUE(endpoint.heads().empty())
+        << "lake connected to a source that is not a configured peer:\n"
+        << endpoint.heads().front();
+
+    // Repository events go to the repository's workspace audit (decision 52); `audit` reads it.
+    HttpConnection reader(lake_server.server->port());
+    const std::string answered_audit =
+        reader.request("GET",
+                       "/v1/audit?customer_id=" + lake_server.customer_id + "&object=repository/" +
+                           lake_server.repository_id + "&limit=200",
+                       {},
+                       {},
+                       "HTTP/1.1",
+                       "replication-operator");
+    const nlohmann::json audit =
+        nlohmann::json::parse(response_body(answered_audit), nullptr, false);
+    ASSERT_TRUE(audit.is_object() && audit.value("ok", false)) << answered_audit;
+    const auto& items = audit["value"]["items"];
+    const auto refusals = std::ranges::count_if(items, [&](const nlohmann::json& event) {
+        return event.value("action", "") == "replicate_repository" &&
+               event.value("outcome", "") == "failure" &&
+               event["details"].value("refused_source_url", "").starts_with(endpoint.origin());
+    });
+    EXPECT_EQ(refusals, 6) << items.dump();
+}
+
+// lake#915: even a configured peer is reached only over HTTPS on public addresses, unless the
+// operator allows private ones (LAKE_REPLICATION_ALLOW_PRIVATE_ADDRESSES=1).
+TEST(RepositoryReplication, APeerOnAPrivateAddressOrPlainHttpIsRefusedBeforeConnecting) {
+    RecordingEndpoint endpoint;
+    const std::string https_loopback = "https://127.0.0.1:" + std::to_string(endpoint.port());
+    const std::string https_localhost = "https://localhost:" + std::to_string(endpoint.port());
+    ReplicationServer lake_server({endpoint.origin(), https_loopback, https_localhost}, false);
+    for (const std::string& source : {endpoint.origin(), https_loopback, https_localhost}) {
+        const nlohmann::json answered = lake_server.replicate(source, "replication-operator");
+        ASSERT_FALSE(answered.value("ok", true)) << source << ": " << answered.dump();
+        const std::string message = answered["error"]["message"];
+        EXPECT_TRUE(message.find("not a public address") != std::string::npos ||
+                    message.find("must use HTTPS") != std::string::npos)
+            << source << ": " << message;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    EXPECT_TRUE(endpoint.heads().empty()) << endpoint.heads().front();
+}
+
+// lake#915: a configured peer that accepts the connection and never answers holds one pull for at
+// most LAKE_REPLICATION_TIMEOUT_SECONDS, and Lake keeps answering meanwhile.
+TEST(RepositoryReplication, APeerThatNeverAnswersTimesOut) {
+    SilentEndpoint endpoint;
+    const std::string origin = "http://127.0.0.1:" + std::to_string(endpoint.port());
+    ReplicationServer lake_server({origin}, true, std::chrono::seconds(2));
+    const auto started = std::chrono::steady_clock::now();
+    auto replicated = std::async(
+        std::launch::async, [&] { return lake_server.replicate(origin, "replication-operator"); });
+    for (int i = 0; i < 50 && endpoint.accepted() == 0; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    ASSERT_GE(endpoint.accepted(), 1U) << "the pull never reached the peer";
+    HttpConnection connection(lake_server.server->port());
+    const std::string health = connection.request("GET", "/healthz");
+    EXPECT_TRUE(health.starts_with("HTTP/1.1 200")) << health;
+    const nlohmann::json answered = replicated.get();
+    EXPECT_LT(std::chrono::steady_clock::now() - started, std::chrono::seconds(15));
+    ASSERT_FALSE(answered.value("ok", true)) << answered.dump();
+    EXPECT_EQ(answered["error"]["code"], "store_unavailable") << answered.dump();
+    EXPECT_NE(answered["error"]["message"].get<std::string>().find("did not finish"),
+              std::string::npos)
+        << answered.dump();
+}
+
+// lake#915: what LAKE_REPLICATION_PEERS accepts, and how a source is matched to it.
+TEST(RepositoryReplication, PeersAreOriginsAndOnlyAConfiguredOriginMatches) {
+    const auto peers = lake::api::parse_replication_peers(
+        "https://Region-A.lake.example, "
+        "https://region-b.lake.example:8443/\nhttp://127.0.0.1:4900");
+    ASSERT_TRUE(peers) << peers.error();
+    EXPECT_EQ(*peers,
+              (std::vector<std::string>{"https://region-a.lake.example",
+                                        "https://region-b.lake.example:8443",
+                                        "http://127.0.0.1:4900"}));
+    EXPECT_TRUE(lake::api::parse_replication_peers("")->empty());
+    for (const char* refused : {"region-a.lake.example",
+                                "https://user@region-a.lake.example",
+                                "https://region-a.lake.example/path",
+                                "ftp://region-a.lake.example",
+                                "http://region-a.lake.example"}) {
+        EXPECT_FALSE(lake::api::parse_replication_peers(refused)) << refused;
+    }
+    EXPECT_TRUE(lake::api::replication_peer_allowed("https://region-a.lake.example/", *peers));
+    EXPECT_TRUE(lake::api::replication_peer_allowed("https://region-a.lake.example:443", *peers));
+    EXPECT_TRUE(lake::api::replication_peer_allowed("HTTPS://REGION-B.lake.example:8443", *peers));
+    for (const char* refused : {"https://region-b.lake.example",
+                                "https://region-a.lake.example:8443",
+                                "https://region-a.lake.example.attacker.example",
+                                "https://attacker.example",
+                                "http://127.0.0.1:4901",
+                                "https://region-a.lake.example@attacker.example"}) {
+        EXPECT_FALSE(lake::api::replication_peer_allowed(refused, *peers)) << refused;
+    }
 }

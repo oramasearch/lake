@@ -7,7 +7,7 @@ and forms. Files are under `frontend/src/pages/organizations/` and `frontend/src
 
 | Area | Route and tabs | File | Content and actions |
 |---|---|---|---|
-| Organization | `/organization?id=<id>&tab=` `overview`, `teams`, `members`, `invitations`, `access`, `sso`, `applications`, `metering` (labelled Usage), `audit` | `OrganizationPage.tsx` | `get_organization`, `list_teams`, `list_memberships`, `list_invitations`, `entity_effective_access`, `list_sso_providers`, `list_applications`, `metering_usage` (Usage tab only, because it reads the account's workspaces) and `audit` reads; invite (`create_invitation`), create a team (`create_team`), configure a provider (`register_sso_provider`) |
+| Organization | `/organization?id=<id>&tab=` `overview`, `teams`, `members`, `invitations`, `access`, `sso`, `applications`, `metering` (labelled Usage), `audit` | `OrganizationPage.tsx` | `get_organization`, `list_teams`, `list_memberships`, `list_invitations`, `entity_effective_access`, `list_sso_providers`, `list_applications`, `metering_usage` (Usage tab only, because it reads the account's workspaces) and `audit {customer_id}` (the account's audit, its administrators only, lake#18) reads; invite (`create_invitation`), create a team (`create_team`), configure a provider (`register_sso_provider`) |
 | Team | `/team?id=<id>` | `TeamPage.tsx` | the team's memberships and effective access |
 | Member | `/member?id=<id>` | `MemberPage.tsx` | role, attestation evidence, effective access, `set_member_role`, and confirmed `remove_member` |
 | Usage | `/usage` | `../usage/UsagePage.tsx` | usage over time across the chosen workspaces, limits and CSV ([usage.md](usage.md), lake#564) |
@@ -54,6 +54,20 @@ shows and paste the output (`use_own_identity`); a refused signature starts agai
 ([identity.md](../api/identity.md#your-own-identity)); Sessions and devices reads
 `list_sessions` and `list_devices`; Passkeys and Tokens link to `/passkeys` and `/tokens`, where the capability forms
 are ([identity.md](identity.md)); Notifications says no delivery preferences are configured.
+
+### Deleting your account
+
+Profile ends with **Delete account** (lake#810): the shared confirmation
+([deletion.md](deletion.md)) over `delete_account` with no `user_id`, so it is always the signed-in
+person's own account. The dry run lists what goes (`accountLines` in `frontend/src/lib/deletion.ts`:
+workspaces with those of the organizations going, the organizations deleted and those left to their
+other owners, sessions and tokens, credentials and devices, grants, the billing contact) and says
+that invoices and the audit log are kept. While you are the only owner of an organization other
+people belong to, the action is disabled and each such organization is linked, with how many others
+are in it (`accountBlockers`); the page never sends `delete_organizations`. Typing your handle enables
+it; Lake refuses it unless you signed in within the last 15 minutes (the dialog shows the refusal,
+which says to sign in again). Once it is done the page signs out (`POST /logout`), since every
+session went with the account. The capability is [identity.md](../api/identity.md#deleting-an-account).
 
 **What changed.** Every form posted to a server adapter (`/organization/invitations`,
 `/organization/teams`, `/organization/sso`, `/organizations/create`, `/organizations/convert`,

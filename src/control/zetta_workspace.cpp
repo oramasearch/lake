@@ -2,11 +2,13 @@
 
 #include <algorithm>
 #include <cctype>
+#include <charconv>
 #include <chrono>
 #include <filesystem>
 #include <format>
 #include <fstream>
 #include <iterator>
+#include <optional>
 #include <utility>
 
 #include <zetta/connect/http_transport.hpp>
@@ -207,6 +209,35 @@ std::map<std::string, std::string> read_agent_bus_tokens(const std::string& dire
     return tokens;
 }
 
+namespace {
+
+// A long poll's wait in milliseconds, as a number or as the decimal string an agent's query
+// string carries through lake's workspace path (lake#797), clamped to 0..30000; nullopt when it
+// is neither.
+std::optional<long long> long_poll_wait_ms(const nlohmann::json& input) {
+    const auto found = input.find("wait_ms");
+    if (found == input.end() || found->is_null()) {
+        return 0;
+    }
+    long long wait = 0;
+    if (found->is_number_integer()) {
+        wait = found->get<long long>();
+    } else if (found->is_number_unsigned()) {
+        wait = static_cast<long long>(std::min<std::uint64_t>(found->get<std::uint64_t>(), 30'000));
+    } else if (found->is_string()) {
+        const std::string& text = found->get_ref<const std::string&>();
+        const auto [end, error] = std::from_chars(text.data(), text.data() + text.size(), wait);
+        if (text.empty() || error != std::errc() || end != text.data() + text.size()) {
+            return std::nullopt;
+        }
+    } else {
+        return std::nullopt;
+    }
+    return std::clamp(wait, 0LL, 30'000LL);
+}
+
+} // namespace
+
 liquid::runtime::task<ZettaControlResult<nlohmann::json>> ZettaWorkspaceCaller::call(
     std::string url, std::string token, std::string capability, bool read, nlohmann::json input) {
     const zetta::connect::AsyncHttpTransport& transport =
@@ -226,7 +257,13 @@ liquid::runtime::task<ZettaControlResult<nlohmann::json>> ZettaWorkspaceCaller::
     // zetta#1007 was fixed); actions such as compile_intent may legitimately take longer.
     request.timeout_seconds = read ? 15 : 60;
     if (capability == "receive_events" || capability == "browse_topic") {
-        input["wait_ms"] = std::clamp(input.value("wait_ms", 0LL), 0LL, 30'000LL);
+        // A read through lake's workspace path keeps its query values as strings (lake#797).
+        const auto wait = long_poll_wait_ms(input);
+        if (!wait) {
+            co_return ZettaControlResult<nlohmann::json>(std::unexpected(ZettaControlError{
+                "invalid_input", "wait_ms must be a whole number of milliseconds", "/wait_ms"}));
+        }
+        input["wait_ms"] = *wait;
         request.timeout_seconds = 40;
     }
     if (read) {

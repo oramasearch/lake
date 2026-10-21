@@ -42,6 +42,12 @@ struct PlatformMirrorCodec {
 // md5(repository id, newline, name) as a UUID: an environment's id, its record key and its policy
 // object's external id. Migration 0060 computes the same for environments made before the move.
 std::string platform_environment_id(const std::string& repository_id, const std::string& name);
+// The `environment` policy object of a repository's environment, found by that id. Lake creates it
+// directly under the repository's own object; one holding the id anywhere else was made to claim a
+// known repository's environment before its first deploy (lake#913) and is refused as `conflict`,
+// never adopted. `not_found` when the environment has no object yet.
+Result<PolicyObject>
+environment_policy_object(Store& store, const std::string& repository_id, const std::string& name);
 // md5(kind, newline, key) as a UUID: a mirror row's record key and workspace_assignments id.
 std::string platform_mirror_id(const std::string& kind, const std::string& key);
 // The lookup of one repository's records in both collections.

@@ -66,6 +66,14 @@ void register_model_capabilities(Registry& registry);
 void register_transparency_capabilities(Registry& registry);
 void register_timestamp_capabilities(Registry& registry);
 void register_replication_capabilities(Registry& registry);
+// A replication source's origin, `<scheme>://<host>:<port>` with the host lower-cased and the
+// port explicit, or why the URL is not one. https, or http to a loopback host (tests).
+std::expected<std::string, std::string> replication_origin(std::string_view url);
+// LAKE_REPLICATION_PEERS: origins separated by commas or whitespace, each normalized by
+// replication_origin. A peer with a path, query or user information is refused.
+std::expected<std::vector<std::string>, std::string> parse_replication_peers(std::string_view list);
+// Whether `url`'s origin is one of `peers` (lake#915).
+bool replication_peer_allowed(std::string_view url, const std::vector<std::string>& peers);
 void register_application_capabilities(Registry& registry);
 void register_agent_capabilities(Registry& registry);
 void register_platform_capabilities(Registry& registry);

@@ -256,6 +256,19 @@ struct Principal {
     std::string workload_revision;
     std::string workload_token_hash;
 };
+// A proof that the person holds the key of the identity document they enroll with (lake#931,
+// docs/api/identity.md#proving-you-hold-the-key): the nonce and expiry begin_identity_proof issued,
+// and what `liquid sign artifact <challenge>` printed.
+struct IdentityProof {
+    std::string nonce;
+    std::int64_t expires_at = 0;
+    std::string signature;
+};
+// The challenge begin_identity_proof answers; Lake stores nothing for it.
+struct IdentityProofChallenge {
+    std::string challenge, nonce;
+    std::int64_t expires_at = 0;
+};
 struct NewPasswordUser {
     std::string pool_id, email, password, display_name, device_name, identity_document;
     // The new user's id, chosen by the caller so that an application's workspace can record the
@@ -264,6 +277,8 @@ struct NewPasswordUser {
     // The managed key lake minted for a lake-pool sign-up without an identity document (lake#762,
     // decision 65); empty when the person brought their own document.
     std::string custodial_taap_id, custodial_public_key, custodial_wrapped_seed;
+    // Required with identity_document (lake#931).
+    IdentityProof identity_proof;
 };
 struct PasswordSignIn {
     std::string pool_id, email, password, totp_code, device_name;
@@ -617,6 +632,43 @@ struct OrganizationDeletion {
     std::map<std::string, std::int64_t> counts;
     std::string deleted_at; // empty for a dry run
 };
+// Deleting an account (lake#810, docs/api/identity.md#deleting-an-account). An organization the
+// account is a member of, as the deletion sees it: the account's organization-wide role (empty when
+// it is only on a team), how many other organization-wide owners and other members it has, and the
+// live workspaces of its space. One the account is the only owner of is `sole_owner()`: it is either
+// deleted first (with its workspaces) or the account deletion is refused, so an organization is
+// never left without an owner.
+struct AccountOrganization {
+    Organization organization;
+    std::string customer_id, customer_name; // empty when it has no space
+    std::string role;
+    std::int64_t other_owners = 0, other_members = 0;
+    std::vector<Workspace> live_workspaces;
+    bool sole_owner() const { return role == "owner" && other_owners == 0; }
+};
+// What Store::delete_account removes. It is refused (`conflict`) while the account's personal space
+// holds a live workspace or the account is the only owner of an organization that is not deleted.
+// Otherwise one transaction removes the account's sessions and tokens, devices, credentials
+// (password, TOTP, recovery codes, passkeys, OAuth and SSO links), identity documents, TAAP
+// assertions, WebAuthn challenges, recovery attempts and grants, recovery custody it holds for
+// others' repositories, identity links and SCIM mappings; destroys the seed of an identity Lake
+// minted for it (the public key stays, so past signatures verify); removes every membership and
+// every grant naming it; removes its personal space's billing contact, usage limits, storage quota,
+// secret mount routes and policy objects (with every grant on them); and marks the space and the
+// user deleted, the user's email and display name erased. The two rows stay, marked, because the
+// central audit chain names them (audit_events.customer_id is ON DELETE RESTRICT, and principals are
+// TAAP identities); the handle and the TAAP identity stay retired. Invoices, payment records and
+// orders are billing records and are kept. `counts` says how many of each went (a dry run: would
+// go).
+struct AccountDeletion {
+    User user;
+    std::string customer_id, customer_name; // the personal space; empty when it has none
+    std::vector<Workspace> live_workspaces;  // of the personal space
+    std::vector<AccountOrganization> organizations;
+    std::map<std::string, std::int64_t> counts;
+    std::int64_t invoices_kept = 0, open_invoices = 0;
+    std::string deleted_at; // empty for a dry run
+};
 // Where a tenant image repository lives (lake#383, decision 54 S4-S6, migration 0068): the
 // content-free central route from `<space>/<name>` (the space by its customer id, `name` the path
 // below it, `<image>` or `cache/<image>`) to the workspace whose Zetta holds the repository's
@@ -922,6 +974,10 @@ struct AgentLaunch {
     std::string stop_reason;
     // When the operator last wrote the launch's status: a finished job's end (lake#643).
     std::string status_updated_at;
+};
+// What withdraw_agent_workloads withdrew for one deleted agent (lake#524).
+struct AgentWorkloadsWithdrawn {
+    std::size_t launches = 0, schedules = 0;
 };
 struct NewAgentLaunch {
     std::string customer_id, agent_id, agent_name, mode, trigger;
@@ -1233,6 +1289,9 @@ struct OAuthProvider {
 };
 struct OAuthFlow {
     std::string pool_id, provider, state, code_verifier, nonce, device_name, identity_document;
+    // Required with an identity_document outside enterprise (`sso-`) flows (lake#931); never
+    // stored with the flow.
+    IdentityProof identity_proof;
 };
 struct SsoProvider {
     std::string id;
@@ -1264,6 +1323,23 @@ struct NewSsoProvider {
     std::string scim_token;
     nlohmann::json attribute_mapping;
     bool jit_provisioning = false;
+};
+// An outstanding SAML AuthnRequest (lake#836, docs/api/sso.md#saml-sign-in): one use, within ten
+// minutes. `return_to` is a same-origin path, or empty.
+struct SamlRequest {
+    std::string provider_id;
+    std::string request_id;
+    std::string device_name;
+    std::string taap_id;
+    std::string return_to;
+};
+// A verified assertion answering one: the request is consumed and the assertion id recorded until
+// it expires, in one transaction, so each request and each assertion is accepted once.
+struct SamlAnswer {
+    std::string provider_id;
+    std::string request_id;
+    std::string assertion_id;
+    std::int64_t assertion_expires_at = 0; // Unix seconds
 };
 struct FederationIssuer {
     std::string id;
@@ -1445,6 +1521,15 @@ struct NewAgentSession {
     std::string expires_at;
 };
 
+// One participant of a root recovery ceremony (migration 0093, lake#934): the TAAP id that holds
+// share `index`, when it was issued to them, and whether they have presented it.
+struct PkiRecoveryParticipant {
+    int index = 0;
+    std::string principal;
+    std::optional<std::string> share_issued_at;
+    bool submitted = false;
+};
+
 struct PkiRecoveryCeremonyRecord {
     std::string id;
     std::string customer_id;
@@ -1454,6 +1539,7 @@ struct PkiRecoveryCeremonyRecord {
     std::optional<std::string> recovered_at;
     std::string expires_at;
     std::string created_at;
+    std::vector<PkiRecoveryParticipant> participants; // by index; empty before migration 0093
 };
 
 struct NewPkiRecoveryCeremonyRecord {
@@ -1462,6 +1548,7 @@ struct NewPkiRecoveryCeremonyRecord {
     int threshold = 0;
     int share_count = 0;
     std::string expires_at;
+    std::vector<std::string> participants; // share i + 1 is participants[i]'s; distinct
 };
 
 struct PkiRecoveryShareEvidence {
@@ -1534,6 +1621,10 @@ public:
     // them through `live_workspaces` on a dry run); `not_found` for an unknown or deleted one.
     virtual Result<OrganizationDeletion> delete_organization(const std::string& id,
                                                              bool dry_run) = 0;
+    // See AccountDeletion. `conflict` while the personal space has a live workspace or the account
+    // is an organization's only owner (a dry run still answers the plan); `not_found` for an
+    // unknown or deleted account.
+    virtual Result<AccountDeletion> delete_account(const std::string& user_id, bool dry_run) = 0;
 
     virtual Result<Customer> create_customer(const NewCustomer&) = 0;
     virtual Result<std::vector<Customer>> list_customers(int limit,
@@ -1616,6 +1707,11 @@ public:
     virtual Result<std::vector<PolicyObject>> list_policy_objects(const std::string& parent_id,
                                                                   const std::string& object_type,
                                                                   int limit) = 0;
+    // Puts a `path` object under another parent, for a drive folder that moved (lake#929): its
+    // inherited access is then its new place's. Refuses any other object type, a parent the type
+    // may not have, and a parent inside the object's own subtree.
+    virtual Result<PolicyObject> set_policy_object_parent(const std::string& id,
+                                                          const std::string& parent_id) = 0;
     virtual Result<std::vector<ObjectPathEntry>>
     policy_paths(const std::vector<std::string>& requested_object_ids) = 0;
 
@@ -1853,6 +1949,16 @@ public:
     // creation, recording `reason` as its stop_reason (lake#442). Returns how many it withdrew.
     virtual Result<std::size_t> expire_unstarted_agent_launches(std::int64_t seconds,
                                                                 const std::string& reason) = 0;
+    // Withdraws, in one transaction, every present launch of an agent in a workspace (recording
+    // `reason` as its stop_reason) and every present cron schedule of it, so that the operator
+    // removes their Deployments, Jobs and CronJobs (lake#524). Called when the agent is deleted,
+    // or found gone. A launch or schedule without a workspace (before migration 0043) counts as
+    // the agent's in every workspace. Withdrawing none is not an error.
+    virtual Result<AgentWorkloadsWithdrawn>
+    withdraw_agent_workloads(const std::string& customer_id,
+                             const std::string& workspace_id,
+                             const std::string& agent_id,
+                             const std::string& reason) = 0;
     // Methodology runs (lake#655). Creating or withdrawing one NOTIFYs lake_services.
     virtual Result<MethodologyRun> create_methodology_run(const NewMethodologyRun&) = 0;
     virtual Result<MethodologyRun> get_methodology_run(const std::string& id) = 0;
@@ -2079,10 +2185,20 @@ public:
     create_pki_recovery_ceremony(const NewPkiRecoveryCeremonyRecord& value) = 0;
     virtual Result<PkiRecoveryCeremonyRecord>
     get_pki_recovery_ceremony(const std::string& customer_id, const std::string& ceremony_id) = 0;
+    // Root recovery (lake#934): a share is issued once, to its participant, while the ceremony is
+    // active; the answer is its index. `conflict` when already issued or the ceremony is not
+    // active, `forbidden` when `principal` is not a participant.
+    virtual Result<int> claim_pki_recovery_share(const std::string& customer_id,
+                                                 const std::string& ceremony_id,
+                                                 const std::string& principal) = 0;
+    // Record the evidence of the share `principal` presented (verified by the caller), once per
+    // participant and only after it was issued to them; sets recovered_at when this submission
+    // brings the distinct participants presenting theirs to the threshold.
     virtual Result<PkiRecoveryCeremonyRecord>
-    complete_pki_recovery_ceremony(const std::string& customer_id,
-                                   const std::string& ceremony_id,
-                                   const std::vector<PkiRecoveryShareEvidence>& evidence) = 0;
+    submit_pki_recovery_share(const std::string& customer_id,
+                              const std::string& ceremony_id,
+                              const std::string& principal,
+                              const PkiRecoveryShareEvidence& evidence) = 0;
 
     // Secrets (docs/api/secrets.md, lake#328-#332). Mounts, secrets, versions, named keys and data
     // keys live in the mount's workspace Zetta (api/secret_records_api.hpp). The control store
@@ -2150,6 +2266,10 @@ public:
     // Identity core. All bearer and cookie values are resolved here on every
     // request so a revoked session or device is rejected immediately.
     virtual Result<IssuedSession> sign_up_password(const NewPasswordUser&) = 0;
+    // A challenge to sign with the key of `identity_document` before sign_up_password or a first
+    // OAuth sign-in in `pool_id` binds that document to a new account (lake#931).
+    virtual Result<IdentityProofChallenge>
+    begin_identity_proof(const std::string& pool_id, const std::string& identity_document) = 0;
     virtual Result<IssuedSession> sign_in_password(const PasswordSignIn&) = 0;
     virtual Result<IssuedSession> sign_in_taap(const TaapSignIn&) = 0;
     virtual Result<MfaEnrollment> enroll_mfa(const std::string& user_id,
@@ -2160,6 +2280,12 @@ public:
     // Whether the user has an active TOTP enrollment in the pool (the web app's `viewer`,
     // lake#561).
     virtual Result<bool> mfa_enrolled(const std::string& user_id, const std::string& pool_id) = 0;
+    // Checks a fresh TOTP code (or an unused recovery code) of an enrolled user and changes
+    // nothing: the step-up a destructive action asks for (delete_account, lake#810). `unauthorized`
+    // when it does not verify, `not_found` when MFA is not enrolled.
+    virtual Result<void> verify_mfa_code(const std::string& user_id,
+                                         const std::string& pool_id,
+                                         const std::string& code) = 0;
     virtual Result<IssuedSession> sign_in_totp(const PasswordSignIn&) = 0;
     virtual Result<WebAuthnChallenge> begin_passkey_registration(const std::string& user_id,
                                                                  const std::string& pool_id,
@@ -2258,6 +2384,10 @@ public:
     // Internal callback lookup. This is never rendered through an API response.
     virtual Result<OAuthProvider> get_sso_oidc_provider(const std::string& id) = 0;
     virtual Result<SsoProvider> authenticate_scim(const std::string& bearer_token) = 0;
+    // SAML sign-in (lake#836): the provider must be an enabled SAML provider.
+    virtual Result<void> begin_saml(const SamlRequest&) = 0;
+    // unauthorized when the request is unknown, used or expired, or the assertion was used.
+    virtual Result<SamlRequest> consume_saml(const SamlAnswer&) = 0;
     virtual Result<SsoProvider> test_sso_provider(const std::string& id) = 0;
     virtual Result<FederationIssuer> create_federation_issuer(const NewFederationIssuer&) = 0;
     virtual Result<std::vector<FederationIssuer>>

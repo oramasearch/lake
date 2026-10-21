@@ -102,6 +102,36 @@ AuthorizationDecision decide(const std::string& object_id,
 
 } // namespace
 
+bool valid_principal_id(std::string_view value) {
+    constexpr std::string_view prefix = "taap:";
+    if (!value.starts_with(prefix) || value.size() == prefix.size() || value.size() > 512) {
+        return false;
+    }
+    return std::ranges::all_of(value, [](char c) { return c > ' ' && c < 0x7f; });
+}
+
+Result<void> check_principal_id(std::string_view value, std::string_view field) {
+    if (value.empty() || valid_principal_id(value)) {
+        return {};
+    }
+    return std::unexpected(
+        StoreError{"invalid_input", std::string(field) + " must be a TAAP identity (taap:...)"});
+}
+
+Result<Principal> accepted_principal(Result<Principal> principal) {
+    if (!principal) {
+        return principal;
+    }
+    const bool workload = principal->kind.starts_with("app_") ||
+                          principal->kind.starts_with("build_") ||
+                          principal->kind.starts_with("methodology_");
+    if (principal->taap_id == operator_principal ||
+        (!workload && !principal->taap_id.empty() && !valid_principal_id(principal->taap_id))) {
+        return std::unexpected(StoreError{"not_found", "session is not active"});
+    }
+    return principal;
+}
+
 bool role_allows(std::string_view role, std::string_view action) {
     if (role == "admin") {
         return std::ranges::find(actions, action) != actions.end();
@@ -173,6 +203,50 @@ bool object_parent_allowed(std::string_view object_type, std::string_view parent
         return parent_type == "secret_mount";
     }
     return false;
+}
+
+namespace {
+
+// Deeper than any graph lake builds (customer, organization, team, repository and folders); a
+// longer chain is a cycle or damage, and is not followed.
+constexpr int max_policy_depth = 256;
+
+} // namespace
+
+Result<bool>
+object_within(Store& store, const std::string& object_id, const std::string& ancestor_id) {
+    std::string current = object_id;
+    for (int depth = 0; !current.empty() && depth < max_policy_depth; ++depth) {
+        if (current == ancestor_id) {
+            return true;
+        }
+        auto object = store.get_policy_object(current);
+        if (!object) {
+            if (object.error().code == "not_found") {
+                return false;
+            }
+            return std::unexpected(object.error());
+        }
+        current = object->parent_id;
+    }
+    return false;
+}
+
+Result<PolicyObject>
+nearest_object_of_type(Store& store, const std::string& object_id, std::string_view object_type) {
+    std::string current = object_id;
+    for (int depth = 0; !current.empty() && depth < max_policy_depth; ++depth) {
+        auto object = store.get_policy_object(current);
+        if (!object) {
+            return std::unexpected(object.error());
+        }
+        if (object->object_type == object_type) {
+            return object;
+        }
+        current = object->parent_id;
+    }
+    return std::unexpected(
+        StoreError{"not_found", "no " + std::string(object_type) + " object above " + object_id});
 }
 
 Result<std::map<std::string, AuthorizationDecision>>

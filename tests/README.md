@@ -173,6 +173,11 @@ pinned to the AWS examples and Shared Key to an independently computed signature
 `drive_history_support.hpp` is the Drive overwrite exercise of lake#123 (upload twice, history,
 comparison, restore and deletion, through the HTTP API) over any running Lake; the Postgres
 scenario and `WorkspaceStoreDrive.*` (account store and switched workspace store) both run it.
+It also holds the upload exercise of lake#560 (the first upload creates `main`, an upload into a
+missing folder creates it, an upload under a file is refused), which the Postgres scenario,
+`DrivesHttp.TheFirstUploadCreatesMainAndAMissingFolder` and `WorkspaceStoreDrive.TheFirstUpload*`
+run. The Postgres cases sign in as the repository's owner, so they pass the policy check where the
+defect was; the others use the operator token.
 
 The `scenarios/` cases combine those production Postgres stores with an in-process Lake, public
 HTTP routes, and public client libraries. The drive scenario signs users up, synchronizes and

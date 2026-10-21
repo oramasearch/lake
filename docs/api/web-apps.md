@@ -49,6 +49,17 @@ repository ID in the customer. Path defaults to `.`; entrypoint defaults to empt
 reads the app's `app.toml`. Image mode uses `image`. Deploy and rollback accept the same source or
 image input. The old `source` mode value is rejected.
 
+**An image is pinned by digest** (lake#783): `name@sha256:<64 hex digits>`, optionally with a tag
+before the digest (`name:1.27@sha256:…`). That is the `LakeApp` CRD's `spec.image` pattern, and
+the operator fails any other image app ("image must be pinned by SHA-256 digest"), so
+`create_app`, `deploy_app` and `rollback_app` refuse anything else with `invalid_input` at `/image`
+before the app is created or changed. Lake does not resolve a tag to a digest. A finished
+`build_app` reports its image already pinned (`get_build` `image`), and the app page's *Deploy
+build* uses only that. A stdio MCP connection's App (below) is refused with `not_supported` when
+`LAKE_MCP_RUNNER_IMAGE` is not pinned. To verify: `create_app` with
+`nginxinc/nginx-unprivileged:1.27-alpine` answers `invalid_input` at `/image` and lists no app;
+`WebApps.AnImageAppIsRefusedUnlessItsImageIsPinnedByDigest` covers it.
+
 `bindings.zetta` accepts `true`, `["read"]`, or `{"scopes":["read"]}` to bind; false/null/omitted
 means no binding. Writes normalize to the quoted contract. Service IDs stay strings. Lake never
 adds a workspace token or an opaque token Secret reference to bindings, code, or environment.
@@ -65,6 +76,13 @@ names with the comma-separated `LAKE_APPS_RESERVED_NAMES`; surrounding whitespac
 `create_app` returns `invalid_input`, `<name> is reserved`, at `/name` before it writes desired
 state. An omitted, null, or empty `host` remains the default `<name>.<LAKE_APPS_WILDCARD>`, so
 `reports` with `LAKE_APPS_WILDCARD=oramadev.net` becomes `reports.oramadev.net`.
+
+An explicit `host` is held to the same names (lake#947): its label, the part before
+`.<LAKE_APPS_WILDCARD>`, may not be a reserved name, so `{name: "ok", host: "app.oramadev.net"}` is
+refused with `invalid_input`, `<host> is reserved: <label> is a reserved name`, at `/host`. Nor may it
+be one of the Lake's own hosts: its `LAKE_PUBLIC_HOST`, its `LAKE_APEX_HOST` or the host of any region in
+`LAKE_REGIONS` (`<host> is a host of the Lake itself`, at `/host`). Those sit one label beneath the
+wildcard when the wildcard is the zone itself, as `oramadev.net` is on the managing cluster.
 
 Application Agent must propose a non-reserved name and should leave `host` unset unless the person
 asked for a specific address. Its `create_app` tool description identifies platform-host names as
@@ -101,6 +119,7 @@ session to customer code. The operator configures the app ingress with:
 nginx.ingress.kubernetes.io/auth-url: http://lake-prod.lake.svc.cluster.local:80/w/<workspace>/v1/apps/auth
 nginx.ingress.kubernetes.io/auth-signin: https://<lake public host>/apps/authorize?app=<app id>&rd=$scheme://$host$escaped_request_uri
 nginx.ingress.kubernetes.io/auth-always-set-cookie: "true"
+nginx.ingress.kubernetes.io/auth-response-headers: X-Orama-User,X-Orama-Space
 ```
 
 `GET /v1/apps/auth`, including its `/w/<workspace>/v1/apps/auth` form, resolves a live protected
@@ -110,6 +129,18 @@ app by the host of `X-Original-URL` (ingress-nginx sets `Host` to Lake's Service
 `iat`, and `exp`; its HMAC-SHA256 key is derived from the instance KEK with HKDF label
 `lake/app-session/v1`, and it expires after 12 hours. Lake rechecks current workspace membership
 on every request. Invalid, expired, cross-app, or no-longer-authorized tokens return 401.
+
+**Which identity headers an app may trust** (app-runtime#11). Because the Ingress names
+`X-Orama-User` and `X-Orama-Space` in `auth-response-headers`, ingress-nginx sets them from this
+endpoint's answer and a copy sent by the client never reaches a Lake-protected app. No other header
+is set for the app: `X-Orama-User-Id`, `X-Auth-Request-*` and the like arrive as the client wrote them,
+on every app. A public app (`auth = none`) has no forward auth at all, so **every** identity header it
+receives, `X-Orama-User` included, came from the client. The operator tells the pod which case it is
+in `APP_AUTH` (`lake` or `public`). app-runtime's `current_user()` returns the member only when
+`APP_AUTH=lake`, reads only `X-Orama-User`, and removes the forgeable headers before app code sees the
+request. **An image-mode app that does not use app-runtime must not treat these headers as identity
+unless it is Lake-protected**, and must never trust any identity header other than `X-Orama-User` and
+`X-Orama-Space`.
 
 When no app cookie is usable, nginx sends the browser to
 `GET /apps/authorize?app=<app id>&rd=<original URL>` on Lake's own host. Lake's normal browser

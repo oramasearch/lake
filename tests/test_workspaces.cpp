@@ -41,6 +41,11 @@
 namespace {
 
 using json = nlohmann::json;
+
+// An image app's image as the operator runs it, pinned by digest (lake#783).
+std::string pinned_image(const std::string& name) {
+    return "registry.example.test/" + name + "@sha256:" + std::string(64, 'd');
+}
 using lake::control::ZettaControlResult;
 
 constexpr std::string_view customer = "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0";
@@ -1227,6 +1232,56 @@ TEST(Workspaces, ZettaCallerKeepsTheErrorPath) {
     EXPECT_EQ(called->error().code, "invalid_input");
     EXPECT_EQ(called->error().message, "required; set from_defaults: true");
     EXPECT_EQ(called->error().path, "/objective");
+}
+
+// lake#797: an agent reads receive_events through lake's workspace path with a GET, whose query
+// values reach the caller as strings; the long poll's wait is read from the string instead of
+// failing the call with a JSON type error.
+TEST(Workspaces, ZettaCallerReadsALongPollWaitGivenAsText) {
+    const zetta::connect::HttpTransport previous = zetta::connect::default_http_transport();
+    const zetta::connect::AsyncHttpTransport previous_async =
+        zetta::connect::default_async_http_transport();
+    std::vector<std::string> asked;
+    zetta::connect::set_default_http_transport(
+        {},
+        [&asked](const zetta::connect::HttpRequest& request)
+            -> boost::capy::io_task<zetta::connect::HttpResponse> {
+            asked.push_back(request.url);
+            co_return boost::capy::io_result<zetta::connect::HttpResponse>{
+                {},
+                {200,
+                 json{{"ok", true}, {"value", {{"events", json::array()}, {"next_sequence", 1}}}}
+                     .dump(),
+                 {}}};
+        });
+    lake::control::ZettaWorkspaceCaller caller;
+    const auto receive = [&](json wait) {
+        return liquid::runtime::block_on(caller.call("http://ws:4800",
+                                                     "t",
+                                                     "receive_events",
+                                                     true,
+                                                     {{"topic", "study-events.s-1"},
+                                                      {"from_sequence", "1"},
+                                                      {"max", "100"},
+                                                      {"wait_ms", std::move(wait)}}));
+    };
+    const auto text = receive("60000");
+    const auto number = receive(250);
+    const auto unreadable = receive("soon");
+    zetta::connect::set_default_http_transport(previous, previous_async);
+    ASSERT_TRUE(text);
+    ASSERT_TRUE(*text) << text->error().message;
+    EXPECT_EQ((**text)["next_sequence"], 1);
+    ASSERT_EQ(asked.size(), 2U) << "the unreadable wait is refused before any request";
+    EXPECT_NE(asked[0].find("wait_ms=30000"), std::string::npos) << asked[0];
+    EXPECT_NE(asked[0].find("from_sequence=1"), std::string::npos) << asked[0];
+    ASSERT_TRUE(number);
+    ASSERT_TRUE(*number) << number->error().message;
+    EXPECT_NE(asked[1].find("wait_ms=250"), std::string::npos) << asked[1];
+    ASSERT_TRUE(unreadable);
+    ASSERT_FALSE(*unreadable);
+    EXPECT_EQ(unreadable->error().code, "invalid_input");
+    EXPECT_EQ(unreadable->error().path, "/wait_ms");
 }
 
 TEST(Workspaces, ASearchKeyFromAnOlderSessionLastsAsLongAsTheSession) {
@@ -3330,6 +3385,80 @@ TEST(AgentRuns, AgentTurnReachesLibraryNativeAndPythonAgents) {
     EXPECT_EQ(std::get<2>(r.agents.turns.back())["message"], "hello again");
 }
 
+// lake#932: a service launch acts with its creator's credential, so a second person talking to the
+// same Python agent never reaches the first person's launch; each is served by a launch they
+// started, whose credential resolves to them.
+TEST(AgentRuns, EachPersonTalksToAPythonAgentThroughTheirOwnLaunch) {
+    AgentRuns r;
+    auto& config = const_cast<lake::control::WorkspaceConfig&>(r.w.service->config());
+    config.agent_service_token = "service-token";
+    r.w.caller->answers["get_agent"] = {{"id", "p-1"}, {"name", "Py"}, {"runtime", "python"}};
+
+    // The administrator starts the agent's service and talks to it.
+    const auto started = r.call("agent_turn", {{"agent", "p-1"}, {"message", "hello"}});
+    ASSERT_TRUE(started.ok) << started.error.message;
+    const std::string admin_launch = started.value["launch_id"];
+    ASSERT_TRUE(
+        r.store.set_agent_launch_status(admin_launch, "Ready", "", "http://al-admin:8080", "x"));
+
+    // A later writer in the same workspace is not handed the administrator's launch.
+    const auto writer_user =
+        r.store.create_user({"taap:1:ed25519:writer", "writer@example.test", "Writer"});
+    ASSERT_TRUE(writer_user) << writer_user.error().message;
+    const auto space = r.store.find_policy_object("customer", r.w.customer_id);
+    ASSERT_TRUE(space) << space.error().message;
+    ASSERT_TRUE(r.store.create_grant(
+        {writer_user->taap_id, space->id, "write", "writer-attestation", "admin", "writer-grant"}));
+    lake::control::Principal writer = r.principal;
+    writer.user_id = writer_user->id;
+    writer.taap_id = writer_user->taap_id;
+    writer.session_id.clear();
+    const std::size_t before = r.agents.turns.size();
+    const auto refused =
+        r.call_as(writer, "agent_turn", {{"agent", "p-1"}, {"message", "read the admin's repos"}});
+    ASSERT_TRUE(refused.ok) << refused.error.message;
+    EXPECT_EQ(refused.value["status"], "starting");
+    const std::string writer_launch = refused.value["launch_id"];
+    EXPECT_NE(writer_launch, admin_launch);
+    EXPECT_EQ(r.agents.turns.size(), before) << "the administrator's launch is never called";
+    const auto writers = r.store.get_agent_launch(writer_launch);
+    ASSERT_TRUE(writers);
+    EXPECT_EQ(writers->mode, "service");
+    EXPECT_EQ(writers->created_by_user_id, writer_user->id);
+
+    // Once ready, each person's turn goes to their own launch.
+    const std::string writer_credential =
+        "lal." + writer_launch + ".0123456789abcdef0123456789abcdef";
+    ASSERT_TRUE(r.store.set_agent_launch_status(
+        writer_launch,
+        "Ready",
+        "",
+        "http://al-writer:8080",
+        lake::control::identity_crypto::sha256_hex(writer_credential)));
+    const auto mine = r.call_as(writer, "agent_turn", {{"agent", "p-1"}, {"message", "mine"}});
+    ASSERT_TRUE(mine.ok) << mine.error.message;
+    ASSERT_EQ(r.agents.turns.size(), before + 1);
+    EXPECT_EQ(std::get<0>(r.agents.turns.back()), "http://al-writer:8080");
+    const auto theirs = r.call("agent_turn", {{"agent", "p-1"}, {"message", "theirs"}});
+    ASSERT_TRUE(theirs.ok) << theirs.error.message;
+    ASSERT_EQ(r.agents.turns.size(), before + 2);
+    EXPECT_EQ(std::get<0>(r.agents.turns.back()), "http://al-admin:8080");
+
+    // The writer's launch acts as the writer, never as the administrator.
+    const auto acting = r.store.context_for(writer_credential);
+    ASSERT_TRUE(acting) << acting.error().message;
+    EXPECT_EQ(acting->user_id, writer_user->id);
+    EXPECT_NE(acting->user_id, r.principal.user_id);
+
+    // Without a person there is no launch to choose.
+    lake::control::Principal nobody = r.principal;
+    nobody.user_id.clear();
+    const auto anonymous = r.call_as(nobody, "agent_turn", {{"agent", "p-1"}, {"message", "x"}});
+    EXPECT_FALSE(anonymous.ok);
+    EXPECT_EQ(anonymous.error.code, "unauthorized");
+    EXPECT_EQ(r.agents.turns.size(), before + 2);
+}
+
 // Scan my workspace (lake#795): Auto-Suggest Agent's discover turn reads the account's Apps and
 // image builds with its task credential before it suggests (agent-autosuggest's apps.py), so the
 // credential grants those reads, and nothing that changes an App or a build.
@@ -3419,7 +3548,7 @@ TEST(AgentRuns, ApplicationAgentWritesAppsOnlyAfterTheProposalIsConfirmed) {
     EXPECT_EQ(r.w.caller->input, (json{{"database", "datasets"}, {"dataset", "accounts"}}));
     const json create_input{{"name", "agent-reports"},
                             {"mode", "image"},
-                            {"image", "registry.example.test/reports:first"},
+                            {"image", pinned_image("reports:first")},
                             {"framework", "container"},
                             {"port", 8080},
                             {"host", nullptr},
@@ -3428,8 +3557,7 @@ TEST(AgentRuns, ApplicationAgentWritesAppsOnlyAfterTheProposalIsConfirmed) {
     EXPECT_EQ(r.call_as(*first_principal, "create_app", create_input).error.code, "unauthorized");
     EXPECT_EQ(r.call_as(*first_principal,
                         "deploy_app",
-                        {{"app", "not-created"},
-                         {"image", "registry.example.test/reports:first"}})
+                        {{"app", "not-created"}, {"image", pinned_image("reports:first")}})
                   .error.code,
               "unauthorized");
 
@@ -3514,12 +3642,12 @@ TEST(AgentRuns, ApplicationAgentWritesAppsOnlyAfterTheProposalIsConfirmed) {
     const auto refused = r.call_as(*third_principal, "create_app", named_secret);
     EXPECT_EQ(refused.error.code, "invalid_input");
     EXPECT_EQ(refused.error.path, "/env/API_KEY/secret");
-    const auto deployed = r.call_as(
-        *third_principal,
-        "deploy_app",
-        {{"app", created.value["id"]}, {"image", "registry.example.test/reports:confirmed"}});
+    const auto deployed =
+        r.call_as(*third_principal,
+                  "deploy_app",
+                  {{"app", created.value["id"]}, {"image", pinned_image("reports:confirmed")}});
     ASSERT_TRUE(deployed.ok) << deployed.error.message;
-    EXPECT_EQ(deployed.value["image"], "registry.example.test/reports:confirmed");
+    EXPECT_EQ(deployed.value["image"], pinned_image("reports:confirmed"));
 }
 
 TEST(AgentRuns, AConversationFollowUpCarriesThePriorTurn) {
@@ -4472,6 +4600,37 @@ TEST(Workspaces, CreateProjectSaysWhetherTheNameIsMissingOrTaken) {
     const auto other = r.call("workspace_act",
                               {{"capability", "create_project"}, {"input", {{"name", "churn"}}}});
     EXPECT_NE(other.error.code, "conflict") << "only the engine's name refusal is a clash";
+}
+
+// lake#246, lake#799: a native agent created without a model runs on the Orama base model at the
+// path the Orama operator copies it to on every workspace Zetta's data volume, and when the
+// checkpoint is not there its chat says what is missing instead of the engine's tokenizer error.
+TEST(Workspaces, ANativeAgentRunsTheBaseModelWhereTheOperatorPutsIt) {
+    EXPECT_EQ(lake::control::WorkspaceConfig{}.base_agent_model, "/data/models/base-agent")
+        << "the operator's data volume is /data; it copies the base model to models/base-agent";
+    ReadyWorkspace r;
+    r.w.caller->answers["create_agent"] = {{"id", "a-1"}, {"runtime", "native"}};
+    ASSERT_TRUE(r.call("create_agent", {{"name", "Renewal watcher"}, {"runtime", "native"}}).ok);
+    EXPECT_EQ(r.sent("create_agent").value("model", std::string()), "/data/models/base-agent");
+
+    r.w.caller->failure = lake::control::ZettaControlError{
+        "engine_error",
+        "bpe: no tokenizer.json or vocab.json+merges.txt in /data/models/base-agent"};
+    for (const auto& [capability, input] :
+         {std::pair{std::string("chat"), json{{"agent", "a-1"}, {"message", "hello"}}},
+          std::pair{std::string("agent_run"), json{{"agent", "a-1"}, {"input", "hello"}}}}) {
+        const auto refused =
+            r.call("workspace_act", {{"capability", capability}, {"input", input}});
+        ASSERT_FALSE(refused.ok) << capability;
+        EXPECT_EQ(refused.error.code, "engine_error") << capability;
+        EXPECT_EQ(refused.error.message,
+                  "the agent's model checkpoint is not in this workspace: /data/models/base-agent "
+                  "has no tokenizer.json (or vocab.json and merges.txt). The Orama base model is "
+                  "copied to the workspace's volume when its Zetta starts; until it is there, an "
+                  "agent on it cannot chat or run")
+            << capability;
+    }
+    r.w.caller->failure.reset();
 }
 
 // An agent's definition is versioned (lake#653): the engine keeps one record per agent and

@@ -28,7 +28,12 @@ Both stores implement the deletions of lake#645: `delete_organization` (with `dr
 while the organization's account has a live workspace; marks the organization and its account
 `deleted_at`, migration `0076`, and every read and list of them leaves a marked row out),
 `revoke_invitation`, `get_grant` and `revoke_grant`, and `delete_secret_mount_route`, the last
-step of deleting a mount ([deletion.md](../../docs/api/deletion.md)).
+step of deleting a mount ([deletion.md](../../docs/api/deletion.md)). Both implement
+`delete_account` (lake#810, migration `0091`): refused while the personal space has a live workspace
+or the account is an organization's only owner; removes the account's identity rows, memberships
+and grants and its space's billing contact, limits and policy objects, and marks the user and its
+space deleted, the email and name erased, so every read of users leaves it out; and
+`verify_mfa_code`, the step-up that changes nothing ([identity.md](../../docs/api/identity.md#deleting-an-account)).
 
 `WorkspaceService` caches deployment catalogues and project/pipeline definitions in memory for
 five seconds, scoped to the workspace and connection generation. Successful writes explicitly
@@ -101,7 +106,9 @@ See `docs/api/organizations.md`.
 Agent launches and cron schedules carry the workspace that holds their agent (migration
 `0043_agent_launch_workspaces`, lake#442). Both stores filter launch, schedule and scheduled-run
 lists by it. `expire_unstarted_agent_launches` withdraws, with a `stop_reason`, a launch the
-operator has not reported on within the timeout. `agent_runs.cpp` holds that timeout,
+operator has not reported on within the timeout. `withdraw_agent_workloads` withdraws, in one
+transaction, every present launch (with a `stop_reason`) and schedule of an agent in a workspace,
+when the agent is deleted or found gone (lake#524). `agent_runs.cpp` holds that timeout,
 `agent_launch_progress` (what a person is told about a waiting run), and `trigger_cron`, which
 now says why a plain-words schedule is refused. It also holds `checked_time_zone`, which refuses
 a schedule time zone that is not an IANA name (lake#586) against `iana_time_zones` in
@@ -298,3 +305,9 @@ object protocol with two implementations, S3 (SigV4, `ListObjectsV2`, ranged `GE
 Both stores keep served methodology models' `methodology_deployments` rows and the operator's
 `methodology_deployment_status` (lake#690, migration `0083`); `methodologies.cpp` holds
 `methodology_deployment_endpoint_valid`.
+
+`saml.cpp` is SAML's service-provider side (lake#836, `docs/api/sso.md#saml-sign-in`): a strict XML
+reader (no DTDs or entities), Exclusive XML Canonicalization 1.0, XML Signature verification with
+the provider's registered certificate, and the response, assertion and condition checks, with no
+XML library. Both stores keep the outstanding AuthnRequests and the accepted assertion ids
+(`begin_saml`, `consume_saml`; migration `0092_saml_sign_in`), each accepted once.

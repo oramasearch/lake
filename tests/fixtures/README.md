@@ -10,3 +10,11 @@ a signed field directly must fail verification. The conformance test is the veri
 
 `transparency/` holds the independent byte-level transparency verifier fixtures; see its
 [`README.md`](transparency/README.md).
+
+`saml/` holds SAML responses for `tests/test_saml.cpp` (lake#836), signed by signxml (lxml and
+libxml2), an XML Signature implementation independent of Lake's: one shaped like Okta's (response and
+assertion both signed, an `InclusiveNamespaces` prefix list) and one like Microsoft Entra's (only the
+assertion signed, default namespaces), with the certificate that verifies them. They are valid at
+2026-10-21T12:01Z, which the tests pass as the time. `make-fixtures.py` rewrites all three with a new
+key (`uv run --no-project --with signxml python -I tests/fixtures/saml/make-fixtures.py`); it keeps no
+private key, and it is not part of the build.

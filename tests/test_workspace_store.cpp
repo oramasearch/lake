@@ -1450,6 +1450,95 @@ TEST(WorkspaceStoreDrive, AReplacedFileInAWorkspaceStoreKeepsItsPreviousVersion)
         << "the history was served from the workspace store";
 }
 
+// lake#560: the first upload into a new repository creates `main`, and an upload into a missing
+// folder creates it, in the space store and in a switched workspace's store.
+TEST(WorkspaceStoreDrive, TheFirstUploadInTheSpaceStoreCreatesMainAndAMissingFolder) {
+    MoveRig rig;
+    ASSERT_NO_FATAL_FAILURE(rig.SetUp());
+    const auto target = rig.create(rig.beta, "first-upload-space");
+    if (!target) {
+        return; // create() recorded the failure
+    }
+    lake::test::expect_uploads_create_main_and_missing_folders(
+        [&](std::string_view method, const std::string& path, const std::string& body) {
+            return rig.raw(method, path, body);
+        },
+        target->id);
+    EXPECT_TRUE(rig.store->get_workspace(rig.beta)->store_moved_at.empty());
+}
+
+TEST(WorkspaceStoreDrive, TheFirstUploadInAWorkspaceStoreCreatesMainAndAMissingFolder) {
+    MoveRig rig;
+    ASSERT_NO_FATAL_FAILURE(rig.SetUp());
+    ASSERT_EQ(rig.move(rig.alpha, "switch").first, 200U);
+    const auto target = rig.create(rig.alpha, "first-upload-workspace");
+    if (!target) {
+        return; // create() recorded the failure
+    }
+    lake::test::expect_uploads_create_main_and_missing_folders(
+        [&](std::string_view method, const std::string& path, const std::string& body) {
+            return rig.raw(method, path, body);
+        },
+        target->id);
+    EXPECT_TRUE(rig.zetta->has_bucket("http://" + rig.alpha + ".test"))
+        << "the uploads were written to the workspace store";
+}
+
+// lake#776: an archive export_repository just made imports again. The source has a seeded change,
+// a binary file, an empty file, an edit and a change that deletes a file, as the e2e release gate
+// writes them; the copy is recreated in the space store and in a switched workspace's store with
+// the same tree and the same files.
+TEST(WorkspaceStoreExport, AnArchiveExportJustMadeImportsIntoTheSpaceStoreAndAWorkspaceStore) {
+    MoveRig rig;
+    ASSERT_NO_FATAL_FAILURE(rig.SetUp());
+    ASSERT_EQ(rig.move(rig.alpha, "switch").first, 200U);
+    const auto source = rig.create(rig.beta, "export-source");
+    if (!source) {
+        return; // create() recorded the failure
+    }
+    ASSERT_EQ(rig.push(*source, "README.md", "export source\n"), "");
+    ASSERT_EQ(rig.commit(*source, "blob.bin", std::string("\x00\x01\xfe\xff", 4)).first, 200U);
+    ASSERT_EQ(rig.commit(*source, "empty.txt", "").first, 200U);
+    ASSERT_EQ(rig.commit(*source, "README.md", "export source, edited\n").first, 200U);
+    const auto [deleted, deleted_body] = rig.call(
+        "POST",
+        "/v1/commit_repository_files",
+        {{"id", source->id},
+         {"revision", "main"},
+         {"message", "Add a note and delete the empty file"},
+         {"operations",
+          json::array({{{"type", "file"}, {"path", "api/note.txt"}, {"content", "bm90ZQ=="}},
+                       {{"type", "deletedFile"}, {"path", "empty.txt"}}})}});
+    ASSERT_EQ(deleted, 200U) << deleted_body.dump();
+    const std::vector<std::string> expected{"README.md", "api", "api/note.txt", "blob.bin"};
+    ASSERT_EQ(rig.tree(*source), expected);
+
+    const auto [exported, archive] = rig.call(
+        "POST", "/v1/export_repository", {{"repository_id", source->id}, {"include_git", false}});
+    ASSERT_EQ(exported, 200U) << archive.dump();
+    for (const auto& [workspace, name] :
+         {std::pair{rig.beta, std::string("export-copy-space")},
+          std::pair{rig.alpha, std::string("export-copy-workspace")}}) {
+        const auto [imported, copy] = rig.call("POST",
+                                               "/v1/import_repository",
+                                               {{"customer_id", rig.customer_id},
+                                                {"workspace_id", workspace},
+                                                {"name", name},
+                                                {"archive", archive["value"]["archive"]}});
+        ASSERT_EQ(imported, 200U) << name << ": " << copy.dump();
+        lake::control::Repository target;
+        target.id = copy["value"]["id"];
+        EXPECT_EQ(rig.tree(target), expected) << name;
+        const auto [read, file] =
+            rig.call("GET", "/v1/repository_file?id=" + target.id + "&ref=main&path=README.md");
+        EXPECT_EQ(read, 200U) << file.dump();
+        const std::string text = file.dump();
+        EXPECT_TRUE(text.find("export source, edited") != std::string::npos ||
+                    text.find("ZXhwb3J0IHNvdXJjZSwgZWRpdGVk") != std::string::npos)
+            << "the edited README: " << text;
+    }
+}
+
 TEST(WorkspaceStoreMove, ACreationTheWorkspaceStoreRefusesLeavesNoRowAndCanBeRetried) {
     MoveRig rig;
     ASSERT_NO_FATAL_FAILURE(rig.SetUp());

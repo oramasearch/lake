@@ -30,6 +30,7 @@ Every capability answers a failure the same way on REST and MCP:
 | `unauthenticated` | 401 | No credential was accepted: `reason` says whether it was `missing`, `invalid` or `expired`, and `help` links to the page that makes a new key (`/developer/mcp`). |
 | `unauthorized` | 403 | The credential is valid but does not grant this call on this object. |
 | `mfa_required` | 403 | The account must finish multi-factor verification first. |
+| `identity_proof_required` | 403 | An identity document becomes an account's identity only with a fresh signature by its key: sign `begin_identity_proof`'s challenge and send `identity_proof` ([identity.md](identity.md#proving-you-hold-the-key)). |
 | `forbidden` | 403 | The object is read-only for everyone: one of Orama's catalogue solutions cannot be edited or deleted ([solutions](solutions.md)). The message says why and what to do instead, such as `duplicate_solution`. |
 | `consent_required` | 403 | The workspace requires an approval before it reaches an outside source, which lake cannot give. |
 | `not_found` | 404 | The addressed object does not exist, or the caller cannot see it. |
@@ -99,11 +100,14 @@ WWW-Authenticate: Bearer realm="lake", error="invalid_token",
 
 A capability that lets anonymous callers read public repositories answers the same 401 when it
 refuses an anonymous caller. A **bearer** key lake rejects (invalid or expired) is refused with this
-401 on lake's own public reads too, those whose object is the server (`viewer`, `server_info`,
-`list_docs`, `get_doc`; lake#594): a script with a mistyped key learns so instead of reading `signed_in: false`. A
-browser's stale `lake_session` cookie is not refused there; `viewer` answers it as a visitor, so
-the web app shows its sign-in page. Capabilities that verify their own bearer (the agent bus, SCIM
-providers) keep their own answers. MCP answers the same error object in a `tools/call` result with
+401 on every capability a visitor may call: lake's own public reads, those whose object is the
+server (`viewer`, `server_info`, `list_docs`, `get_doc`; lake#594), and the public reads of
+repositories and their content (`list_repositories` and every capability that allows an anonymous
+public read; lake#775). A script with a mistyped or revoked key learns so instead of reading a
+visitor's answer, such as `signed_in: false` or an empty repository list. A browser's stale
+`lake_session` cookie is not refused; it is answered as a visitor, so the web app shows its sign-in
+page. Capabilities that verify their own bearer (SCIM providers, sign-in, the agents' calls) keep
+their own answers. MCP answers the same error object in a `tools/call` result with
 `isError: true` over HTTP 200, as it does every capability failure. A credential that is valid but
 lacks a scope or a grant is still 403 `unauthorized`.
 

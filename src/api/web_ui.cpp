@@ -267,6 +267,35 @@ std::string web_ui_application_sign_up(const control::Application& application,
     return application_shell(application, application.name + " — sign up", content);
 }
 
+std::string web_ui_application_identity_proof(const control::Application& application,
+                                              const WebUiIdentityProof& proof,
+                                              std::string_view error) {
+    const std::string base = "/apps/" + web_ui_escape(application.id);
+    const std::string command = "liquid sign artifact " + proof.challenge;
+    std::string content = "<p class=\"eyebrow\">identity proof</p><h1>Prove You Hold Your Key</h1>";
+    content += error_markup(error);
+    content += "<p>Your identity document is public, so sign this challenge with your liquid "
+               "identity within five minutes and paste everything the command prints.</p><pre>" +
+               web_ui_escape(command) + "</pre><form class=\"stack\" method=\"post\" action=\"" +
+               base + web_ui_escape(proof.action) + "\">";
+    for (const auto& [name, value] : proof.fields) {
+        content += "<input type=\"hidden\" name=\"" + web_ui_escape(name) + "\" value=\"" +
+                   web_ui_escape(value) + "\">";
+    }
+    content += "<input type=\"hidden\" name=\"identity_nonce\" value=\"" +
+               web_ui_escape(proof.nonce) +
+               "\"><input type=\"hidden\" name=\"identity_expires_at\" value=\"" +
+               std::to_string(proof.expires_at) + "\">";
+    if (proof.password) {
+        content += "<label>Password<input type=\"password\" name=\"password\" "
+                   "autocomplete=\"new-password\" minlength=\"12\" required></label>";
+    }
+    content += "<label>What liquid sign printed<textarea name=\"identity_signature\" "
+               "spellcheck=\"false\" required></textarea></label><button class=\"primary\" "
+               "type=\"submit\">Continue</button></form>";
+    return application_shell(application, application.name + " — identity proof", content);
+}
+
 std::string web_ui_application_sign_in(const control::Application& application,
                                        std::string_view error) {
     const std::string base = "/apps/" + web_ui_escape(application.id);

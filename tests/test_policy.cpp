@@ -93,6 +93,40 @@ TEST(Policy, InheritsDownTheGraphAndStopsAtACut) {
     EXPECT_EQ(local->source_object_id, graph.cut);
 }
 
+// lake#929: a moved drive folder's object takes its new parent's grants and loses its old one's;
+// only a path object moves, and never under itself.
+TEST(Policy, APathObjectMovesUnderAnotherParent) {
+    PolicyGraph graph;
+    const std::string shared =
+        graph.store.create_policy_object({"path", "shared", graph.repository, "admin", "r8", true})
+            ->id;
+    const std::string folder =
+        graph.store.create_policy_object({"path", "folder", shared, "admin", "r9", true})->id;
+    graph.grant("taap:1:ed25519:reader", shared, "read");
+    const auto reads = [&] {
+        AuthorizationCache cache;
+        const auto decision =
+            lake::control::authorize(graph.store, "taap:1:ed25519:reader", folder, "read", cache);
+        return decision && decision->allowed;
+    };
+    EXPECT_TRUE(reads());
+
+    const auto moved = graph.store.set_policy_object_parent(folder, graph.below_cut);
+    ASSERT_TRUE(moved) << moved.error().message;
+    EXPECT_EQ(moved->parent_id, graph.below_cut);
+    EXPECT_FALSE(reads());
+
+    EXPECT_EQ(graph.store.set_policy_object_parent(graph.below_cut, folder).error().code,
+              "invalid_input");
+    EXPECT_EQ(graph.store.set_policy_object_parent(folder, folder).error().code, "invalid_input");
+    EXPECT_EQ(graph.store.set_policy_object_parent(graph.repository, graph.customer).error().code,
+              "invalid_input");
+    EXPECT_EQ(graph.store.set_policy_object_parent(folder, graph.team).error().code,
+              "invalid_input");
+    EXPECT_EQ(graph.store.set_policy_object_parent(folder, "missing").error().code,
+              "invalid_input");
+}
+
 TEST(Policy, BatchedAuthorizationUsesTheSameRules) {
     PolicyGraph graph;
     graph.grant("taap:1:ed25519:writer", graph.organization, "write");

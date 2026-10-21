@@ -35,7 +35,9 @@ inline constexpr std::string_view default_model_provider_url = "https://api.open
 
 // The request as lake sends it to the provider, or invalid_input naming the field at fault. A
 // streamed chat completion is asked to report its usage in its last event
-// (`stream_options.include_usage`), so a stream is counted like any other answer.
+// (`stream_options.include_usage`), so a stream is counted like any other answer. A request with
+// `background` set (the Responses API's) is refused: the provider would go on generating after its
+// answer, which reports no usage, and the gateway has no route to read the result (lake#939).
 std::expected<nlohmann::json, ApiError> prepare_model_request(std::string_view endpoint,
                                                               nlohmann::json request);
 
@@ -51,6 +53,13 @@ struct ModelUsage {
 };
 ModelUsage model_usage(std::string_view body, bool stream);
 
+// The tokens counted for `bytes` bytes of a request or an answer whose usage the provider never
+// reported (an answer that failed part way, or one without `usage`, lake#939): one for every four
+// bytes, rounded up. That is about what OpenAI's tokenizer makes of English text, and an answer's
+// bytes include its JSON and, for a stream, each event's framing, so an answer is counted above the
+// text it carried.
+std::uint64_t estimated_model_tokens(std::size_t bytes);
+
 // The usage of an event stream read as it arrives (lake#665): feed it each piece of the body in
 // order, however the pieces cut the events, and `usage()` is what model_usage would say of the
 // whole stream so far. A last line without its line end is read by `finish()`.
@@ -61,11 +70,16 @@ public:
     const ModelUsage& usage() const {
         return usage_;
     }
+    // The bytes fed so far.
+    std::uint64_t bytes() const {
+        return bytes_;
+    }
 
 private:
     void line(std::string_view text);
     std::string partial_;
     ModelUsage usage_;
+    std::uint64_t bytes_ = 0;
 };
 
 // The provider's refusal as a documented error: its own message for a request it refused

@@ -69,8 +69,8 @@ protocol route. The full route table is [`docs/serving/http.md`](docs/serving/ht
 `--node NAME` names the node. `--control-db URI` (default `$LAKE_CONTROL_DB_URI`) selects the
 Postgres control plane, `--memory-store` an in-memory one for demos; `--admin-token`
 (default `$LAKE_ADMIN_TOKEN`) is the bearer every capability except `server_info` requires.
-`LAKE_REPLICATION_TOKEN` is the bearer presented to peer Lake instances and defaults to the admin
-token when omitted.
+`LAKE_REPLICATION_TOKEN` is the bearer presented to peer Lake instances; it has no default and is
+sent only to the origins in `LAKE_REPLICATION_PEERS` ([`docs/api/replication.md`](docs/api/replication.md)).
 `--store-root DIR` (default `$LAKE_STORE_ROOT`) is owned by one lake process at a time. A second
 process on the same root serves its probes at once, reports Ready, and holds store-touching
 requests until the owner drains and releases the root (at most `LAKE_STORE_OWNER_WAIT_SECONDS`,
@@ -150,7 +150,7 @@ For the full PostgreSQL-backed suite, local database setup, and every run option
 
 ## Releases
 
-The current release is **v0.3.1** (2026-10-20): [`docs/releases/v0.3.1.md`](docs/releases/v0.3.1.md), billing through a shared Stripe account, billing contacts and emailed invoices. Before it, **v0.3.0** (2026-10-19).
+The current release is **v0.4.0** (2026-10-21): [`docs/releases/v0.4.0.md`](docs/releases/v0.4.0.md), the security release from the multi-tenant audit and the pre-launch review, with SAML sign-in, OpenID Connect discovery and `delete_account`. Before it, **v0.3.1** (2026-10-20), billing through a shared Stripe account; before that, **v0.3.0** (2026-10-19).
 [`docs/releases/v0.3.0.md`](docs/releases/v0.3.0.md) lists what it adds (the lake.live order sheet
 and the 2026-10-18 UX review's fixes), what it does not include, and its known issues.
 [`docs/releases/v0.2.0.md`](docs/releases/v0.2.0.md) covers secure networking, regions, the managed

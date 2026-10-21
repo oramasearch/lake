@@ -1,6 +1,6 @@
 # Running and talking to agents
 
-**Status: implemented 2026-09-27 (lake#231, epic lake#228); cron schedules as CronJobs 2026-09-27; workspace-scoped launches, start timeout and definition checks 2026-10-02 (lake#442); stream triggers 2026-10-11 (lake#677, not deployed).** How lake runs user-created Python
+**Status: implemented 2026-09-27 (lake#231, epic lake#228); cron schedules as CronJobs 2026-09-27; workspace-scoped launches, start timeout and definition checks 2026-10-02 (lake#442); stream triggers 2026-10-11 (lake#677, not deployed); deleting an agent stops its runs and schedules 2026-10-21 (lake#524, not deployed).** How lake runs user-created Python
 agents on `agent-runtime`, fires their schedules, starts them from workspace streams, and delivers one conversation turn to any agent,
 from the Agent Library's specialized agents to the ones people build.
 
@@ -116,10 +116,41 @@ zone (from a schedule stored before the check), runs not enabled on this lake, o
 could not set it up. Remove it and add it again*. The operator's own text, which names Kubernetes
 objects and fields, stays in `agent_cron_schedule_status` for whoever runs lake. A schedule
 belongs to its workspace, as a launch does. Creating a Python agent with a trigger in Design → Agents (or through the
-Agent Factory) adds its first schedule; deleting the agent removes all of them.
+Agent Factory) adds its first schedule; deleting the agent removes all of them, in lake
+(`delete_agent`, [above](#deleting-an-agent-stops-its-runs)).
 
 The per-agent `agent_schedules` table of 0030 and lake's in-process scheduler are retired: the
 table is no longer read, and is left for a deliberate drop.
+
+## Deleting an agent stops its runs
+
+**Deleting an agent stops what runs it (lake#524).** Once the engine has deleted the agent,
+`delete_agent` (named or through `workspace_act`) withdraws, in one transaction
+(`Store::withdraw_agent_workloads`), every present launch of that agent in the workspace, `job` and
+`service` alike, and every present schedule of it. Each launch gets `desired = absent` and the
+`stop_reason` *Stopped: the agent `<id>` was deleted.*, so the operator removes its Deployment or Job
+and the run's page says why; each schedule gets `desired = absent`, so the operator deletes its
+CronJob. The answer carries `launches_stopped` and `schedules_removed` beside `streams_removed`. If
+the withdrawal fails, the agent is still deleted and the answer says so in `launches_error`; each run
+then stops itself the next time it starts (below).
+
+Before this, a `service` launch kept `desired = present` after its agent was gone: the operator kept
+its Deployment, and agent-runtime exited at start (*cannot read agent ...: not_found*) and was
+restarted for as long as anyone left it (28 hours and 331 restarts on dev, 2026-10-04).
+
+**A run whose agent is gone stops itself.** An agent can also disappear without `delete_agent`
+(deleted in the workspace's engine directly, or a withdrawal that failed above). agent-runtime reads
+its agent before anything else, with `get_agent`. When a launch or schedule credential reads **its
+own** agent and the workspace answers `not_found`, lake withdraws that agent's launches and schedules
+in the workspace in the same way, with the `stop_reason` *Stopped: the agent `<id>` no longer exists
+in this workspace, so the run cannot start.* The pod's next restart finds its credential no longer
+resolves, and the operator removes it. A person's `get_agent`, or a run reading another agent, stops
+nothing. The operator needs no change: it already removes the workloads of absent launches and
+schedules, and it never reads a workspace Zetta (decision 51), so it cannot tell that an agent is
+gone.
+
+Verify: `ctest --test-dir build -R DeletingAnAgentStopsItsLaunchesAndSchedules`
+(`WorkspaceRecordStores.DeletingAnAgentStopsItsLaunchesAndSchedules`, memory and Postgres).
 
 ## Stream triggers
 
@@ -227,11 +258,20 @@ native agents still answer within the call (a follow-up).
 | **Auto-Suggest Agent** (`agent-autosuggest`) | its service | a read-only turn key and `zetta_base_url` = lake's agent path for the workspace; lake builds no profile (a `context.profile` the caller sends is passed through). The agent builds the profile itself (`list_datasets`, then `get_dataset` for up to twelve) and reads the engine's methodologies and solutions through `workspace_query`. The key carries `workspace_query`, `workspace_openapi`, `get_agent_task` and the App and build reads the agent makes before it suggests: `list_apps`, `get_app`, `receive_app_events`, `list_builds`, `get_build`, `receive_build_events` (lake#795). It carries no action and no log read: App changes are only proposed, for the Application Agent to make after a person confirms |
 | **Agent Creator Agent** (`agent-creator`) | its service | a turn key limited to `workspace_query` / `workspace_openapi` |
 | a **native** agent of the account | the workspace's `chat` (`GET`) | the message |
-| a **Python** agent of the account | its running `service` launch | the message and conversation id; with no running service lake starts one and answers `status: starting` |
+| a **Python** agent of the account | the caller's own running `service` launch | the message and conversation id; with no running service the caller started, lake starts one for them and answers `status: starting` |
 
 A turn key is revoked when the turn ends. Offline library agents and library agents this lake
 does not run are refused. lake presents `LAKE_AGENT_SERVICE_TOKEN` as the bearer to every agent
 service.
+
+**Each person talks to their own service launch** (lake#932). A service launch acts with its
+creator's credential (`lal.`, the creator's grants within the launch's scopes), and agent-runtime keeps
+that client for every conversation. So `agent_turn` sends a person's message only to a present
+`service` launch that person started (`created_by_user_id`); when someone else's launch is running,
+lake starts one for the caller instead. A later writer can never drive an administrator's launch to
+read what only the administrator may read, and each launch's credential resolves to the person who
+talks to it. A turn without a signed-in person is refused (`unauthorized`). Verify with
+`AgentRuns.EachPersonTalksToAPythonAgentThroughTheirOwnLaunch`.
 
 ## Capabilities
 

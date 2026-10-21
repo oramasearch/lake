@@ -400,6 +400,53 @@ bool has_scope(const ApiContext& context, std::string_view scope) {
     return std::ranges::find(context.scopes, scope) != context.scopes.end();
 }
 
+// The stop_reason a launch withdrawn with its agent carries (lake#524).
+std::string agent_gone_reason(const std::string& agent_id, bool deleted) {
+    return deleted ? "Stopped: the agent " + agent_id + " was deleted."
+                   : "Stopped: the agent " + agent_id +
+                         " no longer exists in this workspace, so the run cannot start.";
+}
+
+// A launch or schedule whose agent's record the workspace says is gone (lake#524): agent-runtime
+// reads its agent first, and an answer of not_found means it would only exit and be restarted, so
+// lake withdraws the agent's launches and schedules and the operator removes their pods. Only the
+// launch's or schedule's own agent, in its own workspace; any other caller changes nothing.
+void withdraw_workloads_of_missing_agent(ApiContext& context,
+                                         const std::string& customer_id,
+                                         const std::string& workspace_id,
+                                         const std::string& agent_id) {
+    if (context.store == nullptr || agent_id.empty()) {
+        return;
+    }
+    const std::string& session = context.credential_session_id;
+    std::string owner_customer, owner_workspace, owner_agent;
+    if (context.credential_kind == "agent_launch" && session.starts_with("launch:")) {
+        const auto launch = context.store->get_agent_launch(session.substr(7));
+        if (!launch) {
+            return;
+        }
+        owner_customer = launch->customer_id;
+        owner_workspace = launch->workspace_id;
+        owner_agent = launch->agent_id;
+    } else if (context.credential_kind == "agent_schedule" && session.starts_with("schedule:")) {
+        const auto schedule = context.store->get_agent_cron_schedule(session.substr(9));
+        if (!schedule) {
+            return;
+        }
+        owner_customer = schedule->customer_id;
+        owner_workspace = schedule->workspace_id;
+        owner_agent = schedule->agent_id;
+    } else {
+        return;
+    }
+    if (owner_customer != customer_id || owner_agent != agent_id ||
+        (!owner_workspace.empty() && owner_workspace != workspace_id)) {
+        return;
+    }
+    (void)context.store->withdraw_agent_workloads(
+        customer_id, workspace_id, agent_id, agent_gone_reason(agent_id, false));
+}
+
 void set_audit(ApiContext& context, std::string kind, const json& input, std::string capability) {
     context.audit_kind = std::move(kind);
     context.audit_details = {
@@ -915,6 +962,9 @@ liquid::runtime::task<ApiResult> workspace_call(bool read, json input, ApiContex
         // The agent a delete_agent removes: its stream triggers go with it (lake#677).
         const std::string deleted_agent =
             capability == "delete_agent" ? arguments.value("id", std::string()) : std::string();
+        // The agent a get_agent reads: a launch's own agent found gone stops the launch (lake#524).
+        const std::string read_agent =
+            capability == "get_agent" ? arguments.value("id", std::string()) : std::string();
         auto called = co_await call_workspace(context,
                                               input.at("customer_id"),
                                               capability,
@@ -929,6 +979,10 @@ liquid::runtime::task<ApiResult> workspace_call(bool read, json input, ApiContex
                                                                  input.at("customer_id"),
                                                                  input.at("workspace_id"),
                                                                  called->error().details));
+            }
+            if (!read_agent.empty() && called->error().code == "not_found") {
+                withdraw_workloads_of_missing_agent(
+                    context, input.at("customer_id"), input.at("workspace_id"), read_agent);
             }
             if (capability == "create_project" &&
                 called->error().message.starts_with("create_project rejected")) {
@@ -1001,6 +1055,25 @@ liquid::runtime::task<ApiResult> workspace_call(bool read, json input, ApiContex
                 value["streams_removed"] = 0;
                 value["streams_error"] =
                     removed ? (*removed).error().message : removed.error().message;
+            }
+            // Its launches and schedules stop with it, so no pod is left restarting against an
+            // agent that is gone (lake#524). A failure is reported beside the deletion; the
+            // launch's next read of its agent stops it then.
+            auto withdrawn =
+                context.store ? context.store->withdraw_agent_workloads(
+                                    input.at("customer_id"),
+                                    input.at("workspace_id"),
+                                    deleted_agent,
+                                    agent_gone_reason(deleted_agent, true))
+                              : control::Result<control::AgentWorkloadsWithdrawn>(std::unexpected(
+                                    control::StoreError{"store_unavailable", "no control store"}));
+            if (withdrawn) {
+                value["launches_stopped"] = withdrawn->launches;
+                value["schedules_removed"] = withdrawn->schedules;
+            } else {
+                value["launches_stopped"] = 0;
+                value["schedules_removed"] = 0;
+                value["launches_error"] = withdrawn.error().message;
             }
         }
         if (value.is_object() &&
@@ -6563,13 +6636,21 @@ void register_agent_run_capabilities(Registry& registry) {
             if (runtime != "python") {
                 co_return ApiResult::failure("invalid_input", "this agent is not talked to here");
             }
+            // A service launch acts with its creator's credential (lal.), so a person talks only
+            // to a launch they started and never drives another's with that one's authority
+            // (lake#932); without a person there is no launch to choose.
+            if (context.acting_user_id.empty()) {
+                co_return ApiResult::failure("unauthorized",
+                                             "talking to " + agent + " needs a signed-in person");
+            }
             auto launches = context.store->list_agent_launches(
                 customer_id, agent, 20, input.at("workspace_id").get<std::string>());
             if (!launches) {
                 co_return ApiResult::failure(launches.error().code, launches.error().message);
             }
-            const auto live = std::ranges::find_if(*launches, [](const control::AgentLaunch& l) {
-                return l.mode == "service" && l.desired == "present";
+            const auto live = std::ranges::find_if(*launches, [&](const control::AgentLaunch& l) {
+                return l.mode == "service" && l.desired == "present" &&
+                       l.created_by_user_id == context.acting_user_id;
             });
             if (live == launches->end()) {
                 auto started = context.store->create_agent_launch(
@@ -6950,6 +7031,23 @@ std::string engine_words_in_lake_terms(std::string text) {
     replace_all("load the table first with add_dataset",
                 "load the table first with workspace_act upload_dataset");
     replace_all("(approve_plan)", "(workspace_act with capability approve_plan)");
+    // A native agent whose checkpoint is not in the workspace (lake#246, lake#799): the engine's
+    // tokenizer error, said as what is missing and how the base model gets there.
+    constexpr std::string_view no_tokenizer = "bpe: no tokenizer.json or vocab.json+merges.txt in ";
+    if (const std::size_t at = text.find(no_tokenizer); at != std::string::npos) {
+        const std::size_t begin = at + no_tokenizer.size();
+        std::size_t end = begin;
+        while (end < text.size() && std::isspace(static_cast<unsigned char>(text[end])) == 0) {
+            ++end;
+        }
+        const std::string directory = text.substr(begin, end - begin);
+        text.replace(at,
+                     end - at,
+                     "the agent's model checkpoint is not in this workspace: " + directory +
+                         " has no tokenizer.json (or vocab.json and merges.txt). The Orama base "
+                         "model is copied to the workspace's volume when its Zetta starts; until "
+                         "it is there, an agent on it cannot chat or run");
+    }
     return text;
 }
 

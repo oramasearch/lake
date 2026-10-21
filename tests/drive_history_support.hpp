@@ -1,9 +1,12 @@
 #pragma once
 
-// One Drive history exercise (lake#123) shared by the memory, Postgres and workspace-store
-// suites: an ordinary overwrite through `upload_drive_files` keeps the previous version as a
-// normal prior version that can be compared and restored, a restore is a stable-node modification,
-// and a real deletion stays distinct. Every step goes through lake's HTTP API.
+// Drive exercises shared by the memory, Postgres and workspace-store suites. Every step goes
+// through lake's HTTP API.
+// - lake#123: an ordinary overwrite through `upload_drive_files` keeps the previous version as a
+//   normal prior version that can be compared and restored, a restore is a stable-node
+//   modification, and a real deletion stays distinct.
+// - lake#560: the first upload into a repository with no `main` creates `main`, and an upload
+//   into a folder that does not exist yet creates the folder.
 
 #include <gtest/gtest.h>
 
@@ -140,6 +143,89 @@ inline void expect_replaced_drive_file_keeps_its_history(const DriveRequest& req
     EXPECT_EQ(deleted[0]["changes"], json::array({"removed"})) << deleted.dump();
     EXPECT_EQ(deleted[0]["new_blob"], "");
     EXPECT_EQ(deleted[0]["old_blob"], previous["new_blob"]);
+}
+
+// lake#560: the first upload into a repository nobody has written to (no `main`) creates `main`;
+// an upload into a folder that does not exist, nested two deep, creates it as a file manager
+// would; an upload under a file is still refused. `starts_without_main` false runs the folder
+// steps on a repository whose `main` already exists, with none of these paths.
+inline void expect_uploads_create_main_and_missing_folders(const DriveRequest& request,
+                                                           const std::string& repository_id,
+                                                           bool starts_without_main = true) {
+    using nlohmann::json;
+    const auto send = [&](std::string_view method,
+                          const std::string& capability,
+                          const json& input) -> std::pair<unsigned, json> {
+        const std::string suffix = method == "GET"
+                                       ? "/v1/" + capability + "?" + input.get<std::string>()
+                                       : "/v1/" + capability;
+        const auto [status, body] =
+            request(method, suffix, method == "GET" ? std::string() : input.dump());
+        return {status, json::parse(body, nullptr, false)};
+    };
+    const auto ok =
+        [&](std::string_view method, const std::string& capability, const json& input) -> json {
+        const auto [status, parsed] = send(method, capability, input);
+        EXPECT_EQ(status, 200U) << capability << ": " << parsed.dump();
+        EXPECT_TRUE(parsed.is_object() && parsed.value("ok", false))
+            << capability << ": " << parsed.dump();
+        return parsed.is_object() ? parsed.value("value", json::object()) : json::object();
+    };
+    const auto upload_input = [&](const std::string& folder,
+                                  const std::string& name,
+                                  std::string_view text) {
+        return json{{"repository_id", repository_id},
+                    {"ref", "main"},
+                    {"path", folder},
+                    {"files", json::array({{{"name", name}, {"content", drive_base64(text)}}})}};
+    };
+    const auto browse = [&](const std::string& path) {
+        std::vector<std::string> paths;
+        for (const json& item :
+             ok("GET",
+                "drive_browse",
+                json("repository_id=" + repository_id + "&ref=main&path=" + path))["items"]) {
+            paths.push_back(item.value("path", std::string()));
+        }
+        std::ranges::sort(paths);
+        return paths;
+    };
+    const auto with = [](std::vector<std::string> paths, std::vector<std::string> added) {
+        paths.insert(paths.end(), added.begin(), added.end());
+        std::ranges::sort(paths);
+        return paths;
+    };
+
+    std::vector<std::string> top;
+    if (starts_without_main) {
+        const auto [unborn, before] =
+            send("GET", "drive_browse", json("repository_id=" + repository_id + "&ref=main&path="));
+        ASSERT_NE(unborn, 200U) << "the repository starts with no main: " << before.dump();
+    } else {
+        top = browse("");
+    }
+
+    const json first = ok("POST", "upload_drive_files", upload_input("", "first.txt", "First\n"));
+    ASSERT_FALSE(first.value("change", std::string()).empty()) << first.dump();
+    EXPECT_EQ(browse(""), with(top, {"first.txt"})) << "the upload wrote main";
+
+    const json nested =
+        ok("POST", "upload_drive_files", upload_input("Reports/2026", "q3.csv", "id,total\n1,9\n"));
+    ASSERT_FALSE(nested.value("change", std::string()).empty()) << nested.dump();
+    EXPECT_EQ(browse(""), with(top, {"Reports", "first.txt"}));
+    EXPECT_EQ(browse("Reports"), (std::vector<std::string>{"Reports/2026"}));
+    EXPECT_EQ(browse("Reports/2026"), (std::vector<std::string>{"Reports/2026/q3.csv"}));
+    const json preview =
+        ok("GET",
+           "drive_preview",
+           json("repository_id=" + repository_id + "&ref=main&path=Reports/2026/q3.csv"));
+    EXPECT_NE(preview.dump().find("<th>total</th>"), std::string::npos) << preview.dump();
+
+    const auto [under_file, refused] =
+        send("POST", "upload_drive_files", upload_input("first.txt", "inside.txt", "No\n"));
+    EXPECT_EQ(under_file, 400U) << "a file is not a folder: " << refused.dump();
+    EXPECT_EQ(refused["error"]["code"], "invalid_input") << refused.dump();
+    EXPECT_EQ(browse(""), with(top, {"Reports", "first.txt"}));
 }
 
 } // namespace lake::test

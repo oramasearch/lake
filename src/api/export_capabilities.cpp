@@ -14,6 +14,7 @@
 #include "repository_records_api.hpp"
 #include "lake/audit/audit.hpp"
 #include "lake/control/agent_bus.hpp"
+#include "lake/control/identity_crypto.hpp"
 #include "lake/control/policy.hpp"
 #include "lake/control/store.hpp"
 
@@ -110,6 +111,16 @@ ApiResult verify_archive(const json& archive) {
     return ApiResult::success(nullptr);
 }
 
+// A forge record as an archive carries it. A webhook's signing secret never leaves lake, as
+// `list_webhooks` never answers it: export needs only read (LSR-024, lake#933).
+json exported_forge_record(const control::ForgeRecord& record) {
+    json exported = control::to_json(record);
+    if (record.kind == "webhook" && exported["value"].is_object()) {
+        exported["value"].erase("secret");
+    }
+    return exported;
+}
+
 liquid::runtime::task<ApiResult> export_repository(const json& input, ApiContext& context) {
     if (!context.store || !context.sync_store) {
         co_return ApiResult::failure("store_unavailable",
@@ -132,7 +143,7 @@ liquid::runtime::task<ApiResult> export_repository(const json& input, ApiContext
     json forge_values = json::array();
     for (const control::ForgeRecord& record : *records) {
         if (record.kind != "export" && record.kind != "github_import") {
-            forge_values.push_back(control::to_json(record));
+            forge_values.push_back(exported_forge_record(record));
         }
     }
     const auto portable = co_await blocking_call(
@@ -150,13 +161,25 @@ liquid::runtime::task<ApiResult> export_repository(const json& input, ApiContext
     if (!object) {
         co_return store_error(object.error());
     }
-    const auto grants = context.store->list_grants({object->id}, std::nullopt, 100'000);
-    if (!grants) {
-        co_return store_error(grants.error());
+    // Who holds access is an administrator's to read (`list_grants` needs admin), so the archive of
+    // a caller without admin on the repository carries no grants (LSR-024, lake#933).
+    const auto administers = control::authorize(*context.store,
+                                                context.acting_identity,
+                                                object->id,
+                                                "admin",
+                                                context.authorization_cache);
+    if (!administers) {
+        co_return store_error(administers.error());
     }
     json grant_values = json::array();
-    for (const control::Grant& grant : *grants) {
-        grant_values.push_back(control::to_json(grant));
+    if (administers->allowed) {
+        const auto grants = context.store->list_grants({object->id}, std::nullopt, 100'000);
+        if (!grants) {
+            co_return store_error(grants.error());
+        }
+        for (const control::Grant& grant : *grants) {
+            grant_values.push_back(control::to_json(grant));
+        }
     }
     const json payload = {{"repository", control::to_json(*repository)},
                           {"history", portable->history},
@@ -230,6 +253,11 @@ liquid::runtime::task<ApiResult> import_repository(const json& input, ApiContext
         co_return store_error(target_object.error());
     }
     for (const json& grant : payload.at("grants")) {
+        // lake#872: an imported grant names a TAAP identity; `admin` and lake's own synthetic
+        // principals (a share link's `share-link:<id>`, meaningless on this instance) are skipped.
+        if (!control::valid_principal_id(grant.value("principal_taap_id", ""))) {
+            continue;
+        }
         const auto written = context.store->create_grant({grant.value("principal_taap_id", ""),
                                                           target_object->id,
                                                           grant.value("role", ""),
@@ -253,6 +281,29 @@ liquid::runtime::task<ApiResult> import_repository(const json& input, ApiContext
             continue;
         }
         json value = record.value("value", json::object());
+        // An approval is lake's record of who approved in this repository (LSR-077); one carried
+        // in an archive is not, so an imported review never satisfies a required review.
+        if (kind == "review" && value.is_object()) {
+            value.erase("approval");
+        }
+        if (kind == "webhook") {
+            // An archive carries no webhook secret (LSR-024), so the imported webhook signs with a
+            // new one nobody holds, never an empty or guessable key; its owner creates the webhook
+            // again with their receiver's secret. An older archive's secret is kept.
+            if (!value.is_object()) {
+                co_return ApiResult::failure(
+                    "invalid_input", "archive webhook is not an object", "/archive/payload/forge");
+            }
+            if (!value.contains("secret") || !value["secret"].is_string() ||
+                value["secret"].get<std::string>().empty()) {
+                std::string secret = control::identity_crypto::random_secret();
+                if (secret.empty()) {
+                    co_return ApiResult::failure("store_error",
+                                                 "could not generate a webhook signing secret");
+                }
+                value["secret"] = std::move(secret);
+            }
+        }
         if (kind == "branch_protection") {
             const auto policy =
                 context.store->create_policy_object({"path",

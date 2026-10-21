@@ -27,7 +27,7 @@ if(NOT DEFINED CMAKE_CXX_COMPILER AND NOT LAKE_USE_SYSTEM_COMPILER)
   endif()
 endif()
 
-project(lake VERSION 0.3.1 LANGUAGES C CXX)
+project(lake VERSION 0.4.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 26)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -266,6 +266,7 @@ add_library(lake-core STATIC
   src/api/web_ui.cpp
   src/api/markdown.cpp
   src/api/oauth.cpp
+  src/api/saml.cpp
   src/api/clerk.cpp
   src/api/workspace_capabilities.cpp
   src/api/repository_records_api.cpp
@@ -329,6 +330,9 @@ add_library(lake-core STATIC
   src/api/image_capabilities.cpp
   src/api/volume_capabilities.cpp
   src/api/network_capabilities.cpp
+  # lake#889: beside its one user. In lake-control-postgres, which lake-core precedes on the link
+  # line, GNU ld (one pass over static archives) left PendingNetworkRecords' vtable unresolved.
+  src/control/network_records.cpp
   src/api/tunnel_clients.cpp
   src/api/regions.cpp
   src/api/orders.cpp
@@ -377,7 +381,6 @@ add_library(lake-control-postgres STATIC
   src/control/apps_memory.cpp
   src/control/memory_store.cpp
   src/control/network.cpp
-  src/control/network_records.cpp
   src/control/network_memory.cpp
   src/control/postgres_store.cpp
 )

@@ -103,6 +103,26 @@ std::string platform_environment_id(const std::string& repository_id, const std:
     return md5_uuid(repository_id + "\n" + name);
 }
 
+Result<PolicyObject>
+environment_policy_object(Store& store, const std::string& repository_id, const std::string& name) {
+    auto object =
+        store.find_policy_object("environment", platform_environment_id(repository_id, name));
+    if (!object) {
+        return object;
+    }
+    const auto repository = store.find_policy_object("repository", repository_id);
+    if (!repository) {
+        return std::unexpected(repository.error());
+    }
+    if (object->parent_id != repository->id) {
+        return std::unexpected(
+            StoreError{"conflict",
+                       "the policy object of environment " + name +
+                           " belongs to another account; ask the operator to remove it"});
+    }
+    return object;
+}
+
 std::string platform_mirror_id(const std::string& kind, const std::string& key) {
     return md5_uuid(kind + "\n" + key);
 }

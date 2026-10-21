@@ -832,6 +832,93 @@ TEST(RegistryStore, InstancePackagesStayInTheInstanceRegistry) {
         << "instance packages never reach a workspace store";
 }
 
+// A manifest's media type is lake's, never its pusher's (lake#930). A push naming anything but an
+// OCI or Docker schema 2 manifest or index is refused; a record written before names whatever it
+// names and is served as an image manifest; and every registry answer carries nosniff and a sandbox
+// policy. So a manifest that is valid JSON and also markup is never a page on the console's origin.
+TEST(RegistryStore, AManifestIsServedAsAnImageManifestNeverAsATypeItsPusherChose) {
+    RegistryRig rig;
+    ASSERT_NO_FATAL_FAILURE(rig.SetUp());
+    ASSERT_NO_FATAL_FAILURE(rig.switch_store(rig.alpha));
+    ASSERT_NO_FATAL_FAILURE(rig.route(rig.one, rig.alpha, "service"));
+    const auto expect_isolated = [](Reply& reply, const std::string& what) {
+        EXPECT_EQ(reply.headers["x-content-type-options"], "nosniff") << what;
+        EXPECT_EQ(reply.headers["content-security-policy"], "sandbox; default-src 'none'") << what;
+    };
+    const std::string config = R"({"architecture":"amd64","os":"linux"})";
+    json document = RegistryRig::manifest(config, {});
+    document["annotations"] = {{"lake.930", "<b id=\"lake-930-inert-marker\">inert</b>"}};
+    const std::string text = document.dump();
+    const std::string digest = sha256(text);
+    const std::string docker = "application/vnd.docker.distribution.manifest.v2+json";
+
+    for (const std::string repository : {"tenant-one/service", "lake-fixture"}) {
+        ASSERT_EQ(rig.push_blob(repository, config).status, 201U) << repository;
+        const std::string manifests = "/v2/" + repository + "/manifests/";
+        for (const std::string type : {"text/html",
+                                       "TEXT/HTML; charset=utf-8",
+                                       "application/json",
+                                       "image/svg+xml",
+                                       "application/xhtml+xml",
+                                       "text/html, application/vnd.oci.image.manifest.v1+json",
+                                       "application/vnd.oci.image.manifest.v1+json+html",
+                                       "text/xml"}) {
+            Reply refused =
+                exchange(rig.port(), "PUT", manifests + "page", text, {{"Content-Type", type}});
+            EXPECT_EQ(refused.status, 400U) << repository << " " << type << " " << refused.body;
+            EXPECT_EQ(oci_code(refused), "MANIFEST_INVALID") << repository << " " << type;
+        }
+        EXPECT_EQ(exchange(rig.port(), "GET", manifests + "page").status, 404U) << repository;
+        EXPECT_EQ(exchange(rig.port(), "GET", manifests + digest).status, 404U) << repository;
+
+        // A supported type in any case, with a parameter, is stored and served as lake spells it.
+        Reply pushed =
+            exchange(rig.port(),
+                     "PUT",
+                     manifests + "docker",
+                     text,
+                     {{"Content-Type",
+                       " Application/VND.docker.distribution.manifest.V2+json; charset=utf-8"}});
+        ASSERT_EQ(pushed.status, 201U) << repository << " " << pushed.body;
+        for (const std::string method : {"GET", "HEAD"}) {
+            Reply pulled = exchange(rig.port(), method, manifests + "docker");
+            ASSERT_EQ(pulled.status, 200U) << repository << " " << method;
+            EXPECT_EQ(pulled.headers["content-type"], docker) << repository << " " << method;
+            expect_isolated(pulled, repository + " " + method + " manifest");
+        }
+        EXPECT_EQ(exchange(rig.port(), "GET", manifests + "docker").body, text);
+        Reply blob = rig.get_blob(repository, sha256(config));
+        ASSERT_EQ(blob.status, 200U) << repository;
+        expect_isolated(blob, repository + " blob");
+    }
+
+    // Records written before lake#930 that name an HTML type are served as image manifests: the
+    // tenant tag (read by tag and by digest) and the instance registry's pointer file.
+    auto records = rig.records_of(rig.one, rig.alpha);
+    auto tag = lake::control::settled(liquid::runtime::block_on(
+        lake::control::get_oci_tag(records, rig.one, "service", "docker")));
+    ASSERT_TRUE(tag && *tag);
+    lake::control::OciTag legacy = **tag;
+    legacy.content_type = "text/html; charset=utf-8";
+    ASSERT_TRUE(lake::control::settled(
+        liquid::runtime::block_on(lake::control::set_oci_tag(records, legacy))));
+    {
+        std::ofstream pointer(rig.registry() / "manifests" / "lake-fixture" / "docker.json",
+                              std::ios::trunc);
+        pointer << json{{"digest", digest}, {"content_type", "text/html"}}.dump();
+    }
+    for (const std::string& path : {std::string("/v2/tenant-one/service/manifests/docker"),
+                                    "/v2/tenant-one/service/manifests/" + digest,
+                                    std::string("/v2/lake-fixture/manifests/docker")}) {
+        Reply pulled = exchange(rig.port(), "GET", path);
+        ASSERT_EQ(pulled.status, 200U) << path << " " << pulled.body;
+        EXPECT_EQ(pulled.headers["content-type"], "application/vnd.oci.image.manifest.v1+json")
+            << path;
+        EXPECT_EQ(pulled.body, text) << path;
+        expect_isolated(pulled, path);
+    }
+}
+
 // Deleting a workspace (the lake#514 cascade) takes its image blobs with its store: its routes
 // go, its store is closed and its lease released, pulls answer 404, and nothing of it is in the
 // instance registry.

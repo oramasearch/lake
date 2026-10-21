@@ -174,6 +174,7 @@ const std::vector<std::pair<std::string_view, std::string_view>>& calls_only_cap
         {"begin_admin_recovery", "account recovery"},
         {"begin_application_authorization", "sign-in"},
         {"begin_email_recovery", "account recovery"},
+        {"begin_identity_proof", "sign-in"},
         {"begin_own_identity", "sign-in"},
         {"begin_passkey_registration", "sign-in"},
         {"begin_passkey_sign_in", "sign-in"},
@@ -203,6 +204,7 @@ const std::vector<std::pair<std::string_view, std::string_view>>& calls_only_cap
         {"copy_workspace_records", "the operator's one-time copy"},
         {"start_oauth", "sign-in"},
         {"start_sso_oidc", "sign-in"},
+        {"start_sso_saml", "sign-in"},
         // Records: what they write is a few records, never a workload or a file's bytes.
         {"begin_drive_upload", "the upload's record; its bytes are append_drive_upload's"},
         {"finish_drive_upload", "the file's record; its bytes were counted as they came"},

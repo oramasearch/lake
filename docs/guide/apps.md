@@ -47,8 +47,9 @@ bindings and when it last changed. **Open** on a card opens the app.
 ### Create an App from an Image
 
 1. **Ship → Apps → New app**, then choose **From an image**.
-2. Fill in **Name**, **Image** (for example `registry.example/app:tag`), **Framework** (default
-   `container`) and **Port**.
+2. Fill in **Name**, **Image**, pinned by digest (`registry.example/app@sha256:<64 hex digits>`;
+   a tag such as `app:1.27` is refused, because the operator runs only a digest-pinned image),
+   **Framework** (default `container`) and **Port**.
 3. Press **Create app**.
 
 - REST: `POST /v1/create_app`:
@@ -253,6 +254,12 @@ With **Lake Sign-In**, a visitor who is not signed in is sent to Lake's sign-in 
 The app receives the person in the `X-Orama-User` header and never sees their Lake session. The app's
 own cookie lasts 12 hours, and Lake checks on every request that the person still belongs to the
 workspace, so removing someone from the workspace takes effect at once.
+
+With **Public**, nobody signs in, so the app has no signed-in person: `current_user()` from
+`orama_app` returns `None`. Anyone can send an `X-Orama-User` header (or any other identity header) to
+a public app, so an app that decides who sees what must use **Lake Sign-In**. An app in image mode
+that reads these headers itself must not treat them as identity unless it uses **Lake Sign-In**; see
+[Which identity headers an app may trust](../api/web-apps.md#lake-protected-app-authentication).
 
 ### Bindings: Workspace Data and Services
 

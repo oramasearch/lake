@@ -9,7 +9,7 @@ do not recreate end-to-end encrypted repository keys.
 | Capability | Caller and result |
 |---|---|
 | `recover_with_code` | Public entry. Consumes one of the eight Argon2id-hashed codes created by `enroll_mfa` and issues a browser session. A consumed code cannot be reused. |
-| `begin_email_recovery` | Public entry with pool and email. Creates a one-use token, a 24-hour cooling period, a further 24-hour completion window, an operator mail delivery, and a notice for every registered device. |
+| `begin_email_recovery` | Public entry with pool and email. Creates a one-use token, a 24-hour cooling period, a further 24-hour completion window, an operator mail delivery, and a notice for every registered device. **It answers the same for every address** (lake#774): `{"status": "requested", "message": "If an account uses this address, a recovery link is on its way."}`, whether or not the address has an account; the attempt (its id, the account's user id, its timing) reaches only the address's owner, in the recovery email. It used to answer 200 with the attempt for a known address and 404 for an unknown one. |
 | `begin_admin_recovery` | An organization owner or administrator opens recovery for a user who is a member of that organization. The requester supplies approval one. |
 | `approve_admin_recovery` | A different owner or administrator supplies approval two. Reuse by the requester is refused. Approval queues the one-use completion token and notifies every device. |
 | `complete_recovery` | Public entry with recovery UUID and token after the cooling/approval condition. Atomically consumes the attempt, revokes the user's existing sessions, notifies every existing device, and issues a fresh browser session on the named device. |

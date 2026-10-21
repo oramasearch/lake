@@ -119,7 +119,7 @@ request log line therefore carries no customer content. The `handler_exception` 
 ([http.md](http.md#handler-exceptions)) dropped its `path` the same way.
 
 Startup is also one JSON object and records `admin_token_set` and `replication_token_set` as `yes`
-or `no`, never either token. Authorization and cookie values are never logged.
+or `no`, never either token, and `replication_peers`, the origins replication may pull from. Authorization and cookie values are never logged.
 
 ### The workspace request series
 

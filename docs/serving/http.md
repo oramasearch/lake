@@ -38,6 +38,7 @@ tick.
 | `POST /identity/clerk-session` | exchanges a Clerk session token for the `lake_session` cookie ([`../api/clerk.md`](../api/clerk.md)) |
 | `POST /identity/clerk-webhook` | Clerk's user events through Svix (lake#765, [`../api/clerk.md`](../api/clerk.md#webhooks)): no lake credential, the `svix-signature` HMAC-SHA256 with `LAKE_CLERK_WEBHOOK_SECRET` and a five-minute `svix-timestamp` window; each `svix-id` applied once; `user.created`, `user.updated`, `user.deleted` audited centrally; `401` for a refused signature, `503` when the store fails (Clerk retries), `404` without the secret |
 | `GET /v1/oauth/<provider>/callback` | OAuth authorization-code callback with one-use state, PKCE, and verified provider identity; sets the cookie and redirects |
+| `GET /v1/saml/<provider id>/metadata`, `GET /v1/saml/<provider id>/start`, `POST /v1/saml/<provider id>/acs` | SAML sign-in ([`../api/sso.md#saml-sign-in`](../api/sso.md#saml-sign-in), lake#836), no credential: Lake's SP metadata (its URL is the entity id); a one-use AuthnRequest and a redirect to the IdP; the Assertion Consumer Service, which verifies the form's `SAMLResponse`, sets the cookie and redirects. The ACS is exempt from the cross-site check below |
 | `GET /file/raw`, `/file/download`, `/drive/download`, `/exports/download`, `/share/<token>/download` | the bytes of a repository file, a Drive file, a signed export or a shared file; without a credential a protected download redirects to `/sign-in` |
 | `GET /drive/files/download?customer_id=&workspace_id=&drive_id=&id=[&inline=1]` | a workspace file ([drives.md](../api/drives.md#uploads)): authorized and audited through `get_drive_entry`, then streamed from the workspace Zetta's `lake_files` bucket 1 MiB at a time (the image-pull streamer, its slots and idle timeout), `nosniff`, a sandboxing CSP, and `inline` only for media types a browser shows as data; always `Content-Disposition` with the file's name |
 | (both drive downloads) | described in `GET /v1/openapi.json` as `drive_download` and `drive_files_download` (lake#587; `openapi_document` in `src/api/rest.cpp`), although they answer bytes rather than a capability's JSON. `/drive/download` sends a file's own media type (from its extension) when a browser shows that type as data, else `application/octet-stream` (`displayable_media_type`) |
@@ -49,7 +50,7 @@ tick.
 | `GET /apps/authorize?app=<id>&rd=<URL>` | Lake-session handoff for a protected Ship app; validates exact HTTPS app host and redirects with a 60-second one-use code |
 | `GET /v1/apps/auth`, `/w/<workspace_id>/v1/apps/auth` | nginx forward-auth for protected Ship apps; returns app-scoped identity headers and exchanges one-use codes for a host-only cookie |
 | `/api/models/*`, `/api/datasets/*`, model/dataset resolve and basic-LFS routes | the documented `huggingface_hub` create, upload, list, info, snapshot, and file-download subset; see [`../api/models.md`](../api/models.md) |
-| `/v2/*`, native npm and Python package paths, `/buildid/*` | OCI Distribution and package/debug registries; OCI blob upload patches and final puts use the streamed registry limit below; see [`../api/registry.md`](../api/registry.md) |
+| `/v2/*`, native npm and Python package paths, `/buildid/*` | OCI Distribution and package/debug registries; OCI blob upload patches and final puts use the streamed registry limit below; manifests are stored and served only as OCI or Docker schema 2 manifest and index types, and byte responses carry `nosniff` and a sandboxing CSP ([media types and isolation](../api/registry.md#media-types-and-isolation)); see [`../api/registry.md`](../api/registry.md) |
 | `GET /v1/<read>`, `POST /v1/<action>`; the same below `/w/<workspace_id>` | the capability registry as REST: identity and application authentication, short-lived agent-session keys, account recovery, offline grants, tenants, repositories, organization administration, policy, repository search, static secrets, encryption, TUF metadata, transparency monitoring, asynchronous replication, the lake identity and the signed audit stream; bearer required except documented public identity/recovery entry points, transparency reads, and application JWKS |
 | `POST /v1/repositories/<repository-id>/sync/{find-missing,push,pull,chunks}` | streaming liquid push, pull, missing-object negotiation, and chunk upload with bounded streaming request and response bodies, through the same registry policy and audit path; offline push accepts a grant UUID and returns per-change reauthorization results; see [`../api/sync.md`](../api/sync.md) |
 | `GET /v1/repositories/<repository-id>/sync/chunks/<digest>` | ranged liquid chunk reads with `offset` and `length` query parameters |
@@ -381,7 +382,10 @@ A missing `Origin` and a missing `Sec-Fetch-Site` pass: a non-browser client sen
 browser sends `Origin` on every cross-origin unsafe request. Bearer-authenticated calls are not
 affected, from any origin. The check is a router middleware that runs right after the response
 reset and CORS, before any route, so it covers `/v1`, `/mcp` and the remaining form routes
-(`/logout`, `/session`, `/identity/clerk-session`) alike.
+(`/logout`, `/session`, `/identity/clerk-session`) alike. The one exception is the SAML Assertion
+Consumer Service, `POST /v1/saml/<provider id>/acs`: the identity provider's form post is cross-site
+by design, and the route never reads the session a cookie carries; it verifies the signed response
+and replaces the session (lake#836).
 
 **Why.** Ship apps are hosted one label below the platform's zone (`<name>.oramadev.net` beside
 `lake.oramadev.net`), so customer app code is *same-site* with lake and a browser sends

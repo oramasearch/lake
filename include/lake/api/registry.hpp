@@ -59,6 +59,7 @@ namespace lake::api {
 
 struct WorkspaceContent;
 class McpHttp; // lake/api/mcp_client.hpp
+class OidcDiscovery; // lake/api/oauth.hpp
 
 struct ApiError {
     std::string code;    // one of error_codes() (docs/api/errors.md)
@@ -387,8 +388,10 @@ struct ApiContext {
     ModelProvider model_provider;
     // The caller's event stream (lake#665): set by the `/openai/v1/*` route, a streamed
     // model_completion hands it each piece of the provider's event stream as it arrives, instead of
-    // answering the whole stream as `events`. Called on the outbound client's thread; false stops
-    // the stream (the caller has gone). Empty: REST and MCP, which answer `events` whole.
+    // answering the whole stream as `events`. Called on the outbound client's thread; false says
+    // the caller has gone, and it is offered nothing more, while model_completion still reads the
+    // provider's stream to its end to count its usage (lake#939). Empty: REST and MCP, which answer
+    // `events` whole.
     ModelBodySink model_stream;
     // Predictions of a workspace methodology's served model (lake#690); empty when this lake
     // serves none.
@@ -468,7 +471,11 @@ struct ApiContext {
     std::string tsa_trust_pem;
     transparency::TimestampPolicy timestamp_policy;
     ReplicationRequester replication_requester;
+    // The instance's replication credential (LAKE_REPLICATION_TOKEN) and the peer origins it may
+    // be sent to (LAKE_REPLICATION_PEERS, normalized by replication_origin). Replication refuses a
+    // source outside the list, so the credential never reaches a server a caller chose (lake#915).
     std::string replication_token;
+    std::vector<std::string> replication_peers;
     bool authorized = false;
     bool operator_credential = false;
     bool session_credential = false;
@@ -484,6 +491,12 @@ struct ApiContext {
     std::string request_origin;
     std::string caller_origin;
     std::string pool_id = "lake";
+    // A session of an identity application's pool, as the store resolved it (lake#912). The HTTP
+    // server leaves the call unauthenticated and keeps the session here; the registry admits it
+    // only to a capability that serves application pools (Capability::serves_application_pools),
+    // setting the identity fields above for that call alone, and refuses it everywhere else. Its
+    // TAAP identity is never an acting identity elsewhere: a Lake account may hold the same one.
+    std::optional<control::Principal> application_session;
     std::vector<std::string> scopes;
     control::AuthorizationCache authorization_cache;
     std::string audit_customer_id;
@@ -493,6 +506,9 @@ struct ApiContext {
     // The workspace a call acted on, for its audit event (decision 52, audit_routing.hpp): the
     // input's `workspace_id` once Registry::call has validated it, or one a handler resolved.
     std::string audit_workspace_id;
+    // The workspace Registry::call validated and its account, kept so the event's attribution
+    // (lake#18) does not read the workspace twice: {workspace id, customer id}.
+    std::pair<std::string, std::string> audit_validated_workspace;
     // The workspace audit's writer (docs/api/audit.md#workspace-audit). Null: this lake has no
     // workspace Zettas, and every event is recorded in the central log.
     AuditRecorder* audit_recorder = nullptr;
@@ -506,6 +522,9 @@ struct ApiContext {
     // Lake's MCP client transport (decision 60, docs/api/mcp-connections.md): the server's outbound
     // transport, or a test's. Null: a workspace's MCP connections cannot reach their servers.
     std::shared_ptr<McpHttp> mcp_http;
+    // OpenID Connect discovery for generic OAuth and enterprise OIDC providers (lake#837): the
+    // server's, over its outbound client. Null: such a provider cannot be started.
+    std::shared_ptr<OidcDiscovery> oidc_discovery;
     // Whether an MCP connection may name a loopback or private address (tests, and local
     // development with LAKE_MCP_ALLOW_PRIVATE_ADDRESSES=1). Never on a deployed Lake.
     bool mcp_allow_private_addresses = false;
@@ -560,6 +579,12 @@ struct Capability {
     // workspace_query may call each named engine read, and one that may call workspace_act each
     // named engine action (lake#650). The handler still applies an agent turn's own scopes.
     std::string granted_by_scope;
+    // An identity application's user may call it with a session of the application's pool
+    // (lake#912): it acts only on that user's own sign-in in that pool (its sessions, devices,
+    // tokens, MFA and passkeys), never through grants. Every other capability treats such a
+    // session as no credential at all, because grants name a bare TAAP identity, which an
+    // application pool may share with a Lake account.
+    bool serves_application_pools = false;
 };
 
 // The input with every deprecated alias moved onto its canonical field, or invalid_input when a
@@ -597,6 +622,14 @@ public:
     ApiResult call(const std::string& name, const nlohmann::json& input, ApiContext& context) const;
     liquid::runtime::task<ApiResult>
     call_async(const std::string& name, const nlohmann::json& input, ApiContext& context) const;
+    // A call to capability `name` refused before its input could be read (a body that is not
+    // JSON, lake#18): audited once, as a call would be, with `failure` and `details` (safe
+    // metadata such as the body's size, never its contents), and answered `failure`. The handler
+    // never runs. An unknown name is answered unknown_capability and not audited, as call does.
+    ApiResult refuse(const std::string& name,
+                     ApiResult failure,
+                     const nlohmann::json& details,
+                     ApiContext& context) const;
 
 private:
     std::vector<std::shared_ptr<const Capability>> entries_;

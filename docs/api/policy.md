@@ -32,13 +32,45 @@ by the registry. The store retains the issuing session and rejects descendants a
 ancestor or linked device is revoked or expires. The complete derivation and migration contract is
 [`identity.md`](identity.md#token-derivation-and-revocation).
 
+## Principal ids (lake#870)
+
+**What.** The principal `admin` is the operator's: `authorize` allows it everything, and the
+registry skips the policy check for it. Only the admin token acts as it. Every identity a person,
+organization or grant carries is a TAAP id: `taap:` followed by printable ASCII, at most 512
+characters (`valid_principal_id`, `src/control/policy.cpp`).
+
+- **Creation refuses anything else** with `invalid_input`: `create_user`, `create_organization`,
+  `upsert_scim_user` and the just-in-time user of `sign_in_sso`. Before this, those paths stored a
+  caller-chosen `taap_id` as given, so a person who registered their own SSO provider could create a
+  user named `admin` and receive an operator session (lake#870).
+- **Authentication refuses it too.** Each store's `context_for` passes the principal it resolved
+  through `accepted_principal`: a credential whose identity is `admin`, or a person's credential
+  whose identity is not a TAAP id, is answered as an unknown credential (`not_found`). That covers a
+  row written outside lake, such as an old row or a direct database write. Workload credentials
+  (`app_`, `build_`, `methodology_`) name their workload and only the `admin` check applies to them.
+  An agent stream trigger acts as its person only when that person's identity is a TAAP id.
+
+- **Grants and memberships someone writes name TAAP identities** (lake#872): `create_grant`,
+  `create_membership` and imported grants refuse (or, on import, skip) `admin`, bare names and
+  lake's own synthetic principals. `share-link:<id>` is one: a share link's folder is its first
+  grant, so a grant written for another tenant's link id could have repointed it. Lake still creates
+  `share-link:` grants itself when a link is made.
+
+**Why.** Policy decisions are keyed by the principal string, so a stored identity equal to `admin`,
+or to an identity lake sets in code (`agent-service:`, `share-link:`, `sso-provider/`), would inherit
+what that identity may do. The remaining work on unscoped principals is lake#872.
+
+**Verify.** `PrincipalIds.*` (`tests/test_sso.cpp`) and
+`PostgresIdentity.OperatorPrincipalIsNeverAPersonsIdentity` (`tests/test_postgres_identity.cpp`),
+which plants a user named `admin` in the database and shows its session is refused.
+
 ## Objects and grants
 
 | Capability | Authorization | Result |
 |---|---|---|
 | `list_objects` | `read` on `parent_id`; operator admin may list roots | child objects |
 | `get_object` | `read` on `id` | one object |
-| `create_object` | `admin` on `parent_id` | child object |
+| `create_object` | `admin` on `parent_id`; a `path` named for the repository it sits in ([below](#an-object-counts-only-inside-its-own-account-lake913)) | child object |
 | `list_grants` | `admin` on `object_id` | direct grants |
 | `create_grant` | `admin` on `object_id` | grant, with the attestation lake signed for it |
 | `revoke_grant` | `admin` on the grant's object | the revoked grant ([below](#revoking-a-grant)) |
@@ -126,6 +158,65 @@ organization's mount gets the organization child `secrets/<customer-id>/<organiz
 mount the account owns (no `organization_id`, lake#561) gets the customer child
 `secrets/<customer-id>`. Per-name `secret` objects are no longer created (lake#328). Mount capabilities authorize against the mount object; mount lists batch-filter
 their candidates. See [`secrets.md`](secrets.md).
+
+## An object counts only inside its own account (lake#913)
+
+**What.** An object's `(object_type, external_id)` is unique across every account, and lake finds
+the object governing a resource by that pair. Several external ids are derived from identifiers
+other accounts can learn: a repository folder is `<repository_id>:<node_id>`, a branch rule
+`<repository_id>:<ref>`, an environment `md5(<repository_id>\n<name>)`, an account's secret mounts
+sit under `secrets/<customer_id>`. Before lake#913, `create_object` took any type and any external
+id under any parent the caller administered, so an account could create those objects first, under
+its own repository or customer, and govern another account's folders, future environments or
+future secret mounts with its own grants (finding LSR-002 of the 2026-10 security review).
+
+**The rule, in two places.**
+
+- `create_object` adds only `path` objects, and a path's external id must begin with the id of
+  the repository its parent sits in (`<repository_id>:`). Any other type is `invalid_input`: lake
+  creates environments, secret mounts and the account objects itself, from the entity they belong
+  to. The operator credential may still create the other types, for repair; its paths follow the
+  same rule.
+- Every place that finds an object by a derived id checks that the object sits under the entity it
+  names, and never adopts one that does not:
+
+  | Where | The object must sit | Otherwise |
+  |---|---|---|
+  | the drive capabilities (`nearest_drive_location`, folder lists, share links) | under the repository's object | ignored: the repository's own grants decide |
+  | sharing a folder (`ensure_folder_location`) | under the repository's object | `conflict` |
+  | `set_branch_protection` | directly under the repository's object | `conflict` |
+  | environments (`environment_policy_object`: `ensure_environment` and the environment capabilities) | directly under the repository's object | `conflict` |
+  | `create_secret_mount_route` (both stores) | the owner's `secrets/…` environment directly under the owner's object | `conflict`, nothing written |
+  | the secret mount capabilities and `list_secret_mounts` | under the owning customer's object | `conflict`; the list leaves it out (the operator still sees it) |
+
+A `conflict` names the object and asks for the operator: the identifier is unique, so a squatted
+object can be neither adopted nor replaced until it is removed.
+
+**Finding objects made before the fix.** A read-only query on the control database lists the
+objects whose derived id names a repository they do not sit under:
+
+```sql
+WITH RECURSIVE chain AS (
+  SELECT o.id AS start, o.id, o.parent_id FROM objects o WHERE o.object_type = 'path'
+  UNION ALL
+  SELECT c.start, p.id, p.parent_id FROM chain c JOIN objects p ON p.id = c.parent_id
+)
+SELECT o.id, o.object_type, o.external_id FROM objects o
+WHERE o.object_type = 'path'
+  AND NOT EXISTS (SELECT 1 FROM chain c JOIN objects r ON r.id = c.id
+                  WHERE c.start = o.id AND r.object_type = 'repository'
+                    AND o.external_id LIKE r.external_id || ':%');
+```
+
+Environments are checked the same way against `md5(repository_id || E'\n' || name)`, and
+`secrets/<customer_id>…` environments against their parent's customer. Removing a squatted object
+deletes data and needs the operator's explicit decision.
+
+**Verify.** `PolicyObjectOwnership.MemoryStore` and `PolicyObjectOwnership.PostgresStore` run the
+same case against each store: one account's `create_object` is refused for another account's
+folder, environment and `secrets/<customer_id>` ids, and objects planted before the fix (directly
+in the store) neither let it upload into the other account's folder nor claim its branch rule,
+environment or secret mounts, while the owner keeps its access.
 
 ## Verify and change
 

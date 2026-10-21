@@ -73,8 +73,14 @@ target_sources(lake-tests PRIVATE test_network_capabilities.cpp test_network_tun
 target_sources(lake-tests PRIVATE test_tunnel_clients.cpp)
 # Regions and the apex region picker (lake#757).
 target_sources(lake-tests PRIVATE test_regions.cpp)
+# SAML sign-in through the Assertion Consumer Service (lake#836).
+target_sources(lake-tests PRIVATE test_saml.cpp)
+# OpenID Connect discovery for Lake OAuth and enterprise OIDC (lake#837).
+target_sources(lake-tests PRIVATE test_oidc_discovery.cpp)
 # The apex order sheet, its orders, Stripe Checkout and Resend (lake#831).
 target_sources(lake-tests PRIVATE test_orders.cpp)
+# Proving you hold an identity document's key before it becomes an account's identity (lake#931).
+target_sources(lake-tests PRIVATE test_identity_proof.cpp)
 # The version and its release page (root CLAUDE.md, *Cutting a release*).
 target_sources(lake-tests PRIVATE test_release_version.cpp)
 target_link_libraries(lake-tests PRIVATE lake-api lake-control-postgres pqxx OpenSSL::Crypto

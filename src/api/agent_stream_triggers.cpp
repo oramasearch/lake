@@ -302,7 +302,8 @@ stream_person(const ApiContext& base, const std::string& user_id, std::string me
         return std::nullopt;
     }
     const auto user = base.store->get_user(user_id);
-    if (!user) {
+    // The person's identity is a TAAP id, never the operator's (lake#870).
+    if (!user || !control::valid_principal_id(user->taap_id)) {
         return std::nullopt;
     }
     ApiContext context = base;

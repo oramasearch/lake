@@ -143,8 +143,9 @@ refused with *The proposal changed since you saw it; review it again.*
 
 On an agent's page choose **Talk in Ask Orama**, or pick the agent under **Talk to** in
 Ask Orama. A base-model agent answers from the workspace. A frontier-model agent answers from a
-running service: the first message starts it and answers *starting*; send the message again once it
-is ready.
+running service of your own: your first message starts it and answers *starting*; send the message
+again once it is ready. The service acts as you, so a teammate who talks to the same agent gets a
+service of their own, which acts as them.
 
 - REST: `POST /v1/agent_turn` with
   `{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "agent": "<agent id>", "message": "Which accounts need a call this week?"}`
@@ -265,7 +266,8 @@ To change what the agent is, choose **Edit its design**.
 ## Delete an Agent
 
 On the agent's Design page choose **Delete**, type its name and confirm. The agent is deleted, and
-its schedules and the streams that start it with it; its revisions are kept.
+its schedules and the streams that start it with it. Its running services and jobs are stopped, and
+each stopped run says why (*Stopped: the agent ... was deleted.*). Its revisions are kept.
 
 - REST: `POST /v1/delete_agent` with
   `{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "id": "<agent id>"}`

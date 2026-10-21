@@ -30,6 +30,18 @@ bool sha256_digest(std::string_view value) {
 
 } // namespace
 
+bool digest_pinned_image(std::string_view image) {
+    constexpr std::string_view marker = "@sha256:";
+    const std::size_t at = image.find(marker);
+    if (at == 0 || at == std::string_view::npos) {
+        return false;
+    }
+    const std::string_view digest = image.substr(at + marker.size());
+    return digest.size() == 64 && std::ranges::all_of(digest, [](char c) {
+               return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+           });
+}
+
 std::string build_target_image(std::string_view target, std::string_view space) {
     const std::size_t authority = target.find('/');
     const std::size_t tag = target.rfind(':');

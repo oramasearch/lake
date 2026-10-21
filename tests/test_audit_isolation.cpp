@@ -221,6 +221,152 @@ TEST_P(AuditIsolation, CustomerLookupFiltersBeforeLimiting) {
     EXPECT_TRUE(missing->empty());
 }
 
+// lake#18: an organization's administrator reads, filters and exports the audit of its own
+// account, through the same capabilities the operator uses, and nothing of another account's:
+// not by naming it, not by filtering for its events, not by reading the whole log.
+TEST_P(AuditIsolation, AnAccountAdministratorReadsOnlyItsOwnAccountsAudit) {
+    const std::string suffix = lake::control::new_uuid_v4();
+    const auto organization_account = [&](const std::string& name) {
+        const auto organization = store->create_organization(
+            {"taap:1:ed25519:org-" + name + "-" + suffix, "Organization " + name, ""});
+        EXPECT_TRUE(organization) << organization.error().message;
+        const auto customer =
+            store->create_customer({"organization", "", organization->id, name + "-" + suffix});
+        EXPECT_TRUE(customer) << customer.error().message;
+        return *customer;
+    };
+    const lake::control::Customer ours = organization_account("ours");
+    const lake::control::Customer theirs = organization_account("theirs");
+    const auto person = [&](const std::string& name,
+                            const lake::control::Customer& account,
+                            const std::string& role) {
+        const std::string taap_id = "taap:1:ed25519:" + name + "-" + suffix;
+        const auto user = store->create_user({taap_id, taap_id + "@example.test", name});
+        EXPECT_TRUE(user) << user.error().message;
+        const auto object = store->find_policy_object("customer", account.id);
+        EXPECT_TRUE(object) << object.error().message;
+        EXPECT_TRUE(store->create_grant(
+            {taap_id, object->id, role, "attestation-" + name, "admin", "request-" + name}));
+        lake::api::ApiContext signed_in;
+        signed_in.store = store.get();
+        signed_in.authorized = true;
+        signed_in.acting_user_id = user->id;
+        signed_in.acting_identity = taap_id;
+        signed_in.instance_kek = context.instance_kek;
+        return signed_in;
+    };
+    lake::api::ApiContext administrator = person("administrator", ours, "admin");
+    lake::api::ApiContext member = person("member", ours, "read");
+
+    // Events about each account: the operator's, the administrator's own, and the
+    // administrator's refused attempt on the other account.
+    ASSERT_TRUE(
+        registry.call("set_audit_retention", {{"customer_id", ours.id}, {"days", 500}}, context)
+            .ok);
+    ASSERT_TRUE(
+        registry.call("set_audit_retention", {{"customer_id", theirs.id}, {"days", 500}}, context)
+            .ok);
+    context.request_id = "theirs-only-" + suffix;
+    ASSERT_TRUE(
+        registry.call("set_audit_retention", {{"customer_id", theirs.id}, {"days", 600}}, context)
+            .ok);
+    context.request_id.clear();
+    ASSERT_TRUE(
+        registry
+            .call("set_audit_retention", {{"customer_id", ours.id}, {"days", 700}}, administrator)
+            .ok);
+    EXPECT_EQ(
+        registry
+            .call("set_audit_retention", {{"customer_id", theirs.id}, {"days", 700}}, administrator)
+            .error.code,
+        "unauthorized");
+
+    const auto customers_of = [](const nlohmann::json& items) {
+        std::set<std::string> customers;
+        for (const nlohmann::json& item : items) {
+            customers.insert(item.value("customer_id", nlohmann::json()).is_string()
+                                 ? item.at("customer_id").get<std::string>()
+                                 : std::string("(none)"));
+        }
+        return customers;
+    };
+    const auto retention_events = [](const nlohmann::json& items) {
+        return std::ranges::count_if(items, [](const nlohmann::json& item) {
+            return item.at("action") == "set_audit_retention";
+        });
+    };
+
+    // The administrator reads its account's events, through the synchronous and the
+    // asynchronous dispatch alike, and only those.
+    for (const bool async : {false, true}) {
+        const auto call = [&](const std::string& name,
+                              const nlohmann::json& input,
+                              lake::api::ApiContext& caller) -> lake::api::ApiResult {
+            if (!async) {
+                return registry.call(name, input, caller);
+            }
+            auto completed = liquid::runtime::block_on(registry.call_async(name, input, caller));
+            return completed
+                       ? std::move(*completed)
+                       : lake::api::ApiResult::failure("store_error", completed.error().message);
+        };
+        const auto read = call("audit", {{"customer_id", ours.id}, {"limit", 1000}}, administrator);
+        ASSERT_TRUE(read.ok) << read.error.message;
+        EXPECT_EQ(customers_of(read.value.at("items")), std::set<std::string>{ours.id});
+        EXPECT_EQ(retention_events(read.value.at("items")), 2)
+            << "the operator's change and the administrator's own";
+        const auto exported =
+            call("export_audit", {{"customer_id", ours.id}, {"limit", 1000}}, administrator);
+        ASSERT_TRUE(exported.ok) << exported.error.message;
+        const std::string jsonl = exported.value.at("jsonl");
+        EXPECT_FALSE(jsonl.empty());
+        EXPECT_EQ(jsonl.find(theirs.id), std::string::npos) << jsonl;
+
+        // Another account, the whole log, a guessed account: refused, whatever the filter.
+        for (const nlohmann::json& refused :
+             {nlohmann::json{{"customer_id", theirs.id}},
+              nlohmann::json{{"customer_id", theirs.id}, {"log", "central"}},
+              nlohmann::json::object(),
+              nlohmann::json{{"log", "central"}},
+              nlohmann::json{{"principal", "admin"}},
+              nlohmann::json{{"customer_id", lake::control::new_uuid_v4()}}}) {
+            EXPECT_EQ(call("audit", refused, administrator).error.code, "unauthorized")
+                << refused.dump();
+            EXPECT_EQ(call("export_audit", refused, administrator).error.code, "unauthorized")
+                << refused.dump();
+        }
+        // A filter naming the other account's request reaches nothing of it.
+        const auto guessed =
+            call("audit",
+                 {{"customer_id", ours.id}, {"request_id", "theirs-only-" + suffix}},
+                 administrator);
+        ASSERT_TRUE(guessed.ok) << guessed.error.message;
+        EXPECT_TRUE(guessed.value.at("items").empty()) << guessed.value.dump();
+        // A member who may read the account is not its auditor.
+        EXPECT_EQ(call("audit", {{"customer_id", ours.id}}, member).error.code, "unauthorized");
+    }
+
+    // The other account's audit shows the refused attempt on it, attributed to it.
+    const auto operator_view = registry.call(
+        "audit", {{"customer_id", theirs.id}, {"limit", 1000}, {"outcome", "denied"}}, context);
+    ASSERT_TRUE(operator_view.ok) << operator_view.error.message;
+    EXPECT_TRUE(std::ranges::any_of(operator_view.value.at("items"), [&](const nlohmann::json& e) {
+        return e.at("action") == "set_audit_retention" &&
+               e.at("principal") == administrator.acting_identity;
+    })) << operator_view.value.dump();
+    EXPECT_EQ(customers_of(operator_view.value.at("items")), std::set<std::string>{theirs.id});
+    // The refused reads are evidence too, in the central log the operator reads.
+    const auto refusals = registry.call(
+        "audit",
+        {{"principal", administrator.acting_identity}, {"outcome", "denied"}, {"limit", 1000}},
+        context);
+    ASSERT_TRUE(refusals.ok);
+    EXPECT_GT(
+        std::ranges::count_if(refusals.value.at("items"),
+                              [](const nlohmann::json& e) { return e.at("action") == "audit"; }),
+        0);
+}
+
 INSTANTIATE_TEST_SUITE_P(Stores,
                          AuditIsolation,
                          testing::Bool(),

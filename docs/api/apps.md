@@ -52,6 +52,37 @@ application JWT. Its `session.started` lifecycle event is retained. The derivati
 PostgreSQL coverage are in [identity.md](identity.md#token-derivation-and-revocation). Suspending a user revokes that user's sessions in this pool immediately;
 deleting one removes this pool's credentials and sessions. Neither action touches another pool.
 
+### What an application's session may do in Lake (lake#912)
+
+**What.** A session issued in an application's pool reaches only its own user's sign-in in that
+pool: `list_sessions`, `revoke_session`, `list_devices`, `revoke_device`, `create_token`,
+`enroll_mfa`, `disable_mfa`, `begin_passkey_registration` and `register_passkey` (the capabilities
+marked `serves_application_pools`). Every other capability answers it `unauthorized`, or treats it
+as a visitor where a visitor may read (`viewer`, a public repository). On every other route it is no
+credential at all: the cookie routes, downloads, `/metrics` and image pulls from Lake's registry.
+Signing out (`/logout`) still ends it.
+
+**Why.** Grants name a bare TAAP identity, and users are unique per `(pool_id, taap_id)`, so an
+application's pool may hold a user whose identity is a Lake account's: anyone can register an
+application and enroll such a user. Before this change the HTTP server copied that identity into
+the acting identity, and the session carried every grant of the Lake account (finding LSR-001 of the
+2026-10 security review). Whether grants should name a user and pool instead is lake#872.
+
+**How.** `ApiServer::context_for` keeps a pool session apart (`ApiContext::application_session`) and
+leaves the request unauthenticated. `Registry::call` admits it, for one call, only to a capability
+with `serves_application_pools`, setting the user, session and pool from it; the OCI registry's
+credential check refuses it, and the OAuth callback never gives an application user a Lake
+identity.
+
+**Verify.** `ApplicationPoolSessions.MemoryStore` and `ApplicationPoolSessions.PostgresStore` give
+an application-pool user the TAAP identity of a Lake account that administers an account, and check
+over HTTP that its session, as a bearer, as the `lake_session` cookie and through `/mcp`, reads
+nothing of that account, while its own `list_sessions` still answers and the Lake account's own
+token still reads it.
+
+**Change.** A new capability for application users sets `serves_application_pools` only when it
+acts on `acting_user_id` and `pool_id` alone, never through a grant or `acting_identity`.
+
 ### Where settings live (lake#351)
 
 An application's settings, its display name, allowed origins, redirect URIs and hosted-page theme,
@@ -166,6 +197,11 @@ When a redirect URI is configured, successful password, MFA, passkey, and OAuth 
 returns `access_token`, `token_type`, and `expires_in` in its URI fragment; fragments are not sent
 to the redirect server and the application reads and clears them in its own page. Lake never
 redirects to a URI outside the registration.
+A sign-up, or an OAuth start, that brings an identity document and is answered
+`identity_proof_required` renders a second page (`web_ui_application_identity_proof`): the
+`begin_identity_proof` challenge, the `liquid sign artifact` command and a field for its output, with
+the first form's fields kept (the password is typed again, never echoed into the page). Posting it
+sends the request again with `identity_proof` ([identity.md](identity.md#proving-you-hold-the-key)).
 The hosted passkey page contains the sole application-page script: the documented
 `navigator.credentials.get` WebAuthn call and its JSON posts. The other application identity
 pages contain no script. Theme colors accept hexadecimal CSS colors; all application values are
@@ -260,6 +296,9 @@ Supported event names are `user.created`, `user.updated`, `user.deleted`,
 ```json
 {"id":"event UUID","application_id":"application UUID","event":"session.started","created_at":"timestamp","data":{}}
 ```
+
+Deliveries follow the same rules as repository webhooks ([forge.md](forge.md#webhooks)): off the
+server's thread, 10 s in all, and HTTPS to public addresses only (lake#772, lake#876).
 
 Lake sends `Content-Type`, `X-Lake-Event`, `X-Lake-Event-Id`, and `X-Lake-Signature`. The signature
 is lowercase hex `v1=HMAC-SHA256(secret, event_id + "." + exact_body)`. Compare it in constant

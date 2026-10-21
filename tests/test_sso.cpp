@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <chrono>
 #include <string_view>
 #include <vector>
 
@@ -11,7 +12,9 @@
 #include "lake/api/capabilities.hpp"
 #include "lake/api/registry.hpp"
 #include "lake/control/memory_store.hpp"
+#include "lake/control/policy.hpp"
 #include "lake/control/saml.hpp"
+#include "saml_test_support.hpp"
 
 namespace {
 
@@ -64,80 +67,6 @@ json provider_input(const std::string& organization_id,
     return provider;
 }
 
-std::string base64(const unsigned char* value, std::size_t size) {
-    std::string encoded(((size + 2) / 3) * 4, '\0');
-    const int encoded_size =
-        EVP_EncodeBlock(reinterpret_cast<unsigned char*>(encoded.data()), value, size);
-    encoded.resize(static_cast<std::size_t>(encoded_size));
-    return encoded;
-}
-
-std::string sign(EVP_PKEY* key, std::string_view value) {
-    EVP_MD_CTX* context = EVP_MD_CTX_new();
-    std::size_t size = 0;
-    EXPECT_EQ(EVP_DigestSignInit(context, nullptr, EVP_sha256(), nullptr, key), 1);
-    EXPECT_EQ(EVP_DigestSignUpdate(context, value.data(), value.size()), 1);
-    EXPECT_EQ(EVP_DigestSignFinal(context, nullptr, &size), 1);
-    std::vector<unsigned char> signature(size);
-    EXPECT_EQ(EVP_DigestSignFinal(context, signature.data(), &size), 1);
-    EVP_MD_CTX_free(context);
-    signature.resize(size);
-    return base64(signature.data(), signature.size());
-}
-
-std::string certificate(EVP_PKEY* key) {
-    X509* result = X509_new();
-    X509_set_version(result, 2);
-    ASN1_INTEGER_set(X509_get_serialNumber(result), 1);
-    X509_gmtime_adj(X509_get_notBefore(result), 0);
-    X509_gmtime_adj(X509_get_notAfter(result), 3600);
-    X509_set_pubkey(result, key);
-    X509_sign(result, key, EVP_sha256());
-    BIO* bio = BIO_new(BIO_s_mem());
-    PEM_write_bio_X509(bio, result);
-    char* value = nullptr;
-    const long size = BIO_get_mem_data(bio, &value);
-    const std::string pem(value, static_cast<std::size_t>(size));
-    BIO_free(bio);
-    X509_free(result);
-    return pem;
-}
-
-std::string signed_saml_response(EVP_PKEY* key, const std::string& issuer) {
-    const std::string unsigned_assertion =
-        "<saml:Assertion ID=\"stub\" xmlns:ds=\"http://www.w3.org/2000/09/xmldsig#\" "
-        "xmlns:saml=\"urn:oasis:names:tc:SAML:2.0:assertion\">"
-        "<saml:Issuer>" +
-        issuer +
-        "</saml:Issuer><saml:Subject><saml:NameID>saml-signed-user</saml:NameID>"
-        "</saml:Subject><saml:Attribute Name=\"email\"><saml:AttributeValue>"
-        "signed@example.com</saml:AttributeValue></saml:Attribute></saml:Assertion>";
-    const auto canonical = lake::control::saml::canonicalize_exclusive(unsigned_assertion);
-    EXPECT_TRUE(canonical.has_value());
-    unsigned char digest[EVP_MAX_MD_SIZE];
-    unsigned int digest_size = 0;
-    EVP_Digest(canonical->data(), canonical->size(), digest, &digest_size, EVP_sha256(), nullptr);
-    const std::string signed_info =
-        "<ds:SignedInfo xmlns:ds=\"http://www.w3.org/2000/09/xmldsig#\">"
-        "<ds:CanonicalizationMethod Algorithm=\"http://www.w3.org/2001/10/xml-exc-c14n#\"/>"
-        "<ds:SignatureMethod Algorithm=\"http://www.w3.org/2001/04/xmldsig-more#rsa-sha256\"/>"
-        "<ds:Reference URI=\"#stub\"><ds:DigestMethod "
-        "Algorithm=\"http://www.w3.org/2001/04/xmlenc#sha256\"/>"
-        "<ds:DigestValue>" +
-        base64(digest, digest_size) + "</ds:DigestValue></ds:Reference></ds:SignedInfo>";
-    const auto canonical_info = lake::control::saml::canonicalize_exclusive(signed_info);
-    EXPECT_TRUE(canonical_info.has_value());
-    const std::string signature = sign(key, *canonical_info);
-    const std::string signed_assertion =
-        unsigned_assertion.substr(0, unsigned_assertion.rfind("</saml:Assertion>")) +
-        "<ds:Signature>" + signed_info + "<ds:SignatureValue>" + signature +
-        "</ds:SignatureValue></ds:Signature></saml:Assertion>";
-    const std::string response =
-        "<samlp:Response xmlns:samlp=\"urn:oasis:names:tc:SAML:2.0:protocol\">" + signed_assertion +
-        "</samlp:Response>";
-    return base64(reinterpret_cast<const unsigned char*>(response.data()), response.size());
-}
-
 TEST(Sso, SamlAndOidcProviderAssertionsRequireFederationPolicy) {
     SsoSurface surface;
     const ApiResult organization =
@@ -168,13 +97,28 @@ TEST(Sso, SamlAndOidcProviderAssertionsRequireFederationPolicy) {
     ASSERT_TRUE(provision(saml, "saml-user").ok);
     ASSERT_TRUE(provision(oidc, "oidc-user").ok);
 
+    // lake#562: the capability verifies no assertion, so nobody but the operator may call it. An
+    // anonymous caller and a signed-in person are both refused before the store is reached.
+    const json assertion{{"provider_id", saml.value.at("id")},
+                         {"issuer", "https://saml.stub.example"},
+                         {"subject", "saml-user"},
+                         {"claims", {{"email", "saml-user@example.com"}}}};
     surface.context.authorized = false;
     surface.context.operator_credential = false;
-    const ApiResult denied = surface.call("sign_in_sso",
-                                          {{"provider_id", saml.value.at("id")},
-                                           {"issuer", "https://saml.stub.example"},
-                                           {"subject", "saml-user"},
-                                           {"claims", {{"email", "saml-user@example.com"}}}});
+    surface.context.acting_identity.clear();
+    const ApiResult anonymous = surface.call("sign_in_sso", assertion);
+    EXPECT_FALSE(anonymous.ok);
+    EXPECT_EQ(anonymous.error.code, "unauthenticated");
+    surface.context.authorized = true;
+    surface.context.acting_identity = "taap:1:ed25519:someone";
+    const ApiResult person = surface.call("sign_in_sso", assertion);
+    EXPECT_FALSE(person.ok);
+    EXPECT_EQ(person.error.code, "unauthorized");
+    surface.context.acting_identity = "admin";
+
+    // The operator is still held to the federation issuer policy.
+    surface.context.operator_credential = true;
+    const ApiResult denied = surface.call("sign_in_sso", assertion);
     const std::string denied_request = surface.context.request_id;
     EXPECT_FALSE(denied.ok);
     EXPECT_EQ(denied.error.code, "unauthorized");
@@ -194,8 +138,6 @@ TEST(Sso, SamlAndOidcProviderAssertionsRequireFederationPolicy) {
                            {"claim", "email"}})
                     .ok);
 
-    surface.context.authorized = false;
-    surface.context.operator_credential = false;
     const ApiResult saml_sign_in = surface.call("sign_in_sso",
                                                 {{"provider_id", saml.value.at("id")},
                                                  {"issuer", "https://saml.stub.example"},
@@ -213,8 +155,6 @@ TEST(Sso, SamlAndOidcProviderAssertionsRequireFederationPolicy) {
     EXPECT_TRUE(surface.store.context_for(saml_sign_in.value.at("secret")).has_value());
     EXPECT_TRUE(surface.store.context_for(oidc_sign_in.value.at("secret")).has_value());
 
-    surface.context.authorized = true;
-    surface.context.operator_credential = true;
     const ApiResult audit = surface.call("audit", {{"request_id", denied_request}, {"limit", 1}});
     ASSERT_TRUE(audit.ok) << audit.error.message;
     EXPECT_TRUE(std::ranges::any_of(audit.value.at("items"), [](const json& event) {
@@ -222,24 +162,28 @@ TEST(Sso, SamlAndOidcProviderAssertionsRequireFederationPolicy) {
     }));
 }
 
-TEST(Sso, SignedSamlAssertionIsVerifiedBeforeSignIn) {
-    EVP_PKEY_CTX* key_context = EVP_PKEY_CTX_new_id(EVP_PKEY_RSA, nullptr);
-    ASSERT_NE(key_context, nullptr);
-    ASSERT_EQ(EVP_PKEY_keygen_init(key_context), 1);
-    ASSERT_EQ(EVP_PKEY_CTX_set_rsa_keygen_bits(key_context, 2048), 1);
-    EVP_PKEY* key = nullptr;
-    ASSERT_EQ(EVP_PKEY_keygen(key_context, &key), 1);
-    EVP_PKEY_CTX_free(key_context);
+TEST(Sso, SignedSamlResponseIsVerifiedBeforeSignIn) {
+    lake::test::saml::Idp idp;
     const std::string issuer = "https://saml.signed.stub.example";
     SsoSurface surface;
+    surface.context.public_host = "lake.sso.test";
     const ApiResult organization =
         surface.call("create_organization", {{"display_name", "Signed SAML organization"}});
     ASSERT_TRUE(organization.ok) << organization.error.message;
     json input = provider_input(organization.value.at("id"), "signed-saml", "saml", issuer);
-    input["signing_certificate"] = certificate(key);
+    input["metadata"] =
+        "<md:EntityDescriptor xmlns:md=\"urn:oasis:names:tc:SAML:2.0:metadata\" entityID=\"" +
+        issuer +
+        "\"><md:IDPSSODescriptor protocolSupportEnumeration=\"urn:oasis:names:tc:SAML:2.0:"
+        "protocol\"><md:SingleSignOnService "
+        "Binding=\"urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect\" "
+        "Location=\"https://saml.signed.stub.example/sso\"/></md:IDPSSODescriptor></"
+        "md:EntityDescriptor>";
+    input["signing_certificate"] = idp.certificate();
     input["jit_provisioning"] = true;
     const ApiResult provider = surface.call("register_sso_provider", input);
     ASSERT_TRUE(provider.ok) << provider.error.message;
+    const std::string provider_id = provider.value.at("id");
     ASSERT_TRUE(surface
                     .call("create_federation_issuer",
                           {{"organization_id", organization.value.at("id")},
@@ -248,19 +192,40 @@ TEST(Sso, SignedSamlAssertionIsVerifiedBeforeSignIn) {
                     .ok);
     surface.context.authorized = false;
     surface.context.operator_credential = false;
-    const std::string response = signed_saml_response(key, issuer);
+    const ApiResult started = surface.call("start_sso_saml", {{"provider_id", provider_id}});
+    ASSERT_TRUE(started.ok) << started.error.message;
+    // The request id is inside the redirect; Lake's own store has the one outstanding request.
+    const auto request = lake::control::saml::new_request_id();
+    ASSERT_TRUE(surface.store.begin_saml({provider_id, request, "browser", "", ""}));
+    lake::test::saml::ResponseShape shape;
+    shape.issuer = issuer;
+    shape.destination = lake::control::saml::acs_url("lake.sso.test", provider_id);
+    shape.recipient = shape.destination;
+    shape.audience = lake::control::saml::sp_entity_id("lake.sso.test", provider_id);
+    shape.in_response_to = request;
+    shape.issued = std::chrono::duration_cast<std::chrono::seconds>(
+                       std::chrono::system_clock::now().time_since_epoch())
+                       .count() -
+                   5;
+    shape.subject = "saml-signed-user";
+    shape.email = "signed@example.com";
+    const std::string response = lake::test::saml::base64(
+        idp.sign_assertion(lake::test::saml::response_xml(shape), shape.assertion_id));
+    std::string tampered = response;
+    tampered[tampered.size() / 2] = tampered[tampered.size() / 2] == 'A' ? 'B' : 'A';
+    const ApiResult rejected =
+        surface.call("sign_in_saml", {{"provider_id", provider_id}, {"saml_response", tampered}});
+    const std::string rejected_request = surface.context.request_id;
+    EXPECT_FALSE(rejected.ok);
     const ApiResult signed_in = surface.call("sign_in_saml",
-                                             {{"provider_id", provider.value.at("id")},
+                                             {{"provider_id", provider_id},
                                               {"saml_response", response},
                                               {"taap_id", "taap:1:ed25519:saml-signed"}});
     ASSERT_TRUE(signed_in.ok) << signed_in.error.message;
     EXPECT_TRUE(surface.store.context_for(signed_in.value.at("secret")).has_value());
-    std::string tampered = response;
-    tampered[tampered.size() / 2] = tampered[tampered.size() / 2] == 'A' ? 'B' : 'A';
-    const ApiResult rejected = surface.call(
-        "sign_in_saml", {{"provider_id", provider.value.at("id")}, {"saml_response", tampered}});
-    const std::string rejected_request = surface.context.request_id;
-    EXPECT_FALSE(rejected.ok);
+    const ApiResult replayed =
+        surface.call("sign_in_saml", {{"provider_id", provider_id}, {"saml_response", response}});
+    EXPECT_FALSE(replayed.ok);
     surface.context.authorized = true;
     surface.context.operator_credential = true;
     const ApiResult audit = surface.call("audit", {{"request_id", rejected_request}, {"limit", 1}});
@@ -268,7 +233,6 @@ TEST(Sso, SignedSamlAssertionIsVerifiedBeforeSignIn) {
     EXPECT_TRUE(std::ranges::any_of(audit.value.at("items"), [](const json& event) {
         return event.at("action") == "sign_in_saml" && event.at("outcome") == "denied";
     }));
-    EVP_PKEY_free(key);
 }
 
 TEST(Scim, UserUpdateGroupReplacementAndDeactivationRevokeSessions) {
@@ -320,8 +284,6 @@ TEST(Scim, UserUpdateGroupReplacementAndDeactivationRevokeSessions) {
                            {"issuer", "https://scim.stub.example"},
                            {"claim", "email"}})
                     .ok);
-    surface.context.authorized = false;
-    surface.context.operator_credential = false;
     const ApiResult session = surface.call("sign_in_sso",
                                            {{"provider_id", provider_id},
                                             {"issuer", "https://scim.stub.example"},
@@ -347,6 +309,93 @@ TEST(Scim, UserUpdateGroupReplacementAndDeactivationRevokeSessions) {
     ASSERT_EQ(logs.value.at("items").size(), 1U);
     EXPECT_EQ(logs.value.at("items").front().at("resource"), "user");
     EXPECT_EQ(logs.value.at("items").front().at("operation"), "deactivate");
+}
+
+// lake#870: principal ids are TAAP ids; `admin` belongs to the admin token alone.
+TEST(PrincipalIds, OnlyTaapIdentitiesAreValid) {
+    using lake::control::valid_principal_id;
+    EXPECT_TRUE(valid_principal_id("taap:1:ed25519:abc"));
+    EXPECT_FALSE(valid_principal_id("admin"));
+    EXPECT_FALSE(valid_principal_id(""));
+    EXPECT_FALSE(valid_principal_id("taap:"));
+    EXPECT_FALSE(valid_principal_id("agent-service:ask"));
+    EXPECT_FALSE(valid_principal_id("share-link:1"));
+    EXPECT_FALSE(valid_principal_id("taap:1:\nadmin"));
+    EXPECT_FALSE(valid_principal_id("taap:" + std::string(508, 'a')));
+    EXPECT_TRUE(valid_principal_id("taap:" + std::string(507, 'a')));
+}
+
+TEST(PrincipalIds, NoCreationPathAcceptsTheOperatorIdentity) {
+    SsoSurface surface;
+    EXPECT_FALSE(surface.store.create_user({"admin", "", "Operator"}));
+    const ApiResult organization =
+        surface.call("create_organization", {{"display_name", "Org"}, {"taap_id", "admin"}});
+    EXPECT_FALSE(organization.ok);
+    EXPECT_EQ(organization.error.code, "invalid_input");
+
+    const ApiResult created =
+        surface.call("create_organization", {{"display_name", "JIT organization"}});
+    ASSERT_TRUE(created.ok) << created.error.message;
+    json provider =
+        provider_input(created.value.at("id"), "jit", "oidc", "https://oidc.attacker.example");
+    provider["jit_provisioning"] = true;
+    const ApiResult registered = surface.call("register_sso_provider", provider);
+    ASSERT_TRUE(registered.ok) << registered.error.message;
+
+    const ApiResult scim = surface.call("upsert_scim_user",
+                                        {{"provider_id", registered.value.at("id")},
+                                         {"external_id", "scim-admin"},
+                                         {"display_name", "Operator"},
+                                         {"taap_id", "admin"},
+                                         {"active", true}});
+    EXPECT_FALSE(scim.ok);
+    EXPECT_EQ(scim.error.code, "invalid_input");
+
+    const auto jit = surface.store.sign_in_sso({registered.value.at("id"),
+                                                "https://oidc.attacker.example",
+                                                "jit-admin",
+                                                "",
+                                                "Operator",
+                                                "admin",
+                                                "browser",
+                                                json::object()});
+    ASSERT_FALSE(jit);
+    EXPECT_EQ(jit.error().code, "invalid_input");
+}
+
+// lake#872: a grant or membership someone writes names a TAAP identity: never `admin`, never lake's
+// own synthetic `share-link:<id>` (whose first grant is a share link's folder), never a bare name.
+TEST(PrincipalIds, GrantsAndMembershipsNameOnlyTaapIdentities) {
+    SsoSurface surface;
+    const ApiResult organization =
+        surface.call("create_organization", {{"display_name", "Grants organization"}});
+    ASSERT_TRUE(organization.ok) << organization.error.message;
+    const auto object =
+        surface.store.find_policy_object("organization", organization.value.at("id"));
+    ASSERT_TRUE(object);
+    for (const std::string refused : {"admin",
+                                      "share-link:00000000-0000-4000-8000-000000000001",
+                                      "reader",
+                                      "agent-service:ask"}) {
+        const ApiResult grant = surface.call(
+            "create_grant",
+            {{"principal_taap_id", refused}, {"object_id", object->id}, {"role", "read"}});
+        EXPECT_FALSE(grant.ok) << refused;
+        EXPECT_EQ(grant.error.code, "invalid_input") << refused;
+        const ApiResult member = surface.call("create_membership",
+                                              {{"organization_id", organization.value.at("id")},
+                                               {"principal_type", "user"},
+                                               {"principal_id", "u-1"},
+                                               {"principal_taap_id", refused},
+                                               {"role", "read"}});
+        EXPECT_FALSE(member.ok) << refused;
+        EXPECT_EQ(member.error.code, "invalid_input") << refused;
+    }
+    const ApiResult granted = surface.call("create_grant",
+                                           {{"principal_taap_id", "taap:1:ed25519:reader"},
+                                            {"object_id", object->id},
+                                            {"role", "read"}});
+    EXPECT_TRUE(granted.ok) << granted.error.message;
 }
 
 } // namespace

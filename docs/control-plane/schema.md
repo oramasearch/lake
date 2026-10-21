@@ -242,7 +242,7 @@ comments. `forge_records` is the area prefix for parallel Phase 6 schema work.
 | `pki_certificates` | Issued short-lived X.509, JWT, ACME, SSH, client, and device credential metadata and public output. |
 | `pki_acme_orders` | ACME order state, identifiers, account key reference, expiry, and issued certificate link. |
 | `pki_callers` | Short-lived workload credentials minted after Kubernetes, federation, AWS, or Azure attestation. |
-| `pki_recovery_ceremonies`, `pki_recovery_shares` | Configured Shamir quorum, recovery evidence digests, expiry, and completed-rehearsal state. Shares are never retained. |
+| `pki_recovery_ceremonies`, `pki_recovery_shares` | Configured Shamir quorum, recovery evidence digests, expiry, and completed-rehearsal state. Shares are never retained. Since `0093`, `pki_recovery_participants` records who holds each share. |
 | `pki_guard` | Guard table for this migration. |
 
 Caller rows retain verified identity metadata and expiry, never the returned bearer credential.
@@ -1285,3 +1285,56 @@ Every field but `email` defaults to `''`. Lake alone writes it, through `set_bil
 sends it to the account's Stripe customer. A billing record (decision 56): no workspace content.
 Additive and idempotent; guard `billing_contacts_guard`. The operator vendors the schema and selects
 that guard before a lake with this change is rolled.
+
+## Account deletion migration
+
+`0091_account_deletion` (lake#810, [`../api/identity.md#deleting-an-account`](../api/identity.md#deleting-an-account))
+adds `users.deleted_at` (`timestamptz`, null for a live account). `delete_account` sets it, erases the
+row's `email` (to null, which frees the address for a new account) and `display_name` (to `''`), and
+sets `disabled_at` if it was not set. The row itself stays, like a deleted organization's (`0076`),
+because the central audit chain names the account: `audit_events.principal` is its TAAP identity,
+which stays on the row and stays retired, and `audit_events.customer_id` names its personal space
+(`ON DELETE RESTRICT`), which is marked `deleted_at` too. Lake never lists or reads a deleted user
+again (`get_user`, `list_users` and the principal names behind the audit pages leave it out). The
+rows that let anyone sign in or act as the account are deleted in the same transaction: `sessions`,
+`devices`, `credentials`, `identity_documents`, `identity_taap_assertions`,
+`identity_webauthn_challenges`, `identity_link_challenges`, `identity_links`, `scim_users`,
+`offline_recovery_attempts`, `offline_recovery_grants`, `offline_recovery_notifications`,
+`app_authorization_codes`, the `offline_recovery_contacts` naming it, every `memberships` and
+`grants` row naming it; a `custodial_identities` row keeps its public key with `wrapped_seed` null
+and `seed_destroyed_at` set. Of the personal space: `billing_contacts`, `customer_usage_limits`,
+`customer_storage_quotas`, `secret_mount_routes` (with their `secret_lease_routes`) and its policy
+objects go; `billing_invoices`, their lines, `billing_accounts`, `billing_payment_events` and
+`cloud_orders` are kept as billing records. Additive and idempotent; guard `account_deletion_guard`.
+The operator vendors the schema and selects that guard before a lake with this change is rolled.
+
+## SAML sign-in migration
+
+`0092_saml_sign_in` (lake#836, [`../api/sso.md#saml-sign-in`](../api/sso.md#saml-sign-in)) adds two
+tables for SAML sign-in through the Assertion Consumer Service:
+
+- `sso_saml_requests`: one row per outstanding AuthnRequest. `provider_id` (cascading with the
+  `sso_providers` row), `request_id_hash` (SHA-256 hex of the request's `ID`, unique), `device_name`
+  (≤ 256), `taap_id` (≤ 512, `''` when the sign-in carried none), `return_to` (a same-origin path,
+  ≤ 2048), `expires_at` (ten minutes after `start_sso_saml` or the start route), `used_at`, and
+  `created_at`. Rows expired for a day are removed when the next request is recorded.
+- `sso_saml_assertions`: primary key `(provider_id, assertion_id_hash)`, the SHA-256 hex of each
+  accepted assertion's `ID`, kept until `expires_at` (the assertion's earliest `NotOnOrAfter`), with
+  `used_at`. Expired rows are removed when the next response is accepted.
+
+The ACS consumes the request and inserts the assertion in one transaction, so each is accepted once.
+Sign-in state (decision 50): nothing from a workspace. Indexes `sso_saml_requests_expires_idx` and
+`sso_saml_assertions_expires_idx`. Additive and idempotent; guard `saml_sign_in_guard`. The operator
+vendors the schema and selects that guard before a lake with this change is rolled.
+
+## Root recovery participants migration
+
+`0093_root_recovery_participants` (lake#934, [`../api/break-glass.md`](../api/break-glass.md))
+adds `pki_recovery_participants`, one row per share of a root recovery ceremony: `ceremony_id`
+(cascading with the ceremony), `share_index` (1 to 255), `principal_id` (the participant's TAAP
+id, non-empty, unique within the ceremony) and `share_issued_at` (when the share was issued to
+them, at most once). Primary key `(ceremony_id, share_index)`. It holds no share value; a presented
+share's evidence digest stays in `pki_recovery_shares`. A ceremony begun before the migration has
+no rows here and cannot be completed. Additive and idempotent; guard
+`root_recovery_participants_guard`. The operator vendors the schema and selects that guard before a
+lake with this change is rolled.

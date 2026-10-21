@@ -167,16 +167,20 @@ endpoints below; any other value is treated as a generic OIDC issuer (`src/api/o
 |---|---|---|---|
 | `google` | Google's fixed public endpoints. The ID token is verified (RS256, issuer, audience, nonce) | Exactly `https://accounts.google.com`: the token's `iss` is compared to it exactly | `https://<LAKE_PUBLIC_HOST>/v1/oauth/google/callback` |
 | `github` | GitHub's fixed endpoints. The access token is checked through `https://api.github.com/user` | Required by the input schema, not used for the endpoints | `https://<LAKE_PUBLIC_HOST>/v1/oauth/github/callback` |
-| Any other value | `<issuer>/authorize`, `<issuer>/token` and `<issuer>/jwks` | The issuer, compared exactly to the ID token's `iss` | `https://<LAKE_PUBLIC_HOST>/v1/oauth/<provider>/callback` |
+| Any other value | Read from `<issuer>/.well-known/openid-configuration`: its `authorization_endpoint`, `token_endpoint` and `jwks_uri` | The issuer, compared exactly to the discovery document's `issuer` and to the ID token's `iss` | `https://<LAKE_PUBLIC_HOST>/v1/oauth/<provider>/callback` |
 
-- **A generic issuer works only if it serves exactly those three paths.** Lake does not read OIDC
-  discovery (`.well-known/openid-configuration`), so Microsoft Entra, Okta and Google Workspace,
-  whose endpoints live elsewhere, do not work this way today
-  ([lake#837](https://github.com/oramasearch/lake/issues/837)).
-- `start_oauth` refuses a provider whose endpoints are plain `http://`, except on loopback
-  (`127.0.0.1`, `localhost`, `[::1]`). It also needs `LAKE_PUBLIC_HOST`.
+- **A generic issuer is read through OIDC discovery** ([`../api/identity.md#openid-connect-discovery`](../api/identity.md#openid-connect-discovery),
+  lake#837). Microsoft Entra (issuer `https://login.microsoftonline.com/<tenant id>/v2.0`, not the
+  multi-tenant `common`), Okta (`https://<org>.okta.com`, or `https://<org>.okta.com/oauth2/<server>`
+  for a custom authorization server) and Google Workspace (`https://accounts.google.com`) work. The
+  issuer must be exactly the one the provider's discovery document names, trailing slash included.
+- Discovery, the token exchange and the keys reach only HTTPS on public addresses. For an identity
+  provider on the install's own network, set `LAKE_OIDC_ALLOW_PRIVATE_ADDRESSES=1` (it also allows
+  plain HTTP to loopback, for tests). `start_oauth` also needs `LAKE_PUBLIC_HOST`.
 - **A first OAuth sign-in must carry the person's TAAP identity document** (`start_oauth`'s
-  `identity_document`). Lake verifies and records it before creating the user. Without it the user is
+  `identity_document`) with `identity_proof`, a signature by its key over a `begin_identity_proof`
+  challenge ([identity.md](../api/identity.md#proving-you-hold-the-key)). Lake verifies and records
+  it before creating the user. Without it the user is
   not created, and the callback answers **403** `OAuth identity could not sign in`. A returning
   person, whose provider subject is already linked, does not need it.
 - **Check:** sign in through the provider. The audit log has one `authentication` event for the
@@ -193,25 +197,20 @@ A customer organization brings its own IdP. Its administrator registers it with
 `register_sso_provider` ([`../api/sso.md`](../api/sso.md)). Its required inputs are
 `organization_id`, `name`, `protocol` (`saml` or `oidc`), `issuer` and `scim_token`.
 
-**Do not offer enterprise SSO to a customer yet.** Three gaps stand in the way:
+**Do not offer enterprise SSO to a customer yet.** The gaps below stand in the way. The security
+defect that blocked it, [lake#562](https://github.com/oramasearch/lake/issues/562) (the
+unauthenticated `sign_in_sso` issued a session for an assertion it never verified), is fixed:
+`sign_in_sso` is operator-only.
 
-- [lake#562](https://github.com/oramasearch/lake/issues/562): the unauthenticated `sign_in_sso`
-  capability issues a session for an assertion it never verifies. It is a security defect, and it
-  blocks offering enterprise SSO at all.
-- **SAML has no ACS endpoint** ([lake#836](https://github.com/oramasearch/lake/issues/836)). SAML
-  sign-in exists only as the `sign_in_saml` capability, whose input is JSON
-  `{provider_id, saml_response}`. No route accepts an identity provider's HTTP-POST `SAMLResponse`,
-  no SP entity id or metadata is published, and no page calls `sign_in_saml`. So there is no ACS URL
-  or entity id to give a customer, and an IdP cannot sign anyone in.
-- **Enterprise OIDC uses the generic endpoints** `<issuer>/authorize`, `<issuer>/token` and
-  `<issuer>/jwks`, not OIDC discovery (as in [§3](#3-lake-oauth-without-clerk)). Microsoft Entra,
-  Okta and Google Workspace serve other paths, so **they do not work over OIDC today**
-  ([lake#837](https://github.com/oramasearch/lake/issues/837)).
+- **Enterprise OIDC cannot start on Postgres** ([lake#1022](https://github.com/oramasearch/lake/issues/1022)):
+  `identity_oauth_flows`' foreign key refuses a flow for an `sso_providers` provider. Its endpoints
+  come from OIDC discovery, as in [§3](#3-lake-oauth-without-clerk), so Entra, Okta and Google
+  Workspace are supported once that is fixed.
 
 | Protocol | The customer gives | Lake gives the customer |
 |---|---|---|
-| **SAML 2.0** | IdP metadata and its signing certificate (PEM). Responses must be enveloped and signed with RSA-SHA256 | Nothing yet: there is no ACS URL ([lake#836](https://github.com/oramasearch/lake/issues/836)) |
-| **OIDC** | Issuer, client id and client secret (encrypted at rest) | The redirect URI `https://<LAKE_PUBLIC_HOST>/v1/oauth/sso-<provider id>/callback`, where the provider id is the one `register_sso_provider` returns |
+| **SAML 2.0** | IdP metadata (its `entityID` must equal `issuer`, with an HTTP-Redirect `SingleSignOnService`) and its signing certificate (PEM, RSA ≥ 2048 bits). The response or the assertion must be signed (enveloped, exclusive canonicalization, RSA-SHA256 or RSA-SHA512); assertions must not be encrypted | The entity id and metadata URL `https://<LAKE_PUBLIC_HOST>/v1/saml/<provider id>/metadata`, the ACS URL `https://<LAKE_PUBLIC_HOST>/v1/saml/<provider id>/acs` (HTTP-POST), and the sign-on URL `https://<LAKE_PUBLIC_HOST>/v1/saml/<provider id>/start` for the app tile. Lake accepts only responses to its own requests, so the IdP's app must start sign-in at that URL, not post unsolicited responses ([`../api/sso.md#saml-sign-in`](../api/sso.md#saml-sign-in)) |
+| **OIDC** | Issuer (exactly the `issuer` its `/.well-known/openid-configuration` names), client id and client secret (encrypted at rest) | The redirect URI `https://<LAKE_PUBLIC_HOST>/v1/oauth/sso-<provider id>/callback`, where the provider id is the one `register_sso_provider` returns |
 
 Then:
 
@@ -219,7 +218,7 @@ Then:
    row each. An assertion from an issuer that is not listed is refused and audited as denied.
 2. Turn **just-in-time provisioning** (`jit_provisioning`) on or off. A first sign-in can create the
    user only when it is on and the sign-in carries the user's TAAP identity (`taap_id` on
-   `start_sso_oidc` or `sign_in_saml`). Otherwise the user must already be provisioned through SCIM.
+   `start_sso_oidc` or `start_sso_saml`). Otherwise the user must already be provisioned through SCIM.
 3. **SCIM:** Lake does not create the token. The administrator generates a long random token,
    passes it as `scim_token` to `register_sso_provider`, and gives the same token to the IdP. Lake
    stores only its hash, so it cannot be read back; keep it only in the IdP. The IdP calls
@@ -232,8 +231,11 @@ Then:
 5. **Check:**
    - `test_sso_provider` records a test time;
    - `list_sso_provisioning_logs` shows the SCIM create;
-   - OIDC only, with an issuer that serves Lake's fixed paths: a test user signs in through
-     `start_sso_oidc`.
+   - OIDC: a test user signs in through `start_sso_oidc`; the provider's issuer is the one its
+     discovery document names.
+   - SAML: a test user opens `https://<host>/v1/saml/<provider id>/start`, signs in at the IdP and
+     lands on Lake signed in. The audit log has an `authentication` event on `saml/<provider id>`
+     with outcome `success`; a refused response has outcome `denied` and the reason.
 
 ## Troubleshooting
 
@@ -249,6 +251,8 @@ Then:
 | The Clerk widget does not load, or the console reports an origin error | The host is not among the instance's allowed origins | Check `ClerkReady`. The operator adds `https://<host>` and the apex |
 | The Clerk dashboard shows DNS not verified on a production instance | The `clerk.`, `accounts.` or email records are missing | Check the Lake's `CloudflareDNSRecord`s, and that `dnsSecretRef` is the zone's token |
 | Microsoft sign-in stops working after months | The Entra client secret expired | Create a new secret in Entra and paste it into Clerk |
+| SAML ACS answers **403** *unsolicited responses are not accepted* | The IdP posted a response Lake did not ask for (IdP-initiated sign-in from an app tile) | Set the app's sign-on URL (Okta: *Initiate login URI*; Entra: *Sign on URL*) to `https://<host>/v1/saml/<provider id>/start` ([§4](#4-enterprise-sso-and-scim)) |
+| SAML ACS answers **403** *for another audience* or *another recipient* | The IdP's audience (SP entity id) or ACS URL is not Lake's for this provider | Copy both from `https://<host>/v1/saml/<provider id>/metadata` |
 
 ## Current state (2026-10-18)
 
@@ -267,7 +271,6 @@ Then:
   secrets. Check it in the dashboard (Configure → SSO connections).
 - **Who owns the provider-side OAuth apps:** the Google Cloud project, the GitHub OAuth app, the
   Entra tenant and the Apple team. Record each here once it is created.
-- **SAML's ACS URL and entity id** do not exist yet: [lake#836](https://github.com/oramasearch/lake/issues/836).
 - **Enterprise SSO under Clerk** is not decided: a hosted Lake customer's IdP could connect through
   Lake's own SSO ([§4](#4-enterprise-sso-and-scim)) or through Clerk's enterprise connections.
 - **Microsoft client secret expiry dates**, once the secrets are created.

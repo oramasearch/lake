@@ -1,8 +1,12 @@
 /** Personal settings (`/settings?tab=`): Profile, Identity, Sessions and devices, Passkeys, Tokens
- * and Notifications, each a tab of cards. Identity is which key the account signs with (lake#762). An unknown tab shows Notifications, as the server page did. */
+ * and Notifications, each a tab of cards. Identity is which key the account signs with (lake#762). An unknown tab shows Notifications, as the server page did.
+ * Profile ends with Delete account (lake#810, docs/ui/settings.md#deleting-your-account). */
 import { Link, useSearchParams } from "react-router-dom";
-import { Bell, Fingerprint, KeyRound, MonitorSmartphone, ShieldCheck } from "lucide-react";
-import { useList } from "@/lib/api";
+import { Bell, Fingerprint, KeyRound, MonitorSmartphone, ShieldCheck, Trash2 } from "lucide-react";
+import { signOut } from "@/components/Shell";
+import { type Row, useList } from "@/lib/api";
+import { accountBlockers, accountLines, accountTyped } from "@/lib/deletion";
+import { DeletionButton } from "@/lib/deletionDialog";
 import { useSession } from "@/lib/session";
 import { useTrail } from "@/lib/trail";
 import { Button, Card, Empty, ErrorBlock, KeyValue, Page, Skeleton, Stat, StatRow, Status } from "@/lib/ui";
@@ -58,6 +62,29 @@ function Panel({ selected }: { selected: string }) {
               <ShieldCheck size={14} aria-hidden /> Manage MFA
             </Button>
           </Card>
+          <Card label="Delete account" title="Delete your account">
+            <p className="mt-0 text-[13px] text-ink-2">
+              Deletes your workspaces and the organizations you alone own, signs you out everywhere and erases your email and name. It cannot be undone. Sign in again first if you
+              signed in more than 15 minutes ago.
+            </p>
+            <DeletionButton
+              variant="danger"
+              capability="delete_account"
+              input={{}}
+              workspace={null}
+              title="Delete your account"
+              confirmLabel="Delete account"
+              intro="Deleting your account removes everything below. It cannot be undone."
+              typed={accountTyped}
+              sendConfirm
+              lines={accountLines}
+              blocked={(plan) => (accountBlockers(plan).length > 0 ? <OrganizationsInTheWay plan={plan} /> : null)}
+              done="Your account is deleted"
+              onDone={() => signOut()}
+            >
+              <Trash2 size={14} aria-hidden /> Delete account
+            </DeletionButton>
+          </Card>
         </div>
       );
     case "identity":
@@ -107,6 +134,29 @@ function SessionsSummary() {
       <Button variant="primary" to="/sessions">
         Manage sessions and devices
       </Button>
+    </>
+  );
+}
+
+/** The organizations other people belong to that you alone own: they need another owner first. */
+function OrganizationsInTheWay({ plan }: { plan: Row }) {
+  const organizations = accountBlockers(plan);
+  if (organizations.length === 0) return null;
+  return (
+    <>
+      <strong className="block">Give {organizations.length === 1 ? "this organization" : "these organizations"} another owner first</strong>
+      You are the only owner, and other people belong to {organizations.length === 1 ? "it" : "them"}. Make another member an owner, or delete the organization from its page.
+      <ul className="mt-2 mb-0 space-y-1 pl-4">
+        {organizations.map((organization) => (
+          <li key={organization.id}>
+            <Link to={`/organization?id=${encodeURIComponent(organization.id)}`}>{organization.name}</Link>
+            <span className="text-ink-2">
+              {" "}
+              ({organization.members} {organization.members === 1 ? "other member" : "other members"})
+            </span>
+          </li>
+        ))}
+      </ul>
     </>
   );
 }

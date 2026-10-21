@@ -3,10 +3,15 @@
 One page per tagged release, newest first. A page states what the release includes, what it
 does not, what is knowingly still broken, and how it was verified.
 
+- [v0.4.0](v0.4.0.md) — 2026-10-21. The security release from the multi-tenant audit and the
+  pre-launch review: every Critical the review found in Lake closed, SAML sign-in with Lake's own
+  signature verification, OpenID Connect discovery, `delete_account`, and 23 more security fixes.
+  Three migrations (`0091` to `0093`) the operator vendors before the image rolls.
 - [v0.3.1](v0.3.1.md) — 2026-10-20. A patch for billing through a Stripe account shared with Cloud v1
   and other Lakes: Lake's objects tagged and others' events ignored, invoices and Checkout under
   Lake's own products, a missing kept customer replaced, billing contacts (migration `0090`) with a
-  card on the Billing page, and invoices emailed by Stripe.
+  card on the Billing page, and invoices emailed by Stripe. Image `main-89968edc` = `v0.3.1`
+  (`sha256:d2347fb0…`), on every Lake since 2026-10-20.
 - [v0.3.0](v0.3.0.md) — 2026-10-19. The lake.live order sheet (four offers, Stripe Checkout,
   order forms, Resend email, status page; migration `0089_cloud_orders`), and the 2026-10-18 UX
   review's fixes: datasets named after their file and shown in the file's column order with types,

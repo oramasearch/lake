@@ -34,6 +34,7 @@
 
 #include "lake/control/handles.hpp"
 #include "lake/control/identity_crypto.hpp"
+#include "lake/control/own_identity.hpp"
 #include "network_internal.hpp"
 #include "secrets_crypto.hpp"
 
@@ -578,13 +579,122 @@ std::string base64url_encode(std::string_view value) {
     return base64url(reinterpret_cast<const unsigned char*>(value.data()), value.size());
 }
 
+namespace {
+
+std::vector<std::byte> as_bytes_of(const std::vector<unsigned char>& value) {
+    std::vector<std::byte> output(value.size());
+    std::ranges::transform(value, output.begin(), [](auto byte) { return std::byte{byte}; });
+    return output;
+}
+
+// The identifier a key derives, as liquid writes it: `taap:1:<algorithm>:<fingerprint>`, and the
+// identifier its signatures name.
+std::string derived_taap_id(const liquid::actor& subject, const std::string& fingerprint) {
+    return "taap:1:" + subject.algorithm + ":" + fingerprint;
+}
+
+} // namespace
+
+bool identity_document_is_self_certifying(const liquid::identity_document& document) {
+    // lake#917: an initial document whose identifier is the one its own key derives. liquid's
+    // verify_document checks only that the document is self-signed by the key it carries and that
+    // the identifier ends with the claimed fingerprint, so a document naming someone else's
+    // identifier with the caller's key verifies too. Only this check binds key and identifier.
+    return !document.previous_document_hash && !document.subject.key_fingerprint.empty() &&
+           document.subject.fingerprint == document.subject.key_fingerprint &&
+           document.subject.taap_id ==
+               derived_taap_id(document.subject, document.subject.key_fingerprint);
+}
+
+std::expected<liquid::actor, std::string>
+bound_taap_key(std::string_view identity_document, std::span<const std::string> identity_chain) {
+    // The documents, oldest first: the chain when one is given (it must end with the presented
+    // document), else the presented document alone.
+    std::vector<std::string_view> encoded_documents;
+    if (identity_chain.empty()) {
+        encoded_documents.push_back(identity_document);
+    } else {
+        if (identity_chain.size() > 64) {
+            return std::unexpected("TAAP identity chain has more than 64 documents");
+        }
+        if (identity_chain.back() != identity_document) {
+            return std::unexpected(
+                "TAAP identity chain must end with the presented identity document");
+        }
+        for (const std::string& encoded : identity_chain) {
+            encoded_documents.push_back(encoded);
+        }
+    }
+    std::vector<liquid::identity_document> documents;
+    documents.reserve(encoded_documents.size());
+    for (const std::string_view encoded : encoded_documents) {
+        const std::vector<unsigned char> bytes = from_base64url(encoded);
+        if (bytes.empty()) {
+            return std::unexpected("TAAP identity document is not base64url");
+        }
+        const std::vector<std::byte> canonical_input = as_bytes_of(bytes);
+        auto document = liquid::decode_identity_document(canonical_input);
+        if (!document) {
+            return std::unexpected("TAAP identity document is invalid canonical CBOR");
+        }
+        const auto canonical = liquid::encode_identity_document(*document);
+        if (!canonical || *canonical != canonical_input) {
+            return std::unexpected("TAAP identity document does not verify canonically");
+        }
+        documents.push_back(std::move(*document));
+    }
+    const liquid::identity_document& root = documents.front();
+    const auto verified_root = liquid::verify_document(root);
+    if (!verified_root || !*verified_root) {
+        return std::unexpected("TAAP identity document does not verify canonically");
+    }
+    if (!identity_document_is_self_certifying(root)) {
+        return std::unexpected(
+            documents.size() == 1 && root.previous_document_hash
+                ? "TAAP identity document is a rotated successor: send the identity chain from "
+                  "the identity's first document (identity_chain)"
+                : "TAAP identity document's key is not the key its identifier was derived from");
+    }
+    if (documents.size() == 1) {
+        return root.subject;
+    }
+    const auto chain = liquid::verify_chain(documents);
+    if (!chain) {
+        return std::unexpected("TAAP identity chain does not verify: " + chain.error().message);
+    }
+    // Every rotation must be signed by the key it replaces. liquid also accepts a successor that
+    // declares the previous key compromised and is signed by the new key alone; a new key bound
+    // that way could have been made by anyone, so it is refused here. A person who lost their key
+    // returns through account recovery (docs/api/recovery.md).
+    for (std::size_t index = 1; index < documents.size(); ++index) {
+        const liquid::actor& previous = documents[index - 1].subject;
+        const std::string previous_key = derived_taap_id(previous, previous.key_fingerprint);
+        if (std::ranges::none_of(documents[index].signatures, [&](const liquid::signature& value) {
+                return value.signing_key_identifier == previous_key;
+            })) {
+            return std::unexpected("TAAP identity rotation is not signed by the key it replaces");
+        }
+    }
+    return chain->subject;
+}
+
+std::string claimed_taap_id(std::string_view identity_document) {
+    const std::vector<unsigned char> bytes = from_base64url(identity_document);
+    if (bytes.empty()) {
+        return {};
+    }
+    const auto document = liquid::decode_identity_document(as_bytes_of(bytes));
+    return document ? document->subject.taap_id : std::string{};
+}
+
 std::expected<VerifiedTaapSignIn, std::string>
 verify_taap_sign_in(std::string_view identity_document,
                     std::string_view pool_id,
                     std::string_view nonce,
                     std::int64_t issued_at,
                     const nlohmann::json& signature,
-                    std::int64_t now_unix) {
+                    std::int64_t now_unix,
+                    std::span<const std::string> identity_chain) {
     if (pool_id.empty() || nonce.size() < 16 || !signature.is_object()) {
         return std::unexpected("TAAP sign-in fields are incomplete");
     }
@@ -596,47 +706,37 @@ verify_taap_sign_in(std::string_view identity_document,
     if (issued_at < now_unix - 300 || issued_at > now_unix + 60) {
         return std::unexpected("TAAP sign-in assertion is outside its validity window");
     }
-    const std::vector<unsigned char> document_bytes = from_base64url(identity_document);
     const std::vector<unsigned char> signature_bytes = from_base64url(signature.value("bytes", ""));
-    if (document_bytes.empty() || signature_bytes.empty()) {
+    if (signature_bytes.empty()) {
         return std::unexpected("TAAP sign-in document or signature is not base64url");
     }
-    std::vector<std::byte> encoded_document(document_bytes.size());
-    std::vector<std::byte> encoded_signature(signature_bytes.size());
-    std::transform(document_bytes.begin(),
-                   document_bytes.end(),
-                   encoded_document.begin(),
-                   [](auto value) { return std::byte{value}; });
-    std::transform(signature_bytes.begin(),
-                   signature_bytes.end(),
-                   encoded_signature.begin(),
-                   [](auto value) { return std::byte{value}; });
-    const auto document = liquid::decode_identity_document(encoded_document);
-    if (!document) {
-        return std::unexpected("TAAP identity document is invalid canonical CBOR");
-    }
-    const auto verified_document = liquid::verify_document(*document);
-    const auto canonical = liquid::encode_identity_document(*document);
-    if (!verified_document || !*verified_document || !canonical || *canonical != encoded_document) {
-        return std::unexpected("TAAP identity document does not verify canonically");
+    // lake#917: the key the assertion must be signed with is the one bound to the identifier: an
+    // initial document's own key, or the current key of a chain from that document whose every
+    // rotation the replaced key signed.
+    const auto key = bound_taap_key(identity_document, identity_chain);
+    if (!key) {
+        return std::unexpected(key.error());
     }
     liquid::signature signed_value{signature.value("algorithm", ""),
                                    signature.value("signing_key_identifier", ""),
                                    signature.value("signing_key_label", ""),
                                    signature.value("signature_purpose", ""),
                                    signature.value("signed_at", ""),
-                                   std::move(encoded_signature)};
+                                   as_bytes_of(signature_bytes)};
+    // The assertion names the bound key, so liquid verifies it with that key and no other.
+    if (signed_value.signing_key_identifier != derived_taap_id(*key, key->key_fingerprint)) {
+        return std::unexpected("TAAP sign-in signature is not made with the identity's key");
+    }
     const std::string body =
         std::string(pool_id) + "\n" + std::string(nonce) + "\n" + std::to_string(issued_at);
     const std::span<const std::byte> body_bytes(reinterpret_cast<const std::byte*>(body.data()),
                                                 body.size());
-    const auto verified =
-        liquid::verify(document->subject, "lake_sign_in", body_bytes, signed_value);
+    const auto verified = liquid::verify(*key, "lake_sign_in", body_bytes, signed_value);
     if (!verified || !*verified) {
         return std::unexpected("TAAP sign-in signature does not verify");
     }
     return VerifiedTaapSignIn{
-        document->subject.taap_id,
+        key->taap_id,
         sha256_hex(std::string(identity_document) + "\n" + body + "\n" + signature.dump())};
 }
 
@@ -1769,6 +1869,9 @@ public:
     }
 
     Result<User> create_user(const NewUser& in) override {
+        if (auto checked = check_principal_id(in.taap_id, "taap_id"); !checked) {
+            return std::unexpected(checked.error());
+        }
         return with_tx<User>([&](pqxx::work& tx) -> Result<User> {
             const pqxx::result rows = tx.exec_params(
                 std::string("INSERT INTO users (taap_id, email, display_name) VALUES "
@@ -1784,7 +1887,8 @@ public:
         return with_tx<std::vector<User>>([&](pqxx::work& tx) -> Result<std::vector<User>> {
             const pqxx::result rows =
                 tx.exec_params(std::string("SELECT ") + user_columns +
-                                   " FROM users ORDER BY created_at DESC LIMIT $1",
+                                   " FROM users WHERE deleted_at IS NULL ORDER BY created_at DESC "
+                                   "LIMIT $1",
                                limit);
             std::vector<User> out;
             for (const auto& r : rows)
@@ -1795,7 +1899,9 @@ public:
     Result<User> get_user(const std::string& id) override {
         return with_tx<User>([&](pqxx::work& tx) -> Result<User> {
             const pqxx::result rows = tx.exec_params(
-                std::string("SELECT ") + user_columns + " FROM users WHERE id = $1::uuid", id);
+                std::string("SELECT ") + user_columns +
+                    " FROM users WHERE id = $1::uuid AND deleted_at IS NULL",
+                id);
             if (rows.empty())
                 return std::unexpected(StoreError{"not_found", "no user " + id});
             return user_of(rows[0]);
@@ -1812,7 +1918,7 @@ public:
                 const pqxx::result rows = tx.exec_params(
                     "WITH wanted AS (SELECT jsonb_array_elements_text($1::jsonb) AS taap_id) "
                     "SELECT users.taap_id, COALESCE(NULLIF(users.display_name, ''), users.email) "
-                    "FROM users JOIN wanted USING (taap_id) "
+                    "FROM users JOIN wanted USING (taap_id) WHERE users.deleted_at IS NULL "
                     "UNION ALL SELECT organizations.taap_id, organizations.display_name "
                     "FROM organizations JOIN wanted USING (taap_id) "
                     "WHERE organizations.display_name <> ''",
@@ -1828,6 +1934,9 @@ public:
     }
 
     Result<Organization> create_organization(const NewOrganization& in) override {
+        if (auto checked = check_principal_id(in.taap_id, "taap_id"); !checked) {
+            return std::unexpected(checked.error());
+        }
         return with_tx<Organization>([&](pqxx::work& tx) -> Result<Organization> {
             std::optional<std::string> parent_id;
             if (!in.customer_id.empty()) {
@@ -2941,6 +3050,53 @@ public:
         });
     }
 
+    Result<PolicyObject> set_policy_object_parent(const std::string& id,
+                                                  const std::string& parent_id) override {
+        return with_tx<PolicyObject>([&](pqxx::work& tx) -> Result<PolicyObject> {
+            // One parent change at a time, so two concurrent moves cannot close a cycle that
+            // policy_paths would then walk forever.
+            tx.exec("SELECT pg_advisory_xact_lock(hashtext('lake_policy_object_parents'))");
+            const pqxx::result objects = tx.exec_params(
+                "SELECT object_type FROM objects WHERE id = $1::uuid FOR UPDATE", id);
+            if (objects.empty()) {
+                return std::unexpected(StoreError{"not_found", "no policy object " + id});
+            }
+            if (objects[0][0].as<std::string>() != "path") {
+                return std::unexpected(
+                    StoreError{"invalid_input", "only a path policy object changes its parent"});
+            }
+            const pqxx::result parents =
+                tx.exec_params("SELECT object_type FROM objects WHERE id = $1::uuid", parent_id);
+            if (parents.empty()) {
+                return std::unexpected(
+                    StoreError{"invalid_input", "parent_id does not reference a policy object"});
+            }
+            if (!object_parent_allowed("path", parents[0][0].as<std::string>())) {
+                return std::unexpected(
+                    StoreError{"invalid_input", "object type is not valid under this parent"});
+            }
+            const pqxx::result cycle =
+                tx.exec_params("WITH RECURSIVE up(id, parent_id) AS ("
+                               "SELECT id, parent_id FROM objects WHERE id = $2::uuid "
+                               "UNION SELECT objects.id, objects.parent_id FROM objects "
+                               "JOIN up ON objects.id = up.parent_id) "
+                               "SELECT 1 FROM up WHERE id = $1::uuid",
+                               id,
+                               parent_id);
+            if (!cycle.empty()) {
+                return std::unexpected(
+                    StoreError{"invalid_input", "a policy object cannot be put under itself"});
+            }
+            const pqxx::result rows = tx.exec_params(
+                std::string("UPDATE objects SET parent_id = $2::uuid WHERE id = $1::uuid "
+                            "RETURNING ") +
+                    object_columns,
+                id,
+                parent_id);
+            return object_of(rows[0]);
+        });
+    }
+
     Result<PolicyObject> find_policy_object(const std::string& object_type,
                                             const std::string& external_id) override {
         return with_tx<PolicyObject>([&](pqxx::work& tx) -> Result<PolicyObject> {
@@ -3339,6 +3495,7 @@ public:
                         "(SELECT sequence FROM audit_events WHERE id::text = $8)) "
                         "AND NOT (outcome = 'success' AND action IN "
                         "(SELECT jsonb_array_elements_text($9::jsonb))) "
+                        "AND ($10 = '' OR customer_id::text = $10) "
                         "ORDER BY sequence " +
                         (filter.newest_first ? "DESC" : "ASC") + " LIMIT $6",
                     filter.principal,
@@ -3349,7 +3506,8 @@ public:
                     filter.limit,
                     filter.request_id,
                     filter.after_id,
-                    nlohmann::json(filter.omit_successful_actions).dump());
+                    nlohmann::json(filter.omit_successful_actions).dump(),
+                    filter.customer_id);
                 std::vector<audit::Event> events;
                 for (const pqxx::row& row : rows) {
                     events.push_back(audit_event_of(row));
@@ -5473,6 +5631,42 @@ public:
             }
             return rows.size();
         });
+    }
+
+    Result<AgentWorkloadsWithdrawn> withdraw_agent_workloads(const std::string& customer_id,
+                                                             const std::string& workspace_id,
+                                                             const std::string& agent_id,
+                                                             const std::string& reason) override {
+        return with_tx<AgentWorkloadsWithdrawn>(
+            [&](pqxx::work& tx) -> Result<AgentWorkloadsWithdrawn> {
+                AgentWorkloadsWithdrawn withdrawn;
+                const pqxx::result launches = tx.exec_params(
+                    "UPDATE agent_launches SET desired = 'absent', generation = generation + 1, "
+                    "stop_reason = $4, updated_at = now() WHERE customer_id = $1::uuid AND "
+                    "agent_id = $3 AND desired = 'present' AND (workspace_id IS NULL OR "
+                    "workspace_id = NULLIF($2, '')::uuid) RETURNING id::text",
+                    customer_id,
+                    workspace_id,
+                    agent_id,
+                    reason);
+                const pqxx::result schedules = tx.exec_params(
+                    "UPDATE agent_cron_schedules SET desired = 'absent', generation = "
+                    "generation + 1, updated_at = now() WHERE customer_id = $1::uuid AND "
+                    "agent_id = $3 AND desired = 'present' AND (workspace_id IS NULL OR "
+                    "workspace_id = NULLIF($2, '')::uuid) RETURNING id::text",
+                    customer_id,
+                    workspace_id,
+                    agent_id);
+                for (const pqxx::result* rows : {&launches, &schedules}) {
+                    for (const pqxx::row& row : *rows) {
+                        tx.exec_params("SELECT pg_notify('lake_services', $1)",
+                                       row[0].as<std::string>());
+                    }
+                }
+                withdrawn.launches = launches.size();
+                withdrawn.schedules = schedules.size();
+                return withdrawn;
+            });
     }
 
     // Methodology runs (lake#655, migration 0078).
@@ -7672,6 +7866,16 @@ public:
         if (managed) {
             identity->identifier = in.custodial_taap_id;
         }
+        // A document is public: it becomes this account's identity only with a fresh signature by
+        // its key (lake#931).
+        Result<std::string> proof_id = std::string();
+        if (!managed) {
+            proof_id = verify_identity_proof(
+                in.pool_id, in.identity_document, identity->identifier, in.identity_proof);
+            if (!proof_id) {
+                return std::unexpected(proof_id.error());
+            }
+        }
         const std::string password_hash = identity_crypto::hash_secret(in.password);
         if (password_hash.empty()) {
             return std::unexpected(
@@ -7709,6 +7913,22 @@ public:
                                user_id,
                                identity->document,
                                identity->hash);
+                // After the user's row, so a retried sign-up still answers conflict; a proof spent
+                // by an OAuth start is refused here.
+                if (identity_proof_used(tx, *proof_id)) {
+                    return std::unexpected(
+                        StoreError{"unauthorized", "that identity proof was already used"});
+                }
+                try {
+                    tx.exec_params("INSERT INTO identity_taap_assertions "
+                                   "(assertion_id, user_id, pool_id) VALUES ($1, $2::uuid, $3)",
+                                   *proof_id,
+                                   user_id,
+                                   in.pool_id);
+                } catch (const pqxx::unique_violation&) {
+                    return std::unexpected(
+                        StoreError{"unauthorized", "that identity proof was already used"});
+                }
             }
             tx.exec_params("INSERT INTO credentials (user_id, pool_id, kind, "
                            "subject, secret_hash) "
@@ -7865,6 +8085,41 @@ public:
                     hash);
             }
             return enrollment;
+        });
+    }
+    Result<void> verify_mfa_code(const std::string& user_id,
+                                 const std::string& pool_id,
+                                 const std::string& code) override {
+        return with_tx<void>([&](pqxx::work& tx) -> Result<void> {
+            const pqxx::result rows =
+                tx.exec_params("SELECT public_data->>'encrypted_seed' FROM credentials "
+                               "WHERE user_id = $1::uuid AND pool_id = $2 AND kind = 'totp' "
+                               "AND revoked_at IS NULL",
+                               user_id,
+                               pool_id);
+            if (rows.empty()) {
+                return std::unexpected(StoreError{"not_found", "MFA is not enrolled"});
+            }
+            const Result<std::string> seed =
+                decrypt_secret(tx, "identity.totp", rows[0][0].as<std::string>());
+            if (!seed) {
+                return std::unexpected(seed.error());
+            }
+            if (identity_crypto::verify_totp(*seed, code)) {
+                return {};
+            }
+            const pqxx::result recovery_rows =
+                tx.exec_params("SELECT secret_hash FROM credentials WHERE user_id = $1::uuid "
+                               "AND pool_id = $2 AND kind = 'recovery' AND revoked_at IS NULL",
+                               user_id,
+                               pool_id);
+            if (std::any_of(recovery_rows.begin(), recovery_rows.end(), [&](const pqxx::row& row) {
+                    return identity_crypto::verify_secret(row[0].as<std::string>(), code);
+                })) {
+                return {};
+            }
+            return std::unexpected(
+                StoreError{"unauthorized", "a fresh MFA verification is required"});
         });
     }
     Result<void> disable_mfa(const std::string& user_id,
@@ -8503,7 +8758,41 @@ public:
             return std::unexpected(
                 StoreError{"invalid_input", "OAuth flow material is incomplete"});
         }
+        // A first sign-in binds the flow's document to the new account (sign_in_oauth), so the flow
+        // takes one only with a fresh signature by its key (lake#931). Enterprise flows
+        // (`sso-<id>`) carry a TAAP id to sign_in_sso instead of a document (lake#872).
+        std::string proof_id;
+        if (!in.identity_document.empty() && !in.provider.starts_with("sso-")) {
+            auto proven =
+                verify_identity_proof(in.pool_id, in.identity_document, "", in.identity_proof);
+            if (!proven) {
+                return std::unexpected(proven.error());
+            }
+            proof_id = std::move(*proven);
+        }
         return with_tx<void>([&](pqxx::work& tx) -> Result<void> {
+            if (!proof_id.empty()) {
+                if (identity_proof_used(tx, proof_id)) {
+                    return std::unexpected(
+                        StoreError{"unauthorized", "that identity proof was already used"});
+                }
+                // No user exists yet to record the proof against in identity_taap_assertions, so it
+                // is spent as a flow row that can never be consumed: already used, its state hash
+                // derived from the proof (a real flow's is the hash of a random state).
+                try {
+                    tx.exec_params(
+                        "INSERT INTO identity_oauth_flows (pool_id, provider, state_hash, "
+                        "encrypted_code_verifier, nonce, device_name, expires_at, used_at) VALUES "
+                        "($1, $2, $3, ''::bytea, '', '', to_timestamp($4), now())",
+                        in.pool_id,
+                        in.provider,
+                        identity_crypto::sha256_hex(proof_id),
+                        in.identity_proof.expires_at);
+                } catch (const pqxx::unique_violation&) {
+                    return std::unexpected(
+                        StoreError{"unauthorized", "that identity proof was already used"});
+                }
+            }
             const Result<std::string> encrypted =
                 encrypt_secret(tx, "identity.oauth.flow", in.code_verifier);
             if (!encrypted) {
@@ -8723,7 +9012,13 @@ public:
                              digest};
         });
     }
+    // Every credential's principal passes accepted_principal (lake#870): no credential acts as
+    // the operator, and a person's credential names a TAAP identity.
     Result<Principal> context_for(const std::string& secret) override {
+        return accepted_principal(resolve_principal(secret));
+    }
+
+    Result<Principal> resolve_principal(const std::string& secret) {
         if (auto principal = build_principal(secret)) {
             return principal;
         }
@@ -8923,6 +9218,68 @@ public:
         });
     }
 
+    Result<void> begin_saml(const SamlRequest& in) override {
+        if (in.provider_id.empty() || in.request_id.empty()) {
+            return std::unexpected(
+                StoreError{"invalid_input", "SAML request material is incomplete"});
+        }
+        return with_tx<void>([&](pqxx::work& tx) -> Result<void> {
+            const pqxx::result provider = tx.exec_params(
+                "SELECT 1 FROM sso_providers WHERE id = $1::uuid AND protocol = 'saml' AND enabled",
+                in.provider_id);
+            if (provider.empty()) {
+                return std::unexpected(StoreError{"not_found", "SAML provider is unavailable"});
+            }
+            tx.exec("DELETE FROM sso_saml_requests WHERE expires_at < now() - interval '1 day'");
+            tx.exec_params("INSERT INTO sso_saml_requests (provider_id, request_id_hash, "
+                           "device_name, taap_id, return_to, expires_at) VALUES ($1::uuid, $2, $3, "
+                           "$4, $5, now() + interval '10 minutes')",
+                           in.provider_id,
+                           identity_crypto::sha256_hex(in.request_id),
+                           in.device_name,
+                           in.taap_id,
+                           in.return_to);
+            return {};
+        });
+    }
+
+    Result<SamlRequest> consume_saml(const SamlAnswer& in) override {
+        if (in.provider_id.empty() || in.request_id.empty() || in.assertion_id.empty()) {
+            return std::unexpected(
+                StoreError{"unauthorized", "SAML response answers no outstanding request"});
+        }
+        return with_tx<SamlRequest>([&](pqxx::work& tx) -> Result<SamlRequest> {
+            tx.exec("DELETE FROM sso_saml_assertions WHERE expires_at < now()");
+            const pqxx::result recorded = tx.exec_params(
+                "INSERT INTO sso_saml_assertions (provider_id, assertion_id_hash, expires_at) "
+                "VALUES ($1::uuid, $2, greatest(to_timestamp($3), now())) ON CONFLICT DO NOTHING "
+                "RETURNING 1",
+                in.provider_id,
+                identity_crypto::sha256_hex(in.assertion_id),
+                static_cast<long long>(in.assertion_expires_at));
+            if (recorded.empty()) {
+                return std::unexpected(
+                    StoreError{"unauthorized", "SAML assertion was already used"});
+            }
+            const pqxx::result rows = tx.exec_params(
+                "UPDATE sso_saml_requests SET used_at = now() WHERE provider_id = $1::uuid AND "
+                "request_id_hash = $2 AND used_at IS NULL AND expires_at > now() RETURNING "
+                "device_name, taap_id, return_to",
+                in.provider_id,
+                identity_crypto::sha256_hex(in.request_id));
+            if (rows.empty()) {
+                // An error is not committed: the assertion's row goes with the transaction.
+                return std::unexpected(
+                    StoreError{"unauthorized", "SAML response answers no outstanding request"});
+            }
+            return SamlRequest{in.provider_id,
+                               in.request_id,
+                               rows[0][0].as<std::string>(),
+                               rows[0][1].as<std::string>(),
+                               rows[0][2].as<std::string>()};
+        });
+    }
+
     Result<SsoProvider> authenticate_scim(const std::string& bearer_token) override {
         return with_tx<SsoProvider>([&](pqxx::work& tx) -> Result<SsoProvider> {
             const pqxx::result rows = tx.exec(std::string("SELECT ") + sso_provider_columns +
@@ -9006,6 +9363,9 @@ public:
     }
 
     Result<IssuedSession> sign_in_sso(const SsoIdentity& input) override {
+        if (auto checked = check_principal_id(input.taap_id, "taap_id"); !checked) {
+            return std::unexpected(checked.error());
+        }
         if (input.provider_id.empty() || input.issuer.empty() || input.subject.empty() ||
             !input.claims.is_object()) {
             return std::unexpected(StoreError{"invalid_input", "SSO assertion is incomplete"});
@@ -9124,6 +9484,9 @@ public:
     }
 
     Result<ScimUser> upsert_scim_user(const NewScimUser& input) override {
+        if (auto checked = check_principal_id(input.taap_id, "taap_id"); !checked) {
+            return std::unexpected(checked.error());
+        }
         if (input.provider_id.empty() || input.external_id.empty() || input.taap_id.empty()) {
             return std::unexpected(StoreError{
                 "invalid_input", "provider, external id, and TAAP identity are required"});
@@ -9784,11 +10147,55 @@ public:
         });
     }
 
+    // A ceremony and its participants, read in `tx`.
+    static Result<PkiRecoveryCeremonyRecord> pki_recovery_ceremony_in(
+        pqxx::work& tx, const std::string& customer_id, const std::string& ceremony_id) {
+        const pqxx::result rows = tx.exec_params(
+            "SELECT id::text, customer_id::text, authority_id::text, threshold, "
+            "share_count, recovered_at::text, expires_at::text, created_at::text "
+            "FROM pki_recovery_ceremonies WHERE customer_id = $1::uuid AND id = $2::uuid",
+            customer_id,
+            ceremony_id);
+        if (rows.empty()) {
+            return std::unexpected(StoreError{"not_found", "recovery ceremony does not exist"});
+        }
+        PkiRecoveryCeremonyRecord record{
+            rows[0][0].as<std::string>(),
+            rows[0][1].as<std::string>(),
+            rows[0][2].as<std::string>(),
+            rows[0][3].as<int>(),
+            rows[0][4].as<int>(),
+            rows[0][5].is_null() ? std::nullopt
+                                 : std::optional<std::string>(rows[0][5].as<std::string>()),
+            rows[0][6].as<std::string>(),
+            rows[0][7].as<std::string>(),
+            {}};
+        const pqxx::result participants =
+            tx.exec_params("SELECT p.share_index, p.principal_id, p.share_issued_at::text, "
+                           "s.share_index IS NOT NULL FROM pki_recovery_participants p "
+                           "LEFT JOIN pki_recovery_shares s "
+                           "ON s.ceremony_id = p.ceremony_id AND s.share_index = p.share_index "
+                           "WHERE p.ceremony_id = $1::uuid ORDER BY p.share_index",
+                           ceremony_id);
+        for (const auto& row : participants) {
+            record.participants.push_back(
+                {row[0].as<int>(),
+                 row[1].as<std::string>(),
+                 row[2].is_null() ? std::nullopt
+                                  : std::optional<std::string>(row[2].as<std::string>()),
+                 row[3].as<bool>()});
+        }
+        return record;
+    }
+
     Result<PkiRecoveryCeremonyRecord>
     create_pki_recovery_ceremony(const NewPkiRecoveryCeremonyRecord& input) override {
+        const std::set<std::string> distinct(input.participants.begin(), input.participants.end());
         if (input.id.empty() || input.customer_id.empty() || input.threshold < 2 ||
             input.share_count < input.threshold || input.share_count > 255 ||
-            input.expires_at.empty()) {
+            input.expires_at.empty() ||
+            static_cast<int>(input.participants.size()) != input.share_count ||
+            distinct.size() != input.participants.size() || distinct.contains("")) {
             return std::unexpected(StoreError{"invalid_input", "recovery ceremony is invalid"});
         }
         return with_tx<PkiRecoveryCeremonyRecord>(
@@ -9797,9 +10204,7 @@ public:
                     "INSERT INTO pki_recovery_ceremonies "
                     "(id, customer_id, authority_id, threshold, share_count, expires_at) "
                     "SELECT $1::uuid, $2::uuid, id, $3, $4, $5::timestamptz "
-                    "FROM pki_authorities WHERE customer_id = $2::uuid "
-                    "RETURNING id::text, customer_id::text, authority_id::text, threshold, "
-                    "share_count, recovered_at::text, expires_at::text, created_at::text",
+                    "FROM pki_authorities WHERE customer_id = $2::uuid RETURNING id",
                     input.id,
                     input.customer_id,
                     input.threshold,
@@ -9809,14 +10214,15 @@ public:
                     return std::unexpected(
                         StoreError{"not_found", "customer authority does not exist"});
                 }
-                return PkiRecoveryCeremonyRecord{rows[0][0].as<std::string>(),
-                                                 rows[0][1].as<std::string>(),
-                                                 rows[0][2].as<std::string>(),
-                                                 rows[0][3].as<int>(),
-                                                 rows[0][4].as<int>(),
-                                                 std::nullopt,
-                                                 rows[0][6].as<std::string>(),
-                                                 rows[0][7].as<std::string>()};
+                for (std::size_t index = 0; index < input.participants.size(); ++index) {
+                    tx.exec_params("INSERT INTO pki_recovery_participants "
+                                   "(ceremony_id, share_index, principal_id) "
+                                   "VALUES ($1::uuid, $2, $3)",
+                                   input.id,
+                                   static_cast<int>(index) + 1,
+                                   input.participants[index]);
+                }
+                return pki_recovery_ceremony_in(tx, input.customer_id, input.id);
             });
     }
 
@@ -9825,77 +10231,101 @@ public:
                               const std::string& ceremony_id) override {
         return with_tx<PkiRecoveryCeremonyRecord>(
             [&](pqxx::work& tx) -> Result<PkiRecoveryCeremonyRecord> {
-                const pqxx::result rows = tx.exec_params(
-                    "SELECT id::text, customer_id::text, authority_id::text, threshold, "
-                    "share_count, recovered_at::text, expires_at::text, created_at::text "
-                    "FROM pki_recovery_ceremonies WHERE customer_id = $1::uuid AND id = $2::uuid",
-                    customer_id,
-                    ceremony_id);
-                if (rows.empty()) {
-                    return std::unexpected(
-                        StoreError{"not_found", "recovery ceremony does not exist"});
-                }
-                const std::optional<std::string> recovered =
-                    rows[0][5].is_null() ? std::nullopt
-                                         : std::optional<std::string>(rows[0][5].as<std::string>());
-                return PkiRecoveryCeremonyRecord{rows[0][0].as<std::string>(),
-                                                 rows[0][1].as<std::string>(),
-                                                 rows[0][2].as<std::string>(),
-                                                 rows[0][3].as<int>(),
-                                                 rows[0][4].as<int>(),
-                                                 recovered,
-                                                 rows[0][6].as<std::string>(),
-                                                 rows[0][7].as<std::string>()};
+                return pki_recovery_ceremony_in(tx, customer_id, ceremony_id);
             });
     }
 
-    Result<PkiRecoveryCeremonyRecord>
-    complete_pki_recovery_ceremony(const std::string& customer_id,
-                                   const std::string& ceremony_id,
-                                   const std::vector<PkiRecoveryShareEvidence>& evidence) override {
-        return with_tx<PkiRecoveryCeremonyRecord>([&](pqxx::work& tx)
-                                                      -> Result<PkiRecoveryCeremonyRecord> {
-            const pqxx::result active = tx.exec_params(
-                "SELECT threshold FROM pki_recovery_ceremonies "
-                "WHERE customer_id = $1::uuid AND id = $2::uuid AND recovered_at IS NULL "
-                "AND expires_at > now() FOR UPDATE",
+    Result<int> claim_pki_recovery_share(const std::string& customer_id,
+                                         const std::string& ceremony_id,
+                                         const std::string& principal) override {
+        return with_tx<int>([&](pqxx::work& tx) -> Result<int> {
+            // One statement: a share is issued at most once, even to concurrent claims.
+            const pqxx::result issued = tx.exec_params(
+                "UPDATE pki_recovery_participants p SET share_issued_at = now() "
+                "FROM pki_recovery_ceremonies c "
+                "WHERE c.id = p.ceremony_id AND c.customer_id = $1::uuid AND c.id = $2::uuid "
+                "AND p.principal_id = $3 AND p.share_issued_at IS NULL "
+                "AND c.recovered_at IS NULL AND c.expires_at > now() RETURNING p.share_index",
+                customer_id,
+                ceremony_id,
+                principal);
+            if (!issued.empty()) {
+                return issued[0][0].as<int>();
+            }
+            const pqxx::result ceremony = tx.exec_params(
+                "SELECT recovered_at IS NULL AND expires_at > now() FROM pki_recovery_ceremonies "
+                "WHERE customer_id = $1::uuid AND id = $2::uuid",
                 customer_id,
                 ceremony_id);
-            if (active.empty()) {
+            if (ceremony.empty()) {
+                return std::unexpected(StoreError{"not_found", "recovery ceremony does not exist"});
+            }
+            if (!ceremony[0][0].as<bool>()) {
                 return std::unexpected(StoreError{"conflict", "recovery ceremony is not active"});
             }
-            if (static_cast<int>(evidence.size()) < active[0][0].as<int>()) {
+            const pqxx::result participant =
+                tx.exec_params("SELECT 1 FROM pki_recovery_participants "
+                               "WHERE ceremony_id = $1::uuid AND principal_id = $2",
+                               ceremony_id,
+                               principal);
+            if (participant.empty()) {
                 return std::unexpected(
-                    StoreError{"invalid_input", "recovery quorum is not present"});
+                    StoreError{"forbidden", "the caller is not a participant of this ceremony"});
             }
-            std::set<int> indices;
-            for (const PkiRecoveryShareEvidence& share : evidence) {
-                if (share.index < 1 || share.digest.empty() ||
-                    !indices.insert(share.index).second) {
-                    return std::unexpected(
-                        StoreError{"invalid_input", "recovery evidence is invalid"});
-                }
+            return std::unexpected(
+                StoreError{"conflict", "this participant's recovery share was already issued"});
+        });
+    }
+
+    Result<PkiRecoveryCeremonyRecord>
+    submit_pki_recovery_share(const std::string& customer_id,
+                              const std::string& ceremony_id,
+                              const std::string& principal,
+                              const PkiRecoveryShareEvidence& evidence) override {
+        return with_tx<PkiRecoveryCeremonyRecord>([&](pqxx::work& tx)
+                                                      -> Result<PkiRecoveryCeremonyRecord> {
+            // The ceremony row is locked, so submissions to one ceremony are serialized.
+            const pqxx::result active =
+                tx.exec_params("SELECT threshold, recovered_at IS NULL AND expires_at > now() "
+                               "FROM pki_recovery_ceremonies "
+                               "WHERE customer_id = $1::uuid AND id = $2::uuid FOR UPDATE",
+                               customer_id,
+                               ceremony_id);
+            if (active.empty()) {
+                return std::unexpected(StoreError{"not_found", "recovery ceremony does not exist"});
+            }
+            if (!active[0][1].as<bool>()) {
+                return std::unexpected(StoreError{"conflict", "recovery ceremony is not active"});
+            }
+            const pqxx::result participant = tx.exec_params(
+                "SELECT share_index, share_issued_at IS NOT NULL FROM pki_recovery_participants "
+                "WHERE ceremony_id = $1::uuid AND principal_id = $2",
+                ceremony_id,
+                principal);
+            if (participant.empty() || participant[0][0].as<int>() != evidence.index) {
+                return std::unexpected(
+                    StoreError{"forbidden", "the caller is not this share's participant"});
+            }
+            if (!participant[0][1].as<bool>() || evidence.digest.empty()) {
+                return std::unexpected(StoreError{
+                    "conflict", "this participant's recovery share cannot be presented"});
+            }
+            const pqxx::result recorded =
                 tx.exec_params("INSERT INTO pki_recovery_shares "
                                "(ceremony_id, share_index, share_digest) "
-                               "VALUES ($1::uuid, $2, $3)",
+                               "VALUES ($1::uuid, $2, $3) ON CONFLICT DO NOTHING RETURNING 1",
                                ceremony_id,
-                               share.index,
-                               share.digest);
+                               evidence.index,
+                               evidence.digest);
+            if (recorded.empty()) {
+                return std::unexpected(StoreError{
+                    "conflict", "this participant's recovery share cannot be presented"});
             }
-            const pqxx::result rows =
-                tx.exec_params("UPDATE pki_recovery_ceremonies SET recovered_at = now() "
-                               "WHERE id = $1::uuid RETURNING id::text, customer_id::text, "
-                               "authority_id::text, threshold, share_count, recovered_at::text, "
-                               "expires_at::text, created_at::text",
-                               ceremony_id);
-            return PkiRecoveryCeremonyRecord{rows[0][0].as<std::string>(),
-                                             rows[0][1].as<std::string>(),
-                                             rows[0][2].as<std::string>(),
-                                             rows[0][3].as<int>(),
-                                             rows[0][4].as<int>(),
-                                             rows[0][5].as<std::string>(),
-                                             rows[0][6].as<std::string>(),
-                                             rows[0][7].as<std::string>()};
+            tx.exec_params("UPDATE pki_recovery_ceremonies SET recovered_at = now() "
+                           "WHERE id = $1::uuid AND (SELECT count(*) FROM pki_recovery_shares "
+                           "WHERE ceremony_id = $1::uuid) >= threshold",
+                           ceremony_id);
+            return pki_recovery_ceremony_in(tx, customer_id, ceremony_id);
         });
     }
 
@@ -9948,9 +10378,18 @@ public:
                                "VALUES ('environment', $1, $2::uuid) "
                                "ON CONFLICT (object_type, external_id) DO UPDATE SET external_id = "
                                "EXCLUDED.external_id "
-                               "RETURNING id::text",
+                               "RETURNING id::text, coalesce(parent_id::text, '')",
                                environment_external,
                                scope[0][0].as<std::string>());
+            // The owner's environment sits under the owner's own object. One that already holds
+            // its id elsewhere was made to claim the owner's future mounts (lake#913): it is never
+            // adopted, and the mount is refused until the operator removes it.
+            if (environment[0][1].as<std::string>() != scope[0][0].as<std::string>()) {
+                return std::unexpected(
+                    StoreError{"conflict",
+                               "the secret mounts' policy object of this owner belongs to another "
+                               "account; ask the operator to remove it"});
+            }
             tx.exec_params("INSERT INTO objects (object_type, external_id, parent_id) "
                            "VALUES ('secret_mount', $1, $2::uuid)",
                            input.mount_id,
@@ -10083,6 +10522,227 @@ public:
                 tx.exec_params("UPDATE customers SET deleted_at = now() WHERE id = $1::uuid",
                                plan.customer_id);
             }
+            plan.deleted_at = deleted[0][0].as<std::string>();
+            return plan;
+        });
+    }
+
+    // ---- account deletion (lake#810) ----
+
+    Result<AccountDeletion> delete_account(const std::string& user_id, bool dry_run) override {
+        return with_tx<AccountDeletion>([&](pqxx::work& tx) -> Result<AccountDeletion> {
+            const pqxx::result rows = tx.exec_params(
+                std::string("SELECT ") + user_columns +
+                    " FROM users WHERE id = $1::uuid AND deleted_at IS NULL FOR UPDATE",
+                user_id);
+            if (rows.empty()) {
+                return std::unexpected(StoreError{"not_found", "no account " + user_id});
+            }
+            AccountDeletion plan{.user = user_of(rows[0])};
+            const std::string taap = plan.user.taap_id;
+            const auto live_workspaces = [&](const std::string& customer_id) {
+                std::vector<Workspace> live;
+                const pqxx::result found = tx.exec_params(
+                    std::string("SELECT ") + workspace_columns +
+                        " FROM workspaces WHERE customer_id = $1::uuid AND desired <> 'deleted' "
+                        "ORDER BY created_at, id",
+                    customer_id);
+                for (const auto& row : found) {
+                    live.push_back(workspace_from(row));
+                }
+                return live;
+            };
+            const pqxx::result customers =
+                tx.exec_params("SELECT id::text, name FROM customers WHERE user_id = $1::uuid AND "
+                               "deleted_at IS NULL FOR UPDATE",
+                               user_id);
+            if (!customers.empty()) {
+                plan.customer_id = customers[0][0].as<std::string>();
+                plan.customer_name = customers[0][1].as<std::string>();
+                plan.live_workspaces = live_workspaces(plan.customer_id);
+            }
+            // The account's memberships: by its user id, or by its TAAP identity.
+            const std::string mine = "((principal_type = 'user' AND principal_id = $1) OR "
+                                     "($2 <> '' AND principal_taap_id = $2))";
+            const pqxx::result organizations = tx.exec_params(
+                std::string("SELECT DISTINCT o.id::text FROM memberships m JOIN organizations o "
+                            "ON o.id = m.organization_id WHERE o.deleted_at IS NULL AND ") +
+                    "((m.principal_type = 'user' AND m.principal_id = $1) OR ($2 <> '' AND "
+                    "m.principal_taap_id = $2)) ORDER BY 1",
+                user_id,
+                taap);
+            for (const auto& organization_row : organizations) {
+                const std::string organization_id = organization_row[0].as<std::string>();
+                const pqxx::result found = tx.exec_params(
+                    std::string("SELECT ") + organization_columns +
+                        " FROM organizations WHERE id = $1::uuid FOR UPDATE",
+                    organization_id);
+                AccountOrganization entry{.organization = organization_of(found[0])};
+                const pqxx::result role = tx.exec_params(
+                    "SELECT role FROM memberships WHERE organization_id = $3::uuid AND team_id IS "
+                    "NULL AND " +
+                        mine + " ORDER BY (role = 'owner') DESC LIMIT 1",
+                    user_id,
+                    taap,
+                    organization_id);
+                if (!role.empty()) {
+                    entry.role = role[0][0].as<std::string>();
+                }
+                entry.other_owners =
+                    tx.exec_params("SELECT count(DISTINCT principal_taap_id) FROM memberships "
+                                   "WHERE organization_id = $3::uuid AND team_id IS NULL AND "
+                                   "role = 'owner' AND NOT " +
+                                       mine,
+                                   user_id,
+                                   taap,
+                                   organization_id)[0][0]
+                        .as<std::int64_t>();
+                entry.other_members =
+                    tx.exec_params("SELECT count(DISTINCT principal_taap_id) FROM memberships "
+                                   "WHERE organization_id = $3::uuid AND NOT " +
+                                       mine,
+                                   user_id,
+                                   taap,
+                                   organization_id)[0][0]
+                        .as<std::int64_t>();
+                const pqxx::result space =
+                    tx.exec_params("SELECT id::text, name FROM customers WHERE organization_id = "
+                                   "$1::uuid AND deleted_at IS NULL",
+                                   organization_id);
+                if (!space.empty()) {
+                    entry.customer_id = space[0][0].as<std::string>();
+                    entry.customer_name = space[0][1].as<std::string>();
+                    entry.live_workspaces = live_workspaces(entry.customer_id);
+                }
+                plan.organizations.push_back(std::move(entry));
+            }
+            const pqxx::result roots = tx.exec_params(
+                "SELECT coalesce(array_agg(id::text), '{}') FROM objects WHERE $1 <> '' AND "
+                "object_type = 'customer' AND external_id = $1",
+                plan.customer_id);
+            const std::string root_ids = roots[0][0].as<std::string>();
+            const auto count = [&](const std::string& sql) -> std::int64_t {
+                return tx.exec_params(sql, user_id, taap, plan.customer_id)[0][0]
+                    .as<std::int64_t>();
+            };
+            const std::string by_user = " WHERE user_id = $1::uuid AND $2 = $2 AND $3 = $3";
+            const std::string of_space = " WHERE $1 = $1 AND $2 = $2 AND customer_id::text = $3";
+            for (const char* table : {"sessions",
+                                      "devices",
+                                      "credentials",
+                                      "identity_documents",
+                                      "identity_taap_assertions",
+                                      "identity_webauthn_challenges",
+                                      "identity_link_challenges",
+                                      "identity_links",
+                                      "offline_recovery_attempts",
+                                      "offline_recovery_grants",
+                                      "app_authorization_codes",
+                                      "scim_users"}) {
+                plan.counts[table] = count(std::string("SELECT count(*) FROM ") + table + by_user);
+            }
+            plan.counts["custodial_seeds"] =
+                count("SELECT count(*) FROM custodial_identities" + by_user +
+                      " AND wrapped_seed IS NOT NULL");
+            plan.counts["recovery_custody"] =
+                count("SELECT count(*) FROM offline_recovery_contacts WHERE $1 = $1 AND $2 <> '' "
+                      "AND contact_taap_id = $2 AND $3 = $3");
+            plan.counts["memberships"] =
+                count("SELECT count(*) FROM memberships WHERE $3 = $3 AND " + mine);
+            plan.counts["grants"] =
+                count("SELECT count(*) FROM grants WHERE $1 = $1 AND $3 = $3 AND $2 <> '' AND "
+                      "principal_taap_id = $2");
+            for (const char* table :
+                 {"billing_contacts", "customer_usage_limits", "customer_storage_quotas"}) {
+                plan.counts[table] = count(std::string("SELECT count(*) FROM ") + table + of_space);
+            }
+            plan.counts["secret_mount_routes"] =
+                count("SELECT count(*) FROM secret_mount_routes" + of_space);
+            plan.counts["policy_objects"] =
+                tx.exec_params(std::string(policy_subtree_cte) + "SELECT count(*) FROM subtree",
+                               root_ids)[0][0]
+                    .as<std::int64_t>();
+            plan.counts["space_grants"] =
+                tx.exec_params(std::string(policy_subtree_cte) +
+                                   "SELECT count(*) FROM grants WHERE object_id IN "
+                                   "(SELECT id FROM subtree)",
+                               root_ids)[0][0]
+                    .as<std::int64_t>();
+            plan.invoices_kept = count("SELECT count(*) FROM billing_invoices" + of_space);
+            plan.open_invoices =
+                count("SELECT count(*) FROM billing_invoices" + of_space + " AND state = 'due'");
+            if (dry_run) {
+                return plan;
+            }
+            if (!plan.live_workspaces.empty()) {
+                std::string names;
+                for (const Workspace& workspace : plan.live_workspaces) {
+                    names += (names.empty() ? "" : ", ") + workspace.name;
+                }
+                return std::unexpected(StoreError{
+                    "conflict", "the account still has workspaces; delete them first: " + names});
+            }
+            for (const AccountOrganization& organization : plan.organizations) {
+                if (organization.sole_owner()) {
+                    return std::unexpected(StoreError{
+                        "conflict",
+                        "the account is the only owner of the organization " +
+                            organization.organization.display_name +
+                            "; make another member an owner or delete the organization first"});
+                }
+            }
+            // Identity: every way to sign in or act as the account.
+            tx.exec_params("DELETE FROM memberships WHERE $3 = $3 AND " + mine,
+                           user_id,
+                           taap,
+                           plan.customer_id);
+            if (!taap.empty()) {
+                tx.exec_params("DELETE FROM grants WHERE principal_taap_id = $1", taap);
+                tx.exec_params("DELETE FROM offline_recovery_contacts WHERE contact_taap_id = $1",
+                               taap);
+            }
+            for (const char* table : {"scim_users",
+                                      "offline_recovery_attempts",
+                                      "offline_recovery_grants",
+                                      "offline_recovery_notifications",
+                                      "app_authorization_codes",
+                                      "identity_link_challenges",
+                                      "identity_links",
+                                      "identity_webauthn_challenges",
+                                      "identity_taap_assertions",
+                                      "identity_documents",
+                                      "sessions",
+                                      "credentials",
+                                      "devices"}) {
+                tx.exec_params(std::string("DELETE FROM ") + table + " WHERE user_id = $1::uuid",
+                               user_id);
+            }
+            tx.exec_params("UPDATE custodial_identities SET wrapped_seed = NULL, "
+                           "seed_destroyed_at = coalesce(seed_destroyed_at, now()) "
+                           "WHERE user_id = $1::uuid",
+                           user_id);
+            // The personal space: what it holds outside its (already deleted) workspaces.
+            if (!plan.customer_id.empty()) {
+                tx.exec_params("DELETE FROM secret_lease_routes WHERE mount_id IN (SELECT "
+                               "mount_id FROM secret_mount_routes WHERE customer_id = $1::uuid)",
+                               plan.customer_id);
+                for (const char* table : {"secret_mount_routes",
+                                          "billing_contacts",
+                                          "customer_usage_limits",
+                                          "customer_storage_quotas"}) {
+                    tx.exec_params(std::string("DELETE FROM ") + table +
+                                       " WHERE customer_id = $1::uuid",
+                                   plan.customer_id);
+                }
+                tx.exec_params("DELETE FROM objects WHERE id = ANY($1::uuid[])", root_ids);
+                tx.exec_params("UPDATE customers SET deleted_at = now() WHERE id = $1::uuid",
+                               plan.customer_id);
+            }
+            const pqxx::result deleted = tx.exec_params(
+                "UPDATE users SET email = NULL, display_name = '', deleted_at = now(), "
+                "disabled_at = coalesce(disabled_at, now()) WHERE id = $1::uuid "
+                "RETURNING deleted_at::text",
+                user_id);
             plan.deleted_at = deleted[0][0].as<std::string>();
             return plan;
         });
@@ -11096,6 +11756,93 @@ private:
             StoreError{"conflict", "could not allocate a personal customer handle; retry sign-up"});
     }
 
+    Result<IdentityProofChallenge>
+    begin_identity_proof(const std::string& pool_id,
+                         const std::string& identity_document) override {
+        if (pool_id.empty()) {
+            return std::unexpected(StoreError{"invalid_input", "a pool is required"});
+        }
+        const auto document = own_identity::verify_document(identity_document);
+        if (!document) {
+            return std::unexpected(document.error());
+        }
+        const auto key = instance_kek();
+        if (!key) {
+            return std::unexpected(key.error());
+        }
+        IdentityProofChallenge issued{"", identity_crypto::random_secret(), 0};
+        issued.expires_at = unix_seconds_now() + own_identity::enrollment_lifetime_seconds;
+        issued.challenge = own_identity::enrollment_challenge(
+            *key, pool_id, *document, issued.nonce, issued.expires_at);
+        if (issued.nonce.empty() || issued.challenge.empty()) {
+            return std::unexpected(
+                StoreError{"store_error", "could not issue an identity proof challenge"});
+        }
+        return issued;
+    }
+
+    static std::int64_t unix_seconds_now() {
+        return std::chrono::duration_cast<std::chrono::seconds>(
+                   std::chrono::system_clock::now().time_since_epoch())
+            .count();
+    }
+
+    // Checks that `proof` is a signature by the key of `identity_document` over the challenge
+    // begin_identity_proof issued for it in `pool_id`, still unexpired (lake#931). `taap_id`, when
+    // given, must be the document's identity. Answers the proof's one-use id; whether it was spent
+    // is the caller's check, in its transaction (identity_proof_used).
+    Result<std::string> verify_identity_proof(std::string_view pool_id,
+                                              std::string_view identity_document,
+                                              std::string_view taap_id,
+                                              const IdentityProof& proof) const {
+        const auto document = own_identity::verify_document(identity_document);
+        if (!document) {
+            return std::unexpected(document.error());
+        }
+        if (proof.nonce.empty() || proof.expires_at == 0 || proof.signature.empty()) {
+            return std::unexpected(StoreError{
+                "identity_proof_required",
+                "Prove you hold this identity's key: sign the challenge begin_identity_proof "
+                "issues with liquid sign artifact, and send what it printed as identity_proof."});
+        }
+        if (!taap_id.empty() && taap_id != document->taap_id) {
+            return std::unexpected(
+                StoreError{"invalid_input", "the identity proof names another identity"});
+        }
+        const std::int64_t now = unix_seconds_now();
+        if (proof.expires_at <= now ||
+            proof.expires_at > now + own_identity::enrollment_lifetime_seconds) {
+            return std::unexpected(StoreError{
+                "unauthorized", "The identity proof's challenge has expired; ask for a new one."});
+        }
+        const auto key = instance_kek();
+        if (!key) {
+            return std::unexpected(key.error());
+        }
+        const std::string challenge = own_identity::enrollment_challenge(
+            *key, pool_id, *document, proof.nonce, proof.expires_at);
+        if (challenge.empty()) {
+            return std::unexpected(
+                StoreError{"store_error", "could not compute the identity proof challenge"});
+        }
+        const auto signed_value =
+            own_identity::verify_challenge_signature(document->encoded, challenge, proof.signature);
+        if (!signed_value) {
+            return std::unexpected(signed_value.error());
+        }
+        return "identity_proof:" + challenge;
+    }
+
+    // Whether a proof was spent: by a sign-up (identity_taap_assertions) or an OAuth start (its
+    // spent row in identity_oauth_flows).
+    static bool identity_proof_used(pqxx::work& tx, const std::string& proof_id) {
+        return !tx.exec_params("SELECT 1 FROM identity_taap_assertions WHERE assertion_id = $1 "
+                               "UNION ALL SELECT 1 FROM identity_oauth_flows WHERE state_hash = $2",
+                               proof_id,
+                               identity_crypto::sha256_hex(proof_id))
+                    .empty();
+    }
+
     Result<VerifiedIdentityDocument> verify_identity_document(std::string_view serialized) const {
         const auto encoded = decode_base64url(serialized);
         if (!encoded) {
@@ -11121,6 +11868,16 @@ private:
         if (!canonical || *canonical != *encoded) {
             return std::unexpected(
                 StoreError{"invalid_input", "TAAP identity document is not canonical"});
+        }
+        // lake#917: the account is bound to the identifier this document's own key derives. A
+        // document naming another identifier with a different key verifies in liquid but proves
+        // nothing about that identifier, and a rotated successor needs its chain.
+        if (!identity_crypto::identity_document_is_self_certifying(*document)) {
+            return std::unexpected(StoreError{
+                "invalid_input",
+                "TAAP identity document must be the identity's first document, whose key derives "
+                "its identifier. Register before rotating, or run liquid identity show "
+                "--document on the identity you created."});
         }
         {
             EVP_MD* algorithm = EVP_MD_fetch(nullptr, "SHA512-256", nullptr);

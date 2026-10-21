@@ -161,9 +161,19 @@ struct ServerOptions {
     // The admin bearer token (LAKE_ADMIN_TOKEN). Empty = every capability except
     // server_info refuses with unauthorized.
     std::string admin_token;
-    // Bearer presented to another Lake during asynchronous replication. The
-    // executable defaults it to the admin bearer when no separate Secret is set.
+    // Bearer presented to another Lake during asynchronous replication (LAKE_REPLICATION_TOKEN).
+    // Empty unless set: it never falls back to the admin bearer (lake#915).
     std::string replication_token;
+    // The peer Lake origins replication may pull from (LAKE_REPLICATION_PEERS), each normalized
+    // by replication_origin. A source outside the list is refused before any connection, so the
+    // replication credential is only ever sent to an origin the operator configured (lake#915).
+    std::vector<std::string> replication_peers;
+    // Replication reaches only HTTPS on public addresses unless this is set
+    // (LAKE_REPLICATION_ALLOW_PRIVATE_ADDRESSES=1, local development and tests only).
+    bool replication_allow_private_addresses = false;
+    // The longest one replication pull may take, the name lookup, connection and every transfer
+    // included (LAKE_REPLICATION_TIMEOUT_SECONDS). A retry resumes from the saved cursor.
+    std::chrono::seconds replication_timeout{600};
     // A base64 32-byte Ed25519 seed. When empty lake creates its own identity at
     // server start.
     std::string identity_seed;
@@ -194,6 +204,14 @@ struct ServerOptions {
     // development and tests only), and an injected transport (tests); null: the server's own.
     bool mcp_allow_private_addresses = false;
     std::shared_ptr<McpHttp> mcp_http;
+    // Repository and application webhooks reach only HTTPS on public addresses (lake#876) unless
+    // this is set (LAKE_WEBHOOK_ALLOW_PRIVATE_ADDRESSES=1, local development and tests only).
+    bool webhook_allow_private_addresses = false;
+    // OpenID Connect discovery, token and JWKS requests for generic OAuth and enterprise OIDC
+    // providers reach only HTTPS on public addresses (lake#837, lake#876) unless this is set
+    // (LAKE_OIDC_ALLOW_PRIVATE_ADDRESSES=1: tests, local development, or an install whose
+    // identity provider is on its own network).
+    bool oidc_allow_private_addresses = false;
     // How a customer's own bucket is browsed as a drive (lake#664, docs/api/storage.md): an
     // injected browser (tests' fakes), else control::cloud_store_browser over the server's own
     // public-only transport. `store_allow_private_addresses` (LAKE_STORE_ALLOW_PRIVATE_ADDRESSES=1,

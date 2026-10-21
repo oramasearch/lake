@@ -32,6 +32,11 @@ drag and drop added by a script. Empty folders use a reserved `.lake-folder` mar
 drive results. Deleting or moving a current path never removes its prior versions from liquid
 history; the delete confirmation says so.
 
+The first upload into an empty repository creates its `main`, and an upload into a folder that
+does not exist yet (a dropped `Q3/report.csv`, or a `path` naming a new folder) creates the folder
+(lake#560, [../api/drive.md](../api/drive.md#upload-input-schema)). Before that both were refused
+with "no revision main" and "no drive path".
+
 ## Preview and download
 
 `/drive/preview` (`DrivePreviewPage.tsx`) reads `drive_preview`, which chooses a renderer from
@@ -94,6 +99,11 @@ Liquid client contracts:
   compare and the previous one restores, and that a real deletion stays distinct (lake#123). The
   same exercise runs on the memory store's account store and on a switched workspace store
   (`WorkspaceStoreDrive.*`).
+- `DriveScenario.TheFirstUploadCreatesMainAndAMissingFolder` proves that the first upload into a
+  repository with no `main` creates it, that an upload into a missing folder two deep creates both
+  folders, and that an upload under a file is refused (lake#560). The same exercise runs on the
+  memory store (`DrivesHttp.TheFirstUploadCreatesMainAndAMissingFolder`), the account store and a
+  switched workspace store (`WorkspaceStoreDrive.TheFirstUpload*`).
 - `DriveScenario.SyncedFolderPullsAsRepositoryAndBuildsProject` proves that a drive folder is the
   same Liquid repository: the public repository client pulls and materializes it, after which CMake
   builds and runs the contained project.

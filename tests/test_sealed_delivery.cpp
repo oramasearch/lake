@@ -321,15 +321,16 @@ TEST_F(MintSealedSecret, AnAppNamesALakeSecretItsWorkspaceHolds) {
                       {"value", {{"DATABASE_URL", "postgres://app:pw-app@db/app"}}}})
                     .ok);
     const json secret{{"mount_id", mount_id}, {"name", "database"}, {"field", "DATABASE_URL"}};
-    const ApiResult created = call("create_app",
-                                   {{"customer_id", customer_id},
-                                    {"workspace_id", workspace_id},
-                                    {"name", "reports"},
-                                    {"mode", "image"},
-                                    {"image", "registry.example.test/reports:v1"},
-                                    {"framework", "container"},
-                                    {"port", 8080},
-                                    {"env", {{"DATABASE_URL", {{"secret", secret}}}}}});
+    const ApiResult created =
+        call("create_app",
+             {{"customer_id", customer_id},
+              {"workspace_id", workspace_id},
+              {"name", "reports"},
+              {"mode", "image"},
+              {"image", "registry.example.test/reports:v1@sha256:" + std::string(64, 'd')},
+              {"framework", "container"},
+              {"port", 8080},
+              {"env", {{"DATABASE_URL", {{"secret", secret}}}}}});
     ASSERT_TRUE(created.ok) << created.error.message;
     const std::string reference = "lake-secret://" + mount_id + "/database#DATABASE_URL";
     EXPECT_EQ(created.value.at("secret_env_refs").at("DATABASE_URL"), reference);

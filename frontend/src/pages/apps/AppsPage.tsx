@@ -304,7 +304,7 @@ export default function AppsPage() {
               </label>
               <label>
                 Image
-                <input name="image" placeholder="registry.example/app:tag" required />
+                <input name="image" placeholder="registry.example/app@sha256:…" pattern=".+@sha256:[0-9a-fA-F]{64}" title="An image pinned by digest: name@sha256: and 64 hex digits" required />
               </label>
               <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                 <label>

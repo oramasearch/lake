@@ -33,6 +33,7 @@ constexpr std::array central = std::to_array<std::string_view>({
     // An application's sign-in flow is identity: who signed in, before any workspace is chosen.
     "begin_application_authorization",
     "begin_email_recovery",
+    "begin_identity_proof",
     "begin_own_identity",
     "begin_passkey_registration",
     "begin_passkey_sign_in",
@@ -43,6 +44,7 @@ constexpr std::array central = std::to_array<std::string_view>({
     "check_agent_certificate",
     "check_cached_read",
     "claim_recovery_deliveries",
+    "claim_root_recovery_share",
     "complete_recovery",
     "complete_root_recovery",
     // Account recovery's custody of a repository key is identity, not the repository's data.
@@ -62,6 +64,7 @@ constexpr std::array central = std::to_array<std::string_view>({
     "create_token",
     "create_user",
     "create_workspace",
+    "delete_account",
     "delete_organization",
     "delete_workspace",
     "disable_mfa",
@@ -197,6 +200,7 @@ constexpr std::array central = std::to_array<std::string_view>({
     "sign_up_password",
     "start_oauth",
     "start_sso_oidc",
+    "start_sso_saml",
     "start_workspace",
     "test_sso_provider",
     "timestamp_checkpoint",

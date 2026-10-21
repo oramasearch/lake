@@ -2,6 +2,7 @@
 #include <gtest/gtest.h>
 
 #include <array>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -33,6 +34,8 @@
 #include <openssl/x509v3.h>
 
 namespace {
+
+using json = nlohmann::json;
 
 struct PkeyDeleter {
     void operator()(EVP_PKEY* value) const {
@@ -423,33 +426,228 @@ TEST(Pki, RegistryIssuesSvidAndRecordsAuditEvent) {
     ASSERT_TRUE(event) << event.error().message;
     EXPECT_EQ(event->draft.kind, "certificate");
     EXPECT_EQ(event->draft.action, "issue_device_certificate");
+}
 
-    context.request_id.clear();
-    const auto ceremony =
-        registry.call("begin_root_recovery",
-                      {{"customer_id", customer->id}, {"threshold", 2}, {"share_count", 3}},
-                      context);
-    ASSERT_TRUE(ceremony.ok) << ceremony.error.message;
-    const auto pending_ceremony = store.get_pki_recovery_ceremony(
-        customer->id, ceremony.value.at("ceremony_id").get<std::string>());
-    ASSERT_TRUE(pending_ceremony) << pending_ceremony.error().message;
-    EXPECT_FALSE(pending_ceremony->recovered_at);
-    const auto recovery = registry.call(
-        "complete_root_recovery",
-        {{"customer_id", customer->id},
-         {"ceremony_id", ceremony.value.at("ceremony_id")},
-         {"threshold", 2},
-         {"shares", {ceremony.value.at("shares").at(0), ceremony.value.at("shares").at(1)}}},
-        context);
-    ASSERT_TRUE(recovery.ok) << recovery.error.message;
-    const auto recovery_event = store.latest_audit_event();
-    ASSERT_TRUE(recovery_event) << recovery_event.error().message;
-    EXPECT_EQ(recovery_event->draft.kind, "recovery");
-    EXPECT_EQ(recovery_event->draft.action, "complete_root_recovery");
-    const auto completed_ceremony = store.get_pki_recovery_ceremony(
-        customer->id, ceremony.value.at("ceremony_id").get<std::string>());
-    ASSERT_TRUE(completed_ceremony) << completed_ceremony.error().message;
-    EXPECT_TRUE(completed_ceremony->recovered_at);
+// A customer with a CA and four people, the first three holding admin on it, and the rehearsal's
+// contexts: each person signed in as themselves, and the operator.
+struct RootRecoveryRig {
+    static constexpr std::string_view kek =
+        "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+    lake::api::Registry registry;
+    lake::control::InMemoryStore store;
+    lake::control::pki::Service pki;
+    std::string customer_id;
+    std::map<std::string, std::string> users; // TAAP id -> user id
+
+    RootRecoveryRig() {
+        lake::api::register_core_capabilities(registry, "test");
+        const auto organization =
+            store.create_organization({"taap:1:ed25519:recovery-org", "Recovery", ""});
+        EXPECT_TRUE(organization) << organization.error().message;
+        const auto customer =
+            store.create_customer({"organization", "", organization->id, "recovery-customer"});
+        EXPECT_TRUE(customer) << customer.error().message;
+        customer_id = customer->id;
+        const auto object = store.find_policy_object("customer", customer_id);
+        EXPECT_TRUE(object) << object.error().message;
+        for (const std::string name : {"alice", "bob", "carol", "dave"}) {
+            const std::string taap = "taap:1:ed25519:recovery-" + name;
+            const auto user = store.create_user({taap, name + "@example.test", name});
+            EXPECT_TRUE(user) << user.error().message;
+            users[taap] = user->id;
+            if (name != "dave") {
+                EXPECT_TRUE(store.create_grant({taap,
+                                                object->id,
+                                                "admin",
+                                                "attestation-" + name,
+                                                "admin",
+                                                "request-" + name}));
+            }
+        }
+        auto admin = operator_context();
+        const auto authority =
+            registry.call("create_pki_authority", {{"customer_id", customer_id}}, admin);
+        EXPECT_TRUE(authority.ok) << authority.error.message;
+    }
+
+    static std::string taap(std::string_view name) {
+        return "taap:1:ed25519:recovery-" + std::string(name);
+    }
+
+    lake::api::ApiContext operator_context() {
+        lake::api::ApiContext context;
+        context.store = &store;
+        context.pki = &pki;
+        context.authorized = true;
+        context.acting_identity = "admin";
+        context.operator_credential = true;
+        context.instance_kek = std::string(kek);
+        return context;
+    }
+
+    lake::api::ApiContext person(std::string_view name) {
+        auto context = operator_context();
+        context.operator_credential = false;
+        context.acting_identity = taap(name);
+        context.acting_user_id = users.at(taap(name));
+        context.session_credential = true;
+        context.credential_kind = "browser";
+        context.scopes = {"*"};
+        return context;
+    }
+
+    lake::api::ApiResult
+    call(const std::string& name, const json& input, lake::api::ApiContext context) {
+        return registry.call(name, input, context);
+    }
+
+    json begin(lake::api::ApiContext context, int threshold, json participants) {
+        const auto begun = call("begin_root_recovery",
+                                {{"customer_id", customer_id},
+                                 {"threshold", threshold},
+                                 {"participants", std::move(participants)}},
+                                std::move(context));
+        EXPECT_TRUE(begun.ok) << begun.error.message;
+        return begun.value;
+    }
+
+    lake::api::ApiResult claim(std::string_view name, const std::string& ceremony_id) {
+        return call("claim_root_recovery_share",
+                    {{"customer_id", customer_id}, {"ceremony_id", ceremony_id}},
+                    person(name));
+    }
+
+    lake::api::ApiResult
+    present(lake::api::ApiContext context, const std::string& ceremony_id, const json& share) {
+        return call("complete_root_recovery",
+                    {{"customer_id", customer_id},
+                     {"ceremony_id", ceremony_id},
+                     {"share", {{"index", share.at("index")}, {"value", share.at("value")}}}},
+                    std::move(context));
+    }
+};
+
+TEST(Pki, RootRecoveryBeginsWithoutHandingOutAnyShare) {
+    RootRecoveryRig rig;
+    // The form that answered every share to its one caller (lake#934) is refused, share-less.
+    const auto whole_quorum =
+        rig.call("begin_root_recovery",
+                 {{"customer_id", rig.customer_id}, {"threshold", 2}, {"share_count", 3}},
+                 rig.person("alice"));
+    EXPECT_FALSE(whole_quorum.ok);
+    EXPECT_FALSE(whole_quorum.value.contains("shares")) << whole_quorum.value.dump();
+
+    const json participants = json::array({RootRecoveryRig::taap("alice"),
+                                           RootRecoveryRig::taap("bob"),
+                                           RootRecoveryRig::taap("carol")});
+    const json begun = rig.begin(rig.person("alice"), 2, participants);
+    EXPECT_FALSE(begun.contains("shares"));
+    EXPECT_EQ(begun.at("share_count"), 3);
+    ASSERT_EQ(begun.at("participants").size(), 3U);
+    for (const json& participant : begun.at("participants")) {
+        EXPECT_EQ(participant.size(), 2U) << participant.dump(); // index and principal only
+    }
+    const std::string ceremony_id = begun.at("ceremony_id").get<std::string>();
+
+    // Every share, claimed afterwards, is absent from the answer that began the ceremony.
+    for (const std::string name : {"alice", "bob", "carol"}) {
+        const auto share = rig.claim(name, ceremony_id);
+        ASSERT_TRUE(share.ok) << share.error.message;
+        EXPECT_EQ(begun.dump().find(share.value.at("value").get<std::string>()), std::string::npos);
+    }
+
+    // A quorum of one, more than there are participants, or the same person twice is refused.
+    auto alice = rig.person("alice");
+    for (const auto& [threshold, people] : std::vector<std::pair<int, json>>{
+             {1, participants},
+             {4, participants},
+             {2, json::array({RootRecoveryRig::taap("alice"), RootRecoveryRig::taap("alice")})},
+             {2, json::array({RootRecoveryRig::taap("alice")})}}) {
+        const auto refused = rig.call(
+            "begin_root_recovery",
+            {{"customer_id", rig.customer_id}, {"threshold", threshold}, {"participants", people}},
+            alice);
+        EXPECT_FALSE(refused.ok) << threshold << " " << people.dump();
+    }
+    // A participant who does not hold admin on the customer, or who is not a TAAP identity, is
+    // refused.
+    for (const json& people :
+         {json::array({RootRecoveryRig::taap("alice"), RootRecoveryRig::taap("dave")}),
+          json::array({RootRecoveryRig::taap("alice"), "admin"})}) {
+        const auto refused =
+            rig.call("begin_root_recovery",
+                     {{"customer_id", rig.customer_id}, {"threshold", 2}, {"participants", people}},
+                     alice);
+        EXPECT_FALSE(refused.ok) << people.dump();
+    }
+}
+
+TEST(Pki, RootRecoveryNeedsSharesPresentedByDistinctParticipants) {
+    RootRecoveryRig rig;
+    const json begun = rig.begin(rig.operator_context(),
+                                 2,
+                                 json::array({RootRecoveryRig::taap("alice"),
+                                              RootRecoveryRig::taap("bob"),
+                                              RootRecoveryRig::taap("carol")}));
+    const std::string ceremony_id = begun.at("ceremony_id").get<std::string>();
+
+    // Only a participant, signed in as themselves, claims a share: their own, once.
+    EXPECT_EQ(rig.call("claim_root_recovery_share",
+                       {{"customer_id", rig.customer_id}, {"ceremony_id", ceremony_id}},
+                       rig.operator_context())
+                  .error.code,
+              "forbidden");
+    EXPECT_FALSE(rig.claim("dave", ceremony_id).ok); // not an admin, not a participant
+    auto agent = rig.person("alice");
+    agent.credential_kind = "agent_task";
+    EXPECT_EQ(rig.call("claim_root_recovery_share",
+                       {{"customer_id", rig.customer_id}, {"ceremony_id", ceremony_id}},
+                       agent)
+                  .error.code,
+              "forbidden");
+    const auto alice_share = rig.claim("alice", ceremony_id);
+    ASSERT_TRUE(alice_share.ok) << alice_share.error.message;
+    EXPECT_EQ(alice_share.value.at("index"), 1);
+    EXPECT_EQ(rig.claim("alice", ceremony_id).error.code, "conflict");
+    const auto bob_share = rig.claim("bob", ceremony_id);
+    ASSERT_TRUE(bob_share.ok) << bob_share.error.message;
+    EXPECT_EQ(bob_share.value.at("index"), 2);
+
+    // One person holding two shares cannot present both: the second is not theirs.
+    const auto first = rig.present(rig.person("alice"), ceremony_id, alice_share.value);
+    ASSERT_TRUE(first.ok) << first.error.message;
+    EXPECT_FALSE(first.value.at("recovered").get<bool>());
+    EXPECT_EQ(first.value.at("submitted"), 1);
+    EXPECT_EQ(rig.present(rig.person("alice"), ceremony_id, bob_share.value).error.code,
+              "forbidden");
+    EXPECT_EQ(rig.present(rig.person("alice"), ceremony_id, alice_share.value).error.code,
+              "conflict");
+    EXPECT_FALSE(rig.present(rig.operator_context(), ceremony_id, bob_share.value).ok);
+    EXPECT_FALSE(rig.store.get_pki_recovery_ceremony(rig.customer_id, ceremony_id)->recovered_at);
+
+    // A wrong value is refused without using up the participant's turn.
+    json tampered = bob_share.value;
+    std::string value = tampered.at("value").get<std::string>();
+    value[0] = value[0] == '0' ? '1' : '0';
+    tampered["value"] = value;
+    EXPECT_EQ(rig.present(rig.person("bob"), ceremony_id, tampered).error.code, "unauthorized");
+
+    const auto second = rig.present(rig.person("bob"), ceremony_id, bob_share.value);
+    ASSERT_TRUE(second.ok) << second.error.message;
+    EXPECT_TRUE(second.value.at("recovered").get<bool>());
+    EXPECT_EQ(second.value.at("submitted"), 2);
+    const auto event = rig.store.latest_audit_event();
+    ASSERT_TRUE(event) << event.error().message;
+    EXPECT_EQ(event->draft.kind, "recovery");
+    EXPECT_EQ(event->draft.action, "complete_root_recovery");
+    EXPECT_EQ(event->draft.principal, RootRecoveryRig::taap("bob"));
+    EXPECT_EQ(event->draft.object, "root-recovery/" + ceremony_id);
+    EXPECT_EQ(event->draft.details.dump().find(bob_share.value.at("value").get<std::string>()),
+              std::string::npos);
+    EXPECT_TRUE(rig.store.get_pki_recovery_ceremony(rig.customer_id, ceremony_id)->recovered_at);
+
+    // A recovered ceremony issues no further share.
+    EXPECT_EQ(rig.claim("carol", ceremony_id).error.code, "conflict");
 }
 
 TEST(Pki, PersistsAuthorityKeysThroughTheCustomerKeystore) {
@@ -629,6 +827,192 @@ TEST(Pki, AcmeClientCompletesHttp01OrderAndDownloadsCertificate) {
     server.stop();
 }
 
+// ACME is anonymous, so its in-memory state is bounded and expires (lake#940). A test clock moves
+// time; `now` starts well past the clock's epoch.
+struct AcmeTestClock {
+    std::shared_ptr<std::chrono::steady_clock::time_point> now =
+        std::make_shared<std::chrono::steady_clock::time_point>(std::chrono::hours(1000));
+
+    lake::control::pki::AcmeLimits limits() const {
+        lake::control::pki::AcmeLimits limits;
+        limits.clock = [now = now] { return *now; };
+        return limits;
+    }
+    void advance(std::chrono::steady_clock::duration by) const {
+        *now += by;
+    }
+};
+
+lake::control::pki::AcmeJwk new_acme_jwk() {
+    const Pkey key = new_p256_key();
+    const nlohmann::json jwk = jwk_of(key.get());
+    return {jwk.at("x").get<std::string>(), jwk.at("y").get<std::string>()};
+}
+
+TEST(Pki, AcmeNoncesAreStatelessOneUseAndExpire) {
+    const AcmeTestClock clock;
+    auto limits = clock.limits();
+    limits.nonce_lifetime = std::chrono::seconds(60);
+    limits.used_nonces = 4;
+    lake::control::pki::Service pki(limits);
+
+    // Issuing nonces keeps nothing, however many are asked for.
+    for (int i = 0; i < 10000; ++i) {
+        ASSERT_TRUE(pki.new_acme_nonce());
+    }
+    EXPECT_EQ(pki.acme_state_size().used_nonces, 0U);
+
+    auto nonce = pki.new_acme_nonce();
+    ASSERT_TRUE(nonce);
+    EXPECT_TRUE(pki.consume_acme_nonce(*nonce));
+    EXPECT_FALSE(pki.consume_acme_nonce(*nonce));
+
+    // A nonce past its lifetime, altered, foreign or empty is refused.
+    auto stale = pki.new_acme_nonce();
+    ASSERT_TRUE(stale);
+    clock.advance(std::chrono::seconds(60));
+    EXPECT_FALSE(pki.consume_acme_nonce(*stale));
+    auto fresh = pki.new_acme_nonce();
+    ASSERT_TRUE(fresh);
+    std::string altered = *fresh;
+    altered[20] = altered[20] == 'A' ? 'B' : 'A';
+    EXPECT_FALSE(pki.consume_acme_nonce(altered));
+    lake::control::pki::Service other(clock.limits());
+    auto foreign = other.new_acme_nonce();
+    ASSERT_TRUE(foreign);
+    EXPECT_FALSE(pki.consume_acme_nonce(*foreign));
+    EXPECT_FALSE(pki.consume_acme_nonce(""));
+    EXPECT_TRUE(pki.consume_acme_nonce(*fresh));
+
+    // Consumed nonces are remembered up to the cap; past it every older nonce is refused, so a
+    // forgotten one is never accepted again.
+    std::vector<std::string> nonces;
+    for (int i = 0; i < 10; ++i) {
+        auto issued = pki.new_acme_nonce();
+        ASSERT_TRUE(issued);
+        nonces.push_back(*issued);
+    }
+    for (std::size_t i = 1; i < nonces.size(); ++i) {
+        EXPECT_TRUE(pki.consume_acme_nonce(nonces[i])) << i;
+        EXPECT_LE(pki.acme_state_size().used_nonces, 4U);
+    }
+    EXPECT_FALSE(pki.consume_acme_nonce(nonces[0]));
+    for (const std::string& used : nonces) {
+        EXPECT_FALSE(pki.consume_acme_nonce(used));
+    }
+    auto after = pki.new_acme_nonce();
+    ASSERT_TRUE(after);
+    EXPECT_TRUE(pki.consume_acme_nonce(*after));
+
+    // Remembered nonces are dropped once they could no longer be accepted anyway.
+    clock.advance(std::chrono::seconds(60));
+    EXPECT_EQ(pki.acme_state_size().used_nonces, 0U);
+}
+
+TEST(Pki, AcmeAccountsAndOrdersAreBoundedAndOrdersExpire) {
+    auto store = std::make_shared<lake::control::InMemoryStore>();
+    const std::string instance_kek =
+        "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+    std::vector<std::string> customers;
+    for (const std::string name : {"acme-one", "acme-two"}) {
+        const auto organization = store->create_organization({"taap:1:ed25519:" + name, name, ""});
+        ASSERT_TRUE(organization) << organization.error().message;
+        const auto customer = store->create_customer({"organization", "", organization->id, name});
+        ASSERT_TRUE(customer) << customer.error().message;
+        customers.push_back(customer->id);
+    }
+    const AcmeTestClock clock;
+    auto limits = clock.limits();
+    limits.accounts_per_customer = 3;
+    limits.accounts = 5;
+    limits.orders_per_account = 2;
+    limits.order_lifetime = std::chrono::seconds(60);
+    limits.account_idle_lifetime = std::chrono::hours(1);
+    lake::control::pki::Service pki(limits);
+    ASSERT_TRUE(pki.create_authority(*store, customers[0], instance_kek));
+
+    // Only an existing customer gets an account.
+    const auto unknown =
+        pki.create_acme_account(*store, lake::control::new_uuid_v4(), new_acme_jwk());
+    ASSERT_FALSE(unknown);
+    EXPECT_EQ(unknown.error().code, "not_found");
+    EXPECT_EQ(pki.acme_state_size().accounts, 0U);
+
+    // Past a customer's cap its least recently used account goes, with its orders.
+    std::vector<std::string> accounts;
+    for (int i = 0; i < 10; ++i) {
+        const auto account = pki.create_acme_account(*store, customers[0], new_acme_jwk());
+        ASSERT_TRUE(account) << account.error().message;
+        accounts.push_back(account->id);
+        clock.advance(std::chrono::seconds(1));
+    }
+    EXPECT_EQ(pki.acme_state_size().accounts, 3U);
+    EXPECT_FALSE(
+        pki.create_acme_order(*store, customers[0], accounts[0], "a.lake.test", instance_kek));
+
+    // Past the global cap the least recently used account of any customer goes.
+    for (int i = 0; i < 3; ++i) {
+        ASSERT_TRUE(pki.create_acme_account(*store, customers[1], new_acme_jwk()));
+        clock.advance(std::chrono::seconds(1));
+    }
+    EXPECT_EQ(pki.acme_state_size().accounts, 5U);
+    EXPECT_FALSE(
+        pki.create_acme_order(*store, customers[0], accounts[7], "a.lake.test", instance_kek));
+
+    // Past an account's cap its oldest order goes, and with it the HTTP-01 token.
+    const std::string& account = accounts[9];
+    std::vector<lake::control::pki::AcmeOrder> orders;
+    std::vector<std::string> tokens;
+    for (int i = 0; i < 5; ++i) {
+        const auto order =
+            pki.create_acme_order(*store, customers[0], account, "a.lake.test", instance_kek);
+        ASSERT_TRUE(order) << order.error().message;
+        const auto authorization =
+            pki.acme_authorization(customers[0], account, order->authorization_id);
+        ASSERT_TRUE(authorization) << authorization.error().message;
+        orders.push_back(*order);
+        tokens.push_back(authorization->token);
+    }
+    EXPECT_EQ(pki.acme_state_size().orders, 2U);
+    EXPECT_EQ(pki.acme_state_size().authorizations, 2U);
+    EXPECT_FALSE(pki.acme_order(customers[0], account, orders[0].id));
+    EXPECT_FALSE(pki.acme_http01_response(tokens[0]));
+    EXPECT_TRUE(pki.acme_http01_response(tokens[4]));
+
+    // An order expires with its authorization and token.
+    clock.advance(std::chrono::seconds(60));
+    EXPECT_EQ(pki.acme_state_size().orders, 0U);
+    EXPECT_EQ(pki.acme_state_size().authorizations, 0U);
+    EXPECT_FALSE(pki.acme_order(customers[0], account, orders[4].id));
+    EXPECT_FALSE(pki.acme_http01_response(tokens[4]));
+    EXPECT_FALSE(pki.authorize_acme_order(customers[0], account, orders[4].authorization_id));
+
+    // An idle account expires.
+    clock.advance(std::chrono::hours(1));
+    EXPECT_EQ(pki.acme_state_size().accounts, 0U);
+    EXPECT_FALSE(pki.create_acme_order(*store, customers[0], account, "a.lake.test", instance_kek));
+}
+
+TEST(Pki, AcmeNewAccountForAnUnknownCustomerIsRefused) {
+    auto store = std::make_shared<lake::control::InMemoryStore>();
+    lake::api::ServerOptions options;
+    options.port = 0;
+    options.store = store;
+    options.instance_kek = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+    lake::api::ApiServer server(options);
+    ASSERT_TRUE(server.start()) << server.reason();
+
+    AcmeClient client(server.port());
+    const std::string base = "http://127.0.0.1:" + std::to_string(server.port()) + "/acme/" +
+                             lake::control::new_uuid_v4();
+    ASSERT_EQ(client.nonce(base + "/new-nonce").status, 200);
+    const HttpResponse account =
+        client.post(base + "/new-account", {{"termsOfServiceAgreed", true}}, true);
+    EXPECT_EQ(account.status, 404) << account.body;
+    EXPECT_TRUE(header(account, "Location").empty());
+    server.stop();
+}
+
 TEST(PostgresPki, PersistsAndRewrapsCustomerAuthority) {
     const char* uri = lake::test::postgres_uri();
     if (uri == nullptr || std::string(uri).empty()) {
@@ -664,16 +1048,66 @@ TEST(PostgresPki, PersistsAndRewrapsCustomerAuthority) {
     EXPECT_TRUE(after_restart.issue_jwt_svid(
         *store, customer->id, "spiffe://lake.test/postgres", "lake", instance_kek));
 
-    auto ceremony = after_restart.begin_recovery(*store, customer->id, instance_kek, 2, 3);
+    const std::vector<std::string> participants{"taap:1:ed25519:pki-pg-a-" + suffix,
+                                                "taap:1:ed25519:pki-pg-b-" + suffix,
+                                                "taap:1:ed25519:pki-pg-c-" + suffix};
+    auto ceremony =
+        after_restart.begin_recovery(*store, customer->id, instance_kek, 2, participants);
     ASSERT_TRUE(ceremony) << ceremony.error().message;
     const auto pending = store->get_pki_recovery_ceremony(customer->id, ceremony->id);
     ASSERT_TRUE(pending) << pending.error().message;
     EXPECT_FALSE(pending->recovered_at);
-    const std::vector<lake::control::pki::ShamirShare> quorum{ceremony->shares.at(0),
-                                                              ceremony->shares.at(2)};
+    ASSERT_EQ(pending->participants.size(), 3U);
+    EXPECT_EQ(pending->participants[2].principal, participants[2]);
+
+    // Each share is issued once, to its participant, by any process.
     lake::control::pki::Service completing_process;
-    ASSERT_TRUE(
-        completing_process.recover_root(*store, customer->id, instance_kek, *ceremony, quorum));
+    auto first = completing_process.claim_recovery_share(
+        *store, customer->id, instance_kek, ceremony->id, participants[0]);
+    ASSERT_TRUE(first) << first.error().message;
+    EXPECT_EQ(first->index, 1);
+    EXPECT_EQ(
+        completing_process
+            .claim_recovery_share(*store, customer->id, instance_kek, ceremony->id, participants[0])
+            .error()
+            .code,
+        "conflict");
+    EXPECT_EQ(completing_process
+                  .claim_recovery_share(*store,
+                                        customer->id,
+                                        instance_kek,
+                                        ceremony->id,
+                                        "taap:1:ed25519:pki-pg-outsider-" + suffix)
+                  .error()
+                  .code,
+              "forbidden");
+    auto third = after_restart.claim_recovery_share(
+        *store, customer->id, instance_kek, ceremony->id, participants[2]);
+    ASSERT_TRUE(third) << third.error().message;
+    EXPECT_EQ(third->index, 3);
+
+    // One participant cannot present another's share, nor their own twice.
+    EXPECT_EQ(completing_process
+                  .submit_recovery_share(
+                      *store, customer->id, instance_kek, ceremony->id, participants[0], *third)
+                  .error()
+                  .code,
+              "forbidden");
+    auto one = completing_process.submit_recovery_share(
+        *store, customer->id, instance_kek, ceremony->id, participants[0], *first);
+    ASSERT_TRUE(one) << one.error().message;
+    EXPECT_FALSE(one->recovered);
+    EXPECT_EQ(completing_process
+                  .submit_recovery_share(
+                      *store, customer->id, instance_kek, ceremony->id, participants[0], *first)
+                  .error()
+                  .code,
+              "conflict");
+    auto two = after_restart.submit_recovery_share(
+        *store, customer->id, instance_kek, ceremony->id, participants[2], *third);
+    ASSERT_TRUE(two) << two.error().message;
+    EXPECT_TRUE(two->recovered);
+    EXPECT_EQ(two->submitted, 2);
     const auto completed = store->get_pki_recovery_ceremony(customer->id, ceremony->id);
     ASSERT_TRUE(completed) << completed.error().message;
     EXPECT_TRUE(completed->recovered_at);

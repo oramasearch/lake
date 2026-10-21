@@ -260,7 +260,8 @@ protected:
         workspaces = std::make_unique<lake::test::RecordWorkspaces>(store);
         control = std::make_shared<FakeZettaControl>();
         loki = std::make_shared<FakeLoki>();
-        const auto user = store->create_user({"admin", "admin@example.test", "Admin"});
+        const auto user =
+            store->create_user({"taap:1:ed25519:platform-admin", "admin@example.test", "Admin"});
         ASSERT_TRUE(user);
         const auto customer = store->create_customer({"individual", user->id, "", "admin"});
         ASSERT_TRUE(customer);

@@ -8,14 +8,17 @@
 #include <ctime>
 #include <format>
 #include <memory>
+#include <set>
 #include <string>
 #include <utility>
 
 #include <openssl/bio.h>
 #include <openssl/bn.h>
 #include <openssl/core_names.h>
+#include <openssl/crypto.h>
 #include <openssl/ec.h>
 #include <openssl/evp.h>
+#include <openssl/hmac.h>
 #include <openssl/pem.h>
 #include <openssl/rand.h>
 #include <openssl/x509.h>
@@ -571,6 +574,21 @@ Result<std::string> acme_thumbprint(const AcmeJwk& jwk) {
     return base64url_encode(digest.data(), digest_size);
 }
 
+void put_big_endian(char* out, std::uint64_t value) {
+    for (int i = 7; i >= 0; --i) {
+        out[i] = static_cast<char>(value & 0xff);
+        value >>= 8;
+    }
+}
+
+std::uint64_t get_big_endian(const unsigned char* in) {
+    std::uint64_t value = 0;
+    for (int i = 0; i < 8; ++i) {
+        value = (value << 8) | in[i];
+    }
+    return value;
+}
+
 Result<std::string> random_acme_value(std::size_t size) {
     std::vector<unsigned char> bytes(size);
     if (RAND_bytes(bytes.data(), static_cast<int>(bytes.size())) != 1) {
@@ -1017,19 +1035,12 @@ Result<SshCertificate> issue_ssh_certificate(const Authority& authority,
                           serial};
 }
 
-Result<std::vector<ShamirShare>>
-split_secret(const std::vector<std::byte>& secret, int threshold, int share_count) {
-    if (secret.empty() || threshold < 2 || share_count < threshold || share_count > 255) {
-        return std::unexpected(Error{"invalid_input", "invalid Shamir threshold or share count"});
-    }
-    std::vector<std::vector<std::uint8_t>> coefficients(secret.size(),
-                                                        std::vector<std::uint8_t>(threshold));
-    for (std::size_t offset = 0; offset < secret.size(); ++offset) {
-        coefficients[offset][0] = std::to_integer<std::uint8_t>(secret[offset]);
-        if (RAND_bytes(coefficients[offset].data() + 1, threshold - 1) != 1) {
-            return std::unexpected(crypto_error("could not create recovery shares"));
-        }
-    }
+// The shares of a secret whose byte at `offset` is the constant term of the polynomial with the
+// remaining `coefficients[offset]`, evaluated at 1..share_count in GF(2^8).
+std::vector<ShamirShare>
+shares_of_polynomials(const std::vector<std::byte>& secret,
+                      const std::vector<std::vector<std::uint8_t>>& coefficients,
+                      int share_count) {
     std::vector<ShamirShare> shares;
     shares.reserve(static_cast<std::size_t>(share_count));
     for (int index = 1; index <= share_count; ++index) {
@@ -1037,17 +1048,32 @@ split_secret(const std::vector<std::byte>& secret, int threshold, int share_coun
         share.index = index;
         share.value.resize(secret.size());
         for (std::size_t offset = 0; offset < secret.size(); ++offset) {
-            std::uint8_t value = 0;
+            std::uint8_t value = std::to_integer<std::uint8_t>(secret[offset]);
             std::uint8_t x_power = 1;
             for (const std::uint8_t coefficient : coefficients[offset]) {
-                value ^= gf_multiply(coefficient, x_power);
                 x_power = gf_multiply(x_power, static_cast<std::uint8_t>(index));
+                value ^= gf_multiply(coefficient, x_power);
             }
             share.value[offset] = static_cast<std::byte>(value);
         }
         shares.push_back(std::move(share));
     }
     return shares;
+}
+
+Result<std::vector<ShamirShare>>
+split_secret(const std::vector<std::byte>& secret, int threshold, int share_count) {
+    if (secret.empty() || threshold < 2 || share_count < threshold || share_count > 255) {
+        return std::unexpected(Error{"invalid_input", "invalid Shamir threshold or share count"});
+    }
+    std::vector<std::vector<std::uint8_t>> coefficients(secret.size(),
+                                                        std::vector<std::uint8_t>(threshold - 1));
+    for (auto& polynomial : coefficients) {
+        if (RAND_bytes(polynomial.data(), threshold - 1) != 1) {
+            return std::unexpected(crypto_error("could not create recovery shares"));
+        }
+    }
+    return shares_of_polynomials(secret, coefficients, share_count);
 }
 
 Result<std::vector<std::byte>> recover_secret(const std::vector<ShamirShare>& shares,
@@ -1084,37 +1110,59 @@ Result<std::vector<std::byte>> recover_secret(const std::vector<ShamirShare>& sh
     return secret;
 }
 
-Result<RecoveryCeremony>
-recovery_ceremony_for(const Authority& authority, int threshold, int share_count) {
+std::vector<std::byte> root_secret(const Authority& authority) {
     std::vector<std::byte> root;
     root.reserve(authority.root_private_key_pem.size());
     for (const char character : authority.root_private_key_pem) {
         root.push_back(static_cast<std::byte>(character));
     }
-    auto shares = split_secret(root, threshold, share_count);
-    if (!shares) {
-        return std::unexpected(shares.error());
-    }
-    return RecoveryCeremony{new_uuid_v4(), threshold, std::move(*shares)};
+    return root;
 }
 
-Result<void> verify_recovered_root(const Authority& authority,
-                                   const RecoveryCeremony& ceremony,
-                                   const std::vector<ShamirShare>& shares) {
-    auto recovered = recover_secret(shares, ceremony.threshold);
-    if (!recovered) {
-        return std::unexpected(recovered.error());
+// A ceremony's shares (lake#934). Its polynomials' coefficients are derived from the root private
+// key, as RFC 6979 derives a signature nonce: HMAC-SHA256 keyed with the root key over a label,
+// the ceremony id and a block counter. Only a holder of the root can compute them, so Lake keeps
+// no share and gives each participant theirs alone when they claim it.
+Result<std::vector<ShamirShare>> ceremony_shares(const Authority& authority,
+                                                 std::string_view ceremony_id,
+                                                 int threshold,
+                                                 int share_count) {
+    const std::vector<std::byte> secret = root_secret(authority);
+    if (secret.empty() || ceremony_id.empty() || threshold < 2 || share_count < threshold ||
+        share_count > 255) {
+        return std::unexpected(Error{"invalid_input", "invalid Shamir threshold or share count"});
     }
-    std::string root;
-    root.reserve(recovered->size());
-    for (const std::byte byte : *recovered) {
-        root.push_back(static_cast<char>(byte));
+    const std::string& key = authority.root_private_key_pem;
+    std::vector<std::uint8_t> stream;
+    const std::size_t needed = secret.size() * static_cast<std::size_t>(threshold - 1);
+    for (std::uint32_t block = 0; stream.size() < needed; ++block) {
+        std::vector<unsigned char> input;
+        constexpr std::string_view label = "lake root recovery coefficients v1";
+        input.insert(input.end(), label.begin(), label.end());
+        input.push_back(0);
+        input.insert(input.end(), ceremony_id.begin(), ceremony_id.end());
+        input.push_back(0);
+        append_u32(input, block);
+        std::array<unsigned char, EVP_MAX_MD_SIZE> digest{};
+        unsigned int digest_size = 0;
+        if (HMAC(EVP_sha256(),
+                 key.data(),
+                 static_cast<int>(key.size()),
+                 input.data(),
+                 input.size(),
+                 digest.data(),
+                 &digest_size) == nullptr) {
+            return std::unexpected(crypto_error("could not derive recovery shares"));
+        }
+        stream.insert(stream.end(), digest.begin(), digest.begin() + digest_size);
     }
-    if (root != authority.root_private_key_pem) {
-        return std::unexpected(
-            Error{"unauthorized", "recovery shares do not restore the customer root"});
+    std::vector<std::vector<std::uint8_t>> coefficients(secret.size());
+    auto next = stream.begin();
+    for (auto& polynomial : coefficients) {
+        polynomial.assign(next, next + (threshold - 1));
+        next += threshold - 1;
     }
-    return {};
+    return shares_of_polynomials(secret, coefficients, share_count);
 }
 
 Result<PkiRecoveryShareEvidence> recovery_evidence(const ShamirShare& share) {
@@ -1409,111 +1457,185 @@ Result<SshCertificate> Service::issue_ssh_certificate(::lake::control::Store& st
         *authority, public_key, key_id, principals, host, lifetime_seconds);
 }
 
-Result<RecoveryCeremony>
-Service::begin_recovery(std::string_view customer_id, int threshold, int share_count) {
-    std::lock_guard lock(mutex_);
-    const auto authority = authorities_.find(std::string(customer_id));
-    if (authority == authorities_.end()) {
-        return std::unexpected(Error{"not_found", "customer certificate authority does not exist"});
-    }
-    return recovery_ceremony_for(authority->second, threshold, share_count);
-}
-
 Result<RecoveryCeremony> Service::begin_recovery(::lake::control::Store& store,
                                                  std::string_view customer_id,
                                                  std::string_view instance_kek,
                                                  int threshold,
-                                                 int share_count) {
+                                                 const std::vector<std::string>& participants) {
+    const std::set<std::string> distinct(participants.begin(), participants.end());
+    if (distinct.size() != participants.size() || distinct.contains("")) {
+        return std::unexpected(
+            Error{"invalid_input", "recovery participants must be distinct principals"});
+    }
+    const int share_count = static_cast<int>(participants.size());
     auto authority = load_authority(store, customer_id, instance_kek);
     if (!authority) {
         return std::unexpected(authority.error());
     }
-    auto ceremony = recovery_ceremony_for(*authority, threshold, share_count);
-    if (!ceremony) {
-        return std::unexpected(ceremony.error());
+    RecoveryCeremony ceremony{new_uuid_v4(), threshold, participants, {}};
+    // Prove the derivation restores this root before any participant relies on it.
+    auto shares = ceremony_shares(*authority, ceremony.id, threshold, share_count);
+    if (!shares) {
+        return std::unexpected(shares.error());
+    }
+    shares->resize(static_cast<std::size_t>(threshold));
+    auto restored = recover_secret(*shares, threshold);
+    if (!restored || *restored != root_secret(*authority)) {
+        return std::unexpected(crypto_error("recovery shares do not restore the customer root"));
     }
     const auto expires_at = std::chrono::system_clock::now() + std::chrono::minutes(15);
-    auto record = store.create_pki_recovery_ceremony(NewPkiRecoveryCeremonyRecord{
-        ceremony->id,
-        std::string(customer_id),
-        threshold,
-        share_count,
-        std::format("{:%FT%TZ}", std::chrono::floor<std::chrono::seconds>(expires_at))});
+    ceremony.expires_at =
+        std::format("{:%FT%TZ}", std::chrono::floor<std::chrono::seconds>(expires_at));
+    auto record =
+        store.create_pki_recovery_ceremony(NewPkiRecoveryCeremonyRecord{ceremony.id,
+                                                                        std::string(customer_id),
+                                                                        threshold,
+                                                                        share_count,
+                                                                        ceremony.expires_at,
+                                                                        participants});
     if (!record) {
         return std::unexpected(Error{record.error().code, record.error().message});
     }
     return ceremony;
 }
 
-Result<void> Service::recover_root(std::string_view customer_id,
-                                   const RecoveryCeremony& ceremony,
-                                   const std::vector<ShamirShare>& shares) {
-    std::lock_guard lock(mutex_);
-    const auto authority = authorities_.find(std::string(customer_id));
-    if (authority == authorities_.end()) {
-        return std::unexpected(Error{"not_found", "customer certificate authority does not exist"});
-    }
-    return verify_recovered_root(authority->second, ceremony, shares);
-}
-
-Result<void> Service::recover_root(::lake::control::Store& store,
-                                   std::string_view customer_id,
-                                   std::string_view instance_kek,
-                                   const RecoveryCeremony& ceremony,
-                                   const std::vector<ShamirShare>& shares) {
-    auto record = store.get_pki_recovery_ceremony(std::string(customer_id), ceremony.id);
+Result<ShamirShare> Service::claim_recovery_share(::lake::control::Store& store,
+                                                  std::string_view customer_id,
+                                                  std::string_view instance_kek,
+                                                  std::string_view ceremony_id,
+                                                  std::string_view participant) {
+    auto record =
+        store.get_pki_recovery_ceremony(std::string(customer_id), std::string(ceremony_id));
     if (!record) {
         return std::unexpected(Error{record.error().code, record.error().message});
-    }
-    if (record->threshold != ceremony.threshold) {
-        return std::unexpected(
-            Error{"invalid_input", "recovery threshold does not match ceremony"});
     }
     auto authority = load_authority(store, customer_id, instance_kek);
     if (!authority) {
         return std::unexpected(authority.error());
     }
-    RecoveryCeremony persisted{record->id, record->threshold, {}};
-    auto verified = verify_recovered_root(*authority, persisted, shares);
-    if (!verified) {
-        return std::unexpected(verified.error());
+    auto shares = ceremony_shares(*authority, record->id, record->threshold, record->share_count);
+    if (!shares) {
+        return std::unexpected(shares.error());
     }
-    std::vector<PkiRecoveryShareEvidence> evidence;
-    evidence.reserve(shares.size());
-    for (const ShamirShare& share : shares) {
-        auto digest = recovery_evidence(share);
-        if (!digest) {
-            return std::unexpected(digest.error());
-        }
-        evidence.push_back(std::move(*digest));
+    // The store issues the share once, to its participant, while the ceremony is active.
+    auto index = store.claim_pki_recovery_share(
+        std::string(customer_id), std::string(ceremony_id), std::string(participant));
+    if (!index) {
+        return std::unexpected(Error{index.error().code, index.error().message});
     }
-    auto completed =
-        store.complete_pki_recovery_ceremony(std::string(customer_id), ceremony.id, evidence);
-    if (!completed) {
-        return std::unexpected(Error{completed.error().code, completed.error().message});
+    if (*index < 1 || *index > static_cast<int>(shares->size())) {
+        return std::unexpected(Error{"corrupt", "recovery participant has no share"});
     }
-    return {};
+    return std::move(shares->at(static_cast<std::size_t>(*index - 1)));
+}
+
+Result<RecoverySubmission> Service::submit_recovery_share(::lake::control::Store& store,
+                                                          std::string_view customer_id,
+                                                          std::string_view instance_kek,
+                                                          std::string_view ceremony_id,
+                                                          std::string_view participant,
+                                                          const ShamirShare& share) {
+    auto record =
+        store.get_pki_recovery_ceremony(std::string(customer_id), std::string(ceremony_id));
+    if (!record) {
+        return std::unexpected(Error{record.error().code, record.error().message});
+    }
+    auto authority = load_authority(store, customer_id, instance_kek);
+    if (!authority) {
+        return std::unexpected(authority.error());
+    }
+    auto shares = ceremony_shares(*authority, record->id, record->threshold, record->share_count);
+    if (!shares) {
+        return std::unexpected(shares.error());
+    }
+    const bool own_share = std::ranges::any_of(record->participants, [&](const auto& value) {
+        return value.principal == participant && value.index == share.index;
+    });
+    if (!own_share || share.index > static_cast<int>(shares->size())) {
+        return std::unexpected(Error{"forbidden", "the caller is not this share's participant"});
+    }
+    const ShamirShare& expected = shares->at(static_cast<std::size_t>(share.index - 1));
+    if (share.value.size() != expected.value.size() ||
+        CRYPTO_memcmp(share.value.data(), expected.value.data(), expected.value.size()) != 0) {
+        return std::unexpected(
+            Error{"unauthorized", "recovery share does not belong to this ceremony"});
+    }
+    auto digest = recovery_evidence(share);
+    if (!digest) {
+        return std::unexpected(digest.error());
+    }
+    // The store accepts it only from the share's own participant, once, after it was issued.
+    auto submitted = store.submit_pki_recovery_share(
+        std::string(customer_id), std::string(ceremony_id), std::string(participant), *digest);
+    if (!submitted) {
+        return std::unexpected(Error{submitted.error().code, submitted.error().message});
+    }
+    const auto count =
+        std::ranges::count_if(submitted->participants, &PkiRecoveryParticipant::submitted);
+    return RecoverySubmission{
+        static_cast<int>(count), submitted->threshold, submitted->recovered_at.has_value()};
 }
 
 Result<std::string> Service::new_acme_nonce() {
-    auto nonce = random_acme_value(16);
-    if (!nonce) {
-        return std::unexpected(nonce.error());
+    if (!acme_nonce_key_ready_) {
+        return std::unexpected(crypto_error("ACME nonce key is unavailable"));
     }
-    std::lock_guard lock(mutex_);
-    acme_nonces_.insert(*nonce);
-    return nonce;
+    const std::uint64_t counter = acme_nonce_counter_.fetch_add(1) + 1;
+    const std::int64_t issued_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                       acme_limits_.clock().time_since_epoch())
+                                       .count();
+    auto mac = acme_nonce_mac(counter, issued_ms);
+    if (!mac) {
+        return std::unexpected(mac.error());
+    }
+    std::string nonce(16, '\0');
+    put_big_endian(nonce.data(), counter);
+    put_big_endian(nonce.data() + 8, static_cast<std::uint64_t>(issued_ms));
+    nonce += *mac;
+    return base64url_encode(reinterpret_cast<const unsigned char*>(nonce.data()), nonce.size());
 }
 
 Result<void> Service::consume_acme_nonce(std::string_view nonce) {
+    const Error refused{"unauthorized", "ACME nonce is missing or was already used"};
+    // A nonce is exactly the 32 bytes new_acme_nonce encodes, in that one encoding.
+    if (!acme_nonce_key_ready_ || nonce.size() != 43) {
+        return std::unexpected(refused);
+    }
+    auto decoded = base64url_decode(std::string(nonce));
+    if (!decoded || decoded->size() != 32) {
+        return std::unexpected(refused);
+    }
+    auto canonical = base64url_encode(decoded->data(), decoded->size());
+    if (!canonical || *canonical != nonce) {
+        return std::unexpected(refused);
+    }
+    const std::uint64_t counter = get_big_endian(decoded->data());
+    const auto issued_ms = static_cast<std::int64_t>(get_big_endian(decoded->data() + 8));
+    auto mac = acme_nonce_mac(counter, issued_ms);
+    if (!mac || CRYPTO_memcmp(mac->data(), decoded->data() + 16, mac->size()) != 0) {
+        return std::unexpected(refused);
+    }
+    const AcmeTime issued{
+        std::chrono::duration_cast<AcmeTime::duration>(std::chrono::milliseconds(issued_ms))};
     std::lock_guard lock(mutex_);
-    if (acme_nonces_.erase(std::string(nonce)) != 1) {
-        return std::unexpected(Error{"unauthorized", "ACME nonce is missing or was already used"});
+    const AcmeTime now = acme_limits_.clock();
+    prune_acme_locked(now);
+    if (issued > now || now - issued >= acme_limits_.nonce_lifetime ||
+        counter < acme_nonce_floor_ || !acme_used_nonces_.emplace(counter, issued).second) {
+        return std::unexpected(refused);
+    }
+    // Forgetting the oldest consumed nonce refuses every nonce issued before it, so none can be
+    // replayed once it is forgotten.
+    while (acme_used_nonces_.size() > acme_limits_.used_nonces) {
+        acme_nonce_floor_ = acme_used_nonces_.begin()->first + 1;
+        acme_used_nonces_.erase(acme_used_nonces_.begin());
     }
     return {};
 }
 
-Result<AcmeAccount> Service::create_acme_account(std::string_view customer_id, const AcmeJwk& jwk) {
+Result<AcmeAccount> Service::create_acme_account(::lake::control::Store& store,
+                                                 std::string_view customer_id,
+                                                 const AcmeJwk& jwk) {
     if (customer_id.empty()) {
         return std::unexpected(Error{"invalid_input", "ACME customer is required"});
     }
@@ -1521,9 +1643,31 @@ Result<AcmeAccount> Service::create_acme_account(std::string_view customer_id, c
     if (!key) {
         return std::unexpected(key.error());
     }
+    if (auto customer = store.get_customer(std::string(customer_id)); !customer) {
+        return std::unexpected(customer.error().code == "not_found"
+                                   ? Error{"not_found", "ACME customer does not exist"}
+                                   : Error{customer.error().code, customer.error().message});
+    }
     AcmeAccount account{new_uuid_v4(), std::string(customer_id), jwk};
     std::lock_guard lock(mutex_);
-    acme_accounts_.emplace(account.id, account);
+    const AcmeTime now = acme_limits_.clock();
+    prune_acme_locked(now);
+    for (auto owned = acme_customer_accounts_.find(account.customer_id);
+         owned != acme_customer_accounts_.end() &&
+         owned->second.size() >= acme_limits_.accounts_per_customer;
+         owned = acme_customer_accounts_.find(account.customer_id)) {
+        const std::string least_recent =
+            *std::ranges::min_element(owned->second, {}, [&](const std::string& id) {
+                return acme_accounts_.at(id).last_used;
+            });
+        remove_acme_account_locked(least_recent);
+    }
+    while (!acme_account_use_.empty() && acme_accounts_.size() >= acme_limits_.accounts) {
+        remove_acme_account_locked(std::string(acme_account_use_.begin()->second));
+    }
+    acme_customer_accounts_[account.customer_id].push_back(account.id);
+    acme_accounts_.emplace(account.id, AcmeAccountEntry{account, now, {}});
+    acme_account_use_.emplace(now, account.id);
     return account;
 }
 
@@ -1536,18 +1680,27 @@ Result<void> Service::verify_acme_signature(std::string_view account_id,
         selected = *jwk;
     } else {
         std::lock_guard lock(mutex_);
+        prune_acme_locked(acme_limits_.clock());
         const auto account = acme_accounts_.find(std::string(account_id));
         if (account == acme_accounts_.end()) {
             return std::unexpected(Error{"unauthorized", "ACME account does not exist"});
         }
-        selected = account->second.jwk;
+        selected = account->second.account.jwk;
     }
     auto key = key_from_acme_jwk(selected);
     auto raw_signature = base64url_decode(std::string(signature));
     if (!key || !raw_signature) {
         return std::unexpected(Error{"unauthorized", "ACME JWS is invalid"});
     }
-    return verify_jws(key->get(), signing_input, *raw_signature);
+    auto verified = verify_jws(key->get(), signing_input, *raw_signature);
+    if (verified && !jwk) {
+        std::lock_guard lock(mutex_);
+        const auto account = acme_accounts_.find(std::string(account_id));
+        if (account != acme_accounts_.end()) {
+            touch_acme_account_locked(account->second, acme_limits_.clock());
+        }
+    }
+    return verified;
 }
 
 Result<AcmeOrder> Service::create_acme_order(::lake::control::Store& store,
@@ -1567,13 +1720,20 @@ Result<AcmeOrder> Service::create_acme_order(::lake::control::Store& store,
         return std::unexpected(token.error());
     }
     std::lock_guard lock(mutex_);
+    const AcmeTime now = acme_limits_.clock();
+    prune_acme_locked(now);
     const auto account = acme_accounts_.find(std::string(account_id));
-    if (account == acme_accounts_.end() || account->second.customer_id != customer_id) {
+    if (account == acme_accounts_.end() || account->second.account.customer_id != customer_id) {
         return std::unexpected(Error{"unauthorized", "ACME account does not own this customer"});
     }
-    auto thumbprint = acme_thumbprint(account->second.jwk);
+    auto thumbprint = acme_thumbprint(account->second.account.jwk);
     if (!thumbprint) {
         return std::unexpected(thumbprint.error());
+    }
+    touch_acme_account_locked(account->second, now);
+    while (!account->second.orders.empty() &&
+           account->second.orders.size() >= acme_limits_.orders_per_account) {
+        remove_acme_order_locked(std::string(account->second.orders.front()));
     }
     const std::string order_id = new_uuid_v4();
     const std::string authorization_id = new_uuid_v4();
@@ -1590,8 +1750,12 @@ Result<AcmeOrder> Service::create_acme_order(::lake::control::Store& store,
                                     *token,
                                     *token + "." + *thumbprint,
                                     "pending"};
-    acme_orders_.emplace(order.id, order);
+    const AcmeTime expires_at = now + acme_limits_.order_lifetime;
+    acme_orders_.emplace(order.id, AcmeOrderEntry{order, expires_at});
+    acme_order_expiry_.emplace(expires_at, order.id);
     acme_authorizations_.emplace(authorization.id, authorization);
+    acme_tokens_.emplace(authorization.token, authorization.id);
+    account->second.orders.push_back(order.id);
     return order;
 }
 
@@ -1599,25 +1763,23 @@ Result<AcmeOrder> Service::acme_order(std::string_view customer_id,
                                       std::string_view account_id,
                                       std::string_view order_id) {
     std::lock_guard lock(mutex_);
-    const auto order = acme_orders_.find(std::string(order_id));
-    if (order == acme_orders_.end() || order->second.customer_id != customer_id ||
-        order->second.account_id != account_id) {
+    prune_acme_locked(acme_limits_.clock());
+    const AcmeOrderEntry* order = find_acme_order_locked(customer_id, account_id, order_id);
+    if (order == nullptr) {
         return std::unexpected(Error{"not_found", "ACME order does not exist"});
     }
-    return order->second;
+    return order->order;
 }
 
 Result<AcmeAuthorization> Service::acme_authorization(std::string_view customer_id,
                                                       std::string_view account_id,
                                                       std::string_view authorization_id) {
     std::lock_guard lock(mutex_);
+    prune_acme_locked(acme_limits_.clock());
     const auto authorization = acme_authorizations_.find(std::string(authorization_id));
-    if (authorization == acme_authorizations_.end()) {
-        return std::unexpected(Error{"not_found", "ACME authorization does not exist"});
-    }
-    const auto order = acme_orders_.find(authorization->second.order_id);
-    if (order == acme_orders_.end() || order->second.customer_id != customer_id ||
-        order->second.account_id != account_id) {
+    if (authorization == acme_authorizations_.end() ||
+        find_acme_order_locked(customer_id, account_id, authorization->second.order_id) ==
+            nullptr) {
         return std::unexpected(Error{"not_found", "ACME authorization does not exist"});
     }
     return authorization->second;
@@ -1627,28 +1789,28 @@ Result<AcmeAuthorization> Service::authorize_acme_order(std::string_view custome
                                                         std::string_view account_id,
                                                         std::string_view authorization_id) {
     std::lock_guard lock(mutex_);
+    prune_acme_locked(acme_limits_.clock());
     const auto authorization = acme_authorizations_.find(std::string(authorization_id));
-    if (authorization == acme_authorizations_.end()) {
-        return std::unexpected(Error{"not_found", "ACME authorization does not exist"});
-    }
-    const auto order = acme_orders_.find(authorization->second.order_id);
-    if (order == acme_orders_.end() || order->second.customer_id != customer_id ||
-        order->second.account_id != account_id) {
+    AcmeOrderEntry* order =
+        authorization == acme_authorizations_.end()
+            ? nullptr
+            : find_acme_order_locked(customer_id, account_id, authorization->second.order_id);
+    if (order == nullptr) {
         return std::unexpected(Error{"not_found", "ACME authorization does not exist"});
     }
     authorization->second.status = "valid";
-    order->second.status = "ready";
+    order->order.status = "ready";
     return authorization->second;
 }
 
 Result<std::string> Service::acme_http01_response(std::string_view token) {
     std::lock_guard lock(mutex_);
-    const auto authorization = std::ranges::find_if(
-        acme_authorizations_, [&](const auto& value) { return value.second.token == token; });
-    if (authorization == acme_authorizations_.end()) {
+    prune_acme_locked(acme_limits_.clock());
+    const auto authorization = acme_tokens_.find(std::string(token));
+    if (authorization == acme_tokens_.end()) {
         return std::unexpected(Error{"not_found", "ACME HTTP-01 token does not exist"});
     }
-    return authorization->second.key_authorization;
+    return acme_authorizations_.at(authorization->second).key_authorization;
 }
 
 Result<AcmeOrder> Service::finalize_acme_order(::lake::control::Store& store,
@@ -1660,12 +1822,12 @@ Result<AcmeOrder> Service::finalize_acme_order(::lake::control::Store& store,
     AcmeOrder pending;
     {
         std::lock_guard lock(mutex_);
-        const auto order = acme_orders_.find(std::string(order_id));
-        if (order == acme_orders_.end() || order->second.customer_id != customer_id ||
-            order->second.account_id != account_id || order->second.status != "ready") {
+        prune_acme_locked(acme_limits_.clock());
+        const AcmeOrderEntry* order = find_acme_order_locked(customer_id, account_id, order_id);
+        if (order == nullptr || order->order.status != "ready") {
             return std::unexpected(Error{"invalid_input", "ACME order is not ready to finalize"});
         }
-        pending = order->second;
+        pending = order->order;
     }
     auto authority = load_authority(store, pending.customer_id, instance_kek);
     if (!authority) {
@@ -1676,13 +1838,122 @@ Result<AcmeOrder> Service::finalize_acme_order(::lake::control::Store& store,
         return std::unexpected(certificate.error());
     }
     std::lock_guard lock(mutex_);
-    const auto order = acme_orders_.find(std::string(order_id));
-    if (order == acme_orders_.end() || order->second.status != "ready") {
+    prune_acme_locked(acme_limits_.clock());
+    AcmeOrderEntry* order = find_acme_order_locked(customer_id, account_id, order_id);
+    if (order == nullptr || order->order.status != "ready") {
         return std::unexpected(Error{"conflict", "ACME order changed during finalization"});
     }
-    order->second.status = "valid";
-    order->second.certificate_pem = certificate->certificate_pem + certificate->chain_pem;
-    return order->second;
+    order->order.status = "valid";
+    order->order.certificate_pem = certificate->certificate_pem + certificate->chain_pem;
+    return order->order;
+}
+
+AcmeStateSize Service::acme_state_size() {
+    std::lock_guard lock(mutex_);
+    prune_acme_locked(acme_limits_.clock());
+    return {acme_used_nonces_.size(),
+            acme_accounts_.size(),
+            acme_orders_.size(),
+            acme_authorizations_.size()};
+}
+
+Service::Service(AcmeLimits acme_limits) : acme_limits_(std::move(acme_limits)) {
+    if (!acme_limits_.clock) {
+        acme_limits_.clock = std::chrono::steady_clock::now;
+    }
+    acme_nonce_key_ready_ =
+        RAND_bytes(acme_nonce_key_.data(), static_cast<int>(acme_nonce_key_.size())) == 1;
+}
+
+// The first 16 bytes of HMAC-SHA-256(key, counter || issued_ms), both big-endian.
+Result<std::string> Service::acme_nonce_mac(std::uint64_t counter, std::int64_t issued_ms) const {
+    std::array<unsigned char, 16> message{};
+    put_big_endian(reinterpret_cast<char*>(message.data()), counter);
+    put_big_endian(reinterpret_cast<char*>(message.data() + 8),
+                   static_cast<std::uint64_t>(issued_ms));
+    std::array<unsigned char, EVP_MAX_MD_SIZE> digest{};
+    unsigned digest_size = 0;
+    if (HMAC(EVP_sha256(),
+             acme_nonce_key_.data(),
+             static_cast<int>(acme_nonce_key_.size()),
+             message.data(),
+             message.size(),
+             digest.data(),
+             &digest_size) == nullptr ||
+        digest_size < 16) {
+        return std::unexpected(crypto_error("could not authenticate ACME nonce"));
+    }
+    return std::string(reinterpret_cast<const char*>(digest.data()), 16);
+}
+
+// Drop consumed nonces past their lifetime, idle accounts and expired orders. Each index is
+// ordered by time, so the cost is proportional to what is dropped.
+void Service::prune_acme_locked(AcmeTime now) {
+    while (!acme_used_nonces_.empty() &&
+           acme_used_nonces_.begin()->second + acme_limits_.nonce_lifetime <= now) {
+        acme_used_nonces_.erase(acme_used_nonces_.begin());
+    }
+    while (!acme_order_expiry_.empty() && acme_order_expiry_.begin()->first <= now) {
+        remove_acme_order_locked(std::string(acme_order_expiry_.begin()->second));
+    }
+    while (!acme_account_use_.empty() &&
+           acme_account_use_.begin()->first + acme_limits_.account_idle_lifetime <= now) {
+        remove_acme_account_locked(std::string(acme_account_use_.begin()->second));
+    }
+}
+
+void Service::touch_acme_account_locked(AcmeAccountEntry& entry, AcmeTime now) {
+    acme_account_use_.erase({entry.last_used, entry.account.id});
+    entry.last_used = now;
+    acme_account_use_.emplace(now, entry.account.id);
+}
+
+void Service::remove_acme_account_locked(const std::string& account_id) {
+    const auto account = acme_accounts_.find(account_id);
+    if (account == acme_accounts_.end()) {
+        return;
+    }
+    for (const std::string& order_id : std::vector<std::string>(account->second.orders)) {
+        remove_acme_order_locked(order_id);
+    }
+    const auto owned = acme_customer_accounts_.find(account->second.account.customer_id);
+    if (owned != acme_customer_accounts_.end()) {
+        std::erase(owned->second, account_id);
+        if (owned->second.empty()) {
+            acme_customer_accounts_.erase(owned);
+        }
+    }
+    acme_account_use_.erase({account->second.last_used, account_id});
+    acme_accounts_.erase(account);
+}
+
+void Service::remove_acme_order_locked(const std::string& order_id) {
+    const auto order = acme_orders_.find(order_id);
+    if (order == acme_orders_.end()) {
+        return;
+    }
+    const auto authorization = acme_authorizations_.find(order->second.order.authorization_id);
+    if (authorization != acme_authorizations_.end()) {
+        acme_tokens_.erase(authorization->second.token);
+        acme_authorizations_.erase(authorization);
+    }
+    const auto account = acme_accounts_.find(order->second.order.account_id);
+    if (account != acme_accounts_.end()) {
+        std::erase(account->second.orders, order_id);
+    }
+    acme_order_expiry_.erase({order->second.expires_at, order_id});
+    acme_orders_.erase(order);
+}
+
+Service::AcmeOrderEntry* Service::find_acme_order_locked(std::string_view customer_id,
+                                                         std::string_view account_id,
+                                                         std::string_view order_id) {
+    const auto order = acme_orders_.find(std::string(order_id));
+    if (order == acme_orders_.end() || order->second.order.customer_id != customer_id ||
+        order->second.order.account_id != account_id) {
+        return nullptr;
+    }
+    return &order->second;
 }
 
 } // namespace lake::control::pki

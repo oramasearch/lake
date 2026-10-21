@@ -82,6 +82,7 @@ public:
     Result<std::vector<Organization>> list_organizations(int limit) override;
     Result<Organization> get_organization(const std::string& id) override;
     Result<OrganizationDeletion> delete_organization(const std::string& id, bool dry_run) override;
+    Result<AccountDeletion> delete_account(const std::string& user_id, bool dry_run) override;
     Result<Customer> create_customer(const NewCustomer&) override;
     Result<std::vector<Customer>> list_customers(int limit,
                                                  const std::string& user_id = {}) override;
@@ -134,6 +135,8 @@ public:
                                                              int limit) override;
     Result<PolicyObject> create_policy_object(const NewPolicyObject&) override;
     Result<PolicyObject> get_policy_object(const std::string& id) override;
+    Result<PolicyObject> set_policy_object_parent(const std::string& id,
+                                                  const std::string& parent_id) override;
     Result<PolicyObject> find_policy_object(const std::string& object_type,
                                             const std::string& external_id) override;
     Result<std::vector<PolicyObject>> list_policy_objects(const std::string& parent_id,
@@ -279,6 +282,10 @@ public:
     Result<AgentLaunch> withdraw_agent_launch(const std::string& id) override;
     Result<std::size_t> expire_unstarted_agent_launches(std::int64_t seconds,
                                                         const std::string& reason) override;
+    Result<AgentWorkloadsWithdrawn> withdraw_agent_workloads(const std::string& customer_id,
+                                                             const std::string& workspace_id,
+                                                             const std::string& agent_id,
+                                                             const std::string& reason) override;
     // Moves a launch's creation time back, as if it had been waiting `seconds`; tests only.
     Result<void> age_agent_launch(const std::string& id, std::int64_t seconds);
     // What the operator writes to agent_launch_status; tests and local demos call it directly.
@@ -453,10 +460,14 @@ public:
     Result<PkiRecoveryCeremonyRecord>
     get_pki_recovery_ceremony(const std::string& customer_id,
                               const std::string& ceremony_id) override;
+    Result<int> claim_pki_recovery_share(const std::string& customer_id,
+                                         const std::string& ceremony_id,
+                                         const std::string& principal) override;
     Result<PkiRecoveryCeremonyRecord>
-    complete_pki_recovery_ceremony(const std::string& customer_id,
-                                   const std::string& ceremony_id,
-                                   const std::vector<PkiRecoveryShareEvidence>& evidence) override;
+    submit_pki_recovery_share(const std::string& customer_id,
+                              const std::string& ceremony_id,
+                              const std::string& principal,
+                              const PkiRecoveryShareEvidence& evidence) override;
     Result<SecretMountRoute> create_secret_mount_route(const SecretMountRoute& value) override;
     Result<SecretMountRoute> get_secret_mount_route(const std::string& mount_id) override;
     Result<void> delete_secret_mount_route(const std::string& mount_id) override;
@@ -486,6 +497,8 @@ public:
     Result<std::vector<SecretLeaseRoute>> claim_due_secret_leases(int limit,
                                                                   int hold_seconds) override;
     Result<IssuedSession> sign_up_password(const NewPasswordUser&) override;
+    Result<IdentityProofChallenge> begin_identity_proof(const std::string& pool_id,
+                                                        const std::string& document) override;
     Result<IssuedSession> sign_in_password(const PasswordSignIn&) override;
     Result<IssuedSession> sign_in_taap(const TaapSignIn&) override;
     Result<MfaEnrollment> enroll_mfa(const std::string& user_id,
@@ -494,6 +507,9 @@ public:
                              const std::string& pool_id,
                              const std::string& code) override;
     Result<bool> mfa_enrolled(const std::string& user_id, const std::string& pool_id) override;
+    Result<void> verify_mfa_code(const std::string& user_id,
+                                 const std::string& pool_id,
+                                 const std::string& code) override;
     Result<IssuedSession> sign_in_totp(const PasswordSignIn&) override;
     Result<WebAuthnChallenge> begin_passkey_registration(const std::string& user_id,
                                                          const std::string& pool_id,
@@ -527,6 +543,8 @@ public:
     Result<OAuthProvider> get_oauth_provider(const std::string& pool_id,
                                              const std::string& provider) override;
     Result<void> begin_oauth(const OAuthFlow&) override;
+    Result<void> begin_saml(const SamlRequest&) override;
+    Result<SamlRequest> consume_saml(const SamlAnswer&) override;
     Result<OAuthFlow> consume_oauth(const std::string& provider, const std::string& state) override;
     Result<IssuedSession> create_token(const NewToken&) override;
     Result<std::vector<Session>> list_sessions(const std::string& user_id,
@@ -535,6 +553,7 @@ public:
     Result<std::vector<Device>> list_devices(const std::string& user_id) override;
     Result<void> revoke_device(const std::string& user_id, const std::string& device_id) override;
     Result<Principal> context_for(const std::string& secret) override;
+    Result<Principal> resolve_principal(const std::string& secret);
     Result<OfflineGrant> issue_offline_grant(const NewOfflineGrant& grant) override;
     Result<std::vector<OfflineGrant>> list_offline_grants(const std::string& user_id) override;
     Result<OfflineGrant> get_offline_grant(const std::string& id) override;
@@ -630,6 +649,8 @@ private:
     std::vector<Organization> organizations_;
     // Organizations deleted by delete_organization and their spaces (lake#645): kept, never read.
     std::set<std::string> deleted_organizations_, deleted_customers_;
+    // Accounts deleted by delete_account (lake#810): kept, email and name erased, never read.
+    std::set<std::string> deleted_users_;
     std::vector<Customer> customers_;
     std::vector<Repository> repositories_; // routing rows: no description (lake#315 part 2)
     // Audit event id -> (workspace, outcome), as workspace_assignments holds them (lake#317).
@@ -771,6 +792,14 @@ private:
         bool used = false;
     };
     std::vector<OAuthFlowRecord> oauth_flows_;
+    struct SamlRequestRecord {
+        SamlRequest request;
+        std::chrono::steady_clock::time_point expires_at;
+        bool used = false;
+    };
+    std::vector<SamlRequestRecord> saml_requests_;
+    // (provider id, assertion id) to the assertion's expiry in Unix seconds.
+    std::map<std::pair<std::string, std::string>, std::int64_t> saml_assertions_;
     std::vector<Device> devices_;
     std::vector<Session> sessions_;
     std::vector<std::pair<std::string, std::string>> session_secrets_;

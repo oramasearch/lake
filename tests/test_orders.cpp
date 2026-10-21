@@ -462,15 +462,18 @@ TEST(OrdersForm, StatusLinksAreBoundToTheOrderAndTheKey) {
 TEST(OrdersForm, TheRateLimitIsPerClientAndInAll) {
     OrderRateLimiter limiter(2, 3);
     const auto start = std::chrono::steady_clock::now();
-    EXPECT_TRUE(limiter.allow("1.1.1.1", start));
-    EXPECT_TRUE(limiter.allow("1.1.1.1", start));
-    EXPECT_FALSE(limiter.allow("1.1.1.1", start)) << "two an hour from one address";
-    EXPECT_TRUE(limiter.allow("2.2.2.2", start));
-    EXPECT_FALSE(limiter.allow("3.3.3.3", start)) << "three an hour in all";
+    EXPECT_TRUE(limiter.allow("1.1.1.1", "order_form", start));
+    EXPECT_TRUE(limiter.allow("1.1.1.1", "order_form", start));
+    EXPECT_FALSE(limiter.allow("1.1.1.1", "order_form", start)) << "two an hour from one address";
+    EXPECT_TRUE(limiter.allow("2.2.2.2", "order_form", start));
+    EXPECT_FALSE(limiter.allow("3.3.3.3", "order_form", start)) << "three an hour in all";
+    // lake#838: order forms that used up their cap cannot block a checkout order.
+    EXPECT_TRUE(limiter.allow("3.3.3.3", "checkout", start));
+    EXPECT_TRUE(limiter.allow("4.4.4.4", "checkout", start));
     // An hour later the window has moved on.
     const auto later = start + std::chrono::minutes(61);
-    EXPECT_TRUE(limiter.allow("1.1.1.1", later));
-    EXPECT_TRUE(limiter.allow("3.3.3.3", later));
+    EXPECT_TRUE(limiter.allow("1.1.1.1", "order_form", later));
+    EXPECT_TRUE(limiter.allow("3.3.3.3", "order_form", later));
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -1263,7 +1266,7 @@ Response send(unsigned short port,
 }
 
 const std::map<std::string, std::string> form_headers{
-    {"Content-Type", "application/x-www-form-urlencoded"}, {"CF-Connecting-IP", "203.0.113.7"}};
+    {"Content-Type", "application/x-www-form-urlencoded"}, {"X-Real-IP", "203.0.113.7"}};
 
 struct OrderRig {
     FakeCheckout stripe;
@@ -1272,7 +1275,10 @@ struct OrderRig {
         std::make_shared<lake::control::InMemoryStore>();
     std::unique_ptr<ApiServer> server;
 
-    explicit OrderRig(bool with_resend = true, int per_client = 5, bool billing = true) {
+    explicit OrderRig(bool with_resend = true,
+                      int per_client = 5,
+                      bool billing = true,
+                      int per_hour = 60) {
         ServerOptions options;
         options.port = 0;
         options.store = store;
@@ -1281,6 +1287,7 @@ struct OrderRig {
         options.billing = billing;
         options.payment_providers = stripe.providers();
         options.order_sheet.orders_per_client_per_hour = per_client;
+        options.order_sheet.orders_per_hour = per_hour;
         if (with_resend) {
             options.resend = resend_settings();
         }
@@ -1573,6 +1580,35 @@ TEST(OrdersApex, AFailedCheckoutCancelsTheOrderAndOffersTheForm) {
     EXPECT_EQ(no_card.status, 400);
 }
 
+// lake#838: order forms that used up the hour's cap, from many addresses, cannot block a checkout
+// order: it is still recorded and sent to Stripe.
+TEST(OrdersApex, OrderFormsCannotUseUpTheCheckoutCap) {
+    OrderRig rig(true, 100, true, 2);
+    const std::string order_form = "offer=on_prem&path=order_form&contact_name=Ada&contact_email="
+                                   "ada%40example.com&details=Bare+metal";
+    for (const char* address : {"198.51.100.11", "198.51.100.12"}) {
+        auto headers = form_headers;
+        headers["X-Real-IP"] = address;
+        EXPECT_EQ(send(rig.port(), "POST", "/order", "lake.live", headers, order_form).status, 200);
+    }
+    auto spammer = form_headers;
+    spammer["X-Real-IP"] = "198.51.100.13";
+    EXPECT_EQ(send(rig.port(), "POST", "/order", "lake.live", spammer, order_form).status, 429)
+        << "the order forms' cap is used up";
+    auto customer = form_headers;
+    customer["X-Real-IP"] = "203.0.113.50";
+    const Response paid =
+        send(rig.port(),
+             "POST",
+             "/order",
+             "lake.live",
+             customer,
+             "offer=dedicated_cluster&path=checkout&location=azure%3Acanadacentral&"
+             "contact_name=Bo&contact_email=bo%40example.com&quantity=1");
+    ASSERT_EQ(paid.status, 302) << paid.body;
+    EXPECT_EQ(paid.headers.at("location"), "https://checkout.stripe.test/c/cs_test_1");
+}
+
 TEST(OrdersApex, AbuseIsRefused) {
     OrderRig rig(true, 2);
     const std::string order = "offer=on_prem&path=order_form&contact_name=Ada&contact_email=ada%40"
@@ -1590,8 +1626,19 @@ TEST(OrdersApex, AbuseIsRefused) {
     EXPECT_EQ(send(rig.port(), "POST", "/order", "lake.live", form_headers, order).status, 200);
     EXPECT_EQ(send(rig.port(), "POST", "/order", "lake.live", form_headers, order).status, 200);
     EXPECT_EQ(send(rig.port(), "POST", "/order", "lake.live", form_headers, order).status, 429);
+    // lake#838: headers a sender can write do not move it into a fresh bucket; only the address the
+    // ingress set (X-Real-IP) does.
+    for (const auto& [name, value] : std::vector<std::pair<std::string, std::string>>{
+             {"CF-Connecting-IP", "198.51.100.1"},
+             {"X-Forwarded-For", "198.51.100.2"},
+             {"X-Forwarded-For", "198.51.100.3, 203.0.113.7"}}) {
+        auto forged = form_headers;
+        forged[name] = value;
+        EXPECT_EQ(send(rig.port(), "POST", "/order", "lake.live", forged, order).status, 429)
+            << name << ": " << value;
+    }
     auto other = form_headers;
-    other["CF-Connecting-IP"] = "198.51.100.9";
+    other["X-Real-IP"] = "198.51.100.9";
     EXPECT_EQ(send(rig.port(), "POST", "/order", "lake.live", other, order).status, 200);
     // An invalid form is answered with the form and its errors, and records nothing.
     const Response invalid = send(rig.port(),

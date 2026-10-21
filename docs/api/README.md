@@ -31,7 +31,8 @@ its OpenAI-compatible routes `POST /openai/v1/chat/completions`, `/responses` an
 every agent model call goes through Lake with Orama's own key and is counted as the run's workspace's
 `model_tokens`, the monthly `model_tokens` limit is enforced (`usage_limit_reached`, 429), and agents
 hold no provider key. A `stream: true` call is relayed event by event as the provider sends it
-(lake#665, [Streaming](model-gateway.md#streaming)).
+(lake#665, [Streaming](model-gateway.md#streaming)); a caller that drops the stream is still
+billed for the whole answer, and an answer without usage is counted by estimate (lake#939).
 
 lake#564 (decision 56, migration `0073_billing`): [billing.md](billing.md) documents billing, on only
 where `LAKE_BILLING` is (Orama Cloud): `price_list`, `set_price_list`, `billing_account`,
@@ -55,6 +56,9 @@ lake#645: [deletion.md](deletion.md) documents deleting and revoking what could 
 before, each with `dry_run: true` first and a typed confirmation in Lake Console:
 `delete_organization`, `revoke_invitation`, `revoke_grant`, `delete_secret_mount`, `delete_dataset`,
 `delete_model`, `delete_run`, `delete_index` and `delete_ask_conversation`.
+lake#810: [identity.md](identity.md#deleting-an-account) documents `delete_account`, which the
+account itself (after a recent sign-in or MFA) or the operator calls to delete an account with its
+workspaces and the organizations it alone owns, never leaving an organization without an owner.
 lake#561: [drives.md](drives.md) documents drives (repository, workspace files, virtual) and workspace files in the workspace Zetta. [transcripts.md](transcripts.md) documents speech-to-text (`transcribe`) and the
 workspace transcripts kept in the workspace Zetta (`create_transcript`, `list_transcripts`,
 `get_transcript`, `update_transcript`, `delete_transcript`), the audio never kept.
@@ -221,7 +225,9 @@ in PostgreSQL, so a refused caller reaches no workspace
 [`audit.md`](audit.md) defines the signed audit stream. Since decision 52 (lake#317, lake#318)
 it is two kinds of log: the central chain in PostgreSQL for control-plane and identity events, and
 each workspace's own chain, in its Zetta, for events about its data, written off the request path;
-the audit capabilities read both ([audit.md](audit.md#which-log)).
+the audit capabilities read both ([audit.md](audit.md#which-log)). An account's administrator
+reads and exports its own account's audit; the whole log is the operator's
+([audit.md](audit.md#who-may-read-it), lake#18).
 
 [`registry.md`](registry.md) defines the OCI Distribution, npm, Python, and debuginfod protocol
 routes, build-push credentials, exact-repository app pull credentials, and exact-byte integration
@@ -237,7 +243,8 @@ phase 1, lake#196), with their capabilities and the Data → Drives → Storage 
 the customer's own bucket over Lake's own S3 and Azure Blob clients with a workspace secret, and
 stores Lake keeps in the workspace Zetta or a liquid repository (lake#664).
 [`web-apps.md`](web-apps.md) defines customer-scoped Ship app creation, direct-zone hosts,
-platform-reserved names, deployment, lifecycle, authentication, environment, attach/detach
+platform-reserved names, deployment, lifecycle, authentication (and which identity headers an app
+may trust), environment, attach/detach
 bindings, logs, events and the read-only app registry pull token. It is separate from identity
 [applications](apps.md).
 [`builds.md`](builds.md) defines asynchronous in-cluster image builds, configured Ship App runtime
@@ -303,6 +310,7 @@ and `Experiments.CompareRunsAnswersItsGetFormWithRepeatedKeysOrACommaList`
 | `list_organizations` | read | `limit` | `{items: [organization]}` | [customers.md](customers.md) |
 | `get_organization` | read | `id` | organization, with its own account's `customer_id` (null when none) | [customers.md](customers.md) |
 | `create_organization` | action | `taap_id?`, `display_name?`, `customer_id?` | organization | [organizations.md](organizations.md) |
+| `delete_account` | action, the account itself (signed in within 15 minutes, or `code`) or the operator | `user_id?`, `confirm` (its handle), `code?`, `delete_organizations?`, `dry_run?` | what went, with counts and the workspaces and organizations deleted; `409` naming an organization it alone owns that others belong to | [identity.md](identity.md#deleting-an-account) |
 | `delete_organization` | action, an owner | `organization_id`, `confirm` (its handle), `dry_run?` | what went, with counts; `409` naming the workspaces it still owns | [organizations.md](organizations.md#deleting-an-organization) |
 | `revoke_invitation`, `revoke_grant` | action, `admin` on the scope or object | `invitation_id` or `grant_id`, `dry_run?` | the invitation (now `revoked`) or the grant removed | [organizations.md](organizations.md#revoking-an-invitation), [policy.md](policy.md#revoking-a-grant) |
 | `list_customers` | read | `limit` | `{items: [customer]}` | [customers.md](customers.md) |
@@ -355,8 +363,8 @@ and `Experiments.CompareRunsAnswersItsGetFormWithRepeatedKeysOrACommaList`
 | `entity_effective_access` | read | `object_type` (`repository`, `organization`, or `team`), `id` | `{object, items: [effective access]}` | [policy.md](policy.md) |
 | `identity` | read, **no auth** | — | lake TAAP identity document | [audit.md](audit.md) |
 | `rotate_identity` | action | — | replacement lake identity document | [audit.md](audit.md) |
-| `audit` | read | `principal?`, `object?`, `outcome?`, `from?`, `to?`, `limit?`, `workspace_id?`, `customer_id?`, `log?` | `{items: [audit event with log], unread_workspaces}`, the central log and the workspaces' audits | [audit.md](audit.md#reading-both-logs) |
-| `export_audit` | read | audit filters | `{jsonl}`, the central log or one workspace's audit | [audit.md](audit.md) |
+| `audit` | read | `principal?`, `object?`, `outcome?`, `from?`, `to?`, `limit?`, `workspace_id?`, `customer_id?`, `log?` | `{items: [audit event with log], unread_workspaces}`, the central log and the workspaces' audits; an account's for its administrator | [audit.md](audit.md#who-may-read-it) |
+| `export_audit` | read | audit filters | `{jsonl}`, the central log (one account's with `customer_id`) or one workspace's audit | [audit.md](audit.md#who-may-read-it) |
 | `verify_audit` | read | `workspace_id?`, `customer_id?` | `{verified: true, log}`, the central chain or one workspace's | [audit.md](audit.md#tamper-evidence) |
 | `set_audit_retention` | action | `customer_id`, `days` (≥400) | `{customer_id, days, workspace_audit_retention}` | [audit.md](audit.md#retention) |
 | `initialize_tuf` | action | threshold-signed root metadata | immutable root metadata version | [transparency.md](transparency.md) |
@@ -390,7 +398,8 @@ and `Experiments.CompareRunsAnswersItsGetFormWithRepeatedKeysOrACommaList`
 | `export_transparency_replication_batch` | action | source tree-size cursor | verified log suffix with base/head commitments and current checkpoint | [replication.md](replication.md) |
 | `replicate_transparency_log` | action | source Lake URL | applied tree size, root, checkpoint sequence, and catch-up state | [replication.md](replication.md) |
 | `replicate_repository` | action | repository, source instance, source Lake URL | durable liquid cursor, transfer totals, and ref count | [replication.md](replication.md) |
-| `sign_up_password`, `sign_in_password`, `sign_in_taap`, `verify_mfa` | action, public entry | password (an identity document optional in Lake's pool), one-use TAAP assertion, or MFA proof | browser session + secret | [identity.md](identity.md) |
+| `sign_up_password`, `sign_in_password`, `sign_in_taap`, `verify_mfa` | action, public entry | password (an identity document optional in Lake's pool, with `identity_proof` when given), one-use TAAP assertion, or MFA proof | browser session + secret | [identity.md](identity.md) |
+| `begin_identity_proof` | action, public entry | pool, identity document | a five-minute challenge to sign with `liquid sign artifact` before sign-up or a first OAuth sign-in binds the document | [identity.md](identity.md#proving-you-hold-the-key) |
 | `register_application`, `list_applications`, `get_application`, `update_application_theme`, `rotate_application_signing_key` | action/read | customer, application registration, theme, or application id | isolated pool registration and key metadata | [apps.md](apps.md) |
 | `application_jwks`, `issue_application_jwt` | public read / protected action | application, its `workspace_id` (JWT) and active user ids | Ed25519 JWKS or short-lived audience-bound JWT | [apps.md](apps.md) |
 | `begin_application_authorization`, `exchange_application_authorization_code` | protected/public action | application, exact redirect, state, nonce, PKCE challenge; then code and verifier | one-use authorization result, then access and ID tokens | [apps.md](apps.md) |
@@ -401,7 +410,7 @@ and `Experiments.CompareRunsAnswersItsGetFormWithRepeatedKeysOrACommaList`
 | `begin_passkey_registration`, `register_passkey` | action | WebAuthn client data and attestation object | creation options, then confirmation with a lake-signed TAAP binding stored on the device | [identity.md](identity.md) |
 | `begin_passkey_sign_in`, `sign_in_passkey` | action, public entry | pool, then WebAuthn assertion | request options, then browser session + secret | [identity.md](identity.md) |
 | `register_oauth_provider` | action, operator | issuer, client id, secret, scopes | confirmation | [identity.md](identity.md) |
-| `start_oauth` | action, public entry | pool, provider, device name, identity document for a new user | authorization URL | [identity.md](identity.md) |
+| `start_oauth` | action, public entry | pool, provider, device name, identity document and `identity_proof` for a new user | authorization URL | [identity.md](identity.md) |
 | `create_token`, `list_sessions`, `revoke_session` | action/read | name/scopes or session id | tokens bounded by issuer scopes and expiry, with parent revocation | [identity.md](identity.md) |
 | `list_devices`, `revoke_device` | read/action | device id for revocation | device data, including passkey credential IDs and signed bindings | [identity.md](identity.md) |
 | `account_identity`, `begin_own_identity`, `use_own_identity` | read/action, signed-in person | identity document; challenge and `liquid sign artifact` output | which key the account signs with; the challenge; the linked account identity | [identity.md](identity.md#your-own-identity) |
@@ -411,7 +420,10 @@ and `Experiments.CompareRunsAnswersItsGetFormWithRepeatedKeysOrACommaList`
 | `configure_recovery_contact`, `repository_recovery_status`, `recover_repository_key` | action/read | repository, contact TAAP identity, opaque wrapped key | custody status or contact-wrapped key | [recovery.md](recovery.md) |
 | `register_sso_provider`, `list_sso_providers`, `test_sso_provider` | action/read | organization, protocol configuration, or provider id | secret-free provider configuration | [sso.md](sso.md) |
 | `create_federation_issuer`, `list_federation_issuers` | action/read | organization, issuer, claim | acceptable issuer-claim policy rows | [sso.md](sso.md) |
+| `sign_in_sso` | action, operator only (lake#562) | provider assertion identity and claims | browser session + secret | [sso.md](sso.md) |
 | `sign_in_sso` | action, public entry | provider assertion identity and claims | browser session + secret | [sso.md](sso.md) |
+| `start_sso_saml` | action, public entry | SAML provider id, device name, TAAP id, return path | the IdP's sign-in URL carrying a one-use AuthnRequest | [sso.md](sso.md#saml-sign-in) |
+| `sign_in_saml` | action, public entry | SAML provider id, base64 SAMLResponse answering a `start_sso_saml` request | browser session + secret | [sso.md](sso.md#saml-sign-in) |
 | `upsert_scim_user`, `upsert_scim_group`, `list_sso_provisioning_logs` | action/read | SCIM resource mapping or provider id | SCIM mapping or provisioning outcomes | [sso.md](sso.md) |
 | `scim_list_*`, `scim_get_*`, `scim_upsert_*`, `scim_patch_*`, `scim_delete_*` | action, provider entry | provider bearer plus filter, resource, PATCH operations, or resource id | SCIM user/group resource, list response, or deletion confirmation | [sso.md](sso.md) |
 | `search` | read | `query`, `customer?`, `repository?`, `ref?`, `change?`, `history?`, `limit?` | `{mode, scanned_changes, items: [ranked hit]}` | [search.md](search.md) |
@@ -438,7 +450,7 @@ and `Experiments.CompareRunsAnswersItsGetFormWithRepeatedKeysOrACommaList`
 | `issue_agent_certificate`, `rotate_agent_certificate`, `revoke_agent_certificate`, `check_agent_certificate` | action/read | customer and TAAP key; then certificate id and optional replacement key | short-lived public-key certificate or enforced status | [pki.md](pki.md) |
 | `issue_ssh_user_certificate`, `issue_ssh_host_certificate` | action | customer, Ed25519 public key, key ID, principals, optional lifetime | short-lived OpenSSH certificate and CA public key | [pki.md](pki.md) |
 | `acme_new_account`, `acme_new_order`, `acme_order`, `acme_authorization`, `acme_http01_challenge`, `acme_finalize_order`, `acme_certificate`, `acme_http01_response` | ACME transport | RFC 8555 JWS, account, order, authorization, challenge and CSR fields | customer-scoped ACME state and certificate chain | [pki.md](pki.md) |
-| `begin_root_recovery`, `complete_root_recovery` | action | customer, configured quorum; then ceremony and shares | recovery shares, then rehearsal confirmation | [break-glass.md](break-glass.md) |
+| `begin_root_recovery`, `claim_root_recovery_share`, `complete_root_recovery` | action | customer, threshold and distinct participants; then ceremony; then the caller's own share | ceremony and participants (no share); the caller's own share, once; progress toward the quorum | [break-glass.md](break-glass.md) |
 | `exchange_kubernetes_attestation` | action, public entry | customer, organization, projected token, workload TAAP ID, audiences | durable caller ID and short-lived workload credential | [callers.md](callers.md) |
 | `exchange_jwt_attestation`, `exchange_cloud_attestation` | action, public entry | customer, federation assertion or AWS/Azure evidence, workload TAAP ID | durable caller ID and short-lived workload credential | [callers.md](callers.md) |
 
@@ -463,6 +475,11 @@ protection there before it starts ([forge.md](forge.md#where-forge-records-live)
 OAuth providers return the browser to `GET /v1/oauth/<provider>/callback`. This callback is the
 documented provider-facing route outside the registry; it consumes one-use state and issues the
 same `lake_session` cookie returned by the identity capabilities.
+
+SAML identity providers post to the Assertion Consumer Service `POST /v1/saml/<provider id>/acs`,
+and read Lake's metadata at `GET /v1/saml/<provider id>/metadata`; `GET /v1/saml/<provider id>/start`
+starts a sign-in ([sso.md](sso.md#saml-sign-in)). The ACS runs the same verification as
+`sign_in_saml` and issues the same cookie.
 
 SCIM clients use the canonical `/scim/v2` resources. Their adapter translates HTTP methods and
 SCIM envelopes into the `scim_*` capabilities; provider authentication, validation, store calls,

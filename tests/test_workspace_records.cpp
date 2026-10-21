@@ -4015,6 +4015,277 @@ TEST_P(WorkspaceRecordStores, McpConnectionsSignInWithOAuthAndKeepOnlyARefreshTo
     EXPECT_NE(server.refresh_token(), first_refresh) << "the rotated token is the one kept";
 }
 
+// A sign-in's token reaches only the server it was asked for (lake#927): resource metadata naming
+// another resource, or authorization server metadata naming another issuer, stops the sign-in
+// before Lake registers or redirects anyone; a connection moved to another server between
+// beginning and completing a sign-in, or after it, sends that server neither the code's token nor
+// the kept one.
+TEST_P(WorkspaceRecordStores, McpConnectionSignInIsBoundToTheServerItIsFor) {
+    auto store = make_store();
+    if (!store) {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
+    }
+    TwoSpaces t(store, database_uri_);
+    lake::test::McpTestServer server;
+    server.required_bearer = "nobody-has-this-yet";
+    lake::test::McpTestServer other; // a server the token is not for
+    other.required_bearer = "nobody-has-this-either";
+    t.mcp_http = lake::api::make_mcp_http(true);
+    const auto& first = t.spaces[0];
+    const auto in = [&](json input) {
+        input["customer_id"] = first.customer_id;
+        input["workspace_id"] = first.workspaces[0];
+        return input;
+    };
+    const auto mount = t.call(first, "create_secret_mount", in({{"name", "oauth"}}));
+    ASSERT_TRUE(mount.ok) << mount.error.message;
+    const std::string mount_id = mount.value["id"];
+    const auto created =
+        t.call(first,
+               "create_mcp_connection",
+               in({{"name", "Docs"}, {"url", server.url()}, {"auth", {{"kind", "oauth"}}}}));
+    ASSERT_TRUE(created.ok) << created.error.message;
+    const std::string id = created.value["id"];
+    const auto begin = [&] {
+        return t.call(
+            first, "begin_mcp_connection_sign_in", in({{"id", id}, {"mount_id", mount_id}}));
+    };
+    const auto complete = [&](const json& state, const std::string& code) {
+        return t.call(
+            first, "complete_mcp_connection_sign_in", in({{"state", state}, {"code", code}}));
+    };
+    const auto query_of = [](const json& begun) {
+        const std::string url = begun["authorization_url"];
+        return lake::test::McpTestServer::form(url.substr(url.find('?') + 1));
+    };
+    const auto move_to = [&](const std::string& url) {
+        const auto moved = t.call(first, "update_mcp_connection", in({{"id", id}, {"url", url}}));
+        ASSERT_TRUE(moved.ok) << moved.error.message;
+    };
+    const auto other_saw_a_bearer = [&] {
+        return std::ranges::any_of(other.seen(), [](const auto& request) {
+            return request.headers.contains("authorization");
+        });
+    };
+
+    // Metadata naming another API, another port of this host, another path or no resource at all.
+    for (const std::string& named : {std::string("https://api.example.com/"),
+                                     other.base() + "/mcp",
+                                     server.base() + "/admin",
+                                     server.base() + "/mcp/admin",
+                                     server.base() + "/MCP",
+                                     server.base() + "/mcp?audience=admin",
+                                     std::string()}) {
+        server.metadata_resource = named;
+        const auto refused = begin();
+        EXPECT_FALSE(refused.ok) << named;
+        EXPECT_NE(refused.error.message.find("resource"), std::string::npos)
+            << named << ": " << refused.error.message;
+    }
+    // An issuer whose metadata names another issuer, or none.
+    server.metadata_resource.reset();
+    for (const std::string& issuer : {std::string("https://issuer.example.com"),
+                                      other.base(),
+                                      server.base() + "/tenant",
+                                      std::string()}) {
+        server.metadata_issuer = issuer;
+        const auto refused = begin();
+        EXPECT_FALSE(refused.ok) << issuer;
+        EXPECT_NE(refused.error.message.find("issuer"), std::string::npos)
+            << issuer << ": " << refused.error.message;
+    }
+    server.metadata_issuer.reset();
+    EXPECT_TRUE(server.clients().empty()) << "nothing registered for a refused discovery";
+
+    // The server's own URL, with or without a trailing slash, or its origin, is its resource.
+    for (const std::string& named : {server.base() + "/mcp/", server.base() + "/"}) {
+        server.metadata_resource = named;
+        const auto begun = begin();
+        ASSERT_TRUE(begun.ok) << named << ": " << begun.error.message;
+        EXPECT_EQ(query_of(begun.value).at("resource"), named);
+    }
+    server.metadata_resource.reset();
+
+    // The connection moves to another server between the sign-in's start and its end: the code is
+    // never exchanged, and the other server is never sent a token.
+    auto begun = begin();
+    ASSERT_TRUE(begun.ok) << begun.error.message;
+    auto query = query_of(begun.value);
+    auto code = server.issue_code(query.at("client_id"),
+                                  query.at("redirect_uri"),
+                                  query.at("code_challenge"),
+                                  query.at("resource"));
+    move_to(other.url());
+    EXPECT_FALSE(complete(begun.value["state"], code).ok);
+    EXPECT_TRUE(server.token_grants().empty()) << "the code was exchanged for another server";
+    EXPECT_FALSE(other_saw_a_bearer());
+
+    // Signed in at its own server, then moved: the kept token is not sent to the new address.
+    move_to(server.url());
+    begun = begin();
+    ASSERT_TRUE(begun.ok) << begun.error.message;
+    query = query_of(begun.value);
+    code = server.issue_code(query.at("client_id"),
+                             query.at("redirect_uri"),
+                             query.at("code_challenge"),
+                             query.at("resource"));
+    const auto done = complete(begun.value["state"], code);
+    ASSERT_TRUE(done.ok) << done.error.message;
+    EXPECT_EQ(done.value["status"], "connected");
+    ASSERT_TRUE(t.call(first,
+                       "update_mcp_connection",
+                       in({{"id", id}, {"tools", {{"echo", {{"allowed", true}}}}}}))
+                    .ok);
+    move_to(other.url());
+    const auto moved_call =
+        t.call(first,
+               "read_mcp_tool",
+               in({{"connection_id", id}, {"tool", "echo"}, {"arguments", {{"text", "hi"}}}}));
+    EXPECT_FALSE(moved_call.ok);
+    EXPECT_EQ(moved_call.error.code, "sign_in_required");
+    EXPECT_FALSE(other_saw_a_bearer()) << "the token signed in for one server went to another";
+    // Back at its own server, the move has already dropped the sign-in (lake#928).
+    move_to(server.url());
+    const auto back =
+        t.call(first,
+               "read_mcp_tool",
+               in({{"connection_id", id}, {"tool", "echo"}, {"arguments", {{"text", "hi"}}}}));
+    EXPECT_EQ(back.error.code, "sign_in_required");
+}
+
+// A connection moved to another address keeps no credential it had (lake#928): a writer who moves
+// it to a server they run gets no bearer, refresh token, cached access token or pending sign-in's
+// code sent there, and moving it back restores none of them. A bearer connection moves only when
+// the same update names its secret again, as someone who may read it.
+TEST_P(WorkspaceRecordStores, McpConnectionMovedToAnotherAddressKeepsNoCredential) {
+    auto store = make_store();
+    if (!store) {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
+    }
+    TwoSpaces t(store, database_uri_);
+    lake::test::McpTestServer server;
+    server.required_bearer = "the-plaintext-bearer-token";
+    lake::test::McpTestServer other;   // a server the writer runs
+    lake::test::McpTestServer granted; // a server the secret's reader chose
+    t.mcp_http = lake::api::make_mcp_http(true);
+    const auto& first = t.spaces[0];
+    const auto in = [&](json input) {
+        input["customer_id"] = first.customer_id;
+        input["workspace_id"] = first.workspaces[0];
+        return input;
+    };
+    const auto mount = t.call(first, "create_secret_mount", in({{"name", "mcp-tokens"}}));
+    ASSERT_TRUE(mount.ok) << mount.error.message;
+    const std::string mount_id = mount.value["id"];
+    ASSERT_TRUE(t.call(first,
+                       "put_secret",
+                       {{"mount_id", mount_id},
+                        {"name", "desk"},
+                        {"value", {{"token", "the-plaintext-bearer-token"}}}})
+                    .ok);
+    const json secret{{"mount_id", mount_id}, {"name", "desk"}, {"field", "token"}};
+    const auto other_saw_a_credential = [&] {
+        return std::ranges::any_of(other.seen(), [](const auto& request) {
+            return request.headers.contains("authorization") ||
+                   request.body.find("grant_type=") != std::string::npos ||
+                   request.body.find("code_verifier=") != std::string::npos;
+        });
+    };
+    const auto echo = [&](const std::string& id) {
+        return t.call(
+            first,
+            "read_mcp_tool",
+            in({{"connection_id", id}, {"tool", "echo"}, {"arguments", {{"text", "hi"}}}}));
+    };
+    const auto update = [&](json change) {
+        return t.call(first, "update_mcp_connection", in(change));
+    };
+
+    // A bearer connection, working at its own server.
+    const auto created = t.call(first,
+                                "create_mcp_connection",
+                                in({{"name", "Desk"},
+                                    {"url", server.url()},
+                                    {"auth", {{"kind", "bearer"}, {"secret", secret}}}}));
+    ASSERT_TRUE(created.ok) << created.error.message;
+    const std::string bearer_id = created.value["id"];
+    ASSERT_TRUE(update({{"id", bearer_id}, {"tools", {{"echo", {{"allowed", true}}}}}}).ok);
+    ASSERT_TRUE(echo(bearer_id).ok);
+
+    // Moved without naming the secret: refused before anything changes or reaches the new address.
+    const auto moved = update({{"id", bearer_id}, {"url", other.url()}});
+    EXPECT_FALSE(moved.ok);
+    EXPECT_EQ(moved.error.path, "/auth") << moved.error.message;
+    EXPECT_EQ(t.call(first, "get_mcp_connection", in({{"id", bearer_id}})).value["url"],
+              server.url());
+    EXPECT_TRUE(echo(bearer_id).ok);
+    EXPECT_TRUE(other.seen().empty()) << "the move reached the new address";
+    // The same address again is not a move.
+    EXPECT_TRUE(update({{"id", bearer_id}, {"name", "Desk 2"}, {"url", server.url()}}).ok);
+    EXPECT_TRUE(echo(bearer_id).ok);
+    // Moved while naming the secret again, by someone who may read it, carries it over.
+    const auto carried = update({{"id", bearer_id},
+                                 {"url", granted.url()},
+                                 {"auth", {{"kind", "bearer"}, {"secret", secret}}}});
+    ASSERT_TRUE(carried.ok) << carried.error.message;
+    EXPECT_EQ(carried.value["auth"]["secret"], secret);
+    EXPECT_TRUE(std::ranges::any_of(granted.seen(), [](const auto& request) {
+        return request.headers.contains("authorization");
+    }));
+
+    // An OAuth connection signed in at its own server, with a pending sign-in of someone else.
+    server.required_bearer = "nobody-has-this-yet";
+    const auto oauth = t.call(first,
+                              "create_mcp_connection",
+                              in({{"name", "Docs"},
+                                  {"url", server.url()},
+                                  {"auth", {{"kind", "oauth"}}}}));
+    ASSERT_TRUE(oauth.ok) << oauth.error.message;
+    const std::string id = oauth.value["id"];
+    const auto begin = [&] {
+        return t.call(
+            first, "begin_mcp_connection_sign_in", in({{"id", id}, {"mount_id", mount_id}}));
+    };
+    const auto code_for = [&](const json& begun) {
+        const std::string url = begun["authorization_url"];
+        const auto query = lake::test::McpTestServer::form(url.substr(url.find('?') + 1));
+        return server.issue_code(query.at("client_id"),
+                                 query.at("redirect_uri"),
+                                 query.at("code_challenge"),
+                                 query.at("resource"));
+    };
+    const auto complete = [&](const json& begun, const std::string& code) {
+        return t.call(first,
+                      "complete_mcp_connection_sign_in",
+                      in({{"state", begun["state"]}, {"code", code}}));
+    };
+    auto begun = begin();
+    ASSERT_TRUE(begun.ok) << begun.error.message;
+    ASSERT_TRUE(complete(begun.value, code_for(begun.value)).ok);
+    ASSERT_TRUE(update({{"id", id}, {"tools", {{"echo", {{"allowed", true}}}}}}).ok);
+    ASSERT_TRUE(echo(id).ok);
+    const auto pending = begin();
+    ASSERT_TRUE(pending.ok) << pending.error.message;
+    const std::string pending_code = code_for(pending.value);
+    const std::size_t grants = server.token_grants().size();
+
+    // Moved to the writer's server, which they then begin a sign-in at, so its metadata names
+    // their token endpoint: nothing the first sign-in or the pending one holds goes there.
+    const auto moved_oauth = update({{"id", id}, {"url", other.url()}});
+    ASSERT_TRUE(moved_oauth.ok) << moved_oauth.error.message;
+    EXPECT_EQ(moved_oauth.value["status"], "needs_sign_in");
+    EXPECT_TRUE(moved_oauth.value["auth"]["secret"].is_null()) << moved_oauth.value.dump();
+    ASSERT_TRUE(begin().ok);
+    EXPECT_EQ(echo(id).error.code, "sign_in_required");
+    EXPECT_FALSE(complete(pending.value, pending_code).ok);
+    EXPECT_FALSE(other_saw_a_credential()) << "a token or code went to the new address";
+    // Moved back: the first sign-in and the pending one are both gone.
+    ASSERT_TRUE(update({{"id", id}, {"url", server.url()}}).ok);
+    EXPECT_EQ(echo(id).error.code, "sign_in_required");
+    EXPECT_FALSE(complete(pending.value, pending_code).ok);
+    EXPECT_EQ(server.token_grants().size(), grants) << "nothing exchanged after the move";
+}
+
 // A connection's streams (lake#652): the store root's owner mirrors the server's notifications to a
 // workspace topic, starts a job of the connection's agent for each new input event as the person
 // who set the streams, and publishes each finished job's result as agent-events carries it.
@@ -4271,6 +4542,137 @@ TEST_P(WorkspaceRecordStores, AStreamStartsItsAgentOncePerMessageAsThePersonWhoS
     EXPECT_TRUE(t.call(first, "list_agent_streams", in(json::object())).value["streams"].empty());
 }
 
+// lake#524: deleting an agent withdraws its present launches (with a stop_reason that names the
+// deletion) and its cron schedules, so the operator removes their pods instead of restarting them
+// against an agent that is gone. Another agent's, another workspace's and a finished launch are
+// left as they are. A launch whose agent was deleted outside lake is withdrawn the first time it
+// reads its agent and the workspace answers not_found.
+TEST_P(WorkspaceRecordStores, DeletingAnAgentStopsItsLaunchesAndSchedules) {
+    auto store = make_store();
+    if (!store) {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
+    }
+    TwoSpaces t(store, database_uri_);
+    const auto& first = t.spaces[0];
+    const std::string home = first.workspaces[0];
+    const std::string other = first.workspaces.size() > 1 ? first.workspaces[1] : std::string();
+    const auto in = [&](json input) {
+        input["customer_id"] = first.customer_id;
+        input["workspace_id"] = home;
+        return input;
+    };
+    std::set<std::string> deleted;
+    t.zetta->responder =
+        [&](const std::string& capability,
+            const json& input) -> std::optional<lake::control::ZettaControlResult<json>> {
+        const std::string id = input.value("id", std::string());
+        if (capability == "get_agent") {
+            if (deleted.contains(id)) {
+                return lake::control::ZettaControlResult<json>(std::unexpected(
+                    lake::control::ZettaControlError{"not_found", "no agent '" + id + "'"}));
+            }
+            return json{{"id", id}, {"name", "Briefer"}, {"runtime", "python"}};
+        }
+        if (capability == "delete_agent") {
+            deleted.insert(id);
+            return json{{"deleted", true}};
+        }
+        return std::nullopt;
+    };
+    const auto launch =
+        [&](const std::string& agent, const std::string& mode, const std::string& workspace) {
+            const auto made =
+                t.store->create_agent_launch({.customer_id = first.customer_id,
+                                              .agent_id = agent,
+                                              .agent_name = "Briefer",
+                                              .mode = mode,
+                                              .trigger = "manual",
+                                              .scopes = lake::control::agent_launch_scopes,
+                                              .created_by_user_id = first.principal.user_id,
+                                              .created_by_taap_id = first.principal.taap_id,
+                                              .workspace_id = workspace});
+            EXPECT_TRUE(made) << made.error().message;
+            return made ? made->id : std::string();
+        };
+    const std::string service = launch("agent-9", "service", home);
+    const std::string job = launch("agent-9", "job", home);
+    const std::string finished = launch("agent-9", "job", home);
+    ASSERT_TRUE(t.store->withdraw_agent_launch(finished));
+    const std::string bystander = launch("agent-8", "service", home);
+    const std::string elsewhere =
+        other.empty() ? std::string() : launch("agent-9", "service", other);
+    const auto schedule =
+        t.store->create_agent_cron_schedule({.customer_id = first.customer_id,
+                                             .agent_id = "agent-9",
+                                             .agent_name = "Briefer",
+                                             .cron = "0 9 * * 1",
+                                             .scopes = lake::control::agent_launch_scopes,
+                                             .created_by_user_id = first.principal.user_id,
+                                             .created_by_taap_id = first.principal.taap_id,
+                                             .workspace_id = home});
+    ASSERT_TRUE(schedule) << schedule.error().message;
+    const auto generation_of = [&](const std::string& id) {
+        return t.store->get_agent_launch(id)->generation;
+    };
+    const std::int64_t finished_generation = generation_of(finished);
+
+    const auto removed = t.call(first, "delete_agent", in({{"id", "agent-9"}}));
+    ASSERT_TRUE(removed.ok) << removed.error.message;
+    EXPECT_EQ(removed.value["launches_stopped"], 2);
+    EXPECT_EQ(removed.value["schedules_removed"], 1);
+    for (const std::string& id : {service, job}) {
+        const auto stopped = t.store->get_agent_launch(id);
+        ASSERT_TRUE(stopped);
+        EXPECT_EQ(stopped->desired, "absent") << "the operator removes its Deployment or Job";
+        EXPECT_NE(stopped->stop_reason.find("agent-9 was deleted"), std::string::npos)
+            << stopped->stop_reason;
+    }
+    EXPECT_EQ(generation_of(finished), finished_generation) << "an absent launch is left alone";
+    EXPECT_EQ(t.store->get_agent_launch(bystander)->desired, "present") << "another agent's";
+    if (!elsewhere.empty()) {
+        EXPECT_EQ(t.store->get_agent_launch(elsewhere)->desired, "present")
+            << "another workspace's agent of the same id";
+    }
+    EXPECT_EQ(t.store->get_agent_cron_schedule(schedule->id)->desired, "absent")
+        << "the operator deletes its CronJob";
+    const auto again = t.call(first, "delete_agent", in({{"id", "agent-9"}}));
+    ASSERT_TRUE(again.ok) << again.error.message;
+    EXPECT_EQ(again.value["launches_stopped"], 0) << "nothing is left to stop";
+
+    // An agent deleted outside lake: its service launch reads it, is told not_found, and stops.
+    const std::string orphan = launch("agent-7", "service", home);
+    const std::string watching = launch("agent-6", "service", home);
+    deleted.insert("agent-7");
+    auto runtime = t.context(first);
+    runtime.session_credential = false;
+    runtime.credential_kind = "agent_launch";
+    runtime.credential_session_id = "launch:" + orphan;
+    runtime.scopes = lake::control::agent_launch_scopes;
+    const auto read_as = [&](lake::api::ApiContext context, const std::string& agent) {
+        const auto completed = liquid::runtime::block_on(
+            t.registry.call_async("get_agent", in({{"id", agent}}), context));
+        EXPECT_TRUE(completed);
+        return *completed;
+    };
+    // Reading another agent that is gone changes nothing: only the launch's own agent counts.
+    deleted.insert("agent-6");
+    EXPECT_FALSE(read_as(runtime, "agent-6").ok);
+    EXPECT_EQ(t.store->get_agent_launch(watching)->desired, "present");
+    deleted.erase("agent-6");
+    const auto missing = read_as(runtime, "agent-7");
+    EXPECT_FALSE(missing.ok);
+    const auto withdrawn = t.store->get_agent_launch(orphan);
+    ASSERT_TRUE(withdrawn);
+    EXPECT_EQ(withdrawn->desired, "absent");
+    EXPECT_NE(withdrawn->stop_reason.find("no longer exists"), std::string::npos)
+        << withdrawn->stop_reason;
+    // A person reading an agent that is gone stops nothing.
+    const std::string kept = launch("agent-5", "service", home);
+    deleted.insert("agent-5");
+    EXPECT_FALSE(t.call(first, "get_agent", in({{"id", "agent-5"}})).ok);
+    EXPECT_EQ(t.store->get_agent_launch(kept)->desired, "present");
+}
+
 // lake#684, lake#685: Lake keeps a dispatch row for each connection that streams or re-exports
 // tools. A re-export, or a change of what it re-exports, changes the workspace endpoint's tool-list
 // digest, so a session that began before is told; the stream worker calls only the workspaces
@@ -4465,7 +4867,16 @@ TEST_P(WorkspaceRecordStores, McpStdioConnectionsRunAsAWorkspaceApp) {
     EXPECT_EQ(t.call(first, "create_mcp_connection", in({{"name", "Everything"}, {"stdio", stdio}}))
                   .error.code,
               "not_supported");
+    // Nor does one whose runner image is a tag: the operator runs only a digest-pinned image
+    // (lake#783), so nothing is started that could only fail.
     t.mcp_runner_image = "oramasearch/lake-mcp-runner:0.1.0";
+    const auto tagged =
+        t.call(first, "create_mcp_connection", in({{"name", "Everything"}, {"stdio", stdio}}));
+    EXPECT_EQ(tagged.error.code, "not_supported");
+    EXPECT_TRUE(tagged.error.message.contains("pinned by digest")) << tagged.error.message;
+    const std::string runner_image =
+        "oramasearch/lake-mcp-runner:0.1.0@sha256:" + std::string(64, 'c');
+    t.mcp_runner_image = runner_image;
 
     // Refusals before anything starts.
     const auto refused = [&](json changed, const std::string& path) {
@@ -4523,7 +4934,7 @@ TEST_P(WorkspaceRecordStores, McpStdioConnectionsRunAsAWorkspaceApp) {
     EXPECT_EQ(app.id, app_id);
     EXPECT_EQ(app.workspace_id, home);
     EXPECT_EQ(app.mode, "image");
-    EXPECT_EQ(app.image, "oramasearch/lake-mcp-runner:0.1.0");
+    EXPECT_EQ(app.image, runner_image);
     EXPECT_EQ(app.framework, "mcp");
     EXPECT_EQ(app.port, 8080) << "the port the workspace admits Lake to";
     EXPECT_TRUE(app.name.starts_with("mcp-everything-")) << app.name;

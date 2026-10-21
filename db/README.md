@@ -1,5 +1,19 @@
 # Database schema
 
+Migration `0091_account_deletion` (lake#810) adds `users.deleted_at`, set by `delete_account` when
+an account is deleted (its email and display name are erased in the same statement), and the guard
+`account_deletion_guard`. Additive; apply before the new binary, and have the operator vendor the
+schema and select the guard. See [identity.md](../docs/api/identity.md#deleting-an-account).
+Migration `0092_saml_sign_in` (lake#836) adds `sso_saml_requests` (each outstanding SAML
+AuthnRequest, its id as a hash) and `sso_saml_assertions` (each accepted assertion's id hash until it
+expires), and the guard `saml_sign_in_guard`. Additive; apply before the new binary, and have the
+operator vendor the schema and select the guard. See
+[schema.md](../docs/control-plane/schema.md#saml-sign-in-migration).
+Migration `0093_root_recovery_participants` (lake#934) adds `pki_recovery_participants`, who holds
+each share of a root recovery ceremony and when it was issued, and the guard
+`root_recovery_participants_guard`. Additive; apply before the new binary, and have the operator
+vendor the schema and select the guard. See [break-glass.md](../docs/api/break-glass.md).
+
 Migration `0090_billing_contacts` (lake#857) adds `billing_contacts`, each account's billing email,
 name and address, and the guard `billing_contacts_guard`. Additive; apply before the new binary, and
 have the operator vendor the schema and select the guard. See

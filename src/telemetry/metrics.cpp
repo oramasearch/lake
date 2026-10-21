@@ -349,6 +349,10 @@ public:
         return call("delete_organization",
                     [&] { return store_->delete_organization(id, dry_run); });
     }
+    control::Result<control::AccountDeletion> delete_account(const std::string& user_id,
+                                                             bool dry_run) override {
+        return call("delete_account", [&] { return store_->delete_account(user_id, dry_run); });
+    }
     control::Result<control::Customer> create_customer(const control::NewCustomer& value) override {
         return call("create_customer", [&] { return store_->create_customer(value); });
     }
@@ -494,6 +498,11 @@ public:
     }
     control::Result<control::PolicyObject> get_policy_object(const std::string& id) override {
         return call("get_policy_object", [&] { return store_->get_policy_object(id); });
+    }
+    control::Result<control::PolicyObject>
+    set_policy_object_parent(const std::string& id, const std::string& parent_id) override {
+        return call("set_policy_object_parent",
+                    [&] { return store_->set_policy_object_parent(id, parent_id); });
     }
     control::Result<control::PolicyObject>
     find_policy_object(const std::string& object_type, const std::string& external_id) override {
@@ -1006,6 +1015,15 @@ public:
         return call("expire_unstarted_agent_launches",
                     [&] { return store_->expire_unstarted_agent_launches(seconds, reason); });
     }
+    control::Result<control::AgentWorkloadsWithdrawn>
+    withdraw_agent_workloads(const std::string& customer_id,
+                             const std::string& workspace_id,
+                             const std::string& agent_id,
+                             const std::string& reason) override {
+        return call("withdraw_agent_workloads", [&] {
+            return store_->withdraw_agent_workloads(customer_id, workspace_id, agent_id, reason);
+        });
+    }
     control::Result<control::AgentTask>
     create_agent_task(const control::AgentTask& value) override {
         return call("create_agent_task", [&] { return store_->create_agent_task(value); });
@@ -1211,12 +1229,20 @@ public:
         return call("get_pki_recovery_ceremony",
                     [&] { return store_->get_pki_recovery_ceremony(customer_id, ceremony_id); });
     }
-    control::Result<control::PkiRecoveryCeremonyRecord> complete_pki_recovery_ceremony(
-        const std::string& customer_id,
-        const std::string& ceremony_id,
-        const std::vector<control::PkiRecoveryShareEvidence>& evidence) override {
-        return call("complete_pki_recovery_ceremony", [&] {
-            return store_->complete_pki_recovery_ceremony(customer_id, ceremony_id, evidence);
+    control::Result<int> claim_pki_recovery_share(const std::string& customer_id,
+                                                  const std::string& ceremony_id,
+                                                  const std::string& principal) override {
+        return call("claim_pki_recovery_share", [&] {
+            return store_->claim_pki_recovery_share(customer_id, ceremony_id, principal);
+        });
+    }
+    control::Result<control::PkiRecoveryCeremonyRecord>
+    submit_pki_recovery_share(const std::string& customer_id,
+                              const std::string& ceremony_id,
+                              const std::string& principal,
+                              const control::PkiRecoveryShareEvidence& evidence) override {
+        return call("submit_pki_recovery_share", [&] {
+            return store_->submit_pki_recovery_share(customer_id, ceremony_id, principal, evidence);
         });
     }
     control::Result<control::SecretMountRoute>
@@ -1303,6 +1329,11 @@ public:
     sign_up_password(const control::NewPasswordUser& value) override {
         return call("sign_up_password", [&] { return store_->sign_up_password(value); });
     }
+    control::Result<control::IdentityProofChallenge>
+    begin_identity_proof(const std::string& pool_id, const std::string& document) override {
+        return call("begin_identity_proof",
+                    [&] { return store_->begin_identity_proof(pool_id, document); });
+    }
     control::Result<control::IssuedSession>
     sign_in_password(const control::PasswordSignIn& value) override {
         return call("sign_in_password", [&] { return store_->sign_in_password(value); });
@@ -1318,6 +1349,12 @@ public:
     control::Result<bool> mfa_enrolled(const std::string& user_id,
                                        const std::string& pool_id) override {
         return call("mfa_enrolled", [&] { return store_->mfa_enrolled(user_id, pool_id); });
+    }
+    control::Result<void> verify_mfa_code(const std::string& user_id,
+                                          const std::string& pool_id,
+                                          const std::string& code) override {
+        return call("verify_mfa_code",
+                    [&] { return store_->verify_mfa_code(user_id, pool_id, code); });
     }
     control::Result<void> disable_mfa(const std::string& user_id,
                                       const std::string& pool_id,
@@ -1527,6 +1564,12 @@ public:
     }
     control::Result<control::SsoProvider> get_sso_provider(const std::string& id) override {
         return call("get_sso_provider", [&] { return store_->get_sso_provider(id); });
+    }
+    control::Result<void> begin_saml(const control::SamlRequest& value) override {
+        return call("begin_saml", [&] { return store_->begin_saml(value); });
+    }
+    control::Result<control::SamlRequest> consume_saml(const control::SamlAnswer& value) override {
+        return call("consume_saml", [&] { return store_->consume_saml(value); });
     }
     control::Result<control::OAuthProvider> get_sso_oidc_provider(const std::string& id) override {
         return call("get_sso_oidc_provider", [&] { return store_->get_sso_oidc_provider(id); });

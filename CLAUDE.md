@@ -8,11 +8,11 @@ document rules, confidentiality, and the decisions not to drift past. Read both.
 
 ## Status
 
-Status: 2026-10-20. The current release is **v0.3.1** ([`docs/releases/v0.3.1.md`](docs/releases/v0.3.1.md): billing through a shared Stripe account, billing contacts and emailed invoices); before it **v0.3.0**
+Status: 2026-10-21. The current release is **v0.4.0** ([`docs/releases/v0.4.0.md`](docs/releases/v0.4.0.md): the security release from the multi-tenant audit and the pre-launch review, SAML sign-in, OpenID Connect discovery and `delete_account`); before it **v0.3.1** (billing through a shared Stripe account); before that **v0.3.0**
 ([`docs/releases/v0.3.0.md`](docs/releases/v0.3.0.md): the lake.live order sheet and the 2026-10-18
 UX review's fixes, with its known issues); v0.2.0 ([`docs/releases/v0.2.0.md`](docs/releases/v0.2.0.md))
 added secure networking, regions, the managed key and own identity, Clerk webhooks, the agents'
-names and Ask Orama's home. `server_info` of a v0.3.1 build reports version `0.3.1`. The paragraph below describes v0.1.0, the
+names and Ask Orama's home. `server_info` of a v0.4.0 build reports version `0.4.0`. The paragraph below describes v0.1.0, the
 first tagged release ([`docs/releases/v0.1.0.md`](docs/releases/v0.1.0.md) lists everything in it),
 and what ran on 2026-10-12. `Lake/prod` on the
 dev AKS cluster (there is no production environment yet) serves `oramasearch/lake:20261012a`, which
@@ -72,6 +72,20 @@ sessions without erasing anything; every delivery is audited centrally. Not depl
 must vendor the schema, select `clerk_webhooks_guard` and configure the endpoint and secret
 (orama-operator#541). See [`docs/api/clerk.md#webhooks`](docs/api/clerk.md#webhooks).
 
+SAML sign-in has an Assertion Consumer Service (lake#836, migration `0092_saml_sign_in`):
+`GET /v1/saml/<provider>/metadata` (the SP entity id), `GET /v1/saml/<provider>/start` and
+`start_sso_saml` (a one-use AuthnRequest over HTTP-Redirect), `POST /v1/saml/<provider>/acs`
+(HTTP-POST). Verification is Lake's own strict XML reader, Exclusive Canonicalization and XML
+Signature check (`src/control/saml.cpp`, no XML library), with audience, recipient, destination,
+time, `InResponseTo` and once-only assertion checks; unsolicited responses are refused. Not
+deployed; the operator must vendor the schema and select `saml_sign_in_guard`. See
+[`docs/api/sso.md#saml-sign-in`](docs/api/sso.md#saml-sign-in).
+Generic Lake OAuth and enterprise OIDC providers are read through OpenID Connect discovery
+(lake#837, no migration): `<issuer>/.well-known/openid-configuration`, whose `issuer` must equal the
+configured one, gives the authorization, token and JWKS endpoints, cached an hour; the fetches are
+HTTPS to public addresses within 10 s unless `LAKE_OIDC_ALLOW_PRIVATE_ADDRESSES=1`. Not deployed. See
+[`docs/api/identity.md#openid-connect-discovery`](docs/api/identity.md#openid-connect-discovery).
+
 Deployments made with `liquid deploy` reach Ship → Deployments (lake#805, migration
 `0088_repository_liquid_ids`): `liquid deploy` sends the id liquid gave the repository, not lake's
 UUID, so `repositories.liquid_id` records it (every push, and the platform sync for repositories it
@@ -82,6 +96,14 @@ repository is reported (`unresolved_repository`, `platform_unresolved_repositori
 the `lake_platform_unresolved_repositories` gauge, one log line per change), never skipped quietly.
 Not deployed; the operator must vendor the schema and select `repository_liquid_ids_guard`. See
 [`docs/api/platform.md#which-repository-a-row-names`](docs/api/platform.md#which-repository-a-row-names).
+
+Root recovery separates its participants (lake#934, migration `0093_root_recovery_participants`):
+`begin_root_recovery` names distinct TAAP identities holding admin on the customer and answers no
+share; each participant, signed in as themselves, claims only their own share once
+(`claim_root_recovery_share`) and presents it (`complete_root_recovery`), and the ceremony
+recovers at a quorum of distinct participants. No share is stored: the coefficients are derived
+from the root key. Not deployed; the operator must vendor the schema and select
+`root_recovery_participants_guard`. See [`docs/api/break-glass.md`](docs/api/break-glass.md).
 
 The newest dated record, [`docs/deployment/dev-2026-10-01.md`](docs/deployment/dev-2026-10-01.md),
 and [`docs/design/status.md`](docs/design/status.md) still describe the 2026-10-01 deployment
@@ -396,6 +418,16 @@ Zetta before its route), `delete_dataset`, `delete_model`, `delete_run`, `delete
 engine's deletes, zetta#1257; `not_supported` from an older engine) and `delete_ask_conversation`
 (with the agent tasks the conversation started, lake#673), each with `dry_run: true` and a typed confirmation in Lake Console. Not deployed; the operator must
 vendor the schema and select `organization_deletion_guard`. See `docs/api/deletion.md`.
+Deleting an account follows (lake#810, migration `0091_account_deletion`): `delete_account`, by the
+account itself (signed in within 15 minutes, or a fresh MFA `code`; never a token) or the operator
+(`user_id`), deletes its personal space's workspaces and the organizations it alone owns through
+`delete_workspace` and `delete_organization`, and refuses while it alone owns an organization other
+people belong to unless `delete_organizations: true`, so no organization is left without an owner.
+Then one store transaction removes its sessions, tokens, devices, credentials, memberships, grants
+and billing contact and marks the user and its space deleted, the email and name erased; invoices,
+orders and the central audit log are kept. Settings → Profile has the typed confirmation. Not
+deployed; the operator must vendor the schema and select `account_deletion_guard`. See
+`docs/api/identity.md#deleting-an-account`.
 A user's secret reaches a Kubernetes Secret only as a sealed projection (lake#625, decision 58, no
 migration): lake has two levels of secrets, Orama's platform credentials as environment variables
 of the hosting platform and users' workspace secrets in the secret store (`docs/deployment/secrets.md`).

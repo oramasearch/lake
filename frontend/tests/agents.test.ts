@@ -61,7 +61,7 @@ const native = {
     name : "Renewal watcher",
     kind : "custom",
     runtime : "native",
-    model : "/var/lib/zetta/models/base-agent",
+    model : "/data/models/base-agent",
     model_name : "Orama base model",
     purpose : "Flag renewals at risk",
     manifesto : "Answer from company data only.",

@@ -1,10 +1,12 @@
 /** Sign in (`/sign-in`). Under Clerk, Clerk's form (ClerkSignIn). Otherwise lake's own: a password
  * (with the TOTP step when the account has MFA, keeping the email and password in memory) and an
- * OAuth provider. Both call `/v1` directly; the password call sets `lake_session` itself. */
+ * OAuth provider. Both call `/v1` directly; the password call sets `lake_session` itself. An OAuth
+ * first sign-in with an identity document proves its key first (lake#931). */
 import { useState } from "react";
 import { Link, useLocation } from "react-router-dom";
 import { act, ApiError } from "@/lib/api";
-import { Button, Field, fieldError, Form, Notice, Page } from "@/lib/ui";
+import { Button, CopyBlock, Field, fieldError, Form, Notice, Page } from "@/lib/ui";
+import { type IdentityProofChallenge, looksSigned, signCommand, signedOutput } from "@/lib/identity";
 import { useSession } from "@/lib/session";
 import { AuthFrame, useSignedInRedirect } from "./AuthFrame";
 import { ClerkSignIn } from "./ClerkSignIn";
@@ -130,25 +132,47 @@ function PasswordPanel() {
   );
 }
 
+/** A first sign-in that brings an identity document proves the person holds its key (lake#931): Lake
+ * issues a challenge for the document (`begin_identity_proof`), the person signs it with `liquid sign
+ * artifact`, and `start_oauth` carries what that printed as `identity_proof`. */
 function OAuthPanel() {
   const [provider, setProvider] = useState("");
   const [deviceName, setDeviceName] = useState("browser");
   const [identityDocument, setIdentityDocument] = useState("");
+  const [proof, setProof] = useState<IdentityProofChallenge | null>(null);
+  const [signature, setSignature] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
+  const document = identityDocument.trim();
   const start = async () => {
     setBusy(true);
     setError(null);
     try {
+      if (document && !proof) {
+        setProof(await act<IdentityProofChallenge>("begin_identity_proof", { identity_document: document }, NO_WORKSPACE));
+        setBusy(false);
+        return;
+      }
       const value = await act<{ authorization_url?: string }>(
         "start_oauth",
-        { provider: provider.trim(), device_name: deviceName, ...(identityDocument.trim() ? { identity_document: identityDocument.trim() } : {}) },
+        {
+          provider: provider.trim(),
+          device_name: deviceName,
+          ...(document && proof
+            ? { identity_document: document, identity_proof: { nonce: proof.nonce, expires_at: proof.expires_at, signature: signedOutput(signature) } }
+            : {}),
+        },
         NO_WORKSPACE,
       );
       // The provider sends the person back to lake's callback, which sets the cookie.
       leaveFor(value.authorization_url || "/sign-in");
     } catch (e) {
       setError(e);
+      // A refused proof or an expired challenge needs a new challenge.
+      if (proof) {
+        setProof(null);
+        setSignature("");
+      }
       setBusy(false);
     }
   };
@@ -164,12 +188,30 @@ function OAuthPanel() {
           <input type="text" name="device_name" value={deviceName} onChange={(e) => setDeviceName(e.target.value)} />
         </Field>
         <Field label="TAAP/1 identity document for first sign-in" error={fieldError(error, "identity_document")}>
-          <textarea name="identity_document" spellCheck={false} value={identityDocument} onChange={(e) => setIdentityDocument(e.target.value)} />
+          <textarea
+            name="identity_document"
+            spellCheck={false}
+            value={identityDocument}
+            readOnly={proof !== null}
+            onChange={(e) => setIdentityDocument(e.target.value)}
+          />
         </Field>
-        <div>
-          <Button type="submit" variant="primary" loading={busy}>
-            Continue to provider
+        {proof ? (
+          <>
+            <p className="m-0 text-[13px]">Prove you hold this identity's key: sign this challenge before it expires, and paste everything the command prints.</p>
+            <div className="min-w-0 [&_pre]:break-all [&_pre]:whitespace-pre-wrap">
+              <CopyBlock label="Run" value={signCommand(proof.challenge)} multiline />
+            </div>
+            <Field label="What liquid sign printed" error={fieldError(error, "identity_proof")} required>
+              <textarea name="identity_signature" spellCheck={false} value={signature} onChange={(e) => setSignature(e.target.value)} />
+            </Field>
+          </>
+        ) : null}
+        <div className="flex gap-2">
+          <Button type="submit" variant="primary" loading={busy} disabled={proof !== null && !looksSigned(signature)}>
+            {document && !proof ? "Continue" : "Continue to provider"}
           </Button>
+          {proof ? <Button onClick={() => { setProof(null); setSignature(""); }}>Start again</Button> : null}
         </div>
       </Form>
     </div>

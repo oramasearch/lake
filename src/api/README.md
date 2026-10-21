@@ -133,12 +133,14 @@ agent's model call, sent through `ApiContext::model_provider` on the blocking po
 to the run's workspace usage and refused past the monthly `model_tokens` limit. `model_gateway.cpp`
 holds the gateway's pure parts (the request as forwarded, the usage of every answer shape, the
 provider's refusals, `openai_model_provider`), and `http_server.cpp` serves the OpenAI-compatible
-`POST /openai/v1/<endpoint>` over `model_completion` and builds the provider over its outbound client
+`POST /openai/v1/<endpoint>` (and the same under `/w/<workspace>/`, which must be the run's own workspace) over `model_completion` and builds the provider over its outbound client
 when `LAKE_OPENAI_API_KEY` is set (`docs/api/model-gateway.md`). A streamed call is relayed as it
 arrives (lake#665): the outbound client's `on_body` hands the provider's body on piece by piece, the
 route sets `ApiContext::model_stream` to queue each piece, and its relay writes them to the caller in
 chunked transfer while `model_completion` reads the usage from the events as they pass
-(`ModelStreamUsage`). `metering_capabilities.cpp`'s
+(`ModelStreamUsage`). A caller that goes is sent nothing more, but the provider's stream is read to
+its end and counted, and an answer without usage, or one that failed part way, is counted by
+`estimated_model_tokens` (lake#939). `metering_capabilities.cpp`'s
 `queue_repository_builds` is the build-record queueing the sample shares with `metering_usage`. See
 [metering](../../docs/api/metering.md#usage-over-time).
 
@@ -244,7 +246,9 @@ finished job's result on the output topic; `mcp_connection_internal.hpp` lends i
 bearer, never a capability. `agent_stream_triggers.cpp` (lake#677) registers `set_agent_streams` and
 `list_agent_streams` and is `AgentStreamWorker`, run on the same owner-only pass: one job of an agent
 per new message on a workspace stream it names, as the person who set it, and the trigger's removal
-after `delete_agent` (`remove_agent_stream_triggers`, called by `workspace_capabilities.cpp`). Both
+after `delete_agent` (`remove_agent_stream_triggers`, called by `workspace_capabilities.cpp`, which
+also withdraws the deleted agent's launches and schedules with `withdraw_agent_workloads`, and does
+the same when a launch's or schedule's own `get_agent` answers `not_found`, lake#524). Both
 workers start their jobs through `start_stream_runs` and act through `stream_person`
 (`agent_stream_runs.hpp`).
 `deletion_capabilities.cpp` registers what deletes a workspace's data (lake#645):
@@ -253,6 +257,10 @@ workspace engine's own deletes that answer `not_supported` from an older engine,
 `delete_ask_conversation`, which removes one person's message records from the workspace Zetta and
 the agent tasks the conversation started (their `lake_agent_tasks` records, then their dispatch
 rows through `Store::delete_agent_tasks`, lake#673).
+`delete_account` (lake#810) sits beside `delete_organization` in `capabilities.cpp`: it checks the
+caller (the account after a recent sign-in or MFA, or the operator), then calls `delete_workspace`
+and `delete_organization` through the registry as the same caller before `Store::delete_account`
+([identity.md](../../docs/api/identity.md#deleting-an-account)).
 `delete_organization`, `revoke_invitation` and `revoke_grant` sit beside their siblings in
 `capabilities.cpp`, and `delete_secret_mount` in `secrets_capabilities.cpp` over
 `MountSecrets::remove_all` (`secret_records_api.cpp`). Each takes `dry_run`. See
@@ -635,3 +643,13 @@ of the workspace secret the store names (read as Lake, kept a minute). `http_ser
 default browser, `control::cloud_store_browser` over its own public-only transport
 (`LAKE_STORE_ALLOW_PRIVATE_ADDRESSES` for local development). See
 [storage.md](../../docs/api/storage.md#browsing-a-store).
+
+SAML sign-in (lake#836, `docs/api/sso.md#saml-sign-in`): `saml.cpp` holds the steps the
+`start_sso_saml` and `sign_in_saml` capabilities and the `/v1/saml/<provider>/metadata`, `/start`
+and `/acs` routes in `http_server.cpp` share: starting a request, and verifying a response, consuming
+its request and recording its assertion once before `sign_in_sso` provisions the person.
+OpenID Connect discovery (lake#837, `docs/api/identity.md#openid-connect-discovery`): `oauth.cpp`
+holds `OidcDiscovery`, which reads and caches each issuer's `/.well-known/openid-configuration` over
+a fetch `http_server.cpp` injects (the outbound client, public addresses only unless
+`LAKE_OIDC_ALLOW_PRIVATE_ADDRESSES`). `ApiContext::oidc_discovery` carries it to `start_oauth` and
+`start_sso_oidc`, which read it on the blocking pool, and the OAuth callback uses it directly.

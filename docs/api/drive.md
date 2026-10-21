@@ -13,7 +13,7 @@ deduplication remain liquid repository values.
 | `download_drive_file` | `read` on the path | `{path, blob, size, media_type, content_base64, download_url}`: the exact bytes as base64 for a file of at most 16 MiB (`null` above), the media type from the name, and the `GET /drive/download` address that streams any size (lake#587) |
 | `drive_share_people` | `share` on the folder | The people a folder can be shared with by email or handle ([sharing.md](sharing.md#live-grants-and-effective-access)) |
 | `create_drive_folder` | `write` on the containing folder | A new liquid change containing an empty-folder marker |
-| `upload_drive_files` | `write` on the containing folder | One liquid change containing all decoded uploads |
+| `upload_drive_files` | `write` on the containing folder, or its nearest existing folder when it does not exist yet (lake#560) | One liquid change containing all decoded uploads; it creates `main` in a repository with none, and any missing folders |
 | `move_drive_path` | `write` on the source and destination parent | A new liquid move preserving the stable path node |
 | `delete_drive_path` | `write` on the path | A new liquid deletion without history removal |
 | `drive_history` | `read` on the path or nearest retained parent | Changes whose structural diff names `path` as its old or new path, one item per change with the path's state after it (see below) |
@@ -27,6 +27,38 @@ stable liquid tree node id means a move does not discard policy. Reads use the n
 folder object, so repository policy remains the default. Move authorization checks both the
 source and destination location. Every mutation calls `commit_repository_files`; the HTTP forms
 do not write the store directly.
+
+## A Moved Folder's Access (lake#929)
+
+A folder's access is the access of the folders it is in now, plus its own grants. Its policy object
+is found by its stable node id, so its own grants follow it wherever it goes; its stored parent is
+where it was when it was shared, so lake does not trust that parent on its own:
+
+- **Every read and write checks the stored parents against the path.** The path's folders at the
+  requested ref are read top down, and an object that inherits counts only when its parent is the
+  object of the folder above it (the repository's for a top folder) and that object counted too. An
+  object that does not inherit stands alone. Authorization uses the nearest object that counts. A
+  parent left from where a folder used to be (a move through a pushed change or Data → Drives, or
+  one made before lake#929), or one the folder never had, therefore costs the grants below it and
+  never lends its own. `drive_browse` decides a child with its own object the same way: that object
+  decides only when its parent is the folder's, otherwise the folder's object does.
+- **`move_drive_path` moves the object.** When the source has its own object, every folder of the
+  destination's parent gets one under the folder above it, and the source's object is put under the
+  destination parent's (`Store::set_policy_object_parent`) before the change is written. If the
+  change fails the object goes back. The source's direct grants stay; grants on its former folders
+  stop applying and the destination's apply.
+- **Sharing puts objects back.** `share_drive_folder` and `create_drive_share_link` give every
+  folder on the path an object under the folder above it, putting back any whose stored parent is
+  another, so a folder whose access fell back after an outside move is shared as it is now.
+
+A policy object holds one parent for every ref, so a folder that sits in different places on two
+refs is decided by the stored parent only where it matches; elsewhere its access falls back to the
+nearest folder above whose object does match. `set_policy_object_parent` moves only `path` objects,
+never under themselves (PostgreSQL takes one advisory lock for every such change, so two moves
+cannot close a cycle).
+
+To verify: `MovedFolderScenario.*` in `tests/scenarios/drive_test.cpp` (needs `LAKE_TEST_DB_URI`) and
+`Policy.APathObjectMovesUnderAnotherParent`.
 
 ## Search Follows Every Drive Write (lake#584)
 
@@ -107,6 +139,21 @@ the folder), never both (`invalid_input` at `/files/<n>/path`); `content_type` i
 the item has the same shape as `upload_drive_entries`' (lake#587), and a repository keeps no media
 type. An empty `content` string creates an empty file; additional item fields are rejected. The registry advertises these nested fields and
 `contentEncoding: base64` in both OpenAPI and MCP.
+
+The target folder need not exist (lake#560): an upload into `Reports/2026` when neither folder is
+there creates both, as a file manager would, and the policy check is `write` on the nearest folder
+that does exist (the repository itself at the top). A repository nobody has written to yet (made
+by `create_repository`, with no ref at all) has no `main`; an upload to `ref: main` treats it as
+empty and its change creates `main`. Every other drive capability still answers `not_found` for
+such a repository, and a ref other than `main` is never created. An upload whose `path` names a
+file is refused (`invalid_input`, "path component is not a directory"). Before lake#560 the first case answered `not_found` "no revision main" and the
+second `not_found` "no drive path <path>", both from the policy check, before anything was
+written. The tests are `DrivesHttp.TheFirstUploadCreatesMainAndAMissingFolder` (memory store),
+`DriveScenario.TheFirstUploadCreatesMainAndAMissingFolder` and
+`DriveScenario.AnUploadIntoAMissingFolderCreatesIt` (Postgres, signed in as the owner, which is
+where both failed) and
+`WorkspaceStoreDrive.TheFirstUpload*` (the account store and a switched workspace store), one
+exercise in `tests/drive_history_support.hpp`.
 
 Registry validation rejects wrong item and field types before the handler runs. For example,
 `files: [1]` returns REST `400 invalid_input` with `error.path: "/files/0"`; a missing or

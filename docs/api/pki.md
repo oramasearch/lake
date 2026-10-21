@@ -53,6 +53,27 @@ SAN, then signs that CSR public key with the customer's online intermediate. Non
 once, and every state transition and challenge access calls an ACME registry capability and
 records an audit event.
 
+### Bounded ACME State
+
+Every ACME route answers without a credential, so nothing a client sends grows Lake's memory
+without limit (lake#940). The bounds are `pki::AcmeLimits`; the defaults are below.
+
+- A `Replay-Nonce` keeps no state when it is issued: it is a counter and the issue time under an
+  HMAC-SHA-256 with a key each process draws at start. It is accepted once, within five minutes,
+  by the process that issued it and in exactly the encoding it was sent. Only consumed nonces are
+  remembered, at most 16,384; past that the oldest is forgotten and every nonce issued before it
+  answers `badNonce`, so a forgotten nonce is never accepted again. A client that gets `badNonce`
+  retries with the nonce on that answer, as RFC 8555 expects.
+- `newAccount` needs a customer that exists (404 otherwise). A customer keeps at most 16 accounts
+  and the process 4,096; past either cap the least recently used account goes, with its orders. An
+  account unused for 24 hours goes too.
+- An order and its authorization go one hour after they were created, and an account keeps at
+  most 8 orders, losing its oldest past that. An HTTP-01 token is looked up in an index, not by
+  scanning every authorization.
+
+Accounts and orders live in the process's memory, as before: a restart forgets them, and the
+client registers again.
+
 The API server owns the PKI service for its process and supplies it to every registry call. The
 service creates and loads customer authority records through the control-plane store; callers must
 not substitute an HTTP-local signer for that record.
@@ -74,7 +95,9 @@ intermediate chain, and parses issued user and host certificates with `ssh-keyge
 runs a minimal ES256 ACME client against a live lake server. The client
 gets a nonce, creates an account and order, reads Lake's HTTP-01 response, answers the challenge,
 submits a signed CSR, polls the order, and downloads the certificate chain. The suite also
-confirms issuance and renewal create audit events.
+confirms issuance and renewal create audit events. `Pki.AcmeNoncesAreStatelessOneUseAndExpire`,
+`Pki.AcmeAccountsAndOrdersAreBoundedAndOrdersExpire` and
+`Pki.AcmeNewAccountForAnUnknownCustomerIsRefused` hold the bounds above on a test clock.
 
 ## How to change
 

@@ -1,7 +1,8 @@
 # Audit API
 
 lake records signed, hash-linked audit events for every capability call, including authorization
-and input failures. Since decision 52 (lake#317) the events are kept in two kinds of log: the
+and input failures, a request body lake cannot read among them
+([Every call, an unreadable body included](#every-call-an-unreadable-body-included)). Since decision 52 (lake#317) the events are kept in two kinds of log: the
 central log in lake's PostgreSQL for control-plane and identity events, and each workspace's own
 audit, in its Zetta, for events about that workspace's data. See [Which log](#which-log). The audit stream is the source of evidence for authentication, session and
 token lifecycle, denied authorization, grant changes, secrets and certificate activity, retention
@@ -20,8 +21,8 @@ All audit capabilities except `identity` require the normal lake bearer or sessi
 |---|---|---|
 | `identity` | `GET /v1/identity` | Lake's public TAAP/1 Ed25519 identity document. |
 | `rotate_identity` | `POST /v1/rotate_identity` | A new public identity document after a dual-signed rotation. |
-| `audit` | `GET /v1/audit` | `{items: [event], unread_workspaces}` filtered by `principal`, `object`, `outcome`, `from`, `to`, and `limit`, from the central log and the workspaces' audits; `workspace_id`, `customer_id` and `log` choose the logs ([Reading both logs](#reading-both-logs)). |
-| `export_audit` | `GET /v1/export_audit` | `{jsonl}` containing the matching event objects, one JSON line each: the central log, or with `workspace_id` that workspace's whole audit. |
+| `audit` | `GET /v1/audit` | `{items: [event], unread_workspaces}` filtered by `principal`, `object`, `outcome`, `from`, `to`, and `limit`, from the central log and the workspaces' audits; `workspace_id`, `customer_id` and `log` choose the logs ([Reading both logs](#reading-both-logs)). An account's administrator reads its own account's ([Who may read it](#who-may-read-it)). |
+| `export_audit` | `GET /v1/export_audit` | `{jsonl}` containing the matching event objects, one JSON line each: the central log (with `customer_id`, the events attributed to that account), or with `workspace_id` that workspace's whole audit. |
 | `verify_audit` | `GET /v1/verify_audit` | `{verified: true, log}` after checking every stored signature, digest, and predecessor link of the central chain, or with `workspace_id` of that workspace's chain. |
 | `set_audit_retention` | `POST /v1/set_audit_retention` | The customer ID and retained days after setting the central log's retention to at least 400 days, and `workspace_audit_retention`. |
 
@@ -33,9 +34,15 @@ stored binding, and verification accepts its historical lake signing identity af
 
 ## Page
 
-`GET /audit` is the server-rendered audit page. It requires the same sign-in as the other
-control-plane pages and exposes the same principal, object, outcome, and time filters as `audit`.
-The page links only to registry capabilities and does not offer an operation the API cannot do.
+`/audit` is the web app's audit page (`frontend/src/pages/admin/AuditPage.tsx`), the operator's:
+the whole log, with the same principal, object, outcome, and time filters as `audit`, calling only
+`audit`. Opened by an account it says, inside the page, that it is the operator's.
+
+An organization's settings have an **Audit** tab (`/organization?id=<id>&tab=audit`), the
+account's surface: it reads `audit {customer_id}` for the organization's account (the central
+events attributed to it and its workspaces' audits), filters them by outcome and text, and exports
+them through `export_audit`. A person who is not the organization's administrator sees the
+refusal in the tab.
 
 ## Identity key custody
 
@@ -106,9 +113,55 @@ See [testing.md](../build/testing.md) for fixture ownership and the bounded-read
 
 `my_audit` takes the same filters as `audit` but always returns only the caller's own events: the
 principal is forced to the signed-in TAAP identity, and a `principal` filter cannot widen it. It is
-authorized on the caller's own principal object, so any signed-in account may call it; `audit`
-itself stays instance-wide and operator-only. The `/activity` page (Organization in the sidebar)
-renders it.
+authorized on the caller's own principal object, so any signed-in account may call it. `audit`
+reads the whole instance only for the operator; an account's administrator reads that account's
+([Who may read it](#who-may-read-it)). The `/activity` page (Organization in the sidebar) renders
+it.
+
+## Who may read it
+
+lake#18. `audit` and `export_audit` decide whose audit a call reads before it runs
+(`audit_log_object` in `src/api/capabilities.cpp`):
+
+- **No account named**: the whole instance's log, the central log and every workspace's audit.
+  Only the operator may read it.
+- **An account named**, by `customer_id`, or through `workspace_id` (the workspace's account): that
+  account's audit, for the operator and for a principal with `admin` on the account, such as an
+  organization's administrator or the owner of a personal account. It is the central events
+  attributed to the account (`audit::Filter::customer_id`) and its workspaces' audits, or with
+  `workspace_id` that one workspace's audit. A member who may only read the account is refused.
+
+Every other call is one refusal, `unauthorized`, whether the account belongs to someone else or
+does not exist, so a guessed id learns nothing; filters (`principal`, `object`, `request_id`) only
+narrow the account's events and never reach another's. The refusal is itself an audit event.
+`verify_audit` stays the operator's.
+
+An event is attributed to an account (`customer_id` on the event) when the capability names it
+itself, else by the workspace the call acted on, the `customer_id` or `organization_id` of its
+input, or the organization its event names (`audit_customer_of` in `src/api/registry.cpp`). A
+refused call is attributed the same way, so an attempt on an account is evidence in that account's
+audit; a name that is not an account's is left unattributed. Events recorded before this change
+carry the attribution their capability gave them, often none, and so appear only in the
+operator's view.
+
+`tests/test_audit_isolation.cpp` (`AnAccountAdministratorReadsOnlyItsOwnAccountsAudit`, both
+stores, both dispatches) covers the administrator's read and export, the refusals of another
+account, the whole log, a guessed account and a guessed request, and a reader who is not an
+administrator. `tests/test_http_server.cpp`
+(`AnAccountAdministratorReadsItsAuditOverRestAndMcp`) covers REST and MCP.
+
+## Every call, an unreadable body included
+
+A request to a capability route whose body lake cannot read (not JSON, too large, cut off, or
+for a workspace's Zetta or SCIM not a JSON object) is answered as before, 400 or 413, and recorded
+as one `failure` event of that capability (`Registry::refuse`): the caller as principal
+(`anonymous` without a credential), the request id, `details.error_code`, `details.input`
+(`not_json`, `not_an_object`, `too_large`, `unreadable` or `empty`) and `details.body_bytes`.
+The body itself is never recorded. This covers `/v1/<capability>`, a workspace's Zetta
+(`workspace_query`/`workspace_act`, with `details.capability`), SCIM and the model gateway
+(`model_completion`). If the event cannot be recorded the call answers `store_error`, as any call
+does. `tests/test_http_server.cpp` (`AMalformedBodyIsAuditedLikeAnyFailedCall`) checks one signed
+event for a well-formed and for a malformed body, without the body's contents.
 
 ## Reading the log as a person (lake#445)
 
@@ -239,7 +292,8 @@ read; the rest is still answered.
 
 - `workspace_id`: that workspace's audit alone. `after_id` cannot be combined with it; it pages the
   central log.
-- `customer_id`: the central log and the audits of that account's live workspaces.
+- `customer_id`: the account's audit: the central events attributed to it and the audits of its
+  live workspaces.
 - `log: central`: the central log alone (the Organization page's events).
 - Otherwise, `audit` (operator only) reads the central log and every live workspace's audit;
   `my_audit` reads the central log and the audits of the workspaces of the caller's own accounts,
