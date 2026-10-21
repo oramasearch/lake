@@ -10147,11 +10147,55 @@ public:
         });
     }
 
+    // A ceremony and its participants, read in `tx`.
+    static Result<PkiRecoveryCeremonyRecord> pki_recovery_ceremony_in(
+        pqxx::work& tx, const std::string& customer_id, const std::string& ceremony_id) {
+        const pqxx::result rows = tx.exec_params(
+            "SELECT id::text, customer_id::text, authority_id::text, threshold, "
+            "share_count, recovered_at::text, expires_at::text, created_at::text "
+            "FROM pki_recovery_ceremonies WHERE customer_id = $1::uuid AND id = $2::uuid",
+            customer_id,
+            ceremony_id);
+        if (rows.empty()) {
+            return std::unexpected(StoreError{"not_found", "recovery ceremony does not exist"});
+        }
+        PkiRecoveryCeremonyRecord record{
+            rows[0][0].as<std::string>(),
+            rows[0][1].as<std::string>(),
+            rows[0][2].as<std::string>(),
+            rows[0][3].as<int>(),
+            rows[0][4].as<int>(),
+            rows[0][5].is_null() ? std::nullopt
+                                 : std::optional<std::string>(rows[0][5].as<std::string>()),
+            rows[0][6].as<std::string>(),
+            rows[0][7].as<std::string>(),
+            {}};
+        const pqxx::result participants =
+            tx.exec_params("SELECT p.share_index, p.principal_id, p.share_issued_at::text, "
+                           "s.share_index IS NOT NULL FROM pki_recovery_participants p "
+                           "LEFT JOIN pki_recovery_shares s "
+                           "ON s.ceremony_id = p.ceremony_id AND s.share_index = p.share_index "
+                           "WHERE p.ceremony_id = $1::uuid ORDER BY p.share_index",
+                           ceremony_id);
+        for (const auto& row : participants) {
+            record.participants.push_back(
+                {row[0].as<int>(),
+                 row[1].as<std::string>(),
+                 row[2].is_null() ? std::nullopt
+                                  : std::optional<std::string>(row[2].as<std::string>()),
+                 row[3].as<bool>()});
+        }
+        return record;
+    }
+
     Result<PkiRecoveryCeremonyRecord>
     create_pki_recovery_ceremony(const NewPkiRecoveryCeremonyRecord& input) override {
+        const std::set<std::string> distinct(input.participants.begin(), input.participants.end());
         if (input.id.empty() || input.customer_id.empty() || input.threshold < 2 ||
             input.share_count < input.threshold || input.share_count > 255 ||
-            input.expires_at.empty()) {
+            input.expires_at.empty() ||
+            static_cast<int>(input.participants.size()) != input.share_count ||
+            distinct.size() != input.participants.size() || distinct.contains("")) {
             return std::unexpected(StoreError{"invalid_input", "recovery ceremony is invalid"});
         }
         return with_tx<PkiRecoveryCeremonyRecord>(
@@ -10160,9 +10204,7 @@ public:
                     "INSERT INTO pki_recovery_ceremonies "
                     "(id, customer_id, authority_id, threshold, share_count, expires_at) "
                     "SELECT $1::uuid, $2::uuid, id, $3, $4, $5::timestamptz "
-                    "FROM pki_authorities WHERE customer_id = $2::uuid "
-                    "RETURNING id::text, customer_id::text, authority_id::text, threshold, "
-                    "share_count, recovered_at::text, expires_at::text, created_at::text",
+                    "FROM pki_authorities WHERE customer_id = $2::uuid RETURNING id",
                     input.id,
                     input.customer_id,
                     input.threshold,
@@ -10172,14 +10214,15 @@ public:
                     return std::unexpected(
                         StoreError{"not_found", "customer authority does not exist"});
                 }
-                return PkiRecoveryCeremonyRecord{rows[0][0].as<std::string>(),
-                                                 rows[0][1].as<std::string>(),
-                                                 rows[0][2].as<std::string>(),
-                                                 rows[0][3].as<int>(),
-                                                 rows[0][4].as<int>(),
-                                                 std::nullopt,
-                                                 rows[0][6].as<std::string>(),
-                                                 rows[0][7].as<std::string>()};
+                for (std::size_t index = 0; index < input.participants.size(); ++index) {
+                    tx.exec_params("INSERT INTO pki_recovery_participants "
+                                   "(ceremony_id, share_index, principal_id) "
+                                   "VALUES ($1::uuid, $2, $3)",
+                                   input.id,
+                                   static_cast<int>(index) + 1,
+                                   input.participants[index]);
+                }
+                return pki_recovery_ceremony_in(tx, input.customer_id, input.id);
             });
     }
 
@@ -10188,77 +10231,101 @@ public:
                               const std::string& ceremony_id) override {
         return with_tx<PkiRecoveryCeremonyRecord>(
             [&](pqxx::work& tx) -> Result<PkiRecoveryCeremonyRecord> {
-                const pqxx::result rows = tx.exec_params(
-                    "SELECT id::text, customer_id::text, authority_id::text, threshold, "
-                    "share_count, recovered_at::text, expires_at::text, created_at::text "
-                    "FROM pki_recovery_ceremonies WHERE customer_id = $1::uuid AND id = $2::uuid",
-                    customer_id,
-                    ceremony_id);
-                if (rows.empty()) {
-                    return std::unexpected(
-                        StoreError{"not_found", "recovery ceremony does not exist"});
-                }
-                const std::optional<std::string> recovered =
-                    rows[0][5].is_null() ? std::nullopt
-                                         : std::optional<std::string>(rows[0][5].as<std::string>());
-                return PkiRecoveryCeremonyRecord{rows[0][0].as<std::string>(),
-                                                 rows[0][1].as<std::string>(),
-                                                 rows[0][2].as<std::string>(),
-                                                 rows[0][3].as<int>(),
-                                                 rows[0][4].as<int>(),
-                                                 recovered,
-                                                 rows[0][6].as<std::string>(),
-                                                 rows[0][7].as<std::string>()};
+                return pki_recovery_ceremony_in(tx, customer_id, ceremony_id);
             });
     }
 
-    Result<PkiRecoveryCeremonyRecord>
-    complete_pki_recovery_ceremony(const std::string& customer_id,
-                                   const std::string& ceremony_id,
-                                   const std::vector<PkiRecoveryShareEvidence>& evidence) override {
-        return with_tx<PkiRecoveryCeremonyRecord>([&](pqxx::work& tx)
-                                                      -> Result<PkiRecoveryCeremonyRecord> {
-            const pqxx::result active = tx.exec_params(
-                "SELECT threshold FROM pki_recovery_ceremonies "
-                "WHERE customer_id = $1::uuid AND id = $2::uuid AND recovered_at IS NULL "
-                "AND expires_at > now() FOR UPDATE",
+    Result<int> claim_pki_recovery_share(const std::string& customer_id,
+                                         const std::string& ceremony_id,
+                                         const std::string& principal) override {
+        return with_tx<int>([&](pqxx::work& tx) -> Result<int> {
+            // One statement: a share is issued at most once, even to concurrent claims.
+            const pqxx::result issued = tx.exec_params(
+                "UPDATE pki_recovery_participants p SET share_issued_at = now() "
+                "FROM pki_recovery_ceremonies c "
+                "WHERE c.id = p.ceremony_id AND c.customer_id = $1::uuid AND c.id = $2::uuid "
+                "AND p.principal_id = $3 AND p.share_issued_at IS NULL "
+                "AND c.recovered_at IS NULL AND c.expires_at > now() RETURNING p.share_index",
+                customer_id,
+                ceremony_id,
+                principal);
+            if (!issued.empty()) {
+                return issued[0][0].as<int>();
+            }
+            const pqxx::result ceremony = tx.exec_params(
+                "SELECT recovered_at IS NULL AND expires_at > now() FROM pki_recovery_ceremonies "
+                "WHERE customer_id = $1::uuid AND id = $2::uuid",
                 customer_id,
                 ceremony_id);
-            if (active.empty()) {
+            if (ceremony.empty()) {
+                return std::unexpected(StoreError{"not_found", "recovery ceremony does not exist"});
+            }
+            if (!ceremony[0][0].as<bool>()) {
                 return std::unexpected(StoreError{"conflict", "recovery ceremony is not active"});
             }
-            if (static_cast<int>(evidence.size()) < active[0][0].as<int>()) {
+            const pqxx::result participant =
+                tx.exec_params("SELECT 1 FROM pki_recovery_participants "
+                               "WHERE ceremony_id = $1::uuid AND principal_id = $2",
+                               ceremony_id,
+                               principal);
+            if (participant.empty()) {
                 return std::unexpected(
-                    StoreError{"invalid_input", "recovery quorum is not present"});
+                    StoreError{"forbidden", "the caller is not a participant of this ceremony"});
             }
-            std::set<int> indices;
-            for (const PkiRecoveryShareEvidence& share : evidence) {
-                if (share.index < 1 || share.digest.empty() ||
-                    !indices.insert(share.index).second) {
-                    return std::unexpected(
-                        StoreError{"invalid_input", "recovery evidence is invalid"});
-                }
+            return std::unexpected(
+                StoreError{"conflict", "this participant's recovery share was already issued"});
+        });
+    }
+
+    Result<PkiRecoveryCeremonyRecord>
+    submit_pki_recovery_share(const std::string& customer_id,
+                              const std::string& ceremony_id,
+                              const std::string& principal,
+                              const PkiRecoveryShareEvidence& evidence) override {
+        return with_tx<PkiRecoveryCeremonyRecord>([&](pqxx::work& tx)
+                                                      -> Result<PkiRecoveryCeremonyRecord> {
+            // The ceremony row is locked, so submissions to one ceremony are serialized.
+            const pqxx::result active =
+                tx.exec_params("SELECT threshold, recovered_at IS NULL AND expires_at > now() "
+                               "FROM pki_recovery_ceremonies "
+                               "WHERE customer_id = $1::uuid AND id = $2::uuid FOR UPDATE",
+                               customer_id,
+                               ceremony_id);
+            if (active.empty()) {
+                return std::unexpected(StoreError{"not_found", "recovery ceremony does not exist"});
+            }
+            if (!active[0][1].as<bool>()) {
+                return std::unexpected(StoreError{"conflict", "recovery ceremony is not active"});
+            }
+            const pqxx::result participant = tx.exec_params(
+                "SELECT share_index, share_issued_at IS NOT NULL FROM pki_recovery_participants "
+                "WHERE ceremony_id = $1::uuid AND principal_id = $2",
+                ceremony_id,
+                principal);
+            if (participant.empty() || participant[0][0].as<int>() != evidence.index) {
+                return std::unexpected(
+                    StoreError{"forbidden", "the caller is not this share's participant"});
+            }
+            if (!participant[0][1].as<bool>() || evidence.digest.empty()) {
+                return std::unexpected(StoreError{
+                    "conflict", "this participant's recovery share cannot be presented"});
+            }
+            const pqxx::result recorded =
                 tx.exec_params("INSERT INTO pki_recovery_shares "
                                "(ceremony_id, share_index, share_digest) "
-                               "VALUES ($1::uuid, $2, $3)",
+                               "VALUES ($1::uuid, $2, $3) ON CONFLICT DO NOTHING RETURNING 1",
                                ceremony_id,
-                               share.index,
-                               share.digest);
+                               evidence.index,
+                               evidence.digest);
+            if (recorded.empty()) {
+                return std::unexpected(StoreError{
+                    "conflict", "this participant's recovery share cannot be presented"});
             }
-            const pqxx::result rows =
-                tx.exec_params("UPDATE pki_recovery_ceremonies SET recovered_at = now() "
-                               "WHERE id = $1::uuid RETURNING id::text, customer_id::text, "
-                               "authority_id::text, threshold, share_count, recovered_at::text, "
-                               "expires_at::text, created_at::text",
-                               ceremony_id);
-            return PkiRecoveryCeremonyRecord{rows[0][0].as<std::string>(),
-                                             rows[0][1].as<std::string>(),
-                                             rows[0][2].as<std::string>(),
-                                             rows[0][3].as<int>(),
-                                             rows[0][4].as<int>(),
-                                             rows[0][5].as<std::string>(),
-                                             rows[0][6].as<std::string>(),
-                                             rows[0][7].as<std::string>()};
+            tx.exec_params("UPDATE pki_recovery_ceremonies SET recovered_at = now() "
+                           "WHERE id = $1::uuid AND (SELECT count(*) FROM pki_recovery_shares "
+                           "WHERE ceremony_id = $1::uuid) >= threshold",
+                           ceremony_id);
+            return pki_recovery_ceremony_in(tx, customer_id, ceremony_id);
         });
     }
 

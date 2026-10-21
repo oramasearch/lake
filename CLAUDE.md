@@ -97,6 +97,14 @@ the `lake_platform_unresolved_repositories` gauge, one log line per change), nev
 Not deployed; the operator must vendor the schema and select `repository_liquid_ids_guard`. See
 [`docs/api/platform.md#which-repository-a-row-names`](docs/api/platform.md#which-repository-a-row-names).
 
+Root recovery separates its participants (lake#934, migration `0093_root_recovery_participants`):
+`begin_root_recovery` names distinct TAAP identities holding admin on the customer and answers no
+share; each participant, signed in as themselves, claims only their own share once
+(`claim_root_recovery_share`) and presents it (`complete_root_recovery`), and the ceremony
+recovers at a quorum of distinct participants. No share is stored: the coefficients are derived
+from the root key. Not deployed; the operator must vendor the schema and select
+`root_recovery_participants_guard`. See [`docs/api/break-glass.md`](docs/api/break-glass.md).
+
 The newest dated record, [`docs/deployment/dev-2026-10-01.md`](docs/deployment/dev-2026-10-01.md),
 and [`docs/design/status.md`](docs/design/status.md) still describe the 2026-10-01 deployment
 (`oramasearch/lake:20261001d`, `36679e1`); they have not been brought up to the release. Until they

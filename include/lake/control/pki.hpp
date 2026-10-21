@@ -70,10 +70,20 @@ struct AuthorityPublic {
     std::string intermediate_chain_pem;
 };
 
+// A root recovery ceremony as begun (lake#934): its quorum and the participants, one share each,
+// participant i holding share i + 1. It carries no share; each participant claims their own.
 struct RecoveryCeremony {
     std::string id;
     int threshold = 0;
-    std::vector<ShamirShare> shares;
+    std::vector<std::string> participants;
+    std::string expires_at;
+};
+
+// Where a ceremony stands after one participant's share was verified.
+struct RecoverySubmission {
+    int submitted = 0;
+    int threshold = 0;
+    bool recovered = false;
 };
 
 struct AcmeOrder {
@@ -215,21 +225,27 @@ public:
                                                  bool host,
                                                  std::string_view instance_kek,
                                                  int lifetime_seconds = 3600);
-    Result<RecoveryCeremony>
-    begin_recovery(std::string_view customer_id, int threshold, int share_count);
+    // Begin a root recovery ceremony for distinct `participants` (TAAP ids), any `threshold` of
+    // whom restore the root. No share is returned: each participant claims only their own.
     Result<RecoveryCeremony> begin_recovery(Store& store,
                                             std::string_view customer_id,
                                             std::string_view instance_kek,
                                             int threshold,
-                                            int share_count);
-    Result<void> recover_root(std::string_view customer_id,
-                              const RecoveryCeremony& ceremony,
-                              const std::vector<ShamirShare>& shares);
-    Result<void> recover_root(Store& store,
-                              std::string_view customer_id,
-                              std::string_view instance_kek,
-                              const RecoveryCeremony& ceremony,
-                              const std::vector<ShamirShare>& shares);
+                                            const std::vector<std::string>& participants);
+    // The share of `participant` in an active ceremony, issued once.
+    Result<ShamirShare> claim_recovery_share(Store& store,
+                                             std::string_view customer_id,
+                                             std::string_view instance_kek,
+                                             std::string_view ceremony_id,
+                                             std::string_view participant);
+    // Verify the share `participant` presents and record it; the ceremony is recovered once
+    // `threshold` distinct participants have presented theirs.
+    Result<RecoverySubmission> submit_recovery_share(Store& store,
+                                                     std::string_view customer_id,
+                                                     std::string_view instance_kek,
+                                                     std::string_view ceremony_id,
+                                                     std::string_view participant,
+                                                     const ShamirShare& share);
     Result<std::string> new_acme_nonce();
     Result<void> consume_acme_nonce(std::string_view nonce);
     // Register an account key for an existing customer.

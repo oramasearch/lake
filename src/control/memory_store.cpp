@@ -7111,8 +7111,11 @@ InMemoryStore::create_pki_recovery_ceremony(const NewPkiRecoveryCeremonyRecord& 
     if (authority == pki_authorities_.end()) {
         return std::unexpected(StoreError{"not_found", "customer authority does not exist"});
     }
+    const std::set<std::string> distinct(input.participants.begin(), input.participants.end());
     if (input.id.empty() || input.threshold < 2 || input.share_count < input.threshold ||
-        input.share_count > 255 || input.expires_at <= now_iso8601()) {
+        input.share_count > 255 || input.expires_at <= now_iso8601() ||
+        static_cast<int>(input.participants.size()) != input.share_count ||
+        distinct.size() != input.participants.size() || distinct.contains("")) {
         return std::unexpected(StoreError{"invalid_input", "recovery ceremony is invalid"});
     }
     if (std::ranges::any_of(pki_recovery_ceremonies_,
@@ -7126,7 +7129,12 @@ InMemoryStore::create_pki_recovery_ceremony(const NewPkiRecoveryCeremonyRecord& 
                                      input.share_count,
                                      std::nullopt,
                                      input.expires_at,
-                                     now_iso8601()};
+                                     now_iso8601(),
+                                     {}};
+    for (std::size_t index = 0; index < input.participants.size(); ++index) {
+        record.participants.push_back(
+            {static_cast<int>(index) + 1, input.participants[index], std::nullopt, false});
+    }
     pki_recovery_ceremonies_.push_back(record);
     return record;
 }
@@ -7144,10 +7152,9 @@ InMemoryStore::get_pki_recovery_ceremony(const std::string& customer_id,
     return *ceremony;
 }
 
-Result<PkiRecoveryCeremonyRecord> InMemoryStore::complete_pki_recovery_ceremony(
-    const std::string& customer_id,
-    const std::string& ceremony_id,
-    const std::vector<PkiRecoveryShareEvidence>& evidence) {
+Result<int> InMemoryStore::claim_pki_recovery_share(const std::string& customer_id,
+                                                    const std::string& ceremony_id,
+                                                    const std::string& principal) {
     std::lock_guard lock(mutex_);
     auto ceremony = std::ranges::find_if(pki_recovery_ceremonies_, [&](const auto& value) {
         return value.id == ceremony_id && value.customer_id == customer_id;
@@ -7159,17 +7166,52 @@ Result<PkiRecoveryCeremonyRecord> InMemoryStore::complete_pki_recovery_ceremony(
     if (ceremony->recovered_at || ceremony->expires_at <= now) {
         return std::unexpected(StoreError{"conflict", "recovery ceremony is not active"});
     }
-    std::set<int> indices;
-    for (const PkiRecoveryShareEvidence& share : evidence) {
-        if (share.index < 1 || share.digest.empty() || !indices.insert(share.index).second) {
-            return std::unexpected(StoreError{"invalid_input", "recovery evidence is invalid"});
-        }
+    auto participant = std::ranges::find_if(
+        ceremony->participants, [&](const auto& value) { return value.principal == principal; });
+    if (principal.empty() || participant == ceremony->participants.end()) {
+        return std::unexpected(
+            StoreError{"forbidden", "the caller is not a participant of this ceremony"});
     }
-    if (static_cast<int>(evidence.size()) < ceremony->threshold) {
-        return std::unexpected(StoreError{"invalid_input", "recovery quorum is not present"});
+    if (participant->share_issued_at) {
+        return std::unexpected(
+            StoreError{"conflict", "this participant's recovery share was already issued"});
     }
-    ceremony->recovered_at = now;
-    pki_recovery_evidence_[ceremony_id] = evidence;
+    participant->share_issued_at = now;
+    return participant->index;
+}
+
+Result<PkiRecoveryCeremonyRecord>
+InMemoryStore::submit_pki_recovery_share(const std::string& customer_id,
+                                         const std::string& ceremony_id,
+                                         const std::string& principal,
+                                         const PkiRecoveryShareEvidence& evidence) {
+    std::lock_guard lock(mutex_);
+    auto ceremony = std::ranges::find_if(pki_recovery_ceremonies_, [&](const auto& value) {
+        return value.id == ceremony_id && value.customer_id == customer_id;
+    });
+    if (ceremony == pki_recovery_ceremonies_.end()) {
+        return std::unexpected(StoreError{"not_found", "recovery ceremony does not exist"});
+    }
+    if (ceremony->recovered_at || ceremony->expires_at <= now_iso8601()) {
+        return std::unexpected(StoreError{"conflict", "recovery ceremony is not active"});
+    }
+    auto participant = std::ranges::find_if(
+        ceremony->participants, [&](const auto& value) { return value.principal == principal; });
+    if (principal.empty() || participant == ceremony->participants.end() ||
+        participant->index != evidence.index) {
+        return std::unexpected(
+            StoreError{"forbidden", "the caller is not this share's participant"});
+    }
+    if (!participant->share_issued_at || participant->submitted || evidence.digest.empty()) {
+        return std::unexpected(
+            StoreError{"conflict", "this participant's recovery share cannot be presented"});
+    }
+    participant->submitted = true;
+    pki_recovery_evidence_[ceremony_id].push_back(evidence);
+    if (std::ranges::count_if(ceremony->participants, &PkiRecoveryParticipant::submitted) >=
+        ceremony->threshold) {
+        ceremony->recovered_at = now_iso8601();
+    }
     return *ceremony;
 }
 

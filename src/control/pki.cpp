@@ -8,6 +8,7 @@
 #include <ctime>
 #include <format>
 #include <memory>
+#include <set>
 #include <string>
 #include <utility>
 
@@ -1034,19 +1035,12 @@ Result<SshCertificate> issue_ssh_certificate(const Authority& authority,
                           serial};
 }
 
-Result<std::vector<ShamirShare>>
-split_secret(const std::vector<std::byte>& secret, int threshold, int share_count) {
-    if (secret.empty() || threshold < 2 || share_count < threshold || share_count > 255) {
-        return std::unexpected(Error{"invalid_input", "invalid Shamir threshold or share count"});
-    }
-    std::vector<std::vector<std::uint8_t>> coefficients(secret.size(),
-                                                        std::vector<std::uint8_t>(threshold));
-    for (std::size_t offset = 0; offset < secret.size(); ++offset) {
-        coefficients[offset][0] = std::to_integer<std::uint8_t>(secret[offset]);
-        if (RAND_bytes(coefficients[offset].data() + 1, threshold - 1) != 1) {
-            return std::unexpected(crypto_error("could not create recovery shares"));
-        }
-    }
+// The shares of a secret whose byte at `offset` is the constant term of the polynomial with the
+// remaining `coefficients[offset]`, evaluated at 1..share_count in GF(2^8).
+std::vector<ShamirShare>
+shares_of_polynomials(const std::vector<std::byte>& secret,
+                      const std::vector<std::vector<std::uint8_t>>& coefficients,
+                      int share_count) {
     std::vector<ShamirShare> shares;
     shares.reserve(static_cast<std::size_t>(share_count));
     for (int index = 1; index <= share_count; ++index) {
@@ -1054,17 +1048,32 @@ split_secret(const std::vector<std::byte>& secret, int threshold, int share_coun
         share.index = index;
         share.value.resize(secret.size());
         for (std::size_t offset = 0; offset < secret.size(); ++offset) {
-            std::uint8_t value = 0;
+            std::uint8_t value = std::to_integer<std::uint8_t>(secret[offset]);
             std::uint8_t x_power = 1;
             for (const std::uint8_t coefficient : coefficients[offset]) {
-                value ^= gf_multiply(coefficient, x_power);
                 x_power = gf_multiply(x_power, static_cast<std::uint8_t>(index));
+                value ^= gf_multiply(coefficient, x_power);
             }
             share.value[offset] = static_cast<std::byte>(value);
         }
         shares.push_back(std::move(share));
     }
     return shares;
+}
+
+Result<std::vector<ShamirShare>>
+split_secret(const std::vector<std::byte>& secret, int threshold, int share_count) {
+    if (secret.empty() || threshold < 2 || share_count < threshold || share_count > 255) {
+        return std::unexpected(Error{"invalid_input", "invalid Shamir threshold or share count"});
+    }
+    std::vector<std::vector<std::uint8_t>> coefficients(secret.size(),
+                                                        std::vector<std::uint8_t>(threshold - 1));
+    for (auto& polynomial : coefficients) {
+        if (RAND_bytes(polynomial.data(), threshold - 1) != 1) {
+            return std::unexpected(crypto_error("could not create recovery shares"));
+        }
+    }
+    return shares_of_polynomials(secret, coefficients, share_count);
 }
 
 Result<std::vector<std::byte>> recover_secret(const std::vector<ShamirShare>& shares,
@@ -1101,37 +1110,59 @@ Result<std::vector<std::byte>> recover_secret(const std::vector<ShamirShare>& sh
     return secret;
 }
 
-Result<RecoveryCeremony>
-recovery_ceremony_for(const Authority& authority, int threshold, int share_count) {
+std::vector<std::byte> root_secret(const Authority& authority) {
     std::vector<std::byte> root;
     root.reserve(authority.root_private_key_pem.size());
     for (const char character : authority.root_private_key_pem) {
         root.push_back(static_cast<std::byte>(character));
     }
-    auto shares = split_secret(root, threshold, share_count);
-    if (!shares) {
-        return std::unexpected(shares.error());
-    }
-    return RecoveryCeremony{new_uuid_v4(), threshold, std::move(*shares)};
+    return root;
 }
 
-Result<void> verify_recovered_root(const Authority& authority,
-                                   const RecoveryCeremony& ceremony,
-                                   const std::vector<ShamirShare>& shares) {
-    auto recovered = recover_secret(shares, ceremony.threshold);
-    if (!recovered) {
-        return std::unexpected(recovered.error());
+// A ceremony's shares (lake#934). Its polynomials' coefficients are derived from the root private
+// key, as RFC 6979 derives a signature nonce: HMAC-SHA256 keyed with the root key over a label,
+// the ceremony id and a block counter. Only a holder of the root can compute them, so Lake keeps
+// no share and gives each participant theirs alone when they claim it.
+Result<std::vector<ShamirShare>> ceremony_shares(const Authority& authority,
+                                                 std::string_view ceremony_id,
+                                                 int threshold,
+                                                 int share_count) {
+    const std::vector<std::byte> secret = root_secret(authority);
+    if (secret.empty() || ceremony_id.empty() || threshold < 2 || share_count < threshold ||
+        share_count > 255) {
+        return std::unexpected(Error{"invalid_input", "invalid Shamir threshold or share count"});
     }
-    std::string root;
-    root.reserve(recovered->size());
-    for (const std::byte byte : *recovered) {
-        root.push_back(static_cast<char>(byte));
+    const std::string& key = authority.root_private_key_pem;
+    std::vector<std::uint8_t> stream;
+    const std::size_t needed = secret.size() * static_cast<std::size_t>(threshold - 1);
+    for (std::uint32_t block = 0; stream.size() < needed; ++block) {
+        std::vector<unsigned char> input;
+        constexpr std::string_view label = "lake root recovery coefficients v1";
+        input.insert(input.end(), label.begin(), label.end());
+        input.push_back(0);
+        input.insert(input.end(), ceremony_id.begin(), ceremony_id.end());
+        input.push_back(0);
+        append_u32(input, block);
+        std::array<unsigned char, EVP_MAX_MD_SIZE> digest{};
+        unsigned int digest_size = 0;
+        if (HMAC(EVP_sha256(),
+                 key.data(),
+                 static_cast<int>(key.size()),
+                 input.data(),
+                 input.size(),
+                 digest.data(),
+                 &digest_size) == nullptr) {
+            return std::unexpected(crypto_error("could not derive recovery shares"));
+        }
+        stream.insert(stream.end(), digest.begin(), digest.begin() + digest_size);
     }
-    if (root != authority.root_private_key_pem) {
-        return std::unexpected(
-            Error{"unauthorized", "recovery shares do not restore the customer root"});
+    std::vector<std::vector<std::uint8_t>> coefficients(secret.size());
+    auto next = stream.begin();
+    for (auto& polynomial : coefficients) {
+        polynomial.assign(next, next + (threshold - 1));
+        next += threshold - 1;
     }
-    return {};
+    return shares_of_polynomials(secret, coefficients, share_count);
 }
 
 Result<PkiRecoveryShareEvidence> recovery_evidence(const ShamirShare& share) {
@@ -1426,90 +1457,123 @@ Result<SshCertificate> Service::issue_ssh_certificate(::lake::control::Store& st
         *authority, public_key, key_id, principals, host, lifetime_seconds);
 }
 
-Result<RecoveryCeremony>
-Service::begin_recovery(std::string_view customer_id, int threshold, int share_count) {
-    std::lock_guard lock(mutex_);
-    const auto authority = authorities_.find(std::string(customer_id));
-    if (authority == authorities_.end()) {
-        return std::unexpected(Error{"not_found", "customer certificate authority does not exist"});
-    }
-    return recovery_ceremony_for(authority->second, threshold, share_count);
-}
-
 Result<RecoveryCeremony> Service::begin_recovery(::lake::control::Store& store,
                                                  std::string_view customer_id,
                                                  std::string_view instance_kek,
                                                  int threshold,
-                                                 int share_count) {
+                                                 const std::vector<std::string>& participants) {
+    const std::set<std::string> distinct(participants.begin(), participants.end());
+    if (distinct.size() != participants.size() || distinct.contains("")) {
+        return std::unexpected(
+            Error{"invalid_input", "recovery participants must be distinct principals"});
+    }
+    const int share_count = static_cast<int>(participants.size());
     auto authority = load_authority(store, customer_id, instance_kek);
     if (!authority) {
         return std::unexpected(authority.error());
     }
-    auto ceremony = recovery_ceremony_for(*authority, threshold, share_count);
-    if (!ceremony) {
-        return std::unexpected(ceremony.error());
+    RecoveryCeremony ceremony{new_uuid_v4(), threshold, participants, {}};
+    // Prove the derivation restores this root before any participant relies on it.
+    auto shares = ceremony_shares(*authority, ceremony.id, threshold, share_count);
+    if (!shares) {
+        return std::unexpected(shares.error());
+    }
+    shares->resize(static_cast<std::size_t>(threshold));
+    auto restored = recover_secret(*shares, threshold);
+    if (!restored || *restored != root_secret(*authority)) {
+        return std::unexpected(crypto_error("recovery shares do not restore the customer root"));
     }
     const auto expires_at = std::chrono::system_clock::now() + std::chrono::minutes(15);
-    auto record = store.create_pki_recovery_ceremony(NewPkiRecoveryCeremonyRecord{
-        ceremony->id,
-        std::string(customer_id),
-        threshold,
-        share_count,
-        std::format("{:%FT%TZ}", std::chrono::floor<std::chrono::seconds>(expires_at))});
+    ceremony.expires_at =
+        std::format("{:%FT%TZ}", std::chrono::floor<std::chrono::seconds>(expires_at));
+    auto record =
+        store.create_pki_recovery_ceremony(NewPkiRecoveryCeremonyRecord{ceremony.id,
+                                                                        std::string(customer_id),
+                                                                        threshold,
+                                                                        share_count,
+                                                                        ceremony.expires_at,
+                                                                        participants});
     if (!record) {
         return std::unexpected(Error{record.error().code, record.error().message});
     }
     return ceremony;
 }
 
-Result<void> Service::recover_root(std::string_view customer_id,
-                                   const RecoveryCeremony& ceremony,
-                                   const std::vector<ShamirShare>& shares) {
-    std::lock_guard lock(mutex_);
-    const auto authority = authorities_.find(std::string(customer_id));
-    if (authority == authorities_.end()) {
-        return std::unexpected(Error{"not_found", "customer certificate authority does not exist"});
-    }
-    return verify_recovered_root(authority->second, ceremony, shares);
-}
-
-Result<void> Service::recover_root(::lake::control::Store& store,
-                                   std::string_view customer_id,
-                                   std::string_view instance_kek,
-                                   const RecoveryCeremony& ceremony,
-                                   const std::vector<ShamirShare>& shares) {
-    auto record = store.get_pki_recovery_ceremony(std::string(customer_id), ceremony.id);
+Result<ShamirShare> Service::claim_recovery_share(::lake::control::Store& store,
+                                                  std::string_view customer_id,
+                                                  std::string_view instance_kek,
+                                                  std::string_view ceremony_id,
+                                                  std::string_view participant) {
+    auto record =
+        store.get_pki_recovery_ceremony(std::string(customer_id), std::string(ceremony_id));
     if (!record) {
         return std::unexpected(Error{record.error().code, record.error().message});
-    }
-    if (record->threshold != ceremony.threshold) {
-        return std::unexpected(
-            Error{"invalid_input", "recovery threshold does not match ceremony"});
     }
     auto authority = load_authority(store, customer_id, instance_kek);
     if (!authority) {
         return std::unexpected(authority.error());
     }
-    RecoveryCeremony persisted{record->id, record->threshold, {}};
-    auto verified = verify_recovered_root(*authority, persisted, shares);
-    if (!verified) {
-        return std::unexpected(verified.error());
+    auto shares = ceremony_shares(*authority, record->id, record->threshold, record->share_count);
+    if (!shares) {
+        return std::unexpected(shares.error());
     }
-    std::vector<PkiRecoveryShareEvidence> evidence;
-    evidence.reserve(shares.size());
-    for (const ShamirShare& share : shares) {
-        auto digest = recovery_evidence(share);
-        if (!digest) {
-            return std::unexpected(digest.error());
-        }
-        evidence.push_back(std::move(*digest));
+    // The store issues the share once, to its participant, while the ceremony is active.
+    auto index = store.claim_pki_recovery_share(
+        std::string(customer_id), std::string(ceremony_id), std::string(participant));
+    if (!index) {
+        return std::unexpected(Error{index.error().code, index.error().message});
     }
-    auto completed =
-        store.complete_pki_recovery_ceremony(std::string(customer_id), ceremony.id, evidence);
-    if (!completed) {
-        return std::unexpected(Error{completed.error().code, completed.error().message});
+    if (*index < 1 || *index > static_cast<int>(shares->size())) {
+        return std::unexpected(Error{"corrupt", "recovery participant has no share"});
     }
-    return {};
+    return std::move(shares->at(static_cast<std::size_t>(*index - 1)));
+}
+
+Result<RecoverySubmission> Service::submit_recovery_share(::lake::control::Store& store,
+                                                          std::string_view customer_id,
+                                                          std::string_view instance_kek,
+                                                          std::string_view ceremony_id,
+                                                          std::string_view participant,
+                                                          const ShamirShare& share) {
+    auto record =
+        store.get_pki_recovery_ceremony(std::string(customer_id), std::string(ceremony_id));
+    if (!record) {
+        return std::unexpected(Error{record.error().code, record.error().message});
+    }
+    auto authority = load_authority(store, customer_id, instance_kek);
+    if (!authority) {
+        return std::unexpected(authority.error());
+    }
+    auto shares = ceremony_shares(*authority, record->id, record->threshold, record->share_count);
+    if (!shares) {
+        return std::unexpected(shares.error());
+    }
+    const bool own_share = std::ranges::any_of(record->participants, [&](const auto& value) {
+        return value.principal == participant && value.index == share.index;
+    });
+    if (!own_share || share.index > static_cast<int>(shares->size())) {
+        return std::unexpected(Error{"forbidden", "the caller is not this share's participant"});
+    }
+    const ShamirShare& expected = shares->at(static_cast<std::size_t>(share.index - 1));
+    if (share.value.size() != expected.value.size() ||
+        CRYPTO_memcmp(share.value.data(), expected.value.data(), expected.value.size()) != 0) {
+        return std::unexpected(
+            Error{"unauthorized", "recovery share does not belong to this ceremony"});
+    }
+    auto digest = recovery_evidence(share);
+    if (!digest) {
+        return std::unexpected(digest.error());
+    }
+    // The store accepts it only from the share's own participant, once, after it was issued.
+    auto submitted = store.submit_pki_recovery_share(
+        std::string(customer_id), std::string(ceremony_id), std::string(participant), *digest);
+    if (!submitted) {
+        return std::unexpected(Error{submitted.error().code, submitted.error().message});
+    }
+    const auto count =
+        std::ranges::count_if(submitted->participants, &PkiRecoveryParticipant::submitted);
+    return RecoverySubmission{
+        static_cast<int>(count), submitted->threshold, submitted->recovered_at.has_value()};
 }
 
 Result<std::string> Service::new_acme_nonce() {

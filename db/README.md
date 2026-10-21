@@ -9,6 +9,10 @@ AuthnRequest, its id as a hash) and `sso_saml_assertions` (each accepted asserti
 expires), and the guard `saml_sign_in_guard`. Additive; apply before the new binary, and have the
 operator vendor the schema and select the guard. See
 [schema.md](../docs/control-plane/schema.md#saml-sign-in-migration).
+Migration `0093_root_recovery_participants` (lake#934) adds `pki_recovery_participants`, who holds
+each share of a root recovery ceremony and when it was issued, and the guard
+`root_recovery_participants_guard`. Additive; apply before the new binary, and have the operator
+vendor the schema and select the guard. See [break-glass.md](../docs/api/break-glass.md).
 
 Migration `0090_billing_contacts` (lake#857) adds `billing_contacts`, each account's billing email,
 name and address, and the guard `billing_contacts_guard`. Additive; apply before the new binary, and
