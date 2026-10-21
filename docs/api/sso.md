@@ -12,10 +12,19 @@ configuration and records its test time.
 
 `create_federation_issuer` creates one `(organization, issuer, claim)` policy row; a provider
 assertion is accepted only when its issuer equals the registered issuer and every asserted claim
-has a row for that organization. `sign_in_sso` binds the provider subject to a SCIM user and
-issues a browser session. A first assertion may create that SCIM user only when the provider
-enables just-in-time provisioning and supplies the user's TAAP identity. The resulting
-credential has kind `saml` or `oidc`, and the session remains pool-scoped.
+has a row for that organization. The store's `sign_in_sso` binds the provider subject to a SCIM
+user and issues a browser session. A first assertion may create that SCIM user only when the
+provider enables just-in-time provisioning and supplies the user's TAAP identity, which must be a
+TAAP id ([policy.md](policy.md#principal-ids-lake870)). The resulting credential has kind `saml` or
+`oidc`, and the session remains pool-scoped.
+
+**People reach it only through a path that verifies the provider:** the OIDC callback
+(`GET /v1/oauth/sso-<id>/callback`) verifies the ID token and calls the store, and `sign_in_saml`
+verifies the signed response. **The `sign_in_sso` capability itself is operator-only**
+(lake#562): it verifies no assertion, so a caller who is not the admin token is refused, an
+anonymous one with `unauthenticated` and a signed-in person with `unauthorized`. Before this it was
+a public entry point, and anyone who knew a provider's id, its issuer and a provisioned subject
+received that person's session.
 
 `sign_in_saml` accepts a base64 SAML response only after verifying its enveloped RSA-SHA256
 signature and SHA-256 digest with the provider's configured PEM X.509 certificate. The verifier

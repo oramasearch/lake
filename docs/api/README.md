@@ -411,7 +411,7 @@ and `Experiments.CompareRunsAnswersItsGetFormWithRepeatedKeysOrACommaList`
 | `configure_recovery_contact`, `repository_recovery_status`, `recover_repository_key` | action/read | repository, contact TAAP identity, opaque wrapped key | custody status or contact-wrapped key | [recovery.md](recovery.md) |
 | `register_sso_provider`, `list_sso_providers`, `test_sso_provider` | action/read | organization, protocol configuration, or provider id | secret-free provider configuration | [sso.md](sso.md) |
 | `create_federation_issuer`, `list_federation_issuers` | action/read | organization, issuer, claim | acceptable issuer-claim policy rows | [sso.md](sso.md) |
-| `sign_in_sso` | action, public entry | provider assertion identity and claims | browser session + secret | [sso.md](sso.md) |
+| `sign_in_sso` | action, operator only (lake#562) | provider assertion identity and claims | browser session + secret | [sso.md](sso.md) |
 | `upsert_scim_user`, `upsert_scim_group`, `list_sso_provisioning_logs` | action/read | SCIM resource mapping or provider id | SCIM mapping or provisioning outcomes | [sso.md](sso.md) |
 | `scim_list_*`, `scim_get_*`, `scim_upsert_*`, `scim_patch_*`, `scim_delete_*` | action, provider entry | provider bearer plus filter, resource, PATCH operations, or resource id | SCIM user/group resource, list response, or deletion confirmation | [sso.md](sso.md) |
 | `search` | read | `query`, `customer?`, `repository?`, `ref?`, `change?`, `history?`, `limit?` | `{mode, scanned_changes, items: [ranked hit]}` | [search.md](search.md) |
