@@ -412,7 +412,9 @@ TEST(PostgresCapabilities, OrganizationAndPolicyRoundTrip) {
     ASSERT_TRUE(repository_object) << repository_object.error().message;
     const ApiResult path = call("create_object",
                                 {{"object_type", "path"},
-                                 {"external_id", "node-" + suffix},
+                                 // Named for the repository it sits in (lake#913).
+                                 {"external_id",
+                                  repository.value.at("id").get<std::string>() + ":node-" + suffix},
                                  {"parent_id", repository_object->id},
                                  {"inherit", true}});
     ASSERT_TRUE(path.ok) << path.error.message;

@@ -9948,9 +9948,18 @@ public:
                                "VALUES ('environment', $1, $2::uuid) "
                                "ON CONFLICT (object_type, external_id) DO UPDATE SET external_id = "
                                "EXCLUDED.external_id "
-                               "RETURNING id::text",
+                               "RETURNING id::text, coalesce(parent_id::text, '')",
                                environment_external,
                                scope[0][0].as<std::string>());
+            // The owner's environment sits under the owner's own object. One that already holds
+            // its id elsewhere was made to claim the owner's future mounts (lake#913): it is never
+            // adopted, and the mount is refused until the operator removes it.
+            if (environment[0][1].as<std::string>() != scope[0][0].as<std::string>()) {
+                return std::unexpected(
+                    StoreError{"conflict",
+                               "the secret mounts' policy object of this owner belongs to another "
+                               "account; ask the operator to remove it"});
+            }
             tx.exec_params("INSERT INTO objects (object_type, external_id, parent_id) "
                            "VALUES ('secret_mount', $1, $2::uuid)",
                            input.mount_id,

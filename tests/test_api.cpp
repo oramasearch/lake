@@ -58,6 +58,7 @@
 #include "lake/control/identity_crypto.hpp"
 #include "lake/control/memory_store.hpp"
 #include "lake/control/metering.hpp"
+#include "lake/control/platform_records.hpp"
 #include "lake/control/policy.hpp"
 #include "lake/control/postgres_store.hpp"
 #include "lake/control/workspace_audit.hpp"
@@ -4900,6 +4901,180 @@ TEST(Repositories, PublicRepositoryContentCapabilitiesUseTheRepositoryStore) {
     EXPECT_EQ(artifact.value["outputs"][0]["path"], "build/app");
     EXPECT_EQ(artifact.value["attestations"][0]["profile"], "slsa_provenance/1");
     EXPECT_EQ(artifact.value["trace"]["id"], "trace-1");
+}
+
+// lake#913 (LSR-002): a policy object counts only inside its own account. One account cannot
+// create objects carrying another account's resource identifiers (a folder, an environment, the
+// account's secret mounts), and objects already in the store that carry them, made before the
+// fix, are never adopted: the account the identifiers name keeps its resources.
+void expect_policy_objects_stay_in_their_account(std::shared_ptr<lake::control::Store> store,
+                                                 const std::string& database_uri) {
+    Registry registry;
+    register_core_capabilities(registry, "0.0.1");
+    RepositoryFixtureStore repository_store;
+    lake::test::RecordWorkspaces workspaces(store, database_uri);
+    const std::string suffix = lake::control::new_uuid_v4().substr(0, 8);
+    const auto call_as = [&](const std::string& taap, const std::string& name, json input) {
+        ApiContext context;
+        context.store = store.get();
+        context.sync_store = &repository_store;
+        context.workspaces = workspaces.service.get();
+        context.instance_kek = std::string(drive_kek);
+        context.node_name = "test";
+        context.authorized = true;
+        context.acting_identity = taap;
+        const auto capability = registry.find(name);
+        if (capability && capability->async_handler) {
+            auto completed = liquid::runtime::block_on(registry.call_async(name, input, context));
+            return completed ? std::move(*completed)
+                             : ApiResult::failure("store_error", completed.error().message);
+        }
+        return registry.call(name, input, context);
+    };
+    struct Account {
+        std::string taap, customer, customer_object, workspace, repository, repository_object;
+    };
+    // An account: its person, its customer with the person as admin, and a repository.
+    const auto account = [&](const std::string& name) {
+        Account made{.taap = "taap:1:ed25519:" + name + "-" + suffix};
+        const auto user =
+            store->create_user({made.taap, name + "-" + suffix + "@example.test", name});
+        if (!user) {
+            throw std::runtime_error("create_user: " + user.error().message);
+        }
+        const auto customer =
+            store->create_customer({"individual", user->id, "", name + "-" + suffix});
+        if (!customer) {
+            throw std::runtime_error("create_customer: " + customer.error().message);
+        }
+        made.customer = customer->id;
+        made.customer_object = store->find_policy_object("customer", customer->id)->id;
+        const auto granted =
+            store->create_grant({made.taap,
+                                 made.customer_object,
+                                 "admin",
+                                 lake::control::identity_crypto::sha256_hex(made.taap),
+                                 "admin",
+                                 lake::control::new_uuid_v4()});
+        if (!granted) {
+            throw std::runtime_error("create_grant: " + granted.error().message);
+        }
+        made.workspace = workspaces.create(customer->id, "home");
+        const auto repository =
+            store->create_repository({customer->id, "drive", "", "private", made.workspace});
+        if (!repository) {
+            throw std::runtime_error("create_repository: " + repository.error().message);
+        }
+        made.repository = repository->id;
+        made.repository_object = store->find_policy_object("repository", repository->id)->id;
+        return made;
+    };
+    const Account owner = account("owner");
+    const Account intruder = account("intruder");
+    // The fixture tree's `shared` folder; repository_tree answers its node id to any reader.
+    const std::string node = "22222222222222222222222222222222";
+    const std::string folder_id = owner.repository + ":" + node;
+    const std::string branch_id = owner.repository + ":refs/heads/main";
+    const std::string environment_id =
+        lake::control::platform_environment_id(owner.repository, "production");
+    const std::string secrets_id = "secrets/" + owner.customer;
+
+    // create_object refuses every identifier of the owner's, under the intruder's own objects.
+    const auto create =
+        [&](const std::string& type, const std::string& external_id, const std::string& parent) {
+            return call_as(
+                intruder.taap,
+                "create_object",
+                {{"object_type", type}, {"external_id", external_id}, {"parent_id", parent}});
+        };
+    EXPECT_EQ(create("path", folder_id, intruder.repository_object).error.code, "invalid_input");
+    EXPECT_EQ(create("path", branch_id, intruder.repository_object).error.code, "invalid_input");
+    EXPECT_EQ(create("environment", environment_id, intruder.repository_object).error.code,
+              "invalid_input");
+    EXPECT_EQ(create("environment", secrets_id, intruder.customer_object).error.code,
+              "invalid_input");
+    for (const auto& [type, id] : {std::pair{"path", folder_id},
+                                   std::pair{"path", branch_id},
+                                   std::pair{"environment", environment_id},
+                                   std::pair{"environment", secrets_id}}) {
+        EXPECT_EQ(store->find_policy_object(type, id).error().code, "not_found") << id;
+    }
+    // A path object in its own repository is still made.
+    const ApiResult own =
+        create("path", intruder.repository + ":" + node, intruder.repository_object);
+    EXPECT_TRUE(own.ok) << own.error.message;
+
+    // Objects that already carry the owner's identifiers under the intruder's objects, as
+    // create_object made them before this fix.
+    for (const auto& [type, id, parent] :
+         {std::tuple{"path", folder_id, intruder.repository_object},
+          std::tuple{"path", branch_id, intruder.repository_object},
+          std::tuple{"environment", environment_id, intruder.customer_object},
+          std::tuple{"environment", secrets_id, intruder.customer_object}}) {
+        const auto planted = store->create_policy_object(
+            {type, id, parent, intruder.taap, lake::control::new_uuid_v4(), true});
+        ASSERT_TRUE(planted) << planted.error().message;
+    }
+    // The intruder's admin does not reach the owner's folder: it cannot upload into it.
+    const ApiResult upload =
+        call_as(intruder.taap,
+                "upload_drive_files",
+                {{"repository_id", owner.repository},
+                 {"ref", "main"},
+                 {"path", "shared"},
+                 {"files", json::array({{{"name", "planted.txt"}, {"content", "aGk="}}})}});
+    EXPECT_EQ(upload.error.code, "unauthorized") << upload.error.message;
+    EXPECT_TRUE(repository_store.committed_operations.empty());
+    // The owner still reads it, and sharing it refuses to adopt the planted object.
+    const ApiResult browsed =
+        call_as(owner.taap,
+                "drive_browse",
+                {{"repository_id", owner.repository}, {"ref", "main"}, {"path", "shared"}});
+    EXPECT_TRUE(browsed.ok) << browsed.error.message;
+    EXPECT_EQ(call_as(owner.taap,
+                      "share_drive_folder",
+                      {{"repository_id", owner.repository},
+                       {"ref", "main"},
+                       {"path", "shared"},
+                       {"principal_taap_id", owner.taap},
+                       {"role", "read"}})
+                  .error.code,
+              "conflict");
+    // The branch rule, the environment and the account's secret mounts are not adopted either.
+    EXPECT_EQ(call_as(owner.taap,
+                      "set_branch_protection",
+                      {{"repository_id", owner.repository},
+                       {"ref", "refs/heads/main"},
+                       {"required_review", true}})
+                  .error.code,
+              "conflict");
+    EXPECT_EQ(lake::control::environment_policy_object(*store, owner.repository, "production")
+                  .error()
+                  .code,
+              "conflict");
+    const std::string mount_id = lake::control::new_uuid_v4();
+    const auto mount =
+        store->create_secret_mount_route({mount_id, owner.customer, "", owner.workspace});
+    ASSERT_FALSE(mount);
+    EXPECT_EQ(mount.error().code, "conflict");
+    EXPECT_FALSE(store->get_secret_mount_route(mount_id));
+    EXPECT_EQ(store->find_policy_object("secret_mount", mount_id).error().code, "not_found");
+}
+
+TEST(PolicyObjectOwnership, MemoryStore) {
+    expect_policy_objects_stay_in_their_account(std::make_shared<lake::control::InMemoryStore>(),
+                                                {});
+}
+
+TEST(PolicyObjectOwnership, PostgresStore) {
+    const char* database_uri = lake::test::postgres_uri();
+    if (database_uri == nullptr || *database_uri == '\0') {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
+    }
+    std::shared_ptr<lake::control::Store> store = lake::control::make_postgres_store(
+        database_uri, "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff");
+    ASSERT_TRUE(store->ping());
+    expect_policy_objects_stay_in_their_account(store, database_uri);
 }
 
 TEST(Drive, FolderSharingMatchesAuthorizeAndLinksExpire) {
