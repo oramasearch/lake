@@ -190,6 +190,10 @@ int main(int argc, char** argv) {
     // against an MCP server on the same machine (docs/api/mcp-connections.md#the-client).
     opts.mcp_allow_private_addresses = env_or("LAKE_MCP_ALLOW_PRIVATE_ADDRESSES", "") == "1";
     opts.store_allow_private_addresses = env_or("LAKE_STORE_ALLOW_PRIVATE_ADDRESSES", "") == "1";
+    // Webhooks reach only HTTPS on public addresses unless this is set (lake#876), for local
+    // development against a receiver on the same machine.
+    opts.webhook_allow_private_addresses =
+        env_or("LAKE_WEBHOOK_ALLOW_PRIVATE_ADDRESSES", "") == "1";
     // Billing (docs/api/billing.md): on only where LAKE_BILLING=on, as on Orama Cloud; an
     // enterprise install leaves it unset and has no billing capability or page.
     opts.billing = lake::api::billing_enabled(env_or("LAKE_BILLING", ""));

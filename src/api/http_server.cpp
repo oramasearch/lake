@@ -6728,6 +6728,10 @@ struct OutboundRequest {
     // Plain http to a cluster Service (`<name>.<namespace>.svc.cluster.local`): a served
     // methodology's model (lake#690), whose Service only Lake's pods can reach.
     bool cluster_http = false;
+    // Only HTTPS to public addresses (lake#876): every address the host resolves to is checked at
+    // connect time with mcp_public_address, as MCP connections are, so a webhook a tenant points at
+    // a private, loopback or link-local address never reaches Lake's own network.
+    bool public_only = false;
 };
 
 struct OutboundResponse {
@@ -6985,8 +6989,18 @@ private:
             finish(pending);
             co_return;
         }
+        if (pending->request.public_only && !target.secure) {
+            pending->response.error = "outbound URL must use HTTPS";
+            finish(pending);
+            co_return;
+        }
+        // Every step is bounded by the request's timeout (lake#772): the name lookup, the
+        // connection and the TLS handshake, as well as the exchange. An endpoint that accepts a
+        // connection and never answers cannot hold the request.
+        const auto deadline = pending->request.timeout;
         boost::corosio::resolver resolver(io_context_);
-        auto [resolve_error, results] = co_await resolver.resolve(target.host, target.port);
+        auto [resolve_error, results] =
+            co_await boost::capy::timeout(resolver.resolve(target.host, target.port), deadline);
         if (resolve_error) {
             pending->response.error = "could not resolve outbound host: " + resolve_error.message();
             finish(pending);
@@ -6997,7 +7011,22 @@ private:
         bool connected = false;
         std::string connect_error = "outbound host resolved no addresses";
         for (const auto& entry : results) {
-            auto [error] = co_await socket.connect(entry.get_endpoint());
+            const auto endpoint = entry.get_endpoint();
+            if (pending->request.public_only) {
+                std::vector<std::uint8_t> bytes;
+                if (endpoint.is_v4()) {
+                    const auto raw = endpoint.v4_address().to_bytes();
+                    bytes.assign(raw.begin(), raw.end());
+                } else {
+                    const auto raw = endpoint.v6_address().to_bytes();
+                    bytes.assign(raw.begin(), raw.end());
+                }
+                if (!mcp_public_address(bytes)) {
+                    connect_error = "the outbound host's address is not a public address";
+                    continue;
+                }
+            }
+            auto [error] = co_await boost::capy::timeout(socket.connect(endpoint), deadline);
             if (!error) {
                 connected = true;
                 break;
@@ -7020,7 +7049,8 @@ private:
                 co_return;
             }
             boost::corosio::openssl_stream secure(&socket, *context);
-            auto [handshake_error] = co_await secure.handshake(boost::corosio::tls_stream::client);
+            auto [handshake_error] = co_await boost::capy::timeout(
+                secure.handshake(boost::corosio::tls_stream::client), deadline);
             if (handshake_error) {
                 pending->response.error =
                     "outbound TLS handshake failed: " + handshake_error.message();
@@ -9119,8 +9149,13 @@ struct ApiServer::Impl {
                     outbound_headers.emplace_back(name, value.get<std::string>());
                 }
             }
-            const OutboundResponse response =
-                outbound_http.request({"POST", url, payload, std::move(outbound_headers)});
+            // A delivery waits at most 10 s in all (lake#772), and reaches only HTTPS on public
+            // addresses (lake#876). The capability calls this through run_blocking, never on the
+            // server's own thread.
+            OutboundRequest request{"POST", url, payload, std::move(outbound_headers)};
+            request.timeout = std::chrono::seconds(10);
+            request.public_only = !options.webhook_allow_private_addresses;
+            const OutboundResponse response = outbound_http.request(std::move(request));
             return WebhookDeliveryResult{response.status, response.error};
         };
         if (route.req.count(boost::http::field::user_agent) != 0) {

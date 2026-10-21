@@ -128,6 +128,25 @@ canonical JSON payload bytes, an `x-lake-event` header, and an HMAC-SHA-256
 signature, payload, and attempt count. `retry_webhook_delivery` creates a new attempt only when a
 prior attempt was unsuccessful; it never overwrites the event log.
 
+**How a delivery is sent (lake#772, lake#876).** The endpoint belongs to the customer, so Lake
+assumes it may be slow, hostile or pointed somewhere it should not be:
+
+- **Off the server's thread.** The request runs on the blocking pool (`run_blocking`), never on the
+  thread that serves every other request. Before lake#772 a delivery to an endpoint that did not answer
+  stopped Lake answering anything, `/healthz` included, until the liveness probe restarted the pod.
+- **10 seconds in all.** The name lookup, the connection, the TLS handshake and the exchange are each
+  bounded, so a delivery gives up within about 10 s and the attempt is recorded with its error.
+- **HTTPS to public addresses only.** Every address the host resolves to is checked at connect time,
+  as for MCP connections (`mcp_public_address`): loopback, private, link-local, CGNAT and metadata
+  addresses are refused with "the outbound host's address is not a public address", and plain HTTP
+  with "outbound URL must use HTTPS". Before lake#876 a webhook could make Lake POST to its own
+  network. `LAKE_WEBHOOK_ALLOW_PRIVATE_ADDRESSES=1` lifts the address check for local development
+  and tests only; never set it on a hosted Lake.
+
+The same rules apply to [application lifecycle webhooks](apps.md#lifecycle-webhooks). Verify with
+`WebhookDelivery.ASilentEndpointDoesNotStopLakeAndTimesOut` and
+`WebhookDelivery.PrivateAddressesAndPlainHttpAreRefused` (`tests/test_http_server.cpp`).
+
 The sender is an injected service at the API boundary so the registry and its tests do not perform
 network I/O. The HTTP service supplies that sender in deployment. If a sender is unavailable, the
 attempt is retained as a failed delivery and can be retried when delivery is configured.

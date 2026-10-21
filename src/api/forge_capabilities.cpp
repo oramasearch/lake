@@ -434,11 +434,16 @@ record_webhook_attempt(RepositoryForge& forge, const control::ForgeRecord& webho
         webhook_signature(webhook.value.value("secret", ""), encoded_payload);
     WebhookDeliveryResult delivery{.error = "webhook sender is not configured"};
     if (context.webhook_sender) {
-        delivery = context.webhook_sender(webhook.value.value("url", ""),
-                                          {{"content-type", "application/json"},
-                                           {"x-lake-event", event},
-                                           {"x-lake-signature-256", signature}},
-                                          encoded_payload);
+        // The endpoint is the customer's and may be slow: the request waits on the blocking pool,
+        // never on the thread that serves every other request (lake#772).
+        auto sent = co_await run_blocking(
+            [sender = context.webhook_sender,
+             url = webhook.value.value("url", ""),
+             headers = json{{"content-type", "application/json"},
+                            {"x-lake-event", event},
+                            {"x-lake-signature-256", signature}},
+             encoded_payload] { return sender(url, headers, encoded_payload); });
+        delivery = sent ? std::move(*sent) : WebhookDeliveryResult{.error = sent.error().message};
     }
     const bool delivered =
         delivery.error.empty() && delivery.status >= 200 && delivery.status < 300;

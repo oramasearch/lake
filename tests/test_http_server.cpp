@@ -2,6 +2,8 @@
 #include <gtest/gtest.h>
 
 #include <functional>
+#include <future>
+#include <thread>
 
 #include "lake/control/identity_crypto.hpp"
 
@@ -3920,4 +3922,197 @@ TEST(HttpServer, RequestLogsNameRoutesAndEachWorkspaceGetsItsOwnRequestSeries) {
     // Every capability call routed to the workspace is one call: the two reads and the sync pull.
     EXPECT_EQ(home_series.metric_total("lake_usage", {{"dimension", "calls"}, {"kind", "api"}}), 3);
     EXPECT_EQ(home_series.metric_total("lake_usage", {{"dimension", "calls"}, {"kind", "mcp"}}), 0);
+}
+
+// A TCP endpoint on loopback that accepts every connection and never answers: the slow customer
+// endpoint of lake#772. It counts the connections it took.
+class SilentEndpoint {
+public:
+    SilentEndpoint() {
+        descriptor_ = ::socket(AF_INET, SOCK_STREAM, 0);
+        sockaddr_in address{};
+        address.sin_family = AF_INET;
+        address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        socklen_t size = sizeof(address);
+        ::bind(descriptor_, reinterpret_cast<sockaddr*>(&address), sizeof(address));
+        ::listen(descriptor_, 16);
+        ::getsockname(descriptor_, reinterpret_cast<sockaddr*>(&address), &size);
+        port_ = ntohs(address.sin_port);
+        thread_ = std::thread([this] {
+            for (;;) {
+                const int accepted = ::accept(descriptor_, nullptr, nullptr);
+                if (accepted < 0) {
+                    return;
+                }
+                std::lock_guard lock(mutex_);
+                held_.push_back(accepted);
+            }
+        });
+    }
+    ~SilentEndpoint() {
+        ::shutdown(descriptor_, SHUT_RDWR);
+        ::close(descriptor_);
+        thread_.join();
+        for (const int held : held_) {
+            ::close(held);
+        }
+    }
+    unsigned short port() const {
+        return port_;
+    }
+    std::size_t accepted() {
+        std::lock_guard lock(mutex_);
+        return held_.size();
+    }
+
+private:
+    int descriptor_ = -1;
+    unsigned short port_ = 0;
+    std::thread thread_;
+    std::mutex mutex_;
+    std::vector<int> held_;
+};
+
+// One request on its own connection with a receive timeout longer than a webhook delivery's.
+std::string slow_request(unsigned short port,
+                         const std::string& path,
+                         const std::string& body,
+                         const std::string& bearer) {
+    const int socket_fd = connect_loopback(port);
+    timeval timeout{};
+    timeout.tv_sec = 30;
+    static_cast<void>(::setsockopt(socket_fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)));
+    const std::string wire =
+        "POST " + path + " HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n" +
+        "Content-Type: application/json\r\nAuthorization: Bearer " + bearer +
+        "\r\nContent-Length: " + std::to_string(body.size()) + "\r\n\r\n" + body;
+    std::string response;
+    if (send_all(socket_fd, wire)) {
+        response = read_response(socket_fd, true);
+    }
+    ::close(socket_fd);
+    return response;
+}
+
+struct WebhookServer {
+    std::shared_ptr<lake::control::InMemoryStore> store =
+        std::make_shared<lake::control::InMemoryStore>();
+    lake::test::RecordWorkspaces workspaces{store};
+    std::unique_ptr<lake::api::ApiServer> server;
+    std::string repository_id;
+
+    explicit WebhookServer(bool allow_private) {
+        lake::api::ServerOptions options;
+        options.port = 0;
+        options.store = store;
+        options.admin_token = "webhook-operator";
+        options.instance_kek = std::string(64, '7');
+        options.store_root =
+            lake::test::fixture_path("webhook-store-" + lake::control::new_uuid_v4()).string();
+        options.workspaces = workspaces.service;
+        options.webhook_allow_private_addresses = allow_private;
+        server = std::make_unique<lake::api::ApiServer>(options);
+        if (!server->start()) {
+            throw std::runtime_error(server->reason());
+        }
+        const auto user = store->create_user({"taap:1:ed25519:webhook-owner", "", "Owner"});
+        const auto customer = store->create_customer({"individual", user->id, "", "hooks"});
+        const std::string workspace = workspaces.create(customer->id, "home");
+        const auto created =
+            call("create_repository",
+                 {{"customer_id", customer->id}, {"workspace_id", workspace}, {"name", "hooks"}});
+        if (!created.value("ok", false)) {
+            throw std::runtime_error("create_repository: " + created.dump());
+        }
+        repository_id = created["value"]["id"];
+    }
+
+    nlohmann::json call(const std::string& capability, const nlohmann::json& input) {
+        const std::string response =
+            slow_request(server->port(), "/v1/" + capability, input.dump(), "webhook-operator");
+        const std::string body = response_body(response);
+        if (body.empty()) {
+            throw std::runtime_error(capability + " answered no body: " + response);
+        }
+        return nlohmann::json::parse(body);
+    }
+
+    std::string webhook(const std::string& url) {
+        const auto created = call("create_webhook",
+                                  {{"repository_id", repository_id},
+                                   {"url", url},
+                                   {"events", nlohmann::json::array({"ping"})},
+                                   {"secret", "hook-secret"}});
+        if (!created.value("ok", false)) {
+            throw std::runtime_error("create_webhook: " + created.dump());
+        }
+        return created["value"]["id"];
+    }
+};
+
+// lake#772: a delivery to an endpoint that never answers runs off the server's own thread, so lake
+// keeps answering everything else while it waits, and the delivery gives up after its 10 s limit
+// with the attempt recorded.
+TEST(WebhookDelivery, ASilentEndpointDoesNotStopLakeAndTimesOut) {
+    SilentEndpoint endpoint;
+    WebhookServer lake_server(true);
+    const std::string webhook =
+        lake_server.webhook("https://127.0.0.1:" + std::to_string(endpoint.port()) + "/hook");
+
+    const auto started = std::chrono::steady_clock::now();
+    auto delivery = std::async(std::launch::async, [&] {
+        return lake_server.call("deliver_webhook",
+                                {{"repository_id", lake_server.repository_id},
+                                 {"webhook_id", webhook},
+                                 {"event", "ping"},
+                                 {"payload", {{"hello", "world"}}}});
+    });
+    for (int i = 0; i < 50 && endpoint.accepted() == 0; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    ASSERT_GE(endpoint.accepted(), 1U) << "the delivery never reached the endpoint";
+    for (int probe = 0; probe < 3; ++probe) {
+        const auto asked = std::chrono::steady_clock::now();
+        HttpConnection connection(lake_server.server->port());
+        const std::string health = connection.request("GET", "/healthz");
+        const std::string info = connection.request("GET", "/v1/server_info");
+        EXPECT_TRUE(health.starts_with("HTTP/1.1 200")) << health;
+        EXPECT_TRUE(info.starts_with("HTTP/1.1 200")) << info;
+        EXPECT_LT(std::chrono::steady_clock::now() - asked, std::chrono::seconds(2))
+            << "lake stopped answering while a webhook delivery waited";
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    }
+    const nlohmann::json answered = delivery.get();
+    const auto waited = std::chrono::steady_clock::now() - started;
+    ASSERT_TRUE(answered["ok"]) << answered.dump();
+    EXPECT_FALSE(answered["value"]["value"]["delivered"]);
+    EXPECT_NE(answered["value"]["value"]["error"].get<std::string>(), "");
+    EXPECT_LT(waited, std::chrono::seconds(15)) << "the delivery outlived its limit";
+}
+
+// lake#876: without the operator setting, a webhook reaches only HTTPS on public addresses. A
+// loopback target is refused before any connection is made, and plain HTTP is refused outright.
+TEST(WebhookDelivery, PrivateAddressesAndPlainHttpAreRefused) {
+    SilentEndpoint endpoint;
+    WebhookServer lake_server(false);
+    for (const std::string url :
+         {"https://127.0.0.1:" + std::to_string(endpoint.port()) + "/hook",
+          "https://localhost:" + std::to_string(endpoint.port()) + "/hook",
+          "http://127.0.0.1:" + std::to_string(endpoint.port()) + "/hook"}) {
+        const std::string webhook = lake_server.webhook(url);
+        const nlohmann::json answered =
+            lake_server.call("deliver_webhook",
+                             {{"repository_id", lake_server.repository_id},
+                              {"webhook_id", webhook},
+                              {"event", "ping"},
+                              {"payload", nlohmann::json::object()}});
+        ASSERT_TRUE(answered["ok"]) << url << ": " << answered.dump();
+        const auto& attempt = answered["value"]["value"];
+        EXPECT_FALSE(attempt["delivered"]) << url;
+        const std::string error = attempt["error"];
+        EXPECT_TRUE(error.find("not a public address") != std::string::npos ||
+                    error.find("must use HTTPS") != std::string::npos)
+            << url << ": " << error;
+    }
+    EXPECT_EQ(endpoint.accepted(), 0U) << "a refused webhook still connected";
 }
