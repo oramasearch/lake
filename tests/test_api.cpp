@@ -4739,6 +4739,125 @@ TEST(Export, VerifiesAndRecreatesPortableRepositoryFacts) {
               "invalid_digest");
 }
 
+// A webhook's signing secret never leaves lake in an archive, and only a repository administrator's
+// archive names who holds access (LSR-024, lake#933). An imported webhook signs with a new secret.
+TEST(Export, AnArchiveCarriesNoWebhookSecretAndGrantsOnlyForAnAdministrator) {
+    Surface source;
+    RepositoryFixtureStore source_store;
+    source.ctx.sync_store = &source_store;
+    const ApiResult user = source.call("create_user", {{"display_name", "Ada"}});
+    ASSERT_TRUE(user.ok) << user.error.message;
+    const ApiResult customer = source.call(
+        "create_customer",
+        {{"customer_type", "individual"}, {"user_id", user.value["id"]}, {"name", "ada"}});
+    ASSERT_TRUE(customer.ok) << customer.error.message;
+    const ApiResult repository = source.call(
+        "create_repository",
+        {{"customer_id", customer.value["id"]},
+         {"workspace_id", source.workspace(customer.value["id"])},
+         {"name", "hooked"}});
+    ASSERT_TRUE(repository.ok) << repository.error.message;
+    const std::string repository_id = repository.value["id"];
+    const std::string secret = "lsr-024-webhook-signing-secret";
+    ASSERT_TRUE(source
+                    .call("create_webhook",
+                          {{"repository_id", repository_id},
+                           {"url", "https://example.test/lake"},
+                           {"events", json::array({"issue"})},
+                           {"secret", secret}})
+                    .ok);
+    const auto object = source.store.find_policy_object("repository", repository_id);
+    ASSERT_TRUE(object) << object.error().message;
+    const std::string reader = "taap:1:ed25519:export-reader";
+    ASSERT_TRUE(source.store
+                    .create_grant({reader, object->id, "read", "reader-proof", "admin", "test"})
+                    .has_value());
+
+    const auto webhooks_of = [](const json& archive) {
+        json found = json::array();
+        for (const json& record : archive["payload"]["forge"]) {
+            if (record.value("kind", "") == "webhook") {
+                found.push_back(record);
+            }
+        }
+        return found;
+    };
+
+    // A reader's archive: the webhook's endpoint and events, never its secret, and no grants.
+    source.ctx.acting_identity = reader;
+    source.ctx.operator_credential = false;
+    const ApiResult read_export =
+        source.call("export_repository", {{"repository_id", repository_id}});
+    ASSERT_TRUE(read_export.ok) << read_export.error.message;
+    const json& read_archive = read_export.value["archive"];
+    EXPECT_EQ(read_export.value.dump().find(secret), std::string::npos);
+    const json read_webhooks = webhooks_of(read_archive);
+    ASSERT_EQ(read_webhooks.size(), 1u);
+    EXPECT_EQ(read_webhooks[0]["value"]["url"], "https://example.test/lake");
+    EXPECT_FALSE(read_webhooks[0]["value"].contains("secret"));
+    EXPECT_EQ(read_archive["payload"]["grants"], json::array());
+
+    // An administrator's archive keeps the grants, still without the secret.
+    source.ctx.acting_identity = "admin";
+    source.ctx.operator_credential = true;
+    const ApiResult admin_export =
+        source.call("export_repository", {{"repository_id", repository_id}});
+    ASSERT_TRUE(admin_export.ok) << admin_export.error.message;
+    const json& admin_archive = admin_export.value["archive"];
+    EXPECT_EQ(admin_export.value.dump().find(secret), std::string::npos);
+    EXPECT_FALSE(webhooks_of(admin_archive)[0]["value"].contains("secret"));
+    EXPECT_TRUE(std::ranges::any_of(admin_archive["payload"]["grants"], [&](const json& grant) {
+        return grant.value("principal_taap_id", "") == reader;
+    }));
+
+    // The imported webhook signs with a secret of its own: neither the source's nor an empty one.
+    Surface destination;
+    RepositoryFixtureStore destination_store;
+    destination.ctx.sync_store = &destination_store;
+    const ApiResult target_user = destination.call("create_user", {{"display_name", "Grace"}});
+    ASSERT_TRUE(target_user.ok) << target_user.error.message;
+    const ApiResult target_customer = destination.call(
+        "create_customer",
+        {{"customer_type", "individual"}, {"user_id", target_user.value["id"]}, {"name", "grace"}});
+    ASSERT_TRUE(target_customer.ok) << target_customer.error.message;
+    const ApiResult imported =
+        destination.call("import_repository",
+                         {{"customer_id", target_customer.value["id"]},
+                          {"workspace_id", destination.workspace(target_customer.value["id"])},
+                          {"name", "hooked-copy"},
+                          {"archive", read_archive}});
+    ASSERT_TRUE(imported.ok) << imported.error.message;
+    std::string delivered_payload;
+    std::string delivered_signature;
+    destination.ctx.webhook_sender = [&](const std::string&,
+                                         const json& headers,
+                                         const std::string& payload) -> WebhookDeliveryResult {
+        delivered_payload = payload;
+        delivered_signature = headers.at("x-lake-signature-256").get<std::string>();
+        return {.status = 204};
+    };
+    ASSERT_TRUE(destination
+                    .call("create_issue",
+                          {{"repository_id", imported.value["id"]}, {"title", "Trigger hook"}})
+                    .ok);
+    ASSERT_FALSE(delivered_payload.empty());
+    const auto signed_with = [&](std::string_view key) {
+        unsigned char digest[EVP_MAX_MD_SIZE];
+        unsigned int size = 0;
+        HMAC(EVP_sha256(),
+             key.data(),
+             static_cast<int>(key.size()),
+             reinterpret_cast<const unsigned char*>(delivered_payload.data()),
+             delivered_payload.size(),
+             digest,
+             &size);
+        return "sha256=" + lake::control::identity_crypto::base64url_encode(
+                               std::string_view(reinterpret_cast<const char*>(digest), size));
+    };
+    EXPECT_NE(delivered_signature, signed_with(""));
+    EXPECT_NE(delivered_signature, signed_with(secret));
+}
+
 TEST(GitHubImport, MapsRecordedIssuesReviewsAndWorkflowReport) {
     Surface surface;
     RepositoryFixtureStore repository_store;
