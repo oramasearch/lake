@@ -22,7 +22,9 @@ The pages follow the console's rich layout (`docs/ui/web-app.md`, *The look*):
 - **Apps** opens with figures from `list_apps` (Apps, Ready, Failed, With Zetta), then a search and a
   phase filter over a card grid: each card shows the app's name, phase chip, URL, revision, bindings
   and when it was last updated (`updated_at`). **New app** opens a drawer with *From a repository* and
-  *From an image*. **Build with the Application Agent** opens a drawer for the description. A task named
+  *From an image*; its image field, like the App's Deploy field, takes only an image pinned by
+  digest (`name@sha256:<64 hex>`), which is all `create_app` and `deploy_app` accept (lake#783).
+  **Build with the Application Agent** opens a drawer for the description. A task named
   by `?task=` is shown above the grid.
 - **App** is a Split. The main column has tabs in `?tab=` (Overview, Builds, Logs, Events, Settings,
   Services), and every other query parameter is kept. Overview holds the deploy history with
@@ -50,7 +52,7 @@ labels stack over their controls).
 | Restart, Stop, Start | `restart_app`, `stop_app`, `start_app` |
 | Scale | `scale_app` |
 | Deploy, Rollback (to a revision in the history) | `deploy_app`, `rollback_app` |
-| Build, Cancel build, Deploy build | `build_app`, `cancel_build`, `deploy_app` |
+| Build, Cancel build, Deploy build (only a finished build, whose `image` is pinned by digest) | `build_app`, `cancel_build`, `deploy_app` |
 | Set or unset an environment variable, plain or Secret-referenced | `set_app_env`, `unset_app_env` |
 | Attach or detach the workspace Zetta | `set_app_zetta_binding` |
 | Attach or detach an existing service; create and attach one | `bind_service_to_app`, `unbind_service_from_app`, `create_service_and_bind_to_app` (choices from `list_services`) |

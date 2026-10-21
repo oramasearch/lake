@@ -41,6 +41,11 @@
 namespace {
 
 using json = nlohmann::json;
+
+// An image app's image as the operator runs it, pinned by digest (lake#783).
+std::string pinned_image(const std::string& name) {
+    return "registry.example.test/" + name + "@sha256:" + std::string(64, 'd');
+}
 using lake::control::ZettaControlResult;
 
 constexpr std::string_view customer = "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0";
@@ -3419,7 +3424,7 @@ TEST(AgentRuns, ApplicationAgentWritesAppsOnlyAfterTheProposalIsConfirmed) {
     EXPECT_EQ(r.w.caller->input, (json{{"database", "datasets"}, {"dataset", "accounts"}}));
     const json create_input{{"name", "agent-reports"},
                             {"mode", "image"},
-                            {"image", "registry.example.test/reports:first"},
+                            {"image", pinned_image("reports:first")},
                             {"framework", "container"},
                             {"port", 8080},
                             {"host", nullptr},
@@ -3428,8 +3433,7 @@ TEST(AgentRuns, ApplicationAgentWritesAppsOnlyAfterTheProposalIsConfirmed) {
     EXPECT_EQ(r.call_as(*first_principal, "create_app", create_input).error.code, "unauthorized");
     EXPECT_EQ(r.call_as(*first_principal,
                         "deploy_app",
-                        {{"app", "not-created"},
-                         {"image", "registry.example.test/reports:first"}})
+                        {{"app", "not-created"}, {"image", pinned_image("reports:first")}})
                   .error.code,
               "unauthorized");
 
@@ -3514,12 +3518,12 @@ TEST(AgentRuns, ApplicationAgentWritesAppsOnlyAfterTheProposalIsConfirmed) {
     const auto refused = r.call_as(*third_principal, "create_app", named_secret);
     EXPECT_EQ(refused.error.code, "invalid_input");
     EXPECT_EQ(refused.error.path, "/env/API_KEY/secret");
-    const auto deployed = r.call_as(
-        *third_principal,
-        "deploy_app",
-        {{"app", created.value["id"]}, {"image", "registry.example.test/reports:confirmed"}});
+    const auto deployed =
+        r.call_as(*third_principal,
+                  "deploy_app",
+                  {{"app", created.value["id"]}, {"image", pinned_image("reports:confirmed")}});
     ASSERT_TRUE(deployed.ok) << deployed.error.message;
-    EXPECT_EQ(deployed.value["image"], "registry.example.test/reports:confirmed");
+    EXPECT_EQ(deployed.value["image"], pinned_image("reports:confirmed"));
 }
 
 TEST(AgentRuns, AConversationFollowUpCarriesThePriorTurn) {

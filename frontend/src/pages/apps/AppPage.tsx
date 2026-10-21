@@ -225,7 +225,7 @@ export default function AppPage() {
                 ) : (
                   <label>
                     Deploy image
-                    <input name="image" defaultValue={String(app.image ?? "")} key={String(app.image ?? "")} required />
+                    <input name="image" defaultValue={String(app.image ?? "")} key={String(app.image ?? "")} pattern=".+@sha256:[0-9a-fA-F]{64}" title="An image pinned by digest: name@sha256: and 64 hex digits" required />
                   </label>
                 )}
                 <div>
@@ -704,7 +704,8 @@ function BuildRow({
 }) {
   const ws = useWorkspaceLink();
   const id = String(build.id ?? build.build_id ?? "");
-  const image = String(build.image ?? "") || String(build.target ?? "");
+  // Only a finished build has a digest-pinned image; its tag (`target`) is not deployable (lake#783).
+  const image = String(build.image ?? "");
   const logs = useRead<{ lines?: unknown[]; next_sequence?: number }>("build_logs", { customer_id: customerId, workspace_id: workspaceId ?? undefined, build_id: id });
   const retained = useMemo(() => (logs.data?.lines ?? []).map((line) => (typeof line === "string" ? line : JSON.stringify(line))).join("\n"), [logs.data]);
   const [live, setLive] = useState<string[]>([]);

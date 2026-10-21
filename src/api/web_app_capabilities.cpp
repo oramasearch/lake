@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "agent_task_records_api.hpp"
+#include "lake/api/images.hpp"
 #include "lake/api/sealed_delivery.hpp"
 #include "lake/control/agent_bus.hpp"
 #include "lake/control/platform.hpp"
@@ -576,8 +577,22 @@ std::optional<ApiResult> validate_deployment(const json& input) {
         }
     } else if (!input.at("image").is_string() || input.at("image").get<std::string>().empty()) {
         return ApiResult::failure("invalid_input", "image cannot be empty", "/image");
+    } else if (!digest_pinned_image(input.at("image").get<std::string>())) {
+        // The operator runs only a digest-pinned image (lake#783): refused here, not after the
+        // app exists and has failed.
+        return ApiResult::failure(
+            "invalid_input",
+            "image must be pinned by digest, as name@sha256:<digest> (64 hex digits); a tag "
+            "such as name:1.27 is not accepted",
+            "/image");
     }
     return std::nullopt;
+}
+
+// An image app's image, pinned by digest (lake#783).
+json image_property() {
+    return {{"type", "string"},
+            {"description", "an image pinned by digest: name@sha256:<64 hex digits>"}};
 }
 
 json deployment_properties() {
@@ -589,7 +604,7 @@ json deployment_properties() {
                 {"path", {{"type", "string"}}},
                 {"entrypoint", {{"type", "string"}}}}},
               {"additionalProperties", false}}},
-            {"image", {{"type", "string"}}}};
+            {"image", image_property()}};
 }
 
 } // namespace
@@ -681,7 +696,7 @@ void register_web_app_capabilities(Registry& registry) {
             {{"name", {{"type", "string"}}},
              {"mode", {{"type", "string"}, {"enum", json::array({"runtime", "image"})}}},
              {"source", deployment_properties().at("source")},
-             {"image", {{"type", "string"}}},
+             {"image", image_property()},
              {"framework", {{"type", "string"}}},
              {"port", {{"type", "integer"}, {"minimum", 1}, {"maximum", 65535}}},
              {"replicas", {{"type", "integer"}, {"minimum", 1}, {"maximum", 100}}},

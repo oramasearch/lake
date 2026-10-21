@@ -25,6 +25,11 @@ namespace {
 
 using json = nlohmann::json;
 
+// An image app's image as the operator runs it, pinned by digest (lake#783).
+std::string pinned_image(const std::string& name) {
+    return "registry.example.test/" + name + "@sha256:" + std::string(64, 'd');
+}
+
 lake::control::ClerkIdentity minted(std::string subject) {
     const auto identity = lake::audit::mint_custodial_identity("web-app-test-kek");
     return lake::control::ClerkIdentity{subject,
@@ -217,7 +222,7 @@ TEST(WebApps, DesiredStateStatusAndQuotasFollowTheContract) {
     const auto over_quota = apps.call("create_app",
                                       {{"name", "second"},
                                        {"mode", "image"},
-                                       {"image", "registry.example.test/second:v1"},
+                                       {"image", pinned_image("second:v1")},
                                        {"framework", "container"},
                                        {"port", 8080}});
     EXPECT_EQ(over_quota.error.code, "quota_exceeded");
@@ -277,6 +282,64 @@ TEST(WebApps, ReservedNamesAreRefusedAndOrdinaryNamesUseTheZone) {
     EXPECT_EQ(created.value["host"], "reports.oramadev.net");
 }
 
+// lake#783: the operator runs an image app only when its image is pinned by digest
+// (`name@sha256:<64 hex>`, the LakeApp CRD's pattern and orama-operator's lakeAppRowSource), so
+// lake refuses any other reference when the app is created, deployed or rolled back, instead of
+// letting the app be created and then fail.
+TEST(WebApps, AnImageAppIsRefusedUnlessItsImageIsPinnedByDigest) {
+    WebApps apps;
+    const std::string hex(64, 'a');
+    for (const std::string image :
+         {std::string("nginxinc/nginx-unprivileged:1.27-alpine"),
+          std::string("registry.example.test/app"),
+          std::string("registry.example.test/app:v1@sha256:") + "abc",
+          std::string("@sha256:") + hex,
+          std::string("registry.example.test/app@sha256:") + hex + "0",
+          std::string("registry.example.test/app@sha256:") + std::string(63, 'a') + "g",
+          std::string("registry.example.test/app@sha256:") + hex + "@sha256:" + hex}) {
+        const auto refused = apps.call("create_app",
+                                       {{"name", "unpinned"},
+                                        {"mode", "image"},
+                                        {"image", image},
+                                        {"framework", "container"},
+                                        {"port", 8080}});
+        EXPECT_EQ(refused.error.code, "invalid_input") << image;
+        EXPECT_EQ(refused.error.path, "/image") << image;
+        EXPECT_TRUE(refused.error.message.contains("name@sha256:<digest>"))
+            << image << ": " << refused.error.message;
+    }
+    const auto listed = apps.call("list_apps");
+    ASSERT_TRUE(listed.ok) << listed.error.message;
+    EXPECT_TRUE(listed.value["apps"].empty()) << listed.value.dump();
+
+    const std::string pinned = "registry.example.test/app:v1@sha256:" + std::string(64, 'A');
+    const auto created = apps.call("create_app",
+                                   {{"name", "pinned"},
+                                    {"mode", "image"},
+                                    {"image", pinned},
+                                    {"framework", "container"},
+                                    {"port", 8080}});
+    ASSERT_TRUE(created.ok) << created.error.message;
+    EXPECT_EQ(created.value["image"], pinned);
+    const std::string id = created.value.at("id");
+
+    for (const char* capability : {"deploy_app", "rollback_app"}) {
+        const auto refused =
+            apps.call(capability, {{"app_id", id}, {"image", "registry.example.test/app:v2"}});
+        EXPECT_EQ(refused.error.code, "invalid_input") << capability;
+        EXPECT_EQ(refused.error.path, "/image") << capability;
+    }
+    const auto unchanged = apps.call("get_app", {{"app_id", id}});
+    ASSERT_TRUE(unchanged.ok) << unchanged.error.message;
+    EXPECT_EQ(unchanged.value["image"], pinned);
+    EXPECT_EQ(unchanged.value["generation"], 1);
+
+    const std::string next = "registry.example.test/app@sha256:" + std::string(64, 'b');
+    const auto deployed = apps.call("deploy_app", {{"app_id", id}, {"image", next}});
+    ASSERT_TRUE(deployed.ok) << deployed.error.message;
+    EXPECT_EQ(deployed.value["image"], next);
+}
+
 TEST(WebApps, CapabilitiesAreCustomerScopedAndValidateSecretsHostsAndDeletes) {
     WebApps apps;
     for (const std::string& read : {"list_apps", "get_app", "app_logs", "receive_app_events"}) {
@@ -304,7 +367,7 @@ TEST(WebApps, CapabilitiesAreCustomerScopedAndValidateSecretsHostsAndDeletes) {
     const auto wrong_host = apps.call("create_app",
                                       {{"name", "wrong-host"},
                                        {"mode", "image"},
-                                       {"image", "registry.example.test/app:v1"},
+                                       {"image", pinned_image("app:v1")},
                                        {"framework", "container"},
                                        {"port", 8080},
                                        {"host", "app.example.test"}});
@@ -312,7 +375,7 @@ TEST(WebApps, CapabilitiesAreCustomerScopedAndValidateSecretsHostsAndDeletes) {
     const auto invalid_label = apps.call("create_app",
                                          {{"name", "bad-label"},
                                           {"mode", "image"},
-                                          {"image", "registry.example.test/app:v1"},
+                                          {"image", pinned_image("app:v1")},
                                           {"framework", "container"},
                                           {"port", 8080},
                                           {"host", "bad-.apps.example.test"}});
@@ -321,7 +384,7 @@ TEST(WebApps, CapabilitiesAreCustomerScopedAndValidateSecretsHostsAndDeletes) {
     const auto empty_host = apps.call("create_app",
                                       {{"name", "empty-host"},
                                        {"mode", "image"},
-                                       {"image", "registry.example.test/app:v1"},
+                                       {"image", pinned_image("app:v1")},
                                        {"framework", "container"},
                                        {"port", 8080},
                                        {"host", ""}});
@@ -368,7 +431,7 @@ TEST(WebApps, CapabilitiesAreCustomerScopedAndValidateSecretsHostsAndDeletes) {
     EXPECT_EQ(attached.value["bindings"]["zetta"]["scopes"], json::array({"read"}));
 
     const auto deployed =
-        apps.call("deploy_app", {{"app_id", id}, {"image", "registry.example.test/reports:v2"}});
+        apps.call("deploy_app", {{"app_id", id}, {"image", pinned_image("reports:v2")}});
     ASSERT_TRUE(deployed.ok) << deployed.error.message;
     EXPECT_EQ(deployed.value["mode"], "image");
     const auto rolled_back = apps.call(

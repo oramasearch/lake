@@ -47,8 +47,9 @@ bindings and when it last changed. **Open** on a card opens the app.
 ### Create an App from an Image
 
 1. **Ship → Apps → New app**, then choose **From an image**.
-2. Fill in **Name**, **Image** (for example `registry.example/app:tag`), **Framework** (default
-   `container`) and **Port**.
+2. Fill in **Name**, **Image**, pinned by digest (`registry.example/app@sha256:<64 hex digits>`;
+   a tag such as `app:1.27` is refused, because the operator runs only a digest-pinned image),
+   **Framework** (default `container`) and **Port**.
 3. Press **Create app**.
 
 - REST: `POST /v1/create_app`:

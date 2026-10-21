@@ -24,6 +24,7 @@
 
 #include "audit_logs.hpp"
 #include "lake/api/capabilities.hpp"
+#include "lake/api/images.hpp"
 #include "lake/api/mcp_client.hpp"
 #include "lake/api/sealed_delivery.hpp"
 #include "lake/api/usage_recorder.hpp"
@@ -1122,6 +1123,14 @@ liquid::runtime::task<Outcome<StdioApp>> start_stdio_app(ApiContext& context,
         co_return Answer(std::unexpected(ApiResult::failure(
             "not_supported",
             "this Lake runs no stdio MCP servers (LAKE_MCP_RUNNER_IMAGE is not set)",
+            "/stdio")));
+    }
+    // The App runs this image, and the operator runs only a digest-pinned one (lake#783).
+    if (!digest_pinned_image(context.mcp_runner_image)) {
+        co_return Answer(std::unexpected(ApiResult::failure(
+            "not_supported",
+            "this Lake cannot run stdio MCP servers: LAKE_MCP_RUNNER_IMAGE must be pinned by "
+            "digest (name@sha256:<digest>)",
             "/stdio")));
     }
     if (context.store == nullptr) {

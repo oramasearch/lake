@@ -49,6 +49,17 @@ repository ID in the customer. Path defaults to `.`; entrypoint defaults to empt
 reads the app's `app.toml`. Image mode uses `image`. Deploy and rollback accept the same source or
 image input. The old `source` mode value is rejected.
 
+**An image is pinned by digest** (lake#783): `name@sha256:<64 hex digits>`, optionally with a tag
+before the digest (`name:1.27@sha256:…`). That is the `LakeApp` CRD's `spec.image` pattern, and
+the operator fails any other image app ("image must be pinned by SHA-256 digest"), so
+`create_app`, `deploy_app` and `rollback_app` refuse anything else with `invalid_input` at `/image`
+before the app is created or changed. Lake does not resolve a tag to a digest. A finished
+`build_app` reports its image already pinned (`get_build` `image`), and the app page's *Deploy
+build* uses only that. A stdio MCP connection's App (below) is refused with `not_supported` when
+`LAKE_MCP_RUNNER_IMAGE` is not pinned. To verify: `create_app` with
+`nginxinc/nginx-unprivileged:1.27-alpine` answers `invalid_input` at `/image` and lists no app;
+`WebApps.AnImageAppIsRefusedUnlessItsImageIsPinnedByDigest` covers it.
+
 `bindings.zetta` accepts `true`, `["read"]`, or `{"scopes":["read"]}` to bind; false/null/omitted
 means no binding. Writes normalize to the quoted contract. Service IDs stay strings. Lake never
 adds a workspace token or an opaque token Secret reference to bindings, code, or environment.
