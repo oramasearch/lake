@@ -1,3 +1,4 @@
+#include "../identity_proof_test_support.hpp"
 #include "../personal_customer_test_support.hpp"
 #include "../postgres_fixture.hpp"
 
@@ -101,7 +102,12 @@ std::string base64url(const std::vector<std::byte>& bytes) {
     return encoded;
 }
 
-std::string signed_identity_document(const std::filesystem::path& root, std::string_view label) {
+struct SignedIdentity {
+    std::string document;
+    std::optional<liquid::signer> signer;
+};
+
+SignedIdentity signed_identity_document(const std::filesystem::path& root, std::string_view label) {
     const std::filesystem::path home = root / ("identity-" + std::string(label));
     setenv("LIQUID_HOME", home.c_str(), 1);
     auto signer = liquid::runtime::block_on(liquid::identity_detail::local_signer());
@@ -116,7 +122,7 @@ std::string signed_identity_document(const std::filesystem::path& root, std::str
     for (char character; input.get(character);) {
         document.push_back(static_cast<std::byte>(static_cast<unsigned char>(character)));
     }
-    return base64url(document);
+    return {base64url(document), std::move(*signer)};
 }
 
 std::string http_request(unsigned short port,
@@ -238,11 +244,29 @@ protected:
     SignedUpUser sign_up(std::string_view label) {
         const std::string email =
             std::string(label) + "-" + lake::control::new_uuid_v4() + "@example.test";
+        SignedIdentity identity = signed_identity_document(root_.path(), label);
+        // Lake binds the document only with a signature by its key over its challenge (lake#931).
+        const json challenge =
+            response_json(http_request(server_->port(),
+                                       "POST",
+                                       "/v1/begin_identity_proof",
+                                       json{{"identity_document", identity.document}}.dump()));
+        EXPECT_TRUE(challenge.value("ok", false)) << challenge.dump();
+        if (!challenge.value("ok", false) || !identity.signer) {
+            return {};
+        }
+        const json& issued = challenge.at("value");
         const json input{{"email", email},
                          {"password", "correct horse battery staple"},
                          {"display_name", std::string(label)},
                          {"device_name", "drive client"},
-                         {"identity_document", signed_identity_document(root_.path(), label)}};
+                         {"identity_document", identity.document},
+                         {"identity_proof",
+                          {{"nonce", issued.at("nonce")},
+                           {"expires_at", issued.at("expires_at")},
+                           {"signature",
+                            lake::test::liquid_sign_artifact(
+                                *identity.signer, issued.at("challenge").get<std::string>())}}}};
         const std::string response =
             http_request(server_->port(), "POST", "/v1/sign_up_password", input.dump());
         EXPECT_NE(response.find(" 200 "), std::string::npos) << response;

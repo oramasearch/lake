@@ -120,7 +120,7 @@ void log_database_diagnostic(std::string_view code, std::string_view message) {
     std::println(stderr, "{}", entry.dump());
 }
 
-constexpr std::array<ErrorCode, 33> documented_error_codes{{
+constexpr std::array<ErrorCode, 34> documented_error_codes{{
     {"invalid_input", 400, "The input is at fault; `path` points at the field."},
     {"secret_required",
      400,
@@ -136,6 +136,10 @@ constexpr std::array<ErrorCode, 33> documented_error_codes{{
      "`help` links to the page that makes a new key."},
     {"unauthorized", 403, "The credential is valid but does not grant this call on this object."},
     {"mfa_required", 403, "The account must finish multi-factor verification first."},
+    {"identity_proof_required",
+     403,
+     "An identity document becomes an account's identity only with a fresh signature by its key: "
+     "sign begin_identity_proof's challenge and send identity_proof."},
     {"forbidden",
      403,
      "The object is read-only for everyone, such as one of Orama's catalogue solutions; the "

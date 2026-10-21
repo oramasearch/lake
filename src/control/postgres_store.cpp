@@ -34,6 +34,7 @@
 
 #include "lake/control/handles.hpp"
 #include "lake/control/identity_crypto.hpp"
+#include "lake/control/own_identity.hpp"
 #include "network_internal.hpp"
 #include "secrets_crypto.hpp"
 
@@ -7865,6 +7866,16 @@ public:
         if (managed) {
             identity->identifier = in.custodial_taap_id;
         }
+        // A document is public: it becomes this account's identity only with a fresh signature by
+        // its key (lake#931).
+        Result<std::string> proof_id = std::string();
+        if (!managed) {
+            proof_id = verify_identity_proof(
+                in.pool_id, in.identity_document, identity->identifier, in.identity_proof);
+            if (!proof_id) {
+                return std::unexpected(proof_id.error());
+            }
+        }
         const std::string password_hash = identity_crypto::hash_secret(in.password);
         if (password_hash.empty()) {
             return std::unexpected(
@@ -7902,6 +7913,22 @@ public:
                                user_id,
                                identity->document,
                                identity->hash);
+                // After the user's row, so a retried sign-up still answers conflict; a proof spent
+                // by an OAuth start is refused here.
+                if (identity_proof_used(tx, *proof_id)) {
+                    return std::unexpected(
+                        StoreError{"unauthorized", "that identity proof was already used"});
+                }
+                try {
+                    tx.exec_params("INSERT INTO identity_taap_assertions "
+                                   "(assertion_id, user_id, pool_id) VALUES ($1, $2::uuid, $3)",
+                                   *proof_id,
+                                   user_id,
+                                   in.pool_id);
+                } catch (const pqxx::unique_violation&) {
+                    return std::unexpected(
+                        StoreError{"unauthorized", "that identity proof was already used"});
+                }
             }
             tx.exec_params("INSERT INTO credentials (user_id, pool_id, kind, "
                            "subject, secret_hash) "
@@ -8731,7 +8758,41 @@ public:
             return std::unexpected(
                 StoreError{"invalid_input", "OAuth flow material is incomplete"});
         }
+        // A first sign-in binds the flow's document to the new account (sign_in_oauth), so the flow
+        // takes one only with a fresh signature by its key (lake#931). Enterprise flows
+        // (`sso-<id>`) carry a TAAP id to sign_in_sso instead of a document (lake#872).
+        std::string proof_id;
+        if (!in.identity_document.empty() && !in.provider.starts_with("sso-")) {
+            auto proven =
+                verify_identity_proof(in.pool_id, in.identity_document, "", in.identity_proof);
+            if (!proven) {
+                return std::unexpected(proven.error());
+            }
+            proof_id = std::move(*proven);
+        }
         return with_tx<void>([&](pqxx::work& tx) -> Result<void> {
+            if (!proof_id.empty()) {
+                if (identity_proof_used(tx, proof_id)) {
+                    return std::unexpected(
+                        StoreError{"unauthorized", "that identity proof was already used"});
+                }
+                // No user exists yet to record the proof against in identity_taap_assertions, so it
+                // is spent as a flow row that can never be consumed: already used, its state hash
+                // derived from the proof (a real flow's is the hash of a random state).
+                try {
+                    tx.exec_params(
+                        "INSERT INTO identity_oauth_flows (pool_id, provider, state_hash, "
+                        "encrypted_code_verifier, nonce, device_name, expires_at, used_at) VALUES "
+                        "($1, $2, $3, ''::bytea, '', '', to_timestamp($4), now())",
+                        in.pool_id,
+                        in.provider,
+                        identity_crypto::sha256_hex(proof_id),
+                        in.identity_proof.expires_at);
+                } catch (const pqxx::unique_violation&) {
+                    return std::unexpected(
+                        StoreError{"unauthorized", "that identity proof was already used"});
+                }
+            }
             const Result<std::string> encrypted =
                 encrypt_secret(tx, "identity.oauth.flow", in.code_verifier);
             if (!encrypted) {
@@ -11626,6 +11687,93 @@ private:
         }
         return std::unexpected(
             StoreError{"conflict", "could not allocate a personal customer handle; retry sign-up"});
+    }
+
+    Result<IdentityProofChallenge>
+    begin_identity_proof(const std::string& pool_id,
+                         const std::string& identity_document) override {
+        if (pool_id.empty()) {
+            return std::unexpected(StoreError{"invalid_input", "a pool is required"});
+        }
+        const auto document = own_identity::verify_document(identity_document);
+        if (!document) {
+            return std::unexpected(document.error());
+        }
+        const auto key = instance_kek();
+        if (!key) {
+            return std::unexpected(key.error());
+        }
+        IdentityProofChallenge issued{"", identity_crypto::random_secret(), 0};
+        issued.expires_at = unix_seconds_now() + own_identity::enrollment_lifetime_seconds;
+        issued.challenge = own_identity::enrollment_challenge(
+            *key, pool_id, *document, issued.nonce, issued.expires_at);
+        if (issued.nonce.empty() || issued.challenge.empty()) {
+            return std::unexpected(
+                StoreError{"store_error", "could not issue an identity proof challenge"});
+        }
+        return issued;
+    }
+
+    static std::int64_t unix_seconds_now() {
+        return std::chrono::duration_cast<std::chrono::seconds>(
+                   std::chrono::system_clock::now().time_since_epoch())
+            .count();
+    }
+
+    // Checks that `proof` is a signature by the key of `identity_document` over the challenge
+    // begin_identity_proof issued for it in `pool_id`, still unexpired (lake#931). `taap_id`, when
+    // given, must be the document's identity. Answers the proof's one-use id; whether it was spent
+    // is the caller's check, in its transaction (identity_proof_used).
+    Result<std::string> verify_identity_proof(std::string_view pool_id,
+                                              std::string_view identity_document,
+                                              std::string_view taap_id,
+                                              const IdentityProof& proof) const {
+        const auto document = own_identity::verify_document(identity_document);
+        if (!document) {
+            return std::unexpected(document.error());
+        }
+        if (proof.nonce.empty() || proof.expires_at == 0 || proof.signature.empty()) {
+            return std::unexpected(StoreError{
+                "identity_proof_required",
+                "Prove you hold this identity's key: sign the challenge begin_identity_proof "
+                "issues with liquid sign artifact, and send what it printed as identity_proof."});
+        }
+        if (!taap_id.empty() && taap_id != document->taap_id) {
+            return std::unexpected(
+                StoreError{"invalid_input", "the identity proof names another identity"});
+        }
+        const std::int64_t now = unix_seconds_now();
+        if (proof.expires_at <= now ||
+            proof.expires_at > now + own_identity::enrollment_lifetime_seconds) {
+            return std::unexpected(StoreError{
+                "unauthorized", "The identity proof's challenge has expired; ask for a new one."});
+        }
+        const auto key = instance_kek();
+        if (!key) {
+            return std::unexpected(key.error());
+        }
+        const std::string challenge = own_identity::enrollment_challenge(
+            *key, pool_id, *document, proof.nonce, proof.expires_at);
+        if (challenge.empty()) {
+            return std::unexpected(
+                StoreError{"store_error", "could not compute the identity proof challenge"});
+        }
+        const auto signed_value =
+            own_identity::verify_challenge_signature(document->encoded, challenge, proof.signature);
+        if (!signed_value) {
+            return std::unexpected(signed_value.error());
+        }
+        return "identity_proof:" + challenge;
+    }
+
+    // Whether a proof was spent: by a sign-up (identity_taap_assertions) or an OAuth start (its
+    // spent row in identity_oauth_flows).
+    static bool identity_proof_used(pqxx::work& tx, const std::string& proof_id) {
+        return !tx.exec_params("SELECT 1 FROM identity_taap_assertions WHERE assertion_id = $1 "
+                               "UNION ALL SELECT 1 FROM identity_oauth_flows WHERE state_hash = $2",
+                               proof_id,
+                               identity_crypto::sha256_hex(proof_id))
+                    .empty();
     }
 
     Result<VerifiedIdentityDocument> verify_identity_document(std::string_view serialized) const {

@@ -1321,6 +1321,11 @@ public:
     sign_up_password(const control::NewPasswordUser& value) override {
         return call("sign_up_password", [&] { return store_->sign_up_password(value); });
     }
+    control::Result<control::IdentityProofChallenge>
+    begin_identity_proof(const std::string& pool_id, const std::string& document) override {
+        return call("begin_identity_proof",
+                    [&] { return store_->begin_identity_proof(pool_id, document); });
+    }
     control::Result<control::IssuedSession>
     sign_in_password(const control::PasswordSignIn& value) override {
         return call("sign_in_password", [&] { return store_->sign_in_password(value); });

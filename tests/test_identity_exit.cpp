@@ -1,4 +1,5 @@
 #include "audit_test_support.hpp"
+#include "identity_proof_test_support.hpp"
 #include "personal_customer_test_support.hpp"
 #include "postgres_fixture.hpp"
 #include "stream_fixture.hpp"
@@ -195,11 +196,23 @@ TEST(IdentityExit, PostgresProvesIdentityPkiAndDynamicSecrets) {
     };
 
     const std::string suffix = lake::control::new_uuid_v4().substr(0, 8);
-    const ApiResult signed_up = call("sign_up_password",
-                                     {{"email", "identity-exit-" + suffix + "@example.test"},
-                                      {"password", "correct horse battery staple"},
-                                      {"display_name", "Identity exit"},
-                                      {"identity_document", base64url(document)}});
+    // The document is public; Lake binds it to the account only with a signature by its key
+    // over a challenge it issued (lake#931).
+    const ApiResult proof_challenge =
+        call("begin_identity_proof", {{"identity_document", base64url(document)}});
+    ASSERT_TRUE(proof_challenge.ok) << proof_challenge.error.message;
+    const ApiResult signed_up =
+        call("sign_up_password",
+             {{"email", "identity-exit-" + suffix + "@example.test"},
+              {"password", "correct horse battery staple"},
+              {"display_name", "Identity exit"},
+              {"identity_document", base64url(document)},
+              {"identity_proof",
+               {{"nonce", proof_challenge.value.at("nonce")},
+                {"expires_at", proof_challenge.value.at("expires_at")},
+                {"signature",
+                 lake::test::liquid_sign_artifact(
+                     signer, proof_challenge.value.at("challenge").get<std::string>())}}}});
     ASSERT_TRUE(signed_up.ok) << signed_up.error.message;
     const std::int64_t issued_at = std::chrono::duration_cast<std::chrono::seconds>(
                                        std::chrono::system_clock::now().time_since_epoch())

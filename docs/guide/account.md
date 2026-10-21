@@ -39,8 +39,11 @@ Identity](#your-identity)).
 {"email": "you@example.com", "password": "<password>", "display_name": "Your Name", "device_name": "laptop"}
 ```
 
-  Add `"identity_document": "<output of liquid identity show --document>"` to sign up with your own
-  identity from the start instead.
+  To sign up with your own identity from the start instead, prove you hold its key: `POST
+  /v1/begin_identity_proof` with `{"identity_document": "<output of liquid identity show
+  --document>"}`, run the `command` it answers (`liquid sign artifact <challenge>`), then add
+  `"identity_document"` and `"identity_proof": {"nonce": "<nonce>", "expires_at": <expires_at>,
+  "signature": "<everything liquid sign printed>"}` to the sign-up body within five minutes.
 - MCP: `sign_up_password` with the same input.
 
 ## Sign In

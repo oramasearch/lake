@@ -8,6 +8,7 @@
 #include <vector>
 
 #include <openssl/evp.h>
+#include <openssl/hmac.h>
 
 #include <liquid/hash.hpp>
 #include <liquid/identity.hpp>
@@ -248,6 +249,46 @@ verify_challenge_signature(std::string_view document_text,
                           {"signature_purpose", signed_value->signature_purpose},
                           {"signed_at", signed_value->signed_at},
                           {"signature_hex", signature_text}};
+}
+
+std::string enrollment_challenge(std::span<const unsigned char> instance_kek,
+                                 std::string_view pool_id,
+                                 const Document& document,
+                                 std::string_view nonce,
+                                 std::int64_t expires_at) {
+    // A key of its own, so the instance key never MACs request-shaped bytes directly.
+    static constexpr std::string_view label = "lake identity enrollment challenge/1";
+    std::array<unsigned char, EVP_MAX_MD_SIZE> key{};
+    unsigned int key_size = 0;
+    if (instance_kek.empty() || HMAC(EVP_sha256(),
+                                     instance_kek.data(),
+                                     static_cast<int>(instance_kek.size()),
+                                     reinterpret_cast<const unsigned char*>(label.data()),
+                                     label.size(),
+                                     key.data(),
+                                     &key_size) == nullptr) {
+        return {};
+    }
+    const std::vector<std::uint8_t> statement =
+        nlohmann::json::to_cbor(nlohmann::json{{"document_hash", document.hash},
+                                               {"expires_at", expires_at},
+                                               {"key_fingerprint", document.key_fingerprint},
+                                               {"nonce", nonce},
+                                               {"pool", pool_id},
+                                               {"purpose", enrollment_purpose},
+                                               {"taap_id", document.taap_id}});
+    std::array<unsigned char, EVP_MAX_MD_SIZE> mac{};
+    unsigned int mac_size = 0;
+    if (HMAC(EVP_sha256(),
+             key.data(),
+             static_cast<int>(key_size),
+             statement.data(),
+             statement.size(),
+             mac.data(),
+             &mac_size) == nullptr) {
+        return {};
+    }
+    return "sha256:" + hex(std::span<const unsigned char>(mac.data(), mac_size));
 }
 
 nlohmann::json link_body(const IdentityLinkChallenge& value, const std::string& linked_at) {

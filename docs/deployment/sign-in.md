@@ -178,7 +178,9 @@ endpoints below; any other value is treated as a generic OIDC issuer (`src/api/o
   provider on the install's own network, set `LAKE_OIDC_ALLOW_PRIVATE_ADDRESSES=1` (it also allows
   plain HTTP to loopback, for tests). `start_oauth` also needs `LAKE_PUBLIC_HOST`.
 - **A first OAuth sign-in must carry the person's TAAP identity document** (`start_oauth`'s
-  `identity_document`). Lake verifies and records it before creating the user. Without it the user is
+  `identity_document`) with `identity_proof`, a signature by its key over a `begin_identity_proof`
+  challenge ([identity.md](../api/identity.md#proving-you-hold-the-key)). Lake verifies and records
+  it before creating the user. Without it the user is
   not created, and the callback answers **403** `OAuth identity could not sign in`. A returning
   person, whose provider subject is already linked, does not need it.
 - **Check:** sign in through the provider. The audit log has one `authentication` event for the

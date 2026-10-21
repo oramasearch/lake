@@ -174,6 +174,7 @@ const std::vector<std::pair<std::string_view, std::string_view>>& calls_only_cap
         {"begin_admin_recovery", "account recovery"},
         {"begin_application_authorization", "sign-in"},
         {"begin_email_recovery", "account recovery"},
+        {"begin_identity_proof", "sign-in"},
         {"begin_own_identity", "sign-in"},
         {"begin_passkey_registration", "sign-in"},
         {"begin_passkey_sign_in", "sign-in"},

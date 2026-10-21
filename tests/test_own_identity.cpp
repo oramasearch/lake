@@ -1,6 +1,7 @@
 // Managed keys and using your own identity (lake#762, liquid-bridge decision 65,
 // docs/api/identity.md#your-own-identity).
 #include "audit_test_support.hpp"
+#include "identity_proof_test_support.hpp"
 #include "personal_customer_test_support.hpp"
 #include "postgres_fixture.hpp"
 #include "repository_test_support.hpp"
@@ -674,13 +675,33 @@ void expect_taap_sign_in_binds_the_key(lake::control::Store& store,
     Person attacker = person_at(home / "attacker");
     const std::string victim_id = victim.signer.identity().taap_id;
 
+    // Password sign-up with a document on PostgreSQL also needs a fresh signature by the
+    // document's key (lake#931); the in-memory store asks for none.
+    const auto proven = [&](json input, liquid::signer& signer, const std::string& document) {
+        if (refuses_unbound_registration) {
+            const auto issued = store.begin_identity_proof("lake", document);
+            if (issued) {
+                input["identity_proof"] = lake::test::identity_proof_json(
+                    {issued->nonce,
+                     issued->expires_at,
+                     lake::test::liquid_sign_artifact(signer, issued->challenge)});
+            }
+        }
+        return input;
+    };
+
     // The victim registers their identity at sign-up.
     ApiContext anonymous;
     const ApiResult registered = harness.call("sign_up_password",
-                                              {{"email", "victim-" + suffix + "@example.test"},
-                                               {"password", "correct horse battery staple"},
-                                               {"identity_document", victim.document}},
+                                              proven({{"email", "victim-" + suffix + "@example.test"},
+                                                      {"password", "correct horse battery staple"},
+                                                      {"identity_document", victim.document}},
+                                                     victim.signer,
+                                                     victim.document),
                                               anonymous);
+    ASSERT_TRUE(!refuses_unbound_registration ||
+                store.begin_identity_proof("lake", victim.document))
+        << "the victim's own first document is issued a challenge";
     ASSERT_TRUE(registered.ok) << registered.error.message;
     const ApiContext victim_session = harness.signed_in(registered.value.value("secret", ""));
     ASSERT_EQ(victim_session.acting_identity, victim_id);
@@ -720,10 +741,14 @@ void expect_taap_sign_in_binds_the_key(lake::control::Store& store,
     // Registering the forged document never gives an account the victim's identifier: PostgreSQL
     // refuses it, and the in-memory store, which never trusted a document's claim, gives the new
     // account an identifier of its own.
+    // On PostgreSQL no challenge is issued for the forged document (it is not a first document), so
+    // it reaches sign-up without a proof, where the binding check refuses it first.
     const ApiResult claimed = harness.call("sign_up_password",
-                                           {{"email", "claimer-" + suffix + "@example.test"},
-                                            {"password", "correct horse battery staple"},
-                                            {"identity_document", forged}},
+                                           proven({{"email", "claimer-" + suffix + "@example.test"},
+                                                   {"password", "correct horse battery staple"},
+                                                   {"identity_document", forged}},
+                                                  attacker.signer,
+                                                  forged),
                                            anonymous);
     EXPECT_EQ(claimed.ok, !refuses_unbound_registration) << claimed.error.message;
     if (claimed.ok) {
