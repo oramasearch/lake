@@ -1966,10 +1966,16 @@ class FakeAgentService final : public lake::control::AgentCaller {
 public:
     std::vector<std::tuple<std::string, std::string, json>> turns;
     json answer = {{"ok", true}, {"reply", "done"}};
+    // When set, a turn with any other token is refused as the agent would (HTTP 401).
+    std::string accepted_token;
 
     liquid::runtime::task<ZettaControlResult<json>>
     turn(std::string endpoint, std::string token, json body) override {
         turns.emplace_back(endpoint, token, body);
+        if (!accepted_token.empty() && token != accepted_token) {
+            co_return ZettaControlResult<json>(std::unexpected(
+                lake::control::ZettaControlError{"unauthorized", "the agent refused the token"}));
+        }
         co_return ZettaControlResult<json>(answer);
     }
 };
@@ -3328,6 +3334,32 @@ TEST(AgentRuns, AgentTurnReachesLibraryNativeAndPythonAgents) {
     ASSERT_EQ(r.agents.turns.size(), before + 1);
     EXPECT_EQ(std::get<0>(r.agents.turns.back()), "http://al-1:8080");
     EXPECT_EQ(std::get<2>(r.agents.turns.back())["message"], "hello again");
+    // agent-runtime#14: the launch runs the user's code, so Lake presents the launch's own token,
+    // never the shared one every library agent accepts.
+    EXPECT_EQ(std::get<1>(r.agents.turns.back()),
+              lake::control::launch_service_token("service-token", launch_id));
+    EXPECT_NE(std::get<1>(r.agents.turns.back()), "service-token");
+
+    // A launch an older operator started holds the shared token: refused once, Lake tries it.
+    r.agents.accepted_token = "service-token";
+    const std::size_t legacy_before = r.agents.turns.size();
+    const auto legacy = r.call(
+        "agent_turn", {{"agent", "p-1"}, {"message", "and again"}, {"conversation_id", "c-1"}});
+    ASSERT_TRUE(legacy.ok) << legacy.error.message;
+    ASSERT_EQ(r.agents.turns.size(), legacy_before + 2);
+    EXPECT_EQ(std::get<1>(r.agents.turns.back()), "service-token");
+    r.agents.accepted_token.clear();
+}
+
+// agent-runtime#14: the derivation the operator also computes (its launchServiceToken), checked
+// against one fixed vector in both repositories so they cannot drift apart.
+TEST(AgentRuns, ALaunchsServiceTokenIsDerivedForThatLaunchAlone) {
+    EXPECT_EQ(lake::control::launch_service_token("the-shared-agent-service-token",
+                                                  "6f1c2a4e-0d3b-4c55-9a7e-1b2c3d4e5f60"),
+              "7b5669274c2c87960d42063668286334197529b4f4439c37a00fbd10b166cba9");
+    EXPECT_NE(lake::control::launch_service_token("the-shared-agent-service-token", "a"),
+              lake::control::launch_service_token("the-shared-agent-service-token", "b"));
+    EXPECT_EQ(lake::control::launch_service_token("", "a"), "");
 }
 
 // Scan my workspace (lake#795): Auto-Suggest Agent's discover turn reads the account's Apps and

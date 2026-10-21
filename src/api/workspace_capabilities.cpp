@@ -6602,10 +6602,19 @@ void register_agent_run_capabilities(Registry& registry) {
                           (live->phase.empty() ? std::string("pending") : live->phase) +
                           "). Send your message again in a moment."}});
             }
+            // The launch runs the user's code, so it holds only its own token, never the shared one
+            // every library agent accepts (agent-runtime#14). An operator from before that change
+            // still mounts the shared token, so an unauthorized answer is tried once with it.
+            const json turn_body{{"conversation_id", body["conversation_id"]},
+                                 {"message", message}};
             auto reply = co_await context.agent_caller->turn(
                 live->endpoint,
-                config.agent_service_token,
-                {{"conversation_id", body["conversation_id"]}, {"message", message}});
+                control::launch_service_token(config.agent_service_token, live->id),
+                turn_body);
+            if (reply && !*reply && reply->error().code == "unauthorized") {
+                reply = co_await context.agent_caller->turn(
+                    live->endpoint, config.agent_service_token, turn_body);
+            }
             if (!reply) {
                 co_return ApiResult::failure("store_error", reply.error().message);
             }

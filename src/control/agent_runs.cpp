@@ -8,6 +8,9 @@
 #include <print>
 #include <vector>
 
+#include <openssl/evp.h>
+#include <openssl/hmac.h>
+
 #include <zetta/connect/http_transport.hpp>
 
 namespace lake::control {
@@ -395,6 +398,13 @@ HttpAgentCaller::turn(std::string endpoint, std::string service_token, nlohmann:
             "the agent did not answer" +
                 (response.error.empty() ? std::string() : ": " + response.error)}));
     }
+    // The agent refused the token (agent-runtime#14): said apart so the caller can tell it from a
+    // failed turn.
+    if (response.status == 401 || response.status == 403) {
+        co_return ZettaControlResult<nlohmann::json>(std::unexpected(ZettaControlError{
+            "unauthorized",
+            "the agent refused Lake's token (HTTP " + std::to_string(response.status) + ")"}));
+    }
     nlohmann::json answer = nlohmann::json::parse(response.body, nullptr, false);
     if (answer.is_discarded() || !answer.is_object()) {
         co_return ZettaControlResult<nlohmann::json>(std::unexpected(ZettaControlError{
@@ -429,6 +439,29 @@ std::vector<std::string> agent_launch_scopes_for(const nlohmann::json& agent) {
         }
     }
     return agent_launch_scopes_for(skills);
+}
+
+std::string launch_service_token(std::string_view shared_token, std::string_view launch_id) {
+    const std::string message = "lake-agent-launch:" + std::string(launch_id);
+    unsigned char digest[EVP_MAX_MD_SIZE];
+    unsigned int size = 0;
+    if (shared_token.empty() || HMAC(EVP_sha256(),
+                                     shared_token.data(),
+                                     static_cast<int>(shared_token.size()),
+                                     reinterpret_cast<const unsigned char*>(message.data()),
+                                     message.size(),
+                                     digest,
+                                     &size) == nullptr) {
+        return {};
+    }
+    static constexpr char hex[] = "0123456789abcdef";
+    std::string out;
+    out.reserve(size * 2);
+    for (unsigned int i = 0; i < size; ++i) {
+        out.push_back(hex[digest[i] >> 4]);
+        out.push_back(hex[digest[i] & 0x0f]);
+    }
+    return out;
 }
 
 } // namespace lake::control

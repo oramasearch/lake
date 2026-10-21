@@ -230,8 +230,18 @@ native agents still answer within the call (a follow-up).
 | a **Python** agent of the account | its running `service` launch | the message and conversation id; with no running service lake starts one and answers `status: starting` |
 
 A turn key is revoked when the turn ends. Offline library agents and library agents this lake
-does not run are refused. lake presents `LAKE_AGENT_SERVICE_TOKEN` as the bearer to every agent
-service.
+does not run are refused. lake presents `LAKE_AGENT_SERVICE_TOKEN` as the bearer to every library
+agent's service.
+
+**A Python agent's service launch gets its own token** (agent-runtime#14). The launch runs the
+account's own code, so it must never hold the shared token, which every library agent accepts on
+`POST /v1/turn`. Lake presents `launch_service_token(LAKE_AGENT_SERVICE_TOKEN, launch id)`, the
+lowercase hex of HMAC-SHA256 over `lake-agent-launch:<launch id>`, and the operator writes the same
+value into the launch's credential Secret (key `service-token`). Neither side stores it, and it opens
+no other launch and no library agent. A launch an older operator started still holds the shared
+token: when the launch refuses the derived token (HTTP 401 or 403), lake tries the shared token once.
+Verify with `AgentRuns.ALaunchsServiceTokenIsDerivedForThatLaunchAlone`, whose fixed vector the
+operator's `TestLaunchServiceTokenMatchesLakesDerivation` checks too.
 
 ## Capabilities
 

@@ -110,6 +110,12 @@ AgentLaunchProgress agent_launch_progress(const AgentLaunch& launch,
 // A store timestamp, YYYY-MM-DDTHH:MM:SSZ, as a time point; nothing when it is not one.
 std::optional<std::chrono::sys_seconds> utc_seconds(std::string_view text);
 
+// The token Lake presents to one service launch of a user-created agent (agent-runtime#14):
+// lowercase hex of HMAC-SHA256(shared agent service token, "lake-agent-launch:" + launch id). The
+// operator writes the same value into the launch's credential Secret, so the launch never holds the
+// shared token, which every library agent accepts, and its token opens no other launch.
+std::string launch_service_token(std::string_view shared_token, std::string_view launch_id);
+
 // One turn to an agent's service: POST <endpoint>/v1/turn with the service token as bearer.
 // Injected so tests need no HTTP server.
 class AgentCaller {
