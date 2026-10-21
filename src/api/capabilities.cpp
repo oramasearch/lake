@@ -38,6 +38,7 @@
 #include "lake/control/identity_crypto.hpp"
 #include "lake/control/own_identity.hpp"
 #include "lake/control/pki.hpp"
+#include "lake/control/policy.hpp"
 #include "lake/control/saml.hpp"
 #include "lake/control/store.hpp"
 #include "lake/search/index.hpp"
@@ -5194,6 +5195,12 @@ void register_organization_capabilities(Registry& registry) {
             if (!ctx.store) {
                 return no_store();
             }
+            // lake#872: a member is a TAAP identity, never a reserved principal.
+            if (!control::valid_principal_id(in.at("principal_taap_id").get<std::string>())) {
+                return ApiResult::failure("invalid_input",
+                                          "principal_taap_id must be a TAAP identity (taap:...)",
+                                          "/principal_taap_id");
+            }
             const auto attestation =
                 sign_lake_attestation(ctx,
                                       {{"type", "lake.org_membership/1"},
@@ -5724,6 +5731,16 @@ void register_policy_capabilities(Registry& registry) {
         .handler = [](const json& in, ApiContext& ctx) {
             if (!ctx.store) {
                 return no_store();
+            }
+            // lake#872: a grant someone writes names a TAAP identity. `admin` and the identities
+            // lake creates itself (`share-link:<id>`, whose first grant is the link's folder) are
+            // never granted through here: one tenant could otherwise repoint another's share link.
+            if (auto checked = control::check_principal_id(
+                    in.at("principal_taap_id").get<std::string>(), "principal_taap_id");
+                !checked || in.at("principal_taap_id").get<std::string>().empty()) {
+                return ApiResult::failure("invalid_input",
+                                          "principal_taap_id must be a TAAP identity (taap:...)",
+                                          "/principal_taap_id");
             }
             const auto attestation =
                 sign_lake_attestation(ctx,
