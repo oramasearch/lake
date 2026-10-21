@@ -20,7 +20,10 @@ authorization path before returning any row.
 `EVP_KDF` `ARGON2ID` with 64 MiB memory, three iterations, one lane, and a unique 128-bit salt.
 A user with an enrolled TOTP factor receives `mfa_required` from password sign-in and must use
 `verify_mfa` with a current TOTP or an unused recovery code. `enroll_mfa` returns an `otpauth` URI
-and eight recovery codes once; replacing the enrollment invalidates the previous seed and codes.
+whose `secret` is the key in RFC 4648 base32 without padding, as the Key Uri Format requires and
+authenticator apps decode (lake#773; it was hexadecimal before, so every code an authenticator
+showed was refused; the stored seed is unchanged, so earlier enrollments verify the same), and
+eight recovery codes once; replacing the enrollment invalidates the previous seed and codes.
 Recovery codes are single-use. `disable_mfa` requires a fresh TOTP or unused recovery code and
 revokes the seed and every remaining recovery code. Tokens are named sessions with explicit
 capability-name scopes. Ordinary tokens
