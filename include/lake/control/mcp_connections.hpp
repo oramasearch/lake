@@ -128,7 +128,9 @@ liquid::runtime::task<ZettaControlResult<void>>
 remove_mcp_connection(WorkspaceRecords& records, std::string customer_id, std::string id);
 
 // One OAuth sign-in in progress (lake#652): the PKCE verifier and where the code goes back, kept
-// ten minutes in `lake_mcp_oauth_states`, keyed by the state's random part, and taken once.
+// ten minutes in `lake_mcp_oauth_states`, keyed by the state's random part, and taken once. It
+// names the server, issuer, token endpoint and resource it was begun for, so its code is exchanged
+// only there and only while the connection still names them (lake#927).
 struct McpOAuthState {
     std::string state;
     std::string customer_id;
@@ -140,6 +142,10 @@ struct McpOAuthState {
     std::string mount_id;
     std::string secret_name;
     std::string started_by;
+    std::string url;
+    std::string issuer;
+    std::string token_endpoint;
+    std::string resource;
 };
 struct McpOAuthStateCodec {
     using Value = McpOAuthState;

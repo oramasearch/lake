@@ -19,6 +19,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <set>
 #include <string>
 #include <thread>
@@ -56,6 +57,10 @@ public:
     bool notify_before_answer = false; // a notifications/message before each streamed answer
     bool no_get_stream = false;        // GET /mcp answers 405
     int get_stream_events = 3;         // notifications the GET stream sends before it ends
+    // The protected resource metadata's `resource` (unset: base() + "/mcp"; empty: none) and the
+    // authorization server metadata's `issuer` (unset: base(); empty: none).
+    std::optional<std::string> metadata_resource;
+    std::optional<std::string> metadata_issuer;
     json tools = default_tools();
 
     // ---- What it saw ---------------------------------------------------------------------------
@@ -389,28 +394,27 @@ private:
     void route(int fd, const Seen& request) {
         const std::string path = request.path.substr(0, request.path.find('?'));
         if (path.starts_with("/.well-known/oauth-protected-resource")) {
-            respond(fd,
-                    200,
-                    "application/json",
-                    json{{"resource", base() + "/mcp"},
-                         {"authorization_servers", json::array({base()})},
-                         {"scopes_supported", json::array({"tools"})}}
-                        .dump());
+            json metadata{{"authorization_servers", json::array({base()})},
+                          {"scopes_supported", json::array({"tools"})}};
+            if (const std::string named = metadata_resource.value_or(base() + "/mcp");
+                !named.empty()) {
+                metadata["resource"] = named;
+            }
+            respond(fd, 200, "application/json", metadata.dump());
             return;
         }
         if (path == "/.well-known/oauth-authorization-server") {
-            respond(fd,
-                    200,
-                    "application/json",
-                    json{{"issuer", base()},
-                         {"authorization_endpoint", base() + "/authorize"},
-                         {"token_endpoint", base() + "/token"},
-                         {"registration_endpoint", base() + "/register"},
-                         {"response_types_supported", json::array({"code"})},
-                         {"grant_types_supported",
-                          json::array({"authorization_code", "refresh_token"})},
-                         {"code_challenge_methods_supported", json::array({"S256"})}}
-                        .dump());
+            json metadata{
+                {"authorization_endpoint", base() + "/authorize"},
+                {"token_endpoint", base() + "/token"},
+                {"registration_endpoint", base() + "/register"},
+                {"response_types_supported", json::array({"code"})},
+                {"grant_types_supported", json::array({"authorization_code", "refresh_token"})},
+                {"code_challenge_methods_supported", json::array({"S256"})}};
+            if (const std::string issuer = metadata_issuer.value_or(base()); !issuer.empty()) {
+                metadata["issuer"] = issuer;
+            }
+            respond(fd, 200, "application/json", metadata.dump());
             return;
         }
         if (path == "/register" && request.method == "POST") {

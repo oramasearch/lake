@@ -353,7 +353,11 @@ json McpOAuthStateCodec::encode(const McpOAuthState& state) {
             {"client_secret", state.client_secret},
             {"mount_id", state.mount_id},
             {"secret_name", state.secret_name},
-            {"started_by", state.started_by}};
+            {"started_by", state.started_by},
+            {"url", state.url},
+            {"issuer", state.issuer},
+            {"token_endpoint", state.token_endpoint},
+            {"resource", state.resource}};
 }
 
 std::optional<McpOAuthState> McpOAuthStateCodec::decode(const StoredRecord& record) {
@@ -371,6 +375,10 @@ std::optional<McpOAuthState> McpOAuthStateCodec::decode(const StoredRecord& reco
     state.mount_id = text(record.body, "mount_id");
     state.secret_name = text(record.body, "secret_name");
     state.started_by = text(record.body, "started_by");
+    state.url = text(record.body, "url");
+    state.issuer = text(record.body, "issuer");
+    state.token_endpoint = text(record.body, "token_endpoint");
+    state.resource = text(record.body, "resource");
     if (state.customer_id.empty() || state.connection_id.empty() || state.verifier.empty()) {
         return std::nullopt;
     }

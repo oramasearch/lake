@@ -407,11 +407,61 @@ std::expected<LakeSecretRef, ApiResult> secret_from_input(const json& secret,
     return reference;
 }
 
+// Whether `resource`, a protected resource identifier (RFC 8707), names the MCP server at `server`
+// (RFC 9728 section 3.3, lake#927): the server's URL without its query, ignoring one trailing
+// slash, or the server's origin. Scheme, host and port compare as parse_mcp_url normalizes them;
+// the path compares byte for byte. Any other resource is another server's audience, and a token
+// issued for it must never be sent to this one.
+bool names_server(std::string_view resource, const McpUrl& server, bool allow_private) {
+    auto named = parse_mcp_url(resource, allow_private);
+    if (!named || named->origin() != server.origin()) {
+        return false;
+    }
+    if (named->path == "/") {
+        return true;
+    }
+    const auto without_slash = [](std::string path) {
+        if (path.size() > 1 && path.back() == '/') {
+            path.pop_back();
+        }
+        return path;
+    };
+    return without_slash(named->path) ==
+           without_slash(server.path.substr(0, server.path.find('?')));
+}
+
+// Whether two issuer identifiers are the same (RFC 8414 section 3.3): scheme and host without
+// case, the default port and an empty path as "/"; nothing else is folded.
+bool same_issuer(std::string_view published, std::string_view expected, bool allow_private) {
+    auto left = parse_mcp_url(published, allow_private);
+    auto right = parse_mcp_url(expected, allow_private);
+    return left && right && left->origin() == right->origin() && left->path == right->path;
+}
+
+// The issuer, token endpoint and resource a sign-in's tokens belong to (lake#927), read from a
+// connection's `oauth` or from the secret the sign-in wrote. A token is used only while the two
+// agree, so it never reaches another server or another authorization server's token endpoint.
+std::string oauth_binding(const json& oauth) {
+    return text(oauth, "issuer") + '\n' + text(oauth, "token_endpoint") + '\n' +
+           text(oauth, "resource");
+}
+
+// Whether a connection's OAuth sign-in may give a bearer to the connection's URL: it has an
+// issuer and token endpoint, and its resource names that URL.
+bool oauth_names_connection(const ApiContext& context, const McpConnection& connection) {
+    auto server = parse_mcp_url(connection.url, context.mcp_allow_private_addresses);
+    return server && !text(connection.oauth, "issuer").empty() &&
+           !text(connection.oauth, "token_endpoint").empty() &&
+           names_server(
+               text(connection.oauth, "resource"), *server, context.mcp_allow_private_addresses);
+}
+
 // An access token Lake obtained with a connection's refresh token, kept in this process only
-// until shortly before it expires.
+// until shortly before it expires, with the oauth_binding it was issued under.
 struct CachedToken {
     std::string access_token;
     std::chrono::steady_clock::time_point expires;
+    std::string binding;
 };
 std::mutex& token_mutex() {
     static std::mutex mutex;
@@ -516,10 +566,19 @@ credential_for(const ApiContext& context, const McpConnection& connection, bool 
                                    " first"),
             true);
     }
+    // An OAuth token goes only to the server its resource names (lake#927).
+    const std::string binding = oauth_binding(connection.oauth);
+    if (connection.auth_kind == "oauth" && !oauth_names_connection(context, connection)) {
+        co_return credential_refused(
+            ApiResult::failure("sign_in_required",
+                               "the sign-in to " + connection.name +
+                                   " was not for its address; sign in again"),
+            true);
+    }
     if (connection.auth_kind == "oauth" && !fresh) {
         std::lock_guard lock(token_mutex());
         const auto found = token_cache().find(connection.id);
-        if (found != token_cache().end() &&
+        if (found != token_cache().end() && found->second.binding == binding &&
             found->second.expires > std::chrono::steady_clock::now()) {
             co_return Credential{{found->second.access_token}, std::nullopt, false};
         }
@@ -546,7 +605,15 @@ credential_for(const ApiContext& context, const McpConnection& connection, bool 
         }
         co_return Credential{{token}, std::nullopt, false};
     }
-    // OAuth: the refresh token, or a lone access token while it lasts.
+    // OAuth: the refresh token, or a lone access token while it lasts, only under the issuer,
+    // token endpoint and resource it was issued for. A secret from before lake#927 names none.
+    if (oauth_binding(value) != binding) {
+        co_return credential_refused(
+            ApiResult::failure("sign_in_required",
+                               "the sign-in to " + connection.name +
+                                   " was for another server or issuer; sign in again"),
+            true);
+    }
     const std::string refresh = text(value, "refresh_token");
     if (refresh.empty()) {
         const std::string access = text(value, "access_token");
@@ -594,8 +661,10 @@ credential_for(const ApiContext& context, const McpConnection& connection, bool 
     }
     {
         std::lock_guard lock(token_mutex());
-        token_cache()[connection.id] = {
-            access, std::chrono::steady_clock::now() + std::chrono::seconds(expires_in - 30)};
+        token_cache()[connection.id] = {access,
+                                        std::chrono::steady_clock::now() +
+                                            std::chrono::seconds(expires_in - 30),
+                                        binding};
     }
     // A rotated refresh token replaces the old one, as a new version of the same secret.
     if (const std::string rotated = text(ran->body, "refresh_token");
@@ -2149,8 +2218,12 @@ Discovered discover_oauth(McpHttp& http,
         if (servers.is_array() && !servers.empty() && servers[0].is_string()) {
             issuer = servers[0].get<std::string>();
         }
-        if (!text(resource.body, "resource").empty()) {
-            resource_id = text(resource.body, "resource");
+        // The metadata must be this server's (RFC 9728 section 3.3, lake#927): a resource naming
+        // another would have Lake ask for that resource's token and hand it to this server.
+        resource_id = text(resource.body, "resource");
+        if (!names_server(resource_id, *server, allow_private)) {
+            return {json(),
+                    "the protected resource metadata names a resource other than this server"};
         }
     }
     if (issuer.empty()) {
@@ -2169,13 +2242,17 @@ Discovered discover_oauth(McpHttp& http,
         return {json(), "the authorization server published no metadata (" + metadata.error + ")"};
     }
     const json& body = metadata.body;
+    // The metadata must be the issuer's own (RFC 8414 section 3.3, lake#927).
+    if (!same_issuer(text(body, "issuer"), issuer, allow_private)) {
+        return {json(), "the authorization server's metadata names an issuer other than " + issuer};
+    }
     const json methods = body.value("code_challenge_methods_supported", json::array());
     if (!methods.is_array() ||
         std::find(methods.begin(), methods.end(), json("S256")) == methods.end()) {
         return {json(),
                 "the authorization server does not offer PKCE with S256, which Lake requires"};
     }
-    json oauth{{"issuer", text(body, "issuer").empty() ? issuer : text(body, "issuer")},
+    json oauth{{"issuer", issuer},
                {"authorization_endpoint", text(body, "authorization_endpoint")},
                {"token_endpoint", text(body, "token_endpoint")},
                {"registration_endpoint", text(body, "registration_endpoint")},
@@ -2339,7 +2416,11 @@ liquid::runtime::task<ApiResult> begin_sign_in(const json& input, ApiContext& co
                                  prepared->client_secret,
                                  mount_id,
                                  secret_name,
-                                 acting_person(context)};
+                                 acting_person(context),
+                                 current.url,
+                                 text(prepared->oauth, "issuer"),
+                                 text(prepared->oauth, "token_endpoint"),
+                                 text(prepared->oauth, "resource")};
     auto saved = control::settled(co_await control::record_mcp_oauth_state(*records, state));
     if (!saved) {
         co_return failed(saved.error());
@@ -2349,6 +2430,10 @@ liquid::runtime::task<ApiResult> begin_sign_in(const json& input, ApiContext& co
         customer_id,
         id,
         [&](McpConnection& next) -> std::optional<control::ZettaControlError> {
+            if (next.url != current.url) {
+                return control::ZettaControlError{
+                    "conflict", "the connection's address changed during the sign-in", "/id"};
+            }
             json keep = prepared->oauth;
             keep["signed_in_at"] = next.oauth.value("signed_in_at", json());
             keep["signed_in_by"] = next.oauth.value("signed_in_by", json());
@@ -2406,16 +2491,29 @@ liquid::runtime::task<ApiResult> complete_sign_in(const json& input, ApiContext&
     if (!connection) {
         co_return connection.error();
     }
+    // The code goes only to the token endpoint of the sign-in that asked for it, and only while
+    // the connection still names the server, issuer and resource it began with (lake#927).
+    const json began{{"issuer", taken->issuer},
+                     {"token_endpoint", taken->token_endpoint},
+                     {"resource", taken->resource}};
+    if (connection->auth_kind != "oauth" || taken->url.empty() || connection->url != taken->url ||
+        oauth_binding(connection->oauth) != oauth_binding(began) ||
+        !oauth_names_connection(context, *connection)) {
+        co_return ApiResult::failure(
+            "conflict",
+            "the connection changed after this sign-in began; start the sign-in again",
+            "/state");
+    }
     const std::string verifier = taken->verifier;
     const std::string client_secret = taken->client_secret;
-    const std::string token_endpoint = text(connection->oauth, "token_endpoint");
+    const std::string token_endpoint = taken->token_endpoint;
     const std::string body = form({{"grant_type", "authorization_code"},
                                    {"code", input.at("code").get<std::string>()},
                                    {"redirect_uri", taken->redirect_uri},
                                    {"client_id", taken->client_id},
                                    {"client_secret", client_secret},
                                    {"code_verifier", verifier},
-                                   {"resource", text(connection->oauth, "resource")}});
+                                   {"resource", taken->resource}});
     auto http = context.mcp_http;
     if (!http) {
         co_return ApiResult::failure("not_supported", "this Lake cannot reach MCP servers");
@@ -2433,7 +2531,11 @@ liquid::runtime::task<ApiResult> complete_sign_in(const json& input, ApiContext&
                 (exchanged->error.empty() ? std::string("no access token") : exchanged->error) +
                 ")");
     }
-    json secret{{"client_id", taken->client_id}};
+    // The secret names what its tokens are for, so a call uses them only there (lake#927).
+    json secret{{"client_id", taken->client_id},
+                {"issuer", taken->issuer},
+                {"token_endpoint", taken->token_endpoint},
+                {"resource", taken->resource}};
     if (!client_secret.empty()) {
         secret["client_secret"] = client_secret;
     }
@@ -2470,7 +2572,8 @@ liquid::runtime::task<ApiResult> complete_sign_in(const json& input, ApiContext&
         std::lock_guard lock(token_mutex());
         token_cache()[connection->id] = {text(exchanged->body, "access_token"),
                                          std::chrono::steady_clock::now() +
-                                             std::chrono::seconds(expires_in - 30)};
+                                             std::chrono::seconds(expires_in - 30),
+                                         oauth_binding(began)};
     }
     const std::string person = acting_person(context);
     const std::string field = refresh_token.empty() ? "access_token" : "refresh_token";
@@ -2479,6 +2582,10 @@ liquid::runtime::task<ApiResult> complete_sign_in(const json& input, ApiContext&
         customer_id,
         connection->id,
         [&](McpConnection& next) -> std::optional<control::ZettaControlError> {
+            if (next.url != taken->url || oauth_binding(next.oauth) != oauth_binding(began)) {
+                return control::ZettaControlError{
+                    "conflict", "the connection changed during the sign-in", "/state"};
+            }
             next.secret_ref = lake_secret_ref({taken->mount_id, taken->secret_name, field});
             next.oauth["signed_in_at"] = now_text();
             next.oauth["signed_in_by"] = person;

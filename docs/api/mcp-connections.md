@@ -181,13 +181,21 @@ specification describes; a person does it once, and Lake keeps the refresh token
      `/.well-known/oauth-authorization-server` (RFC 8414, then `openid-configuration`). An issuer
      that does not list `S256` in `code_challenge_methods_supported` is refused. Every URL is
      checked like the server's: public addresses, `https`.
+   - **Whose token** (lake#927). The resource metadata's `resource` must name this server: its URL
+     without the query (one trailing slash aside) or its origin, with scheme, host and port compared
+     as Lake normalizes them and the path byte for byte. Metadata with no `resource`, or one naming
+     another API, host, port or path, stops the sign-in (RFC 9728 section 3.3); otherwise a malicious
+     server could have Lake obtain another API's token and send it that token. The authorization
+     server's metadata must name the same issuer Lake asked (RFC 8414 section 3.3), or the sign-in
+     stops too. Nothing is registered and no one is redirected when either check fails.
    - **Registration.** Lake registers itself as a public client (RFC 7591: `client_name: Lake`, the
      redirect URI, `authorization_code` and `refresh_token`, `token_endpoint_auth_method: none`),
      once per connection and redirect URI. A server that registers no clients needs the client id
      it issued, passed as `client_id`.
    - **PKCE.** A 32-byte verifier from the system's random generator, its S256 challenge, and a
-     `state` of `<customer>.<workspace>.<random>`; the verifier, the redirect URI, the client and
-     where the token goes are a sealed `lake_mcp_oauth_states` record kept ten minutes.
+     `state` of `<customer>.<workspace>.<random>`; the verifier, the redirect URI, the client,
+     where the token goes, and the server URL, issuer, token endpoint and resource the sign-in was
+     begun for are a sealed `lake_mcp_oauth_states` record kept ten minutes.
    - The answer's `authorization_url` carries `response_type=code`, `client_id`, `redirect_uri`,
      `code_challenge`, `code_challenge_method=S256`, `state`, `resource` (RFC 8707: the server's
      resource) and the resource metadata's `scope`. The redirect URI is
@@ -195,17 +203,24 @@ specification describes; a person does it once, and Lake keeps the refresh token
 2. The person signs in at the authorization server, which sends them back to the callback page
    with `code` and `state`; the page calls `complete_mcp_connection_sign_in {state, code}`:
    - the state is taken once (a second use, an expired one, another workspace's or another person's
-     is `not_found`), and the code is exchanged at the token endpoint with the verifier and
-     `resource`;
-   - the **refresh token** (with a registration's client secret, if the server issued one) is written
-     with `put_secret` **as the person** to `secret_name` (default `mcp-<prefix>`) in the mount, so
+     is `not_found`), and the code is exchanged at the token endpoint the state names, with the
+     verifier and the state's `resource`. A connection whose URL, issuer, token endpoint or
+     resource changed after the sign-in began is `conflict`, and the code is never sent;
+   - the **refresh token**, beside a registration's client secret (if the server issued one) and
+     the issuer, token endpoint and resource it was issued for, is written with `put_secret`
+     **as the person** to `secret_name` (default `mcp-<prefix>`) in the mount, so
      their permission on the mount is checked and the write audited there; the access token is
      never stored. A server that issues no refresh token gets its access token kept there with its
      expiry instead, and the person signs in again when it lapses;
    - the connection names that secret, records who signed in and when, and discovers the server.
 
 A call obtains an access token with the refresh token (`grant_type=refresh_token`, with `resource`)
-and keeps it in the process's memory until shortly before `expires_in`. A **rotated** refresh token
+and keeps it in the process's memory until shortly before `expires_in`. Lake sends a token only
+when the connection's resource still names the connection's URL and the secret, and the cached
+access token, name the issuer, token endpoint and resource the connection has now (lake#927). A
+connection moved to another address, or re-discovered under another issuer, is
+`sign_in_required` until a person signs in again. A secret written before lake#927 names none of
+them, so each OAuth connection signed in before then needs one more sign-in. A **rotated** refresh token
 is written back as a new version of the same secret. A server that refuses the access token gets
 one more call with a fresh one; a refused refresh token makes the connection `needs_sign_in` and the
 call `sign_in_required`.
@@ -381,7 +396,12 @@ grant taken back, the audit with no arguments, the usage series, re-export throu
 `mcp_dispatch_async` with `/w/<workspace>/mcp`, a refused token marking the connection, and delete.
 `...McpConnectionsSignInWithOAuthAndKeepOnlyARefreshToken`: discovery, registration, the PKCE
 challenge, a state taken once and by its own person, only the refresh token kept, and an access
-token renewed with a rotated refresh token. `...McpConnectionStreamsMirrorNotificationsAndDriveTheAgent`:
+token renewed with a rotated refresh token. `...McpConnectionSignInIsBoundToTheServerItIsFor`
+(lake#927): resource metadata naming another API, port, path, query or no resource, and
+authorization server metadata naming another issuer or none, stop the sign-in before anything is
+registered; the server's URL with a trailing slash, or its origin, is accepted; a connection moved
+to another server between beginning and completing a sign-in never exchanges the code, and one
+moved after signing in never sends the other server its token. `...McpConnectionStreamsMirrorNotificationsAndDriveTheAgent`:
 notifications mirrored to their topic after a subscription, one job per input event as the person,
 and its result published once on the output topic.
 `...McpConnectionDispatchNamesExportsAndStreamingWorkspacesOnly`: no row for a connection that
