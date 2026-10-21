@@ -8,11 +8,11 @@ document rules, confidentiality, and the decisions not to drift past. Read both.
 
 ## Status
 
-Status: 2026-10-20. The current release is **v0.3.1** ([`docs/releases/v0.3.1.md`](docs/releases/v0.3.1.md): billing through a shared Stripe account, billing contacts and emailed invoices); before it **v0.3.0**
+Status: 2026-10-21. The current release is **v0.4.0** ([`docs/releases/v0.4.0.md`](docs/releases/v0.4.0.md): the security release from the multi-tenant audit and the pre-launch review, SAML sign-in, OpenID Connect discovery and `delete_account`); before it **v0.3.1** (billing through a shared Stripe account); before that **v0.3.0**
 ([`docs/releases/v0.3.0.md`](docs/releases/v0.3.0.md): the lake.live order sheet and the 2026-10-18
 UX review's fixes, with its known issues); v0.2.0 ([`docs/releases/v0.2.0.md`](docs/releases/v0.2.0.md))
 added secure networking, regions, the managed key and own identity, Clerk webhooks, the agents'
-names and Ask Orama's home. `server_info` of a v0.3.1 build reports version `0.3.1`. The paragraph below describes v0.1.0, the
+names and Ask Orama's home. `server_info` of a v0.4.0 build reports version `0.4.0`. The paragraph below describes v0.1.0, the
 first tagged release ([`docs/releases/v0.1.0.md`](docs/releases/v0.1.0.md) lists everything in it),
 and what ran on 2026-10-12. `Lake/prod` on the
 dev AKS cluster (there is no production environment yet) serves `oramasearch/lake:20261012a`, which
