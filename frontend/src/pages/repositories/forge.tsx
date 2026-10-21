@@ -420,8 +420,10 @@ export function useRepositoryTrail(repository: Pick<Repository, "id" | "name"> |
 
 export type TabKey = "files" | "code" | "changes" | "issues" | "releases" | "artifacts" | "platform" | "webhooks" | "protection" | "conflicts";
 
-/** `forge_tabs`: the repository's sections. Signed out, Files, Deployments and Webhooks are
- * hidden; Protection is shown to the operator only, because its page reads the instance audit. */
+/** `forge_tabs`: the repository's sections. Signed out, Files, Deployments, Webhooks and Protection
+ * are hidden. Protection is every signed-in reader's (lake#777): its rules are readable with the
+ * repository, and its refusals come from the account's audit, which the page shows only to those
+ * who may read it. */
 export function ForgeTabs({ repository, current }: { repository: Pick<Repository, "id">; current: TabKey }) {
   const { viewer } = useSession();
   const id = encodeURIComponent(repository.id);
@@ -439,8 +441,7 @@ export function ForgeTabs({ repository, current }: { repository: Pick<Repository
   return (
     <nav className="tabs forge-tabs" aria-label="Repository">
       {tabs
-        .filter(([, , key]) => viewer.signed_in || !["files", "platform", "webhooks"].includes(key))
-        .filter(([, , key]) => key !== "protection" || viewer.administrator)
+        .filter(([, , key]) => viewer.signed_in || !["files", "platform", "webhooks", "protection"].includes(key))
         .map(([label, to, key]) => (
           <Link key={key} to={to} aria-current={key === current ? "page" : undefined}>
             {label}

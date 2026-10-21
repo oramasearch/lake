@@ -48,7 +48,12 @@ prepared replacement text; `resolve_conflict` applies path authorization and sig
 Release, webhook and protection pages also read only capability results. Webhook history never
 receives the stored signing secret, and a retry creates a new durable attempt. The protection page
 joins its rule list with signed refusal events by repository; it does not infer denials from the
-current rules.
+current rules. **Every signed-in reader of the repository sees the Protection tab and its rules**
+(lake#777); it used to be the operator's alone, because the page read the instance audit and failed
+for anyone else. The refusals come from `audit` on the repository's workspace, which the account's
+administrators may read (lake#18, PR https://github.com/oramasearch/lake/pull/897) as well as the
+operator; to anyone else the page shows the rules and says the administrators can see the
+refusals, instead of failing.
 
 Forge records live in the workspace Zetta of the repository's workspace (lake#341,
 [forge.md](../api/forge.md#where-forge-records-live)), so these pages keep their addresses and read
