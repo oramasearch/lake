@@ -1234,6 +1234,56 @@ TEST(Workspaces, ZettaCallerKeepsTheErrorPath) {
     EXPECT_EQ(called->error().path, "/objective");
 }
 
+// lake#797: an agent reads receive_events through lake's workspace path with a GET, whose query
+// values reach the caller as strings; the long poll's wait is read from the string instead of
+// failing the call with a JSON type error.
+TEST(Workspaces, ZettaCallerReadsALongPollWaitGivenAsText) {
+    const zetta::connect::HttpTransport previous = zetta::connect::default_http_transport();
+    const zetta::connect::AsyncHttpTransport previous_async =
+        zetta::connect::default_async_http_transport();
+    std::vector<std::string> asked;
+    zetta::connect::set_default_http_transport(
+        {},
+        [&asked](const zetta::connect::HttpRequest& request)
+            -> boost::capy::io_task<zetta::connect::HttpResponse> {
+            asked.push_back(request.url);
+            co_return boost::capy::io_result<zetta::connect::HttpResponse>{
+                {},
+                {200,
+                 json{{"ok", true}, {"value", {{"events", json::array()}, {"next_sequence", 1}}}}
+                     .dump(),
+                 {}}};
+        });
+    lake::control::ZettaWorkspaceCaller caller;
+    const auto receive = [&](json wait) {
+        return liquid::runtime::block_on(caller.call("http://ws:4800",
+                                                     "t",
+                                                     "receive_events",
+                                                     true,
+                                                     {{"topic", "study-events.s-1"},
+                                                      {"from_sequence", "1"},
+                                                      {"max", "100"},
+                                                      {"wait_ms", std::move(wait)}}));
+    };
+    const auto text = receive("60000");
+    const auto number = receive(250);
+    const auto unreadable = receive("soon");
+    zetta::connect::set_default_http_transport(previous, previous_async);
+    ASSERT_TRUE(text);
+    ASSERT_TRUE(*text) << text->error().message;
+    EXPECT_EQ((**text)["next_sequence"], 1);
+    ASSERT_EQ(asked.size(), 2U) << "the unreadable wait is refused before any request";
+    EXPECT_NE(asked[0].find("wait_ms=30000"), std::string::npos) << asked[0];
+    EXPECT_NE(asked[0].find("from_sequence=1"), std::string::npos) << asked[0];
+    ASSERT_TRUE(number);
+    ASSERT_TRUE(*number) << number->error().message;
+    EXPECT_NE(asked[1].find("wait_ms=250"), std::string::npos) << asked[1];
+    ASSERT_TRUE(unreadable);
+    ASSERT_FALSE(*unreadable);
+    EXPECT_EQ(unreadable->error().code, "invalid_input");
+    EXPECT_EQ(unreadable->error().path, "/wait_ms");
+}
+
 TEST(Workspaces, ASearchKeyFromAnOlderSessionLastsAsLongAsTheSession) {
     Workspaces w;
     lake::control::InMemoryStore& store = *w.store;

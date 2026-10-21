@@ -295,6 +295,9 @@ credential's OpenAPI document. A supplied path or input workspace must match the
   refused reaches the workspace.
 - **The workspace's pub/sub.** `list_topics` and `receive_events` remain allowed reads; only
   exposed topics are reachable, and a `receive_events` long poll waits at most 10 seconds.
+  Its `wait_ms` may arrive as the query string's text (`wait_ms=10000`): lake reads the number
+  from it before clamping, and refuses text that is not a whole number with `invalid_input` at
+  `/wait_ms` (lake#797; before, the read failed with a JSON type error as `store_error`).
   Topic/message writes now use the registered [Streams capabilities](streams.md), not raw
   `workspace_act`, so creator ownership and system-topic protections cannot be bypassed.
   Streams uses non-consuming `browse_topic` and permits bounded waits up to 30 seconds.
