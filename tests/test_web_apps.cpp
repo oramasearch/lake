@@ -73,6 +73,8 @@ struct WebApps {
     std::shared_ptr<lake::control::PlatformService> platform;
     std::string apps_wildcard = "apps.example.test";
     std::string apps_reserved_names;
+    std::string public_host;
+    const lake::api::Regions* regions = nullptr;
 
     WebApps() {
         std::filesystem::create_directories(service_dir);
@@ -112,6 +114,8 @@ struct WebApps {
         context.agent_bus = bus.get();
         context.apps_wildcard = apps_wildcard;
         context.apps_reserved_names = apps_reserved_names;
+        context.public_host = public_host;
+        context.regions = regions;
         context.apps_per_customer = app_limit;
         context.app_replicas_per_customer = replica_limit;
         context.authorized = true;
@@ -338,6 +342,66 @@ TEST(WebApps, AnImageAppIsRefusedUnlessItsImageIsPinnedByDigest) {
     const auto deployed = apps.call("deploy_app", {{"app_id", id}, {"image", next}});
     ASSERT_TRUE(deployed.ok) << deployed.error.message;
     EXPECT_EQ(deployed.value["image"], next);
+}
+
+// An explicit host is held to the reserved names too, and may never be one of the Lake's own hosts
+// (lake#947): {name: "ok", host: "app.<wildcard>"} took the platform's names past the name check.
+TEST(WebApps, AnExplicitHostCannotTakeAReservedNameOrTheLakesOwnHost) {
+    WebApps apps;
+    apps.apps_wildcard = "oramadev.net";
+    apps.apps_reserved_names = "customer-portal, internal";
+    apps.public_host = "dev-lake.oramadev.net";
+    auto regions = lake::api::regions_from_environment(
+        "westus2",
+        "",
+        R"([{"name":"westus2","label":"US West","host":"us.oramadev.net","latitude":47,"longitude":-122}])",
+        "picker.oramadev.net");
+    ASSERT_TRUE(regions) << regions.error();
+    apps.regions = &*regions;
+    const auto with_host = [&](const std::string& name, const std::string& host) {
+        return apps.call("create_app",
+                         {{"name", name},
+                          {"mode", "runtime"},
+                          {"source",
+                           {{"repository", apps.repository_id},
+                            {"revision", "main"},
+                            {"path", "web"},
+                            {"entrypoint", "server:app"}}},
+                          {"framework", "node"},
+                          {"port", 3000},
+                          {"bindings", {{"zetta", true}, {"services", json::array()}}},
+                          {"host", host}});
+    };
+    int attempt = 0;
+    for (const char* value : {"app.oramadev.net",
+                              "login.oramadev.net",
+                              "auth.oramadev.net",
+                              "sso.oramadev.net",
+                              "grafana.oramadev.net",
+                              "lake.oramadev.net",
+                              "lake-eu.oramadev.net",
+                              "orama-console.oramadev.net",
+                              "customer-portal.oramadev.net",
+                              "internal.oramadev.net"}) {
+        const std::string host = value;
+        const auto refused = with_host("ok-" + std::to_string(attempt++), host);
+        EXPECT_EQ(refused.error.code, "invalid_input") << host;
+        EXPECT_EQ(refused.error.path, "/host") << host;
+        EXPECT_TRUE(refused.error.message.contains("is reserved"))
+            << host << ": " << refused.error.message;
+    }
+    for (const char* value : {"dev-lake.oramadev.net", "us.oramadev.net", "picker.oramadev.net"}) {
+        const std::string host = value;
+        const auto refused = with_host("ok-" + std::to_string(attempt++), host);
+        EXPECT_EQ(refused.error.code, "invalid_input") << host;
+        EXPECT_EQ(refused.error.path, "/host") << host;
+        EXPECT_TRUE(refused.error.message.contains("a host of the Lake itself"))
+            << host << ": " << refused.error.message;
+    }
+
+    const auto created = with_host("ok", "shop.oramadev.net");
+    ASSERT_TRUE(created.ok) << created.error.message;
+    EXPECT_EQ(created.value["host"], "shop.oramadev.net");
 }
 
 TEST(WebApps, CapabilitiesAreCustomerScopedAndValidateSecretsHostsAndDeletes) {
