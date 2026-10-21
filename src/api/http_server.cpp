@@ -12764,16 +12764,23 @@ struct ApiServer::Impl {
             route, status, std::move(html), "text/html; charset=utf-8", "no-store");
     }
 
-    // The address an anonymous order is counted against: Cloudflare's CF-Connecting-IP, else the
-    // first X-Forwarded-For hop, else one bucket for every direct client.
+    // The address an anonymous order is counted against (lake#838): X-Real-IP, which the ingress
+    // (ingress-nginx) always sets itself, overwriting any the sender sent; else the last
+    // X-Forwarded-For hop, the one the nearest proxy appended; else one bucket for every direct
+    // client. Never CF-Connecting-IP or the first X-Forwarded-For hop: a sender that reaches the
+    // ingress without passing Cloudflare can write either, and would land in a fresh bucket with
+    // each request. The ingress decides which client address to trust (Cloudflare's ranges), and
+    // lake counts what it decided.
     static std::string order_client_address(const boost::http::route_params& route) {
-        if (route.req.count("cf-connecting-ip") != 0) {
-            return std::string(route.req.at("cf-connecting-ip")).substr(0, 64);
+        if (route.req.count("x-real-ip") != 0) {
+            return std::string(route.req.at("x-real-ip")).substr(0, 64);
         }
         if (route.req.count("x-forwarded-for") != 0) {
             std::string forwarded(route.req.at("x-forwarded-for"));
-            forwarded = forwarded.substr(0, forwarded.find(','));
-            return forwarded.substr(0, 64);
+            const auto comma = forwarded.rfind(',');
+            forwarded = comma == std::string::npos ? forwarded : forwarded.substr(comma + 1);
+            const auto first = forwarded.find_first_not_of(' ');
+            return first == std::string::npos ? "direct" : forwarded.substr(first, 64);
         }
         return "direct";
     }
@@ -12887,7 +12894,8 @@ struct ApiServer::Impl {
                 web_ui_order_form(
                     sheet, options.regions, *offer, input, order.error(), checkout_available));
         }
-        if (!order_limiter->allow(order_client_address(route), std::chrono::steady_clock::now())) {
+        if (!order_limiter->allow(
+                order_client_address(route), order->path, std::chrono::steady_clock::now())) {
             metrics.increment_counter("lake_cloud_orders_refused_total", {{"reason", "rate"}});
             co_return co_await send_order_html(
                 route,

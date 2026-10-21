@@ -82,10 +82,18 @@ that serves the apex (for production, `https://eu.lake.live/billing/stripe/webho
 
 The apex is anonymous, so the form cannot flood support:
 
-- **Rate limits**: at most `orders_per_client_per_hour` orders (default 5) from one address and
-  `orders_per_hour` (default 60) in all, over a sliding hour, kept in memory per process. The address
-  is Cloudflare's `CF-Connecting-IP`, else the first `X-Forwarded-For` hop, else one bucket for
-  every direct client. Past it: `429`, nothing recorded.
+- **Rate limits**: at most `orders_per_client_per_hour` orders (default 5) from one address, and
+  `orders_per_hour` (default 60) in all **per path**, over a sliding hour, kept in memory per
+  process. Checkout orders and order forms have separate in-all caps (lake#838), so order forms,
+  which anyone can send, can never use up the cap a paying customer is counted against. Past a
+  limit: `429`, nothing recorded.
+- **The address** is `X-Real-IP`, which the ingress (ingress-nginx) always sets itself, overwriting
+  any a sender wrote; else the last `X-Forwarded-For` hop (the one the nearest proxy appended); else
+  one bucket for every direct client. Lake never reads `CF-Connecting-IP` or the first
+  `X-Forwarded-For` hop: a sender that reaches the ingress without passing Cloudflare could write
+  either and land in a fresh bucket with each request (lake#838). Which client address to trust is
+  the ingress's decision: until it trusts Cloudflare's header from Cloudflare's ranges (https://github.com/oramasearch/orama-operator/issues/719),
+  visitors behind one Cloudflare edge share a bucket.
 - **Honeypot**: the form has a field named `website` that is off-screen and `aria-hidden`; people
   never fill it. A form that fills it is answered with a confirmation and nothing is recorded or
   sent (`lake_cloud_orders_refused_total{reason="honeypot"}`).
