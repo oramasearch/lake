@@ -1450,6 +1450,40 @@ TEST(WorkspaceStoreDrive, AReplacedFileInAWorkspaceStoreKeepsItsPreviousVersion)
         << "the history was served from the workspace store";
 }
 
+// lake#560: the first upload into a new repository creates `main`, and an upload into a missing
+// folder creates it, in the space store and in a switched workspace's store.
+TEST(WorkspaceStoreDrive, TheFirstUploadInTheSpaceStoreCreatesMainAndAMissingFolder) {
+    MoveRig rig;
+    ASSERT_NO_FATAL_FAILURE(rig.SetUp());
+    const auto target = rig.create(rig.beta, "first-upload-space");
+    if (!target) {
+        return; // create() recorded the failure
+    }
+    lake::test::expect_uploads_create_main_and_missing_folders(
+        [&](std::string_view method, const std::string& path, const std::string& body) {
+            return rig.raw(method, path, body);
+        },
+        target->id);
+    EXPECT_TRUE(rig.store->get_workspace(rig.beta)->store_moved_at.empty());
+}
+
+TEST(WorkspaceStoreDrive, TheFirstUploadInAWorkspaceStoreCreatesMainAndAMissingFolder) {
+    MoveRig rig;
+    ASSERT_NO_FATAL_FAILURE(rig.SetUp());
+    ASSERT_EQ(rig.move(rig.alpha, "switch").first, 200U);
+    const auto target = rig.create(rig.alpha, "first-upload-workspace");
+    if (!target) {
+        return; // create() recorded the failure
+    }
+    lake::test::expect_uploads_create_main_and_missing_folders(
+        [&](std::string_view method, const std::string& path, const std::string& body) {
+            return rig.raw(method, path, body);
+        },
+        target->id);
+    EXPECT_TRUE(rig.zetta->has_bucket("http://" + rig.alpha + ".test"))
+        << "the uploads were written to the workspace store";
+}
+
 TEST(WorkspaceStoreMove, ACreationTheWorkspaceStoreRefusesLeavesNoRowAndCanBeRetried) {
     MoveRig rig;
     ASSERT_NO_FATAL_FAILURE(rig.SetUp());

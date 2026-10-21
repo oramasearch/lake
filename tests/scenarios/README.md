@@ -18,6 +18,11 @@ the shared test fixture loads the schema and removes only its own database after
   restorable, that a restore is a stable-node modification, and that a real deletion stays distinct.
   The same exercise (`../drive_history_support.hpp`) runs against the memory store's space store and
   a switched workspace store in `WorkspaceStoreDrive.*` (`../test_workspace_store.cpp`).
+- `DriveScenario.TheFirstUploadCreatesMainAndAMissingFolder` and
+  `DriveScenario.AnUploadIntoAMissingFolderCreatesIt` (lake#560) upload as the signed-in owner into
+  a repository with no `main` and into a folder that does not exist (`Reports/2026`), and check that
+  `main` and both folders are created and that an upload under a file is refused. The same
+  exercise runs on the memory store, the account store and a switched workspace store.
 - `DriveScenario.SyncedFolderPullsAsRepositoryAndBuildsProject` synchronizes a CMake project,
   pulls and materializes the same repository with Liquid's public client, and builds and runs it.
 

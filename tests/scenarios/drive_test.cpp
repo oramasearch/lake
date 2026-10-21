@@ -683,6 +683,56 @@ TEST_F(DriveScenario, ReplacingAnUploadedFileKeepsThePreviousVersionRestorable) 
         fixture.repository.id);
 }
 
+// lake#560: on Postgres, the first upload into a repository nobody has written to creates `main`,
+// and an upload into a folder that does not exist yet creates it.
+TEST_F(DriveScenario, TheFirstUploadCreatesMainAndAMissingFolder) {
+    const ProvisionedRepository fixture = provision("first-upload-owner");
+    ASSERT_FALSE(fixture.owner.secret.empty());
+    const std::string authorization = bearer(fixture.owner);
+    lake::test::expect_uploads_create_main_and_missing_folders(
+        [&](std::string_view method, const std::string& path, const std::string& body) {
+            const std::string response =
+                http_request(server_->port(), method, path, body, authorization);
+            const std::size_t space = response.find(' ');
+            const unsigned status = space == std::string::npos
+                                        ? 0U
+                                        : static_cast<unsigned>(std::strtoul(
+                                              response.c_str() + space + 1, nullptr, 10));
+            return std::pair<unsigned, std::string>{status, response_body(response)};
+        },
+        fixture.repository.id);
+}
+
+// lake#560: on Postgres, an upload into a folder that does not exist yet creates it in a
+// repository whose `main` the drive client already wrote.
+TEST_F(DriveScenario, AnUploadIntoAMissingFolderCreatesIt) {
+    const ProvisionedRepository fixture = provision("missing-folder-owner");
+    ASSERT_FALSE(fixture.owner.secret.empty());
+    const std::filesystem::path folder = root_.path() / "missing-folder-drive";
+    write_text(folder / "shared" / "README.md", "missing folder scenario\n");
+    auto client = liquid::runtime::block_on(
+        liquid::drive_client::open(folder,
+                                   repository_url(fixture.repository),
+                                   {.bearer_token = fixture.owner.secret, .durable = false}));
+    ASSERT_TRUE(client) << client.error().message;
+    const auto synced = liquid::runtime::block_on(client->sync());
+    ASSERT_TRUE(synced) << synced.error().message;
+    const std::string authorization = bearer(fixture.owner);
+    lake::test::expect_uploads_create_main_and_missing_folders(
+        [&](std::string_view method, const std::string& path, const std::string& body) {
+            const std::string response =
+                http_request(server_->port(), method, path, body, authorization);
+            const std::size_t space = response.find(' ');
+            const unsigned status = space == std::string::npos
+                                        ? 0U
+                                        : static_cast<unsigned>(std::strtoul(
+                                              response.c_str() + space + 1, nullptr, 10));
+            return std::pair<unsigned, std::string>{status, response_body(response)};
+        },
+        fixture.repository.id,
+        false);
+}
+
 TEST_F(DriveScenario, ConcurrentOfflineEditsExposeAndResolveFirstClassConflict) {
     const ProvisionedRepository fixture = provision("conflict-owner");
     ASSERT_FALSE(fixture.owner.secret.empty());

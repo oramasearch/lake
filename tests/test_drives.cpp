@@ -24,6 +24,7 @@
 #include <nlohmann/json.hpp>
 
 #include "api/workspace_records_api.hpp"
+#include "drive_history_support.hpp"
 #include "lake/api/audit_routing.hpp"
 #include "lake/api/capabilities.hpp"
 #include "lake/api/registry.hpp"
@@ -1249,6 +1250,19 @@ TEST(DrivesHttp, ARepositoryDriveHasMainFromTheMomentItIsCreated) {
                          {"drive_id", drive["value"]["id"]}})["error"]["code"],
               "invalid_input")
         << "a repository drive is browsed with drive_browse";
+}
+
+// lake#560: a repository made with create_repository has no `main` until something is written;
+// the first upload creates it, and an upload into a missing folder creates the folder.
+TEST(DrivesHttp, TheFirstUploadCreatesMainAndAMissingFolder) {
+    Lake lake;
+    const json bare = lake.call("create_repository", {{"name", "first-upload"}});
+    ASSERT_TRUE(bare.value("ok", false)) << bare.dump();
+    lake::test::expect_uploads_create_main_and_missing_folders(
+        [&](std::string_view method, const std::string& path, const std::string& body) {
+            return lake.request(std::string(method), path, body);
+        },
+        bare["value"]["id"]);
 }
 
 TEST(DrivesHttp, AWorkspaceFileDownloadStreamsItsBytes) {
