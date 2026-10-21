@@ -69,10 +69,10 @@ std::expected<std::string, ApiError> environment_object(const json& input, ApiCo
         return std::unexpected(
             ApiError{repository.error().code, repository.error().message, "/repository_id"});
     }
-    const auto object = context.store->find_policy_object(
-        "environment",
-        control::platform_environment_id(input.at("repository_id").get<std::string>(),
-                                         environment));
+    // Only the object under the repository's own counts; another account's is `conflict`
+    // (lake#913).
+    const auto object = control::environment_policy_object(
+        *context.store, input.at("repository_id").get<std::string>(), environment);
     if (!object) {
         if (object.error().code == "not_found") {
             return std::unexpected(

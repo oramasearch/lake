@@ -744,6 +744,45 @@ std::expected<std::string, ApiError> global_object(const json&, ApiContext&) {
     return std::string{};
 }
 
+// Why `create_object` refuses this object, or success when it may be made (lake#913). Every
+// consumer finds an object by its type and external id, which is unique across all accounts, so
+// an object a caller names with another account's identifiers would govern that account's
+// resource from the caller's own part of the graph. A caller therefore creates only path
+// objects, and only under its own repository: the external id begins with the id of the
+// repository the parent sits in. Environments, secret mounts, secrets and the account objects
+// are created by lake itself, from the entity they belong to. The operator keeps the other
+// types for repair, held to the same rule for paths.
+ApiResult caller_object_refusal(const json& in, ApiContext& ctx) {
+    const std::string object_type = in.at("object_type");
+    const std::string external_id = in.at("external_id");
+    if (object_type != "path") {
+        if (!ctx.operator_credential) {
+            return ApiResult::failure("invalid_input",
+                                      "create_object adds only path objects; lake creates " +
+                                          object_type + " objects itself",
+                                      "/object_type");
+        }
+        return ApiResult::success(json::object());
+    }
+    const auto repository =
+        control::nearest_object_of_type(*ctx.store, in.at("parent_id"), "repository");
+    if (!repository) {
+        if (repository.error().code == "not_found") {
+            return ApiResult::failure(
+                "invalid_input", "a path object sits under a repository or a path", "/parent_id");
+        }
+        return ApiResult::failure(repository.error().code, repository.error().message);
+    }
+    const std::string prefix = repository->external_id + ":";
+    if (external_id.size() <= prefix.size() || !external_id.starts_with(prefix)) {
+        return ApiResult::failure("invalid_input",
+                                  "a path object's external_id is " + prefix +
+                                      "<node id>, in the repository it sits in",
+                                  "/external_id");
+    }
+    return ApiResult::success(json::object());
+}
+
 std::expected<std::string, ApiError> self_object(const json&, ApiContext& context) {
     return "principal/" + context.acting_identity;
 }
@@ -6006,8 +6045,10 @@ void register_policy_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "create_object",
         .title = "Create object",
-        .description = "Add a path, environment, secret mount, or secret to the "
-                       "object graph.",
+        .description = "Add a path object under a repository or one of its folders, to protect "
+                       "a folder or a file with its own grants. Its external_id is "
+                       "<repository_id>:<node id>, naming the repository it sits in; Lake creates "
+                       "every other kind of object itself.",
         .input_schema = {{"type", "object"},
                          {"properties",
                           {{"object_type", {{"type", "string"}}},
@@ -6022,6 +6063,9 @@ void register_policy_capabilities(Registry& registry) {
         .action = "admin",
         .resolve_object = direct_object("parent_id"),
         .handler = [](const json& in, ApiContext& ctx) {
+            if (ApiResult refused = caller_object_refusal(in, ctx); !refused.ok) {
+                return refused;
+            }
             return one_result(ctx.store->create_policy_object(
                 control::NewPolicyObject{in.at("object_type"),
                                          in.at("external_id"),

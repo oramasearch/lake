@@ -205,6 +205,50 @@ bool object_parent_allowed(std::string_view object_type, std::string_view parent
     return false;
 }
 
+namespace {
+
+// Deeper than any graph lake builds (customer, organization, team, repository and folders); a
+// longer chain is a cycle or damage, and is not followed.
+constexpr int max_policy_depth = 256;
+
+} // namespace
+
+Result<bool>
+object_within(Store& store, const std::string& object_id, const std::string& ancestor_id) {
+    std::string current = object_id;
+    for (int depth = 0; !current.empty() && depth < max_policy_depth; ++depth) {
+        if (current == ancestor_id) {
+            return true;
+        }
+        auto object = store.get_policy_object(current);
+        if (!object) {
+            if (object.error().code == "not_found") {
+                return false;
+            }
+            return std::unexpected(object.error());
+        }
+        current = object->parent_id;
+    }
+    return false;
+}
+
+Result<PolicyObject>
+nearest_object_of_type(Store& store, const std::string& object_id, std::string_view object_type) {
+    std::string current = object_id;
+    for (int depth = 0; !current.empty() && depth < max_policy_depth; ++depth) {
+        auto object = store.get_policy_object(current);
+        if (!object) {
+            return std::unexpected(object.error());
+        }
+        if (object->object_type == object_type) {
+            return object;
+        }
+        current = object->parent_id;
+    }
+    return std::unexpected(
+        StoreError{"not_found", "no " + std::string(object_type) + " object above " + object_id});
+}
+
 Result<std::map<std::string, AuthorizationDecision>>
 authorize_batch(Store& store,
                 const std::string& principal_taap_id,

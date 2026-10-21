@@ -744,6 +744,14 @@ ForgeTask<ApiResult> set_branch_protection(const json& input, ApiContext& contex
     if (!policy) {
         co_return from_store_error(policy.error());
     }
+    // The rule's object sits directly under the repository's own. One holding the same id
+    // anywhere else was made to claim this branch (lake#913) and is never adopted.
+    if (policy->parent_id != repository->id) {
+        co_return ApiResult::failure("conflict",
+                                     "the policy object for " + ref +
+                                         " belongs elsewhere; ask the operator to remove it",
+                                     "/ref");
+    }
     json value = input;
     value.erase("repository_id");
     value["policy_object_id"] = policy->id;

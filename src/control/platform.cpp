@@ -401,8 +401,9 @@ PlatformService::ensure_environment(WorkspaceRecords& records, const Repository&
                                     const std::string& name) {
     const std::string id = platform_environment_id(repository.id, name);
     // The policy object stays in the control store with its grants; its external id is the
-    // environment's derived id, so authorization finds it without reading the workspace.
-    auto object = store_->find_policy_object("environment", id);
+    // environment's derived id, so authorization finds it without reading the workspace. An object
+    // holding that id outside the repository is refused, never adopted (lake#913).
+    auto object = environment_policy_object(*store_, repository.id, name);
     if (!object && object.error().code == "not_found") {
         const auto parent = store_->find_policy_object("repository", repository.id);
         if (!parent) {
@@ -412,7 +413,7 @@ PlatformService::ensure_environment(WorkspaceRecords& records, const Repository&
             {"environment", id, parent->id, "lake", new_uuid_v4(), true});
         if (!object) {
             // Another replica created it first.
-            object = store_->find_policy_object("environment", id);
+            object = environment_policy_object(*store_, repository.id, name);
         }
     }
     if (!object) {

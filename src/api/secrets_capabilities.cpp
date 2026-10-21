@@ -28,6 +28,32 @@ ApiResult no_store() {
                               "no control-plane store is configured (LAKE_CONTROL_DB_URI)");
 }
 
+// A mount's policy object, which counts only inside the account that owns the mount: under its
+// customer object, directly or through the owning organization. A mount made under an
+// environment another account created first to claim this account's identifiers sits outside
+// it (lake#913) and is refused.
+control::Result<control::PolicyObject> owned_mount_object(control::Store& store,
+                                                          const control::SecretMountRoute& route) {
+    auto object = store.find_policy_object("secret_mount", route.mount_id);
+    if (!object) {
+        return object;
+    }
+    const auto customer = store.find_policy_object("customer", route.customer_id);
+    if (!customer) {
+        return std::unexpected(customer.error());
+    }
+    const auto within = control::object_within(store, object->id, customer->id);
+    if (!within) {
+        return std::unexpected(within.error());
+    }
+    if (!*within) {
+        return std::unexpected(control::StoreError{
+            "conflict",
+            "secret mount " + route.mount_id + " sits under another account's policy object"});
+    }
+    return object;
+}
+
 json object_schema() {
     return {{"type", "object"}};
 }
@@ -107,7 +133,7 @@ std::expected<std::string, ApiError> resolve_mount(const std::string& mount_id,
     context.audit_kind = audit_kind;
     context.audit_object = "secret_mount/" + mount_id;
     context.audit_details = {{"mount_id", mount_id}, {"workspace_id", route->workspace_id}};
-    auto object = context.store->find_policy_object("secret_mount", mount_id);
+    auto object = owned_mount_object(*context.store, *route);
     if (!object) {
         return std::unexpected(ApiError{object.error().code, object.error().message, "/mount_id"});
     }
@@ -354,7 +380,12 @@ void register_mount_capabilities(Registry& registry) {
             std::vector<std::string> object_ids;
             std::map<std::string, std::string> object_of;
             for (const auto& route : *routes) {
-                auto object = context.store->find_policy_object("secret_mount", route.mount_id);
+                auto object = owned_mount_object(*context.store, route);
+                if (!object && object.error().code == "conflict") {
+                    // Governed from another account's part of the graph (lake#913): listed only
+                    // to the operator, and refused by every mount capability.
+                    continue;
+                }
                 if (!object) {
                     co_return from_store_error(object.error());
                 }

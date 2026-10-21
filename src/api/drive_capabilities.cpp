@@ -58,6 +58,36 @@ std::string path_external_id(std::string_view repository_id, std::string_view no
     return std::string(repository_id) + ":" + std::string(node_id);
 }
 
+// The policy object of one node of a repository, found by its derived id. The id is unique across
+// every account, so an object holding it that does not sit under the repository's own object was
+// made elsewhere to claim the node (lake#913): it is never the node's object. It is reported as
+// `conflict`, so a reader falls back to the repository's own object and a caller that would create
+// the object refuses instead of adopting it.
+control::Result<control::PolicyObject> repository_path_object(control::Store& store,
+                                                              const std::string& repository_object,
+                                                              std::string_view repository_id,
+                                                              std::string_view node_id) {
+    auto object = store.find_policy_object("path", path_external_id(repository_id, node_id));
+    if (!object) {
+        return object;
+    }
+    const auto within = control::object_within(store, object->id, repository_object);
+    if (!within) {
+        return std::unexpected(within.error());
+    }
+    if (!*within) {
+        return std::unexpected(control::StoreError{
+            "conflict", "the policy object for this folder belongs to another repository"});
+    }
+    return object;
+}
+
+// A node with no object of its own, or only another repository's: either way the folder's
+// authority comes from above it.
+bool no_own_object(const control::StoreError& error) {
+    return error.code == "not_found" || error.code == "conflict";
+}
+
 std::string parent_path(std::string path) {
     const std::size_t slash = path.find_last_of('/');
     return slash == std::string::npos ? std::string{} : path.substr(0, slash);
@@ -128,28 +158,28 @@ std::expected<DriveLocation, ApiError> nearest_drive_location(const json& input,
     if (require_path && !path.empty() && !find_entry(*entries, path)) {
         return std::unexpected(ApiError{"not_found", "no drive path " + path, "/path"});
     }
+    const auto repository_object = context.store->find_policy_object("repository", repository.id);
+    if (!repository_object) {
+        return std::unexpected(ApiError{
+            repository_object.error().code, repository_object.error().message, "/repository_id"});
+    }
     std::string candidate = find_entry(*entries, path) ? path : parent_path(path);
     while (!candidate.empty()) {
         const RepositoryTreeEntry* entry = find_entry(*entries, candidate);
         if (entry && !entry->node_id.empty()) {
-            const auto object = context.store->find_policy_object(
-                "path", path_external_id(repository.id, entry->node_id));
+            const auto object = repository_path_object(
+                *context.store, repository_object->id, repository.id, entry->node_id);
             if (object) {
                 return DriveLocation{repository, *object, entry->node_id, path};
             }
-            if (object.error().code != "not_found") {
+            if (!no_own_object(object.error())) {
                 return std::unexpected(
                     ApiError{object.error().code, object.error().message, "/path"});
             }
         }
         candidate = parent_path(candidate);
     }
-    const auto object = context.store->find_policy_object("repository", repository.id);
-    if (!object) {
-        return std::unexpected(
-            ApiError{object.error().code, object.error().message, "/repository_id"});
-    }
-    return DriveLocation{repository, *object, "", path};
+    return DriveLocation{repository, *repository_object, "", path};
 }
 
 std::expected<DriveLocation, ApiError> ensure_folder_location(const json& input,
@@ -169,6 +199,7 @@ std::expected<DriveLocation, ApiError> ensure_folder_location(const json& input,
         return std::unexpected(
             ApiError{parent.error().code, parent.error().message, "/repository_id"});
     }
+    const std::string repository_object = parent->id;
     std::size_t offset = 0;
     while (offset < path.size()) {
         const std::size_t slash = path.find('/', offset);
@@ -178,16 +209,26 @@ std::expected<DriveLocation, ApiError> ensure_folder_location(const json& input,
             return std::unexpected(
                 ApiError{"invalid_input", "every shared path component must be a folder", "/path"});
         }
-        const std::string external_id = path_external_id(repository.id, entry->node_id);
-        auto object = context.store->find_policy_object("path", external_id);
+        auto object = repository_path_object(
+            *context.store, repository_object, repository.id, entry->node_id);
         if (!object && object.error().code == "not_found") {
             object = context.store->create_policy_object(
                 control::NewPolicyObject{"path",
-                                         external_id,
+                                         path_external_id(repository.id, entry->node_id),
                                          parent->id,
                                          context.acting_identity,
                                          context.request_id,
                                          true});
+        }
+        if (!object && object.error().code == "conflict") {
+            // Another account holds this folder's id. Its object can neither be adopted nor
+            // replaced (the id is unique), so the folder cannot be shared until the operator
+            // removes it.
+            return std::unexpected(
+                ApiError{"conflict",
+                         "the policy object for " + prefix +
+                             " belongs to another repository; ask the operator to remove it",
+                         "/path"});
         }
         if (!object) {
             return std::unexpected(ApiError{object.error().code, object.error().message, "/path"});
@@ -648,11 +689,20 @@ ApiResult browse_result(const DriveLocation& location,
                         ApiContext& context,
                         std::string_view principal) {
     json items = json::array();
+    std::optional<std::string> repository_object;
     for (const RepositoryTreeEntry& entry : folder_children(entries, location.path)) {
         bool allowed = true;
         if (context.acting_identity != "admin" && !entry.node_id.empty()) {
-            const auto object = context.store->find_policy_object(
-                "path", path_external_id(location.repository.id, entry.node_id));
+            if (!repository_object) {
+                const auto found =
+                    context.store->find_policy_object("repository", location.repository.id);
+                if (!found) {
+                    return store_error(found.error());
+                }
+                repository_object = found->id;
+            }
+            const auto object = repository_path_object(
+                *context.store, *repository_object, location.repository.id, entry.node_id);
             if (object) {
                 const auto decision = control::authorize(*context.store,
                                                          std::string(principal),
@@ -663,7 +713,7 @@ ApiResult browse_result(const DriveLocation& location,
                     return store_error(decision.error());
                 }
                 allowed = decision->allowed;
-            } else if (object.error().code != "not_found") {
+            } else if (!no_own_object(object.error())) {
                 return store_error(object.error());
             }
         }
@@ -772,11 +822,17 @@ shared_path_object(const control::DriveShareLink& link,
                    std::string path,
                    std::string_view root_path,
                    ApiContext& context) {
+    const auto repository_object =
+        context.store->find_policy_object("repository", link.repository_id);
+    if (!repository_object) {
+        return std::unexpected(
+            ApiError{repository_object.error().code, repository_object.error().message, {}});
+    }
     while (path_touches(path, root_path)) {
         const auto* entry = find_entry(entries, path);
         if (entry && !entry->node_id.empty()) {
-            const auto object = context.store->find_policy_object(
-                "path", path_external_id(link.repository_id, entry->node_id));
+            const auto object = repository_path_object(
+                *context.store, repository_object->id, link.repository_id, entry->node_id);
             if (object) {
                 const auto decision = control::authorize(*context.store,
                                                          context.acting_identity,
@@ -793,7 +849,7 @@ shared_path_object(const control::DriveShareLink& link,
                 }
                 return *object;
             }
-            if (object.error().code != "not_found") {
+            if (!no_own_object(object.error())) {
                 return std::unexpected(ApiError{object.error().code, object.error().message, {}});
             }
         }

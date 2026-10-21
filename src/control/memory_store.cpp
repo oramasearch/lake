@@ -7128,6 +7128,12 @@ Result<SecretMountRoute> InMemoryStore::create_secret_mount_route(const SecretMo
         policy_objects_.push_back(PolicyObject{
             new_uuid_v4(), "environment", environment_external, owner_object_id, now, now, true});
         environment = std::prev(policy_objects_.end());
+    } else if (environment->parent_id != owner_object_id) {
+        // Made under another account to claim this owner's future mounts (lake#913): never
+        // adopted.
+        return std::unexpected(StoreError{"conflict",
+                                          "the secret mounts' policy object of this owner belongs "
+                                          "to another account; ask the operator to remove it"});
     }
     policy_objects_.push_back(PolicyObject{
         new_uuid_v4(), "secret_mount", input.mount_id, environment->id, now, now, true});
