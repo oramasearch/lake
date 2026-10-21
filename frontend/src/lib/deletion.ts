@@ -65,6 +65,48 @@ export function organizationTyped(plan: Plan): string {
   return typeof plan.handle === "string" && plan.handle ? plan.handle : String(plan.organization_id ?? "");
 }
 
+/** An organization an account deletion would leave its only owner of, with other people in it
+ * (lake#810): the deletion is refused until another member is made an owner or it is deleted. */
+export type BlockingOrganization = { id: string; name: string; handle?: string; members: number };
+export function accountBlockers(plan: Plan): BlockingOrganization[] {
+  return list(plan.organizations)
+    .map((value) => obj(value))
+    .filter((value) => value.action === "blocked" && typeof value.organization_id === "string")
+    .map((value) => ({
+      id: String(value.organization_id),
+      name: String(value.display_name || value.handle || value.organization_id),
+      handle: typeof value.handle === "string" ? value.handle : undefined,
+      members: num(value.other_members),
+    }));
+}
+
+/** What deleting an account takes (lake#810, docs/api/identity.md#deleting-an-account). */
+export function accountLines(plan: Plan): DeletionLine[] {
+  const counts = obj(plan.counts);
+  const organizations = list(plan.organizations).map((value) => obj(value));
+  const going = organizations.filter((value) => value.action === "delete");
+  const left = organizations.filter((value) => value.action === "leave");
+  const workspaces =
+    list(plan.workspaces).length + going.reduce((total, value) => total + list(value.workspaces).length, 0);
+  const credentials = num(counts.credentials) + num(counts.devices);
+  return [
+    { count: null, text: "Your account. Your email is released, and your handle and identity are retired." },
+    line(workspaces, "workspace", "workspaces", ", with everything in them"),
+    line(going.length, "organization you alone own", "organizations you alone own", ", with their members and invitations"),
+    line(left.length, "organization you leave", "organizations you leave", " to their other owners"),
+    line(num(counts.sessions), "session or token", "sessions and tokens", ", signed out at once"),
+    line(credentials, "credential or device", "credentials and devices", " (passwords, passkeys, MFA)"),
+    line(num(counts.grants), "access grant", "access grants"),
+    line(num(counts.billing_contacts), "billing contact", "billing contacts"),
+    { count: null, text: "Invoices and the audit log are kept, as the records of what happened." },
+  ].filter((entry) => entry.count === null || entry.count > 0);
+}
+
+/** The text that confirms deleting an account: its handle, or its user id without one. */
+export function accountTyped(plan: Plan): string {
+  return typeof plan.handle === "string" && plan.handle ? plan.handle : String(plan.user_id ?? "");
+}
+
 export function secretMountLines(plan: Plan): DeletionLine[] {
   const counts = obj(plan.counts);
   return [

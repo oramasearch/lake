@@ -349,6 +349,10 @@ public:
         return call("delete_organization",
                     [&] { return store_->delete_organization(id, dry_run); });
     }
+    control::Result<control::AccountDeletion> delete_account(const std::string& user_id,
+                                                             bool dry_run) override {
+        return call("delete_account", [&] { return store_->delete_account(user_id, dry_run); });
+    }
     control::Result<control::Customer> create_customer(const control::NewCustomer& value) override {
         return call("create_customer", [&] { return store_->create_customer(value); });
     }
@@ -1318,6 +1322,12 @@ public:
     control::Result<bool> mfa_enrolled(const std::string& user_id,
                                        const std::string& pool_id) override {
         return call("mfa_enrolled", [&] { return store_->mfa_enrolled(user_id, pool_id); });
+    }
+    control::Result<void> verify_mfa_code(const std::string& user_id,
+                                          const std::string& pool_id,
+                                          const std::string& code) override {
+        return call("verify_mfa_code",
+                    [&] { return store_->verify_mfa_code(user_id, pool_id, code); });
     }
     control::Result<void> disable_mfa(const std::string& user_id,
                                       const std::string& pool_id,

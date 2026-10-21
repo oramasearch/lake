@@ -36,11 +36,13 @@ names the confirmation text; it is pure and tested by `frontend/tests/deletion.t
 | Run | Train → Run, header, **Delete**, enabled once the run has finished | the first 8 characters of its id | the run and its report, the models it keeps |
 | Search index | Ship → Search Index, header, **Delete** | the indexed table (its id's first 8 characters without one) | the index, whether it was published, the dataset it keeps |
 | Ask Orama conversation | Ask Orama home, beside New conversation, **Delete** | `delete` | how many messages, how it starts, how many agent tasks it started go with it; a new conversation starts after it |
+| Your account (lake#810) | Settings → Profile, **Delete account** | your handle | your workspaces, the organizations you alone own and those you leave, sessions and tokens, credentials and devices, access grants, the billing contact, and that invoices and the audit log are kept; while you alone own an organization other people belong to, the action is disabled and the organization is linked. After it, you are signed out ([settings.md](settings.md#deleting-your-account)) |
 
 ## How to check it
 
 `frontend/checks/deletion.mjs` drives the built pages with Playwright against `npx vite` and mocked
 answers, at 1440 and 390 px wide: an organization that still owns a workspace (blocked, the
 workspace linked), one that owns none (the typed handle enables the button), a secret mount, a
-dataset, and an Ask Orama conversation with the two agent tasks it started (lake#673). It reports whether a page scrolls sideways, the dialog's lines and the button's state
+dataset, an Ask Orama conversation with the two agent tasks it started (lake#673), and your own
+account, blocked by an organization you alone own with other members and then free to go (lake#810). It reports whether a page scrolls sideways, the dialog's lines and the button's state
 before and after typing, and writes screenshots to `OUT`.

@@ -617,6 +617,43 @@ struct OrganizationDeletion {
     std::map<std::string, std::int64_t> counts;
     std::string deleted_at; // empty for a dry run
 };
+// Deleting an account (lake#810, docs/api/identity.md#deleting-an-account). An organization the
+// account is a member of, as the deletion sees it: the account's organization-wide role (empty when
+// it is only on a team), how many other organization-wide owners and other members it has, and the
+// live workspaces of its space. One the account is the only owner of is `sole_owner()`: it is either
+// deleted first (with its workspaces) or the account deletion is refused, so an organization is
+// never left without an owner.
+struct AccountOrganization {
+    Organization organization;
+    std::string customer_id, customer_name; // empty when it has no space
+    std::string role;
+    std::int64_t other_owners = 0, other_members = 0;
+    std::vector<Workspace> live_workspaces;
+    bool sole_owner() const { return role == "owner" && other_owners == 0; }
+};
+// What Store::delete_account removes. It is refused (`conflict`) while the account's personal space
+// holds a live workspace or the account is the only owner of an organization that is not deleted.
+// Otherwise one transaction removes the account's sessions and tokens, devices, credentials
+// (password, TOTP, recovery codes, passkeys, OAuth and SSO links), identity documents, TAAP
+// assertions, WebAuthn challenges, recovery attempts and grants, recovery custody it holds for
+// others' repositories, identity links and SCIM mappings; destroys the seed of an identity Lake
+// minted for it (the public key stays, so past signatures verify); removes every membership and
+// every grant naming it; removes its personal space's billing contact, usage limits, storage quota,
+// secret mount routes and policy objects (with every grant on them); and marks the space and the
+// user deleted, the user's email and display name erased. The two rows stay, marked, because the
+// central audit chain names them (audit_events.customer_id is ON DELETE RESTRICT, and principals are
+// TAAP identities); the handle and the TAAP identity stay retired. Invoices, payment records and
+// orders are billing records and are kept. `counts` says how many of each went (a dry run: would
+// go).
+struct AccountDeletion {
+    User user;
+    std::string customer_id, customer_name; // the personal space; empty when it has none
+    std::vector<Workspace> live_workspaces;  // of the personal space
+    std::vector<AccountOrganization> organizations;
+    std::map<std::string, std::int64_t> counts;
+    std::int64_t invoices_kept = 0, open_invoices = 0;
+    std::string deleted_at; // empty for a dry run
+};
 // Where a tenant image repository lives (lake#383, decision 54 S4-S6, migration 0068): the
 // content-free central route from `<space>/<name>` (the space by its customer id, `name` the path
 // below it, `<image>` or `cache/<image>`) to the workspace whose Zetta holds the repository's
@@ -1534,6 +1571,10 @@ public:
     // them through `live_workspaces` on a dry run); `not_found` for an unknown or deleted one.
     virtual Result<OrganizationDeletion> delete_organization(const std::string& id,
                                                              bool dry_run) = 0;
+    // See AccountDeletion. `conflict` while the personal space has a live workspace or the account
+    // is an organization's only owner (a dry run still answers the plan); `not_found` for an
+    // unknown or deleted account.
+    virtual Result<AccountDeletion> delete_account(const std::string& user_id, bool dry_run) = 0;
 
     virtual Result<Customer> create_customer(const NewCustomer&) = 0;
     virtual Result<std::vector<Customer>> list_customers(int limit,
@@ -2160,6 +2201,12 @@ public:
     // Whether the user has an active TOTP enrollment in the pool (the web app's `viewer`,
     // lake#561).
     virtual Result<bool> mfa_enrolled(const std::string& user_id, const std::string& pool_id) = 0;
+    // Checks a fresh TOTP code (or an unused recovery code) of an enrolled user and changes
+    // nothing: the step-up a destructive action asks for (delete_account, lake#810). `unauthorized`
+    // when it does not verify, `not_found` when MFA is not enrolled.
+    virtual Result<void> verify_mfa_code(const std::string& user_id,
+                                         const std::string& pool_id,
+                                         const std::string& code) = 0;
     virtual Result<IssuedSession> sign_in_totp(const PasswordSignIn&) = 0;
     virtual Result<WebAuthnChallenge> begin_passkey_registration(const std::string& user_id,
                                                                  const std::string& pool_id,

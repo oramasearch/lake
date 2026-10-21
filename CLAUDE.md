@@ -396,6 +396,16 @@ Zetta before its route), `delete_dataset`, `delete_model`, `delete_run`, `delete
 engine's deletes, zetta#1257; `not_supported` from an older engine) and `delete_ask_conversation`
 (with the agent tasks the conversation started, lake#673), each with `dry_run: true` and a typed confirmation in Lake Console. Not deployed; the operator must
 vendor the schema and select `organization_deletion_guard`. See `docs/api/deletion.md`.
+Deleting an account follows (lake#810, migration `0091_account_deletion`): `delete_account`, by the
+account itself (signed in within 15 minutes, or a fresh MFA `code`; never a token) or the operator
+(`user_id`), deletes its personal space's workspaces and the organizations it alone owns through
+`delete_workspace` and `delete_organization`, and refuses while it alone owns an organization other
+people belong to unless `delete_organizations: true`, so no organization is left without an owner.
+Then one store transaction removes its sessions, tokens, devices, credentials, memberships, grants
+and billing contact and marks the user and its space deleted, the email and name erased; invoices,
+orders and the central audit log are kept. Settings → Profile has the typed confirmation. Not
+deployed; the operator must vendor the schema and select `account_deletion_guard`. See
+`docs/api/identity.md#deleting-an-account`.
 A user's secret reaches a Kubernetes Secret only as a sealed projection (lake#625, decision 58, no
 migration): lake has two levels of secrets, Orama's platform credentials as environment variables
 of the hosting platform and users' workspace secrets in the secret store (`docs/deployment/secrets.md`).

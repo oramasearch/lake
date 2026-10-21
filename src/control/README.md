@@ -28,7 +28,12 @@ Both stores implement the deletions of lake#645: `delete_organization` (with `dr
 while the organization's account has a live workspace; marks the organization and its account
 `deleted_at`, migration `0076`, and every read and list of them leaves a marked row out),
 `revoke_invitation`, `get_grant` and `revoke_grant`, and `delete_secret_mount_route`, the last
-step of deleting a mount ([deletion.md](../../docs/api/deletion.md)).
+step of deleting a mount ([deletion.md](../../docs/api/deletion.md)). Both implement
+`delete_account` (lake#810, migration `0091`): refused while the personal space has a live workspace
+or the account is an organization's only owner; removes the account's identity rows, memberships
+and grants and its space's billing contact, limits and policy objects, and marks the user and its
+space deleted, the email and name erased, so every read of users leaves it out; and
+`verify_mfa_code`, the step-up that changes nothing ([identity.md](../../docs/api/identity.md#deleting-an-account)).
 
 `WorkspaceService` caches deployment catalogues and project/pipeline definitions in memory for
 five seconds, scoped to the workspace and connection generation. Successful writes explicitly

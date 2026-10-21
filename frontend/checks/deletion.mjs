@@ -1,7 +1,8 @@
 // Screenshots of the delete and revoke confirmations (lake#645, docs/ui/deletion.md) at 1440 and 390
 // wide: an organization that still owns a workspace (blocked, with the workspace linked), one that
 // owns none (typed handle), a dataset, a secret mount and an Ask Orama conversation with the agent
-// tasks it started (lake#673). Run against `npx vite --port 5174`; every
+// tasks it started (lake#673), and your own account (lake#810), blocked by an organization you alone
+// own with other members in it, and free to go. Run against `npx vite --port 5174`; every
 // /v1 call is answered by the mocks below, so no lake is needed. Playwright is not a dependency:
 //
 //   PLAYWRIGHT_FROM=/path/to/a/project/with/playwright/package.json OUT=/tmp/shots node checks/deletion.mjs
@@ -42,6 +43,21 @@ const orgPlan = (blocked) => ({
   deleted: false,
 });
 
+const accountPlan = (blocked) => ({
+  user_id: "u-1",
+  customer_id: "me",
+  handle: "steve-x7f2",
+  workspaces: [{ id: "me-0", name: "steve", environment: "dev", customer_id: "me" }],
+  organizations: [
+    { organization_id: "o-2", display_name: "Side project", handle: "side-project", role: "owner", other_owners: 0, other_members: 0, workspaces: [{ id: "w-2", name: "side" }], action: "delete" },
+    { organization_id: "o-1", display_name: "Acme Analytics", handle: "acme-analytics", role: "owner", other_owners: blocked ? 0 : 1, other_members: 6, workspaces: [], action: blocked ? "blocked" : "leave" },
+  ],
+  counts: { sessions: 3, devices: 2, credentials: 2, memberships: 2, grants: 4, billing_contacts: 1 },
+  kept: { invoices: 2, open_invoices: 0 },
+  dry_run: true,
+  deleted: false,
+});
+
 function answer(name, body, blocked) {
   if (name === "viewer") return viewer;
   if (name === "workspace_status") return { requested: true, ready: true, phase: "Ready", workspace_id: "me-0" };
@@ -49,6 +65,7 @@ function answer(name, body, blocked) {
   if (name === "list_memberships") return { items: [{ id: "m-1", organization_id: "o-1", principal_taap_id: "taap:me", role: "owner" }] };
   if (name === "list_teams" || name === "list_invitations") return { items: [] };
   if (name === "delete_organization") return orgPlan(blocked);
+  if (name === "delete_account") return accountPlan(blocked);
   if (name === "list_secret_mounts") return { items: [{ id: "mt-1", name: "payments-vault", workspace_id: "me-0", customer_id: "me", created_at: "2026-09-02T10:00:00Z" }] };
   if (name === "delete_secret_mount")
     return { mount_id: "mt-1", name: "payments-vault", workspace_id: "me-0", dry_run: true, deleted: false, counts: { secrets: 3, versions: 5, encryption_keys: 1, data_keys: 2, leases: 0, mount: 1 }, secrets: ["database", "stripe", "smtp"] };
@@ -67,6 +84,8 @@ const SHOTS = [
   { tag: "mount", path: "/secret-mounts?workspace_id=me-0", open: "Delete", typed: "payments-vault" },
   { tag: "conversation", path: "/?conversation=cv-1", open: "Delete", typed: "delete" },
   { tag: "dataset", path: "/w/me-0/train/dataset?name=orders&database=datasets", open: "Delete dataset", typed: "orders" },
+  { tag: "account-blocked", path: "/settings?tab=profile", open: "Delete account", blocked: true },
+  { tag: "account", path: "/settings?tab=profile", open: "Delete account", typed: "steve-x7f2" },
 ];
 
 const browser = await chromium.launch();

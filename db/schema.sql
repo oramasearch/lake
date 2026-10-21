@@ -4640,3 +4640,19 @@ CREATE TABLE IF NOT EXISTS billing_contacts (
 
 CREATE TABLE IF NOT EXISTS billing_contacts_guard (applied_at timestamptz NOT NULL DEFAULT now());
 INSERT INTO schema_migrations (version) VALUES ('0090_billing_contacts') ON CONFLICT DO NOTHING;
+
+-- ---------------------------------------------------------------------------------------------
+-- 0091_account_deletion (lake#810, docs/api/identity.md#deleting-an-account): a person deletes
+-- their own account, or the operator deletes one. delete_account first deletes the workspaces of
+-- the account's personal space and the organizations it is the only owner of (through
+-- delete_workspace and delete_organization), then removes its sessions, tokens, devices,
+-- credentials, identity documents, memberships and grants and its space's billing contact, and
+-- marks the user and its space deleted. The user row stays, its email and display name erased,
+-- because the central audit chain names its TAAP identity and space (audit_events is append-only
+-- and audit_events.customer_id is ON DELETE RESTRICT); lake never lists or reads a deleted account
+-- again, and its handle and TAAP identity stay retired. Idempotent; drops nothing.
+-- ---------------------------------------------------------------------------------------------
+ALTER TABLE users ADD COLUMN IF NOT EXISTS deleted_at timestamptz;
+
+CREATE TABLE IF NOT EXISTS account_deletion_guard (applied_at timestamptz NOT NULL DEFAULT now());
+INSERT INTO schema_migrations (version) VALUES ('0091_account_deletion') ON CONFLICT DO NOTHING;
