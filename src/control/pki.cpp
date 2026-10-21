@@ -14,8 +14,10 @@
 #include <openssl/bio.h>
 #include <openssl/bn.h>
 #include <openssl/core_names.h>
+#include <openssl/crypto.h>
 #include <openssl/ec.h>
 #include <openssl/evp.h>
+#include <openssl/hmac.h>
 #include <openssl/pem.h>
 #include <openssl/rand.h>
 #include <openssl/x509.h>
@@ -569,6 +571,21 @@ Result<std::string> acme_thumbprint(const AcmeJwk& jwk) {
         return std::unexpected(crypto_error("could not hash ACME account key"));
     }
     return base64url_encode(digest.data(), digest_size);
+}
+
+void put_big_endian(char* out, std::uint64_t value) {
+    for (int i = 7; i >= 0; --i) {
+        out[i] = static_cast<char>(value & 0xff);
+        value >>= 8;
+    }
+}
+
+std::uint64_t get_big_endian(const unsigned char* in) {
+    std::uint64_t value = 0;
+    for (int i = 0; i < 8; ++i) {
+        value = (value << 8) | in[i];
+    }
+    return value;
 }
 
 Result<std::string> random_acme_value(std::size_t size) {
@@ -1496,24 +1513,65 @@ Result<void> Service::recover_root(::lake::control::Store& store,
 }
 
 Result<std::string> Service::new_acme_nonce() {
-    auto nonce = random_acme_value(16);
-    if (!nonce) {
-        return std::unexpected(nonce.error());
+    if (!acme_nonce_key_ready_) {
+        return std::unexpected(crypto_error("ACME nonce key is unavailable"));
     }
-    std::lock_guard lock(mutex_);
-    acme_nonces_.insert(*nonce);
-    return nonce;
+    const std::uint64_t counter = acme_nonce_counter_.fetch_add(1) + 1;
+    const std::int64_t issued_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                       acme_limits_.clock().time_since_epoch())
+                                       .count();
+    auto mac = acme_nonce_mac(counter, issued_ms);
+    if (!mac) {
+        return std::unexpected(mac.error());
+    }
+    std::string nonce(16, '\0');
+    put_big_endian(nonce.data(), counter);
+    put_big_endian(nonce.data() + 8, static_cast<std::uint64_t>(issued_ms));
+    nonce += *mac;
+    return base64url_encode(reinterpret_cast<const unsigned char*>(nonce.data()), nonce.size());
 }
 
 Result<void> Service::consume_acme_nonce(std::string_view nonce) {
+    const Error refused{"unauthorized", "ACME nonce is missing or was already used"};
+    // A nonce is exactly the 32 bytes new_acme_nonce encodes, in that one encoding.
+    if (!acme_nonce_key_ready_ || nonce.size() != 43) {
+        return std::unexpected(refused);
+    }
+    auto decoded = base64url_decode(std::string(nonce));
+    if (!decoded || decoded->size() != 32) {
+        return std::unexpected(refused);
+    }
+    auto canonical = base64url_encode(decoded->data(), decoded->size());
+    if (!canonical || *canonical != nonce) {
+        return std::unexpected(refused);
+    }
+    const std::uint64_t counter = get_big_endian(decoded->data());
+    const auto issued_ms = static_cast<std::int64_t>(get_big_endian(decoded->data() + 8));
+    auto mac = acme_nonce_mac(counter, issued_ms);
+    if (!mac || CRYPTO_memcmp(mac->data(), decoded->data() + 16, mac->size()) != 0) {
+        return std::unexpected(refused);
+    }
+    const AcmeTime issued{
+        std::chrono::duration_cast<AcmeTime::duration>(std::chrono::milliseconds(issued_ms))};
     std::lock_guard lock(mutex_);
-    if (acme_nonces_.erase(std::string(nonce)) != 1) {
-        return std::unexpected(Error{"unauthorized", "ACME nonce is missing or was already used"});
+    const AcmeTime now = acme_limits_.clock();
+    prune_acme_locked(now);
+    if (issued > now || now - issued >= acme_limits_.nonce_lifetime ||
+        counter < acme_nonce_floor_ || !acme_used_nonces_.emplace(counter, issued).second) {
+        return std::unexpected(refused);
+    }
+    // Forgetting the oldest consumed nonce refuses every nonce issued before it, so none can be
+    // replayed once it is forgotten.
+    while (acme_used_nonces_.size() > acme_limits_.used_nonces) {
+        acme_nonce_floor_ = acme_used_nonces_.begin()->first + 1;
+        acme_used_nonces_.erase(acme_used_nonces_.begin());
     }
     return {};
 }
 
-Result<AcmeAccount> Service::create_acme_account(std::string_view customer_id, const AcmeJwk& jwk) {
+Result<AcmeAccount> Service::create_acme_account(::lake::control::Store& store,
+                                                 std::string_view customer_id,
+                                                 const AcmeJwk& jwk) {
     if (customer_id.empty()) {
         return std::unexpected(Error{"invalid_input", "ACME customer is required"});
     }
@@ -1521,9 +1579,31 @@ Result<AcmeAccount> Service::create_acme_account(std::string_view customer_id, c
     if (!key) {
         return std::unexpected(key.error());
     }
+    if (auto customer = store.get_customer(std::string(customer_id)); !customer) {
+        return std::unexpected(customer.error().code == "not_found"
+                                   ? Error{"not_found", "ACME customer does not exist"}
+                                   : Error{customer.error().code, customer.error().message});
+    }
     AcmeAccount account{new_uuid_v4(), std::string(customer_id), jwk};
     std::lock_guard lock(mutex_);
-    acme_accounts_.emplace(account.id, account);
+    const AcmeTime now = acme_limits_.clock();
+    prune_acme_locked(now);
+    for (auto owned = acme_customer_accounts_.find(account.customer_id);
+         owned != acme_customer_accounts_.end() &&
+         owned->second.size() >= acme_limits_.accounts_per_customer;
+         owned = acme_customer_accounts_.find(account.customer_id)) {
+        const std::string least_recent =
+            *std::ranges::min_element(owned->second, {}, [&](const std::string& id) {
+                return acme_accounts_.at(id).last_used;
+            });
+        remove_acme_account_locked(least_recent);
+    }
+    while (!acme_account_use_.empty() && acme_accounts_.size() >= acme_limits_.accounts) {
+        remove_acme_account_locked(std::string(acme_account_use_.begin()->second));
+    }
+    acme_customer_accounts_[account.customer_id].push_back(account.id);
+    acme_accounts_.emplace(account.id, AcmeAccountEntry{account, now, {}});
+    acme_account_use_.emplace(now, account.id);
     return account;
 }
 
@@ -1536,18 +1616,27 @@ Result<void> Service::verify_acme_signature(std::string_view account_id,
         selected = *jwk;
     } else {
         std::lock_guard lock(mutex_);
+        prune_acme_locked(acme_limits_.clock());
         const auto account = acme_accounts_.find(std::string(account_id));
         if (account == acme_accounts_.end()) {
             return std::unexpected(Error{"unauthorized", "ACME account does not exist"});
         }
-        selected = account->second.jwk;
+        selected = account->second.account.jwk;
     }
     auto key = key_from_acme_jwk(selected);
     auto raw_signature = base64url_decode(std::string(signature));
     if (!key || !raw_signature) {
         return std::unexpected(Error{"unauthorized", "ACME JWS is invalid"});
     }
-    return verify_jws(key->get(), signing_input, *raw_signature);
+    auto verified = verify_jws(key->get(), signing_input, *raw_signature);
+    if (verified && !jwk) {
+        std::lock_guard lock(mutex_);
+        const auto account = acme_accounts_.find(std::string(account_id));
+        if (account != acme_accounts_.end()) {
+            touch_acme_account_locked(account->second, acme_limits_.clock());
+        }
+    }
+    return verified;
 }
 
 Result<AcmeOrder> Service::create_acme_order(::lake::control::Store& store,
@@ -1567,13 +1656,20 @@ Result<AcmeOrder> Service::create_acme_order(::lake::control::Store& store,
         return std::unexpected(token.error());
     }
     std::lock_guard lock(mutex_);
+    const AcmeTime now = acme_limits_.clock();
+    prune_acme_locked(now);
     const auto account = acme_accounts_.find(std::string(account_id));
-    if (account == acme_accounts_.end() || account->second.customer_id != customer_id) {
+    if (account == acme_accounts_.end() || account->second.account.customer_id != customer_id) {
         return std::unexpected(Error{"unauthorized", "ACME account does not own this customer"});
     }
-    auto thumbprint = acme_thumbprint(account->second.jwk);
+    auto thumbprint = acme_thumbprint(account->second.account.jwk);
     if (!thumbprint) {
         return std::unexpected(thumbprint.error());
+    }
+    touch_acme_account_locked(account->second, now);
+    while (!account->second.orders.empty() &&
+           account->second.orders.size() >= acme_limits_.orders_per_account) {
+        remove_acme_order_locked(std::string(account->second.orders.front()));
     }
     const std::string order_id = new_uuid_v4();
     const std::string authorization_id = new_uuid_v4();
@@ -1590,8 +1686,12 @@ Result<AcmeOrder> Service::create_acme_order(::lake::control::Store& store,
                                     *token,
                                     *token + "." + *thumbprint,
                                     "pending"};
-    acme_orders_.emplace(order.id, order);
+    const AcmeTime expires_at = now + acme_limits_.order_lifetime;
+    acme_orders_.emplace(order.id, AcmeOrderEntry{order, expires_at});
+    acme_order_expiry_.emplace(expires_at, order.id);
     acme_authorizations_.emplace(authorization.id, authorization);
+    acme_tokens_.emplace(authorization.token, authorization.id);
+    account->second.orders.push_back(order.id);
     return order;
 }
 
@@ -1599,25 +1699,23 @@ Result<AcmeOrder> Service::acme_order(std::string_view customer_id,
                                       std::string_view account_id,
                                       std::string_view order_id) {
     std::lock_guard lock(mutex_);
-    const auto order = acme_orders_.find(std::string(order_id));
-    if (order == acme_orders_.end() || order->second.customer_id != customer_id ||
-        order->second.account_id != account_id) {
+    prune_acme_locked(acme_limits_.clock());
+    const AcmeOrderEntry* order = find_acme_order_locked(customer_id, account_id, order_id);
+    if (order == nullptr) {
         return std::unexpected(Error{"not_found", "ACME order does not exist"});
     }
-    return order->second;
+    return order->order;
 }
 
 Result<AcmeAuthorization> Service::acme_authorization(std::string_view customer_id,
                                                       std::string_view account_id,
                                                       std::string_view authorization_id) {
     std::lock_guard lock(mutex_);
+    prune_acme_locked(acme_limits_.clock());
     const auto authorization = acme_authorizations_.find(std::string(authorization_id));
-    if (authorization == acme_authorizations_.end()) {
-        return std::unexpected(Error{"not_found", "ACME authorization does not exist"});
-    }
-    const auto order = acme_orders_.find(authorization->second.order_id);
-    if (order == acme_orders_.end() || order->second.customer_id != customer_id ||
-        order->second.account_id != account_id) {
+    if (authorization == acme_authorizations_.end() ||
+        find_acme_order_locked(customer_id, account_id, authorization->second.order_id) ==
+            nullptr) {
         return std::unexpected(Error{"not_found", "ACME authorization does not exist"});
     }
     return authorization->second;
@@ -1627,28 +1725,28 @@ Result<AcmeAuthorization> Service::authorize_acme_order(std::string_view custome
                                                         std::string_view account_id,
                                                         std::string_view authorization_id) {
     std::lock_guard lock(mutex_);
+    prune_acme_locked(acme_limits_.clock());
     const auto authorization = acme_authorizations_.find(std::string(authorization_id));
-    if (authorization == acme_authorizations_.end()) {
-        return std::unexpected(Error{"not_found", "ACME authorization does not exist"});
-    }
-    const auto order = acme_orders_.find(authorization->second.order_id);
-    if (order == acme_orders_.end() || order->second.customer_id != customer_id ||
-        order->second.account_id != account_id) {
+    AcmeOrderEntry* order =
+        authorization == acme_authorizations_.end()
+            ? nullptr
+            : find_acme_order_locked(customer_id, account_id, authorization->second.order_id);
+    if (order == nullptr) {
         return std::unexpected(Error{"not_found", "ACME authorization does not exist"});
     }
     authorization->second.status = "valid";
-    order->second.status = "ready";
+    order->order.status = "ready";
     return authorization->second;
 }
 
 Result<std::string> Service::acme_http01_response(std::string_view token) {
     std::lock_guard lock(mutex_);
-    const auto authorization = std::ranges::find_if(
-        acme_authorizations_, [&](const auto& value) { return value.second.token == token; });
-    if (authorization == acme_authorizations_.end()) {
+    prune_acme_locked(acme_limits_.clock());
+    const auto authorization = acme_tokens_.find(std::string(token));
+    if (authorization == acme_tokens_.end()) {
         return std::unexpected(Error{"not_found", "ACME HTTP-01 token does not exist"});
     }
-    return authorization->second.key_authorization;
+    return acme_authorizations_.at(authorization->second).key_authorization;
 }
 
 Result<AcmeOrder> Service::finalize_acme_order(::lake::control::Store& store,
@@ -1660,12 +1758,12 @@ Result<AcmeOrder> Service::finalize_acme_order(::lake::control::Store& store,
     AcmeOrder pending;
     {
         std::lock_guard lock(mutex_);
-        const auto order = acme_orders_.find(std::string(order_id));
-        if (order == acme_orders_.end() || order->second.customer_id != customer_id ||
-            order->second.account_id != account_id || order->second.status != "ready") {
+        prune_acme_locked(acme_limits_.clock());
+        const AcmeOrderEntry* order = find_acme_order_locked(customer_id, account_id, order_id);
+        if (order == nullptr || order->order.status != "ready") {
             return std::unexpected(Error{"invalid_input", "ACME order is not ready to finalize"});
         }
-        pending = order->second;
+        pending = order->order;
     }
     auto authority = load_authority(store, pending.customer_id, instance_kek);
     if (!authority) {
@@ -1676,13 +1774,122 @@ Result<AcmeOrder> Service::finalize_acme_order(::lake::control::Store& store,
         return std::unexpected(certificate.error());
     }
     std::lock_guard lock(mutex_);
-    const auto order = acme_orders_.find(std::string(order_id));
-    if (order == acme_orders_.end() || order->second.status != "ready") {
+    prune_acme_locked(acme_limits_.clock());
+    AcmeOrderEntry* order = find_acme_order_locked(customer_id, account_id, order_id);
+    if (order == nullptr || order->order.status != "ready") {
         return std::unexpected(Error{"conflict", "ACME order changed during finalization"});
     }
-    order->second.status = "valid";
-    order->second.certificate_pem = certificate->certificate_pem + certificate->chain_pem;
-    return order->second;
+    order->order.status = "valid";
+    order->order.certificate_pem = certificate->certificate_pem + certificate->chain_pem;
+    return order->order;
+}
+
+AcmeStateSize Service::acme_state_size() {
+    std::lock_guard lock(mutex_);
+    prune_acme_locked(acme_limits_.clock());
+    return {acme_used_nonces_.size(),
+            acme_accounts_.size(),
+            acme_orders_.size(),
+            acme_authorizations_.size()};
+}
+
+Service::Service(AcmeLimits acme_limits) : acme_limits_(std::move(acme_limits)) {
+    if (!acme_limits_.clock) {
+        acme_limits_.clock = std::chrono::steady_clock::now;
+    }
+    acme_nonce_key_ready_ =
+        RAND_bytes(acme_nonce_key_.data(), static_cast<int>(acme_nonce_key_.size())) == 1;
+}
+
+// The first 16 bytes of HMAC-SHA-256(key, counter || issued_ms), both big-endian.
+Result<std::string> Service::acme_nonce_mac(std::uint64_t counter, std::int64_t issued_ms) const {
+    std::array<unsigned char, 16> message{};
+    put_big_endian(reinterpret_cast<char*>(message.data()), counter);
+    put_big_endian(reinterpret_cast<char*>(message.data() + 8),
+                   static_cast<std::uint64_t>(issued_ms));
+    std::array<unsigned char, EVP_MAX_MD_SIZE> digest{};
+    unsigned digest_size = 0;
+    if (HMAC(EVP_sha256(),
+             acme_nonce_key_.data(),
+             static_cast<int>(acme_nonce_key_.size()),
+             message.data(),
+             message.size(),
+             digest.data(),
+             &digest_size) == nullptr ||
+        digest_size < 16) {
+        return std::unexpected(crypto_error("could not authenticate ACME nonce"));
+    }
+    return std::string(reinterpret_cast<const char*>(digest.data()), 16);
+}
+
+// Drop consumed nonces past their lifetime, idle accounts and expired orders. Each index is
+// ordered by time, so the cost is proportional to what is dropped.
+void Service::prune_acme_locked(AcmeTime now) {
+    while (!acme_used_nonces_.empty() &&
+           acme_used_nonces_.begin()->second + acme_limits_.nonce_lifetime <= now) {
+        acme_used_nonces_.erase(acme_used_nonces_.begin());
+    }
+    while (!acme_order_expiry_.empty() && acme_order_expiry_.begin()->first <= now) {
+        remove_acme_order_locked(std::string(acme_order_expiry_.begin()->second));
+    }
+    while (!acme_account_use_.empty() &&
+           acme_account_use_.begin()->first + acme_limits_.account_idle_lifetime <= now) {
+        remove_acme_account_locked(std::string(acme_account_use_.begin()->second));
+    }
+}
+
+void Service::touch_acme_account_locked(AcmeAccountEntry& entry, AcmeTime now) {
+    acme_account_use_.erase({entry.last_used, entry.account.id});
+    entry.last_used = now;
+    acme_account_use_.emplace(now, entry.account.id);
+}
+
+void Service::remove_acme_account_locked(const std::string& account_id) {
+    const auto account = acme_accounts_.find(account_id);
+    if (account == acme_accounts_.end()) {
+        return;
+    }
+    for (const std::string& order_id : std::vector<std::string>(account->second.orders)) {
+        remove_acme_order_locked(order_id);
+    }
+    const auto owned = acme_customer_accounts_.find(account->second.account.customer_id);
+    if (owned != acme_customer_accounts_.end()) {
+        std::erase(owned->second, account_id);
+        if (owned->second.empty()) {
+            acme_customer_accounts_.erase(owned);
+        }
+    }
+    acme_account_use_.erase({account->second.last_used, account_id});
+    acme_accounts_.erase(account);
+}
+
+void Service::remove_acme_order_locked(const std::string& order_id) {
+    const auto order = acme_orders_.find(order_id);
+    if (order == acme_orders_.end()) {
+        return;
+    }
+    const auto authorization = acme_authorizations_.find(order->second.order.authorization_id);
+    if (authorization != acme_authorizations_.end()) {
+        acme_tokens_.erase(authorization->second.token);
+        acme_authorizations_.erase(authorization);
+    }
+    const auto account = acme_accounts_.find(order->second.order.account_id);
+    if (account != acme_accounts_.end()) {
+        std::erase(account->second.orders, order_id);
+    }
+    acme_order_expiry_.erase({order->second.expires_at, order_id});
+    acme_orders_.erase(order);
+}
+
+Service::AcmeOrderEntry* Service::find_acme_order_locked(std::string_view customer_id,
+                                                         std::string_view account_id,
+                                                         std::string_view order_id) {
+    const auto order = acme_orders_.find(std::string(order_id));
+    if (order == acme_orders_.end() || order->second.order.customer_id != customer_id ||
+        order->second.order.account_id != account_id) {
+        return nullptr;
+    }
+    return &order->second;
 }
 
 } // namespace lake::control::pki

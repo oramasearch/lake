@@ -2,6 +2,7 @@
 #include <gtest/gtest.h>
 
 #include <array>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -626,6 +627,192 @@ TEST(Pki, AcmeClientCompletesHttp01OrderAndDownloadsCertificate) {
     const auto event = store->latest_audit_event();
     ASSERT_TRUE(event) << event.error().message;
     EXPECT_EQ(event->draft.action, "acme_certificate");
+    server.stop();
+}
+
+// ACME is anonymous, so its in-memory state is bounded and expires (lake#940). A test clock moves
+// time; `now` starts well past the clock's epoch.
+struct AcmeTestClock {
+    std::shared_ptr<std::chrono::steady_clock::time_point> now =
+        std::make_shared<std::chrono::steady_clock::time_point>(std::chrono::hours(1000));
+
+    lake::control::pki::AcmeLimits limits() const {
+        lake::control::pki::AcmeLimits limits;
+        limits.clock = [now = now] { return *now; };
+        return limits;
+    }
+    void advance(std::chrono::steady_clock::duration by) const {
+        *now += by;
+    }
+};
+
+lake::control::pki::AcmeJwk new_acme_jwk() {
+    const Pkey key = new_p256_key();
+    const nlohmann::json jwk = jwk_of(key.get());
+    return {jwk.at("x").get<std::string>(), jwk.at("y").get<std::string>()};
+}
+
+TEST(Pki, AcmeNoncesAreStatelessOneUseAndExpire) {
+    const AcmeTestClock clock;
+    auto limits = clock.limits();
+    limits.nonce_lifetime = std::chrono::seconds(60);
+    limits.used_nonces = 4;
+    lake::control::pki::Service pki(limits);
+
+    // Issuing nonces keeps nothing, however many are asked for.
+    for (int i = 0; i < 10000; ++i) {
+        ASSERT_TRUE(pki.new_acme_nonce());
+    }
+    EXPECT_EQ(pki.acme_state_size().used_nonces, 0U);
+
+    auto nonce = pki.new_acme_nonce();
+    ASSERT_TRUE(nonce);
+    EXPECT_TRUE(pki.consume_acme_nonce(*nonce));
+    EXPECT_FALSE(pki.consume_acme_nonce(*nonce));
+
+    // A nonce past its lifetime, altered, foreign or empty is refused.
+    auto stale = pki.new_acme_nonce();
+    ASSERT_TRUE(stale);
+    clock.advance(std::chrono::seconds(60));
+    EXPECT_FALSE(pki.consume_acme_nonce(*stale));
+    auto fresh = pki.new_acme_nonce();
+    ASSERT_TRUE(fresh);
+    std::string altered = *fresh;
+    altered[20] = altered[20] == 'A' ? 'B' : 'A';
+    EXPECT_FALSE(pki.consume_acme_nonce(altered));
+    lake::control::pki::Service other(clock.limits());
+    auto foreign = other.new_acme_nonce();
+    ASSERT_TRUE(foreign);
+    EXPECT_FALSE(pki.consume_acme_nonce(*foreign));
+    EXPECT_FALSE(pki.consume_acme_nonce(""));
+    EXPECT_TRUE(pki.consume_acme_nonce(*fresh));
+
+    // Consumed nonces are remembered up to the cap; past it every older nonce is refused, so a
+    // forgotten one is never accepted again.
+    std::vector<std::string> nonces;
+    for (int i = 0; i < 10; ++i) {
+        auto issued = pki.new_acme_nonce();
+        ASSERT_TRUE(issued);
+        nonces.push_back(*issued);
+    }
+    for (std::size_t i = 1; i < nonces.size(); ++i) {
+        EXPECT_TRUE(pki.consume_acme_nonce(nonces[i])) << i;
+        EXPECT_LE(pki.acme_state_size().used_nonces, 4U);
+    }
+    EXPECT_FALSE(pki.consume_acme_nonce(nonces[0]));
+    for (const std::string& used : nonces) {
+        EXPECT_FALSE(pki.consume_acme_nonce(used));
+    }
+    auto after = pki.new_acme_nonce();
+    ASSERT_TRUE(after);
+    EXPECT_TRUE(pki.consume_acme_nonce(*after));
+
+    // Remembered nonces are dropped once they could no longer be accepted anyway.
+    clock.advance(std::chrono::seconds(60));
+    EXPECT_EQ(pki.acme_state_size().used_nonces, 0U);
+}
+
+TEST(Pki, AcmeAccountsAndOrdersAreBoundedAndOrdersExpire) {
+    auto store = std::make_shared<lake::control::InMemoryStore>();
+    const std::string instance_kek =
+        "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+    std::vector<std::string> customers;
+    for (const std::string name : {"acme-one", "acme-two"}) {
+        const auto organization = store->create_organization({"taap:1:ed25519:" + name, name, ""});
+        ASSERT_TRUE(organization) << organization.error().message;
+        const auto customer = store->create_customer({"organization", "", organization->id, name});
+        ASSERT_TRUE(customer) << customer.error().message;
+        customers.push_back(customer->id);
+    }
+    const AcmeTestClock clock;
+    auto limits = clock.limits();
+    limits.accounts_per_customer = 3;
+    limits.accounts = 5;
+    limits.orders_per_account = 2;
+    limits.order_lifetime = std::chrono::seconds(60);
+    limits.account_idle_lifetime = std::chrono::hours(1);
+    lake::control::pki::Service pki(limits);
+    ASSERT_TRUE(pki.create_authority(*store, customers[0], instance_kek));
+
+    // Only an existing customer gets an account.
+    const auto unknown =
+        pki.create_acme_account(*store, lake::control::new_uuid_v4(), new_acme_jwk());
+    ASSERT_FALSE(unknown);
+    EXPECT_EQ(unknown.error().code, "not_found");
+    EXPECT_EQ(pki.acme_state_size().accounts, 0U);
+
+    // Past a customer's cap its least recently used account goes, with its orders.
+    std::vector<std::string> accounts;
+    for (int i = 0; i < 10; ++i) {
+        const auto account = pki.create_acme_account(*store, customers[0], new_acme_jwk());
+        ASSERT_TRUE(account) << account.error().message;
+        accounts.push_back(account->id);
+        clock.advance(std::chrono::seconds(1));
+    }
+    EXPECT_EQ(pki.acme_state_size().accounts, 3U);
+    EXPECT_FALSE(
+        pki.create_acme_order(*store, customers[0], accounts[0], "a.lake.test", instance_kek));
+
+    // Past the global cap the least recently used account of any customer goes.
+    for (int i = 0; i < 3; ++i) {
+        ASSERT_TRUE(pki.create_acme_account(*store, customers[1], new_acme_jwk()));
+        clock.advance(std::chrono::seconds(1));
+    }
+    EXPECT_EQ(pki.acme_state_size().accounts, 5U);
+    EXPECT_FALSE(
+        pki.create_acme_order(*store, customers[0], accounts[7], "a.lake.test", instance_kek));
+
+    // Past an account's cap its oldest order goes, and with it the HTTP-01 token.
+    const std::string& account = accounts[9];
+    std::vector<lake::control::pki::AcmeOrder> orders;
+    std::vector<std::string> tokens;
+    for (int i = 0; i < 5; ++i) {
+        const auto order =
+            pki.create_acme_order(*store, customers[0], account, "a.lake.test", instance_kek);
+        ASSERT_TRUE(order) << order.error().message;
+        const auto authorization =
+            pki.acme_authorization(customers[0], account, order->authorization_id);
+        ASSERT_TRUE(authorization) << authorization.error().message;
+        orders.push_back(*order);
+        tokens.push_back(authorization->token);
+    }
+    EXPECT_EQ(pki.acme_state_size().orders, 2U);
+    EXPECT_EQ(pki.acme_state_size().authorizations, 2U);
+    EXPECT_FALSE(pki.acme_order(customers[0], account, orders[0].id));
+    EXPECT_FALSE(pki.acme_http01_response(tokens[0]));
+    EXPECT_TRUE(pki.acme_http01_response(tokens[4]));
+
+    // An order expires with its authorization and token.
+    clock.advance(std::chrono::seconds(60));
+    EXPECT_EQ(pki.acme_state_size().orders, 0U);
+    EXPECT_EQ(pki.acme_state_size().authorizations, 0U);
+    EXPECT_FALSE(pki.acme_order(customers[0], account, orders[4].id));
+    EXPECT_FALSE(pki.acme_http01_response(tokens[4]));
+    EXPECT_FALSE(pki.authorize_acme_order(customers[0], account, orders[4].authorization_id));
+
+    // An idle account expires.
+    clock.advance(std::chrono::hours(1));
+    EXPECT_EQ(pki.acme_state_size().accounts, 0U);
+    EXPECT_FALSE(pki.create_acme_order(*store, customers[0], account, "a.lake.test", instance_kek));
+}
+
+TEST(Pki, AcmeNewAccountForAnUnknownCustomerIsRefused) {
+    auto store = std::make_shared<lake::control::InMemoryStore>();
+    lake::api::ServerOptions options;
+    options.port = 0;
+    options.store = store;
+    options.instance_kek = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+    lake::api::ApiServer server(options);
+    ASSERT_TRUE(server.start()) << server.reason();
+
+    AcmeClient client(server.port());
+    const std::string base = "http://127.0.0.1:" + std::to_string(server.port()) + "/acme/" +
+                             lake::control::new_uuid_v4();
+    ASSERT_EQ(client.nonce(base + "/new-nonce").status, 200);
+    const HttpResponse account =
+        client.post(base + "/new-account", {{"termsOfServiceAgreed", true}}, true);
+    EXPECT_EQ(account.status, 404) << account.body;
+    EXPECT_TRUE(header(account, "Location").empty());
     server.stop();
 }
 
