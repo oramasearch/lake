@@ -219,6 +219,21 @@ TEST(ModelGateway, PreparesEachRequestAndAsksAStreamForItsUsage) {
     EXPECT_FALSE(responses->contains("stream_options"));
 }
 
+// lake#939: a background answer goes on being generated after the provider has answered, with no
+// usage in that answer, so the gateway refuses it.
+TEST(ModelGateway, RefusesABackgroundAnswer) {
+    using lake::api::prepare_model_request;
+    for (const json& background : {json(true), json("yes"), json(1)}) {
+        const auto refused =
+            prepare_model_request("responses", {{"model", "gpt-5.5"}, {"background", background}});
+        ASSERT_FALSE(refused) << background.dump();
+        EXPECT_EQ(refused.error().path, "/request/background");
+    }
+    EXPECT_TRUE(prepare_model_request("responses", {{"model", "gpt-5.5"}, {"background", false}}));
+    EXPECT_TRUE(
+        prepare_model_request("responses", {{"model", "gpt-5.5"}, {"background", nullptr}}));
+}
+
 TEST(ModelGateway, ReadsTheUsageOfEveryAnswerShape) {
     using lake::api::model_usage;
     const auto completion = model_usage(chat_answer.dump(), false);
@@ -433,7 +448,8 @@ TEST(ModelCompletion, RelaysAStreamToItsCallerAndCountsItsLastEvent) {
               42);
 }
 
-TEST(ModelCompletion, AuditsARelayedStreamWithoutUsageAsUnreported) {
+// lake#939: an answer without usage is counted by estimate, never as zero.
+TEST(ModelCompletion, CountsARelayedStreamWithoutUsageByEstimate) {
     GatewayRig rig;
     const std::string no_usage =
         "data: {\"id\":\"c\",\"model\":\"gpt-5.5\",\"choices\":[{\"index\":0,\"delta\":"
@@ -450,11 +466,122 @@ TEST(ModelCompletion, AuditsARelayedStreamWithoutUsageAsUnreported) {
     const auto answered = rig.call(chat(true), context);
     ASSERT_TRUE(answered.ok) << answered.error.message;
     EXPECT_EQ(joined, no_usage);
+    ASSERT_EQ(rig.fake.calls(), 1U);
+    const std::uint64_t input = lake::api::estimated_model_tokens(rig.fake.requests[0].body.size());
+    const std::uint64_t output = lake::api::estimated_model_tokens(no_usage.size());
+    EXPECT_GT(input, 0U);
+    EXPECT_GT(output, 0U);
     EXPECT_EQ(answered.value["usage_reported"], false);
-    EXPECT_EQ(answered.value["recorded"], false);
+    EXPECT_EQ(answered.value["recorded"], true);
+    EXPECT_EQ(answered.value["input_tokens"], input);
+    EXPECT_EQ(answered.value["output_tokens"], output);
     EXPECT_EQ(context.audit_details["usage_reported"], false);
-    EXPECT_EQ(context.audit_details["input_tokens"], 0);
-    EXPECT_EQ(context.audit_details["output_tokens"], 0);
+    EXPECT_EQ(context.audit_details["input_tokens"], input);
+    EXPECT_EQ(context.audit_details["output_tokens"], output);
+    static_cast<void>(liquid::runtime::block_on(rig.recorder.flush()));
+    EXPECT_EQ(rig.workspaces.records(rig.home).metric_total("lake_usage",
+                                                            {{"dimension", "model_tokens"}}),
+              static_cast<double>(input + output));
+}
+
+// lake#939: a caller that stops reading a relayed stream is sent nothing more, but the provider's
+// stream is still read to its end and the usage in its last event counted.
+TEST(ModelCompletion, CountsAStreamWhoseCallerStoppedReading) {
+    GatewayRig rig;
+    rig.fake.answer = {200, chat_stream, {}};
+    const auto task = rig.task(rig.home, "agent-project");
+    auto context = rig.task_context(task);
+    std::size_t offered = 0;
+    context.model_stream = [&](std::string_view) {
+        ++offered;
+        return false; // gone at the first piece
+    };
+    const auto answered = rig.call(chat(true), context);
+    ASSERT_TRUE(answered.ok) << answered.error.code << ": " << answered.error.message;
+    EXPECT_EQ(offered, 1U) << "a caller that has gone is offered nothing more";
+    EXPECT_EQ(answered.value["usage_reported"], true);
+    EXPECT_EQ(answered.value["input_tokens"], 40);
+    EXPECT_EQ(answered.value["output_tokens"], 2);
+    EXPECT_EQ(context.audit_details["usage_reported"], true);
+    static_cast<void>(liquid::runtime::block_on(rig.recorder.flush()));
+    EXPECT_EQ(rig.workspaces.records(rig.home).metric_total("lake_usage",
+                                                            {{"dimension", "model_tokens"}}),
+              42);
+}
+
+// lake#939: an answer that fails part way (the provider drops the connection, the deadline
+// passes) was already charged for by the provider: it is counted by estimate, relayed or not,
+// streamed or not, before the failure is answered.
+TEST(ModelCompletion, CountsAnAnswerThatFailedPartWay) {
+    const std::string first_event = chat_stream.substr(0, chat_stream.find("\n\n") + 2);
+    struct Case {
+        bool stream;
+        bool relayed;
+        std::string body;
+    };
+    for (const Case& shape : {Case{true, true, first_event},
+                              Case{true, false, first_event},
+                              Case{false, false, chat_answer.dump().substr(0, 40)}}) {
+        GatewayRig rig;
+        rig.fake.answer = {200, shape.body, "outbound request timed out"};
+        const auto task = rig.task(rig.home, "agent-project");
+        auto context = rig.task_context(task);
+        std::string joined;
+        if (shape.relayed) {
+            context.model_stream = [&](std::string_view piece) {
+                joined.append(piece);
+                return true;
+            };
+        }
+        const auto failed = rig.call(chat(shape.stream), context);
+        EXPECT_FALSE(failed.ok) << shape.stream << shape.relayed;
+        EXPECT_EQ(failed.error.code, "store_unavailable");
+        ASSERT_EQ(rig.fake.calls(), 1U);
+        const std::uint64_t input =
+            lake::api::estimated_model_tokens(rig.fake.requests[0].body.size());
+        const std::uint64_t output = lake::api::estimated_model_tokens(shape.body.size());
+        EXPECT_EQ(context.audit_details["usage_reported"], false);
+        EXPECT_EQ(context.audit_details["input_tokens"], input);
+        EXPECT_EQ(context.audit_details["output_tokens"], output);
+        static_cast<void>(liquid::runtime::block_on(rig.recorder.flush()));
+        EXPECT_EQ(rig.workspaces.records(rig.home).metric_total("lake_usage",
+                                                                {{"dimension", "model_tokens"}}),
+                  static_cast<double>(input + output))
+            << shape.stream << shape.relayed;
+    }
+}
+
+// lake#939: while the provider answers one call, the estimate of its input is held against the
+// account's limit, so a call made meanwhile cannot pass a limit the first will reach. A call the
+// provider refuses releases it.
+TEST(ModelCompletion, HoldsAnEstimateOfTheInputWhileTheProviderAnswers) {
+    GatewayRig rig;
+    auto admin = rig.admin();
+    ASSERT_TRUE(liquid::runtime::block_on(rig.registry.call_async("set_usage_limit",
+                                                                  {{"customer_id", rig.customer},
+                                                                   {"dimension", "model_tokens"},
+                                                                   {"limit", 10}},
+                                                                  admin))
+                    ->ok);
+    const auto task = rig.task(rig.home, "agent-application");
+    auto context = rig.task_context(task);
+    ApiResult meanwhile = ApiResult::failure("not_called", "");
+    context.model_provider = [&](const ModelProviderRequest& request) {
+        EXPECT_GE(lake::api::estimated_model_tokens(request.body.size()), 10U);
+        auto second = rig.task_context(task);
+        meanwhile = rig.call(chat(), second);
+        return ModelProviderResponse{
+            400, R"({"error":{"message":"Invalid value for 'temperature'."}})", {}};
+    };
+    EXPECT_EQ(rig.call(chat(), context).error.code, "engine_error");
+    EXPECT_EQ(meanwhile.error.code, "usage_limit_reached");
+    EXPECT_EQ(rig.fake.calls(), 0U);
+
+    auto after = rig.task_context(task);
+    const auto answered = rig.call(chat(), after);
+    EXPECT_TRUE(answered.ok) << "the refused call counted nothing and held nothing after it: "
+                             << answered.error.code;
+    EXPECT_EQ(rig.fake.calls(), 1U);
 }
 
 TEST(ModelCompletion, CountsALaunchedAgentsCallsAndRefusesEveryOtherCaller) {
@@ -685,7 +812,8 @@ TEST(ModelGatewayRoute, AnswersTheOpenAIShapeForATaskCredential) {
 
 // A model provider on loopback that streams a chat completion in chunked transfer: it sends its
 // first event, then holds the last until `release` is set (or a deadline passes) and records
-// whether it was released before it sent the last.
+// whether it was released before it sent the last. Once released it sends `middle_events` more
+// events, 20 ms apart, before the last.
 class StreamingProvider {
 public:
     StreamingProvider() {
@@ -716,6 +844,7 @@ public:
     }
 
     std::atomic<bool> release{false};
+    std::atomic<int> middle_events{0};
     std::atomic<bool> released_before_last{false};
     std::atomic<bool> sent_last{false};
     std::string request_head;
@@ -723,6 +852,9 @@ public:
     static constexpr std::string_view first =
         "data: {\"id\":\"c\",\"model\":\"gpt-5.5-2026-08-01\",\"choices\":[{\"index\":0,"
         "\"delta\":{\"content\":\"FIRST\"}}],\"usage\":null}\n\n";
+    static constexpr std::string_view middle =
+        "data: {\"id\":\"c\",\"model\":\"gpt-5.5-2026-08-01\",\"choices\":[{\"index\":0,"
+        "\"delta\":{\"content\":\"MIDDLE\"}}],\"usage\":null}\n\n";
     static constexpr std::string_view last =
         "data: {\"id\":\"c\",\"model\":\"gpt-5.5-2026-08-01\",\"choices\":[],\"usage\":"
         "{\"prompt_tokens\":40,\"completion_tokens\":2,\"total_tokens\":42}}\n\n"
@@ -730,8 +862,14 @@ public:
 
 private:
     static void send_all(int fd, std::string_view bytes) {
+        // A send to a connection lake closed fails instead of raising SIGPIPE.
+#ifdef MSG_NOSIGNAL
+        constexpr int flags = MSG_NOSIGNAL;
+#else
+        constexpr int flags = 0;
+#endif
         while (!bytes.empty()) {
-            const auto sent = ::send(fd, bytes.data(), bytes.size(), 0);
+            const auto sent = ::send(fd, bytes.data(), bytes.size(), flags);
             if (sent <= 0) {
                 return;
             }
@@ -748,6 +886,10 @@ private:
         if (fd < 0) {
             return;
         }
+#ifdef SO_NOSIGPIPE
+        int one = 1;
+        ::setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof(one));
+#endif
         std::string received;
         char buffer[4096];
         std::size_t head_end = std::string::npos;
@@ -785,6 +927,10 @@ private:
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
         }
         released_before_last.store(release.load());
+        for (int sent = 0; sent < middle_events.load(); ++sent) {
+            send_all(fd, chunk(middle));
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
         send_all(fd, chunk(last));
         sent_last.store(true);
         send_all(fd, "0\r\n\r\n");
@@ -885,6 +1031,100 @@ TEST(ModelGatewayRoute, RelaysEachEventAsTheProviderSendsIt) {
     server.stop();
     EXPECT_EQ(
         workspaces.records(home).metric_total("lake_usage", {{"dimension", "model_tokens"}}), 42);
+}
+
+// lake#939, over the real server and its outbound client: a caller that reads the first event of
+// a stream and then drops its connection is sent nothing more, but lake reads the provider's stream
+// to its end, and the usage in its last event is counted. Ending a stream early never makes it
+// free.
+TEST(ModelGatewayRoute, CountsAStreamItsCallerAbandoned) {
+    auto store = std::make_shared<lake::control::InMemoryStore>();
+    lake::test::RecordWorkspaces workspaces(store);
+    const std::string customer = space(*store, "gateway-abandon");
+    const std::string home = workspaces.create(customer, "home");
+    const auto owner = store->get_customer(customer);
+    ASSERT_TRUE(owner);
+    lake::control::AgentTask row;
+    row.id = lake::control::new_uuid_v4();
+    row.customer_id = customer;
+    row.agent = "agent-ask-orama";
+    row.kind = "turn";
+    row.workspace_id = home;
+    row.scopes = {"workspace_query"};
+    row.requested_by_user_id = owner->user_id;
+    ASSERT_TRUE(store->create_agent_task(row));
+    const std::string credential = std::string(lake::control::agent_task_credential_prefix) +
+                                   row.id + ".0123456789abcdef0123456789abcdef";
+    ASSERT_TRUE(store->claim_agent_task(
+        row.id, row.agent, lake::control::identity_crypto::sha256_hex(credential)));
+
+    StreamingProvider provider;
+    // Enough events after the caller has gone for lake to find it gone before the last.
+    provider.middle_events.store(25);
+    lake::api::ApiServer server({.port = 0,
+                                 .node_name = "gateway-abandon-test",
+                                 .store = store,
+                                 .workspaces = workspaces.service,
+                                 .admin_token = "gateway-admin",
+                                 .instance_kek = std::string(kek),
+                                 .openai_api_key = "sk-fake-provider",
+                                 .model_provider_url = provider.base_url()});
+    ASSERT_TRUE(server.start()) << server.reason();
+
+    const int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+    ASSERT_GE(fd, 0);
+    sockaddr_in address{};
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    address.sin_port = htons(static_cast<unsigned short>(server.port()));
+    ASSERT_EQ(::connect(fd, reinterpret_cast<sockaddr*>(&address), sizeof(address)), 0);
+    timeval wait{20, 0};
+    ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &wait, sizeof(wait));
+    const std::string body = chat(true)["request"].dump();
+    const std::string sent = "POST /openai/v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+                             "Authorization: Bearer " +
+                             credential +
+                             "\r\nContent-Type: application/json\r\nAccept: text/event-stream\r\n"
+                             "Connection: close\r\nContent-Length: " +
+                             std::to_string(body.size()) + "\r\n\r\n" + body;
+    ASSERT_EQ(::send(fd, sent.data(), sent.size(), 0), static_cast<ssize_t>(sent.size()));
+    std::string received;
+    char buffer[4096];
+    while (received.find("FIRST") == std::string::npos) {
+        const auto got = ::recv(fd, buffer, sizeof(buffer), 0);
+        ASSERT_GT(got, 0) << received;
+        received.append(buffer, static_cast<std::size_t>(got));
+    }
+    // The caller goes at once (a reset, not a graceful close), and the provider goes on.
+    const linger reset{1, 0};
+    ::setsockopt(fd, SOL_SOCKET, SO_LINGER, &reset, sizeof(reset));
+    ::close(fd);
+    provider.release.store(true);
+
+    // The request is over once lake counts it in its request metrics.
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(20);
+    bool finished = false;
+    while (!finished && std::chrono::steady_clock::now() < deadline) {
+        const auto metrics =
+            lake::test::http_request({.url = "http://127.0.0.1:" + std::to_string(server.port()),
+                                      .method = "GET",
+                                      .suffix = "/metrics",
+                                      .headers = {{"Authorization", "Bearer gateway-admin"}}});
+        finished =
+            metrics &&
+            std::string(reinterpret_cast<const char*>(metrics->body.data()), metrics->body.size())
+                    .find("route=\"/openai/v1/chat/completions\"") != std::string::npos;
+        if (!finished) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+    }
+    EXPECT_TRUE(finished);
+    EXPECT_TRUE(provider.sent_last.load());
+
+    // Stopping the server writes what it counted: the provider's own usage, from its last event.
+    server.stop();
+    EXPECT_EQ(workspaces.records(home).metric_total("lake_usage", {{"dimension", "model_tokens"}}),
+              42);
 }
 
 } // namespace

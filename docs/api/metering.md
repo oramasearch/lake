@@ -412,7 +412,8 @@ in that workspace. Anyone else is refused `unauthorized`.
 
 Agents do not report their own tokens: every model call they make goes through the
 [model gateway](model-gateway.md) (lake#248), which counts the provider's own `usage` for the run's
-workspace with the same labels and enforces the `model_tokens` limit. `record_model_usage` remains for
+workspace with the same labels (an [estimate](model-gateway.md#an-answer-without-usage) when the
+answer reports none, lake#939) and enforces the `model_tokens` limit. `record_model_usage` remains for
 a model call made outside Lake; a call through the gateway must not be reported again.
 
 ### Verify
