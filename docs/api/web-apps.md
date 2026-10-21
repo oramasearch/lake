@@ -101,6 +101,7 @@ session to customer code. The operator configures the app ingress with:
 nginx.ingress.kubernetes.io/auth-url: http://lake-prod.lake.svc.cluster.local:80/w/<workspace>/v1/apps/auth
 nginx.ingress.kubernetes.io/auth-signin: https://<lake public host>/apps/authorize?app=<app id>&rd=$scheme://$host$escaped_request_uri
 nginx.ingress.kubernetes.io/auth-always-set-cookie: "true"
+nginx.ingress.kubernetes.io/auth-response-headers: X-Orama-User,X-Orama-Space
 ```
 
 `GET /v1/apps/auth`, including its `/w/<workspace>/v1/apps/auth` form, resolves a live protected
@@ -110,6 +111,18 @@ app by the host of `X-Original-URL` (ingress-nginx sets `Host` to Lake's Service
 `iat`, and `exp`; its HMAC-SHA256 key is derived from the instance KEK with HKDF label
 `lake/app-session/v1`, and it expires after 12 hours. Lake rechecks current workspace membership
 on every request. Invalid, expired, cross-app, or no-longer-authorized tokens return 401.
+
+**Which identity headers an app may trust** (app-runtime#11). Because the Ingress names
+`X-Orama-User` and `X-Orama-Space` in `auth-response-headers`, ingress-nginx sets them from this
+endpoint's answer and a copy sent by the client never reaches a Lake-protected app. No other header
+is set for the app: `X-Orama-User-Id`, `X-Auth-Request-*` and the like arrive as the client wrote them,
+on every app. A public app (`auth = none`) has no forward auth at all, so **every** identity header it
+receives, `X-Orama-User` included, came from the client. The operator tells the pod which case it is
+in `APP_AUTH` (`lake` or `public`). app-runtime's `current_user()` returns the member only when
+`APP_AUTH=lake`, reads only `X-Orama-User`, and removes the forgeable headers before app code sees the
+request. **An image-mode app that does not use app-runtime must not treat these headers as identity
+unless it is Lake-protected**, and must never trust any identity header other than `X-Orama-User` and
+`X-Orama-Space`.
 
 When no app cookie is usable, nginx sends the browser to
 `GET /apps/authorize?app=<app id>&rd=<original URL>` on Lake's own host. Lake's normal browser

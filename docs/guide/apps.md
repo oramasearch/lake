@@ -254,6 +254,12 @@ The app receives the person in the `X-Orama-User` header and never sees their La
 own cookie lasts 12 hours, and Lake checks on every request that the person still belongs to the
 workspace, so removing someone from the workspace takes effect at once.
 
+With **Public**, nobody signs in, so the app has no signed-in person: `current_user()` from
+`orama_app` returns `None`. Anyone can send an `X-Orama-User` header (or any other identity header) to
+a public app, so an app that decides who sees what must use **Lake Sign-In**. An app in image mode
+that reads these headers itself must not treat them as identity unless it uses **Lake Sign-In**; see
+[Which identity headers an app may trust](../api/web-apps.md#lake-protected-app-authentication).
+
 ### Bindings: Workspace Data and Services
 
 **Services** tab:

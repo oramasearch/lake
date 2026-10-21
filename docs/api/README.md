@@ -237,7 +237,8 @@ phase 1, lake#196), with their capabilities and the Data → Drives → Storage 
 the customer's own bucket over Lake's own S3 and Azure Blob clients with a workspace secret, and
 stores Lake keeps in the workspace Zetta or a liquid repository (lake#664).
 [`web-apps.md`](web-apps.md) defines customer-scoped Ship app creation, direct-zone hosts,
-platform-reserved names, deployment, lifecycle, authentication, environment, attach/detach
+platform-reserved names, deployment, lifecycle, authentication (and which identity headers an app
+may trust), environment, attach/detach
 bindings, logs, events and the read-only app registry pull token. It is separate from identity
 [applications](apps.md).
 [`builds.md`](builds.md) defines asynchronous in-cluster image builds, configured Ship App runtime
