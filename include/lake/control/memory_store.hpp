@@ -460,10 +460,14 @@ public:
     Result<PkiRecoveryCeremonyRecord>
     get_pki_recovery_ceremony(const std::string& customer_id,
                               const std::string& ceremony_id) override;
+    Result<int> claim_pki_recovery_share(const std::string& customer_id,
+                                         const std::string& ceremony_id,
+                                         const std::string& principal) override;
     Result<PkiRecoveryCeremonyRecord>
-    complete_pki_recovery_ceremony(const std::string& customer_id,
-                                   const std::string& ceremony_id,
-                                   const std::vector<PkiRecoveryShareEvidence>& evidence) override;
+    submit_pki_recovery_share(const std::string& customer_id,
+                              const std::string& ceremony_id,
+                              const std::string& principal,
+                              const PkiRecoveryShareEvidence& evidence) override;
     Result<SecretMountRoute> create_secret_mount_route(const SecretMountRoute& value) override;
     Result<SecretMountRoute> get_secret_mount_route(const std::string& mount_id) override;
     Result<void> delete_secret_mount_route(const std::string& mount_id) override;

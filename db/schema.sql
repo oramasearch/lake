@@ -4688,3 +4688,26 @@ CREATE INDEX IF NOT EXISTS sso_saml_assertions_expires_idx ON sso_saml_assertion
 
 CREATE TABLE IF NOT EXISTS saml_sign_in_guard (applied_at timestamptz NOT NULL DEFAULT now());
 INSERT INTO schema_migrations (version) VALUES ('0092_saml_sign_in') ON CONFLICT DO NOTHING;
+
+-- ---------------------------------------------------------------------------------------------
+-- 0093_root_recovery_participants (lake#934, docs/api/break-glass.md): who holds each share of a
+-- root recovery ceremony. begin_root_recovery names distinct participants, share i to the i-th;
+-- each claims only their own share, issued once (`share_issued_at`), and presents it themselves.
+-- A presented share's evidence stays in pki_recovery_shares. No share is stored. A ceremony begun
+-- before this migration has no participants and cannot be completed. Idempotent.
+-- ---------------------------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS pki_recovery_participants (
+    ceremony_id     uuid        NOT NULL REFERENCES pki_recovery_ceremonies(id) ON DELETE CASCADE,
+    share_index     integer     NOT NULL,
+    principal_id    text        NOT NULL CHECK (principal_id <> ''),
+    share_issued_at timestamptz,
+    PRIMARY KEY (ceremony_id, share_index),
+    CONSTRAINT pki_recovery_participants_principal_unique UNIQUE (ceremony_id, principal_id),
+    CONSTRAINT pki_recovery_participants_index_check CHECK (share_index BETWEEN 1 AND 255)
+);
+
+CREATE TABLE IF NOT EXISTS root_recovery_participants_guard (
+    applied_at timestamptz NOT NULL DEFAULT now()
+);
+INSERT INTO schema_migrations (version) VALUES ('0093_root_recovery_participants')
+    ON CONFLICT DO NOTHING;

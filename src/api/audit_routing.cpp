@@ -43,6 +43,7 @@ constexpr std::array central = std::to_array<std::string_view>({
     "check_agent_certificate",
     "check_cached_read",
     "claim_recovery_deliveries",
+    "claim_root_recovery_share",
     "complete_recovery",
     "complete_root_recovery",
     // Account recovery's custody of a repository key is identity, not the repository's data.

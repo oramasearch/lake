@@ -242,7 +242,7 @@ comments. `forge_records` is the area prefix for parallel Phase 6 schema work.
 | `pki_certificates` | Issued short-lived X.509, JWT, ACME, SSH, client, and device credential metadata and public output. |
 | `pki_acme_orders` | ACME order state, identifiers, account key reference, expiry, and issued certificate link. |
 | `pki_callers` | Short-lived workload credentials minted after Kubernetes, federation, AWS, or Azure attestation. |
-| `pki_recovery_ceremonies`, `pki_recovery_shares` | Configured Shamir quorum, recovery evidence digests, expiry, and completed-rehearsal state. Shares are never retained. |
+| `pki_recovery_ceremonies`, `pki_recovery_shares` | Configured Shamir quorum, recovery evidence digests, expiry, and completed-rehearsal state. Shares are never retained. Since `0093`, `pki_recovery_participants` records who holds each share. |
 | `pki_guard` | Guard table for this migration. |
 
 Caller rows retain verified identity metadata and expiry, never the returned bearer credential.
@@ -1326,3 +1326,15 @@ The ACS consumes the request and inserts the assertion in one transaction, so ea
 Sign-in state (decision 50): nothing from a workspace. Indexes `sso_saml_requests_expires_idx` and
 `sso_saml_assertions_expires_idx`. Additive and idempotent; guard `saml_sign_in_guard`. The operator
 vendors the schema and selects that guard before a lake with this change is rolled.
+
+## Root recovery participants migration
+
+`0093_root_recovery_participants` (lake#934, [`../api/break-glass.md`](../api/break-glass.md))
+adds `pki_recovery_participants`, one row per share of a root recovery ceremony: `ceremony_id`
+(cascading with the ceremony), `share_index` (1 to 255), `principal_id` (the participant's TAAP
+id, non-empty, unique within the ceremony) and `share_issued_at` (when the share was issued to
+them, at most once). Primary key `(ceremony_id, share_index)`. It holds no share value; a presented
+share's evidence digest stays in `pki_recovery_shares`. A ceremony begun before the migration has
+no rows here and cannot be completed. Additive and idempotent; guard
+`root_recovery_participants_guard`. The operator vendors the schema and selects that guard before a
+lake with this change is rolled.

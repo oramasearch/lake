@@ -1503,6 +1503,15 @@ struct NewAgentSession {
     std::string expires_at;
 };
 
+// One participant of a root recovery ceremony (migration 0093, lake#934): the TAAP id that holds
+// share `index`, when it was issued to them, and whether they have presented it.
+struct PkiRecoveryParticipant {
+    int index = 0;
+    std::string principal;
+    std::optional<std::string> share_issued_at;
+    bool submitted = false;
+};
+
 struct PkiRecoveryCeremonyRecord {
     std::string id;
     std::string customer_id;
@@ -1512,6 +1521,7 @@ struct PkiRecoveryCeremonyRecord {
     std::optional<std::string> recovered_at;
     std::string expires_at;
     std::string created_at;
+    std::vector<PkiRecoveryParticipant> participants; // by index; empty before migration 0093
 };
 
 struct NewPkiRecoveryCeremonyRecord {
@@ -1520,6 +1530,7 @@ struct NewPkiRecoveryCeremonyRecord {
     int threshold = 0;
     int share_count = 0;
     std::string expires_at;
+    std::vector<std::string> participants; // share i + 1 is participants[i]'s; distinct
 };
 
 struct PkiRecoveryShareEvidence {
@@ -2156,10 +2167,20 @@ public:
     create_pki_recovery_ceremony(const NewPkiRecoveryCeremonyRecord& value) = 0;
     virtual Result<PkiRecoveryCeremonyRecord>
     get_pki_recovery_ceremony(const std::string& customer_id, const std::string& ceremony_id) = 0;
+    // Root recovery (lake#934): a share is issued once, to its participant, while the ceremony is
+    // active; the answer is its index. `conflict` when already issued or the ceremony is not
+    // active, `forbidden` when `principal` is not a participant.
+    virtual Result<int> claim_pki_recovery_share(const std::string& customer_id,
+                                                 const std::string& ceremony_id,
+                                                 const std::string& principal) = 0;
+    // Record the evidence of the share `principal` presented (verified by the caller), once per
+    // participant and only after it was issued to them; sets recovered_at when this submission
+    // brings the distinct participants presenting theirs to the threshold.
     virtual Result<PkiRecoveryCeremonyRecord>
-    complete_pki_recovery_ceremony(const std::string& customer_id,
-                                   const std::string& ceremony_id,
-                                   const std::vector<PkiRecoveryShareEvidence>& evidence) = 0;
+    submit_pki_recovery_share(const std::string& customer_id,
+                              const std::string& ceremony_id,
+                              const std::string& principal,
+                              const PkiRecoveryShareEvidence& evidence) = 0;
 
     // Secrets (docs/api/secrets.md, lake#328-#332). Mounts, secrets, versions, named keys and data
     // keys live in the mount's workspace Zetta (api/secret_records_api.hpp). The control store

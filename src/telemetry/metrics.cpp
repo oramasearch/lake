@@ -1229,12 +1229,20 @@ public:
         return call("get_pki_recovery_ceremony",
                     [&] { return store_->get_pki_recovery_ceremony(customer_id, ceremony_id); });
     }
-    control::Result<control::PkiRecoveryCeremonyRecord> complete_pki_recovery_ceremony(
-        const std::string& customer_id,
-        const std::string& ceremony_id,
-        const std::vector<control::PkiRecoveryShareEvidence>& evidence) override {
-        return call("complete_pki_recovery_ceremony", [&] {
-            return store_->complete_pki_recovery_ceremony(customer_id, ceremony_id, evidence);
+    control::Result<int> claim_pki_recovery_share(const std::string& customer_id,
+                                                  const std::string& ceremony_id,
+                                                  const std::string& principal) override {
+        return call("claim_pki_recovery_share", [&] {
+            return store_->claim_pki_recovery_share(customer_id, ceremony_id, principal);
+        });
+    }
+    control::Result<control::PkiRecoveryCeremonyRecord>
+    submit_pki_recovery_share(const std::string& customer_id,
+                              const std::string& ceremony_id,
+                              const std::string& principal,
+                              const control::PkiRecoveryShareEvidence& evidence) override {
+        return call("submit_pki_recovery_share", [&] {
+            return store_->submit_pki_recovery_share(customer_id, ceremony_id, principal, evidence);
         });
     }
     control::Result<control::SecretMountRoute>
