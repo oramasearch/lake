@@ -866,20 +866,27 @@ TEST(PostgresOfflineRecovery, GrantsRecoveryPathsAndRepositoryKeyCustody) {
                       {{"email", "offline-target-" + suffix + "@example.test"}},
                       anonymous);
     ASSERT_TRUE(email.ok) << email.error.message;
+    // lake#774: the answer names no attempt; the attempt id is what the recovery email carries.
+    EXPECT_FALSE(email.value.contains("id"));
+    std::string email_recovery_id;
     {
         pqxx::connection connection(uri);
         pqxx::work transaction(connection);
+        email_recovery_id = transaction
+                                .exec("SELECT id::text FROM offline_recovery_attempts WHERE method "
+                                      "= 'email' ORDER BY created_at DESC LIMIT 1")[0][0]
+                                .as<std::string>();
         transaction.exec("UPDATE offline_recovery_attempts SET ready_at = now() - interval '1 "
                          "second' WHERE id = $1::uuid",
-                         pqxx::params{email.value["id"].get<std::string>()});
+                         pqxx::params{email_recovery_id});
         transaction.commit();
     }
     const auto email_delivery =
-        claim_recovery_delivery(registry, operator_context, email.value["id"]);
+        claim_recovery_delivery(registry, operator_context, email_recovery_id);
     ASSERT_TRUE(email_delivery.ok) << email_delivery.error.message;
     const lake::api::ApiResult email_restored = *liquid::runtime::block_on(registry.call_async(
         "complete_recovery",
-        {{"recovery_id", email.value["id"]}, {"token", email_delivery.value["token"]}},
+        {{"recovery_id", email_recovery_id}, {"token", email_delivery.value["token"]}},
         anonymous));
     ASSERT_TRUE(email_restored.ok) << email_restored.error.message;
     EXPECT_TRUE(store->context_for(email_restored.value["secret"]));

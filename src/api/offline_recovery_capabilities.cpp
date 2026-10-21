@@ -348,8 +348,16 @@ void register_recovery_entry_points(Registry& registry) {
             }
             const auto attempt = context.store->begin_email_recovery(
                 input.value("pool_id", "lake"), input.at("email"), 24 * 60 * 60);
-            return attempt ? ApiResult::success(control::to_json(*attempt))
-                           : from_store_error(attempt.error());
+            // One answer whether or not the address has an account (lake#774): the attempt (its id,
+            // the account's user id, its timing) reaches only the address's owner, by email. Before
+            // this, an anonymous caller learned whether an address had an account and its user id.
+            if (attempt || attempt.error().code == "not_found") {
+                return ApiResult::success(
+                    {{"status", "requested"},
+                     {"message",
+                      "If an account uses this address, a recovery link is on its way."}});
+            }
+            return from_store_error(attempt.error());
         }});
 }
 

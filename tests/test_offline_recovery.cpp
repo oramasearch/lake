@@ -162,12 +162,21 @@ TEST(AccountRecovery, CodesCoolingAndTwoAdministratorApprovalRestoreSignIn) {
     const ApiResult email = registry.call(
         "begin_email_recovery", {{"email", "recovery-target@example.test"}}, anonymous);
     ASSERT_TRUE(email.ok) << email.error.message;
-    EXPECT_EQ(email.value["status"], "cooling");
+    // lake#774: one answer for any address, so a caller cannot tell whether it has an account,
+    // and nothing about the attempt; its id reaches the owner in the recovery email.
+    const ApiResult unknown =
+        registry.call("begin_email_recovery", {{"email", "nobody-here@example.test"}}, anonymous);
+    ASSERT_TRUE(unknown.ok) << unknown.error.message;
+    EXPECT_EQ(email.value, unknown.value);
+    EXPECT_EQ(email.value["status"], "requested");
+    EXPECT_FALSE(email.value.contains("id"));
+    EXPECT_FALSE(email.value.contains("user_id"));
     const auto email_deliveries = store.claim_recovery_deliveries(10);
     ASSERT_TRUE(email_deliveries) << email_deliveries.error().message;
-    ASSERT_EQ(email_deliveries->size(), 1U);
+    ASSERT_EQ(email_deliveries->size(), 1U) << "only the real account's attempt is delivered";
+    const std::string email_recovery_id = email_deliveries->front().recovery_id;
     const auto early =
-        store.complete_recovery(email.value["id"], email_deliveries->front().token, "too early");
+        store.complete_recovery(email_recovery_id, email_deliveries->front().token, "too early");
     ASSERT_FALSE(early);
     EXPECT_EQ(early.error().message, "recovery cooling period has not ended");
 
