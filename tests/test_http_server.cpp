@@ -1,4 +1,5 @@
 #include "audit_test_support.hpp"
+#include "identity_proof_test_support.hpp"
 #include "postgres_fixture.hpp"
 #include <gtest/gtest.h>
 
@@ -623,8 +624,10 @@ protected:
             identity_document_ = "{}";
         }
         email_ = "response-isolation-" + lake::control::new_uuid_v4() + "@example.test";
-        const auto account = store_->sign_up_password(
-            {"lake", email_, password_, "Isolation test", "fixture", identity_document_});
+        lake::control::NewPasswordUser account_input{
+            "lake", email_, password_, "Isolation test", "fixture", identity_document_};
+        account_input.identity_proof = identity_proof_;
+        const auto account = store_->sign_up_password(account_input);
         ASSERT_TRUE(account.has_value());
         lake::api::ServerOptions options;
         options.port = 0;
@@ -821,36 +824,21 @@ protected:
         return *found;
     }
 
+    // A new identity's document and a proof of its key for a Lake-pool sign-up (lake#931).
     void create_identity_document() {
-        const auto home =
-            lake::test::fixture_path("response-identity-" + lake::control::new_uuid_v4());
-        const char* previous = std::getenv("LIQUID_HOME");
-        const bool had_previous_home = previous != nullptr;
-        const std::string previous_home = previous == nullptr ? "" : previous;
-        ASSERT_EQ(setenv("LIQUID_HOME", home.c_str(), 1), 0);
-        auto signer = liquid::runtime::block_on(liquid::identity_detail::local_signer());
-        if (!had_previous_home) {
-            unsetenv("LIQUID_HOME");
-        } else {
-            setenv("LIQUID_HOME", previous_home.c_str(), 1);
+        lake::test::TestIdentity identity =
+            lake::test::test_identity("response-identity-" + lake::control::new_uuid_v4());
+        identity_document_ = identity.document;
+        identity_proof_ = lake::test::prove_identity(*store_, "lake", identity);
+    }
+
+    // A sign-up body with the identity document, and its proof on PostgreSQL.
+    std::string with_identity(nlohmann::json body) const {
+        body["identity_document"] = identity_document_;
+        if (std::get<0>(GetParam())) {
+            body["identity_proof"] = lake::test::identity_proof_json(identity_proof_);
         }
-        ASSERT_TRUE(signer.has_value());
-        const auto path = home / "identity" / (signer->identity().fingerprint + ".identity.cbor");
-        std::ifstream input(path, std::ios::binary);
-        ASSERT_TRUE(input);
-        const std::string bytes((std::istreambuf_iterator<char>(input)),
-                                std::istreambuf_iterator<char>());
-        identity_document_.resize(((bytes.size() + 2) / 3) * 4);
-        const int encoded_size =
-            EVP_EncodeBlock(reinterpret_cast<unsigned char*>(identity_document_.data()),
-                            reinterpret_cast<const unsigned char*>(bytes.data()),
-                            static_cast<int>(bytes.size()));
-        ASSERT_EQ(encoded_size, identity_document_.size());
-        while (identity_document_.ends_with('=')) {
-            identity_document_.pop_back();
-        }
-        std::replace(identity_document_.begin(), identity_document_.end(), '+', '-');
-        std::replace(identity_document_.begin(), identity_document_.end(), '/', '_');
+        return body.dump();
     }
 
     std::unique_ptr<HttpConnection> connect() {
@@ -944,6 +932,7 @@ protected:
     std::string database_uri_;
     std::string email_;
     std::string identity_document_;
+    lake::control::IdentityProof identity_proof_;
     const std::string password_ = "correct horse battery staple";
     const std::string instance_kek_ =
         "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
@@ -956,19 +945,16 @@ TEST_P(HttpResponseIsolation, FreshSignUpOwnsFirstRepositoryWithZeroInitialMeter
     const std::string email = "first-repository-" + lake::control::new_uuid_v4() + "@example.test";
     auto client = connect();
     // Signing up through the API sets the browser session, as the web app's form does.
-    const std::string signup =
-        client->request("POST",
-                        "/v1/sign_up_password",
-                        nlohmann::json{{"email", email},
-                                       {"display_name", "Newcomer"},
-                                       {"password", password_},
-                                       {"device_name", "browser"},
-                                       {"identity_document", identity_document_}}
-                            .dump(),
-                        "",
-                        "HTTP/1.1",
-                        {},
-                        "application/json");
+    const std::string signup = client->request("POST",
+                                               "/v1/sign_up_password",
+                                               with_identity({{"email", email},
+                                                              {"display_name", "Newcomer"},
+                                                              {"password", password_},
+                                                              {"device_name", "browser"}}),
+                                               "",
+                                               "HTTP/1.1",
+                                               {},
+                                               "application/json");
     ASSERT_TRUE(signup.starts_with("HTTP/1.1 200")) << signup;
     const std::string cookie = response_cookie_pair(signup);
     ASSERT_TRUE(cookie.starts_with("lake_session=")) << signup;
@@ -1050,19 +1036,16 @@ TEST_P(HttpResponseIsolation, PersonCreatesAnOrganizationInvitesAndAColleagueJoi
     }
     const std::string colleague_email =
         "colleague-" + lake::control::new_uuid_v4() + "@example.test";
-    const std::string signup =
-        client->request("POST",
-                        "/v1/sign_up_password",
-                        nlohmann::json{{"email", colleague_email},
-                                       {"display_name", "Colleague"},
-                                       {"password", password_},
-                                       {"device_name", "browser"},
-                                       {"identity_document", identity_document_}}
-                            .dump(),
-                        "",
-                        "HTTP/1.1",
-                        {},
-                        "application/json");
+    const std::string signup = client->request("POST",
+                                               "/v1/sign_up_password",
+                                               with_identity({{"email", colleague_email},
+                                                              {"display_name", "Colleague"},
+                                                              {"password", password_},
+                                                              {"device_name", "browser"}}),
+                                               "",
+                                               "HTTP/1.1",
+                                               {},
+                                               "application/json");
     ASSERT_TRUE(signup.starts_with("HTTP/1.1 200")) << signup;
     const std::string colleague = response_cookie_pair(signup);
 

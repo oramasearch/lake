@@ -493,6 +493,8 @@ public:
     Result<std::vector<SecretLeaseRoute>> claim_due_secret_leases(int limit,
                                                                   int hold_seconds) override;
     Result<IssuedSession> sign_up_password(const NewPasswordUser&) override;
+    Result<IdentityProofChallenge> begin_identity_proof(const std::string& pool_id,
+                                                        const std::string& document) override;
     Result<IssuedSession> sign_in_password(const PasswordSignIn&) override;
     Result<IssuedSession> sign_in_taap(const TaapSignIn&) override;
     Result<MfaEnrollment> enroll_mfa(const std::string& user_id,

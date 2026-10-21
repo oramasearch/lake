@@ -18,6 +18,7 @@
 #include <openssl/evp.h>
 #include <pqxx/pqxx>
 
+#include "identity_proof_test_support.hpp"
 #include "lake/api/apps.hpp"
 #include "lake/api/capabilities.hpp"
 #include "lake/api/registry.hpp"
@@ -26,54 +27,44 @@
 #include "lake/control/policy.hpp"
 #include "lake/control/postgres_store.hpp"
 #include "personal_customer_test_support.hpp"
+#include "repository_test_support.hpp"
 #include "stream_fixture.hpp"
 #include "temporary_directory.hpp"
 #include "webauthn_test_support.hpp"
-#include "repository_test_support.hpp"
 
 namespace {
 
 constexpr std::string_view test_instance_kek =
     "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
 
-std::string base64url(const std::vector<std::byte>& bytes) {
-    const auto* input = reinterpret_cast<const unsigned char*>(bytes.data());
-    const std::size_t size = bytes.size();
-    std::string encoded(((size + 2) / 3) * 4, '\0');
-    const int encoded_size = EVP_EncodeBlock(
-        reinterpret_cast<unsigned char*>(encoded.data()), input, static_cast<int>(size));
-    encoded.resize(static_cast<std::size_t>(encoded_size));
-    while (encoded.ends_with('=')) {
-        encoded.pop_back();
-    }
-    std::replace(encoded.begin(), encoded.end(), '+', '-');
-    std::replace(encoded.begin(), encoded.end(), '/', '_');
-    return encoded;
+// A new identity's document, and a proof of its key for sign-up or a first OAuth sign-in in
+// `pool_id` (lake#931).
+struct ProvenDocument {
+    std::string document;
+    lake::control::IdentityProof proof;
+};
+
+ProvenDocument
+proven_document(lake::control::Store& store, const std::string& pool_id, const std::string& label) {
+    lake::test::TestIdentity identity = lake::test::test_identity(label);
+    return {identity.document, lake::test::prove_identity(store, pool_id, identity)};
 }
 
-std::string signed_identity_document(std::string_view label) {
-    const std::filesystem::path home =
-        lake::test::fixture_path("identity-public-api-" + std::string(label));
-    std::error_code error;
-    std::filesystem::remove_all(home, error);
-    setenv("LIQUID_HOME", home.c_str(), 1);
-    auto signer = liquid::runtime::block_on(liquid::identity_detail::local_signer());
-    EXPECT_TRUE(signer) << signer.error().message;
-    const std::filesystem::path document_path =
-        home / "identity" / ((signer ? signer->identity().fingerprint : "") + ".identity.cbor");
-    std::ifstream input(document_path, std::ios::binary);
-    std::vector<std::byte> document;
-    for (char character; input.get(character);) {
-        document.push_back(static_cast<std::byte>(static_cast<unsigned char>(character)));
-    }
-    const auto decoded = liquid::decode_identity_document(document);
-    EXPECT_TRUE(decoded) << decoded.error().message;
-    if (decoded) {
-        const auto verified = liquid::verify_document(*decoded);
-        EXPECT_TRUE(verified && *verified);
-    }
-    std::filesystem::remove_all(home, error);
-    return base64url(document);
+// A Lake-pool password sign-up with a proven document.
+lake::control::NewPasswordUser proven_sign_up(lake::control::Store& store,
+                                              std::string email,
+                                              std::string display_name,
+                                              std::string device_name,
+                                              const std::string& label) {
+    ProvenDocument proven = proven_document(store, "lake", label);
+    lake::control::NewPasswordUser user{"lake",
+                                        std::move(email),
+                                        "correct horse battery staple",
+                                        std::move(display_name),
+                                        std::move(device_name),
+                                        std::move(proven.document)};
+    user.identity_proof = std::move(proven.proof);
+    return user;
 }
 
 lake::api::ApiResult claim_recovery_delivery(lake::api::Registry& registry,
@@ -105,12 +96,11 @@ protected:
         }
         uri = configured_uri;
         store = lake::control::make_postgres_store(uri, std::string(test_instance_kek));
-        input = {"lake",
-                 "provisioning-" + lake::control::new_uuid_v4() + "@example.test",
-                 "correct horse battery staple",
-                 "Personal customer",
-                 "browser",
-                 signed_identity_document(lake::control::new_uuid_v4())};
+        input = proven_sign_up(*store,
+                               "provisioning-" + lake::control::new_uuid_v4() + "@example.test",
+                               "Personal customer",
+                               "browser",
+                               lake::control::new_uuid_v4());
     }
 
     std::string uri;
@@ -171,7 +161,9 @@ TEST_F(PostgresProvisioning, OwnsOneCustomerAndCanCreateFirstRepository) {
     EXPECT_EQ(lake::test::personal_customer(*store, principal->user_id)->id, customer->id);
     input.email = "another-" + input.email;
     EXPECT_FALSE(store->sign_up_password(input));
-    input.identity_document = signed_identity_document(lake::control::new_uuid_v4());
+    ProvenDocument other_document = proven_document(*store, "lake", lake::control::new_uuid_v4());
+    input.identity_document = other_document.document;
+    input.identity_proof = other_document.proof;
     const auto other = store->sign_up_password(input);
     ASSERT_TRUE(other);
     const auto other_customer = lake::test::personal_customer(*store, other->session.user_id);
@@ -391,13 +383,15 @@ TEST(PostgresApplications, CapabilitiesPersistKeysUsersOrganizationsAndWebhooks)
     ASSERT_EQ(webhooks.value.at("items").size(), 1U);
     EXPECT_FALSE(webhooks.value.at("items").at(0).contains("secret"));
 
+    const ProvenDocument app_user = proven_document(*store, pool_id, "application-" + suffix);
     const auto sign_up =
         call("sign_up_password",
              {{"pool_id", pool_id},
               {"email", "postgres-app-user-" + suffix + "@example.test"},
               {"password", "correct horse battery staple"},
               {"display_name", "Postgres application user"},
-              {"identity_document", signed_identity_document("application-" + suffix)}});
+              {"identity_document", app_user.document},
+              {"identity_proof", lake::test::identity_proof_json(app_user.proof)}});
     ASSERT_TRUE(sign_up.ok) << sign_up.error.message;
     EXPECT_TRUE(sign_up.value.contains("access_token"));
     const auto users = call("list_application_users",
@@ -511,12 +505,8 @@ TEST(PostgresIdentity, SessionsTokensAndDeviceRevocation) {
     std::unique_ptr<lake::control::Store> store =
         lake::control::make_postgres_store(uri, std::string(test_instance_kek));
     const std::string email = "postgres-identity-" + std::to_string(getpid()) + "@example.test";
-    const auto sign_up = store->sign_up_password({"lake",
-                                                  email,
-                                                  "correct horse battery staple",
-                                                  "Postgres identity",
-                                                  "integration test",
-                                                  signed_identity_document("password")});
+    const auto sign_up = store->sign_up_password(
+        proven_sign_up(*store, email, "Postgres identity", "integration test", "password"));
     ASSERT_TRUE(sign_up) << sign_up.error().message;
 
     const auto context = store->context_for(sign_up->secret);
@@ -565,13 +555,15 @@ TEST(PostgresIdentity, SessionsTokensAndDeviceRevocation) {
     ASSERT_TRUE(provider) << provider.error().message;
     EXPECT_EQ(provider->client_secret, "oauth-client-secret");
     const std::string state = "state-" + std::to_string(getpid());
+    const ProvenDocument oauth_document = proven_document(*store, "lake", "oauth");
     const auto started = store->begin_oauth({"lake",
                                              provider_name,
                                              state,
                                              "pkce-verifier",
                                              "oidc-nonce",
                                              "integration browser",
-                                             signed_identity_document("oauth")});
+                                             oauth_document.document,
+                                             oauth_document.proof});
     ASSERT_TRUE(started) << started.error().message;
     const auto flow = store->consume_oauth(provider_name, state);
     ASSERT_TRUE(flow) << flow.error().message;
@@ -767,12 +759,11 @@ TEST(PostgresOfflineRecovery, GrantsRecoveryPathsAndRepositoryKeyCustody) {
     lake::api::register_core_capabilities(registry, "test");
     const std::string suffix = lake::control::new_uuid_v4().substr(0, 8);
     const auto create_account = [&](const std::string& label) {
-        return store->sign_up_password({"lake",
-                                        label + "-" + suffix + "@example.test",
-                                        "correct horse battery staple",
-                                        label,
-                                        label + " integration device",
-                                        signed_identity_document(label + "-" + suffix)});
+        return store->sign_up_password(proven_sign_up(*store,
+                                                      label + "-" + suffix + "@example.test",
+                                                      label,
+                                                      label + " integration device",
+                                                      label + "-" + suffix));
     };
     const auto target = create_account("offline-target");
     const auto first_admin = create_account("offline-admin-one");

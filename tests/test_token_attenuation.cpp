@@ -1,4 +1,5 @@
 #include "audit_test_support.hpp"
+#include "identity_proof_test_support.hpp"
 #include "personal_customer_test_support.hpp"
 #include "postgres_fixture.hpp"
 
@@ -43,27 +44,20 @@ using nlohmann::json;
 constexpr std::string_view instance_kek =
     "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
 
-std::string identity_document(const std::string& suffix) {
-    const auto home = lake::test::fixture_path("attenuation-" + suffix);
-    setenv("LIQUID_HOME", home.c_str(), 1);
-    const auto signer = liquid::runtime::block_on(liquid::identity_detail::local_signer());
-    EXPECT_TRUE(signer);
-    if (!signer) {
-        return {};
+// `body` with a new identity's document and, on PostgreSQL, the proof of its key sign-up needs with
+// it (lake#931); the in-memory store binds no document.
+json with_identity(json body,
+                   lake::control::Store& store,
+                   const std::string& pool_id,
+                   const std::string& suffix,
+                   bool postgres) {
+    lake::test::TestIdentity identity = lake::test::test_identity("attenuation-" + suffix);
+    body["identity_document"] = identity.document;
+    if (postgres) {
+        body["identity_proof"] =
+            lake::test::identity_proof_json(lake::test::prove_identity(store, pool_id, identity));
     }
-    std::ifstream input(home / "identity" / (signer->identity().fingerprint + ".identity.cbor"),
-                        std::ios::binary);
-    const std::string bytes((std::istreambuf_iterator<char>(input)), {});
-    std::string encoded(((bytes.size() + 2) / 3) * 4, '\0');
-    EVP_EncodeBlock(reinterpret_cast<unsigned char*>(encoded.data()),
-                    reinterpret_cast<const unsigned char*>(bytes.data()),
-                    bytes.size());
-    while (encoded.ends_with('=')) {
-        encoded.pop_back();
-    }
-    std::ranges::replace(encoded, '+', '-');
-    std::ranges::replace(encoded, '/', '_');
-    return encoded;
+    return body;
 }
 
 std::string request(unsigned short port,
@@ -151,10 +145,13 @@ protected:
         ASSERT_TRUE(server_->start()) << server_->reason();
         const std::string suffix = lake::control::new_uuid_v4();
         auto signup = call("sign_up_password",
-                           {{"email", suffix + "@example.test"},
-                            {"password", "correct horse battery staple"},
-                            {"display_name", "Token attenuation"},
-                            {"identity_document", identity_document(suffix)}},
+                           with_identity({{"email", suffix + "@example.test"},
+                                          {"password", "correct horse battery staple"},
+                                          {"display_name", "Token attenuation"}},
+                                         *store_,
+                                         "lake",
+                                         suffix,
+                                         postgres_),
                            "");
         ASSERT_TRUE(signup.value("ok", false));
         browser_ = signup.at("value");
@@ -525,12 +522,16 @@ TEST_P(TokenAttenuation, ApplicationPoolsReturnOnlyDerivedSessionBearer) {
                                   operator_secret_);
     ASSERT_TRUE(application.at("ok"));
     const auto suffix = lake::control::new_uuid_v4();
+    const std::string pool_id = application.at("value").at("pool_id");
     const auto signup = call("sign_up_password",
-                             {{"pool_id", application.at("value").at("pool_id")},
-                              {"email", suffix + "@example.test"},
-                              {"password", "correct horse battery staple"},
-                              {"display_name", "Application token issuer"},
-                              {"identity_document", identity_document(suffix)}},
+                             with_identity({{"pool_id", pool_id},
+                                            {"email", suffix + "@example.test"},
+                                            {"password", "correct horse battery staple"},
+                                            {"display_name", "Application token issuer"}},
+                                           *store_,
+                                           pool_id,
+                                           suffix,
+                                           postgres_),
                              "");
     ASSERT_TRUE(signup.at("ok"));
     ASSERT_TRUE(signup.at("value").contains("access_token"));
@@ -573,12 +574,15 @@ protected:
         }
         database_uri_ = uri;
         store_ = lake::control::make_postgres_store(database_uri_, std::string(instance_kek));
-        const auto account = store_->sign_up_password({"lake",
-                                                       "lookup@example.test",
-                                                       "correct horse battery staple",
-                                                       "Lookup test",
-                                                       "lookup device",
-                                                       identity_document("lookup")});
+        lake::test::TestIdentity identity = lake::test::test_identity("attenuation-lookup");
+        lake::control::NewPasswordUser lookup{"lake",
+                                              "lookup@example.test",
+                                              "correct horse battery staple",
+                                              "Lookup test",
+                                              "lookup device",
+                                              identity.document};
+        lookup.identity_proof = lake::test::prove_identity(*store_, "lake", identity);
+        const auto account = store_->sign_up_password(lookup);
         ASSERT_TRUE(account) << account.error().message;
         browser_ = *account;
         lake::api::ServerOptions options;

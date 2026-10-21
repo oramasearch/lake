@@ -47,7 +47,10 @@ Sign-in pages leave with a full page load (`leaveFor` in `signIn.ts`), so the wh
 
 Links between sign-in pages carry `next` and `return_to` along. Under Clerk, the pending return is
 posted with Clerk's token as `next` ([clerk.md](../api/clerk.md#how-it-works)). OAuth sends the
-browser to the provider's `authorization_url`; lake's callback sets the cookie.
+browser to the provider's `authorization_url`; lake's callback sets the cookie. An OAuth first
+sign-in that brings an identity document first calls `begin_identity_proof`, shows the challenge and
+the `liquid sign artifact` command, and sends what it printed as `start_oauth`'s `identity_proof`
+([identity.md](../api/identity.md#proving-you-hold-the-key)).
 
 ## Browser sessions
 

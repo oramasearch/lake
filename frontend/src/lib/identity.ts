@@ -18,6 +18,10 @@ export function keySummary(identity: Pick<AccountIdentity, "key"|"linked"|"manag
     return "Your own key: you registered it when you signed up.";
 }
 
+/** A challenge for proving you hold an identity document's key before sign-up or a first OAuth
+ * sign-in binds it to a new account (`begin_identity_proof`, lake#931). */
+export type IdentityProofChallenge = {challenge : string; nonce : string; expires_at : number; command : string};
+
 /** The command that signs the challenge with the person's liquid identity. */
 export function signCommand(challenge: string): string {
     return `liquid sign artifact ${challenge}`;

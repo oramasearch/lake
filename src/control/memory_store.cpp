@@ -3743,6 +3743,14 @@ std::string session_reason(const Session& session) {
 
 } // namespace
 
+// The in-memory store binds no identity document (each new user gets a random identity), so it
+// issues no proof challenge either (lake#931).
+Result<IdentityProofChallenge> InMemoryStore::begin_identity_proof(const std::string&,
+                                                                   const std::string&) {
+    return std::unexpected(
+        StoreError{"not_supported", "identity proofs are issued by the PostgreSQL control plane"});
+}
+
 Result<IssuedSession> InMemoryStore::sign_up_password(const NewPasswordUser& input) {
     if (input.email.empty() || input.password.empty())
         return std::unexpected(StoreError{"invalid_input", "email and password are required"});

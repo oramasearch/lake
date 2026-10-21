@@ -6,7 +6,9 @@
 // statement lake issues for this account with `liquid sign artifact <challenge>`; libliquid's
 // public codecs decode their identity document and that signature, and libliquid verifies both.
 
+#include <cstdint>
 #include <expected>
+#include <span>
 #include <string>
 #include <string_view>
 
@@ -54,6 +56,21 @@ std::string challenge(const nlohmann::json& statement);
 // signature as JSON for the link document.
 std::expected<nlohmann::json, StoreError> verify_challenge_signature(
     std::string_view document, std::string_view challenge, std::string_view signed_output);
+
+// Enrolling a document (lake#931, docs/api/identity.md#proving-you-hold-the-key). A document is
+// public, so password sign-up and a first OAuth sign-in bind one to a new account only with a fresh
+// signature by its key over this challenge, which Lake issues without storing it: `sha256:<hex>` of
+// an HMAC-SHA256, under a key derived from the instance key, over the canonical CBOR of the pool,
+// the document (identifier, key fingerprint and hash), a random nonce and the expiry. Only this
+// Lake can make one, so a nonce and expiry a client sends back are ones it issued for that pool and
+// document. Empty when the HMAC fails.
+inline constexpr std::string_view enrollment_purpose = "lake_enroll_identity";
+inline constexpr int enrollment_lifetime_seconds = 300;
+std::string enrollment_challenge(std::span<const unsigned char> instance_kek,
+                                 std::string_view pool_id,
+                                 const Document& document,
+                                 std::string_view nonce,
+                                 std::int64_t expires_at);
 
 // The link body both keys stand behind; the managed key signs it as `identity_link`.
 nlohmann::json link_body(const IdentityLinkChallenge& challenge, const std::string& linked_at);

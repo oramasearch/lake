@@ -1067,6 +1067,20 @@ std::string form_field(std::string_view body, std::string_view name) {
     return {};
 }
 
+// identity_proof from a hosted form's second step (lake#931); null when the form carries none.
+nlohmann::json identity_proof_form(std::string_view body) {
+    const std::string signature = form_field(body, "identity_signature");
+    if (signature.empty()) {
+        return nullptr;
+    }
+    const std::string expires = form_field(body, "identity_expires_at");
+    std::int64_t expires_at = 0;
+    std::from_chars(expires.data(), expires.data() + expires.size(), expires_at);
+    return {{"nonce", form_field(body, "identity_nonce")},
+            {"expires_at", expires_at},
+            {"signature", signature}};
+}
+
 struct MultipartFile {
     std::string name;
     std::vector<std::byte> contents;
@@ -10163,6 +10177,9 @@ struct ApiServer::Impl {
         if (capability == "sign_up_password") {
             input["display_name"] = form_field(body, "display_name");
             input["identity_document"] = form_field(body, "identity_document");
+            if (nlohmann::json proof = identity_proof_form(body); !proof.is_null()) {
+                input["identity_proof"] = std::move(proof);
+            }
         }
         if (capability == "verify_mfa") {
             input["code"] = form_field(body, "code");
@@ -10171,6 +10188,19 @@ struct ApiServer::Impl {
             unwrap(co_await registry.call_async(std::string(capability), input, context));
         if (!result.ok && result.error.code == "mfa_required") {
             co_return co_await redirect(route, "/apps/" + application->id + "/mfa");
+        }
+        if (!result.ok && result.error.code == "identity_proof_required") {
+            co_return co_await send_identity_proof_step(
+                route,
+                *application,
+                context,
+                "sign-up",
+                {.action = "/identity/sign-up",
+                 .fields = {{"email", input.value("email", "")},
+                            {"display_name", input.value("display_name", "")},
+                            {"device_name", input.value("device_name", "")},
+                            {"identity_document", input.value("identity_document", "")}},
+                 .password = true});
         }
         if (!result.ok) {
             const std::string page = capability == "sign_up_password"
@@ -10182,6 +10212,38 @@ struct ApiServer::Impl {
         const std::string destination = application_redirect_location(*application, result);
         co_return co_await redirect(
             route, destination, browser_session_cookie(route, result.value.value("secret", "")));
+    }
+
+    // A hosted sign-up or OAuth start whose identity document needs a proof of its key (lake#931):
+    // the page with begin_identity_proof's challenge, or `page` with the reason it could not issue
+    // one.
+    boost::http::route_task send_identity_proof_step(boost::http::route_params& route,
+                                                     const control::Application& application,
+                                                     ApiContext& context,
+                                                     std::string_view page,
+                                                     WebUiIdentityProof proof) {
+        std::string document;
+        for (const auto& [name, value] : proof.fields) {
+            if (name == "identity_document") {
+                document = value;
+            }
+        }
+        const ApiResult issued = unwrap(co_await registry.call_async(
+            "begin_identity_proof",
+            {{"pool_id", application.pool_id}, {"identity_document", document}},
+            context));
+        if (!issued.ok) {
+            co_return co_await send_application_identity_page(
+                route, application, page, issued.error.message);
+        }
+        proof.challenge = issued.value.value("challenge", "");
+        proof.nonce = issued.value.value("nonce", "");
+        proof.expires_at = issued.value.value("expires_at", std::int64_t{0});
+        co_return co_await send_text(route,
+                                     boost::http::status::ok,
+                                     web_ui_application_identity_proof(application, proof, {}),
+                                     "text/html; charset=utf-8",
+                                     "no-store");
     }
 
     boost::http::route_task serve_application_passkey(boost::http::route_params& route,
@@ -10247,13 +10309,32 @@ struct ApiServer::Impl {
         }
         ApiContext context = context_for(route);
         context.public_host = request_host(route);
-        const ApiResult result = unwrap(co_await registry.call_async(
-            "start_oauth",
-            {{"pool_id", application->pool_id},
-             {"provider", form_field(body, "provider")},
-             {"device_name", form_field(body, "device_name")},
-             {"identity_document", form_field(body, "identity_document")}},
-            context));
+        nlohmann::json input = {{"pool_id", application->pool_id},
+                                {"provider", form_field(body, "provider")},
+                                {"device_name", form_field(body, "device_name")},
+                                {"identity_document", form_field(body, "identity_document")}};
+        if (nlohmann::json proof = identity_proof_form(body); !proof.is_null()) {
+            input["identity_proof"] = std::move(proof);
+        }
+        const ApiResult result =
+            unwrap(co_await registry.call_async("start_oauth", input, context));
+        if (!result.ok && result.error.code == "identity_proof_required") {
+            // The page renders in the application's settings (lake#351).
+            const auto configured =
+                configured_result(co_await configured_for(application_for_route(route), route));
+            if (!configured) {
+                co_return co_await send_application_error(route, configured.error());
+            }
+            co_return co_await send_identity_proof_step(
+                route,
+                *configured,
+                context,
+                "sign-in",
+                {.action = "/identity/oauth",
+                 .fields = {{"provider", input.value("provider", "")},
+                            {"device_name", input.value("device_name", "")},
+                            {"identity_document", input.value("identity_document", "")}}});
+        }
         if (!result.ok) {
             co_return co_await serve_application_identity_page(
                 route, "sign-in", result.error.message);

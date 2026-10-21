@@ -33,6 +33,7 @@ constexpr std::array central = std::to_array<std::string_view>({
     // An application's sign-in flow is identity: who signed in, before any workspace is chosen.
     "begin_application_authorization",
     "begin_email_recovery",
+    "begin_identity_proof",
     "begin_own_identity",
     "begin_passkey_registration",
     "begin_passkey_sign_in",

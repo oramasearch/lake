@@ -397,7 +397,8 @@ and `Experiments.CompareRunsAnswersItsGetFormWithRepeatedKeysOrACommaList`
 | `export_transparency_replication_batch` | action | source tree-size cursor | verified log suffix with base/head commitments and current checkpoint | [replication.md](replication.md) |
 | `replicate_transparency_log` | action | source Lake URL | applied tree size, root, checkpoint sequence, and catch-up state | [replication.md](replication.md) |
 | `replicate_repository` | action | repository, source instance, source Lake URL | durable liquid cursor, transfer totals, and ref count | [replication.md](replication.md) |
-| `sign_up_password`, `sign_in_password`, `sign_in_taap`, `verify_mfa` | action, public entry | password (an identity document optional in Lake's pool), one-use TAAP assertion, or MFA proof | browser session + secret | [identity.md](identity.md) |
+| `sign_up_password`, `sign_in_password`, `sign_in_taap`, `verify_mfa` | action, public entry | password (an identity document optional in Lake's pool, with `identity_proof` when given), one-use TAAP assertion, or MFA proof | browser session + secret | [identity.md](identity.md) |
+| `begin_identity_proof` | action, public entry | pool, identity document | a five-minute challenge to sign with `liquid sign artifact` before sign-up or a first OAuth sign-in binds the document | [identity.md](identity.md#proving-you-hold-the-key) |
 | `register_application`, `list_applications`, `get_application`, `update_application_theme`, `rotate_application_signing_key` | action/read | customer, application registration, theme, or application id | isolated pool registration and key metadata | [apps.md](apps.md) |
 | `application_jwks`, `issue_application_jwt` | public read / protected action | application, its `workspace_id` (JWT) and active user ids | Ed25519 JWKS or short-lived audience-bound JWT | [apps.md](apps.md) |
 | `begin_application_authorization`, `exchange_application_authorization_code` | protected/public action | application, exact redirect, state, nonce, PKCE challenge; then code and verifier | one-use authorization result, then access and ID tokens | [apps.md](apps.md) |
@@ -408,7 +409,7 @@ and `Experiments.CompareRunsAnswersItsGetFormWithRepeatedKeysOrACommaList`
 | `begin_passkey_registration`, `register_passkey` | action | WebAuthn client data and attestation object | creation options, then confirmation with a lake-signed TAAP binding stored on the device | [identity.md](identity.md) |
 | `begin_passkey_sign_in`, `sign_in_passkey` | action, public entry | pool, then WebAuthn assertion | request options, then browser session + secret | [identity.md](identity.md) |
 | `register_oauth_provider` | action, operator | issuer, client id, secret, scopes | confirmation | [identity.md](identity.md) |
-| `start_oauth` | action, public entry | pool, provider, device name, identity document for a new user | authorization URL | [identity.md](identity.md) |
+| `start_oauth` | action, public entry | pool, provider, device name, identity document and `identity_proof` for a new user | authorization URL | [identity.md](identity.md) |
 | `create_token`, `list_sessions`, `revoke_session` | action/read | name/scopes or session id | tokens bounded by issuer scopes and expiry, with parent revocation | [identity.md](identity.md) |
 | `list_devices`, `revoke_device` | read/action | device id for revocation | device data, including passkey credential IDs and signed bindings | [identity.md](identity.md) |
 | `account_identity`, `begin_own_identity`, `use_own_identity` | read/action, signed-in person | identity document; challenge and `liquid sign artifact` output | which key the account signs with; the challenge; the linked account identity | [identity.md](identity.md#your-own-identity) |

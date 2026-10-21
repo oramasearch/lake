@@ -8,8 +8,8 @@ keys. Offline device grants are specified separately in [`offline.md`](offline.m
 
 Identity capabilities live in the single registry and are therefore available as REST, OpenAPI,
 and MCP tools. `sign_up_password`, `sign_in_password`, `verify_mfa`,
-`begin_passkey_sign_in`, `sign_in_passkey`, `start_oauth`, and `sign_in_taap` are unauthenticated
-entry points.
+`begin_passkey_sign_in`, `sign_in_passkey`, `begin_identity_proof`, `start_oauth`, and
+`sign_in_taap` are unauthenticated entry points.
 `enroll_mfa`, `disable_mfa`, `begin_passkey_registration`, `register_passkey`,
 `create_token`, `list_sessions`, `revoke_session`, `list_devices`, and `revoke_device` require
 the same row-resolved session or operator credential as every other protected capability.
@@ -54,7 +54,9 @@ challenge. The callback is `GET /v1/oauth/<provider>/callback`, as OAuth provide
 browser redirect rather than a JSON capability call.
 
 For a first OAuth sign-in, `start_oauth` also accepts the client-held TAAP/1 identity document and
-carries it through the short-lived flow. The Postgres store verifies and records that document
+carries it through the short-lived flow. It takes the document only with `identity_proof`, a fresh
+signature by the document's key ([Proving you hold the key](#proving-you-hold-the-key)); without
+one it answers `identity_proof_required`. The Postgres store verifies and records that document
 before creating the user and OAuth credential. A returning linked identity does not need to send
 the document again.
 
@@ -132,7 +134,9 @@ identity](#your-own-identity)). With one, and always in an application pool, pas
 the client-held TAAP/1 document as a base64url-encoded canonical-CBOR `identity_document`. lake decodes and verifies its self-signature through libliquid's public
 `decode_identity_document`, `encode_identity_document`, and `verify_document` APIs, hashes the
 complete canonical record with SHA-512/256, writes `identity_documents`, and binds the resulting
-`taap_id` to the new user. lake never receives a person's private key.
+`taap_id` to the new user. A document is public, so sign-up takes one only with `identity_proof`, a
+fresh signature by its key ([Proving you hold the key](#proving-you-hold-the-key)). lake never
+receives a person's private key.
 
 `sign_in_taap` lets that registered user return without a password. The client signs
 `pool_id + "\n" + nonce + "\n" + issued_at` with the key in its liquid identity document. Lake
@@ -308,6 +312,83 @@ exception because the provider invokes it as a browser redirect.
 OAuth registration, PKCE callback processing, JWKS verification and WebAuthn ceremonies use the
 `0007_identity_core` tables. Keep the passkey browser adapter limited to the one documented inline
 script that calls `navigator.credentials`.
+
+## Proving you hold the key
+
+**Status: implemented 2026-10-21 (lake#931), not deployed. No migration.**
+
+### What
+
+An identity document is public: `liquid identity show --document` prints it to be shared. Holding
+one proves nothing, so `sign_up_password` with an `identity_document` and `start_oauth` with one
+(a first OAuth sign-in) bind it to a new account only with a fresh signature by the document's key
+over a challenge Lake issued for that document and pool. Without the proof they answer
+`identity_proof_required` (403) and create nothing. Before lake#931 anyone holding a copy of a
+person's document could sign up as that identity in any pool where it was not yet taken.
+
+| Capability | Kind | Input | Output |
+|---|---|---|---|
+| `begin_identity_proof` | action, unauthenticated | `{pool_id, identity_document}` (`pool_id` defaults to `lake`) | `{challenge, nonce, expires_at, command}` |
+| `sign_up_password`, `start_oauth` | action, unauthenticated | `identity_proof: {nonce, expires_at, signature}` beside `identity_document` | as before |
+
+`signature` is everything `liquid sign artifact <challenge>` printed (its `signature=` line, or the
+hex alone); `nonce` and `expires_at` are returned unchanged from `begin_identity_proof`.
+
+### How
+
+1. `begin_identity_proof` verifies the document as `begin_own_identity` does
+   (`own_identity::verify_document`: canonical CBOR, a valid self-signature, an initial document
+   whose identifier is its own key's fingerprint) and answers a challenge valid for five minutes.
+   Lake stores nothing: the challenge is `sha256:<hex>` of an HMAC-SHA256, under a key derived from
+   `LAKE_INSTANCE_KEK`, over the canonical CBOR of `{purpose: "lake_enroll_identity", pool,
+   taap_id, key_fingerprint, document_hash, nonce, expires_at}`
+   (`own_identity::enrollment_challenge`). Only this Lake can make one, so the nonce and expiry a
+   client returns are ones it issued for that pool and document.
+2. The person runs `liquid sign artifact <challenge>` with their identity.
+3. The Postgres store's `sign_up_password` and `begin_oauth` recompute the challenge from the
+   request's pool, the document, the nonce and the expiry, refuse an expired one, and verify the
+   signature with the document's key (`own_identity::verify_challenge_signature`). A signature by
+   another key, over a challenge for another pool or document, or after the expiry is
+   `unauthorized`.
+4. A proof is used once: sign-up records `identity_proof:<challenge>` in `identity_taap_assertions`
+   with the new user; an OAuth start records it as a spent row in `identity_oauth_flows` (state hash
+   `sha256(identity_proof:<challenge>)`, already used, so it can never be consumed), since there is no
+   user yet. Each path checks both before accepting a proof, so a second use on either is
+   `unauthorized`.
+
+Enterprise OIDC flows (`start_sso_oidc`, providers `sso-<id>`) carry a `taap_id`, not a document, to
+`sign_in_sso`; caller-chosen TAAP ids there are tracked in
+[lake#872](https://github.com/oramasearch/lake/issues/872). The in-memory store binds no document (it
+gives each new user a random identity), so it needs no proof.
+
+The hosted application pages and the console run the same two steps: a sign-up or OAuth form that
+brings a document and is answered `identity_proof_required` shows the challenge, the command and a
+field for its output, then sends the request again with `identity_proof`
+([hosted pages](apps.md), [Lake's sign-in](../ui/web-app.md)).
+
+### Limits
+
+- A rotated identity cannot enroll with its current document alone (as for
+  [your own identity](#your-own-identity)): its key does not prove its identifier.
+- Clients that sent `identity_document` without a proof are refused until they add the second
+  step.
+
+### Verify
+
+```sh
+LAKE_TEST_DB_URI=... ctest --test-dir build -R 'IdentityProof'
+```
+
+`PostgresIdentityProof.*` signs up and starts OAuth with another identity's genuine document and no
+proof, a proof by another key, a replayed proof, an expired challenge and a challenge minted for
+another pool (all refused, no user created), and with a genuine proof (accepted).
+
+### Change it
+
+The challenge is `own_identity::enrollment_challenge` (`src/control/own_identity.cpp`); the checks
+are `verify_identity_proof` and `identity_proof_used` in `src/control/postgres_store.cpp`; the
+capability is `begin_identity_proof` in `src/api/capabilities.cpp`. A change to the statement
+invalidates the challenges outstanding, which last five minutes.
 
 ## Your own identity
 

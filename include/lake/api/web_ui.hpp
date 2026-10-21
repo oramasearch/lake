@@ -1,9 +1,11 @@
 #pragma once
 
+#include <cstdint>
 #include <optional>
 #include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include <nlohmann/json.hpp>
@@ -60,6 +62,19 @@ std::string web_ui_application_sign_in(const control::Application& application,
 std::string web_ui_application_mfa(const control::Application& application, std::string_view error);
 std::string web_ui_application_passkey_sign_in(const control::Application& application,
                                                std::string_view error);
+// The second step of a hosted sign-up or OAuth start that brings an identity document (lake#931,
+// docs/api/identity.md#proving-you-hold-the-key): the challenge begin_identity_proof issued, the
+// `liquid sign artifact` command and a field for what it printed, posting back to `action` with
+// `fields` kept as hidden inputs. `password` asks for the password again, never echoing it.
+struct WebUiIdentityProof {
+    std::string action, challenge, nonce;
+    std::int64_t expires_at = 0;
+    std::vector<std::pair<std::string, std::string>> fields;
+    bool password = false;
+};
+std::string web_ui_application_identity_proof(const control::Application& application,
+                                              const WebUiIdentityProof& proof,
+                                              std::string_view error);
 
 // The apex host's region picker (lake#757, docs/ui/regions.md): every region of the deployment as a
 // choice, `selected` preselected, posting back to `target` (the request's own path and query),

@@ -142,6 +142,15 @@ ApiResult origin_answer(std::expected<ApiResult, liquid::error> completed) {
                      : ApiResult::failure("store_error", completed.error().message);
 }
 
+// The identity_proof of sign_up_password and start_oauth (lake#931); empty when absent, which the
+// store refuses beside a document.
+control::IdentityProof identity_proof_input(const json& input) {
+    const json proof = input.value("identity_proof", json::object());
+    return {proof.value("nonce", ""),
+            proof.value("expires_at", std::int64_t{0}),
+            proof.value("signature", "")};
+}
+
 ApiResult from_sync_store_error(const SyncStoreError& error) {
     return ApiResult::failure(error.code, error.message);
 }
@@ -3111,6 +3120,64 @@ void register_identity_capabilities(Registry& registry) {
                                          {"access_token", {{"type", "string"}}},
                                          {"token_type", {{"type", "string"}}},
                                          {"expires_in", {{"type", "integer"}}}}}};
+    // The proof that the person holds an identity document's key (lake#931): the nonce and expiry
+    // begin_identity_proof issued and what `liquid sign artifact <challenge>` printed.
+    const json identity_proof_schema = {
+        {"type", "object"},
+        {"properties",
+         {{"nonce", {{"type", "string"}}},
+          {"expires_at", {{"type", "integer"}}},
+          {"signature", {{"type", "string"}}}}},
+        {"required", json::array({"nonce", "expires_at", "signature"})},
+        {"additionalProperties", false}};
+    registry.add(Capability{
+        .name = "begin_identity_proof",
+        .title = "Begin identity proof",
+        .description = "Issue a five-minute challenge proving you hold the key of an identity "
+                       "document, which sign_up_password and a first start_oauth need before "
+                       "they bind the document to a new account. Sign it with `liquid sign "
+                       "artifact <challenge>` and send its nonce and expires_at with what that "
+                       "printed as identity_proof, in the same pool.",
+        .input_schema = {{"type", "object"},
+                         {"properties",
+                          {{"pool_id", {{"type", "string"}}},
+                           {"identity_document", {{"type", "string"}}}}},
+                         {"required", json::array({"identity_document"})},
+                         {"additionalProperties", false}},
+        .output_schema = {{"type", "object"},
+                          {"properties",
+                           {{"challenge", {{"type", "string"}}},
+                            {"nonce", {{"type", "string"}}},
+                            {"expires_at", {{"type", "integer"}}},
+                            {"command", {{"type", "string"}}}}}},
+        .kind = CapabilityKind::Action,
+        .requires_auth = false,
+        .object = "authentication",
+        .action = "write",
+        .resolve_object = global_object,
+        .async_handler = [](const json& input,
+                            ApiContext& context) -> liquid::runtime::task<ApiResult> {
+            if (!context.store) {
+                co_return no_store();
+            }
+            const std::string pool_id = input.value("pool_id", "lake");
+            if (const ApiResult origin =
+                    origin_answer(co_await authorize_application_origin(context, pool_id));
+                !origin.ok) {
+                co_return origin;
+            }
+            const auto issued = context.store->begin_identity_proof(
+                pool_id, input.at("identity_document").get<std::string>());
+            if (!issued) {
+                co_return ApiResult::failure(
+                    issued.error().code, issued.error().message, "/identity_document");
+            }
+            co_return ApiResult::success(
+                {{"challenge", issued->challenge},
+                 {"nonce", issued->nonce},
+                 {"expires_at", issued->expires_at},
+                 {"command", "liquid sign artifact " + issued->challenge}});
+        }});
     registry.add(Capability{
         .name = "sign_up_password",
         .title = "Sign up with password",
@@ -3121,7 +3188,9 @@ void register_identity_capabilities(Registry& registry) {
                        "Duplicate email or identity returns conflict; sign in to resume. In the "
                        "Lake pool identity_document is optional: without it Lake creates a "
                        "managed key for the account, which the person can later replace with "
-                       "their own identity (use_own_identity).",
+                       "their own identity (use_own_identity). With it, identity_proof is "
+                       "required: a signature by the document's key over begin_identity_proof's "
+                       "challenge.",
         .input_schema = {{"type", "object"},
                          {"properties",
                           {{"pool_id", {{"type", "string"}}},
@@ -3129,7 +3198,8 @@ void register_identity_capabilities(Registry& registry) {
                            {"password", {{"type", "string"}}},
                            {"display_name", {{"type", "string"}}},
                            {"device_name", {{"type", "string"}}},
-                           {"identity_document", {{"type", "string"}}}}},
+                           {"identity_document", {{"type", "string"}}},
+                           {"identity_proof", identity_proof_schema}}},
                          {"required", json::array({"email", "password"})},
                          {"additionalProperties", false}},
         .output_schema = session_issue_schema,
@@ -3154,6 +3224,7 @@ void register_identity_capabilities(Registry& registry) {
                                           input.value("display_name", ""),
                                           input.value("device_name", "browser"),
                                           input.value("identity_document", "")};
+            user.identity_proof = identity_proof_input(input);
             // Lake's own sign-up without a document gets a managed key (lake#762, decision 65).
             if (pool_id == "lake" &&
                 user.identity_document.find_first_not_of(" \t\r\n") == std::string::npos) {
@@ -3610,13 +3681,16 @@ void register_identity_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "start_oauth",
         .title = "Start OAuth sign-in",
-        .description = "Create a one-use OAuth authorization flow with PKCE and state.",
+        .description = "Create a one-use OAuth authorization flow with PKCE and state. A first "
+                       "sign-in's identity_document needs identity_proof: a signature by its key "
+                       "over begin_identity_proof's challenge.",
         .input_schema = {{"type", "object"},
                          {"properties",
                           {{"pool_id", {{"type", "string"}}},
                            {"provider", {{"type", "string"}}},
                            {"device_name", {{"type", "string"}}},
-                           {"identity_document", {{"type", "string"}}}}},
+                           {"identity_document", {{"type", "string"}}},
+                           {"identity_proof", identity_proof_schema}}},
                          {"required", json::array({"provider"})},
                          {"additionalProperties", false}},
         .output_schema = {{"type", "object"},
@@ -3660,7 +3734,8 @@ void register_identity_capabilities(Registry& registry) {
                                     control::identity_crypto::random_secret(),
                                     control::identity_crypto::random_secret(),
                                     input.value("device_name", "browser"),
-                                    input.value("identity_document", "")};
+                                    input.value("identity_document", ""),
+                                    identity_proof_input(input)};
             if (flow.state.empty() || flow.code_verifier.empty() || flow.nonce.empty()) {
                 co_return ApiResult::failure("store_error", "could not generate OAuth flow material");
             }

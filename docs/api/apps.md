@@ -197,6 +197,11 @@ When a redirect URI is configured, successful password, MFA, passkey, and OAuth 
 returns `access_token`, `token_type`, and `expires_in` in its URI fragment; fragments are not sent
 to the redirect server and the application reads and clears them in its own page. Lake never
 redirects to a URI outside the registration.
+A sign-up, or an OAuth start, that brings an identity document and is answered
+`identity_proof_required` renders a second page (`web_ui_application_identity_proof`): the
+`begin_identity_proof` challenge, the `liquid sign artifact` command and a field for its output, with
+the first form's fields kept (the password is typed again, never echoed into the page). Posting it
+sends the request again with `identity_proof` ([identity.md](identity.md#proving-you-hold-the-key)).
 The hosted passkey page contains the sole application-page script: the documented
 `navigator.credentials.get` WebAuthn call and its JSON posts. The other application identity
 pages contain no script. Theme colors accept hexadecimal CSS colors; all application values are

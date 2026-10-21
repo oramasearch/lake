@@ -256,6 +256,19 @@ struct Principal {
     std::string workload_revision;
     std::string workload_token_hash;
 };
+// A proof that the person holds the key of the identity document they enroll with (lake#931,
+// docs/api/identity.md#proving-you-hold-the-key): the nonce and expiry begin_identity_proof issued,
+// and what `liquid sign artifact <challenge>` printed.
+struct IdentityProof {
+    std::string nonce;
+    std::int64_t expires_at = 0;
+    std::string signature;
+};
+// The challenge begin_identity_proof answers; Lake stores nothing for it.
+struct IdentityProofChallenge {
+    std::string challenge, nonce;
+    std::int64_t expires_at = 0;
+};
 struct NewPasswordUser {
     std::string pool_id, email, password, display_name, device_name, identity_document;
     // The new user's id, chosen by the caller so that an application's workspace can record the
@@ -264,6 +277,8 @@ struct NewPasswordUser {
     // The managed key lake minted for a lake-pool sign-up without an identity document (lake#762,
     // decision 65); empty when the person brought their own document.
     std::string custodial_taap_id, custodial_public_key, custodial_wrapped_seed;
+    // Required with identity_document (lake#931).
+    IdentityProof identity_proof;
 };
 struct PasswordSignIn {
     std::string pool_id, email, password, totp_code, device_name;
@@ -1274,6 +1289,9 @@ struct OAuthProvider {
 };
 struct OAuthFlow {
     std::string pool_id, provider, state, code_verifier, nonce, device_name, identity_document;
+    // Required with an identity_document outside enterprise (`sso-`) flows (lake#931); never
+    // stored with the flow.
+    IdentityProof identity_proof;
 };
 struct SsoProvider {
     std::string id;
@@ -2227,6 +2245,10 @@ public:
     // Identity core. All bearer and cookie values are resolved here on every
     // request so a revoked session or device is rejected immediately.
     virtual Result<IssuedSession> sign_up_password(const NewPasswordUser&) = 0;
+    // A challenge to sign with the key of `identity_document` before sign_up_password or a first
+    // OAuth sign-in in `pool_id` binds that document to a new account (lake#931).
+    virtual Result<IdentityProofChallenge>
+    begin_identity_proof(const std::string& pool_id, const std::string& identity_document) = 0;
     virtual Result<IssuedSession> sign_in_password(const PasswordSignIn&) = 0;
     virtual Result<IssuedSession> sign_in_taap(const TaapSignIn&) = 0;
     virtual Result<MfaEnrollment> enroll_mfa(const std::string& user_id,
