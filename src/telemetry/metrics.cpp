@@ -1547,6 +1547,12 @@ public:
     control::Result<control::SsoProvider> get_sso_provider(const std::string& id) override {
         return call("get_sso_provider", [&] { return store_->get_sso_provider(id); });
     }
+    control::Result<void> begin_saml(const control::SamlRequest& value) override {
+        return call("begin_saml", [&] { return store_->begin_saml(value); });
+    }
+    control::Result<control::SamlRequest> consume_saml(const control::SamlAnswer& value) override {
+        return call("consume_saml", [&] { return store_->consume_saml(value); });
+    }
     control::Result<control::OAuthProvider> get_sso_oidc_provider(const std::string& id) override {
         return call("get_sso_oidc_provider", [&] { return store_->get_sso_oidc_provider(id); });
     }

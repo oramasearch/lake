@@ -535,6 +535,8 @@ public:
     Result<OAuthProvider> get_oauth_provider(const std::string& pool_id,
                                              const std::string& provider) override;
     Result<void> begin_oauth(const OAuthFlow&) override;
+    Result<void> begin_saml(const SamlRequest&) override;
+    Result<SamlRequest> consume_saml(const SamlAnswer&) override;
     Result<OAuthFlow> consume_oauth(const std::string& provider, const std::string& state) override;
     Result<IssuedSession> create_token(const NewToken&) override;
     Result<std::vector<Session>> list_sessions(const std::string& user_id,
@@ -782,6 +784,14 @@ private:
         bool used = false;
     };
     std::vector<OAuthFlowRecord> oauth_flows_;
+    struct SamlRequestRecord {
+        SamlRequest request;
+        std::chrono::steady_clock::time_point expires_at;
+        bool used = false;
+    };
+    std::vector<SamlRequestRecord> saml_requests_;
+    // (provider id, assertion id) to the assertion's expiry in Unix seconds.
+    std::map<std::pair<std::string, std::string>, std::int64_t> saml_assertions_;
     std::vector<Device> devices_;
     std::vector<Session> sessions_;
     std::vector<std::pair<std::string, std::string>> session_secrets_;

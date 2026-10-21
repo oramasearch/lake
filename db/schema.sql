@@ -4656,3 +4656,35 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS deleted_at timestamptz;
 
 CREATE TABLE IF NOT EXISTS account_deletion_guard (applied_at timestamptz NOT NULL DEFAULT now());
 INSERT INTO schema_migrations (version) VALUES ('0091_account_deletion') ON CONFLICT DO NOTHING;
+
+-- ---------------------------------------------------------------------------------------------
+-- 0092_saml_sign_in (lake#836, docs/api/sso.md#saml-sign-in): SAML sign-in through Lake's
+-- Assertion Consumer Service. `sso_saml_requests` holds each outstanding AuthnRequest (its id only
+-- as a SHA-256 hash), used once within ten minutes; `sso_saml_assertions` holds the hash of each
+-- accepted assertion's id until the assertion expires, so a response is accepted once. Sign-in
+-- state (decision 50): nothing from a workspace. Rows go with their provider. Idempotent.
+-- ---------------------------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS sso_saml_requests (
+    id              uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
+    provider_id     uuid        NOT NULL REFERENCES sso_providers(id) ON DELETE CASCADE,
+    request_id_hash text        NOT NULL UNIQUE,
+    device_name     text        NOT NULL CHECK (length(device_name) <= 256),
+    taap_id         text        NOT NULL DEFAULT '' CHECK (length(taap_id) <= 512),
+    return_to       text        NOT NULL DEFAULT '' CHECK (length(return_to) <= 2048),
+    expires_at      timestamptz NOT NULL,
+    used_at         timestamptz,
+    created_at      timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS sso_saml_requests_expires_idx ON sso_saml_requests (expires_at);
+
+CREATE TABLE IF NOT EXISTS sso_saml_assertions (
+    provider_id       uuid        NOT NULL REFERENCES sso_providers(id) ON DELETE CASCADE,
+    assertion_id_hash text        NOT NULL,
+    expires_at        timestamptz NOT NULL,
+    used_at           timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (provider_id, assertion_id_hash)
+);
+CREATE INDEX IF NOT EXISTS sso_saml_assertions_expires_idx ON sso_saml_assertions (expires_at);
+
+CREATE TABLE IF NOT EXISTS saml_sign_in_guard (applied_at timestamptz NOT NULL DEFAULT now());
+INSERT INTO schema_migrations (version) VALUES ('0092_saml_sign_in') ON CONFLICT DO NOTHING;

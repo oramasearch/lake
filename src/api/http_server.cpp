@@ -107,6 +107,7 @@
 #include "lake/api/oauth.hpp"
 #include "lake/api/registry.hpp"
 #include "lake/api/rest.hpp"
+#include "lake/api/saml.hpp"
 #include "lake/api/store_owner.hpp"
 #include "lake/api/sync_store.hpp"
 #include "lake/api/transcription.hpp"
@@ -122,6 +123,7 @@
 #include "lake/control/pki.hpp"
 #include "lake/control/platform.hpp"
 #include "lake/control/policy.hpp"
+#include "lake/control/saml.hpp"
 #include "lake/control/store.hpp"
 #include "lake/control/workspace_store.hpp"
 #include "lake/control/zetta_workspace.hpp"
@@ -9159,6 +9161,13 @@ struct ApiServer::Impl {
         if (path.starts_with("/v1/oauth/") && path.ends_with("/callback")) {
             return "/v1/oauth/:provider/callback";
         }
+        if (path.starts_with("/v1/saml/")) {
+            for (const std::string_view leaf : {"/metadata", "/start", "/acs"}) {
+                if (path.ends_with(leaf)) {
+                    return "/v1/saml/:provider" + std::string(leaf);
+                }
+            }
+        }
         if (path.starts_with("/scim/v2/Users/")) {
             return "/scim/v2/Users/:id";
         }
@@ -10675,6 +10684,194 @@ struct ApiServer::Impl {
             }
         } else if (const std::string app_return = app_sign_in_return(route); !app_return.empty()) {
             destination = app_return;
+        }
+        co_return co_await redirect(route, destination, cookie);
+    }
+
+    // SAML sign-in (docs/api/sso.md#saml-sign-in, lake#836). The provider id comes from the
+    // route; these three routes need no credential.
+    static std::string saml_provider(const boost::http::route_params& route) {
+        for (const auto& [name, value] : route.params) {
+            if (name == "provider") {
+                return value;
+            }
+        }
+        return {};
+    }
+
+    static boost::http::status saml_status(std::string_view code) {
+        namespace http = boost::http;
+        if (code == "invalid_input") {
+            return http::status::bad_request;
+        }
+        if (code == "not_found") {
+            return http::status::not_found;
+        }
+        if (code == "unauthorized" || code == "conflict") {
+            return http::status::forbidden;
+        }
+        return http::status::service_unavailable;
+    }
+
+    boost::http::route_task saml_error(boost::http::route_params& route,
+                                       const std::string& provider_id,
+                                       const ApiError& error) {
+        ApiContext context = context_for(route);
+        context.authentication_method = "saml";
+        if (!record_direct_event(context,
+                                 audit::EventDraft{
+                                     .kind = "authentication",
+                                     .object = "saml/" + provider_id,
+                                     .action = "sign_in",
+                                     .outcome = error.code == "unauthorized" ? "denied" : "failure",
+                                     .method = "saml",
+                                     .device = context.device,
+                                     .details = {{"message", error.message}},
+                                 })) {
+            return send_text(route,
+                             boost::http::status::service_unavailable,
+                             error_body("store_error", "could not record the SAML failure"),
+                             "application/json; charset=utf-8",
+                             "no-store");
+        }
+        return send_text(route,
+                         saml_status(error.code),
+                         error_body(error.code, error.message),
+                         "application/json; charset=utf-8",
+                         "no-store");
+    }
+
+    // GET /v1/saml/<provider id>/metadata: Lake's service-provider metadata; its URL is the SP
+    // entity id.
+    boost::http::route_task serve_saml_metadata(boost::http::route_params& route) {
+        namespace http = boost::http;
+        const std::string provider_id = saml_provider(route);
+        const auto provider = options.store && !options.public_host.empty()
+                                  ? options.store->get_sso_provider(provider_id)
+                                  : control::Result<control::SsoProvider>(std::unexpected(
+                                        control::StoreError{"not_found", "no SAML provider"}));
+        if (!provider || provider->protocol != "saml" || !provider->enabled) {
+            co_return co_await send_text(route,
+                                         http::status::not_found,
+                                         error_body("not_found", "SAML provider is unavailable"),
+                                         "application/json; charset=utf-8",
+                                         "no-store");
+        }
+        co_return co_await send_text(route,
+                                     http::status::ok,
+                                     control::saml::sp_metadata(options.public_host, provider->id),
+                                     "application/samlmetadata+xml; charset=utf-8",
+                                     "public, max-age=300");
+    }
+
+    // GET /v1/saml/<provider id>/start[?return_to=/path]: records a one-use AuthnRequest and
+    // redirects to the identity provider. The provider's sign-on URL for its app tile.
+    boost::http::route_task serve_saml_start(boost::http::route_params& route) {
+        const std::string provider_id = saml_provider(route);
+        if (!options.store) {
+            co_return co_await saml_error(
+                route, provider_id, ApiError{.code = "store_unavailable", .message = "no store"});
+        }
+        const auto started = start_saml_sign_in(*options.store,
+                                                options.public_host,
+                                                provider_id,
+                                                "browser",
+                                                "",
+                                                same_origin_next(query_value(route, "return_to")));
+        if (!started) {
+            co_return co_await saml_error(route, provider_id, started.error());
+        }
+        co_return co_await redirect(route, *started);
+    }
+
+    // POST /v1/saml/<provider id>/acs: the Assertion Consumer Service (HTTP-POST binding). The
+    // form's SAMLResponse is verified like sign_in_saml; RelayState is not used. It sets
+    // lake_session and redirects to the page the request named, else the home.
+    boost::http::route_task serve_saml_acs(boost::http::route_params& route) {
+        namespace http = boost::http;
+        const std::string provider_id = saml_provider(route);
+        if (!options.store) {
+            co_return co_await saml_error(
+                route, provider_id, ApiError{.code = "store_unavailable", .message = "no store"});
+        }
+        auto [read_error, body] =
+            co_await read_string_body(route, control::saml::maximum_document_bytes * 2);
+        if (read_error) {
+            if (body_is_too_large(read_error)) {
+                co_return co_await saml_error(
+                    route,
+                    provider_id,
+                    ApiError{.code = "invalid_input", .message = "the SAML response is too large"});
+            }
+            co_return http::route_error(read_error);
+        }
+        auto accepted = accept_saml_response(*options.store,
+                                             options.public_host,
+                                             provider_id,
+                                             form_field(body, "SAMLResponse"),
+                                             "",
+                                             "browser",
+                                             saml_now());
+        if (!accepted) {
+            co_return co_await saml_error(route, provider_id, accepted.error());
+        }
+        control::Result<control::IssuedSession> issued =
+            options.store->sign_in_sso(accepted->identity);
+        if (!issued) {
+            co_return co_await saml_error(route,
+                                          provider_id,
+                                          ApiError{.code = issued.error().code == "unauthorized"
+                                                               ? "unauthorized"
+                                                               : "store_error",
+                                                   .message = issued.error().message});
+        }
+        ApiContext context = context_for(route);
+        context.authentication_method = "saml";
+        if (const auto principal = options.store->context_for(issued->secret)) {
+            context.authorized = true;
+            context.acting_user_id = principal->user_id;
+            context.acting_identity = principal->taap_id;
+        }
+        const std::string issued_pool = issued->session.pool_id;
+        const ApiResult session_result = unwrap(
+            co_await application_session_result(std::move(issued), context, "session.started"));
+        if (!session_result.ok) {
+            co_return co_await saml_error(route, provider_id, session_result.error);
+        }
+        if (!record_direct_event(context,
+                                 audit::EventDraft{
+                                     .kind = "authentication",
+                                     .object = "saml/" + provider_id,
+                                     .action = "sign_in",
+                                     .outcome = "success",
+                                     .method = "saml",
+                                     .device = accepted->identity.device_name,
+                                 })) {
+            co_return co_await send_text(route,
+                                         http::status::service_unavailable,
+                                         error_body("store_error", "SAML audit recording failed"),
+                                         "application/json; charset=utf-8",
+                                         "no-store");
+        }
+        std::string cookie = "lake_session=" + session_result.value.value("secret", "") +
+                             "; HttpOnly; SameSite=Lax; Path=/";
+        if (request_is_https(route)) {
+            cookie += "; Secure";
+        }
+        std::string destination = same_origin_next(accepted->return_to);
+        if (destination.empty()) {
+            destination = std::string(account_landing);
+        }
+        if (issued_pool != "lake") {
+            // An application's pool returns to the application, as the OIDC callback does.
+            if (auto routing = options.store->get_application_by_pool(issued_pool)) {
+                const std::string fallback = "/apps/" + routing->id + "/sign-in";
+                const auto application =
+                    configured_result(co_await configured_for(std::move(routing), route));
+                destination = application
+                                  ? application_redirect_location(*application, session_result)
+                                  : fallback;
+            }
         }
         co_return co_await redirect(route, destination, cookie);
     }
@@ -13865,6 +14062,12 @@ struct ApiServer::Impl {
         if (!unsafe_method(route) || !session_cookie_request(route)) {
             return {};
         }
+        // The SAML Assertion Consumer Service takes the identity provider's cross-site form post
+        // (lake#836); it never reads the session the cookie carries, it replaces it.
+        if (const std::string path(route.url.path());
+            path.starts_with("/v1/saml/") && path.ends_with("/acs")) {
+            return {};
+        }
         if (!from_own_origin(route)) {
             return "Cross-site requests cannot use the browser session.";
         }
@@ -15303,6 +15506,24 @@ bool ApiServer::start() {
               [&impl](http::route_params& route) -> http::route_task {
                   return impl.observe_request(
                       route, "/api/lfs/:repository/:oid", impl.serve_hub_lfs_upload(route));
+              });
+    add_route(http::method::get,
+              "/v1/saml/:provider/metadata",
+              [&impl](http::route_params& route) -> http::route_task {
+                  return impl.observe_request(
+                      route, "/v1/saml/:provider/metadata", impl.serve_saml_metadata(route));
+              });
+    add_route(http::method::get,
+              "/v1/saml/:provider/start",
+              [&impl](http::route_params& route) -> http::route_task {
+                  return impl.observe_request(
+                      route, "/v1/saml/:provider/start", impl.serve_saml_start(route));
+              });
+    add_route(http::method::post,
+              "/v1/saml/:provider/acs",
+              [&impl](http::route_params& route) -> http::route_task {
+                  return impl.observe_request(
+                      route, "/v1/saml/:provider/acs", impl.serve_saml_acs(route));
               });
     add_route(http::method::get,
                "/v1/oauth/:provider/callback",

@@ -1306,6 +1306,23 @@ struct NewSsoProvider {
     nlohmann::json attribute_mapping;
     bool jit_provisioning = false;
 };
+// An outstanding SAML AuthnRequest (lake#836, docs/api/sso.md#saml-sign-in): one use, within ten
+// minutes. `return_to` is a same-origin path, or empty.
+struct SamlRequest {
+    std::string provider_id;
+    std::string request_id;
+    std::string device_name;
+    std::string taap_id;
+    std::string return_to;
+};
+// A verified assertion answering one: the request is consumed and the assertion id recorded until
+// it expires, in one transaction, so each request and each assertion is accepted once.
+struct SamlAnswer {
+    std::string provider_id;
+    std::string request_id;
+    std::string assertion_id;
+    std::int64_t assertion_expires_at = 0; // Unix seconds
+};
 struct FederationIssuer {
     std::string id;
     std::string organization_id;
@@ -2319,6 +2336,10 @@ public:
     // Internal callback lookup. This is never rendered through an API response.
     virtual Result<OAuthProvider> get_sso_oidc_provider(const std::string& id) = 0;
     virtual Result<SsoProvider> authenticate_scim(const std::string& bearer_token) = 0;
+    // SAML sign-in (lake#836): the provider must be an enabled SAML provider.
+    virtual Result<void> begin_saml(const SamlRequest&) = 0;
+    // unauthorized when the request is unknown, used or expired, or the assertion was used.
+    virtual Result<SamlRequest> consume_saml(const SamlAnswer&) = 0;
     virtual Result<SsoProvider> test_sso_provider(const std::string& id) = 0;
     virtual Result<FederationIssuer> create_federation_issuer(const NewFederationIssuer&) = 0;
     virtual Result<std::vector<FederationIssuer>>

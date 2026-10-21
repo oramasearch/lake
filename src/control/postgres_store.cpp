@@ -9110,6 +9110,68 @@ public:
         });
     }
 
+    Result<void> begin_saml(const SamlRequest& in) override {
+        if (in.provider_id.empty() || in.request_id.empty()) {
+            return std::unexpected(
+                StoreError{"invalid_input", "SAML request material is incomplete"});
+        }
+        return with_tx<void>([&](pqxx::work& tx) -> Result<void> {
+            const pqxx::result provider = tx.exec_params(
+                "SELECT 1 FROM sso_providers WHERE id = $1::uuid AND protocol = 'saml' AND enabled",
+                in.provider_id);
+            if (provider.empty()) {
+                return std::unexpected(StoreError{"not_found", "SAML provider is unavailable"});
+            }
+            tx.exec("DELETE FROM sso_saml_requests WHERE expires_at < now() - interval '1 day'");
+            tx.exec_params("INSERT INTO sso_saml_requests (provider_id, request_id_hash, "
+                           "device_name, taap_id, return_to, expires_at) VALUES ($1::uuid, $2, $3, "
+                           "$4, $5, now() + interval '10 minutes')",
+                           in.provider_id,
+                           identity_crypto::sha256_hex(in.request_id),
+                           in.device_name,
+                           in.taap_id,
+                           in.return_to);
+            return {};
+        });
+    }
+
+    Result<SamlRequest> consume_saml(const SamlAnswer& in) override {
+        if (in.provider_id.empty() || in.request_id.empty() || in.assertion_id.empty()) {
+            return std::unexpected(
+                StoreError{"unauthorized", "SAML response answers no outstanding request"});
+        }
+        return with_tx<SamlRequest>([&](pqxx::work& tx) -> Result<SamlRequest> {
+            tx.exec("DELETE FROM sso_saml_assertions WHERE expires_at < now()");
+            const pqxx::result recorded = tx.exec_params(
+                "INSERT INTO sso_saml_assertions (provider_id, assertion_id_hash, expires_at) "
+                "VALUES ($1::uuid, $2, greatest(to_timestamp($3), now())) ON CONFLICT DO NOTHING "
+                "RETURNING 1",
+                in.provider_id,
+                identity_crypto::sha256_hex(in.assertion_id),
+                static_cast<long long>(in.assertion_expires_at));
+            if (recorded.empty()) {
+                return std::unexpected(
+                    StoreError{"unauthorized", "SAML assertion was already used"});
+            }
+            const pqxx::result rows = tx.exec_params(
+                "UPDATE sso_saml_requests SET used_at = now() WHERE provider_id = $1::uuid AND "
+                "request_id_hash = $2 AND used_at IS NULL AND expires_at > now() RETURNING "
+                "device_name, taap_id, return_to",
+                in.provider_id,
+                identity_crypto::sha256_hex(in.request_id));
+            if (rows.empty()) {
+                // An error is not committed: the assertion's row goes with the transaction.
+                return std::unexpected(
+                    StoreError{"unauthorized", "SAML response answers no outstanding request"});
+            }
+            return SamlRequest{in.provider_id,
+                               in.request_id,
+                               rows[0][0].as<std::string>(),
+                               rows[0][1].as<std::string>(),
+                               rows[0][2].as<std::string>()};
+        });
+    }
+
     Result<SsoProvider> authenticate_scim(const std::string& bearer_token) override {
         return with_tx<SsoProvider>([&](pqxx::work& tx) -> Result<SsoProvider> {
             const pqxx::result rows = tx.exec(std::string("SELECT ") + sso_provider_columns +

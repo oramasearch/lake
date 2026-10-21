@@ -26,10 +26,8 @@ anonymous one with `unauthenticated` and a signed-in person with `unauthorized`.
 a public entry point, and anyone who knew a provider's id, its issuer and a provisioned subject
 received that person's session.
 
-`sign_in_saml` accepts a base64 SAML response only after verifying its enveloped RSA-SHA256
-signature and SHA-256 digest with the provider's configured PEM X.509 certificate. The verifier
-uses the exclusive-canonicalization subset in Lake's assertion contract and rejects declarations,
-entities, and XML forms outside that subset.
+SAML providers sign people in through Lake's Assertion Consumer Service; see
+[SAML sign-in](#saml-sign-in) below.
 
 `start_sso_oidc` creates an authorization-code flow for an enterprise OIDC provider. It reuses
 the identity core's state, PKCE verifier, nonce, one-use callback, and cached JWKS verification.
@@ -70,11 +68,89 @@ All configuration, federation policy, sign-in, and provisioning capabilities run
 registry. They therefore use `authorize` before protected work and append exactly one signed
 audit event for every outcome. A rejected issuer is a denied authentication audit event.
 
+## SAML sign-in
+
+Lake is the SAML 2.0 service provider (Web Browser SSO profile, lake#836). For a provider with id
+`<id>` on a Lake whose `LAKE_PUBLIC_HOST` is `<host>`:
+
+| What | Where |
+|---|---|
+| SP entity id, and the URL of Lake's metadata (`application/samlmetadata+xml`) | `GET https://<host>/v1/saml/<id>/metadata` |
+| Assertion Consumer Service, HTTP-POST binding | `POST https://<host>/v1/saml/<id>/acs` |
+| Sign-on URL: starts sign-in and redirects to the IdP (the app tile's URL) | `GET https://<host>/v1/saml/<id>/start[?return_to=/path]` |
+
+All three need no credential and answer `404` for a provider that is not an enabled SAML provider.
+The metadata says `WantAssertionsSigned="true"` and `AuthnRequestsSigned="false"`.
+
+**The flow.** `start_sso_saml` (`{provider_id, device_name?, taap_id?, return_to?}`, no credential)
+or the start route records a one-use AuthnRequest for ten minutes and answers the IdP's sign-in URL:
+the provider metadata's HTTP-Redirect `SingleSignOnService` (HTTPS, or loopback for tests), with
+the request DEFLATE-encoded in `SAMLRequest`. The metadata's `entityID` must equal the provider's
+`issuer`. The IdP posts its `SAMLResponse` to the ACS. Lake verifies it (below), consumes the request
+it answers, records the assertion, runs `sign_in_sso`'s provisioning (federation issuer policy, the
+SCIM user or just-in-time provisioning with the request's `taap_id`), sets `lake_session` and
+redirects to `return_to` (a same-origin path) or `/`. `RelayState` is not used. Every outcome is
+one `authentication` audit event on `saml/<id>` (method `saml`; outcome `success`, `denied` with the
+reason, or `failure`). The ACS takes the IdP's cross-site form post, so it is exempt from the
+[cross-site check](../serving/http.md#cross-site-requests); it never reads the session a cookie
+carries, it replaces it.
+
+`sign_in_saml` (`{provider_id, saml_response, taap_id?, device_name?}`, no credential) is the same
+verification through the registry, for a client that relays the response itself; it answers the
+session instead of a cookie. Both refuse a response that answers no outstanding request.
+
+**What a response must be.** Verification is Lake's own (`src/control/saml.cpp`, no XML library;
+the bridge's *We write our own* rule and decision 32), and it fails closed:
+
+- **XML.** A strict reader: one root, an optional XML declaration, comments (dropped), the five
+  predefined entities and character references. DTDs, other entities, CDATA and processing
+  instructions are refused, as are unbound prefixes, repeated attributes, more than 64 levels or
+  20,000 elements, and more than 1 MiB.
+- **Signature.** The `samlp:Response`, the one `saml:Assertion` it carries, or both, carry an
+  enveloped XML Signature as a direct child, verified with the provider's registered certificate
+  (PEM, or bare base64 DER; RSA, at least 2048 bits). The signature's `KeyInfo` is ignored. Each
+  present signature must verify, and at least one must cover the assertion. A signature has exactly
+  one `Reference`, whose `URI` is `#` and the ID of the element it sits in, an ID no other element
+  in the document uses; its transforms are exactly enveloped-signature then Exclusive XML
+  Canonicalization 1.0 without comments (with an optional `InclusiveNamespaces` `PrefixList`); its
+  digest is SHA-256 or SHA-512; `SignedInfo` is canonicalized the same way and signed with
+  RSA-SHA256 or RSA-SHA512. Anything else (SHA-1, other transforms, more references, signatures in
+  any other place) is refused.
+- **Against signature wrapping**, the response must carry exactly one assertion anywhere in the
+  document, as its direct child; no element may share the signed ID; and every value Lake uses is
+  read from that verified assertion by direct child. Text split by a comment is read whole, as it
+  was signed.
+- **Status** `Success`. `Destination`, when present, is the ACS URL. The response's `Issuer`, when
+  present, and the assertion's are the provider's `issuer`. Encrypted assertions are refused.
+- **Subject.** A `NameID` (the provider subject). A bearer `SubjectConfirmation` whose
+  `SubjectConfirmationData` has `Recipient` equal to the ACS URL, a `NotOnOrAfter` still ahead, no
+  `NotBefore` still ahead, and an `InResponseTo` naming an outstanding request (equal to the
+  response's `InResponseTo` when that is present). Unsolicited, IdP-initiated responses are refused.
+- **Conditions.** `NotBefore` and `NotOnOrAfter` hold, and at least one `AudienceRestriction`, each
+  of which names the SP entity id. Conditions other than `OneTimeUse` and `ProxyRestriction` are
+  refused. Times allow two minutes of clock skew.
+- **An `AuthnStatement`**, whose `SessionNotOnOrAfter`, when present, is still ahead.
+- **Once.** The request is consumed and the assertion's ID recorded until it expires, in one
+  transaction; a second use of either is refused.
+
+The email is the attribute the provider's `attribute_mapping` names for `email`, else `email`,
+`mail`, the Entra claim `…/claims/emailaddress` or `urn:oid:0.9.2342.19200300.100.1.3`; the display
+name likewise from `display_name` or `name` (`name`, `displayName`, Entra's `…/claims/displayname`,
+`urn:oid:2.16.840.1.113730.3.1.241`). As for OIDC, the claim the issuer policy checks is `email`
+alone, when present. Not supported: encrypted assertions, signed AuthnRequests, IdP-initiated
+sign-in and single logout.
+
+**Storage.** Migration `0092_saml_sign_in` adds `sso_saml_requests` (the request id only as a
+SHA-256 hash, the device name, TAAP id and return path, ten-minute expiry, `used_at`) and
+`sso_saml_assertions` (provider and assertion-id hash, kept until the assertion's `NotOnOrAfter`),
+both cascading with their provider, and the guard `saml_sign_in_guard`
+([schema.md](../control-plane/schema.md#saml-sign-in-migration)).
+
 ## How to verify
 
 ```sh
 cmake --build build
-ctest --test-dir build --output-on-failure -R 'Sso|Scim|Postgres'
+ctest --test-dir build --output-on-failure -R 'Saml|Sso|Scim|Postgres'
 ```
 
 For the release proof, create a fresh database, apply the complete schema, and run the entire
@@ -91,6 +167,17 @@ LAKE_TEST_DB_URI=postgresql://postgres:lake@127.0.0.1:55432/lake_sso_test \
 The in-memory SSO tests configure one SAML and one OIDC stub provider, cover both successful
 assertions, verify a refused unlisted issuer is audited, and exercise SCIM create, update, group
 membership replacement, and deactivation with immediate session rejection.
+
+`tests/test_saml.cpp` covers SAML sign-in: Exclusive Canonicalization against the specification's
+examples and libxml2's output; Okta- and Entra-shaped responses signed by an independent
+implementation (`tests/fixtures/saml`, signed by signxml); tampered, re-signed-with-another-key,
+SHA-1, XPath-transform, unsigned, encrypted, unsolicited, wrong-audience, wrong-recipient,
+wrong-destination, wrong-issuer, expired and not-yet-valid responses; five signature-wrapping
+attacks and a comment inside the `NameID`; the AuthnRequest redirect and both metadata documents;
+the ACS, start and metadata routes end to end (sign-in once, replay of the response and of the
+assertion refused, audit); and the store's once-only request and assertion records in memory and
+on Postgres. `Sso.SignedSamlResponseIsVerifiedBeforeSignIn` runs `sign_in_saml` through the
+registry.
 `ScimHttp.RecordedClientSessionProvisionsUsersGroupsAndRevokesAccess` replays the HTTP sequence:
 failed bearer authentication, two user creates, filtered list, user PATCH, group create, filtered
 member removal, user delete, group delete, and session/access revocation. The Postgres identity

@@ -38,6 +38,7 @@ tick.
 | `POST /identity/clerk-session` | exchanges a Clerk session token for the `lake_session` cookie ([`../api/clerk.md`](../api/clerk.md)) |
 | `POST /identity/clerk-webhook` | Clerk's user events through Svix (lake#765, [`../api/clerk.md`](../api/clerk.md#webhooks)): no lake credential, the `svix-signature` HMAC-SHA256 with `LAKE_CLERK_WEBHOOK_SECRET` and a five-minute `svix-timestamp` window; each `svix-id` applied once; `user.created`, `user.updated`, `user.deleted` audited centrally; `401` for a refused signature, `503` when the store fails (Clerk retries), `404` without the secret |
 | `GET /v1/oauth/<provider>/callback` | OAuth authorization-code callback with one-use state, PKCE, and verified provider identity; sets the cookie and redirects |
+| `GET /v1/saml/<provider id>/metadata`, `GET /v1/saml/<provider id>/start`, `POST /v1/saml/<provider id>/acs` | SAML sign-in ([`../api/sso.md#saml-sign-in`](../api/sso.md#saml-sign-in), lake#836), no credential: Lake's SP metadata (its URL is the entity id); a one-use AuthnRequest and a redirect to the IdP; the Assertion Consumer Service, which verifies the form's `SAMLResponse`, sets the cookie and redirects. The ACS is exempt from the cross-site check below |
 | `GET /file/raw`, `/file/download`, `/drive/download`, `/exports/download`, `/share/<token>/download` | the bytes of a repository file, a Drive file, a signed export or a shared file; without a credential a protected download redirects to `/sign-in` |
 | `GET /drive/files/download?customer_id=&workspace_id=&drive_id=&id=[&inline=1]` | a workspace file ([drives.md](../api/drives.md#uploads)): authorized and audited through `get_drive_entry`, then streamed from the workspace Zetta's `lake_files` bucket 1 MiB at a time (the image-pull streamer, its slots and idle timeout), `nosniff`, a sandboxing CSP, and `inline` only for media types a browser shows as data; always `Content-Disposition` with the file's name |
 | (both drive downloads) | described in `GET /v1/openapi.json` as `drive_download` and `drive_files_download` (lake#587; `openapi_document` in `src/api/rest.cpp`), although they answer bytes rather than a capability's JSON. `/drive/download` sends a file's own media type (from its extension) when a browser shows that type as data, else `application/octet-stream` (`displayable_media_type`) |
@@ -381,7 +382,10 @@ A missing `Origin` and a missing `Sec-Fetch-Site` pass: a non-browser client sen
 browser sends `Origin` on every cross-origin unsafe request. Bearer-authenticated calls are not
 affected, from any origin. The check is a router middleware that runs right after the response
 reset and CORS, before any route, so it covers `/v1`, `/mcp` and the remaining form routes
-(`/logout`, `/session`, `/identity/clerk-session`) alike.
+(`/logout`, `/session`, `/identity/clerk-session`) alike. The one exception is the SAML Assertion
+Consumer Service, `POST /v1/saml/<provider id>/acs`: the identity provider's form post is cross-site
+by design, and the route never reads the session a cookie carries; it verifies the signed response
+and replaces the session (lake#836).
 
 **Why.** Ship apps are hosted one label below the platform's zone (`<name>.oramadev.net` beside
 `lake.oramadev.net`), so customer app code is *same-site* with lake and a browser sends
