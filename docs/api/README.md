@@ -7,6 +7,9 @@ reject missing/disabled people immediately and retain workspace cleanup for the 
 metadata, while public repository revisions remain readable anonymously (lake#970, LSR-104).
 [PKI identities](pki.md#certificate-identities) defines strict ACME DNS and X.509 SPIFFE input
 validation and the single typed SAN each certificate receives (lake#946).
+Pipeline processing (lake#967) has shared step, edge and edit budgets and runs on the bounded
+blocking pool. See [pipeline work budgets](workspaces.md#pipeline-work-budgets).
+
 Capability request bodies use registered byte limits and the credential gate before reading
 (lake#944). Public identity bodies default to 1 MiB; anonymous MCP envelopes are capped at
 256 KiB. All share a single JSON parse with depth and element budgets. See

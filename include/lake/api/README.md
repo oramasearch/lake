@@ -1,5 +1,8 @@
 # Public API types
 
+`pipeline.hpp` defines shared limits of 50,000 steps, 100,000 edges and 256 edits per batch,
+including a JSON shape/count guard used before graph copies and engine saves (lake#967).
+
 `Capability::max_body_bytes` declares the JSON wire allowance (1 MiB default, 64 MiB ceiling).
 `Registry::authenticate` applies the shared credential gate before an HTTP body is read, auditing
 only refusals; the full registry call still validates and authorizes the operation.

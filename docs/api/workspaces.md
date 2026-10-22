@@ -397,3 +397,28 @@ Status: checked on 2026-10-01 against the dev cluster (lake `36679e1`, workspace
   outside the cluster. Unpublishing stops those calls.
 - Workspace reads time out after 15 seconds and actions after 60. Run reports load:
   `get_run_report` answers since https://github.com/oramasearch/zetta/issues/1007 was fixed.
+
+## Pipeline Work Budgets
+
+Lake limits a pipeline to 50,000 steps and 100,000 edges, and an `edit_pipeline` batch to
+256 edits (lake#967, LSR-101). Oversized stored graphs are refused by both `edit_pipeline` and
+`render_pipeline` before their arrays are copied. Edit growth is checked per operation, including
+intermediate states. `save_pipeline` and `workspace_act` with `save_graph` enforce the same counts
+before forwarding to the engine. A direct engine client can still store a larger graph; Lake
+refuses to edit or draw it. Refusals answer `invalid_input` without saving anything.
+
+Graph parsing, edit application, final validation, save-body construction and SVG generation run
+on Lake's bounded blocking pool. A full pool answers `busy`; graph work never falls back to the
+HTTP thread. Kahn's algorithm indexes outgoing edges and uses a min-heap of original step indices,
+so dependency order and the existing earliest-index tie order are preserved in
+O((V+E) log V) work. Rendering and generated step ids also use indexed lookups.
+
+A batch mutates its private graph in order and validates the result once. An edge can precede
+its new target within that batch; only a valid final graph is saved. Operation failures still
+name their edit position, and final structural failures report the graph problem.
+
+Run `ctest --test-dir <build> --timeout 600 -R 'Pipeline\.|Workspaces.EditPipeline'` to check
+limits, atomic batches, pool saturation and a reversed 50,000-step chain whose validation must
+finish within one second. Change the three constants in `include/lake/api/pipeline.hpp` together
+with these contract notes and tests when changing the budgets. Counts apply to both JSON input
+and in-memory graphs; request byte and JSON parser limits remain additional bounds.

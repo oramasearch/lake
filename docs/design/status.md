@@ -1,5 +1,11 @@
 # Implementation and deployment status
 
+Pipeline graph processing (lake#967, LSR-101) is implemented in the source tree: indexed Kahn
+traversal preserves original-index ties, edit batches validate once, graph and edit counts are
+bounded, and parsing/editing/SVG work uses the bounded blocking pool. Stored oversized graphs
+are refused on edit and render; both engine-save spellings enforce the same counts. Not deployed.
+See [pipeline work budgets](../api/workspaces.md#pipeline-work-budgets).
+
 Status: checked on 2026-10-02 against `Lake/prod` on the dev AKS cluster (lake `36679e1`), using
 the [2026-10-01 deployment record](../deployment/dev-2026-10-01.md) and the OpenAPI observation
 [`openapi-2026-10-02.json`](../deployment/observed/openapi-2026-10-02.json). There is no production

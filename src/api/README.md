@@ -16,6 +16,11 @@ an active certificate for the customer. See [agent session keys](../../docs/api/
 `get_dataset` and `get_model`; Registry enforces customer `read` and credential scopes before
 dispatch. Their anonymous public-repository revision reads retain the repository visibility
 check (lake#970, LSR-104). See [models.md](../../docs/api/models.md).
+`pipeline.cpp` uses indexed Kahn traversal with original-index priority, bounded graph sizes and
+one final validation per edit batch (lake#967). `workspace_capabilities.cpp` offloads graph parsing,
+editing and SVG work and checks both save spellings. See
+[pipeline work budgets](../../docs/api/workspaces.md#pipeline-work-budgets).
+
 Capability and MCP body admission (lake#944) resolves credentials first. `Registry::authenticate`
 shares the credential gate with `call` and `call_async`; the REST, workspace Zetta and model
 gateway adapters call it before body reads. `JsonBodySink` builds a single nlohmann document
