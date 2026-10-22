@@ -7715,7 +7715,8 @@ public:
         "coalesce(organization_id::text, ''), coalesce(support_emailed_state, ''), "
         "coalesce(customer_emailed_state, ''), email_attempts, email_error, "
         "coalesce(to_char(email_retry_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), "
-        "'')";
+        "''), subscription_status, paid_through, entitlement_access_until, "
+        "subscription_event_created, entitlement_grace_seconds, entitlement_retry_invoice_id";
 
     static CloudOrder cloud_order_row(const pqxx::row& row) {
         CloudOrder order;
@@ -7750,6 +7751,12 @@ public:
         order.email_attempts = row[column++].as<int>();
         order.email_error = text();
         order.email_retry_at = text();
+        order.entitlement.subscription_status = text();
+        order.entitlement.paid_through = row[column++].as<std::int64_t>();
+        order.entitlement.access_until = row[column++].as<std::int64_t>();
+        order.entitlement.event_created = row[column++].as<std::int64_t>();
+        order.entitlement.grace_seconds = row[column++].as<int>();
+        order.entitlement.retry_invoice_id = text();
         return order;
     }
 
@@ -7875,7 +7882,10 @@ public:
     Result<CloudOrderPaymentResult>
     apply_cloud_order_payment(const CloudOrderPayment& payment) override {
         if (payment.provider.empty() || payment.event_id.empty() || payment.event_id.size() > 255 ||
-            (payment.state != "paid" && payment.state != "cancelled")) {
+            (payment.state != "paid" && payment.state != "cancelled") ||
+            payment.grace_seconds < 0 || payment.grace_seconds > 30 * 86400 ||
+            payment.checkout_session_id.size() > 255 || payment.subscription_id.size() > 255 ||
+            payment.customer_id.size() > 255) {
             return std::unexpected(StoreError{"invalid_input",
                                               "an order payment needs its provider, its id and a "
                                               "state of paid or cancelled"});
@@ -7909,15 +7919,42 @@ public:
                 if (!before) {
                     return std::unexpected(before.error());
                 }
+                if (!payment.order_id.empty() && payment.order_id != before->id) {
+                    return result;
+                }
+                if (before->state != "pending_payment") {
+                    result.matched = true;
+                    result.order = *before;
+                    return result;
+                }
+                if ((!before->stripe_subscription_id.empty() && !payment.subscription_id.empty() &&
+                     before->stripe_subscription_id != payment.subscription_id) ||
+                    (!before->stripe_customer_id.empty() && !payment.customer_id.empty() &&
+                     before->stripe_customer_id != payment.customer_id)) {
+                    return result;
+                }
                 result.matched = true;
                 if (before->state == "pending_payment") {
-                    tx.exec_params("UPDATE cloud_orders SET state = $2, stripe_customer_id = "
-                                   "coalesce($3, stripe_customer_id), stripe_subscription_id = "
-                                   "coalesce($4, stripe_subscription_id) WHERE id = $1::uuid",
-                                   id,
-                                   payment.state,
-                                   nullable(payment.customer_id.substr(0, 255)),
-                                   nullable(payment.subscription_id.substr(0, 255)));
+                    tx.exec_params(
+                        "UPDATE cloud_orders SET state = $2, stripe_customer_id = "
+                        "coalesce($3, stripe_customer_id), stripe_subscription_id = "
+                        "coalesce($4, stripe_subscription_id), entitlement_access_until = CASE "
+                        "WHEN $2 = 'paid' AND entitlement_access_until = 0 AND "
+                        "subscription_status IN ('pending', 'incomplete') AND "
+                        "coalesce($4, stripe_subscription_id) IS NOT NULL THEN "
+                        "floor(extract(epoch FROM now()))::bigint ELSE entitlement_access_until "
+                        "END, "
+                        "entitlement_grace_seconds = CASE WHEN $2 = 'paid' AND "
+                        "entitlement_access_until = 0 AND subscription_status IN ('pending', "
+                        "'incomplete') "
+                        "AND coalesce($4, stripe_subscription_id) "
+                        "IS NOT NULL THEN $5::integer ELSE entitlement_grace_seconds END "
+                        "WHERE id = $1::uuid",
+                        id,
+                        payment.state,
+                        nullable(payment.customer_id.substr(0, 255)),
+                        nullable(payment.subscription_id.substr(0, 255)),
+                        payment.grace_seconds);
                     cloud_order_event(tx,
                                       id,
                                       "pending_payment",
@@ -7934,6 +7971,89 @@ public:
                 result.order = std::move(*after);
                 return result;
             });
+    }
+
+    Result<CloudOrderPaymentResult>
+    apply_cloud_order_subscription(const CloudOrderSubscriptionEvent& event) override {
+        if (!valid_cloud_order_subscription_event(event)) {
+            return std::unexpected(StoreError{"invalid_input", "invalid order subscription event"});
+        }
+        return with_tx<CloudOrderPaymentResult>([&](pqxx::work& tx)
+                                                    -> Result<CloudOrderPaymentResult> {
+            CloudOrderPaymentResult result;
+            const auto recorded = tx.exec_params(
+                "INSERT INTO billing_payment_events (provider, event_id, event_type, reference) "
+                "VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING RETURNING 1",
+                event.provider,
+                event.event_id,
+                event.event_type,
+                event.subscription_id);
+            if (recorded.empty()) {
+                result.duplicate = true;
+                return result;
+            }
+            const auto rows = tx.exec_params(
+                "SELECT id::text FROM cloud_orders WHERE stripe_subscription_id = $1 OR "
+                "(id::text = $2 AND stripe_subscription_id IS NULL AND state = 'pending_payment') "
+                "FOR UPDATE",
+                event.subscription_id,
+                event.order_id);
+            if (rows.size() != 1) {
+                return result;
+            }
+            auto order = cloud_order_in(tx, rows[0][0].as<std::string>());
+            if (!order) {
+                return std::unexpected(order.error());
+            }
+            if (order->path != "checkout" ||
+                (!event.order_id.empty() && event.order_id != order->id) ||
+                (!order->stripe_customer_id.empty() &&
+                 order->stripe_customer_id != event.customer_id) ||
+                (!order->stripe_subscription_id.empty() &&
+                 order->stripe_subscription_id != event.subscription_id)) {
+                return result;
+            }
+            result.matched = true;
+            result.changed = apply_cloud_order_entitlement(order->entitlement, event);
+            const auto& entitlement = order->entitlement;
+            // Recheck the database clock under the lock: a delayed negative event cannot reopen access.
+            tx.exec_params(
+                "UPDATE cloud_orders SET stripe_subscription_id = $2, stripe_customer_id = $3, "
+                "subscription_status = $4, paid_through = $5, entitlement_access_until = CASE "
+                "WHEN $4 IN ('active', 'trialing') OR (entitlement_access_until > 0 AND "
+                "extract(epoch FROM clock_timestamp()) < entitlement_access_until + "
+                "entitlement_grace_seconds) THEN $6::bigint ELSE entitlement_access_until END, "
+                "subscription_event_created = $7, entitlement_grace_seconds = CASE "
+                "WHEN $4 IN ('active', 'trialing') OR (entitlement_access_until > 0 AND "
+                "extract(epoch FROM clock_timestamp()) < entitlement_access_until + "
+                "entitlement_grace_seconds) THEN $8::integer ELSE entitlement_grace_seconds END, "
+                "entitlement_retry_invoice_id = $9 WHERE id = "
+                "$1::uuid",
+                order->id,
+                event.subscription_id,
+                event.customer_id,
+                entitlement.subscription_status,
+                entitlement.paid_through,
+                entitlement.access_until,
+                entitlement.event_created,
+                entitlement.grace_seconds,
+                entitlement.retry_invoice_id);
+            if (result.changed) {
+                cloud_order_event(tx,
+                                  order->id,
+                                  order->state,
+                                  order->state,
+                                  "stripe",
+                                  event.event_type + " " + event.event_id + ": subscription " +
+                                      event.status);
+            }
+            auto after = cloud_order_in(tx, order->id);
+            if (!after) {
+                return std::unexpected(after.error());
+            }
+            result.order = std::move(*after);
+            return result;
+        });
     }
 
     Result<std::vector<CloudOrder>> claim_cloud_order_emails(int limit,

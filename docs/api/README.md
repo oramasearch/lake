@@ -587,3 +587,4 @@ See [metering.md](metering.md#quota-behavior) for authorization and focused proo
 LSR-102 (lake#968): [recovery.md](recovery.md#email-recovery-budgets) documents uniform accepted
 responses, durable client/global limits, account attempt reuse and owner-only `cancel_recovery`,
 linked in device notices. Migration `0096_email_recovery_limits` awaits operator vendoring.
+Recurring order entitlement (lake#972, LSR-105): [orders.md](orders.md#recurring-entitlement-lsr-105-lake972) describes signed renewal/end events, deadline-based grace and the required operator suspension contract.

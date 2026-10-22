@@ -1763,3 +1763,402 @@ TEST(OrdersStore, BoundedTextIsNeverCutInsideAUtf8Sequence) {
     ASSERT_TRUE(created);
     EXPECT_EQ(created->email_error, std::string(1023, 'e'));
 }
+
+namespace {
+
+json subscription_event(const lake::control::CloudOrder& order,
+                        const std::string& id,
+                        const std::string& type,
+                        const std::string& status,
+                        std::int64_t created,
+                        std::int64_t end) {
+    return {{"id", id},
+            {"type", type},
+            {"created", created},
+            {"data",
+             {{"object",
+               {{"id", order.stripe_subscription_id},
+                {"customer", order.stripe_customer_id},
+                {"status", status},
+                {"current_period_end", end},
+                {"trial_end", end},
+                {"metadata",
+                 {{"lake_order_id", order.id},
+                  {"lake_instance", this_lake},
+                  {"orama_app", "lake"}}}}}}}};
+}
+
+json renewal_event(const lake::control::CloudOrder& order,
+                   const std::string& id,
+                   const std::string& type,
+                   std::int64_t created,
+                   std::int64_t end,
+                   bool modern = false) {
+    json details{
+        {"subscription", order.stripe_subscription_id},
+        {"metadata",
+         {{"lake_order_id", order.id}, {"lake_instance", this_lake}, {"orama_app", "lake"}}}};
+    json object{{"id", "in_" + id},
+                {"customer", order.stripe_customer_id},
+                {"subscription", order.stripe_subscription_id},
+                {"lines",
+                 {{"has_more", false},
+                  {"data",
+                   json::array({{{"type", "subscription"},
+                                 {"period", {{"start", end - 100}, {"end", end}}}}})}}}};
+    if (modern) {
+        object["parent"] = {{"type", "subscription_details"}, {"subscription_details", details}};
+        object["lines"]["data"][0].erase("type");
+        object["lines"]["data"][0]["parent"] = {{"type", "subscription_item_details"}};
+        object.erase("subscription");
+    } else {
+        object["subscription_details"] = details;
+    }
+    return {{"id", id}, {"type", type}, {"created", created}, {"data", {{"object", object}}}};
+}
+
+void expect_order_subscription_contract(lake::control::Store& store) {
+    FakeCheckout stripe;
+    auto providers = stripe.providers();
+    ApiContext context;
+    context.store = &store;
+    const auto now = std::chrono::duration_cast<std::chrono::seconds>(
+                         std::chrono::system_clock::now().time_since_epoch())
+                         .count();
+    const auto deliver = [&](const json& event) {
+        const auto body = event.dump();
+        auto reply = liquid::runtime::block_on(receive_payment_notice(
+            *providers, context, body, stripe_signature_header(body, stripe_webhook, now)));
+        EXPECT_TRUE(reply);
+        EXPECT_EQ(reply->status, 200) << reply->body;
+        return reply->body;
+    };
+    const auto paid_order = [&](const std::string& key) {
+        auto order = checkout_order(store, "cs_" + key);
+        deliver(json::parse(
+            checkout_event("evt_" + key, "checkout.session.completed", "cs_" + key, order.id)));
+        EXPECT_TRUE(
+            store.transition_cloud_order({order.id, "paid", "provisioning", "operator", ""}));
+        EXPECT_TRUE(store.transition_cloud_order(
+            {order.id, "provisioning", "ready", "operator", "", "", "acme.lake.live"}));
+        return *store.get_cloud_order(order.id);
+    };
+    auto order = paid_order("entitled");
+    auto paid = renewal_event(order, "evt_first_month", "invoice.paid", now, now + 100);
+    EXPECT_EQ(deliver(paid).value("changed", false), true);
+    EXPECT_EQ(store.get_cloud_order(order.id)->entitlement.paid_through, now + 100);
+    const auto duplicate = deliver(paid);
+    EXPECT_TRUE(duplicate.value("duplicate", false));
+
+    auto failure = renewal_event(
+        order, "evt_renewal_failed", "invoice.payment_failed", now + 1, now + 200, true);
+    failure["data"]["object"]["next_payment_attempt"] = now + 150;
+    deliver(failure);
+    auto entitlement = store.get_cloud_order(order.id)->entitlement;
+    EXPECT_EQ(entitlement.subscription_status, "past_due");
+    EXPECT_EQ(entitlement.paid_through, now + 100);
+    EXPECT_EQ(lake::control::cloud_order_entitlement_state(entitlement, now + 149), "active");
+    EXPECT_EQ(lake::control::cloud_order_entitlement_state(entitlement, now + 150), "grace");
+    EXPECT_EQ(lake::control::cloud_order_entitlement_state(entitlement, now + 150 + 3 * 86400),
+              "suspended");
+
+    // Subscription snapshots must retain an already-known retry window. Stripe Automations
+    // publishes its next attempt on invoice.updated rather than invoice.payment_failed.
+    deliver(subscription_event(order,
+                               "evt_retry_status",
+                               "customer.subscription.updated",
+                               "past_due",
+                               now + 1,
+                               now + 200));
+    EXPECT_EQ(store.get_cloud_order(order.id)->entitlement.access_until, now + 150);
+    auto retry_update =
+        renewal_event(order, "evt_retry_update", "invoice.updated", now + 1, now + 200, true);
+    retry_update["data"]["object"]["id"] = failure["data"]["object"]["id"];
+    retry_update["data"]["object"]["status"] = "open";
+    retry_update["data"]["object"]["attempted"] = true;
+    retry_update["data"]["object"]["next_payment_attempt"] = now + 160;
+    deliver(retry_update);
+    EXPECT_EQ(store.get_cloud_order(order.id)->entitlement.access_until, now + 160);
+    auto next_month =
+        renewal_event(order, "evt_next_unpaid_month", "invoice.payment_failed", now + 1, now + 500);
+    next_month["data"]["object"]["next_payment_attempt"] = now + 400;
+    deliver(next_month);
+    EXPECT_EQ(store.get_cloud_order(order.id)->entitlement.access_until, now + 160);
+    EXPECT_EQ(store.get_cloud_order(order.id)->entitlement.retry_invoice_id,
+              failure["data"]["object"]["id"].get<std::string>());
+
+    // A successful retry restores access without recreating the order or discarding its host.
+    deliver(renewal_event(order, "evt_renewal_paid", "invoice.paid", now + 2, now + 200, true));
+    EXPECT_EQ(store.get_cloud_order(order.id)->entitlement.paid_through, now + 200);
+    EXPECT_EQ(store.get_cloud_order(order.id)->host, "acme.lake.live");
+    auto ended = subscription_event(
+        order, "evt_deleted", "customer.subscription.deleted", "canceled", now + 3, now + 200);
+    ended["data"]["object"]["ended_at"] = now + 3;
+    deliver(ended);
+    entitlement = store.get_cloud_order(order.id)->entitlement;
+    EXPECT_EQ(entitlement.subscription_status, "canceled");
+    EXPECT_EQ(entitlement.access_until, now + 3);
+    EXPECT_EQ(lake::control::cloud_order_entitlement_state(entitlement, now + 3 + 3 * 86400),
+              "suspended");
+    // A delayed successful invoice, stale active snapshot, or duplicate cannot revive a deleted
+    // subscription.
+    deliver(renewal_event(order, "evt_late_payment", "invoice.paid", now + 4, now + 500));
+    deliver(subscription_event(
+        order, "evt_stale_active", "customer.subscription.updated", "active", now + 2, now + 500));
+    deliver(ended);
+    EXPECT_EQ(store.get_cloud_order(order.id)->entitlement.access_until, now + 3);
+    EXPECT_EQ(store.get_cloud_order(order.id)->state, "ready");
+
+    // Incorrect subscription, order, customer, instance, and signatures cannot modify entitlement.
+    auto unrelated = paid_order("unrelated");
+    auto wrong = renewal_event(unrelated, "evt_wrong_order", "invoice.paid", now + 10, now + 1000);
+    wrong["data"]["object"]["subscription_details"]["metadata"]["lake_order_id"] = order.id;
+    EXPECT_FALSE(deliver(wrong).value("matched", true));
+    wrong = renewal_event(unrelated, "evt_wrong_customer", "invoice.paid", now + 10, now + 1000);
+    wrong["data"]["object"]["customer"] = "cus_someone_else";
+    EXPECT_FALSE(deliver(wrong).value("matched", true));
+    wrong =
+        renewal_event(unrelated, "evt_wrong_subscription", "invoice.paid", now + 10, now + 1000);
+    wrong["data"]["object"]["subscription"] = "sub_someone_else";
+    wrong["data"]["object"]["subscription_details"]["subscription"] = "sub_someone_else";
+    EXPECT_FALSE(deliver(wrong).value("matched", true));
+    wrong =
+        renewal_event(unrelated, "evt_wrong_instance", "invoice.paid", now + 10, now + 1000, true);
+    wrong["data"]["object"]["parent"]["subscription_details"]["metadata"]["lake_instance"] =
+        other_lake;
+    EXPECT_TRUE(deliver(wrong).value("ignored", false));
+    const auto forged = liquid::runtime::block_on(
+        receive_payment_notice(*providers, context, paid.dump(), "t=1,v1=00"));
+    ASSERT_TRUE(forged);
+    EXPECT_EQ(forged->status, 400);
+    EXPECT_EQ(store.get_cloud_order(unrelated.id)->entitlement.paid_through, 0);
+
+    // A trial ends by the clock, and an unpaid subscription regains entitlement only on a newer
+    // signed event.
+    context.order_entitlement_grace_seconds = 7;
+    deliver(subscription_event(
+        unrelated, "evt_trial", "customer.subscription.updated", "trialing", now + 11, now + 20));
+    entitlement = store.get_cloud_order(unrelated.id)->entitlement;
+    EXPECT_EQ(lake::control::cloud_order_entitlement_state(entitlement, now + 27), "suspended");
+    deliver(subscription_event(
+        unrelated, "evt_unpaid", "customer.subscription.updated", "unpaid", now + 21, now + 200));
+    EXPECT_EQ(store.get_cloud_order(unrelated.id)->entitlement.access_until, now + 20);
+    auto unpaid_retry =
+        renewal_event(unrelated, "evt_unpaid_retry", "invoice.payment_failed", now + 21, now + 400);
+    unpaid_retry["data"]["object"]["next_payment_attempt"] = now + 300;
+    deliver(unpaid_retry);
+    EXPECT_EQ(store.get_cloud_order(unrelated.id)->entitlement.access_until, now + 20);
+    EXPECT_EQ(store.get_cloud_order(unrelated.id)->entitlement.subscription_status, "unpaid");
+    EXPECT_FALSE(deliver(subscription_event(unrelated,
+                                            "evt_ambiguous_active",
+                                            "customer.subscription.updated",
+                                            "active",
+                                            now + 21,
+                                            now + 200))
+                     .value("changed", true));
+    deliver(subscription_event(
+        unrelated, "evt_restored", "customer.subscription.updated", "active", now + 22, now + 200));
+    entitlement = store.get_cloud_order(unrelated.id)->entitlement;
+    EXPECT_EQ(lake::control::cloud_order_entitlement_state(entitlement, now + 22), "active");
+    EXPECT_EQ(lake::control::cloud_order_entitlement_state(entitlement, now + 207), "suspended");
+
+    // A failure cannot restore expired access, even when its next retry is in the future or
+    // the configured grace was increased. Only new positive entitlement evidence restores it.
+    deliver(subscription_event(unrelated,
+                               "evt_expired_period",
+                               "customer.subscription.updated",
+                               "active",
+                               now + 23,
+                               now - 20));
+    const auto expired_until = store.get_cloud_order(unrelated.id)->entitlement.access_until;
+    context.order_entitlement_grace_seconds = 30 * 86400;
+    auto late_failure =
+        renewal_event(unrelated, "evt_late_failure", "invoice.payment_failed", now + 24, now + 300);
+    late_failure["data"]["object"]["next_payment_attempt"] = now + 200;
+    deliver(late_failure);
+    entitlement = store.get_cloud_order(unrelated.id)->entitlement;
+    EXPECT_EQ(entitlement.access_until, expired_until);
+    EXPECT_EQ(entitlement.grace_seconds, 7);
+    EXPECT_EQ(lake::control::cloud_order_entitlement_state(entitlement, now), "suspended");
+    deliver(renewal_event(unrelated, "evt_paid_after_expiry", "invoice.paid", now + 25, now + 300));
+    entitlement = store.get_cloud_order(unrelated.id)->entitlement;
+    EXPECT_EQ(lake::control::cloud_order_entitlement_state(entitlement, now), "active");
+    EXPECT_TRUE(entitlement.retry_invoice_id.empty());
+
+    // Subscription events can arrive before the Checkout completion, including a cancellation.
+    auto early = checkout_order(store, "cs_early");
+    early.stripe_subscription_id = "sub_evt_early";
+    early.stripe_customer_id = "cus_evt_early";
+    deliver(subscription_event(
+        early, "evt_early_canceled", "customer.subscription.deleted", "canceled", now, now + 100));
+    deliver(json::parse(
+        checkout_event("evt_early", "checkout.session.completed", "cs_early", early.id)));
+    EXPECT_EQ(store.get_cloud_order(early.id)->entitlement.subscription_status, "canceled");
+    EXPECT_EQ(store.get_cloud_order(early.id)->entitlement.access_until, 0);
+    auto incomplete = checkout_order(store, "cs_incomplete");
+    incomplete.stripe_subscription_id = "sub_evt_incomplete";
+    incomplete.stripe_customer_id = "cus_evt_incomplete";
+    deliver(subscription_event(incomplete,
+                               "evt_incomplete_created",
+                               "customer.subscription.created",
+                               "incomplete",
+                               now,
+                               0));
+    EXPECT_EQ(store.get_cloud_order(incomplete.id)->entitlement.access_until, 0);
+    deliver(json::parse(checkout_event(
+        "evt_incomplete", "checkout.session.completed", "cs_incomplete", incomplete.id)));
+    EXPECT_GT(store.get_cloud_order(incomplete.id)->entitlement.access_until, 0);
+}
+
+} // namespace
+
+TEST(OrdersEntitlement, SignedSubscriptionLifecycleInMemory) {
+    lake::control::InMemoryStore store;
+    expect_order_subscription_contract(store);
+}
+
+TEST(OrdersEntitlement, SignedSubscriptionLifecycleInPostgres) {
+    const char* uri = lake::test::postgres_uri();
+    if (uri == nullptr || *uri == '\0') {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
+    }
+    auto store = lake::control::make_postgres_store(uri, std::string(kek));
+    expect_order_subscription_contract(*store);
+}
+
+TEST(OrdersEntitlement, DesiredStateExpiresWithoutAnotherWebhookAndRestoresOnRenewal) {
+    const char* uri = lake::test::postgres_uri();
+    if (uri == nullptr || *uri == '\0') {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
+    }
+    auto store = lake::control::make_postgres_store(uri, std::string(kek));
+    auto order = checkout_order(*store, "cs_desired");
+    ASSERT_TRUE(store->apply_cloud_order_payment({"stripe",
+                                                  "evt_desired",
+                                                  "checkout.session.completed",
+                                                  "cs_desired",
+                                                  order.id,
+                                                  "paid",
+                                                  "cus_desired",
+                                                  "sub_desired",
+                                                  "",
+                                                  0}));
+    ASSERT_TRUE(store->transition_cloud_order({order.id, "paid", "provisioning", "operator", ""}));
+    ASSERT_TRUE(store->transition_cloud_order(
+        {order.id, "provisioning", "ready", "operator", "", "", "acme.lake.live"}));
+    pqxx::connection connection(uri);
+    {
+        pqxx::work tx(connection);
+        const auto initial = tx.exec_params("SELECT desired_state FROM cloud_order_desired_state "
+                                            "WHERE id = $1::uuid",
+                                            order.id);
+        EXPECT_EQ(initial[0][0].as<std::string>(), "suspended")
+            << "zero grace requires a signed period before provisioning";
+        tx.exec_params("UPDATE cloud_orders SET entitlement_access_until = extract(epoch FROM "
+                       "now())::bigint - 10, entitlement_grace_seconds = 5 WHERE id = $1::uuid",
+                       order.id);
+        const auto rows = tx.exec_params("SELECT desired_state, entitlement_state, host, state "
+                                         "FROM cloud_order_desired_state WHERE id = $1::uuid",
+                                         order.id);
+        EXPECT_EQ(rows[0][0].as<std::string>(), "suspended");
+        EXPECT_EQ(rows[0][1].as<std::string>(), "suspended");
+        EXPECT_EQ(rows[0][2].as<std::string>(), "acme.lake.live");
+        EXPECT_EQ(rows[0][3].as<std::string>(), "ready");
+        tx.commit();
+    }
+    const auto now = std::chrono::duration_cast<std::chrono::seconds>(
+                         std::chrono::system_clock::now().time_since_epoch())
+                         .count();
+    lake::control::CloudOrderSubscriptionEvent renewal{"stripe",
+                                                       "evt_desired_renewal",
+                                                       "invoice.paid",
+                                                       order.id,
+                                                       "cus_desired",
+                                                       "sub_desired",
+                                                       "active",
+                                                       now,
+                                                       now + 100};
+    renewal.invoice_id = "in_desired_renewal";
+    ASSERT_TRUE(store->apply_cloud_order_subscription(renewal));
+    {
+        pqxx::work tx(connection);
+        const auto rows = tx.exec_params("SELECT desired_state, entitlement_state FROM "
+                                         "cloud_order_desired_state WHERE id = $1::uuid",
+                                         order.id);
+        EXPECT_EQ(rows[0][0].as<std::string>(), "present");
+        EXPECT_EQ(rows[0][1].as<std::string>(), "active");
+    }
+}
+
+TEST(OrdersEntitlement, CurrentSubscriptionItemsAndExpandedReferencesAreReadSafely) {
+    lake::control::CloudOrder order;
+    order.id = "order_1";
+    order.stripe_customer_id = "cus_1";
+    order.stripe_subscription_id = "sub_1";
+    auto event = subscription_event(
+        order, "evt_modern", "customer.subscription.updated", "active", 100, 200);
+    auto& object = event["data"]["object"];
+    object.erase("current_period_end");
+    object["items"] = {
+        {"has_more", false},
+        {"data", json::array({{{"current_period_end", 200}}, {{"current_period_end", 180}}})}};
+    object["customer"] = {{"id", "cus_1"}};
+    auto parsed = parse_stripe_event(event.dump(), this_lake);
+    ASSERT_TRUE(parsed);
+    ASSERT_TRUE(parsed->order_subscription);
+    EXPECT_EQ(parsed->order_subscription->period_end, 180);
+    EXPECT_EQ(parsed->order_subscription->customer_id, "cus_1");
+    object["items"]["has_more"] = true;
+    EXPECT_FALSE(parse_stripe_event(event.dump(), this_lake));
+    object["items"]["has_more"] = "false";
+    EXPECT_FALSE(parse_stripe_event(event.dump(), this_lake));
+    object["current_period_end"] = 200;
+    // The pinned legacy API keeps period_end on the subscription, not its item rows.
+    object["items"] = {{"data", json::array({{{"id", "si_1"}}})}, {"has_more", false}};
+    EXPECT_TRUE(parse_stripe_event(event.dump(), this_lake));
+    auto invoice = renewal_event(order, "evt_modern_invoice", "invoice.paid", 100, 200, true);
+    invoice["data"]["object"]["parent"]["subscription_details"]["subscription"] = {{"id", "sub_1"}};
+    parsed = parse_stripe_event(invoice.dump(), this_lake);
+    ASSERT_TRUE(parsed);
+    ASSERT_TRUE(parsed->order_subscription);
+    EXPECT_EQ(parsed->order_subscription->subscription_id, "sub_1");
+    invoice["data"]["object"]["lines"]["data"][0]["period"]["end"] = nullptr;
+    EXPECT_FALSE(parse_stripe_event(invoice.dump(), this_lake));
+    auto checkout = json::parse(
+        checkout_event("evt_expanded_checkout", "checkout.session.completed", "cs_1", order.id));
+    checkout["data"]["object"]["customer"] = {{"id", "cus_1"}};
+    checkout["data"]["object"]["subscription"] = {{"id", "sub_1"}};
+    parsed = parse_stripe_event(checkout.dump(), this_lake);
+    ASSERT_TRUE(parsed);
+    EXPECT_EQ(parsed->customer, "cus_1");
+    EXPECT_EQ(parsed->subscription, "sub_1");
+}
+
+TEST(OrdersEntitlement, CancellationWinsEvenWhenALaterInvoiceArrivedFirst) {
+    lake::control::CloudOrderEntitlement entitlement;
+    ASSERT_TRUE(lake::control::apply_cloud_order_entitlement(
+        entitlement,
+        {"stripe", "evt_invoice", "invoice.paid", "order", "cus", "sub", "active", 120, 300}));
+    ASSERT_TRUE(lake::control::apply_cloud_order_entitlement(entitlement,
+                                                             {"stripe",
+                                                              "evt_canceled",
+                                                              "customer.subscription.deleted",
+                                                              "order",
+                                                              "cus",
+                                                              "sub",
+                                                              "canceled",
+                                                              110,
+                                                              300}));
+    EXPECT_EQ(entitlement.access_until, 110);
+    EXPECT_FALSE(lake::control::apply_cloud_order_entitlement(entitlement,
+                                                              {"stripe",
+                                                               "evt_active",
+                                                               "customer.subscription.updated",
+                                                               "order",
+                                                               "cus",
+                                                               "sub",
+                                                               "active",
+                                                               130,
+                                                               500}));
+    EXPECT_EQ(entitlement.access_until, 110);
+}

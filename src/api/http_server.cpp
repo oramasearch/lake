@@ -9441,6 +9441,7 @@ struct ApiServer::Impl {
         ctx.model_provider = model_provider;
         ctx.model_gateway_models = options.model_gateway_models;
         ctx.payments = payments;
+        ctx.order_entitlement_grace_seconds = options.order_entitlement_grace_seconds;
         ctx.object_transport = object_transport;
         ctx.artifact_catalog = [this] {
             nlohmann::json catalog = artifacts.catalog();

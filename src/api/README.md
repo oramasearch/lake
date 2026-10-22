@@ -736,3 +736,4 @@ customer-admin authorization; REST and MCP share the registry handlers.
 Email recovery (lake#968, LSR-102) receives ingress-derived client metadata in the shared HTTP
 context for REST and MCP. `cancel_recovery` authorizes the signed-in account and device notices
 link its capability and POST URL. Cancellation stays in the central identity audit log. See [recovery.md](../../docs/api/recovery.md).
+Recurring order notices (lake#972, LSR-105) use the verified Stripe webhook and `PaymentNotice::order_subscription`; `stripe.cpp` reads legacy/current subscription metadata and recurring periods, and `billing_capabilities.cpp` dispatches them to the subscription store operation. Startup validates `LAKE_ORDER_ENTITLEMENT_GRACE_SECONDS` (default three days). See [orders](../../docs/api/orders.md#recurring-entitlement-lsr-105-lake972).

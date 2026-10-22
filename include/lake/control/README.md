@@ -316,3 +316,4 @@ verification paths; see [the contract](../../../docs/api/identity.md#authenticat
 `begin_email_recovery` accepts trusted transport client metadata and returns an empty attempt
 for unknown accounts or exhausted budgets. `cancel_recovery` takes the signed-in user id and
 checks ownership again in the store. Contracts: [recovery](../../../docs/api/recovery.md).
+`CloudOrderEntitlement` and `CloudOrderSubscriptionEvent` (lake#972) carry signed recurring subscription snapshots. `apply_cloud_order_subscription` matches subscription/customer/order, applies events once under serialization, and retains an access deadline; `cloud_order_entitlement_state` evaluates it at the supplied clock. Both stores share the ordering and expiry rules. See [orders](../../../docs/api/orders.md#recurring-entitlement-lsr-105-lake972).

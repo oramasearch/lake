@@ -469,6 +469,27 @@ inline std::string utf8_prefix(std::string_view text, std::size_t bytes) {
     }
     return std::string(text.substr(0, end));
 }
+// Subscription accounting stays in the control plane; deadlines are UTC Unix seconds.
+// access_until and grace_seconds define entitlement; paid_through advances on signed paid invoices.
+struct CloudOrderEntitlement {
+    std::string subscription_status = "pending";
+    std::int64_t paid_through = 0, access_until = 0, event_created = 0;
+    int grace_seconds = 3 * 86400;
+    std::string retry_invoice_id;
+};
+struct CloudOrderSubscriptionEvent {
+    std::string provider, event_id, event_type, order_id, customer_id, subscription_id, status;
+    std::int64_t created = 0, period_end = 0, next_payment_attempt = 0, ended_at = 0;
+    int grace_seconds = 3 * 86400;
+    std::string invoice_id;
+};
+// Evaluate at the reader's clock: expiry does not depend on another webhook or maintenance pass.
+std::string cloud_order_entitlement_state(const CloudOrderEntitlement& entitlement,
+                                          std::int64_t now);
+bool apply_cloud_order_entitlement(CloudOrderEntitlement& entitlement,
+                                   const CloudOrderSubscriptionEvent& event);
+bool valid_cloud_order_subscription_event(const CloudOrderSubscriptionEvent& event);
+
 // An order from the apex order sheet (lake#831, migration 0089, docs/api/orders.md): what a person
 // asked for, how it is paid, and where it stands. Orders are multitenancy and billing, so they live
 // in the control plane; the operator reads `paid` rows and writes `state`, `host`,
@@ -493,6 +514,7 @@ struct CloudOrder {
     std::string support_emailed_state, customer_emailed_state;
     int email_attempts = 0;
     std::string email_error, email_retry_at;
+    CloudOrderEntitlement entitlement;
 };
 // A new order: `path` checkout starts it in `pending_payment`, order_form in `submitted`.
 struct NewCloudOrder {
@@ -516,11 +538,12 @@ struct CloudOrderTransition {
 struct CloudOrderPayment {
     std::string provider, event_id, event_type, checkout_session_id, order_id, state;
     std::string customer_id, subscription_id, detail;
+    int grace_seconds = 3 * 86400;
 };
 struct CloudOrderPaymentResult {
     bool duplicate = false; // the event id was applied before; nothing changed
-    bool matched = false;   // an order has this Checkout Session
-    bool changed = false;   // the order moved
+    bool matched = false;   // an order has this session or subscription and customer
+    bool changed = false;   // the order or its entitlement changed
     CloudOrder order;       // the order after the notice, when matched
 };
 // One row of cloud_order_events: the order's history, written by lake, Stripe's notices and the
@@ -2189,6 +2212,8 @@ public:
     virtual Result<CloudOrder> transition_cloud_order(const CloudOrderTransition& change) = 0;
     virtual Result<CloudOrderPaymentResult>
     apply_cloud_order_payment(const CloudOrderPayment& payment) = 0;
+    virtual Result<CloudOrderPaymentResult>
+    apply_cloud_order_subscription(const CloudOrderSubscriptionEvent& event) = 0;
     // Orders with an email due (a recipient not yet told about the order's state), at most `limit`,
     // each held for `lease_seconds` so another pass does not send it twice.
     virtual Result<std::vector<CloudOrder>> claim_cloud_order_emails(int limit,

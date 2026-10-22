@@ -553,6 +553,7 @@ struct ApiContext {
     // How invoices are paid where billing is on (docs/api/billing.md#payment-providers): `viewer`
     // and `server_info` report its status. Null: billing is off.
     std::shared_ptr<PaymentProviders> payments;
+    int order_entitlement_grace_seconds = 3 * 86400;
 };
 
 using CapabilityHandler =

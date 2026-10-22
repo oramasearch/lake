@@ -349,3 +349,4 @@ Email recovery (lake#968, LSR-102) reuses pending attempts and enforces account,
 budgets inside both stores before queuing mail or device notices. PostgreSQL keeps atomic budgets
 in `offline_recovery_budgets` (migration `0096_email_recovery_limits`); cancellation clears the
 token and removes unclaimed deliveries. See [recovery.md](../../docs/api/recovery.md).
+`order_entitlements.cpp` (lake#972, LSR-105) is the shared subscription-event reducer and deadline evaluator. Both stores serialize subscription/customer/order matching and event deduplication, preserve canceled subscriptions and reject stale renewal snapshots. PostgreSQL exposes time-dependent desired state through `cloud_order_desired_state`; provisioning suspension remains an operator handoff. See [orders](../../docs/api/orders.md#recurring-entitlement-lsr-105-lake972).
