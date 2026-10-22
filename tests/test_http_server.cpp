@@ -4262,7 +4262,9 @@ TEST(HttpServer, ClerkExchangeRefusesAForgedTokenAndSignOutEndsClerkToo) {
     EXPECT_EQ(response_header(signed_out, "location"), "/sign-in?signed_out=1");
 }
 
-TEST(HttpServer, ClerkInvalidTokensNeverFetchAndForwardedAddressesCannotBypassLimit) {
+// Every request arrives from the same socket peer, as it does behind the ingress: each address the
+// ingress reports gets its own 60 attempts, and clients without one share the direct bucket.
+TEST(HttpServer, ClerkInvalidTokensNeverFetchAndEachIngressClientHasItsOwnLimit) {
     lake::api::ServerOptions options;
     options.port = 0;
     options.store = std::make_shared<lake::control::InMemoryStore>();
@@ -4274,20 +4276,28 @@ TEST(HttpServer, ClerkInvalidTokensNeverFetchAndForwardedAddressesCannotBypassLi
     };
     lake::api::ApiServer server(options);
     ASSERT_TRUE(server.start()) << server.reason();
-    for (unsigned i = 0; i < 100; ++i) {
+    const auto attempt = [&](std::vector<std::pair<std::string, std::string>> headers) {
         HttpConnection connection(server.port());
-        const auto response =
-            connection.request("POST",
-                               "/identity/clerk-session",
-                               "token=not.a.jwt",
-                               {},
-                               "HTTP/1.1",
-                               {},
-                               "application/x-www-form-urlencoded",
-                               {{"X-Real-IP", "192.0.2." + std::to_string(i)},
-                                {"X-Forwarded-For", "198.51.100." + std::to_string(i)}});
-        EXPECT_TRUE(response.starts_with(i < 60 ? "HTTP/1.1 302" : "HTTP/1.1 429")) << response;
-        EXPECT_TRUE(response_header(response, "set-cookie").empty());
+        return connection.request("POST",
+                                  "/identity/clerk-session",
+                                  "token=not.a.jwt",
+                                  {},
+                                  "HTTP/1.1",
+                                  {},
+                                  "application/x-www-form-urlencoded",
+                                  std::move(headers));
+    };
+    const std::vector<std::vector<std::pair<std::string, std::string>>> clients = {
+        {{"X-Real-IP", "192.0.2.1"}, {"X-Forwarded-For", "198.51.100.1, 192.0.2.1"}},
+        {{"X-Real-IP", "192.0.2.2"}},
+        {},
+    };
+    for (const auto& headers : clients) {
+        for (unsigned i = 0; i < 61; ++i) {
+            const auto response = attempt(headers);
+            EXPECT_TRUE(response.starts_with(i < 60 ? "HTTP/1.1 302" : "HTTP/1.1 429")) << response;
+            EXPECT_TRUE(response_header(response, "set-cookie").empty());
+        }
     }
     EXPECT_EQ(fetches, 0U);
 }

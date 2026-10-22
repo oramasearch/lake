@@ -272,16 +272,22 @@ hold the inbound I/O thread. An offloaded task owns its cache and transport thro
 even if its response is abandoned. All JWKS HTTP requests have the OIDC ten-second deadline.
 `ServerOptions.oidc_jwks_fetch` substitutes the transport in tests.
 
-`POST /identity/clerk-session` accepts 60 attempts per minute per socket peer, counting successes
-and failures before reading the body. Further attempts answer 429 with `Retry-After: 60` and do
-not add an authentication audit row. Forwarding headers never change the bucket. Behind a reverse
-proxy, clients using the same proxy address share its allowance; configure network placement with
-that aggregate limit in mind. The address map holds at most 4,096 active buckets, refuses new
-peers when full, and releases buckets after a minute without evicting active limits.
+`POST /identity/clerk-session` accepts 60 attempts per minute per client address, counting
+successes and failures before reading the body. Further attempts answer 429 with `Retry-After: 60`
+and do not add an authentication audit row. The address comes from the trusted ingress hop, as the
+order sheet's does ([orders](orders.md#abuse-protection), lake#838): `X-Real-IP`, which
+ingress-nginx always sets itself, else the last `X-Forwarded-For` hop. The socket peer is the
+ingress pod, so keying on it would put every user in one bucket. A client that reaches Lake
+without either header shares one `direct` bucket, which is still limited. Lake trusts these
+headers only because the ingress is its one way in; a deployment that exposes Lake's port
+directly lets a sender choose its bucket. The address map holds at most 4,096 active buckets,
+refuses new addresses when full, and releases buckets after a minute without evicting active
+limits.
 
 Verify with `ctest --test-dir build --timeout 600 -R 'OidcJwks|HttpServer.Clerk'`.
 The fake fetch tests send 100 invalid tokens per case, advance a monotonic clock across the
 cooldown, hold one refresh open during concurrent attempts, and exercise key rotation and failed
-fetches. The HTTP tests hold JWKS and Backend API requests open while health requests complete and rotate forged
-forwarding headers through 100 exchanges. Change the limits in `oidc_jwks.cpp` and
-`http_server.cpp`, updating these tests and this contract together.
+fetches. The HTTP tests hold JWKS and Backend API requests open while health requests complete,
+and send 61 exchanges from each of two ingress-reported addresses and a direct client over one
+socket peer. Change the limits in `oidc_jwks.cpp` and `http_server.cpp`, updating these tests and
+this contract together.

@@ -442,13 +442,6 @@ public:
         return leave_worker(request_token(route), principal);
     }
 
-    // Socket peer only: untrusted forwarding headers cannot buy more sign-in attempts.
-    [[nodiscard]] std::string client_address(const boost::http::route_params& route) const {
-        const auto token = request_token(route);
-        const auto found = state_->slots.find(token);
-        return found == state_->slots.end() ? "unknown" : found->second->connection->peer;
-    }
-
     [[nodiscard]] HttpConnectionStats stats() const {
         const State& state = *state_;
         return {state.connection_count.load(),

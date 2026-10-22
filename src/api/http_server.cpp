@@ -10535,17 +10535,19 @@ struct ApiServer::Impl {
         };
     }
 
-    // IO-thread-only, bounded address state. Never evict an active bucket to admit a new peer.
+    // IO-thread-only, bounded address state. Never evict an active bucket to admit a new client.
+    // Keyed on the address the trusted ingress hop reports (order_client_address): the socket peer
+    // is the ingress pod, which every user shares. Direct clients share the "direct" bucket.
     bool allow_clerk_exchange(const boost::http::route_params& route) {
         const auto now = std::chrono::steady_clock::now();
         std::erase_if(clerk_attempts, [&](const auto& item) {
             return now - item.second.started >= std::chrono::minutes(1);
         });
-        const auto peer = server->client_address(route);
-        if (!clerk_attempts.contains(peer) && clerk_attempts.size() >= 4096) {
+        const auto client = order_client_address(route);
+        if (!clerk_attempts.contains(client) && clerk_attempts.size() >= 4096) {
             return false;
         }
-        const auto entry = clerk_attempts.try_emplace(peer, ClerkAttempts{now}).first;
+        const auto entry = clerk_attempts.try_emplace(client, ClerkAttempts{now}).first;
         if (entry->second.count >= 60) {
             return false;
         }
