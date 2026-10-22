@@ -177,6 +177,8 @@ when it calls a capability undeployed that the observed OpenAPI lists.
 [`docs/design/overview.md`](docs/design/overview.md) for the service model,
 [`docs/api/README.md`](docs/api/README.md) for the API, and
 [`docs/ui/front-door.md`](docs/ui/front-door.md) for the customer journey.
+[`docs/api/clerk.md`](docs/api/clerk.md) describes browser sign-in, bounded JWKS refresh and
+the Clerk exchange attempt limit.
 [`docs/api/auth.md`](docs/api/auth.md) describes bearer credentials and the session migration;
 its [measurement proof](docs/build/session-authentication.md) records the regression coverage.
 [Clerk offboarding](docs/api/clerk.md#webhooks) describes account disablement and revocation of

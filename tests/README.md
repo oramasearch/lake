@@ -34,6 +34,8 @@ The tests exercise both URL forms, rejected credentials, workspace Zetta and mod
 adapters, anonymous MCP's 256 KiB cap, chunked bodies, depth and element limits, duplicate keys,
 anonymous discovery and authenticated bulk inputs. See [HTTP limits](../docs/serving/http.md#request-body-limits).
 
+`OidcJwks.*` covers invalid tokens, signature failures, unknown key IDs, cooldowns, rotation, concurrent refreshes and failed transports. `HttpServer.ClerkInvalidTokensNeverFetchAndForwardedAddressesCannotBypassLimit` checks 100 exchanges against the socket-peer limit; `HttpServer.ClerkJwksFetchDoesNotBlockOtherRequests` keeps a fake fetch blocked while a health request completes; `HttpServer.ClerkBackendStatusDoesNotBlockOtherRequests` covers the uncached account-status request too (lake#956).
+
 `test_platform.cpp`'s `LiquidIdFixture` covers deployment rows that name a repository by the liquid
 id `liquid deploy` sends, by lake's UUID, by an unknown id (reported, not skipped) and by a liquid
 id two repositories share (lake#805); `*.RecordsAndFindsLiquidIds` runs the store contract on

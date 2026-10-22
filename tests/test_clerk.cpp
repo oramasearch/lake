@@ -5,6 +5,7 @@
 #include <atomic>
 #include <chrono>
 #include <ctime>
+#include <future>
 #include <memory>
 #include <optional>
 #include <stdexcept>
@@ -526,4 +527,52 @@ TEST(Clerk, TemplateExchangeChecksLiveAccountStateWithoutCaching) {
     EXPECT_EQ(count_active(), 1);
     EXPECT_EQ(calls.load(), 7) << "no cached status can hide an account restriction";
     server.stop();
+}
+
+TEST(HttpServer, ClerkBackendStatusDoesNotBlockOtherRequests) {
+    ClerkInstance clerk;
+    std::promise<void> entered;
+    auto entered_future = entered.get_future();
+    std::promise<void> release;
+    auto released = release.get_future();
+    lake::api::ServerOptions options;
+    options.port = 0;
+    options.worker_coroutines = 2;
+    options.store = std::make_shared<lake::control::InMemoryStore>();
+    options.clerk_publishable_key = "pk_test_" + base64("example-123.clerk.accounts.dev$");
+    options.clerk_secret_key = "dummy-clerk-key";
+    options.clerk_http = [&](const std::string& url, const auto&) -> lake::api::ClerkResponse {
+        if (url == std::string(ClerkInstance::issuer) + "/.well-known/jwks.json") {
+            return {200, clerk.jwks(), ""};
+        }
+        entered.set_value();
+        released.wait();
+        return {503, "", "unavailable"};
+    };
+    lake::api::ApiServer server(options);
+    ASSERT_TRUE(server.start()) << server.reason();
+    const auto origin = "http://127.0.0.1:" + std::to_string(server.port());
+    const auto body = "token=" + clerk.template_token();
+    auto exchange = std::async(std::launch::async, [&] {
+        const auto* bytes = reinterpret_cast<const std::byte*>(body.data());
+        return lake::test::http_request(
+            {.url = origin,
+             .method = "POST",
+             .suffix = "/identity/clerk-session",
+             .headers = {{"Content-Type", "application/x-www-form-urlencoded"}},
+             .body = std::vector<std::byte>(bytes, bytes + body.size())});
+    });
+    EXPECT_EQ(entered_future.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    auto probe = std::async(std::launch::async, [&] {
+        return lake::test::http_request({.url = origin, .method = "GET", .suffix = "/healthz"});
+    });
+    const auto responsive = probe.wait_for(std::chrono::seconds(2));
+    release.set_value();
+    EXPECT_EQ(responsive, std::future_status::ready);
+    const auto health = probe.get();
+    ASSERT_TRUE(health);
+    EXPECT_EQ(health->status, 200U);
+    const auto denied = exchange.get();
+    ASSERT_TRUE(denied);
+    EXPECT_EQ(denied->status, 302U);
 }

@@ -17,6 +17,8 @@ Capability request bodies use registered byte limits and the credential gate bef
 [Secrets](secrets.md#dynamic-leases) and [transparency](transparency.md) document digest-only
 publication of successful dynamic-secret events (lake#953); denied and failed events stay private.
 
+Clerk and OIDC key fetching use a shared single-flight cache with a refresh cooldown; Clerk exchanges also enforce a per-peer attempt limit ([contract](clerk.md#bounded-key-refresh-lake956-lsr-090), lake#956).
+
 lake#728/#730/#731: [network.md](network.md) documents the fourteen secure-networking capabilities
 for connections, scoped credential rotation, egress rules, tunnel grants, peers, effective rules,
 sessions and activity. One registry definition supplies their permission checks, REST/OpenAPI

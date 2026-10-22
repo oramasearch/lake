@@ -7,6 +7,7 @@
 
 #include "lake/api/billing.hpp"
 #include "lake/api/clerk.hpp"
+#include "lake/api/oidc_jwks.hpp"
 #include "lake/api/orders.hpp"
 #include "lake/api/regions.hpp"
 #include "lake/api/registry.hpp"
@@ -188,6 +189,9 @@ struct ServerOptions {
     // Missing key or an unavailable Backend API refuses exchange. Never returned or logged.
     std::string clerk_secret_key;
     ClerkGet clerk_http; // injected HTTP responses for isolated tests
+
+    // Optional JWKS transport for tests; empty uses the bounded outbound HTTP client.
+    OidcJwks::Fetch oidc_jwks_fetch;
     // Clerk webhook signing secret (LAKE_CLERK_WEBHOOK_SECRET, `whsec_…`), an Orama platform key
     // the operator injects from the instance's Clerk configuration. Empty: POST
     // /identity/clerk-webhook answers 404. See docs/api/clerk.md#webhooks (lake#765).

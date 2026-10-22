@@ -4262,6 +4262,82 @@ TEST(HttpServer, ClerkExchangeRefusesAForgedTokenAndSignOutEndsClerkToo) {
     EXPECT_EQ(response_header(signed_out, "location"), "/sign-in?signed_out=1");
 }
 
+TEST(HttpServer, ClerkInvalidTokensNeverFetchAndForwardedAddressesCannotBypassLimit) {
+    lake::api::ServerOptions options;
+    options.port = 0;
+    options.store = std::make_shared<lake::control::InMemoryStore>();
+    options.clerk_publishable_key = "pk_test_MTI3LjAuMC4xJA";
+    std::atomic<unsigned> fetches = 0;
+    options.oidc_jwks_fetch = [&](const auto&, bool) -> std::optional<std::string> {
+        ++fetches;
+        return R"({"keys":[]})";
+    };
+    lake::api::ApiServer server(options);
+    ASSERT_TRUE(server.start()) << server.reason();
+    for (unsigned i = 0; i < 100; ++i) {
+        HttpConnection connection(server.port());
+        const auto response =
+            connection.request("POST",
+                               "/identity/clerk-session",
+                               "token=not.a.jwt",
+                               {},
+                               "HTTP/1.1",
+                               {},
+                               "application/x-www-form-urlencoded",
+                               {{"X-Real-IP", "192.0.2." + std::to_string(i)},
+                                {"X-Forwarded-For", "198.51.100." + std::to_string(i)}});
+        EXPECT_TRUE(response.starts_with(i < 60 ? "HTTP/1.1 302" : "HTTP/1.1 429")) << response;
+        EXPECT_TRUE(response_header(response, "set-cookie").empty());
+    }
+    EXPECT_EQ(fetches, 0U);
+}
+
+TEST(HttpServer, ClerkJwksFetchDoesNotBlockOtherRequests) {
+    lake::api::ServerOptions options;
+    options.port = 0;
+    options.worker_coroutines = 2;
+    options.store = std::make_shared<lake::control::InMemoryStore>();
+    options.clerk_publishable_key = "pk_test_MTI3LjAuMC4xJA";
+    std::promise<void> entered;
+    auto entered_future = entered.get_future();
+    std::promise<void> release;
+    auto released = release.get_future();
+    options.oidc_jwks_fetch = [&](const auto&, bool) -> std::optional<std::string> {
+        entered.set_value();
+        released.wait();
+        return std::nullopt;
+    };
+    lake::api::ApiServer server(options);
+    ASSERT_TRUE(server.start()) << server.reason();
+    const auto now = std::chrono::duration_cast<std::chrono::seconds>(
+                         std::chrono::system_clock::now().time_since_epoch())
+                         .count();
+    const auto encode = lake::control::identity_crypto::base64url_encode;
+    const auto token = encode(R"({"alg":"RS256","kid":"unknown"})") + "." +
+                       encode(nlohmann::json{{"iss", "https://127.0.0.1"},
+                                             {"aud", "lake"},
+                                             {"sub", "user"},
+                                             {"iat", now},
+                                             {"exp", now + 300}}
+                                  .dump()) +
+                       ".AA";
+    auto exchange = std::async(std::launch::async, [&] {
+        HttpConnection client(server.port());
+        return client.request("POST", "/identity/clerk-session", "token=" + token);
+    });
+    const auto started = entered_future.wait_for(std::chrono::seconds(5));
+    EXPECT_EQ(started, std::future_status::ready);
+    auto probe = std::async(std::launch::async, [&] {
+        HttpConnection client(server.port());
+        return client.request("GET", "/healthz");
+    });
+    const auto responsive = probe.wait_for(std::chrono::seconds(2));
+    release.set_value();
+    EXPECT_EQ(responsive, std::future_status::ready);
+    EXPECT_TRUE(probe.get().starts_with("HTTP/1.1 200"));
+    EXPECT_TRUE(exchange.get().starts_with("HTTP/1.1 302"));
+}
+
 TEST(HttpServer, ClerkSessionExchangeIsAbsentWithoutClerk) {
     lake::api::ServerOptions options;
     options.port = 0;

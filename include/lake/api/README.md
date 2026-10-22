@@ -8,6 +8,7 @@ including a JSON shape/count guard used before graph copies and engine saves (la
 only refusals; the full registry call still validates and authorizes the operation.
 `requires_credential` retains that early gate for handlers that own their authorization. Anonymous
 MCP envelopes have a separate 256 KiB cap. See [body admission](../../../docs/serving/http.md#request-body-limits).
+`oidc_jwks.hpp` declares the shared Clerk/OIDC key cache with injectable fetch and monotonic clock. `ServerOptions.oidc_jwks_fetch` replaces its transport in HTTP tests. See [bounded refresh](../../../docs/api/clerk.md#bounded-key-refresh-lake956-lsr-090).
 
 `tunnel_clients.hpp` declares the tunnel client downloads (lake#745): the platform allow-list,
 `read_tunnel_clients`, the signed-link helpers (`signed_link_signature`, `signed_link_matches`) and
