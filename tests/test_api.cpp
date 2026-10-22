@@ -1,3 +1,4 @@
+#include "../src/api/store_repository.hpp"
 #include "audit_test_support.hpp"
 #include "personal_customer_test_support.hpp"
 #include "postgres_fixture.hpp"
@@ -133,6 +134,8 @@ struct RepositoryFixtureStore final : SyncStore {
     std::optional<std::string> blob_contents;
     std::string commit_message;
     std::vector<RepositoryWriteOperation> committed_operations;
+    std::optional<std::vector<RepositoryTreeEntry>> write_tree;
+    std::string conflict_path = "readme.md";
     std::string resolved_conflict;
     std::string conflict_resolution;
     std::vector<std::byte> conflict_blob;
@@ -265,7 +268,7 @@ struct RepositoryFixtureStore final : SyncStore {
              .base = "blob-base",
              .left = "blob-1",
              .right = "blob-2",
-             .region = {.path = "readme.md", .bytes = RepositoryConflictByteRange{0, 3}},
+             .region = {.path = conflict_path, .bytes = RepositoryConflictByteRange{0, 3}},
              .kind = "suspicious-merge",
              .explanation = "Both sides changed the greeting.",
              .proposal = "blob-proposal",
@@ -278,7 +281,16 @@ struct RepositoryFixtureStore final : SyncStore {
                                 const std::string&,
                                 const std::string& conflict_id,
                                 const std::string& resolution,
-                                std::vector<std::byte> blob) override {
+                                std::vector<std::byte> blob,
+                                RepositoryWriteAuthorizer authorize) override {
+        if (authorize) {
+            const auto entries =
+                write_tree ? SyncStoreResult<std::vector<RepositoryTreeEntry>>(*write_tree)
+                           : repository_tree("", "", "main");
+            if (const auto allowed = authorize(*entries); !allowed) {
+                return std::unexpected(allowed.error());
+            }
+        }
         resolved_conflict = conflict_id;
         conflict_resolution = resolution;
         conflict_blob = std::move(blob);
@@ -290,16 +302,35 @@ struct RepositoryFixtureStore final : SyncStore {
                             const std::string&,
                             const std::string&,
                             const std::string& message,
-                            std::vector<RepositoryWriteOperation> operations) override {
+                            std::vector<RepositoryWriteOperation> operations,
+                            RepositoryWriteAuthorizer authorize) override {
+        if (authorize) {
+            const auto entries =
+                write_tree ? SyncStoreResult<std::vector<RepositoryTreeEntry>>(*write_tree)
+                           : repository_tree("", "", "main");
+            if (const auto allowed = authorize(*entries); !allowed) {
+                return std::unexpected(allowed.error());
+            }
+        }
         commit_message = message;
         committed_operations = std::move(operations);
         return "drive-change";
     }
 
-    SyncStoreResult<RepositoryChange> restore_repository_file(const std::string&,
-                                                              const std::string&,
-                                                              const std::string& change_id,
-                                                              const std::string& path) override {
+    SyncStoreResult<RepositoryChange>
+    restore_repository_file(const std::string&,
+                            const std::string&,
+                            const std::string& change_id,
+                            const std::string& path,
+                            RepositoryWriteAuthorizer authorize) override {
+        if (authorize) {
+            const auto entries =
+                write_tree ? SyncStoreResult<std::vector<RepositoryTreeEntry>>(*write_tree)
+                           : repository_tree("", "", "main");
+            if (const auto allowed = authorize(*entries); !allowed) {
+                return std::unexpected(allowed.error());
+            }
+        }
         restored = true;
         return RepositoryChange{"restored-change",
                                 {change_id},
@@ -6245,6 +6276,70 @@ TEST(Drive, SharingCannotGrantActionsTheCallerDoesNotHold) {
 
     surface.ctx.acting_identity = "taap:1:ed25519:owner";
     EXPECT_TRUE(share({{"principal_taap_id", "taap:1:ed25519:outsider"}, {"role", "write"}}).ok);
+}
+
+TEST(Drive, MutationChecksTheLockedTreeAndRestoreChecksMain) {
+    Surface surface;
+    RepositoryFixtureStore repositories;
+    surface.ctx.sync_store = &repositories;
+    const auto owner = surface.call(
+        "create_user", {{"taap_id", "taap:1:ed25519:writer"}, {"display_name", "Writer"}});
+    ASSERT_TRUE(owner.ok);
+    const auto customer = surface.call(
+        "create_customer",
+        {{"customer_type", "individual"}, {"user_id", owner.value["id"]}, {"name", "locked-tree"}});
+    ASSERT_TRUE(customer.ok);
+    const auto repository = surface.call("create_repository",
+                                         {{"customer_id", customer.value["id"]},
+                                          {"workspace_id", surface.workspace(customer.value["id"])},
+                                          {"name", "drive"}});
+    ASSERT_TRUE(repository.ok);
+    const auto object = surface.store.find_policy_object("repository", repository.value["id"]);
+    ASSERT_TRUE(object);
+    ASSERT_TRUE(surface.store.create_grant(
+        {"taap:1:ed25519:writer", object->id, "write", "test", "admin", "test"}));
+    // The ref moves after the registry reads it: main now contains a different, protected node.
+    repositories.write_tree = *repositories.repository_tree("", "", "main");
+    repositories.write_tree->back().node_id = "protected-file";
+    const auto protected_file = surface.store.create_policy_object(
+        {"path",
+         repository.value["id"].get<std::string>() + ":protected-file",
+         object->id,
+         "admin",
+         "test",
+         false});
+    ASSERT_TRUE(protected_file);
+    surface.ctx.operator_credential = false;
+    surface.ctx.acting_identity = "taap:1:ed25519:writer";
+    const json target{
+        {"repository_id", repository.value["id"]}, {"ref", "main"}, {"path", "shared"}};
+    json upload = target;
+    upload["files"] = json::array({{{"name", "readme.md"}, {"content", "bmV3"}}});
+    const auto denied = surface.call("upload_drive_files", upload);
+    EXPECT_EQ(denied.error.code, "unauthorized");
+    EXPECT_TRUE(repositories.committed_operations.empty());
+    json restore = target;
+    restore["path"] = "shared/readme.md";
+    restore["ref"] = "change-1"; // A historical ref cannot authorize writes into today's main.
+    restore["change_id"] = "change-1";
+    const auto denied_restore = surface.call("restore_drive_version", restore);
+    EXPECT_EQ(denied_restore.error.code, "unauthorized");
+    EXPECT_FALSE(repositories.restored);
+    repositories.conflict_path = "shared/readme.md";
+    json conflict = restore;
+    conflict.erase("change_id");
+    conflict["conflict_id"] = "conflict-1";
+    conflict["resolution"] = "left";
+    EXPECT_EQ(surface.call("resolve_conflict", conflict).error.code, "unauthorized");
+    EXPECT_TRUE(repositories.resolved_conflict.empty());
+
+    auto contents = repository_store_contents(
+        &repositories, customer.value["id"], repository.value["id"], "main", surface.ctx);
+    const auto store_write = lake::control::settled(
+        liquid::runtime::block_on(contents->write("shared/readme.md", "new", "text/plain")));
+    ASSERT_FALSE(store_write);
+    EXPECT_EQ(store_write.error().code, "unauthorized");
+    EXPECT_TRUE(repositories.committed_operations.empty());
 }
 
 TEST(Drive, ShareDownloadsEncodeAcrossBlockBoundaries) {

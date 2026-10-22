@@ -157,17 +157,13 @@ repository_tree(const json& input,
 // above it (the repository's for the first) and that one counted too; one that does not inherit
 // stands alone. The answer is the nearest object that counts, so a parent left over from where a
 // folder used to be, or one it never had, loses the grants below it and never adds its own.
-std::expected<DriveLocation, ApiError> nearest_drive_location(const json& input,
-                                                              ApiContext& context,
-                                                              bool require_path = true,
-                                                              bool unborn_main_is_empty = false) {
-    control::Repository repository;
-    const auto entries = repository_tree(input, context, repository, unborn_main_is_empty);
-    if (!entries) {
-        return std::unexpected(entries.error());
-    }
-    std::string path = input.value("path", "");
-    if (require_path && !path.empty() && !find_entry(*entries, path)) {
+std::expected<DriveLocation, ApiError>
+drive_location_at(const control::Repository& repository,
+                  const std::vector<RepositoryTreeEntry>& entries,
+                  std::string path,
+                  ApiContext& context,
+                  bool require_path = true) {
+    if (require_path && !path.empty() && !find_entry(entries, path)) {
         return std::unexpected(ApiError{"not_found", "no drive path " + path, "/path"});
     }
     const auto repository_object = context.store->find_policy_object("repository", repository.id);
@@ -176,10 +172,10 @@ std::expected<DriveLocation, ApiError> nearest_drive_location(const json& input,
             repository_object.error().code, repository_object.error().message, "/repository_id"});
     }
     std::vector<std::pair<control::PolicyObject, std::string>> on_path; // nearest first
-    for (std::string candidate = find_entry(*entries, path) ? path : parent_path(path);
+    for (std::string candidate = find_entry(entries, path) ? path : parent_path(path);
          !candidate.empty();
          candidate = parent_path(candidate)) {
-        const RepositoryTreeEntry* entry = find_entry(*entries, candidate);
+        const RepositoryTreeEntry* entry = find_entry(entries, candidate);
         if (entry && !entry->node_id.empty()) {
             const auto object = repository_path_object(
                 *context.store, repository_object->id, repository.id, entry->node_id);
@@ -207,6 +203,18 @@ std::expected<DriveLocation, ApiError> nearest_drive_location(const json& input,
         location.child_parent_id.clear();
     }
     return location;
+}
+
+std::expected<DriveLocation, ApiError> nearest_drive_location(const json& input,
+                                                              ApiContext& context,
+                                                              bool require_path = true,
+                                                              bool unborn_main_is_empty = false) {
+    control::Repository repository;
+    const auto entries = repository_tree(input, context, repository, unborn_main_is_empty);
+    if (!entries) {
+        return std::unexpected(entries.error());
+    }
+    return drive_location_at(repository, *entries, input.value("path", ""), context, require_path);
 }
 
 // Gives every folder on `path` at this ref a policy object under the object of the folder above
@@ -634,6 +642,67 @@ void follow_in_search(const control::Repository& repository, ApiContext& context
     if (!indexed) {
         context.audit_details["search_index"] = indexed.error().message;
     }
+}
+
+// Check every destination and every node an operation removes or moves. All checks use the
+// immutable tree being committed, supplied while the store holds its repository mutation lock.
+SyncStoreResult<void>
+authorize_drive_operations(const control::Repository& repository,
+                           const std::vector<RepositoryTreeEntry>& entries,
+                           const std::vector<RepositoryWriteOperation>& operations,
+                           ApiContext& context) {
+    control::AuthorizationCache cache;
+    auto require_write = [&](const std::string& path) -> SyncStoreResult<void> {
+        const auto location = drive_location_at(repository, entries, path, context, false);
+        if (!location) {
+            return std::unexpected(SyncStoreError{location.error().code, location.error().message});
+        }
+        if (context.operator_credential) {
+            return {};
+        }
+        const auto allowed = control::authorize(
+            *context.store, context.acting_identity, location->object.id, "write", cache);
+        if (!allowed) {
+            return std::unexpected(SyncStoreError{allowed.error().code, allowed.error().message});
+        }
+        if (!allowed->allowed) {
+            return std::unexpected(SyncStoreError{
+                "unauthorized", "principal is not allowed to write drive path", path});
+        }
+        return {};
+    };
+    for (const auto& operation : operations) {
+        if (const auto allowed = require_write(operation.path); !allowed) {
+            return allowed;
+        }
+        if (operation.kind == RepositoryWriteKind::Moved) {
+            if (!find_entry(entries, operation.source_path)) {
+                return std::unexpected(SyncStoreError{"not_found", "drive path does not exist"});
+            }
+            if (find_entry(entries, operation.path)) {
+                return std::unexpected(
+                    SyncStoreError{"conflict", "move destination already exists"});
+            }
+            if (const auto allowed = require_write(operation.source_path); !allowed) {
+                return allowed;
+            }
+        } else if (operation.kind == RepositoryWriteKind::Folder &&
+                   find_entry(entries, operation.path)) {
+            return std::unexpected(SyncStoreError{"conflict", "drive path already exists"});
+        }
+        for (const auto& entry : entries) {
+            // File uploads replace an existing node, including its whole subtree. Folder
+            // deletion and moves likewise require write on every affected descendant.
+            if (path_touches(entry.path, operation.path) ||
+                (operation.kind == RepositoryWriteKind::Moved &&
+                 path_touches(entry.path, operation.source_path))) {
+                if (const auto allowed = require_write(entry.path); !allowed) {
+                    return allowed;
+                }
+            }
+        }
+    }
+    return {};
 }
 
 ApiResult committed_drive_change(const control::Repository& repository,
@@ -1228,6 +1297,20 @@ json drive_input_schema(bool path_required) {
 
 } // namespace
 
+RepositoryWriteAuthorizer
+repository_write_authorizer(const control::Repository& repository,
+                            const std::vector<RepositoryWriteOperation>& operations,
+                            ApiContext& context) {
+    std::vector<RepositoryWriteOperation> paths;
+    for (const auto& operation : operations) {
+        paths.push_back(
+            {.kind = operation.kind, .path = operation.path, .source_path = operation.source_path});
+    }
+    return [repository, paths = std::move(paths), &context](const auto& entries) {
+        return authorize_drive_operations(repository, entries, paths, context);
+    };
+}
+
 void register_drive_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "drive_browse",
@@ -1399,6 +1482,7 @@ void register_drive_capabilities(Registry& registry) {
             }
             std::vector<RepositoryWriteOperation> operations{
                 {.kind = RepositoryWriteKind::Folder, .path = target}};
+            auto authorize = repository_write_authorizer(repository, operations, context);
             return committed_drive_change(
                 repository,
                 "drive.folder.created",
@@ -1407,7 +1491,8 @@ void register_drive_capabilities(Registry& registry) {
                                                             repository.id,
                                                             input.at("ref"),
                                                             "Create folder " + target,
-                                                            std::move(operations)),
+                                                            std::move(operations),
+                                                            std::move(authorize)),
                 context);
         }});
 
@@ -1501,6 +1586,7 @@ void register_drive_capabilities(Registry& registry) {
                 uploaded += operation.contents.size();
             }
             record_workspace_transfer(context, repository->workspace_id, uploaded, 0);
+            auto authorize = repository_write_authorizer(*repository, operations, context);
             return committed_drive_change(
                 *repository,
                 "drive.files.uploaded",
@@ -1509,7 +1595,8 @@ void register_drive_capabilities(Registry& registry) {
                                                             repository->id,
                                                             input.at("ref"),
                                                             "Upload drive files",
-                                                            std::move(operations)),
+                                                            std::move(operations),
+                                                            std::move(authorize)),
                 context);
         }});
 
@@ -1560,54 +1647,61 @@ void register_drive_capabilities(Registry& registry) {
                                           target_access.error().message,
                                           target_access.error().path);
             }
-            // The path's own object moves with it under the destination folder's (lake#929), before
-            // the change, so its direct grants follow it and its former folders' grants do not.
-            // Only an object under this repository's own object is carried (lake#913): another
-            // account's object holding the source's id stays where it is and is never moved into
-            // this repository, where it would then count as the folder's.
+            // Reparent only after every source descendant and the destination are authorized.
+            // Read the carried node from the locked tree, since main may have moved since
+            // resolution.
             std::optional<control::PolicyObject> carried;
-            if (!source_entry->node_id.empty()) {
+            std::vector<RepositoryWriteOperation> operations{
+                {.kind = RepositoryWriteKind::Moved, .path = destination, .source_path = source}};
+            auto authorize =
+                [&, check = repository_write_authorizer(repository, operations, context)](
+                    const std::vector<RepositoryTreeEntry>& tree) -> SyncStoreResult<void> {
+                if (const auto allowed = check(tree); !allowed) {
+                    return allowed;
+                }
+                const auto* current = find_entry(tree, source);
                 const auto repository_object =
                     context.store->find_policy_object("repository", repository.id);
                 if (!repository_object) {
-                    return store_error(repository_object.error());
+                    return std::unexpected(SyncStoreError{repository_object.error().code,
+                                                          repository_object.error().message});
                 }
-                const auto object = repository_path_object(
-                    *context.store, repository_object->id, repository.id, source_entry->node_id);
-                if (object) {
-                    carried = *object;
-                } else if (!no_own_object(object.error())) {
-                    return store_error(object.error());
-                }
-            }
-            if (carried) {
-                const auto destination_parent = link_folder_chain(
-                    *entries, repository, parent_path(destination), context, "/destination");
-                if (!destination_parent) {
-                    return ApiResult::failure(destination_parent.error().code,
-                                              destination_parent.error().message,
-                                              destination_parent.error().path);
-                }
-                if (carried->parent_id != destination_parent->id) {
-                    const auto moved = context.store->set_policy_object_parent(
-                        carried->id, destination_parent->id);
-                    if (!moved) {
-                        return store_error(moved.error());
+                if (!current->node_id.empty()) {
+                    const auto object = repository_path_object(
+                        *context.store, repository_object->id, repository.id, current->node_id);
+                    if (object) {
+                        carried = *object;
+                    } else if (!no_own_object(object.error())) {
+                        return std::unexpected(
+                            SyncStoreError{object.error().code, object.error().message});
                     }
                 }
-            }
-            std::vector<RepositoryWriteOperation> operations{
-                {.kind = RepositoryWriteKind::Moved, .path = destination, .source_path = source}};
+                if (carried) {
+                    const auto parent = link_folder_chain(
+                        tree, repository, parent_path(destination), context, "/destination");
+                    if (!parent) {
+                        return std::unexpected(
+                            SyncStoreError{parent.error().code, parent.error().message});
+                    }
+                    if (carried->parent_id != parent->id) {
+                        const auto moved =
+                            context.store->set_policy_object_parent(carried->id, parent->id);
+                        if (!moved) {
+                            return std::unexpected(
+                                SyncStoreError{moved.error().code, moved.error().message});
+                        }
+                    }
+                }
+                return {};
+            };
             auto committed =
                 context.sync_store->commit_repository_files(repository.customer_id,
                                                             repository.id,
                                                             input.at("ref"),
                                                             "Move " + source + " to " + destination,
-                                                            std::move(operations));
+                                                            std::move(operations),
+                                                            std::move(authorize));
             if (!committed && carried && !carried->parent_id.empty()) {
-                // The path stayed where it was. Its object goes back; were that to fail, the
-                // object's parent is not the folder above it and nearest_drive_location does not
-                // follow it.
                 static_cast<void>(
                     context.store->set_policy_object_parent(carried->id, carried->parent_id));
             }
@@ -1641,6 +1735,7 @@ void register_drive_capabilities(Registry& registry) {
                                                  ? RepositoryWriteKind::DeletedFolder
                                                  : RepositoryWriteKind::DeletedFile;
             std::vector<RepositoryWriteOperation> operations{{.kind = kind, .path = path}};
+            auto authorize = repository_write_authorizer(repository, operations, context);
             return committed_drive_change(
                 repository,
                 "drive.path.deleted",
@@ -1649,7 +1744,8 @@ void register_drive_capabilities(Registry& registry) {
                                                             repository.id,
                                                             input.at("ref"),
                                                             "Delete " + path,
-                                                            std::move(operations)),
+                                                            std::move(operations),
+                                                            std::move(authorize)),
                 context);
         }});
 
@@ -1874,8 +1970,15 @@ void register_drive_capabilities(Registry& registry) {
                 }
                 blob = std::move(*decoded);
             }
+            std::vector<RepositoryWriteOperation> operations{
+                {.kind = RepositoryWriteKind::File, .path = path}};
             const auto resolved = context.sync_store->resolve_repository_conflict(
-                repository->customer_id, repository->id, conflict_id, resolution, std::move(blob));
+                repository->customer_id,
+                repository->id,
+                conflict_id,
+                resolution,
+                std::move(blob),
+                repository_write_authorizer(*repository, operations, context));
             if (!resolved) {
                 return sync_error(resolved.error());
             }
@@ -1915,8 +2018,14 @@ void register_drive_capabilities(Registry& registry) {
             if (!repository) {
                 return store_error(repository.error());
             }
+            std::vector<RepositoryWriteOperation> operations{
+                {.kind = RepositoryWriteKind::File, .path = input.at("path")}};
             const auto restored = context.sync_store->restore_repository_file(
-                repository->customer_id, repository->id, input.at("change_id"), input.at("path"));
+                repository->customer_id,
+                repository->id,
+                input.at("change_id"),
+                input.at("path"),
+                repository_write_authorizer(*repository, operations, context));
             if (!restored) {
                 return sync_error(restored.error());
             }

@@ -13,6 +13,8 @@
 // workspace Zetta (`lake_methodology_runs`); a training run's model is registered by the engine.
 
 #include <algorithm>
+
+#include "lake/api/drive.hpp"
 #include <cctype>
 #include <chrono>
 #include <cstdio>
@@ -425,8 +427,13 @@ std::expected<std::string, ApiResult> commit_files(ApiContext& context,
         }
         operations.push_back(std::move(operation));
     }
-    const auto committed = context.sync_store->commit_repository_files(
-        repository.customer_id, repository.id, "main", message, std::move(operations));
+    auto authorize = repository_write_authorizer(repository, operations, context);
+    const auto committed = context.sync_store->commit_repository_files(repository.customer_id,
+                                                                       repository.id,
+                                                                       "main",
+                                                                       message,
+                                                                       std::move(operations),
+                                                                       std::move(authorize));
     if (!committed) {
         return std::unexpected(sync_failed(committed.error()));
     }

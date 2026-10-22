@@ -3415,8 +3415,10 @@ public:
                                 const std::string& repository_id,
                                 const std::string& conflict_id,
                                 const std::string& resolution,
-                                std::vector<std::byte> blob) override {
-                auto entered_repository = enter_repository(customer_id, repository_id);        auto& repository = entered_repository.state;
+                                std::vector<std::byte> blob,
+                                RepositoryWriteAuthorizer authorize) override {
+        auto entered_repository = enter_repository(customer_id, repository_id);
+        auto& repository = entered_repository.state;
         if (!repository) {
             return std::unexpected(repository.error());
         }
@@ -3436,6 +3438,16 @@ public:
             request.blob = std::move(blob);
         } else {
             return std::unexpected(SyncStoreError{"invalid_input", "unknown conflict resolution"});
+        }
+        if (authorize) {
+            const auto entries =
+                current_write_tree(*(*repository)->subject, *(*repository)->objects);
+            if (!entries) {
+                return std::unexpected(entries.error());
+            }
+            if (const auto allowed = authorize(*entries); !allowed) {
+                return std::unexpected(allowed.error());
+            }
         }
         const auto resolved = liquid::runtime::block_on(
             (*repository)->subject->resolve_conflict(*parsed, std::move(request)));
@@ -3546,8 +3558,10 @@ public:
                             const std::string& repository_id,
                             const std::string& revision,
                             const std::string& message,
-                            std::vector<RepositoryWriteOperation> operations) override {
-                auto entered_repository = enter_repository(customer_id, repository_id);        auto& state = entered_repository.state;
+                            std::vector<RepositoryWriteOperation> operations,
+                            RepositoryWriteAuthorizer authorize) override {
+        auto entered_repository = enter_repository(customer_id, repository_id);
+        auto& state = entered_repository.state;
         if (!state) {
             return std::unexpected(state.error());
         }
@@ -3596,6 +3610,15 @@ public:
             if (staged->size() != operation.size) {
                 return std::unexpected(
                     SyncStoreError{"invalid_input", "staged LFS size does not match commit"});
+            }
+        }
+        if (authorize) {
+            const auto entries = current_write_tree(*(*state)->subject, *(*state)->objects);
+            if (!entries) {
+                return std::unexpected(entries.error());
+            }
+            if (const auto allowed = authorize(*entries); !allowed) {
+                return std::unexpected(allowed.error());
             }
         }
         for (RepositoryWriteOperation& operation : operations) {
@@ -3770,11 +3793,14 @@ public:
                               run_page->records.front().value)};
     }
 
-    SyncStoreResult<RepositoryChange> restore_repository_file(const std::string& customer_id,
-                                                              const std::string& repository_id,
-                                                              const std::string& change_id,
-                                                              const std::string& path) override {
-                auto entered_repository = enter_repository(customer_id, repository_id);        auto& repository = entered_repository.state;
+    SyncStoreResult<RepositoryChange>
+    restore_repository_file(const std::string& customer_id,
+                            const std::string& repository_id,
+                            const std::string& change_id,
+                            const std::string& path,
+                            RepositoryWriteAuthorizer authorize) override {
+        auto entered_repository = enter_repository(customer_id, repository_id);
+        auto& repository = entered_repository.state;
         if (!repository) {
             return std::unexpected(repository.error());
         }
@@ -3798,6 +3824,16 @@ public:
         const auto parent = liquid::runtime::block_on((*repository)->subject->head());
         if (!parent) {
             return std::unexpected(error_of(parent.error()));
+        }
+        if (authorize) {
+            const auto entries =
+                current_write_tree(*(*repository)->subject, *(*repository)->objects);
+            if (!entries) {
+                return std::unexpected(entries.error());
+            }
+            if (const auto allowed = authorize(*entries); !allowed) {
+                return std::unexpected(allowed.error());
+            }
         }
         const auto written = liquid::runtime::block_on(
             (*repository)->subject->write(path, *contents, {.mode = entry->mode}));
@@ -4998,6 +5034,21 @@ private:
         output.builder = predicate.run_details.builder.id;
         output.invocation_id = predicate.run_details.metadata.invocation_id;
         return output;
+    }
+
+    // Called only while enter_repository holds the lane that serializes repository mutations.
+    static SyncStoreResult<std::vector<RepositoryTreeEntry>>
+    current_write_tree(liquid::repository& repository, liquid::store& objects) {
+        // Capture the working root that cut() will publish, including staged state.
+        const auto tree = liquid::runtime::block_on(repository.root());
+        if (!tree) {
+            return std::unexpected(error_of(tree.error()));
+        }
+        std::vector<RepositoryTreeEntry> entries;
+        if (const auto walked = walk_tree(repository, objects, *tree, "", entries); !walked) {
+            return std::unexpected(walked.error());
+        }
+        return entries;
     }
 
     static SyncStoreResult<liquid::tree> tree_at_ref(liquid::repository& repository,

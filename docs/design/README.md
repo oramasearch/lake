@@ -77,3 +77,7 @@ Folder-sharing role attenuation and non-admin recipient restrictions (lake#955) 
 [status.md](status.md) and [the sharing contract](../api/sharing.md).
 `status.md` records organization owner-only membership changes (LSR-099, lake#965); the
 [API contract](../api/organizations.md#delegated-administration) states the rule and checks.
+
+
+Repository mutation destination and descendant authorization (lake#962, LSR-096) is recorded in
+[status.md](status.md) and [the Drive contract](../api/drive.md).

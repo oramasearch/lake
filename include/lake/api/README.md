@@ -232,3 +232,8 @@ outbound client (plain http to `*.svc.cluster.local` only), tests inject a fake.
 `mcp_client.hpp` declares `mcp_max_json_depth` (64 nested containers) and `mcp_parse_json` for
 remote MCP and OAuth response bodies. Invalid or over-depth JSON returns a discarded value.
 See [MCP connection limits](../../../docs/api/mcp-connections.md#the-client) (lake#958, LSR-092).
+
+`sync_store.hpp` defines `RepositoryWriteAuthorizer` (lake#962, LSR-096), invoked before mutation
+under the repository lock with the immutable tree being committed to main. `drive.hpp` declares
+`repository_write_authorizer` for destination and recursive descendant checks; its context must
+outlive the synchronous store call. See [drive.md](../../../docs/api/drive.md).

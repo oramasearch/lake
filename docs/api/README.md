@@ -555,3 +555,8 @@ the `0022_session_lookup` rollout. Password hashing and live revocation guarante
 
 Folder sharing (lake#955) caps live grants and bearer-link roles at the caller's actions and
 limits non-admin recipients to the account's people; see [sharing.md](sharing.md).
+
+
+Repository mutations check every destination and affected descendant under the store mutation
+lock (lake#962, LSR-096), including uploads, recursive move/delete, restore, compatible commits and
+repository-backed stores. See [drive.md](drive.md#nested-mutation-permissions-lake962-lsr-096).
