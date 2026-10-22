@@ -23,6 +23,8 @@ struct ApiContext;
 // because the push itself runs synchronously inside the repository store.
 struct BranchProtectionRecords {
     std::vector<control::ForgeRecord> rules, reviews, releases;
+    // Derived from current repository evidence when loading, never from stored release claims.
+    std::vector<std::string> verified_release_changes;
 };
 
 // Reads the records branch protection needs from the repository's workspace. A repository without

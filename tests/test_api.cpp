@@ -132,6 +132,9 @@ struct RepositoryFixtureStore final : SyncStore {
     bool restored = false;
     bool shared_folder_moved = false;
     std::optional<std::string> blob_contents;
+    std::optional<RepositoryArtifactSource> verified_source;
+    std::optional<SyncStoreError> artifact_error;
+    std::map<std::string, std::optional<RepositoryArtifactSource>> artifact_sources;
     std::string commit_message;
     std::vector<RepositoryWriteOperation> committed_operations;
     std::optional<std::vector<RepositoryTreeEntry>> write_tree;
@@ -242,6 +245,9 @@ struct RepositoryFixtureStore final : SyncStore {
     SyncStoreResult<RepositoryArtifact> repository_artifact(const std::string&,
                                                             const std::string&,
                                                             const std::string& result_id) override {
+        if (artifact_error) {
+            return std::unexpected(*artifact_error);
+        }
         return RepositoryArtifact{
             .id = result_id,
             .action = "action-1",
@@ -258,7 +264,9 @@ struct RepositoryFixtureStore final : SyncStore {
                   true,
                   ""},
                  {"attestation-2", "sbom/1", "subject-1", "taap:1:ed25519:builder", true, ""}},
-            .trace = RepositoryArtifactTrace{"trace-1", 12, 2, 1, 1, 1}};
+            .trace = RepositoryArtifactTrace{"trace-1", 12, 2, 1, 1, 1},
+            .verified_source = artifact_sources.contains(result_id) ? artifact_sources.at(result_id)
+                                                                    : verified_source};
     }
 
     SyncStoreResult<std::vector<RepositoryConflict>>
@@ -5179,6 +5187,137 @@ TEST(Forge, ReleaseRetainsVerifiedArtifactAttestations) {
     EXPECT_EQ(release.value["value"]["artifacts"][0]["attestations"][0]["id"], "attestation-1");
 }
 
+TEST(Forge, ReleaseRejectsArtifactsBoundToAnotherSource) {
+    Surface surface;
+    RepositoryFixtureStore repository_store;
+    surface.ctx.sync_store = &repository_store;
+    const auto user = surface.call("create_user", {{"display_name", "Ada"}});
+    ASSERT_TRUE(user.ok);
+    const auto customer = surface.call("create_customer",
+                                       {{"customer_type", "individual"},
+                                        {"user_id", user.value["id"]},
+                                        {"name", "release-binding"}});
+    ASSERT_TRUE(customer.ok);
+    const auto repository = surface.call("create_repository",
+                                         {{"customer_id", customer.value["id"]},
+                                          {"workspace_id", surface.workspace(customer.value["id"])},
+                                          {"name", "releases"}});
+    ASSERT_TRUE(repository.ok);
+    const std::string id = repository.value["id"];
+    const json input = {{"repository_id", id},
+                        {"tag", "v1"},
+                        {"change_id", "change-C"},
+                        {"artifact_ids", json::array({"result-B"})}};
+    repository_store.verified_source = RepositoryArtifactSource{id, "change-B"};
+    EXPECT_EQ(surface.call("create_release", input).error.code, "conflict");
+    repository_store.verified_source = RepositoryArtifactSource{"another-repository", "change-C"};
+    EXPECT_EQ(surface.call("create_release", input).error.code, "conflict");
+    EXPECT_TRUE(surface.call("list_releases", {{"repository_id", id}}).value["items"].empty());
+    repository_store.verified_source = RepositoryArtifactSource{id, "change-C"};
+    const auto bound = surface.call("create_release", input);
+    ASSERT_TRUE(bound.ok) << bound.error.message;
+    EXPECT_EQ(bound.value["value"]["artifacts"][0].value("source_binding", ""), "verified");
+    repository_store.verified_source.reset();
+    const auto legacy = surface.call("create_release", input);
+    ASSERT_TRUE(legacy.ok) << legacy.error.message;
+    EXPECT_EQ(legacy.value["value"]["artifacts"][0].value("source_binding", ""),
+              "source not bound");
+}
+
+TEST(Forge, RequiredVerificationRechecksEveryReleaseArtifactSource) {
+    Surface surface;
+    RepositoryFixtureStore repository_store;
+    surface.ctx.sync_store = &repository_store;
+    const auto user = surface.call("create_user", {{"display_name", "Ada"}});
+    ASSERT_TRUE(user.ok);
+    const auto customer = surface.call("create_customer",
+                                       {{"customer_type", "individual"},
+                                        {"user_id", user.value["id"]},
+                                        {"name", "verified-push"}});
+    ASSERT_TRUE(customer.ok);
+    const auto created = surface.call("create_repository",
+                                      {{"customer_id", customer.value["id"]},
+                                       {"workspace_id", surface.workspace(customer.value["id"])},
+                                       {"name", "protected"}});
+    ASSERT_TRUE(created.ok);
+    const auto repository = surface.store.get_repository(created.value["id"]);
+    ASSERT_TRUE(repository);
+    ASSERT_TRUE(surface
+                    .call("set_branch_protection",
+                          {{"repository_id", repository->id},
+                           {"ref", "main"},
+                           {"required_verification", true}})
+                    .ok);
+    // A legacy/imported record claims verified evidence, including forged source metadata.
+    surface.workspaces->forge(*repository,
+                              "release",
+                              {{"change_id", "change-C"},
+                               {"artifacts",
+                                json::array({{{"id", "result-B"},
+                                              {"source_binding", "verified"},
+                                              {"repository_id", repository->id},
+                                              {"change_id", "change-C"}}})}},
+                              surface.ctx.instance_kek);
+    const BranchRefUpdate update{.name = "main", .new_head = "change-C", .fast_forward = true};
+    const auto evaluate = [&] {
+        auto loaded = liquid::runtime::block_on(load_branch_protection(surface.ctx, *repository));
+        EXPECT_TRUE(loaded && *loaded);
+        if (!loaded || !*loaded) {
+            return false;
+        }
+        return evaluate_branch_protection(
+                   surface.store, "admin", surface.ctx.authorization_cache, **loaded, update)
+            .has_value();
+    };
+    EXPECT_FALSE(evaluate()) << "unbound snapshots cannot satisfy verification";
+    repository_store.verified_source = RepositoryArtifactSource{repository->id, "change-B"};
+    EXPECT_FALSE(evaluate());
+    repository_store.verified_source = RepositoryArtifactSource{"another-repository", "change-C"};
+    EXPECT_FALSE(evaluate());
+    repository_store.verified_source = RepositoryArtifactSource{repository->id, "change-C"};
+    EXPECT_TRUE(evaluate());
+    // Revalidate on the next push, even if the release snapshot previously passed.
+    repository_store.verified_source.reset();
+    EXPECT_FALSE(evaluate());
+    repository_store.artifact_error = SyncStoreError{"store_unavailable", "evidence unavailable"};
+    auto unavailable = liquid::runtime::block_on(load_branch_protection(surface.ctx, *repository));
+    ASSERT_TRUE(unavailable);
+    EXPECT_FALSE(*unavailable);
+    repository_store.artifact_error = SyncStoreError{"not_found", "evidence removed"};
+    EXPECT_FALSE(evaluate());
+    repository_store.artifact_error.reset();
+    // Every selected artifact must bind; a matching artifact never excuses an unbound one.
+    repository_store.verified_source = RepositoryArtifactSource{repository->id, "change-D"};
+    repository_store.artifact_sources["unbound"] = std::nullopt;
+    surface.workspaces->forge(
+        *repository,
+        "release",
+        {{"change_id", "change-D"},
+         {"artifacts", json::array({{{"id", "bound"}}, {{"id", "unbound"}}})}},
+        surface.ctx.instance_kek);
+    auto mixed = liquid::runtime::block_on(load_branch_protection(surface.ctx, *repository));
+    ASSERT_TRUE(mixed && *mixed);
+    EXPECT_FALSE(evaluate_branch_protection(
+        surface.store,
+        "admin",
+        surface.ctx.authorization_cache,
+        **mixed,
+        BranchRefUpdate{.name = "main", .new_head = "change-D", .fast_forward = true}));
+    // Malformed legacy evidence fails closed without throwing on a non-object item.
+    surface.workspaces->forge(*repository,
+                              "release",
+                              {{"change_id", "change-E"}, {"artifacts", json::array({17})}},
+                              surface.ctx.instance_kek);
+    auto loaded = liquid::runtime::block_on(load_branch_protection(surface.ctx, *repository));
+    ASSERT_TRUE(loaded && *loaded);
+    EXPECT_FALSE(evaluate_branch_protection(
+        surface.store,
+        "admin",
+        surface.ctx.authorization_cache,
+        **loaded,
+        BranchRefUpdate{.name = "main", .new_head = "change-E", .fast_forward = true}));
+}
+
 TEST(Forge, WebhookDeliveryRetriesAndRetainsAnEventLog) {
     Surface surface;
     const ApiResult user = surface.call("create_user", {{"display_name", "Ada"}});
@@ -7295,11 +7434,14 @@ TEST(RepositoryHttp, PublicRepositoriesAreReadableAndPrivateRepositoriesAreHidde
     const auto history = liquid::runtime::block_on(repository.log());
     ASSERT_TRUE(history) << history.error().message;
     ASSERT_FALSE(history->empty());
-    const liquid::action_input build_input{.command = {"remote-build"},
-                                           .outputs = {"build/app"},
-                                           .inputs = history->front().root,
-                                           .toolchain = history->front().root,
-                                           .platform = host_platform()};
+    const liquid::action_input build_input{
+        .command = {"remote-build"},
+        .env = {{"LAKE_SOURCE_REPOSITORY_ID", public_repository->id},
+                {"LAKE_SOURCE_CHANGE_ID", liquid::to_string(second_change->value)}},
+        .outputs = {"build/app"},
+        .inputs = history->front().root,
+        .toolchain = history->front().root,
+        .platform = host_platform()};
     auto first_result_value = liquid::action_result{
         .outputs = {{"build/app", 0100755, *artifact_record}},
         .stdout_output = *artifact_record,
@@ -7340,11 +7482,15 @@ TEST(RepositoryHttp, PublicRepositoriesAreReadableAndPrivateRepositoriesAreHidde
         liquid::runtime::block_on(reformatting_source.cut("reformatting"));
     ASSERT_TRUE(formatting_change) << formatting_change.error().message;
 
+    lake::test::RecordWorkspaces release_workspaces(store);
+    release_workspaces.ready(public_repository->workspace_id);
     ServerOptions options;
     options.port = 0;
     options.node_name = "test-node";
     options.admin_token = "test-token";
     options.store = store;
+    options.workspaces = release_workspaces.service;
+    options.instance_kek = "6c616b652d666f7267652d7265636f7264732d746573742d696e7374616e6365";
     options.store_root = root.path().string();
     ApiServer server(options);
     ASSERT_TRUE(server.start()) << server.reason();
@@ -7388,6 +7534,29 @@ TEST(RepositoryHttp, PublicRepositoriesAreReadableAndPrivateRepositoriesAreHidde
     EXPECT_NE(artifact.find("build/app"), std::string::npos) << artifact;
     EXPECT_NE(artifact.find("slsa_provenance/1"), std::string::npos) << artifact;
     EXPECT_NE(artifact.find("sbom/1"), std::string::npos) << artifact;
+
+    // Real signed action provenance must bind the selected result to this exact source.
+    const auto release = [&](const std::string& change_id) {
+        return response_json(http_request(
+            server.port(),
+            "POST",
+            "/v1/create_release",
+            json{{"repository_id", public_repository->id},
+                 {"tag", "binding-proof"},
+                 {"change_id", change_id},
+                 {"artifact_ids", json::array({liquid::to_string(second_result->value)})}}
+                .dump(),
+            "application/json",
+            {},
+            "Bearer test-token"));
+    };
+    const auto bound_release = release(liquid::to_string(second_change->value));
+    ASSERT_TRUE(bound_release.value("ok", false)) << bound_release.dump();
+    EXPECT_EQ(bound_release["value"]["value"]["artifacts"][0].value("source_binding", ""),
+              "verified");
+    const auto mismatched_release = release(liquid::to_string(first_change->value));
+    EXPECT_FALSE(mismatched_release.value("ok", true)) << mismatched_release.dump();
+    EXPECT_EQ(mismatched_release["error"]["code"], "conflict");
 
     const std::string model_response =
         http_get(server.port(), "/api/models/" + public_repository->id);

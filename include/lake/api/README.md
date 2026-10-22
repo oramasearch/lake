@@ -160,7 +160,11 @@ instance KEK.
 
 `forge.hpp` declares `BranchProtectionRecords` and `load_branch_protection`: the rules, reviews and
 releases a push needs, read from the repository's workspace before the push (lake#341), and
-`evaluate_branch_protection` over that snapshot.
+`evaluate_branch_protection` over that snapshot. `verified_release_changes` contains only changes
+whose selected results were freshly verified in that repository during the load (LSR-106).
+`RepositoryArtifact::verified_source` is populated only by result-bound SLSA verification of
+`LAKE_SOURCE_REPOSITORY_ID` and `LAKE_SOURCE_CHANGE_ID`, never from generic signature checks.
+See [source binding](../../../docs/api/forge.md#source-binding-lsr-106).
 
 Verify changes with the full PostgreSQL-backed static and shared CTest suites. Keep the identity
 contract in `docs/api/identity.md` updated with changes to token derivation.

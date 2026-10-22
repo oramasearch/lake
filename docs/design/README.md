@@ -92,3 +92,6 @@ commitments for successful calls and private audit for denials and failures.
 identity scans (lake#974, LSR-107); [replication](../api/replication.md) describes the compatibility
 change and verification.
 [status.md](status.md) records workspace audit queue isolation and its pending durable retry work (LSR-098).
+Release source binding (LSR-106) and its producer rollout requirement are recorded in
+[status.md](status.md); the [forge contract](../api/forge.md#source-binding-lsr-106) specifies
+which signed evidence can satisfy a protected push.

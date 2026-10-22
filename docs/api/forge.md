@@ -129,11 +129,45 @@ path, profile, and result identity that Liquid persisted.
 
 ## Releases
 
-`create_release` binds a tag and change identity to selected build-result IDs. Lake reads every
-result from the repository store and refuses a release unless each result has at least one verified
-attestation. The release record copies each selected result's ID, action, output count, and verified
-attestation identifiers and subjects. This creates a durable release-to-evidence link even when
-build records are later queried independently.
+`create_release` binds a tag and change identity to selected build-result IDs. Each result must
+have a verified attestation. A result with verified source provenance for a different repository
+or change is refused with `conflict` at `/artifact_ids`, before publication or record creation.
+Unbound legacy evidence remains readable and can accompany an ordinary release; its artifact
+snapshot says `source_binding: "source not bound"`. Bound snapshots say `"verified"`. The snapshot
+also retains the result ID, action, output count and verified attestation identifiers and subjects.
+
+### Source binding (LSR-106)
+
+A source binding comes only from `build::verify_provenance` succeeding for the selected result:
+it checks the result signature, SLSA signature, result subject and action/predicate relationship.
+Lake then reads `LAKE_SOURCE_REPOSITORY_ID` and `LAKE_SOURCE_CHANGE_ID` from that signed SLSA
+`buildDefinition.externalParameters.environment`. Both must be nonempty and match Lake's exact
+repository UUID and the release's exact change ID. No aliases, case folding or input-tree equality
+substitute for a change ID. Generic signed attestations and SBOMs do not establish a source binding.
+The pinned libliquid format has no dedicated source-revision field; these two signed environment
+keys provide the explicit claim without changing its record format.
+
+For `required_verification`, Lake reopens every selected result from this repository before each
+push and checks the binding again. Every artifact in a qualifying release must match; a missing,
+unbound or malformed result cannot count. A repository-store error refuses reference updates.
+Stored release snapshots, including portable imports and pre-upgrade releases, cannot supply the
+claims used by branch protection. Evidence and release reads remain outside the synchronous push
+callback; the callback accepts only the change IDs freshly validated during that push's load.
+
+Producers must put the two keys in the **libliquid action environment before the action/result
+and SLSA records are signed**. Setting environment variables only on the Lake server, adding
+unsigned release fields, or signing an unrelated statement is insufficient. Lake's release path
+copies evidence; it does not produce libliquid build attestations. Operator-managed container
+builds need a producer update to supply these signed claims before their results can satisfy
+protected-branch verification. No operator code or dependency pin changes here.
+
+Verify with `Forge.ReleaseRejectsArtifactsBoundToAnotherSource`,
+`Forge.RequiredVerificationRechecksEveryReleaseArtifactSource` and
+`RepositoryHttp.PublicRepositoriesAreReadableAndPrivateRepositoriesAreHidden`. The HTTP fixture
+creates real signed libliquid provenance and proves a matching release passes while a different
+change is refused. Changes to this contract belong in `RepositoryArtifact::verified_source`, the
+result-bound verifier adapter in `http_server.cpp` and the release/push checks in
+`forge_capabilities.cpp`; keep these tests and this page together.
 
 ## Webhooks
 
