@@ -21,6 +21,27 @@ by `renewed_from_id`; it does not silently change the old row. `revoke_agent_cer
 immediate revocation, and `check_agent_certificate` rejects a revoked or expired certificate at
 the API boundary. Lifetimes are positive and capped at one hour.
 
+### Certificate identities
+
+Lake encodes each subject alternative name directly as one typed ASN.1 `GENERAL_NAME`
+(lake#946, LSR-084). Caller text never enters OpenSSL's extension configuration parser. X.509
+SVIDs and agent certificates contain exactly one URI SAN; ACME certificates contain exactly one
+DNS SAN. Tunnel certificates use the same encoder for their grant URI, with the existing
+recipient-only authorization. Generic client and device subjects remain common names only.
+
+ACME identifiers must be ASCII LDH hostnames: at most 253 bytes, with at least two nonempty
+labels of at most 63 letters, digits or hyphens, each beginning and ending with a letter or
+digit. Wildcards, trailing dots, underscores, whitespace, URI punctuation and embedded NULs
+answer `invalid_input`. ASCII Punycode labels are accepted. The order and final signing path
+both enforce this rule.
+
+X.509 SPIFFE identities follow the [SPIFFE ID syntax](https://github.com/spiffe/spiffe/blob/main/standards/SPIFFE-ID.md):
+`spiffe://`, a nonempty lowercase trust domain of at most 255 bytes using `[a-z0-9._-]`, and an
+optional path with nonempty `[a-zA-Z0-9._-]` segments. Lake caps the identity at 2048 bytes and
+rejects relative segments, trailing slashes, ports, user information, queries, fragments and
+percent encoding. URI SANs in all profiles reject commas, whitespace, non-ASCII bytes and NULs.
+These stricter input rules deliberately reject malformed identities previously accepted.
+
 ## What the exit scenario proves
 
 The identity-exit Postgres scenario uses the same libliquid actor that signed in, gives Lake only
@@ -98,6 +119,11 @@ submits a signed CSR, polls the order, and downloads the certificate chain. The 
 confirms issuance and renewal create audit events. `Pki.AcmeNoncesAreStatelessOneUseAndExpire`,
 `Pki.AcmeAccountsAndOrdersAreBoundedAndOrdersExpire` and
 `Pki.AcmeNewAccountForAnUnknownCustomerIsRefused` hold the bounds above on a test clock.
+`Pki.X509SvidRejectsMalformedSpiffeIdentities`,
+`Pki.AgentCertificateRejectsSanConfigurationDelimiters` and
+`Pki.AcmeRejectsMalformedDnsIdentifiers` reject extra SAN entries and malformed names; the SVID,
+agent and HTTP ACME tests decode the issued certificate and assert its single SAN's type and
+exact bytes. Run these with `ctest --test-dir build -R 'Pki\.' --timeout 600 --output-on-failure`.
 
 ## How to change
 
@@ -105,3 +131,6 @@ Certificate capabilities belong in the registry and authorize against the custom
 Add a profile to the schema constraint, capability schemas, and this page together. Do not expose
 private keys, recovery shares, or protected key-store values through an API response or audit
 details.
+Keep identity validation at order creation and the shared certificate encoder. Add SANs through
+typed `GENERAL_NAME` values and `X509_add1_ext_i2d`; configuration strings are only for fixed
+extension constants.

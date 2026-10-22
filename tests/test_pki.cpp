@@ -30,6 +30,7 @@
 #include <openssl/core_names.h>
 #include <openssl/ecdsa.h>
 #include <openssl/evp.h>
+#include <openssl/pem.h>
 #include <openssl/x509.h>
 #include <openssl/x509v3.h>
 
@@ -306,7 +307,7 @@ private:
     std::string account_url_;
 };
 
-std::string csr_for(std::string_view identifier) {
+std::string csr_for(std::string_view identifier, std::string_view extra_sans = {}) {
     Pkey key = new_p256_key();
     Request request_value(X509_REQ_new());
     if (!key || !request_value || X509_REQ_set_version(request_value.get(), 0) != 1 ||
@@ -324,11 +325,11 @@ std::string csr_for(std::string_view identifier) {
         return {};
     }
     STACK_OF(X509_EXTENSION)* extensions = sk_X509_EXTENSION_new_null();
-    X509_EXTENSION* san =
-        X509V3_EXT_conf_nid(nullptr,
-                            nullptr,
-                            NID_subject_alt_name,
-                            const_cast<char*>(("DNS:" + std::string(identifier)).c_str()));
+    X509_EXTENSION* san = X509V3_EXT_conf_nid(
+        nullptr,
+        nullptr,
+        NID_subject_alt_name,
+        const_cast<char*>(("DNS:" + std::string(identifier) + std::string(extra_sans)).c_str()));
     if (!extensions || !san || sk_X509_EXTENSION_push(extensions, san) != 1 ||
         X509_REQ_add_extensions(request_value.get(), extensions) != 1) {
         sk_X509_EXTENSION_pop_free(extensions, X509_EXTENSION_free);
@@ -350,12 +351,149 @@ std::string csr_for(std::string_view identifier) {
     return base64url(der.data(), der.size());
 }
 
+void expect_single_san(std::string_view pem, int type, std::string_view expected) {
+    std::unique_ptr<BIO, decltype(&BIO_free)> input(
+        BIO_new_mem_buf(pem.data(), static_cast<int>(pem.size())), BIO_free);
+    ASSERT_TRUE(input);
+    std::unique_ptr<X509, decltype(&X509_free)> certificate(
+        PEM_read_bio_X509(input.get(), nullptr, nullptr, nullptr), X509_free);
+    ASSERT_TRUE(certificate);
+    const int index = X509_get_ext_by_NID(certificate.get(), NID_subject_alt_name, -1);
+    ASSERT_GE(index, 0);
+    EXPECT_EQ(X509_get_ext_by_NID(certificate.get(), NID_subject_alt_name, index), -1);
+    std::unique_ptr<GENERAL_NAMES, decltype(&GENERAL_NAMES_free)> names(
+        static_cast<GENERAL_NAMES*>(
+            X509_get_ext_d2i(certificate.get(), NID_subject_alt_name, nullptr, nullptr)),
+        GENERAL_NAMES_free);
+    ASSERT_TRUE(names);
+    ASSERT_EQ(sk_GENERAL_NAME_num(names.get()), 1);
+    const auto* name = sk_GENERAL_NAME_value(names.get(), 0);
+    ASSERT_EQ(name->type, type);
+    const auto* value = type == GEN_URI ? name->d.uniformResourceIdentifier : name->d.dNSName;
+    EXPECT_EQ(std::string_view(reinterpret_cast<const char*>(ASN1_STRING_get0_data(value)),
+                               static_cast<std::size_t>(ASN1_STRING_length(value))),
+              expected);
+}
+
+TEST(Pki, X509SvidRejectsMalformedSpiffeIdentities) {
+    auto authority = lake::control::pki::create_authority("customer-a");
+    ASSERT_TRUE(authority) << authority.error().message;
+    const std::vector<std::string> invalid{"spiffe://lake.test/a,DNS:extra.test",
+                                           "spiffe://lake.test/a,IP:127.0.0.1",
+                                           "spiffe://lake.test/a,URI:spiffe://other.test/a",
+                                           "spiffe://lake.test/a,email:a@b.test",
+                                           "spiffe://lake.test/a:b",
+                                           "spiffe://lake.test:443/a",
+                                           "spiffe://user@lake.test/a",
+                                           "spiffe://",
+                                           "spiffe:///a",
+                                           "spiffe://LAKE.test/a",
+                                           "spiffe://lake.test/",
+                                           "spiffe://lake.test/a//b",
+                                           "spiffe://lake.test/a/../b",
+                                           "spiffe://lake.test/a/./b",
+                                           "spiffe://lake.test/a?b",
+                                           "spiffe://lake.test/a#b",
+                                           "spiffe://lake.test/a%2cb",
+                                           "spiffe://lake.test/a b",
+                                           "spiffe://lake.test/a\tb",
+                                           "spiffe://lake.test/a\nb",
+                                           std::string("spiffe://lake.test/a") + '\0' +
+                                               ",DNS:extra.test",
+                                           "spiffe://lake.test/\xc3\xa9",
+                                           "spiffe://" + std::string(256, 'a') + "/b",
+                                           "spiffe://lake.test/" + std::string(2048, 'a')};
+    for (const auto& identity : invalid) {
+        SCOPED_TRACE(identity);
+        const auto result = lake::control::pki::issue_x509_svid(*authority, identity);
+        ASSERT_FALSE(result);
+        EXPECT_EQ(result.error().code, "invalid_input");
+    }
+    for (const std::string identity : {"spiffe://lake.test/Workload_1/a-b.v2",
+                                       "spiffe://trust_domain",
+                                       "spiffe://127.0.0.1/a"}) {
+        const auto result = lake::control::pki::issue_x509_svid(*authority, identity);
+        ASSERT_TRUE(result) << result.error().message;
+        expect_single_san(result->certificate_pem, GEN_URI, identity);
+    }
+}
+
+TEST(Pki, AgentCertificateRejectsSanConfigurationDelimiters) {
+    auto authority = lake::control::pki::create_authority("customer-a");
+    ASSERT_TRUE(authority) << authority.error().message;
+    const std::string public_key(43, 'A');
+    for (const std::string subject : {"taap:agent,DNS:extra.test",
+                                      "taap:agent,IP:127.0.0.1",
+                                      "taap:agent,URI:spiffe://other.test/a",
+                                      "taap:agent\n"}) {
+        const auto result =
+            lake::control::pki::issue_agent_certificate(*authority, subject, public_key);
+        ASSERT_FALSE(result) << subject;
+        EXPECT_EQ(result.error().code, "invalid_input");
+    }
+    const auto result =
+        lake::control::pki::issue_agent_certificate(*authority, "taap:test-agent", public_key);
+    ASSERT_TRUE(result) << result.error().message;
+    expect_single_san(result->certificate_pem, GEN_URI, "taap:test-agent");
+}
+
+TEST(Pki, AcmeRejectsMalformedDnsIdentifiers) {
+    lake::control::InMemoryStore store;
+    const auto organization = store.create_organization({"taap:acme", "ACME", ""});
+    ASSERT_TRUE(organization);
+    const auto customer = store.create_customer({"organization", "", organization->id, "acme"});
+    ASSERT_TRUE(customer);
+    const std::string kek = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+    lake::control::pki::Service pki;
+    ASSERT_TRUE(pki.create_authority(store, customer->id, kek));
+    const auto jwk = jwk_of(new_p256_key().get());
+    const auto account = pki.create_acme_account(
+        store, customer->id, {jwk.at("x").get<std::string>(), jwk.at("y").get<std::string>()});
+    ASSERT_TRUE(account);
+    const std::vector<std::string> invalid{"a.test,DNS:extra.test",
+                                           "a.test,IP:127.0.0.1",
+                                           "a.test,URI:spiffe://other.test/a",
+                                           "a.test,email:a@b.test",
+                                           "a.test:443",
+                                           "a.test b",
+                                           "a.test\n",
+                                           "a.test\t",
+                                           std::string("a.test") + '\0' + ",DNS:extra.test",
+                                           "a%2ctest.test",
+                                           "a_test.test",
+                                           "*.test",
+                                           "-a.test",
+                                           "a-.test",
+                                           "a..test",
+                                           ".a.test",
+                                           "a.test.",
+                                           "a.test/path",
+                                           "a.\xc3\xa9",
+                                           std::string(64, 'a') + ".test",
+                                           std::string(63, 'a') + "." + std::string(63, 'b') + "." +
+                                               std::string(63, 'c') + "." + std::string(62, 'd')};
+    for (const auto& identifier : invalid) {
+        SCOPED_TRACE(identifier);
+        const auto result =
+            pki.create_acme_order(store, customer->id, account->id, identifier, kek);
+        ASSERT_FALSE(result);
+        EXPECT_EQ(result.error().code, "invalid_input");
+    }
+    EXPECT_EQ(pki.acme_state_size().orders, 0U);
+    for (const std::string identifier : {"Service-1.lake.test", "xn--bcher-kva.test"}) {
+        const auto result =
+            pki.create_acme_order(store, customer->id, account->id, identifier, kek);
+        ASSERT_TRUE(result) << result.error().message;
+    }
+}
+
 TEST(Pki, IssuesAndVerifiesSpiffeX509AndJwtSvids) {
     auto authority = lake::control::pki::create_authority("customer-a");
     ASSERT_TRUE(authority) << authority.error().message;
 
     auto x509 = lake::control::pki::issue_x509_svid(*authority, "spiffe://lake.test/worker");
     ASSERT_TRUE(x509) << x509.error().message;
+    expect_single_san(x509->certificate_pem, GEN_URI, "spiffe://lake.test/worker");
     EXPECT_TRUE(lake::control::pki::verify_x509_svid(*authority, *x509))
         << lake::control::pki::verify_x509_svid(*authority, *x509).error().message;
 
@@ -807,7 +945,10 @@ TEST(Pki, AcmeClientCompletesHttp01OrderAndDownloadsCertificate) {
     EXPECT_EQ(nlohmann::json::parse(challenged.body).at("status"), "valid");
 
     const HttpResponse finalized = client.post(order_document.at("finalize").get<std::string>(),
-                                               {{"csr", csr_for(identifier)}});
+                                               {{"csr",
+                                                 csr_for(identifier,
+                                                         ",DNS:extra.test,IP:127.0.0.1,"
+                                                         "URI:spiffe://other.test/a")}});
     ASSERT_EQ(finalized.status, 200) << finalized.body;
     const nlohmann::json finalized_order = nlohmann::json::parse(finalized.body);
     ASSERT_EQ(finalized_order.at("status"), "valid");
@@ -820,6 +961,7 @@ TEST(Pki, AcmeClientCompletesHttp01OrderAndDownloadsCertificate) {
         client.post(certificate_url, nlohmann::json::object(), false, true);
     ASSERT_EQ(certificate.status, 200) << certificate.body;
     EXPECT_NE(certificate.body.find("-----BEGIN CERTIFICATE-----"), std::string::npos);
+    expect_single_san(certificate.body, GEN_DNS, identifier);
 
     const auto event = store->latest_audit_event();
     ASSERT_TRUE(event) << event.error().message;

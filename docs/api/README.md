@@ -5,6 +5,8 @@ lake#951: [Clerk offboarding](clerk.md#webhooks) revokes delegated agent credent
 reject missing/disabled people immediately and retain workspace cleanup for the next worker pass.
 [models.md](models.md) specifies authenticated customer reads for workspace dataset and model
 metadata, while public repository revisions remain readable anonymously (lake#970, LSR-104).
+[PKI identities](pki.md#certificate-identities) defines strict ACME DNS and X.509 SPIFFE input
+validation and the single typed SAN each certificate receives (lake#946).
 
 lake#728/#730/#731: [network.md](network.md) documents the fourteen secure-networking capabilities
 for connections, scoped credential rotation, egress rules, tunnel grants, peers, effective rules,

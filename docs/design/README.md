@@ -5,6 +5,8 @@ credential refusal and durable workspace-stream cleanup; [Clerk](../api/clerk.md
 behavior and verification contract.
 [status.md](status.md) records the workspace dataset/model metadata authorization fix (lake#970,
 LSR-104) separately from deployment; [models.md](../api/models.md) specifies the access contract.
+[PKI SAN validation](../api/pki.md#certificate-identities) is implemented in the source tree
+(lake#946); [status.md](status.md) keeps that fix separate from deployed PKI behavior.
 
 Secure-networking store and capability support and its separate operator rollout are tracked in
 [status.md](status.md) and specified in the [control-plane](../control-plane/network.md) and

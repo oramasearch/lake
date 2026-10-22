@@ -20,6 +20,9 @@ checks customer authorization before dataset/model workspace exchanges through R
 MCP, including URL workspace context and the model alias. `test_api.cpp`'s
 `Models.AnonymousDatasetAndModelRevisionsRequirePublicRepositories` retains anonymous public
 revision reads and private revision refusals (lake#970, LSR-104; [contract](../docs/api/models.md)).
+`test_pki.cpp` rejects SAN configuration injection through ACME, SPIFFE and agent issuance
+(lake#946), validates malformed DNS/SPIFFE identifiers, and decodes successful certificates to
+check one SAN with exactly the requested type and bytes. See [PKI](../docs/api/pki.md).
 
 `test_platform.cpp`'s `LiquidIdFixture` covers deployment rows that name a repository by the liquid
 id `liquid deploy` sends, by lake's UUID, by an unknown id (reported, not skipped) and by a liquid
