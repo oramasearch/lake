@@ -776,6 +776,77 @@ TEST(TransparencyLog, AuditCommitmentsReplicateAndRemainAbsentFromIdentityScans)
     }
 }
 
+TEST(TransparencyLog, AuditLegacyForgedSignatureCannotClaimVerifiedIdentities) {
+    TemporaryRoot temporary;
+    lake::control::InMemoryStore store;
+    const auto event = lake::audit::record(store,
+                                           {.kind = "dynamic_secret",
+                                            .principal = "taap:1:ed25519:victim",
+                                            .object = "secret_mount/private",
+                                            .outcome = "success"},
+                                           {});
+    ASSERT_TRUE(event);
+    json forged = lake::audit::to_json(*event);
+    std::string forged_signature = forged.at("signature").get<std::string>();
+    ASSERT_FALSE(forged_signature.empty());
+    forged_signature.front() = forged_signature.front() == 'A' ? 'B' : 'A';
+    forged["signature"] = forged_signature;
+    forged.erase("digest");
+    const auto payload = json::to_cbor(forged);
+    std::array<unsigned char, 32> digest{};
+    unsigned int digest_size = 0;
+    ASSERT_EQ(
+        EVP_Digest(
+            payload.data(), payload.size(), digest.data(), &digest_size, EVP_sha512_256(), nullptr),
+        1);
+    constexpr char digits[] = "0123456789abcdef";
+    std::string digest_text;
+    for (const auto byte : digest) {
+        digest_text += digits[byte >> 4];
+        digest_text += digits[byte & 15];
+    }
+    forged["digest"] = digest_text;
+    EXPECT_FALSE(lake::audit::verify_event(store, lake::audit::event_from_json(forged)));
+    const auto cbor = json::to_cbor(forged);
+    std::string entry("LAKE-AUDIT-EVENT-1\n");
+    entry.append(reinterpret_cast<const char*>(cbor.data()), cbor.size());
+    const auto encoded = base64url(std::as_bytes(std::span(entry)));
+    const auto root = sha256(std::string(1, '\0') + entry);
+    lake::transparency::TiledLog log(temporary.path(), "historical-audit");
+    EXPECT_FALSE(log.append({encoded}));
+    const auto base = log.state();
+    ASSERT_TRUE(base);
+    EXPECT_FALSE(log.apply_replication_batch({.base = *base,
+                                              .head = {.tree_size = 1, .root_hash = root},
+                                              .source_tree_size = 1,
+                                              .attestations = {encoded}}));
+
+    // Model an immutable full-event tile written by an older Lake. Its Merkle root and
+    // self-digest are consistent, but neither authenticates the claimed identities.
+    const auto tile_path = log.directory() / "tiles/entries/0/1.tile";
+    std::filesystem::create_directories(tile_path.parent_path());
+    std::string tile("LAKE-TILE-1\n");
+    for (int shift : {24, 16, 8, 0}) {
+        tile.push_back(static_cast<char>((entry.size() >> shift) & 0xff));
+    }
+    tile += entry;
+    std::ofstream(tile_path, std::ios::binary) << tile;
+    const json tree{{"version", "lake_tree/1"},
+                    {"tree_size", 1U},
+                    {"root_hash", root},
+                    {"frontier", json::array({root})}};
+    std::ofstream(log.directory() / "tree.json") << tree.dump();
+    ASSERT_TRUE(log.tile(0, 1));
+    ASSERT_TRUE(log.inclusion_proof(0, 1));
+    for (const auto& identity : {event->draft.principal, event->signer}) {
+        const auto scan = log.scan_identity(identity, 1, root);
+        EXPECT_FALSE(scan) << "a self-digest must not authenticate a forged signature";
+        if (!scan) {
+            EXPECT_EQ(scan.error().code, "unrecoverable");
+        }
+    }
+}
+
 TEST(TransparencyLog, BulkTilesDetectTamperingAndScanOneHundredThousandEntries) {
     TemporaryRoot temporary;
     lake::transparency::TiledLog log(temporary.path(), "monitor-instance");
@@ -1124,6 +1195,10 @@ TEST(TransparencyRegistry, ReplicationCapabilityConvergesTwoInstancesAndRecordsA
     TemporaryRoot temporary;
     lake::transparency::TiledLog source_log(temporary.path(), "registry-replication-source");
     lake::transparency::TiledLog target_log(temporary.path(), "registry-replication-target");
+    lake::transparency::CheckpointService source_checkpoints(
+        temporary.path(), "registry-replication-source", air_gapped_configuration());
+    lake::transparency::CheckpointService target_checkpoints(
+        temporary.path(), "registry-replication-target", air_gapped_configuration());
     lake::control::InMemoryStore store;
     lake::api::Registry registry;
     lake::api::register_core_capabilities(registry, "test");
@@ -1131,6 +1206,7 @@ TEST(TransparencyRegistry, ReplicationCapabilityConvergesTwoInstancesAndRecordsA
     source_context.store = &store;
     source_context.node_name = "registry-replication-source";
     source_context.transparency_log = &source_log;
+    source_context.checkpoints = &source_checkpoints;
     source_context.authorized = true;
     source_context.operator_credential = true;
     source_context.acting_identity = "admin";
@@ -1138,6 +1214,7 @@ TEST(TransparencyRegistry, ReplicationCapabilityConvergesTwoInstancesAndRecordsA
     lake::api::ApiContext target_context = source_context;
     target_context.node_name = "registry-replication-target";
     target_context.transparency_log = &target_log;
+    target_context.checkpoints = &target_checkpoints;
     target_context.replication_requester =
         [&](const std::string&, std::uint64_t after) -> std::expected<json, lake::api::ApiError> {
         source_context.request_id.clear();
@@ -1167,6 +1244,23 @@ TEST(TransparencyRegistry, ReplicationCapabilityConvergesTwoInstancesAndRecordsA
     EXPECT_FALSE(requested) << "a source that is not a configured peer was requested";
 
     target_context.replication_peers = {"https://source.example"};
+    const auto source_head = source_log.state();
+    ASSERT_TRUE(source_head);
+    const auto checkpoint = source_checkpoints.publish(
+        {{"version", "lake_checkpoint/1"},
+         {"tree_size", source_head->tree_size},
+         {"root_hash", source_head->root_hash}},
+        [&](const json& body) -> lake::transparency::Result<json> {
+            const auto signature = lake::audit::sign_transparency_checkpoint(
+                store, body, {.instance_kek = source_context.instance_kek});
+            if (!signature) {
+                return std::unexpected(
+                    lake::transparency::Error{signature.error().code, signature.error().message});
+            }
+            return *signature;
+        },
+        {});
+    ASSERT_TRUE(checkpoint);
     const auto replicated = registry.call(
         "replicate_transparency_log", {{"source_url", "https://source.example/"}}, target_context);
     ASSERT_TRUE(replicated.ok) << replicated.error.message;
@@ -1186,6 +1280,155 @@ TEST(TransparencyRegistry, ReplicationCapabilityConvergesTwoInstancesAndRecordsA
                event.draft.action == "replicate_transparency_log";
     }));
     EXPECT_TRUE(lake::audit::verify(store, *events));
+}
+
+TEST(TransparencyRegistry, ReplicationAuthenticatesTheBatchHeadBeforeWriting) {
+    TemporaryRoot temporary;
+    lake::control::InMemoryStore store;
+    lake::api::Registry registry;
+    lake::api::register_core_capabilities(registry, "test");
+    lake::transparency::TiledLog source(temporary.path(), "authenticated-source");
+    lake::transparency::CheckpointService checkpoints(
+        temporary.path(), "authenticated-source", air_gapped_configuration());
+    lake::api::ApiContext source_context;
+    source_context.store = &store;
+    source_context.transparency_log = &source;
+    source_context.checkpoints = &checkpoints;
+    source_context.node_name = "authenticated-source";
+    source_context.authorized = true;
+    source_context.operator_credential = true;
+    source_context.acting_identity = "admin";
+    const std::string entry = signed_attestation("taap:1:ed25519:replication-auth", 41);
+    ASSERT_TRUE(source.append({entry, entry, entry}));
+    const auto head = source.state();
+    const auto prefix = source.state_at(2);
+    ASSERT_TRUE(head);
+    ASSERT_TRUE(prefix);
+    const auto signer = [&](const json& body) -> lake::transparency::Result<json> {
+        const auto signed_body = lake::audit::sign_transparency_checkpoint(store, body, {});
+        if (!signed_body) {
+            return std::unexpected(
+                lake::transparency::Error{signed_body.error().code, signed_body.error().message});
+        }
+        return *signed_body;
+    };
+    EXPECT_FALSE(
+        registry
+            .call("export_transparency_replication_batch", {{"after_tree_size", 0}}, source_context)
+            .ok);
+    const auto stale = checkpoints.publish({{"version", "lake_checkpoint/1"},
+                                            {"tree_size", prefix->tree_size},
+                                            {"root_hash", prefix->root_hash}},
+                                           signer,
+                                           {});
+    ASSERT_TRUE(stale);
+    EXPECT_FALSE(
+        registry
+            .call("export_transparency_replication_batch", {{"after_tree_size", 0}}, source_context)
+            .ok);
+    const auto checkpoint = checkpoints.publish({{"version", "lake_checkpoint/1"},
+                                                 {"tree_size", head->tree_size},
+                                                 {"root_hash", head->root_hash}},
+                                                signer,
+                                                {});
+    ASSERT_TRUE(checkpoint);
+    const auto exported = registry.call(
+        "export_transparency_replication_batch", {{"after_tree_size", 0}}, source_context);
+    ASSERT_TRUE(exported.ok) << exported.error.message;
+    const json batch = exported.value;
+    std::vector<json> refused;
+    json missing = batch;
+    missing.erase("checkpoint");
+    refused.push_back(missing);
+    json malformed = batch;
+    malformed["checkpoint"] = nullptr;
+    refused.push_back(malformed);
+    json bad_signature = batch;
+    bad_signature["checkpoint"]["signature"]["signature"] = "invalid";
+    refused.push_back(bad_signature);
+    json unknown_signer = batch;
+    unknown_signer["checkpoint"]["signature"]["signer"] = "taap:1:ed25519:untrusted";
+    refused.push_back(unknown_signer);
+    json uncovered = batch;
+    uncovered["checkpoint"] = *stale;
+    refused.push_back(uncovered);
+    json conflicting = batch;
+    auto conflicting_body = checkpoint->at("checkpoint");
+    conflicting_body["root_hash"] = std::string(64, 'a');
+    const auto conflicting_signature = signer(conflicting_body);
+    ASSERT_TRUE(conflicting_signature);
+    conflicting["checkpoint"]["checkpoint"] = conflicting_body;
+    conflicting["checkpoint"]["signature"] = *conflicting_signature;
+    conflicting["checkpoint"]["checkpoint_hash_sha256"] = sha256(conflicting_body.dump());
+    refused.push_back(conflicting);
+
+    json partial = batch;
+    partial["attestations"].erase(2);
+    partial["head"] = {{"tree_size", prefix->tree_size}, {"root_hash", prefix->root_hash}};
+    const auto proof = source.consistency_proof(2, 3);
+    ASSERT_TRUE(proof);
+    partial["checkpoint_consistency"] = proof->audit_path;
+    json missing_proof = partial;
+    missing_proof.erase("checkpoint_consistency");
+    refused.push_back(missing_proof);
+    json bad_proof = partial;
+    bad_proof["checkpoint_consistency"] = json::array({std::string(64, '0')});
+    refused.push_back(bad_proof);
+    json malformed_proof = partial;
+    malformed_proof["checkpoint_consistency"] = json::array({42});
+    refused.push_back(malformed_proof);
+    json long_proof = partial;
+    long_proof["checkpoint_consistency"] = std::vector<std::string>(65, std::string(64, '0'));
+    refused.push_back(long_proof);
+    std::size_t index = 0;
+    for (const auto& response : refused) {
+        SCOPED_TRACE(index);
+        const auto name = "refused-replica-" + std::to_string(index++);
+        lake::transparency::TiledLog target(temporary.path(), name);
+        lake::transparency::CheckpointService target_checkpoints(
+            temporary.path(), name, air_gapped_configuration());
+        auto target_context = source_context;
+        target_context.transparency_log = &target;
+        target_context.checkpoints = &target_checkpoints;
+        target_context.replication_requester = [response](const std::string&, std::uint64_t)
+            -> std::expected<json, lake::api::ApiError> { return response; };
+        const auto applied = registry.call("replicate_transparency_log",
+                                           {{"source_url", "https://source.example"}},
+                                           target_context);
+        EXPECT_FALSE(applied.ok);
+        ASSERT_TRUE(target.state());
+        EXPECT_EQ(target.state()->tree_size, 0U);
+        EXPECT_FALSE(std::filesystem::exists(target.directory() / "tiles/entries/0/3.tile"));
+        EXPECT_FALSE(target_checkpoints.current());
+    }
+    lake::transparency::TiledLog target(temporary.path(), "honest-replica");
+    lake::transparency::CheckpointService target_checkpoints(
+        temporary.path(), "honest-replica", air_gapped_configuration());
+    auto target_context = source_context;
+    target_context.transparency_log = &target;
+    target_context.checkpoints = &target_checkpoints;
+    json response = partial;
+    target_context.replication_requester =
+        [&](const std::string&, std::uint64_t) -> std::expected<json, lake::api::ApiError> {
+        return response;
+    };
+    const auto applied = registry.call(
+        "replicate_transparency_log", {{"source_url", "https://source.example"}}, target_context);
+    ASSERT_TRUE(applied.ok) << applied.error.message;
+    EXPECT_EQ(applied.value.at("tree_size"), 2U);
+    EXPECT_FALSE(applied.value.at("caught_up"));
+    EXPECT_FALSE(target_checkpoints.current());
+    const auto suffix = registry.call(
+        "export_transparency_replication_batch", {{"after_tree_size", 2}}, source_context);
+    ASSERT_TRUE(suffix.ok) << suffix.error.message;
+    response = suffix.value;
+    const auto caught_up = registry.call(
+        "replicate_transparency_log", {{"source_url", "https://source.example"}}, target_context);
+    ASSERT_TRUE(caught_up.ok) << caught_up.error.message;
+    EXPECT_TRUE(caught_up.value.at("caught_up"));
+    EXPECT_EQ(target.state()->root_hash, head->root_hash);
+    EXPECT_EQ(target_checkpoints.current()->at("checkpoint_hash_sha256"),
+              checkpoint->at("checkpoint_hash_sha256"));
 }
 
 TEST(TransparencyCheckpoint, ValidatesRuntimeConfiguration) {
