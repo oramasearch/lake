@@ -41,6 +41,7 @@ constexpr std::array central = std::to_array<std::string_view>({
     // Billing is account configuration in the control plane (decision 56, lake#564).
     "bill_preview",
     "billing_account",
+    "cancel_recovery",
     "check_agent_certificate",
     "check_cached_read",
     "claim_recovery_deliveries",

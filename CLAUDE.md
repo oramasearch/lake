@@ -105,6 +105,12 @@ the `lake_platform_unresolved_repositories` gauge, one log line per change), nev
 Not deployed; the operator must vendor the schema and select `repository_liquid_ids_guard`. See
 [`docs/api/platform.md#which-repository-a-row-names`](docs/api/platform.md#which-repository-a-row-names).
 
+Email recovery abuse protections (lake#968, LSR-102, migration `0096_email_recovery_limits`):
+starts reuse a pending attempt, with account and durable client/global budgets; a signed-in holder
+can cancel their pending recovery from its device notice, invalidating the token. Not deployed;
+the operator must vendor the schema and select `email_recovery_limits_guard`. See
+[`docs/api/recovery.md`](docs/api/recovery.md#email-recovery-budgets).
+
 Root recovery separates its participants (lake#934, migration `0093_root_recovery_participants`):
 `begin_root_recovery` names distinct TAAP identities holding admin on the customer and answers no
 share; each participant, signed in as themselves, claims only their own share once
@@ -926,8 +932,7 @@ one adapter TU) and the pure renderers in `include/zetta/api/web_ui.hpp`.
 - **Schema.** `db/schema.sql` is the source of truth; the operator carries a byte-identical
   vendored copy at `internal/controller/assets/lake-schema.sql` and applies it per Lake as an
   owned `PostgresSchema` (one transaction, guarded on the table the **newest** migration creates,
-  `model_token_prices_guard` in the source tree, versioned by content hash).
-  `clerk_revocation_guard` in the source tree, versioned by content hash).
+  `email_recovery_limits_guard` in the source tree, versioned by content hash).
   Change the schema HERE, then copy it into the operator in the same change; the operator's test
   checks the copy carries the source-of-truth header. Migrations are single-shot today
   (incremental migrations are the PostgresSchema follow-up), so until then a schema change means

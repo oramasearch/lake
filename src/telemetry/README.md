@@ -50,3 +50,7 @@ The wrapper forwards the workspace deletion operations (lake#514): `delete_works
 `get_workspace_deletion`, `pending_workspace_deletions` and `complete_workspace_deletion`. The
 owner loop's resume pass counts `lake_workspace_deletions_completed_total` and
 `lake_workspace_deletion_errors_total`.
+
+The store decorator forwards email recovery's trusted client address and owner cancellation
+(lake#968, LSR-102) so instrumented production stores enforce the same budgets and ownership
+checks as direct stores. See [recovery.md](../../docs/api/recovery.md#email-recovery-budgets).

@@ -359,18 +359,22 @@ void register_recovery_entry_points(Registry& registry) {
             [](const json& input, ApiContext& context) {
                 if (!context.store)
                     return no_store();
-                return email_recovery_answer(context.store->begin_email_recovery(
-                    input.value("pool_id", "lake"), input.at("email"), 24 * 60 * 60));
+                return email_recovery_answer(
+                    context.store->begin_email_recovery(input.value("pool_id", "lake"),
+                                                        input.at("email"),
+                                                        24 * 60 * 60,
+                                                        context.recovery_client_address));
             },
         .async_handler = [](const json& input,
                             ApiContext& context) -> liquid::runtime::task<ApiResult> {
             if (!context.store) {
                 co_return no_store();
             }
-            const auto attempt = co_await authentication_work([store = context.store, input] {
-                return store->begin_email_recovery(
-                    input.value("pool_id", "lake"), input.at("email"), 24 * 60 * 60);
-            });
+            const auto attempt = co_await authentication_work(
+                [store = context.store, input, client = context.recovery_client_address] {
+                    return store->begin_email_recovery(
+                        input.value("pool_id", "lake"), input.at("email"), 24 * 60 * 60, client);
+                });
             co_return email_recovery_answer(attempt);
         }});
 }
@@ -425,6 +429,35 @@ void register_admin_recovery(Registry& registry) {
 }
 
 void register_recovery_completion_and_delivery(Registry& registry) {
+    registry.add(Capability{
+        .name = "cancel_recovery",
+        .title = "Cancel account recovery",
+        .description =
+            "Cancel a pending recovery of the signed-in account and invalidate its token.",
+        .input_schema = {{"type", "object"},
+                         {"properties",
+                          {{"recovery_id", {{"type", "string"}, {"format", "uuid"}}}}},
+                         {"required", json::array({"recovery_id"})},
+                         {"additionalProperties", false}},
+        .output_schema = object_schema(),
+        .kind = CapabilityKind::Action,
+        .object = "principal",
+        .action = "write",
+        .resolve_object = self_object,
+        .handler =
+            [](const json& input, ApiContext& context) {
+                if (!context.store) {
+                    return no_store();
+                }
+                if (!context.session_credential || context.acting_user_id.empty()) {
+                    return ApiResult::failure("unauthorized", "signed-in account is required");
+                }
+                const auto attempt =
+                    context.store->cancel_recovery(context.acting_user_id, input.at("recovery_id"));
+                return attempt ? ApiResult::success(control::to_json(*attempt))
+                               : from_store_error(attempt.error());
+            },
+        .serves_application_pools = true});
     registry.add(Capability{
         .name = "complete_recovery",
         .title = "Complete account recovery",
@@ -501,30 +534,34 @@ void register_recovery_notifications(Registry& registry) {
         .action = "read",
         .resolve_object = self_object,
         .authorizes_candidates = true,
-        .handler = [](const json&, ApiContext& context) {
-            if (!context.store) {
-                return no_store();
-            }
-            const auto decision = control::authorize(*context.store,
-                                                     context.acting_identity,
-                                                     "principal/" + context.acting_identity,
-                                                     "read",
-                                                     context.authorization_cache);
-            if (!decision || !decision->allowed) {
-                return ApiResult::failure(decision ? "unauthorized" : decision.error().code,
-                                          decision ? "principal cannot list recovery notifications"
-                                                   : decision.error().message);
-            }
-            const auto rows = context.store->list_recovery_notifications(context.acting_user_id);
-            if (!rows) {
-                return from_store_error(rows.error());
-            }
-            json items = json::array();
-            for (const control::RecoveryNotification& row : *rows) {
-                items.push_back(control::to_json(row));
-            }
-            return ApiResult::success({{"items", std::move(items)}});
-        }});
+        .handler =
+            [](const json&, ApiContext& context) {
+                if (!context.store) {
+                    return no_store();
+                }
+                const auto decision = control::authorize(*context.store,
+                                                         context.acting_identity,
+                                                         "principal/" + context.acting_identity,
+                                                         "read",
+                                                         context.authorization_cache);
+                if (!decision || !decision->allowed) {
+                    return ApiResult::failure(decision ? "unauthorized" : decision.error().code,
+                                              decision
+                                                  ? "principal cannot list recovery notifications"
+                                                  : decision.error().message);
+                }
+                const auto rows =
+                    context.store->list_recovery_notifications(context.acting_user_id);
+                if (!rows) {
+                    return from_store_error(rows.error());
+                }
+                json items = json::array();
+                for (const control::RecoveryNotification& row : *rows) {
+                    items.push_back(control::to_json(row));
+                }
+                return ApiResult::success({{"items", std::move(items)}});
+            },
+        .serves_application_pools = true});
 }
 
 void register_recovery_contact_configuration(Registry& registry) {

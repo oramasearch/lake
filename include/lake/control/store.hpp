@@ -2416,9 +2416,16 @@ public:
                                                     const std::string& email,
                                                     const std::string& code,
                                                     const std::string& device_name) = 0;
-    virtual Result<RecoveryAttempt> begin_email_recovery(const std::string& pool_id,
-                                                         const std::string& email,
-                                                         int cooling_seconds) = 0;
+    // Reuses an open attempt. Unknown accounts and exhausted budgets return an empty attempt;
+    // public callers must always receive the same accepted response. Client address is trusted
+    // transport metadata; direct callers without it share a single bucket.
+    virtual Result<RecoveryAttempt>
+    begin_email_recovery(const std::string& pool_id,
+                         const std::string& email,
+                         int cooling_seconds,
+                         const std::string& client_address = {}) = 0;
+    virtual Result<RecoveryAttempt> cancel_recovery(const std::string& user_id,
+                                                    const std::string& recovery_id) = 0;
     virtual Result<RecoveryAttempt> begin_admin_recovery(const std::string& organization_id,
                                                          const std::string& user_id,
                                                          const std::string& requested_by) = 0;

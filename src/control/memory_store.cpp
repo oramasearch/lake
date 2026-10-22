@@ -3597,7 +3597,12 @@ nlohmann::json to_json(const RecoveryNotification& value) {
             {"user_id", value.user_id},
             {"device_id", value.device_id},
             {"kind", value.kind},
-            {"created_at", value.created_at}};
+            {"created_at", value.created_at},
+            {"cancel_action",
+             {{"capability", "cancel_recovery"},
+              {"href", "/v1/cancel_recovery"},
+              {"method", "POST"},
+              {"input", {{"recovery_id", value.recovery_id}}}}}};
 }
 
 nlohmann::json to_json(const RecoveryContact& value, bool include_wrapped_key) {
@@ -8046,7 +8051,8 @@ void add_recovery_notifications(std::vector<RecoveryNotification>& notifications
 
 Result<RecoveryAttempt> InMemoryStore::begin_email_recovery(const std::string& pool_id,
                                                             const std::string& email,
-                                                            int cooling_seconds) {
+                                                            int cooling_seconds,
+                                                            const std::string& client_address) {
     if (cooling_seconds < 3600) {
         return std::unexpected(
             StoreError{"invalid_input", "email recovery cooling period is too short"});
@@ -8057,13 +8063,43 @@ Result<RecoveryAttempt> InMemoryStore::begin_email_recovery(const std::string& p
         return std::unexpected(StoreError{"store_error", "could not create recovery token"});
     }
     std::lock_guard lock(mutex_);
+    const auto now = std::chrono::system_clock::now();
+    std::erase_if(recovery_budgets_, [&](const auto& entry) {
+        return entry.second.started_at + std::chrono::hours(1) <= now;
+    });
+    const auto spend = [&](const std::string& key, int limit) {
+        auto [it, inserted] = recovery_budgets_.try_emplace(key, RecoveryBudget{now, 0});
+        if (it->second.requests >= limit) {
+            return false;
+        }
+        ++it->second.requests;
+        return true;
+    };
+    // Empty attempts are accepted without disclosing whether an account or budget exists.
+    if (!spend("global", 300) ||
+        !spend("client/" + identity_crypto::sha256_hex(client_address), 30)) {
+        return RecoveryAttempt{};
+    }
     const auto password = std::ranges::find_if(passwords_, [&](const PasswordCredential& value) {
         return value.pool_id == pool_id && lower(value.email) == lower(email);
     });
-    if (password == passwords_.end()) {
-        return std::unexpected(StoreError{"not_found", "account not found"});
+    // A disabled, deleted or suspended account (lake#948) gets no mail, the same empty answer.
+    if (password == passwords_.end() || !active_delegator_locked(password->user_id)) {
+        return RecoveryAttempt{};
     }
-    const auto now = std::chrono::system_clock::now();
+    for (const auto& record : recovery_attempts_) {
+        if (record.attempt.user_id == password->user_id && record.attempt.method == "email" &&
+            record.attempt.status == "cooling" && record.expires_at > now) {
+            return record.attempt;
+        }
+    }
+    if (std::ranges::any_of(recovery_attempts_, [&](const RecoveryRecord& record) {
+            return record.attempt.user_id == password->user_id &&
+                   record.attempt.method == "email" &&
+                   record.created_at + std::chrono::hours(24) > now;
+        })) {
+        return RecoveryAttempt{};
+    }
     const auto ready = now + std::chrono::seconds(cooling_seconds);
     const auto expires = ready + std::chrono::hours(24);
     RecoveryAttempt attempt{new_uuid_v4(),
@@ -8081,6 +8117,27 @@ Result<RecoveryAttempt> InMemoryStore::begin_email_recovery(const std::string& p
     add_recovery_notifications(
         recovery_notifications_, devices_, attempt, "email_recovery_started");
     return attempt;
+}
+
+Result<RecoveryAttempt> InMemoryStore::cancel_recovery(const std::string& user_id,
+                                                       const std::string& recovery_id) {
+    std::lock_guard lock(mutex_);
+    const auto found = std::ranges::find_if(recovery_attempts_, [&](const RecoveryRecord& value) {
+        return value.attempt.id == recovery_id && value.attempt.user_id == user_id;
+    });
+    if (user_id.empty() || found == recovery_attempts_.end()) {
+        return std::unexpected(StoreError{"not_found", "recovery attempt not found"});
+    }
+    if (found->attempt.status == "completed" ||
+        found->expires_at <= std::chrono::system_clock::now()) {
+        return std::unexpected(StoreError{"conflict", "recovery is no longer pending"});
+    }
+    found->attempt.status = "cancelled";
+    found->token_hash.clear();
+    std::erase_if(recovery_deliveries_, [&](const RecoveryDelivery& delivery) {
+        return delivery.recovery_id == recovery_id && delivery.delivered_at.empty();
+    });
+    return found->attempt;
 }
 
 Result<RecoveryAttempt> InMemoryStore::begin_admin_recovery(const std::string& organization_id,
@@ -8155,6 +8212,9 @@ Result<RecoveryAttempt> InMemoryStore::approve_admin_recovery(const std::string&
     if (std::chrono::system_clock::now() >= found->expires_at) {
         return std::unexpected(StoreError{"conflict", "admin recovery has expired"});
     }
+    if (found->attempt.status != "pending_approval") {
+        return std::unexpected(StoreError{"conflict", "admin recovery is not pending"});
+    }
     found->approvals.push_back(approved_by);
     found->attempt.approval_count = static_cast<int>(found->approvals.size());
     if (found->approvals.size() == 2) {
@@ -8188,7 +8248,11 @@ Result<IssuedSession> InMemoryStore::complete_recovery(const std::string& recove
     auto found = std::ranges::find_if(recovery_attempts_, [&](const RecoveryRecord& value) {
         return value.attempt.id == recovery_id;
     });
-    if (found == recovery_attempts_.end())
+    // A cancelled, completed or unapproved attempt, or one whose token was cleared, is refused
+    // before any hash work; the check is repeated after the hash is verified (lake#968).
+    if (found == recovery_attempts_.end() ||
+        (found->attempt.status != "cooling" && found->attempt.status != "approved") ||
+        found->token_hash.empty())
         return std::unexpected(StoreError{"unauthorized", "invalid recovery token"});
     return authentication_attempt(found->attempt.user_id, [&]() -> Result<IssuedSession> {
         const auto token_hash = found->token_hash;
@@ -8198,7 +8262,8 @@ Result<IssuedSession> InMemoryStore::complete_recovery(const std::string& recove
         found = std::ranges::find_if(recovery_attempts_, [&](const RecoveryRecord& value) {
             return value.attempt.id == recovery_id;
         });
-        if (found == recovery_attempts_.end() || found->attempt.status == "completed" ||
+        if (found == recovery_attempts_.end() ||
+            (found->attempt.status != "cooling" && found->attempt.status != "approved") ||
             found->token_hash != token_hash || !valid) {
             return std::unexpected(StoreError{"unauthorized", "invalid recovery token"});
         }

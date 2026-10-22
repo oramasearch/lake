@@ -469,3 +469,8 @@ must vendor this schema and select that guard before rollout. See
 Every `workload_resources` kind check (the table's own and those of `0077`, `0078` and `0083`) lists
 every kind, so applying the schema again over rows of a later kind (`methodology_run`,
 `methodology_deployment`) does not fail at an earlier migration's check.
+
+Migration `0096_email_recovery_limits` (lake#968, LSR-102) adds `cancelled` recovery state and
+`offline_recovery_budgets` for atomic hourly client/global admission. The operator must vendor
+this schema and select `email_recovery_limits_guard` before rollout. See
+[recovery.md](../docs/api/recovery.md#email-recovery-budgets).

@@ -584,3 +584,6 @@ regeneration. See [authentication attempt limits](identity.md#authentication-att
 Storage quota overrides require the operator credential or instance administrator through both
 `set_storage_quota` and the `storage` dimension of `set_usage_limit` (lake#976, LSR-109).
 See [metering.md](metering.md#quota-behavior) for authorization and focused proof.
+LSR-102 (lake#968): [recovery.md](recovery.md#email-recovery-budgets) documents uniform accepted
+responses, durable client/global limits, account attempt reuse and owner-only `cancel_recovery`,
+linked in device notices. Migration `0096_email_recovery_limits` awaits operator vendoring.

@@ -9372,6 +9372,7 @@ struct ApiServer::Impl {
                 return connections->leave_worker(token, principal);
             };
         }
+        ctx.recovery_client_address = order_client_address(route);
         ctx.request_path = std::string(route.url.path());
         ctx.request_query = std::string(route.url.encoded_query());
         ctx.path_workspace_id = workspace_path_id(ctx.request_path);
