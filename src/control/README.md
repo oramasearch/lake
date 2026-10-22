@@ -331,3 +331,9 @@ acceptance, role changes and removal; PostgreSQL locks the organization before r
 authority and counts. Self-service joins recheck the inviter. See the
 [ownership contract](../../docs/api/organizations.md#delegated-administration) and the shared
 regressions in `tests/test_deletions.cpp`.
+Authentication budgets are enforced in both stores against resolved user ids before hashing
+(lake#969). Recovery credentials select their single Argon2id hash by a versioned SHA-256
+selector in the existing unique subject index; legacy rows are never scanned. PostgreSQL uses
+private authentication transactions, with row locks for one-use recovery; memory verifies
+snapshots outside its shared mutex and rechecks them before committing.
+See [the contract and tests](../../docs/api/identity.md#authentication-attempt-limits).

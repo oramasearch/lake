@@ -15,6 +15,9 @@ namespace lake::control::identity_crypto {
 std::string random_secret();
 std::string hash_secret(std::string_view secret);
 bool verify_secret(std::string_view encoded, std::string_view secret);
+// New recovery codes are 128 random bits with a version prefix; legacy codes are refused.
+std::string new_recovery_code();
+std::string recovery_selector(std::string_view code);
 std::string new_totp_secret();
 bool verify_totp(std::string_view secret, std::string_view code);
 std::string sha256_hex(std::string_view value);

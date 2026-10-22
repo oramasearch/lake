@@ -1,3 +1,4 @@
+#include "lake/api/authentication_work.hpp"
 #include "lake/api/capabilities.hpp"
 
 #include "lake/api/apps.hpp"
@@ -296,6 +297,16 @@ void register_cached_read_check(Registry& registry) {
         }});
 }
 
+ApiResult email_recovery_answer(const control::Result<control::RecoveryAttempt>& attempt) {
+    // Neither transport reveals whether the email is registered (lake#774).
+    if (attempt || attempt.error().code == "not_found") {
+        return ApiResult::success(
+            {{"status", "requested"},
+             {"message", "If an account uses this address, a recovery link is on its way."}});
+    }
+    return from_store_error(attempt.error());
+}
+
 void register_recovery_entry_points(Registry& registry) {
     registry.add(Capability{
         .name = "recover_with_code",
@@ -321,10 +332,12 @@ void register_recovery_entry_points(Registry& registry) {
                 co_return no_store();
             }
             co_return answer(co_await issued_result(
-                context.store->recover_with_code(input.value("pool_id", "lake"),
-                                                 input.at("email"),
-                                                 input.at("code"),
-                                                 input.value("device_name", "recovered device")),
+                co_await authentication_work([store = context.store, input] {
+                    return store->recover_with_code(input.value("pool_id", "lake"),
+                                                    input.at("email"),
+                                                    input.at("code"),
+                                                    input.value("device_name", "recovered device"));
+                }),
                 context));
         }});
     registry.add(Capability{
@@ -342,22 +355,23 @@ void register_recovery_entry_points(Registry& registry) {
         .object = "authentication",
         .action = "write",
         .resolve_object = global_object,
-        .handler = [](const json& input, ApiContext& context) {
+        .handler =
+            [](const json& input, ApiContext& context) {
+                if (!context.store)
+                    return no_store();
+                return email_recovery_answer(context.store->begin_email_recovery(
+                    input.value("pool_id", "lake"), input.at("email"), 24 * 60 * 60));
+            },
+        .async_handler = [](const json& input,
+                            ApiContext& context) -> liquid::runtime::task<ApiResult> {
             if (!context.store) {
-                return no_store();
+                co_return no_store();
             }
-            const auto attempt = context.store->begin_email_recovery(
-                input.value("pool_id", "lake"), input.at("email"), 24 * 60 * 60);
-            // One answer whether or not the address has an account (lake#774): the attempt (its id,
-            // the account's user id, its timing) reaches only the address's owner, by email. Before
-            // this, an anonymous caller learned whether an address had an account and its user id.
-            if (attempt || attempt.error().code == "not_found") {
-                return ApiResult::success(
-                    {{"status", "requested"},
-                     {"message",
-                      "If an account uses this address, a recovery link is on its way."}});
-            }
-            return from_store_error(attempt.error());
+            const auto attempt = co_await authentication_work([store = context.store, input] {
+                return store->begin_email_recovery(
+                    input.value("pool_id", "lake"), input.at("email"), 24 * 60 * 60);
+            });
+            co_return email_recovery_answer(attempt);
         }});
 }
 
@@ -434,9 +448,11 @@ void register_recovery_completion_and_delivery(Registry& registry) {
                 co_return no_store();
             }
             co_return answer(co_await issued_result(
-                context.store->complete_recovery(input.at("recovery_id"),
-                                                 input.at("token"),
-                                                 input.value("device_name", "recovered device")),
+                co_await authentication_work([store = context.store, input] {
+                    return store->complete_recovery(input.at("recovery_id"),
+                                                    input.at("token"),
+                                                    input.value("device_name", "recovered device"));
+                }),
                 context));
         }});
 }

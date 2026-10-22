@@ -9349,6 +9349,8 @@ struct ApiServer::Impl {
             return *timing->context;
         }
         ApiContext ctx;
+        // Authentication budgets count the address the trusted ingress hop decided (LSR-103).
+        ctx.client_address = order_client_address(route);
         // A capability that long-polls gives its HTTP worker back (lake#534).
         if (server) {
             ctx.leave_worker = [connections = server.get(), token = server->request_token(route)](
@@ -13396,10 +13398,10 @@ struct ApiServer::Impl {
             route, status, std::move(html), "text/html; charset=utf-8", "no-store");
     }
 
-    // The address an anonymous order is counted against (lake#838): X-Real-IP, which the ingress
-    // (ingress-nginx) always sets itself, overwriting any the sender sent; else the last
-    // X-Forwarded-For hop, the one the nearest proxy appended; else one bucket for every direct
-    // client. Never CF-Connecting-IP or the first X-Forwarded-For hop: a sender that reaches the
+    // The address an anonymous order and an authentication attempt are counted against (lake#838,
+    // LSR-103): X-Real-IP, which the ingress (ingress-nginx) always sets itself, overwriting any
+    // the sender sent; else the last X-Forwarded-For hop, the one the nearest proxy appended; else
+    // one bucket for every direct client. Never CF-Connecting-IP or the first X-Forwarded-For hop: a sender that reaches the
     // ingress without passing Cloudflare can write either, and would land in a fresh bucket with
     // each request. The ingress decides which client address to trust (Cloudflare's ranges), and
     // lake counts what it decided.

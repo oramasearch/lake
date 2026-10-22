@@ -1307,6 +1307,18 @@ Registry::call(const std::string& name, const nlohmann::json& input, ApiContext&
     nlohmann::json task_resolved_input;
     const nlohmann::json& call_input =
         agent_task_input(*capability, workspace_input, context, task_resolved_input);
+    if ((name == "sign_in_password" || name == "verify_mfa" || name == "recover_with_code" ||
+         name == "enroll_mfa" || name == "disable_mfa" || name == "sign_up_password" ||
+         name == "begin_email_recovery" || name == "complete_recovery") &&
+        !context.client_address.empty() &&
+        !authentication_clients_->admit(context.client_address)) {
+        return refuse(name,
+                      ApiResult::failure(
+                          "rate_limited",
+                          "too many authentication attempts from this client; retry in one minute"),
+                      {{"reason", "authentication_client_limit"}},
+                      context);
+    }
     CallState state = prepare_call(capability, call_input, context);
     if (state.proceed) {
         const auto start = std::chrono::steady_clock::now();
@@ -1390,6 +1402,19 @@ liquid::runtime::task<ApiResult> Registry::call_async(const std::string& name,
     nlohmann::json task_resolved_input;
     const nlohmann::json& call_input =
         agent_task_input(*capability, workspace_input, context, task_resolved_input);
+    if ((name == "sign_in_password" || name == "verify_mfa" || name == "recover_with_code" ||
+         name == "enroll_mfa" || name == "disable_mfa" || name == "sign_up_password" ||
+         name == "begin_email_recovery" || name == "complete_recovery") &&
+        !context.client_address.empty() &&
+        !authentication_clients_->admit(context.client_address)) {
+        co_return refuse(
+            name,
+            ApiResult::failure(
+                "rate_limited",
+                "too many authentication attempts from this client; retry in one minute"),
+            {{"reason", "authentication_client_limit"}},
+            context);
+    }
     CallState state = prepare_call(capability, call_input, context);
     if (state.proceed) {
         // A long poll (`wait_ms`) parks on the bus: it gives its HTTP worker back so parked

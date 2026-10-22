@@ -66,6 +66,7 @@ function Manage() {
       title="Multi-Factor Authentication"
       sub="Confirm your password to enroll or replace a TOTP authenticator. A new enrollment replaces existing recovery codes."
     >
+      <Notice tone="warning">Older 12-character recovery codes no longer work. Enter your current password and enroll again to generate new recovery codes. Your authenticator still works.</Notice>
       {error ? <Notice tone="danger">{messageOf(error)}</Notice> : null}
       {enrollment && (
         <Banner tone="ok" title="Save these now. They are not shown again.">

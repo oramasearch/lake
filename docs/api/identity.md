@@ -639,3 +639,64 @@ account untouched; one central event without the email),
 by the store) and `TheOperatorDeletesAnAccountAndItsSoleOrganizationsWhenAsked`, each over the
 in-memory store and PostgreSQL. The confirmation in Lake Console is
 [`../ui/settings.md`](../ui/settings.md#deleting-your-account).
+
+## Authentication attempt limits
+
+Password sign-in, `verify_mfa`, `recover_with_code`, MFA enrollment/disablement, sign-up and
+email/token recovery run their store work on the bounded blocking pool. At most two authentication
+jobs may be queued or running across the process; a third receives `rate_limited` (HTTP 429). Admission stays reserved
+until the worker finishes, including if its client disconnects. PostgreSQL authentication uses
+private transactions, so an Argon2 calculation or a locked recovery row never holds the control
+store's shared connection mutex. In-memory verification uses an owned snapshot and rechecks it
+under the lock before issuing or consuming a credential.
+
+Each account gets eight failed attempts per minute, shared across password sign-in, MFA sign-in,
+recovery-code sign-in, fresh MFA verification, enrollment, disablement and token completion. The store checks the budget before verifying a hash. Public password,
+MFA sign-in and recovery-code attempts charge failures even when no recovery selector exists.
+Protected fresh-MFA checks and disablement reject unknown selectors cheaply without charging a
+hash-verification failure. An attempt reserves capacity before verification; successful
+verification refunds only its own reservation and never clears earlier failures. Invalid
+enrollment session proofs are rejected before reserving password-verification capacity.
+Email case variants resolve to the same user budget.
+
+Each client address also gets thirty authentication calls per minute across REST, MCP and hosted
+sign-in forms, including sign-up, email-recovery initiation and token completion. The address
+comes from the trusted ingress hop, as for anonymous orders and email recovery: `X-Real-IP`,
+which ingress-nginx sets itself and overwrites, else the last `X-Forwarded-For` hop, the one the
+nearest proxy appended. Never `CF-Connecting-IP` or the first `X-Forwarded-For` hop, which a
+sender can write. The ingress decides which client address to trust (Cloudflare's ranges), so
+two people behind the same ingress pod keep separate budgets. A request that reaches Lake
+directly, with neither header, counts against one shared `direct` budget, so it is still
+limited. These limits are per process and reset on restart. Each
+table retains at most 4,096 active keys; a full table refuses new keys until expiry instead of
+evicting an account's existing budget.
+
+Email-recovery initiation keeps its uniform public acknowledgement and performs the same token
+hashing for known and unknown addresses. It shares the worker and client bounds, but does not
+consume the password-verification budget, so password throttling does not change that
+operation's acknowledgement or token-hashing work.
+
+New recovery codes have the form `rc1_` followed by 32 lowercase hexadecimal characters
+(128 random bits). The SHA-256 selector in `credentials.subject`, indexed by the existing
+unique `(pool_id, kind, subject)` constraint, selects one Argon2id hash. Unknown selectors and
+malformed codes perform no recovery-code derivation. Password-plus-recovery sign-in performs
+one password derivation and at most one recovery derivation. Every recovery verifier, including
+fresh verification and MFA disablement, uses the same selector rule. Consumption during
+recovery and MFA sign-in locks the selected row and revokes it in the session transaction.
+
+Earlier 12-character recovery codes are refused: their salted hashes cannot be backfilled with
+a selector. Regenerate codes by enrolling MFA again with the current password from an interactive
+session. The MFA page displays this instruction. Existing TOTP seeds, passwords and passkeys
+continue to work. There is no SQL migration or operator schema handoff.
+
+With `LAKE_TEST_DB_URI` configured, run:
+
+```sh
+ctest --test-dir <build> --timeout 600 --output-on-failure \
+  -R 'AuthenticationLimits|AuthenticationStores|AuthenticationClientBudget|RecoveryWorkCannotBlock|MfaEnrollment'
+```
+
+The tests exercise both stores, legacy-code refusal, account/client limits, two-worker admission, concurrent
+consumption, and `/healthz` plus unrelated store reads while recovery waits on a locked row.
+When changing a budget, keep it shared across entry points and keep both the memory table and
+the work queue bounded; never add a legacy multi-hash fallback.

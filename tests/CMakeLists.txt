@@ -65,6 +65,7 @@ add_executable(lake-tests test_main.cpp test_web_ui.cpp test_web_app.cpp test_ma
   test_platform.cpp
   test_identity_exit.cpp
   test_postgres_identity.cpp
+  test_authentication_limits.cpp
   test_token_attenuation.cpp
   test_docs_status.cpp
   test_volumes.cpp)

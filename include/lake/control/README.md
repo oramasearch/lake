@@ -308,3 +308,8 @@ migration `0083_methodology_deployments`), its operator status, `methodology_dep
 (the `lmd.` credential, which reaches only `methodology_deployment_input`) and
 `methodology_deployment_endpoint_valid` (only a serve Service's in-cluster URL). `methodologies.hpp`
 adds the chunked artifact bounds (8 MiB chunks, 1 GiB in all) and the predict row limit.
+
+`authentication_limits.hpp` provides the bounded fixed-window attempt table used by both stores
+and HTTP client admission (lake#969). Full tables fail closed without evicting active budgets.
+The store's protected account admission uses resolved user ids across all password/MFA/recovery
+verification paths; see [the contract](../../../docs/api/identity.md#authentication-attempt-limits).

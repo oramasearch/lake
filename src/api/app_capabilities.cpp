@@ -1,4 +1,5 @@
 #include "lake/api/apps.hpp"
+#include "lake/api/authentication_work.hpp"
 
 #include <algorithm>
 #include <array>
@@ -749,7 +750,10 @@ liquid::runtime::task<ApiResult> sign_up_password_session(control::NewPasswordUs
     if (user.pool_id.empty() || user.pool_id == "lake") {
         user.pool_id = "lake";
         co_return completed(co_await application_session_result(
-            context.store->sign_up_password(user), context, "user.created"));
+            co_await authentication_work(
+                [store = context.store, user] { return store->sign_up_password(user); }),
+            context,
+            "user.created"));
     }
     auto application = context.store->get_application_by_pool(user.pool_id);
     if (!application) {
@@ -781,7 +785,8 @@ liquid::runtime::task<ApiResult> sign_up_password_session(control::NewPasswordUs
     if (*refused) {
         co_return std::move(**refused);
     }
-    auto issued = context.store->sign_up_password(user);
+    auto issued = co_await authentication_work(
+        [store = context.store, user] { return store->sign_up_password(user); });
     if (!issued) {
         (void)co_await control::release_application_claim(
             *records,

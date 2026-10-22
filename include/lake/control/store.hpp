@@ -5,6 +5,7 @@
 #include <chrono>
 #include <cstdint>
 #include <expected>
+#include <functional>
 #include <map>
 #include <optional>
 #include <string>
@@ -16,6 +17,7 @@
 
 #include "lake/audit/audit.hpp"
 #include "lake/control/apps.hpp"
+#include "lake/control/authentication_limits.hpp"
 #include "lake/control/builds.hpp"
 #include "lake/control/network.hpp"
 #include "lake/control/offline_recovery.hpp"
@@ -1606,6 +1608,23 @@ nlohmann::json to_json(const ScimGroup&);
 nlohmann::json to_json(const ProvisioningLog&);
 
 class Store {
+    AuthenticationAttempts authentication_attempts_{8};
+
+protected:
+    template <class Callable>
+    auto authentication_attempt(std::string user_id, Callable&& callable) {
+        using ResultType = std::invoke_result_t<Callable>;
+        const auto now = AuthenticationAttempts::Clock::now();
+        if (!authentication_attempts_.admit(user_id, now))
+            return ResultType(std::unexpect,
+                              StoreError{"rate_limited",
+                                         "too many authentication attempts; retry in one minute"});
+        auto result = std::invoke(std::forward<Callable>(callable));
+        if (result || result.error().code == "mfa_required")
+            authentication_attempts_.refund(user_id, now);
+        return result;
+    }
+
 public:
     virtual ~Store() = default;
     [[nodiscard]] virtual std::string kind() const = 0; // "postgres" | "memory"

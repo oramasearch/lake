@@ -756,7 +756,7 @@ private:
     std::vector<SecretLeaseRoute> secret_lease_routes_;
     struct PasswordCredential {
         std::string user_id, pool_id, email, password, totp_secret;
-        std::vector<std::string> recovery_hashes;
+        std::map<std::string, std::string> recovery_hashes;
     };
     struct PasskeyCredential {
         std::string user_id, pool_id, credential_id, public_key_pem, name, device_id, revoked_at;
