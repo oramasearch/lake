@@ -17,7 +17,17 @@ The top-level value has `format: "lake_export/1"`, a `payload`, a
 digest for each payload member: `repository`, `history`, `artifacts`, `forge`, `grants`, and
 `git`. The signature includes the exporting lake identity document, so a destination verifies it
 without a source-database connection. Import rejects a missing member, changed member digest, or
-invalid signer signature before it creates a repository.
+invalid signer signature before it creates a repository. The signer's `taap_id` must exactly
+equal `taap:1:ed25519:` followed by the uppercase, unpadded base32 encoding of the SHA-512/256
+digest of its decoded Ed25519 public key, the same derivation Lake uses to mint its identity.
+Changing that identity to another instance's name and re-signing with a fresh key is refused
+with `invalid_signature` (LSR-088, lake#954). Rotation mints a new key-derived name and remains
+portable.
+
+This verifies the archive's consistency and possession of its signing key. It does not establish
+trust in the exporting instance or authenticate the people or builders named in its metadata.
+Lake accepts self-contained archives without a peer trust registry, and marks all imported
+provenance `untrusted`, including an archive from an instance the importer recognizes.
 
 Liquid history is transferred through the `SyncStore` portable operation. Its implementation uses
 liquid's cursor-bounded `export_drips`/`import_drips` metadata contract and transfers every
@@ -39,10 +49,19 @@ When `include_git` is true, `git` contains the loose-object Git repository emitt
 An import into lake uses the liquid portable history as authoritative; the Git projection is for a
 Git consumer and is still manifest-verified.
 
-Forge records retain their current versioned values. Import creates new local identifiers and
-rewrites issue-comment, review-comment, and webhook-delivery parent references to those new
-identifiers. Direct grants are recreated on the destination repository policy object. Archive
-records themselves are not copied, preventing an export from recursively containing prior
+Forge records retain their historical values with an `import_provenance` object containing
+`source_signer`, `trust: "untrusted"`, and `imported_by`. Supplied provenance markers are replaced.
+Supplied `author` and `opened_by` fields move to `import_provenance.source_author` and
+`source_opened_by`. Local issues and issue comments name the importer as `author`, and reviews
+name the importer as `opened_by`; other copied author fields are removed. Imported items now
+show the importer as author in the console. Historical authors and issuers remain source claims.
+Import creates new local identifiers and rewrites issue-comment, review-comment, and
+webhook-delivery parent references to those new
+identifiers. Direct grants are recreated on the destination repository policy object with the
+importer as `granted_by_taap_id` and a new Lake-signed `lake.grant/1` attestation. Source grantors
+and attestation digests never become local grant evidence. Their signed local attestations are
+recorded in the import audit as `grant_attestations`. Archive records themselves are not copied,
+preventing an export from recursively containing prior
 exports.
 
 ## What an archive never carries
@@ -80,6 +99,13 @@ in the repository it was given in, and a signed archive proves only who exported
 imported review never satisfies a protected branch's `required_review`. Its state is kept as
 history. See [forge](forge.md#who-may-approve-lsr-077).
 
+Imported artifact evidence also carries `import_provenance`; its `verification` is `untrusted`
+and its attestations have `verified: false`. A release's carried `artifacts` move under
+`import_provenance.artifacts`, leaving its active artifact list empty, so source evidence cannot
+satisfy a destination branch's verified-release requirement. Liquid's own history and object
+verification still run independently. The import audit records the bound `source_signer` and
+`source_trust: "untrusted"`.
+
 ## Verify
 
 ```sh
@@ -90,7 +116,12 @@ ctest --test-dir build --output-on-failure
 The API fixture exports a repository with an issue, review, release, and direct grant into a
 second control plane, verifies the manifest signature, and compares the portable history,
 artifacts, forge values, and grants. It also changes a payload member and proves import rejects
-the digest mismatch. That fixture uses a fake repository store, so it never wrote a real history
+the digest mismatch. It re-signs an archive with another key while keeping the claimed source
+identity, proves refusal before any destination repository or transfer is created, and checks
+local grant evidence and untrusted forge/artifact markers. The direct
+`Export.ManifestSignerMustBeNamedAfterItsSigningKey` case covers valid and rotated keys, false
+identifiers, malformed identities, and a signature made by the wrong key.
+That fixture uses a fake repository store, so it never wrote a real history
 item; `WorkspaceStoreExport.AnArchiveExportJustMadeImportsIntoTheSpaceStoreAndAWorkspaceStore`
 (`tests/test_workspace_store.cpp`, lake#776) runs both capabilities over lake's real liquid store.
 It pushes a history with liquid, writes a binary file, an empty file and an edit, deletes the empty

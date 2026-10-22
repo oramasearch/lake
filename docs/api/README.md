@@ -217,6 +217,8 @@ send its session cookie or redirect through another request, including a new cli
 Repository reads are the deliberate public-read exception: anonymous calls return only a public
 repository and its content; all other repository visibility levels remain protected.
 
+LSR-088 (lake#954): portable imports bind the source name to its embedded key, mark imported
+forge and artifact claims untrusted, and recreate grants as the importer with local evidence.
 [`export.md`](export.md) defines the signed `lake_export/1` portable repository archive and its
 import validation.
 

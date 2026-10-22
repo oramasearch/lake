@@ -5,6 +5,10 @@ requires a present, enabled account (lake#951). Disabled/missing principals trig
 workspace cleanup; storage errors leave records pending for retry. No notifications, launches or
 results are processed under a refused principal. Store creation guards also reject a context
 reconstructed before offboarding. See [Clerk offboarding](../../docs/api/clerk.md#webhooks).
+`export_capabilities.cpp` accepts portable archives only after the manifest verifier binds the
+claimed source name to its key (LSR-088, lake#954). Imported forge/artifact claims carry untrusted
+provenance, release evidence cannot satisfy local branch protection, and recreated grants use
+the importer and freshly signed local attestations. See [export.md](../../docs/api/export.md).
 
 `tunnel_clients.cpp` reads the tunnel client folder (allow-listed `zetta-tunnel-<platform>` files
 with a `SHA256SUMS` line, and `VERSION`) and signs and checks their 15-minute links with
