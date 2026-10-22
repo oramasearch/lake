@@ -4711,3 +4711,22 @@ CREATE TABLE IF NOT EXISTS root_recovery_participants_guard (
 );
 INSERT INTO schema_migrations (version) VALUES ('0093_root_recovery_participants')
     ON CONFLICT DO NOTHING;
+
+-- ---------------------------------------------------------------------------------------------
+-- 0095_model_token_prices (LSR-095, lake#961, docs/api/model-gateway.md): exact model input/output
+-- billing classes. Preserve historical GPU-style classes; only model_tokens may use model/direction.
+-- ---------------------------------------------------------------------------------------------
+ALTER TABLE billing_plan_prices DROP CONSTRAINT IF EXISTS billing_plan_prices_class_check;
+ALTER TABLE billing_plan_prices ADD CONSTRAINT billing_plan_prices_class_check CHECK (
+    class ~ '^([a-z0-9][a-z0-9-]{0,31})?$' OR
+    (dimension = 'model_tokens' AND class COLLATE "C" ~ '^[!-~]{1,128}/(input|output)$')
+);
+ALTER TABLE billing_invoice_lines DROP CONSTRAINT IF EXISTS billing_invoice_lines_class_check;
+ALTER TABLE billing_invoice_lines ADD CONSTRAINT billing_invoice_lines_class_check CHECK (
+    class ~ '^([a-z0-9][a-z0-9-]{0,31})?$' OR
+    (dimension = 'model_tokens' AND class COLLATE "C" ~ '^[!-~]{1,128}/(input|output)$')
+);
+CREATE TABLE IF NOT EXISTS model_token_prices_guard (
+    applied_at timestamptz NOT NULL DEFAULT now()
+);
+INSERT INTO schema_migrations (version) VALUES ('0095_model_token_prices') ON CONFLICT DO NOTHING;

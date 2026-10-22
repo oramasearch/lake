@@ -55,7 +55,7 @@ const std::vector<UsageDimension>& usage_dimensions() {
         {"calls", "calls", "sum", "API and MCP Calls"},
         {"predictions", "calls", "sum", "Model Predictions"},
         {"searches", "calls", "sum", "Index Searches"},
-        {"model_tokens", "tokens", "sum", "Model Tokens"},
+        {"model_tokens", "tokens", "sum", "Model Tokens", true, true},
         {"instances", "instance_seconds", "sum", "Service and App Instances", false, false},
         {"volumes", "gib_seconds", "sum", "Service and Store Volumes"},
     };

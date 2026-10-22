@@ -173,7 +173,7 @@ for `engine_storage`).
 | `calls` | calls | `api`, `mcp`, `mcp_connection` (`object_id` the connection) | every capability call routed to the workspace, the same attribution as `lake_requests` ([telemetry](../serving/telemetry.md#the-workspace-request-series)), answered or refused; and each exchange of a workspace's MCP connection with its server, whose bytes are `transfer` with `kind` `mcp_out` and `mcp_in` ([MCP connections](mcp-connections.md#audit-and-usage)) |
 | `predictions` | calls | — (`object_id` is the model) | each answered `predict` of a model the workspace has |
 | `searches` | calls | — (`object_id` is the index) | each answered `search_index` of a published index (lake#658) |
-| `model_tokens` | tokens | `input`, `output` (also `agent`, `launch_id`, `model`) | every agent model call through the [model gateway](model-gateway.md) (`/openai/v1/*`, lake#248), counted from the provider's own `usage`; what an agent reports with `record_model_usage` for a call made outside Lake (below); and the tokens a speech-to-text model reports for a transcript (`model` only); never speech-to-text, which is `speech` (lake#658) |
+| `model_tokens` | tokens | `input`, `output` (also `agent`, `launch_id`, `model`, `class: <model>/input` or `<model>/output`) | every agent model call through the [model gateway](model-gateway.md) (`/openai/v1/*`, lake#248), counted from the provider's own `usage`; what an agent reports with `record_model_usage` for a call made outside Lake (below); and the tokens a speech-to-text model reports for a transcript (`model` only); never speech-to-text, which is `speech` (lake#658) |
 | `instances` | instance-seconds | the service kind (`zetta`, `postgres`, …) or `app` (`object_id` is the service or app) | the owner loop's sample of running services and apps; detail, never billed |
 | `volumes` | GiB-seconds | `service`, `store` (`object_id`) | the owner loop's sample of running services' and stores' volumes; the workspace engine is a service, and its volume is how its disk is billed (decision 61) |
 
@@ -375,7 +375,7 @@ The answer: `periods` (each period's start), and for each dimension `title`, `un
 period, added up across the workspaces; a reading's periods without data are `null`),
 `by_workspace` and `by_kind` (`key`, `total`, `points`, largest first), `by_agent`, `by_launch` and
 `by_model` for `model_tokens`, `by_object` for `instances`, `volumes`, `predictions`, `searches`,
-`cpu`, `ram`, `gpu` and `vram`, `by_class` for `gpu` and `vram`, and `billed`, whether the price list
+`cpu`, `ram`, `gpu` and `vram`, `by_class` for `gpu`, `vram` and `model_tokens`, and `billed`, whether the price list
 bills the dimension (false for the detail dimensions `instances`, `build_compute` and
 `run_compute`).
 `workspaces[]` says which workspaces were read and why one was not; a workspace that could not be
@@ -408,7 +408,10 @@ tokens one of its turns or runs spent. Only an agent's own credential may call i
 launch (`lal.`) or schedule (`las.`) credential, or a library agent's bus credential naming its
 `task_id`. Lake adds both counts together to the usage of the workspace the task, launch or schedule
 runs in, labelled with the agent's name, the run's id (`launch_id`) and `model_name`, and audits it
-in that workspace. Anyone else is refused `unauthorized`.
+in that workspace. Anyone else is refused `unauthorized`. When billing is on, both exact
+`<model>/input` and `<model>/output` prices must be positive before a report is accepted; otherwise
+it returns `invalid_input` at `/model_name` without recording tokens. Reports do not grant gateway
+access, and billing-off reporting is unchanged.
 
 Agents do not report their own tokens: every model call they make goes through the
 [model gateway](model-gateway.md) (lake#248), which counts the provider's own `usage` for the run's

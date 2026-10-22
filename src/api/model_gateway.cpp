@@ -1,8 +1,11 @@
 #include "lake/api/model_gateway.hpp"
 
+#include "lake/api/billing.hpp"
+
 #include <algorithm>
 #include <format>
 #include <optional>
+#include <set>
 
 namespace lake::api {
 namespace {
@@ -338,6 +341,101 @@ std::string provider_message(std::string_view body) {
 }
 
 } // namespace
+
+std::vector<GatewayModel> default_gateway_models() {
+    return {{"gpt-5.5"}, {"gpt-5"}, {"gpt-4o"}, {"text-embedding-3-small"}};
+}
+
+std::expected<std::vector<GatewayModel>, std::string> parse_gateway_models(std::string_view text) {
+    if (text.empty()) {
+        return default_gateway_models();
+    }
+    const auto parsed = nlohmann::json::parse(text, nullptr, false);
+    if (!parsed.is_array()) {
+        return std::unexpected(
+            "LAKE_MODEL_GATEWAY_MODELS must be an array of model/provider objects");
+    }
+    std::vector<GatewayModel> models;
+    std::set<std::string> seen;
+    for (const auto& entry : parsed) {
+        if (!entry.is_object() || entry.size() != 2 || !entry.contains("model") ||
+            !entry.at("model").is_string() || !entry.contains("provider") ||
+            entry.at("provider") != "openai") {
+            return std::unexpected("each gateway model needs model and provider: openai");
+        }
+        const std::string name = entry.at("model");
+        if (name.empty() || name.size() > 128 ||
+            !std::ranges::all_of(name, [](unsigned char c) { return c > 32 && c < 127; }) ||
+            !seen.insert(name).second) {
+            return std::unexpected(
+                "gateway model names must be distinct printable names (1-128 bytes)");
+        }
+        models.push_back({name, "openai"});
+    }
+    return models;
+}
+
+bool gateway_model_allowed(const std::vector<GatewayModel>& models, std::string_view name) {
+    return std::ranges::any_of(models, [name](const GatewayModel& model) {
+        return model.provider == "openai" && model.name == name && !name.empty();
+    });
+}
+
+std::string model_token_class(std::string_view model, std::string_view kind) {
+    return std::format("{}/{}", model, kind);
+}
+
+std::expected<void, ApiError>
+validate_model_prices(std::string_view model, ApiContext& context, std::string_view path) {
+    const auto refused = [path] {
+        return std::unexpected(
+            ApiError{"invalid_input",
+                     "model: this Lake requires positive input and output prices for this model",
+                     std::string(path)});
+    };
+    if (!billing_registered(context.registry)) {
+        return {};
+    }
+    if (!context.store) {
+        return std::unexpected(ApiError{"store_unavailable", "model prices could not be read", ""});
+    }
+    const auto stored = context.store->billing_plans();
+    if (!stored) {
+        return std::unexpected(ApiError{"store_unavailable", "model prices could not be read", ""});
+    }
+    const std::chrono::year_month_day today{
+        std::chrono::floor<std::chrono::days>(std::chrono::system_clock::now())};
+    const auto list =
+        price_list_for(price_lists(*stored),
+                       std::format("{:04}-{:02}", int(today.year()), unsigned(today.month())));
+    if (!list) {
+        return refused();
+    }
+    for (const auto kind : {"input", "output"}) {
+        const std::string key = model_token_class(model, kind);
+        std::size_t matches = 0;
+        for (const auto& price : list->prices) {
+            if (price.dimension == "model_tokens" && price.class_name == key) {
+                if (price.unit_micros == 0 || price.per == 0) {
+                    return refused();
+                }
+                ++matches;
+            }
+        }
+        if (matches != 1) {
+            return refused();
+        }
+    }
+    return {};
+}
+
+std::expected<void, ApiError> validate_gateway_model(std::string_view model, ApiContext& context) {
+    if (!gateway_model_allowed(context.model_gateway_models, model)) {
+        return std::unexpected(ApiError{
+            "invalid_input", "model: not in this Lake's configured model list", "/request/model"});
+    }
+    return validate_model_prices(model, context);
+}
 
 bool is_model_gateway_endpoint(std::string_view endpoint) {
     return std::ranges::find(model_gateway_endpoints, endpoint) != model_gateway_endpoints.end();

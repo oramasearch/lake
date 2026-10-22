@@ -11,8 +11,8 @@ installs**, where usage tracking and its charts stay on ([metering.md](metering.
 based only for lake... no free plan... just straight usage... metis is enterprise priced... talk to
 sales"*.
 
-- **One price list, one rate per usage dimension.** No plans, no Free, Team or Business tier, no
-  monthly fee and no included amounts.
+- **One price list**, with rates per usage dimension, GPU class and model input/output class.
+  No plans, no Free, Team or Business tier, no monthly fee and no included amounts.
 - **Every account is billed on it automatically.** There is nothing to choose: `choose_billing_plan`,
   `billing_plans`, `set_billing_plan` and the plan picker are gone; `price_list` and
   `set_price_list` replace them.
@@ -443,7 +443,8 @@ switch the line on only while the latest run passes.
 
 ## Prices and bills
 
-The price list has at most one rate per usage dimension, keyed on the names `usage_over_time`
+The price list has at most one default rate per usage dimension and one per dimension/class,
+keyed on the names `usage_over_time`
 answers ([metering.md](metering.md#dimensions)): `unit_micros` for every `per` units of the
 dimension's unit. Amounts are integer millionths of the list's three-letter `currency` (USD). A
 dimension without a rate is not charged. There is no fee and nothing is included.
@@ -452,8 +453,22 @@ dimension without a rate is not charged. There is no fee and nothing is included
 `a100`, `h100`, or any lower-case class the operator reports): a price `{dimension, class,
 unit_micros, per}` bills that class's usage alone, and the dimension's rate without a class bills
 every other class and usage of no known class (a GPU the operator could not name). Without a rate
-for the dimension itself, a class without its own rate is not charged. Only `gpu` and `vram` have
-classes; `class` on any other dimension is `invalid_input`.
+for the dimension itself, a GPU class without its own rate is not charged.
+
+`model_tokens` also has classes (LSR-095, lake#961): the exact requested model followed by
+`/input` or `/output`. Each direction has its own positive rate; a blended rate alone cannot
+entitle a gateway call. External `record_model_usage` reports also need both prices before they
+are recorded, so an untrusted report cannot insert an unpriced class that blocks invoicing.
+The [gateway configuration](model-gateway.md#configuration) separately
+limits which models may use the platform key, including when billing is off. Other dimensions
+reject `class` with `invalid_input`.
+
+A preview or new invoice refuses with `conflict` if a used model/direction class lacks an exact
+positive rate in the month's list. It never falls back to the blended rate for those classes,
+including when a later publication removes every model price. Old usage without a billing class
+retains the historical dimension rate; issued invoices retain their frozen lines. The price-list
+editor preserves published model/direction rows when another rate is edited; new model rates can
+be published through `set_price_list`.
 
 **Retired from the list** (lake#643), **kept as detail** (lake#658). `instances`, `build_compute`
 and `run_compute` are still measured and charted as detail of the compute that is billed (how long
@@ -513,7 +528,7 @@ published. So:
 - an invoice already issued keeps the rates frozen on its lines; a new list for that month changes
   only its preview, and the month's next issue after a void.
 
-Lake does not prorate by day: a whole month has one rate per dimension, which keeps a bill
+Lake does not prorate by day: a whole month has one rate per dimension/class, which keeps a bill
 explainable as usage × rate. To raise prices without touching a month already under way, publish
 the new list for the next month.
 
@@ -566,7 +581,7 @@ Why the prices are what they are, and how they are governed: [`../billing/pricin
 | `calls` | $2.00 / million | 2000000 | 1000000 calls | managed HTTP API gateway $1.00 / million (REST APIs $3.50) | 2× |
 | `predictions` | $0.01 / 1,000 | 10000 | 1000 calls | serverless CPU inference, about $4.55 / million requests at 2 GB | 2.2× |
 | `searches` | $0.01 / 1,000 | 10000 | 1000 calls | the same serverless request reference: a search of a published index is one request served by the workspace engine, whose CPU, RAM and volume are billed apart. Hosted search services charge about $0.50 / 1,000 searches, the index's compute included (lake#658) | 2.2× |
-| `model_tokens` | $9.00 / million | 9000000 | 1000000 tokens | the model provider's per-token rate for lake's agents' default model: $5.00 / million input, $30.00 output; $7.27 / million at 10 input to 1 output | provider + 20%, rounded up |
+| `model_tokens` (historical unclassed usage only) | $9.00 / million | 9000000 | 1000000 tokens | the model provider's per-token rate for lake's agents' default model: $5.00 / million input, $30.00 output; $7.27 / million at 10 input to 1 output | provider + 20%, rounded up |
 | `volumes` | $0.20 / GiB-month | 200000 | 2628000 GiB-seconds (730 hours) | block volume $0.08 / GB-month. Every provisioned volume by its requested size while it runs: a workspace engine's, a managed service's and a store's. An engine's disk is billed this way only, never again for the bytes on it (decision 61, lake#663) | 2.5× |
 
 A GPU-hour, its memory included, is therefore 1.5× its GPU-only reference: an L4 $1.008 ($0.648 +
@@ -590,14 +605,17 @@ the issue):
   GPU-only reference is split into a memory share at a flat $0.01 per GiB-hour and a compute share,
   the rest.
 
-Two rates rest on an assumption:
+The compute rate rests on an assumption:
 
 - **Compute is priced on what a workload is scheduled with** (requests, or limits without requests),
   not on what it consumes. A workload that reserves 2 vCPU and idles pays for 2 vCPU, as on
   serverless containers and managed Kubernetes pods; one that asks for nothing is given the
   namespace's default request, and pays for that.
-- **`model_tokens` adds input and output together**, so its rate assumes 10 input tokens to each
-  output token on the default model. Output-heavy use costs Orama more than it bills.
+
+New gateway usage prices input and output separately per model. The historical $9 blended
+example above and worked bills below describe unclassed usage from before LSR-095; they do not
+entitle current gateway requests. Operators must publish both direction rates for approved
+models, based on their provider costs; no provider price is inferred or hardcoded.
 
 A workspace's engine runs all month: at the operator's default (64 MiB, and 0.1 vCPU, the
 workspace namespace's default request) that is about $6.70 of CPU and $0.47 of RAM a month; at 1

@@ -1,5 +1,11 @@
 # Database schema
 
+Migration `0095_model_token_prices` (LSR-095, lake#961) permits exact `<model>/input` and
+`<model>/output` classes for `model_tokens` prices and frozen invoice lines. Existing GPU-style
+classes retain their constraints. The operator must vendor this schema and select
+`model_token_prices_guard` before the new binary is deployed; the operator is not changed here.
+See [model-gateway.md](../docs/api/model-gateway.md#configuration).
+
 Migration `0091_account_deletion` (lake#810) adds `users.deleted_at`, set by `delete_account` when
 an account is deleted (its email and display name are erased in the same statement), and the guard
 `account_deletion_guard`. Additive; apply before the new binary, and have the operator vendor the

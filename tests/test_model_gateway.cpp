@@ -25,6 +25,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include "lake/api/billing.hpp"
 #include "lake/api/capabilities.hpp"
 #include "lake/api/model_gateway.hpp"
 #include "lake/api/registry.hpp"
@@ -185,6 +186,164 @@ json chat(bool stream = false) {
         request["stream"] = true;
     }
     return {{"endpoint", "chat/completions"}, {"request", request}};
+}
+
+TEST(ModelGateway, ParsesAnExactModelAllowlistAndRejectsBadConfiguration) {
+    using lake::api::gateway_model_allowed;
+    using lake::api::parse_gateway_models;
+    ASSERT_TRUE(parse_gateway_models(""));
+    EXPECT_TRUE(gateway_model_allowed(*parse_gateway_models(""), "gpt-5.5"));
+    EXPECT_FALSE(gateway_model_allowed(*parse_gateway_models("[]"), "gpt-5.5"));
+    const auto custom = parse_gateway_models(R"([{"model":"private-model","provider":"openai"}])");
+    ASSERT_TRUE(custom);
+    EXPECT_TRUE(gateway_model_allowed(*custom, "private-model"));
+    EXPECT_FALSE(gateway_model_allowed(*custom, "gpt-5.5"));
+    for (const auto text :
+         {"null",
+          "{}",
+          "broken",
+          R"([{"model":"x"}])",
+          R"([{"model":"x","provider":"other"}])",
+          R"([{"model":" x","provider":"openai"}])",
+          R"([{"model":"","provider":"openai"}])",
+          R"([{"model":"x","provider":"openai","extra":1}])",
+          R"([{"model":"x","provider":"openai"},{"model":"x","provider":"openai"}])"}) {
+        EXPECT_FALSE(parse_gateway_models(text)) << text;
+    }
+}
+
+TEST(ModelCompletion, RejectsUnlistedModelsBeforeEveryEndpointCallsTheProvider) {
+    GatewayRig rig;
+    const auto task = rig.task(rig.home, "agent-project");
+    auto context = rig.task_context(task);
+    for (const auto endpoint : lake::api::model_gateway_endpoints) {
+        for (const std::string model : {"premium-model",
+                                        "GPT-5.5",
+                                        "gpt-5.5 ",
+                                        "gpt-5.5-2026-08-01",
+                                        "gpt-5.5%00",
+                                        "ft:gpt-5.5:premium"}) {
+            json request{{"model", model}};
+            if (endpoint == "embeddings") {
+                request["input"] = "hello";
+            } else if (endpoint == "responses") {
+                request["input"] = "hello";
+            } else {
+                request["messages"] = chat()["request"]["messages"];
+            }
+            const auto refused = rig.call({{"endpoint", endpoint}, {"request", request}}, context);
+            EXPECT_FALSE(refused.ok) << model;
+            EXPECT_EQ(refused.error.code, "invalid_input") << model;
+            EXPECT_EQ(refused.error.path, "/request/model") << model;
+        }
+    }
+    EXPECT_EQ(rig.fake.calls(), 0U);
+    context.model_gateway_models = {{"private-model", "openai"}};
+    auto custom = chat();
+    custom["request"]["model"] = "private-model";
+    EXPECT_TRUE(rig.call(custom, context).ok);
+    context.model_gateway_models.clear();
+    EXPECT_FALSE(rig.call(custom, context).ok);
+    EXPECT_EQ(rig.fake.calls(), 1U);
+}
+
+TEST(ModelCompletion, BillingRequiresBothPositiveExactModelPricesBeforeDispatch) {
+    GatewayRig rig;
+    lake::api::register_billing_capabilities(rig.registry);
+    const auto task = rig.task(rig.home, "agent-project");
+    auto context = rig.task_context(task);
+    const auto reject = [&] {
+        const auto refused = rig.call(chat(), context);
+        EXPECT_FALSE(refused.ok);
+        EXPECT_EQ(refused.error.code, "invalid_input");
+        EXPECT_EQ(refused.error.path, "/request/model");
+        EXPECT_EQ(rig.fake.calls(), 0U);
+    };
+    reject(); // A missing list never grants models.
+    lake::control::BillingPlan plan;
+    plan.id = "usage-200001-00000000000000001";
+    plan.name = "Usage";
+    plan.currency = "USD";
+    plan.id = "usage-209901-00000000000000001";
+    plan.prices = {{"model_tokens", 6'000'000, 1'000'000, 0, "gpt-5.5/input"},
+                   {"model_tokens", 36'000'000, 1'000'000, 0, "gpt-5.5/output"}};
+    ASSERT_TRUE(rig.store->put_billing_plan(plan));
+    reject(); // A future price list is not permission to spend now.
+    plan.id = "usage-200001-00000000000000001";
+    for (const auto& prices : std::vector<std::vector<lake::control::BillingPrice>>{
+             {{"model_tokens", 9'000'000, 1'000'000, 0}},
+             {{"model_tokens", 6'000'000, 1'000'000, 0, "gpt-5.5/input"}},
+             {{"model_tokens", 6'000'000, 1'000'000, 0, "gpt-5.5/input"},
+              {"model_tokens", 0, 1'000'000, 0, "gpt-5.5/output"}},
+             {{"model_tokens", 6'000'000, 1'000'000, 0, "other/input"},
+              {"model_tokens", 36'000'000, 1'000'000, 0, "other/output"}}}) {
+        plan.prices = prices;
+        ASSERT_TRUE(rig.store->put_billing_plan(plan));
+        reject();
+    }
+    auto unlisted = chat();
+    unlisted["request"]["model"] = "other";
+    const auto priced_but_unlisted = rig.call(unlisted, context);
+    EXPECT_FALSE(priced_but_unlisted.ok);
+    EXPECT_EQ(priced_but_unlisted.error.code, "invalid_input");
+    EXPECT_EQ(rig.fake.calls(), 0U);
+    plan.prices = {{"model_tokens", 6'000'000, 1'000'000, 0, "gpt-5.5/input"},
+                   {"model_tokens", 36'000'000, 1'000'000, 0, "gpt-5.5/output"}};
+    ASSERT_TRUE(rig.store->put_billing_plan(plan));
+    ASSERT_TRUE(rig.call(chat(), context).ok);
+    EXPECT_EQ(rig.fake.calls(), 1U);
+    EXPECT_EQ(context.audit_details["answered_model"], "gpt-5.5-2026-08-01");
+    static_cast<void>(liquid::runtime::block_on(rig.recorder.flush()));
+    auto& records = rig.workspaces.records(rig.home);
+    EXPECT_EQ(records.metric_total("lake_usage", {{"class", "gpt-5.5/input"}}), 1200);
+    EXPECT_EQ(records.metric_total("lake_usage", {{"class", "gpt-5.5/output"}}), 300);
+}
+
+TEST(RecordModelUsage, UnpricedReportsCannotPoisonABilledAccountsLedger) {
+    GatewayRig rig;
+    lake::api::register_billing_capabilities(rig.registry);
+    const auto task = rig.task(rig.home, "agent-project");
+    auto context = rig.task_context(task);
+    const json tokens{{"model_name", "outside-model"}, {"input_tokens", 7}, {"output_tokens", 3}};
+    const auto refused = rig.registry.call("record_model_usage", tokens, context);
+    EXPECT_FALSE(refused.ok);
+    EXPECT_EQ(refused.error.code, "invalid_input");
+    EXPECT_EQ(refused.error.path, "/model_name");
+    EXPECT_EQ(context.audit_workspace_id, rig.home);
+    EXPECT_EQ(context.audit_object, "agent_usage/" + task.id);
+    static_cast<void>(liquid::runtime::block_on(rig.recorder.flush()));
+    EXPECT_EQ(rig.workspaces.records(rig.home).metric_total("lake_usage",
+                                                            {{"dimension", "model_tokens"}}),
+              0);
+
+    lake::control::BillingPlan plan;
+    plan.id = "usage-200001-00000000000000001";
+    plan.name = "Usage";
+    plan.currency = "USD";
+    plan.prices = {{"model_tokens", 6, 1, 0, "outside-model/input"},
+                   {"model_tokens", 36, 1, 0, "outside-model/output"}};
+    ASSERT_TRUE(rig.store->put_billing_plan(plan));
+    const auto recorded = rig.registry.call("record_model_usage", tokens, context);
+    ASSERT_TRUE(recorded.ok) << recorded.error.message;
+    static_cast<void>(liquid::runtime::block_on(rig.recorder.flush()));
+    EXPECT_EQ(rig.workspaces.records(rig.home).metric_total("lake_usage",
+                                                            {{"class", "outside-model/input"}}),
+              7);
+    EXPECT_EQ(rig.workspaces.records(rig.home).metric_total("lake_usage",
+                                                            {{"class", "outside-model/output"}}),
+              3);
+    // Reporting outside usage grants no access to the platform provider.
+    auto gateway = chat();
+    gateway["request"]["model"] = "outside-model";
+    EXPECT_FALSE(rig.call(gateway, context).ok);
+    EXPECT_EQ(rig.fake.calls(), 0U);
+
+    GatewayRig enterprise;
+    const auto enterprise_task = enterprise.task(enterprise.home, "agent-project");
+    auto enterprise_context = enterprise.task_context(enterprise_task);
+    const auto unbilled =
+        enterprise.registry.call("record_model_usage", tokens, enterprise_context);
+    EXPECT_TRUE(unbilled.ok) << unbilled.error.message;
 }
 
 TEST(ModelGateway, PreparesEachRequestAndAsksAStreamForItsUsage) {
@@ -614,7 +773,8 @@ TEST(ModelCompletion, CountsATurnsTokensInItsWorkspaceAndKeepsThePromptOutOfTheA
                                    {"kind", "input"},
                                    {"agent", "agent-ask-orama"},
                                    {"launch_id", task.id},
-                                   {"model", "gpt-5.5-2026-08-01"}}),
+                                   {"model", "gpt-5.5"},
+                                   {"class", "gpt-5.5/input"}}),
               1200);
     EXPECT_EQ(
         series.metric_total("lake_usage", {{"dimension", "model_tokens"}, {"kind", "output"}}),
@@ -1018,6 +1178,28 @@ TEST(ModelGatewayRoute, AnswersTheOpenAIShapeForATaskCredential) {
                         nullptr,
                         false)};
     };
+    auto unlisted = chat();
+    unlisted["request"]["model"] = "premium-model";
+    for (const auto& path : {std::string("/openai/v1/chat/completions"),
+                             "/w/" + home + "/openai/v1/chat/completions"}) {
+        const auto [code, refused] = post(path, credential, unlisted["request"]);
+        EXPECT_EQ(code, 400U);
+        EXPECT_EQ(refused["error"]["code"], "invalid_input");
+    }
+    const auto [rest_code, rest_refused] = post("/v1/model_completion", credential, unlisted);
+    EXPECT_EQ(rest_code, 400U);
+    const auto [mcp_code, mcp_refused] =
+        post("/mcp",
+             credential,
+             {{"jsonrpc", "2.0"},
+              {"id", 1},
+              {"method", "tools/call"},
+              {"params", {{"name", "model_completion"}, {"arguments", unlisted}}}});
+    EXPECT_EQ(mcp_code, 200U);
+    EXPECT_EQ(mcp_refused["result"]["isError"], true);
+    EXPECT_NE(mcp_refused.dump().find("invalid_input"), std::string::npos);
+    EXPECT_EQ(fake.calls(), 0U);
+
     const auto [status, answer] =
         post("/openai/v1/chat/completions", credential, chat()["request"]);
     EXPECT_EQ(status, 200U) << answer.dump();

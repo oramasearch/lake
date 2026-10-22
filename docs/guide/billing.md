@@ -2,7 +2,7 @@
 
 **Organization → Billing** is where your account sees this month's usage and what it costs so far,
 and finds its invoices. Lake is priced by usage only: you pay for what your workspaces use, each
-kind of usage at one rate. There is no plan to choose, no monthly fee and no free allowance. The bill
+kind of usage at its published rates. There is no plan to choose, no monthly fee and no free allowance. The bill
 is worked out from the usage your workspaces already record (see [Usage and Metering](/docs/usage)).
 
 Billing is on for Orama Cloud. An enterprise install of Lake has no billing: this page, the Billing
@@ -14,10 +14,10 @@ Metis is not billed here. It is enterprise software priced by Orama's sales team
 
 | Term | What it is |
 |---|---|
-| **Price list** | Orama's rates, one for each kind of usage (a dimension, as on Usage). Every account is billed at it. |
-| **Rate** | An amount for every so many units of one dimension: "$2.00 per 1M calls", "$0.0015 per vCPU-minute" of CPU, "$0.04 per 1 GiB" a month of storage. GPUs have a rate per GPU class (L4, A10G, A100, H100). |
+| **Price list** | Orama's rates for each kind of usage, GPU class and model input/output. Every account is billed at it. |
+| **Rate** | An amount for every so many units of one dimension: "$2.00 per 1M calls", "$0.0015 per vCPU-minute" of CPU, "$0.04 per 1 GiB" a month of storage. GPUs have a rate per GPU class (L4, A10G, A100, H100); model tokens have separate input and output rates for each model. |
 | **Compute** | What your workloads are scheduled with, each at its own rate: CPU (vCPU-minutes), RAM (GiB-minutes), GPU (GPU-minutes, by class) and GPU memory (GiB-minutes). A workload is your workspace's engine, a service, an app, an image build or an agent run. |
-| **Bill** | One UTC calendar month: one line per dimension with what was used, its rate and its cost (usage × rate), and the total. |
+| **Bill** | One UTC calendar month: one line per dimension or class with what was used, its rate and its cost (usage × rate), and the total. |
 | **Invoice** | A month's bill once Orama issues it, after the month ends. Its lines and rates are kept as issued; later usage or new rates never change it. |
 | **State** | An invoice is **due** until it is **paid**, or **void** if Orama cancels it (the month can then be invoiced again). |
 | **Stripe** | Where invoices are paid on Orama Cloud: each invoice has a page on Stripe, and Stripe tells Lake when it is paid. |
@@ -42,8 +42,11 @@ The rates apply to every account; there is nothing to choose or sign up for.
 | Speech to text | $0.0072 per minute |
 | API and MCP calls | $2.00 per million |
 | Model predictions | $0.01 per 1,000 |
-| Model tokens | $9.00 per million |
+| Model tokens | Separate input and output rates for each model, as published on the price list |
 | Service and store volumes | $0.20 per GiB-month |
+
+Model tokens recorded before per-model pricing retain their historical rate. Current model calls
+use only enabled models with published input and output prices.
 
 Compute is what each workload is scheduled with: the CPU and memory its containers request (or
 their limit, when they request nothing), its GPUs and their memory, for as long as it runs. A

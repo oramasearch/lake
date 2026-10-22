@@ -3655,3 +3655,58 @@ TEST(PostgresBilling, CronRunsAreAWorkloadKindAndTheirEndIsRead) {
     EXPECT_EQ(runs->front().created_at, "2026-10-11T03:00:00Z");
     EXPECT_EQ(runs->front().status_updated_at, "2026-10-11T03:02:30Z");
 }
+
+// LSR-095: model/direction rates and frozen invoice lines must survive the PostgreSQL constraints.
+TEST(PostgresBilling, ModelDirectionPricesAndInvoiceLinesRoundTrip) {
+    const char* uri = lake::test::postgres_uri();
+    if (uri == nullptr || std::string(uri).empty()) {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not set";
+    }
+    auto store = lake::control::make_postgres_store(
+        uri, "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff");
+    ASSERT_TRUE(store->ping());
+    const auto user =
+        store->create_user({"taap:1:ed25519:model-billing", "model@example.test", "Model"});
+    ASSERT_TRUE(user) << user.error().message;
+    const auto customer = store->create_customer({"individual", user->id, "", "model-billing"});
+    ASSERT_TRUE(customer) << customer.error().message;
+    lake::control::BillingPlan plan;
+    plan.id = "usage-200001-00000000000000001";
+    plan.name = "Usage";
+    plan.currency = "USD";
+    plan.prices = {{"model_tokens", 6, 1, 0, "gpt-5.5/input"},
+                   {"model_tokens", 36, 1, 0, "gpt-5.5/output"}};
+    const auto kept = store->put_billing_plan(plan);
+    ASSERT_TRUE(kept) << kept.error().message;
+    ASSERT_EQ(kept->prices.size(), 2U);
+    EXPECT_EQ(kept->prices[0].class_name, "gpt-5.5/input");
+    EXPECT_EQ(kept->prices[1].class_name, "gpt-5.5/output");
+    lake::control::Invoice invoice;
+    invoice.customer_id = customer->id;
+    invoice.period = "2026-09";
+    invoice.plan_id = plan.id;
+    invoice.plan_name = plan.name;
+    invoice.currency = "USD";
+    invoice.provider = "manual";
+    invoice.total_micros = 7800;
+    invoice.lines = {
+        {"usage", "model_tokens", "Input", "tokens", 100, 0, 100, 6, 1, 600, "gpt-5.5/input"},
+        {"usage", "model_tokens", "Output", "tokens", 200, 0, 200, 36, 1, 7200, "gpt-5.5/output"}};
+    const auto issued = store->create_invoice(invoice);
+    ASSERT_TRUE(issued) << issued.error().message;
+    ASSERT_EQ(issued->lines.size(), 2U);
+    EXPECT_EQ(issued->lines[0].class_name, "gpt-5.5/input");
+    EXPECT_EQ(issued->lines[1].class_name, "gpt-5.5/output");
+    {
+        pqxx::connection connection(uri);
+        pqxx::work tx(connection);
+        EXPECT_FALSE(
+            tx.exec("SELECT 1 FROM schema_migrations WHERE version = '0095_model_token_prices'")
+                .empty());
+        EXPECT_FALSE(tx.exec("SELECT to_regclass('model_token_prices_guard')")[0][0].is_null());
+        EXPECT_THROW(tx.exec_params("INSERT INTO billing_plan_prices (plan_id, dimension, class, "
+                                    "unit_micros) VALUES ($1, 'gpu', 'gpt-5.5/input', 1)",
+                                    plan.id),
+                     pqxx::check_violation);
+    }
+}

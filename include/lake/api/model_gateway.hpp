@@ -6,8 +6,9 @@
 // model-token limit is used up. Agents hold no provider key: they point the OpenAI SDK's base URL
 // at `<lake>/openai/v1` and use their task, launch or schedule credential as its API key.
 //
-// Everything here is pure: the HTTP exchange is the server's outbound client, injected as a
-// ModelPost, and tests inject a fake ModelProvider.
+// Request preparation and usage parsing are pure; model entitlement also reads published prices
+// when billing is on. The HTTP exchange is the server's outbound client, injected as a ModelPost,
+// and tests inject a fake ModelProvider.
 
 #include <array>
 #include <chrono>
@@ -32,6 +33,19 @@ bool is_model_gateway_endpoint(std::string_view endpoint);
 
 // OpenAI's API, unless LAKE_MODEL_PROVIDER_URL names another OpenAI-compatible base.
 inline constexpr std::string_view default_model_provider_url = "https://api.openai.com/v1";
+
+// Parse LAKE_MODEL_GATEWAY_MODELS: absent uses the defaults; [] disables the gateway.
+// Malformed lists, duplicate names and unsupported providers are configuration errors.
+std::expected<std::vector<GatewayModel>, std::string> parse_gateway_models(std::string_view text);
+bool gateway_model_allowed(const std::vector<GatewayModel>& models, std::string_view name);
+// A token billing class binds the exact requested model to its input or output tokens.
+std::string model_token_class(std::string_view model, std::string_view kind);
+// Reject unpriced model usage before it can enter a billed account's ledger. Billing off: no check.
+std::expected<void, ApiError> validate_model_prices(std::string_view model,
+                                                    ApiContext& context,
+                                                    std::string_view path = "/request/model");
+// Check the configured allowlist and, when billing is registered, both published token prices.
+std::expected<void, ApiError> validate_gateway_model(std::string_view model, ApiContext& context);
 
 // The request as lake sends it to the provider, or invalid_input naming the field at fault. A
 // streamed chat completion is asked to report its usage in its last event

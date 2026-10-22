@@ -17,6 +17,7 @@
 
 #include "lake/api/billing.hpp"
 #include "lake/api/capabilities.hpp"
+#include "lake/api/model_gateway.hpp"
 #include "lake/api/server.hpp"
 #include "lake/api/tunnel_clients.hpp"
 #include "lake/control/agent_bus.hpp"
@@ -90,6 +91,7 @@ int usage() {
     std::println("  LAKE_OPENAI_API_KEY OpenAI key for speech-to-text and the model gateway "
                  "(/openai/v1); LAKE_TRANSCRIBE_MODEL the speech model "
                  "(default gpt-4o-transcribe)");
+    std::println("  LAKE_MODEL_GATEWAY_MODELS JSON model/provider allowlist; [] disables calls");
     std::println("  LAKE_MODEL_PROVIDER_URL the model gateway's OpenAI-compatible provider "
                  "(default https://api.openai.com/v1)");
     std::println("  LAKE_MCP_ALLOW_PRIVATE_ADDRESSES=1 lets MCP connections reach loopback and "
@@ -211,6 +213,12 @@ int main(int argc, char** argv) {
     // Speech-to-text (docs/api/transcripts.md): without a key, transcribe answers not_supported.
     opts.openai_api_key = env_or("LAKE_OPENAI_API_KEY", "");
     opts.model_provider_url = env_or("LAKE_MODEL_PROVIDER_URL", "");
+    auto gateway_models = lake::api::parse_gateway_models(env_or("LAKE_MODEL_GATEWAY_MODELS", ""));
+    if (!gateway_models) {
+        std::println(stderr, "lake: {}", gateway_models.error());
+        return 2;
+    }
+    opts.model_gateway_models = std::move(*gateway_models);
     opts.transcribe_model = env_or("LAKE_TRANSCRIBE_MODEL", "");
     // MCP connections reach only public addresses unless this is set, for local development
     // against an MCP server on the same machine (docs/api/mcp-connections.md#the-client).

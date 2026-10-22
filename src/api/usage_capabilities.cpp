@@ -1749,6 +1749,10 @@ liquid::runtime::task<ApiResult> model_completion(const json& input, ApiContext&
             prepared.error().code, prepared.error().message, prepared.error().path);
     }
     const std::string requested = prepared->at("model");
+    if (const auto allowed = validate_gateway_model(requested, context); !allowed) {
+        co_return ApiResult::failure(
+            allowed.error().code, allowed.error().message, allowed.error().path);
+    }
     const auto stream_field = prepared->find("stream");
     const bool stream = stream_field != prepared->end() && stream_field->is_boolean() &&
                         stream_field->get<bool>();
@@ -1815,21 +1819,23 @@ liquid::runtime::task<ApiResult> model_completion(const json& input, ApiContext&
         usage.output_tokens =
             estimated_model_tokens(relayed ? passing->bytes() : response.body.size());
     }
-    const std::string model = usage.model.empty() ? requested : usage.model;
+    const std::string model = requested;
     const bool recorded = context.usage_recorder != nullptr;
     if (recorded) {
         const Labels labels{
             {"agent", caller->agent}, {"launch_id", caller->launch_id}, {"model", model}};
         Labels in = labels, out = labels;
         in["kind"] = "input";
+        in["class"] = model_token_class(model, "input");
         out["kind"] = "output";
+        out["class"] = model_token_class(model, "output");
         std::vector<UsageRecorder::Increment> increments;
         increments.push_back({"model_tokens", usage.input_tokens, std::move(in)});
         increments.push_back({"model_tokens", usage.output_tokens, std::move(out)});
         context.usage_recorder->add_together(caller->workspace_id, std::move(increments));
     }
     count_model_tokens(caller->customer_id, usage.input_tokens + usage.output_tokens);
-    context.audit_details["answered_model"] = model;
+    context.audit_details["answered_model"] = usage.model.empty() ? requested : usage.model;
     context.audit_details["input_tokens"] = usage.input_tokens;
     context.audit_details["output_tokens"] = usage.output_tokens;
     context.audit_details["usage_reported"] = usage.reported;
@@ -1841,7 +1847,7 @@ liquid::runtime::task<ApiResult> model_completion(const json& input, ApiContext&
     json out{{"workspace_id", caller->workspace_id},
              {"agent", caller->agent},
              {"launch_id", caller->launch_id},
-             {"model", model},
+             {"model", usage.model.empty() ? requested : usage.model},
              {"input_tokens", usage.input_tokens},
              {"output_tokens", usage.output_tokens},
              {"usage_reported", usage.reported},
@@ -2524,7 +2530,9 @@ void register_usage_capabilities(Registry& registry) {
             "An agent reports the model tokens one of its turns or runs spent. Only an agent's own "
             "task, launch or schedule credential may call it, or a library agent's bus credential "
             "naming its task in `task_id`. Lake adds the tokens to the usage of the workspace the "
-            "task, launch or schedule runs in, labelled with the agent, the run and the model.",
+            "task, launch or schedule runs in, labelled with the agent, the run and the model. "
+            "When billing is on, both model input and output prices must be positive before "
+            "a report is recorded.",
         .input_schema = {{"type", "object"},
                          {"properties",
                           {{"model_name",
@@ -2557,7 +2565,13 @@ void register_usage_capabilities(Registry& registry) {
             if (reporter->workspace_id.empty()) {
                 return ApiResult::failure("conflict", "this run belongs to no workspace");
             }
+            context.audit_workspace_id = reporter->workspace_id;
+            context.audit_object = "agent_usage/" + reporter->launch_id;
             const std::string model = input.at("model_name");
+            if (const auto priced = validate_model_prices(model, context, "/model_name"); !priced) {
+                return ApiResult::failure(
+                    priced.error().code, priced.error().message, priced.error().path);
+            }
             const auto input_tokens = input.at("input_tokens").get<std::uint64_t>();
             const auto output_tokens = input.at("output_tokens").get<std::uint64_t>();
             const bool recorded = context.usage_recorder != nullptr;
@@ -2568,13 +2582,13 @@ void register_usage_capabilities(Registry& registry) {
                 std::vector<UsageRecorder::Increment> increments;
                 Labels in = labels, out = labels;
                 in["kind"] = "input";
+                in["class"] = model_token_class(model, "input");
                 out["kind"] = "output";
+                out["class"] = model_token_class(model, "output");
                 increments.push_back({"model_tokens", input_tokens, std::move(in)});
                 increments.push_back({"model_tokens", output_tokens, std::move(out)});
                 context.usage_recorder->add_together(reporter->workspace_id, std::move(increments));
             }
-            context.audit_workspace_id = reporter->workspace_id;
-            context.audit_object = "agent_usage/" + reporter->launch_id;
             context.audit_details = {
                 {"model", model}, {"input_tokens", input_tokens}, {"output_tokens", output_tokens}};
             return ApiResult::success({{"workspace_id", reporter->workspace_id},
@@ -2588,7 +2602,9 @@ void register_usage_capabilities(Registry& registry) {
         .description =
             "The model gateway: an agent's model call, sent to the model provider with Lake's own "
             "key and counted as `model_tokens` in the workspace its task, launch or schedule runs "
-            "in. Only an agent's own task, launch or schedule credential may call it. `endpoint` "
+            "in. Models must be in the configured allowlist and, with billing on, have positive "
+            "published input and output prices. Only an agent's own task, launch or schedule "
+            "credential may call it. `endpoint` "
             "is the OpenAI API path (`chat/completions`, `responses` or `embeddings`) and "
             "`request` its JSON body. Agents normally reach it as the OpenAI-compatible "
             "`POST /openai/v1/<endpoint>`, with the OpenAI SDK's base URL set to "

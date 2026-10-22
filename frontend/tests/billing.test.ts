@@ -106,6 +106,19 @@ test("the price list editor starts from the published list, or the list rates, o
   assert.equal(published.some((r) => r.dimension === "instances"), false, "a retired dimension is not carried over");
 });
 
+test("editing a price list preserves exact model input and output prices", () => {
+  const prices = [
+    { dimension: "model_tokens", class: "Model-Q/input", unit_micros: 6_000_000, per: 1_000_000 },
+    { dimension: "model_tokens", class: "Model-Q/output", unit_micros: 36_000_000, per: 1_000_000 },
+  ];
+  const rows = rateRows(prices);
+  const inputRow = rows.find((row) => row.class === "Model-Q/input");
+  assert.ok(inputRow);
+  assert.equal(rowTitle(inputRow), "Model Tokens (Model-Q/input)");
+  assert.deepEqual(rows.filter((row) => row.dimension === "model_tokens").map((row) => row.class), ["", "Model-Q/input", "Model-Q/output"]);
+  assert.deepEqual(ratesInput(rows), { prices });
+});
+
 test("the editor's rows become set_price_list's prices: millionths, whole units, classes, empty rates left out", () => {
   assert.deepEqual(ratesInput(rateRows(null)), { prices: LIST_RATES.slice().sort((a, b) => order(a) - order(b)) });
   assert.deepEqual(
