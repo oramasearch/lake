@@ -71,7 +71,9 @@ shows it and keeps it honest.
   `0050_drop_ask_messages` (lake#483).
 - **`get_ask_conversation`** takes `customer_id`, `workspace_id` and `conversation_id` (`limit`
   optional) and reads the person's conversation in that workspace; a missing, malformed, unknown or
-  foreign `workspace_id` is `invalid_input` at `/workspace_id`.
+  foreign `workspace_id` is `invalid_input` at `/workspace_id`. A message whose payload has
+  `proposals` also carries `proposal_calls`, Lake's own statement of what each one runs
+  ([below](#what-confirm-runs-lake942)).
 
 ## How-to answers come from the Docs (lake#817)
 
@@ -108,7 +110,7 @@ conversation) and is audited in that workspace's log.
 |---|---|---|---|
 | `send_ask_message` | action | `message`; `conversation_id` (absent: a new one); `kind` `ask` (default) or `factory`; `agent` (default `agent-ask-orama`; the Agent Factory always talks to `agent-creator`, any other `agent` is `invalid_input`); `page` `{path, <query values>}` (Ask Orama only) | `{conversation_id, message_id, task_id?, reply_id?}` |
 | `settle_ask_turn` | action | `conversation_id`, `task_id`, `kind` | `{settled, task}` |
-| `confirm_ask_proposal` | action | `conversation_id`, `message_id`, `index` | `{ok, message_id, capability, error?}` |
+| `confirm_ask_proposal` | action | `conversation_id`, `message_id`, `index`, `input_sha256` | `{ok, message_id, capability, error?}` |
 | `approve_agent_proposal` | action | `conversation_id`, `message_id`, `proposal_sha256` | `{agent_id, name, schedule_error?, check_launch_id?}` ([agent-factory.md](agent-factory.md)) |
 
 - **`send_ask_message`** stores the person's message first; a message the workspace did not store
@@ -145,9 +147,10 @@ conversation) and is audited in that workspace's log.
   `/capability`); a `reply` or `trace_id` that is not text is stored as empty. Neither ever fails the
   turn: the reply and every proposal that can run are still stored.
 - **`confirm_ask_proposal`** takes `payload.proposals[index]` of that stored message (anything else
-  is `not_found` *That proposal is not in this conversation.*), calls its capability with its input
-  as the person (in the conversation's account and workspace when the input names neither,
-  lake#652), and stores *Done: {capability}.* or *That did not work: {error}* with
+  is `not_found` *That proposal is not in this conversation.*), checks `input_sha256` against the
+  call Lake states for it ([What Confirm runs](#what-confirm-runs-lake942)), calls its capability
+  with exactly that input as the person (in the conversation's account and workspace when the input
+  names neither, lake#652), and stores *Done: {capability}.* or *That did not work: {error}* with
   `{agent: "agent-ask-orama", confirmed: {message_id, index}, ok}`. The value's `message_id` is
   that outcome message. A capability that refuses is still a successful confirm with `ok: false`,
   and then both the value and the stored payload carry the refusal's code and whether trying the
@@ -161,8 +164,42 @@ conversation) and is audited in that workspace's log.
   (`invalid_input` at a field), `error` says so in plain words: *`topic` is not valid for
   create_stream: a concrete topic name is required. Ask Orama again with what to use and it will
   propose the change again.*
-  The call's own audit event carries `{ask_confirm: true, conversation_id, capability, ok}`; the
-  proposal's capability records its own event.
+  The call's own audit event carries `{ask_confirm: true, conversation_id, capability,
+  input_sha256, ok}`; the proposal's capability records its own event.
+
+### What Confirm runs (lake#942)
+
+A proposal's `impact` is the model's writing, and content the model read can steer it: an
+invitation of an outside address as an owner can be described as *Fixes sharing for your team*.
+Confirm runs under the person's own permissions, so the person must see the exact call, not the
+model's account of it.
+
+- **`get_ask_conversation` answers `proposal_calls`** beside `payload`, one entry per
+  `payload.proposals` entry in order. It is Lake's, computed when the conversation is read, never
+  stored and never taken from the model: `{capability, title, kind, input, fields, input_sha256}`,
+  where `title` and `kind` are the registry's, `input` is the exact input confirm runs (the stored
+  input with `customer_id` and `workspace_id` filled from the conversation and deprecated field
+  names renamed, as `Registry::call` would), `fields` is that input field by field
+  `{name, description, value}` with the capability schema's own description, and `input_sha256`
+  is the SHA-256 of `{"capability", "input"}`. An entry is `null` when Lake cannot state the call:
+  the capability no longer exists, or the input is not an object or uses a deprecated name beside
+  its current one.
+- **Confirm names the call it was shown.** `confirm_ask_proposal` requires `input_sha256`; Lake
+  recomputes the call from the stored proposal and runs it only when the digest matches. Another
+  digest is `conflict` at `/input_sha256` (*This is not the call you were shown; read the
+  conversation again and review it.*), a proposal without a call is `invalid_input` at `/index`,
+  and in both cases nothing runs and no outcome is stored. A missing `input_sha256` is
+  `invalid_input`; this is a breaking change for API and MCP callers, which read
+  `get_ask_conversation` first.
+- **The web app shows the call and keeps the model's words apart.** Each proposal shows *Confirm
+  runs `<capability>` (<title>, a change) with exactly:* and every field with its description and
+  value, then the impact under *Ask Orama's explanation, not checked by Lake*. Values are written as
+  JSON, so a string keeps its quotes and a leading or trailing blank shows, and every control,
+  format or bidirectional character and every whitespace character other than the plain blank
+  (a right-to-left override `U+202E`, a zero-width `U+200B`) is written as `\u{…}`. A
+  proposal whose entry is `null`, or in a shape the page does not know, shows that it cannot be
+  confirmed and has no Confirm (`proposalCall` and `shownValue` in
+  `frontend/src/pages/ask/home.ts`).
 
 For example, the web app's `send_ask_message` (`POST /w/<workspace_id>/v1/send_ask_message`):
 
@@ -234,6 +271,14 @@ workspace (lake filled `customer_id` and `workspace_id`); on the at-once path th
 proposal writes `customer_id: null`, which lake fills the same way. A null `reply` or `trace_id` is stored as
 empty. `HttpServer/HttpResponseIsolation.AskOramaOffersTryAgainOnlyForATransientRefusal`: a confirm
 refused with `store_unavailable` is stored with `retry: true` and no *Ask Orama again*.
+
+`HttpServer/HttpResponseIsolation.AskOramaConfirmShowsAndRunsOnlyTheExactCall` (lake#942): a
+`create_invitation` proposal for an outside address as `owner`, described by its impact as a sharing
+fix, is answered with `proposal_calls` naming the exact recipient, role and organization; a confirm
+without `input_sha256` (400) or with another digest (409) creates no invitation and stores no
+outcome; the confirm with the shown digest creates the invitation with exactly the values shown.
+`frontend/tests/home.test.ts` checks that the page offers no Confirm without Lake's call and that a
+shown value cannot hide characters.
 
 `HttpServer/HttpResponseIsolation.TheWebAppTalksToAskOramaThroughCapabilities` (lake#561): the same
 conversation over `/v1` with the browser session: `send_ask_message` with a page, `settle_ask_turn`

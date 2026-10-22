@@ -783,6 +783,10 @@ dd {
 .ask-proposal {
   margin-top: var(--lake-space-2);
 }
+/* Ask Orama's own words about a proposal, kept apart from the exact call Lake runs (lake#942). */
+.ask-proposal-impact {
+  color: var(--lake-text-secondary);
+}
 /* An agent's markdown reply: tables scroll inside the message rather than widen the page. */
 .ask-reply > :first-child {
   margin-top: 0;

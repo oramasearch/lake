@@ -3,7 +3,7 @@
  * conversation, and the starting questions. `npm test`; the build runs it. */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { askLinkTarget, confirmOutcomes, greeting, homeLink, homeView, isAskHome, landingAfterSignIn, linkThread, starterQuestions } from "../src/pages/ask/home.ts";
+import { askLinkTarget, confirmOutcomes, greeting, homeLink, homeView, isAskHome, landingAfterSignIn, linkThread, proposalCall, shownValue, starterQuestions, visibleText } from "../src/pages/ask/home.ts";
 import { HOME_NAV, currentNavIn, localPath } from "../src/routes/nav.ts";
 
 const person = { signed_in: true, administrator: false };
@@ -192,4 +192,55 @@ test("Try again is offered only when Lake says trying again could work (lake#794
   assert.match(outcomes.refused["m1/0"].reason, /Ask Orama again/);
   assert.equal(outcomes.refused["m1/1"].retry, true);
   assert.equal(outcomes.confirmed.size, 0);
+});
+
+test("Confirm shows the exact invitation Lake runs, not the model's impact (lake#942)", () => {
+  const sha = "a".repeat(64);
+  const message = {
+    payload: { proposals: [{ capability: "create_invitation", impact: "Fixes sharing for your team; nothing else changes.", input: {} }] },
+    proposal_calls: [
+      {
+        capability: "create_invitation",
+        title: "Create invitation",
+        kind: "action",
+        input: { organization_id: "org-1", invitee_type: "email", invitee: "outsider@evil.test", role: "owner" },
+        fields: [
+          { name: "invitee", description: "", value: "outsider@evil.test" },
+          { name: "invitee_type", description: "", value: "email" },
+          { name: "organization_id", description: "", value: "org-1" },
+          { name: "role", description: "", value: "owner" },
+        ],
+        input_sha256: sha,
+      },
+    ],
+  };
+  const call = proposalCall(message, 0);
+  assert.ok(call);
+  assert.equal(call.capability, "create_invitation");
+  assert.equal(call.input_sha256, sha);
+  const shown = Object.fromEntries(call.fields.map((f) => [f.name, shownValue(f.value)]));
+  assert.deepEqual(shown, { invitee: '"outsider@evil.test"', invitee_type: '"email"', organization_id: '"org-1"', role: '"owner"' });
+  assert.ok(!JSON.stringify(call).includes("Fixes sharing"), "the model's impact is no part of the call");
+});
+
+test("a proposal Lake states no exact call for offers no Confirm (lake#942)", () => {
+  const good = { capability: "create_invitation", title: "", kind: "action", fields: [], input_sha256: "b".repeat(64) };
+  assert.equal(proposalCall({}, 0), null, "a message stored without proposal_calls");
+  assert.equal(proposalCall({ proposal_calls: [null] }, 0), null);
+  assert.equal(proposalCall({ proposal_calls: [good] }, 1), null, "another index");
+  assert.equal(proposalCall({ proposal_calls: [{ ...good, input_sha256: "" }] }, 0), null);
+  assert.equal(proposalCall({ proposal_calls: [{ ...good, capability: 7 }] }, 0), null);
+  assert.equal(proposalCall({ proposal_calls: [{ ...good, fields: "role: member" }] }, 0), null);
+  assert.equal(proposalCall({ proposal_calls: [{ ...good, fields: [{ value: "x" }] }] }, 0), null, "a field without a name");
+  assert.ok(proposalCall({ proposal_calls: [good] }, 0));
+});
+
+test("a shown value cannot hide characters (lake#942)", () => {
+  assert.equal(shownValue("admin\u202e@evil.test"), '"admin\\u{202e}@evil.test"');
+  assert.equal(shownValue("a\u200bb"), '"a\\u{200b}b"');
+  assert.equal(shownValue(" padded "), '" padded "');
+  assert.equal(shownValue("two\nlines"), '"two\\nlines"');
+  assert.equal(shownValue({ public: true }), '{\n  "public": true\n}');
+  assert.equal(shownValue(3), "3");
+  assert.equal(visibleText("role\u2066"), "role\\u{2066}", "a field's name too");
 });

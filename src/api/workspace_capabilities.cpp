@@ -4310,6 +4310,16 @@ settle_solution(ApiContext& context, control::AgentTask task, json edits) {
     co_return created;
 }
 
+namespace {
+
+// Defined with the conversation capabilities below; get_ask_conversation answers it (lake#942).
+json ask_proposal_calls(const ApiContext& context,
+                        const json& payload,
+                        const std::string& customer_id,
+                        const std::string& workspace_id);
+
+} // namespace
+
 void register_agent_flow_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "start_solution",
@@ -4820,11 +4830,20 @@ void register_agent_flow_capabilities(Registry& registry) {
             }
             json out = json::array();
             for (const control::AskMessage& message : *messages) {
-                out.push_back({{"id", message.id},
-                               {"role", message.role},
-                               {"content", message.content},
-                               {"payload", message.payload},
-                               {"created_at", message.created_at}});
+                json item{{"id", message.id},
+                          {"role", message.role},
+                          {"content", message.content},
+                          {"payload", message.payload},
+                          {"created_at", message.created_at}};
+                // Lake's own statement of what each proposal runs, beside the model's payload.
+                if (message.payload.is_object() &&
+                    message.payload.value("proposals", json()).is_array()) {
+                    item["proposal_calls"] = ask_proposal_calls(context,
+                                                                message.payload,
+                                                                input.at("customer_id"),
+                                                                input.at("workspace_id"));
+                }
+                out.push_back(std::move(item));
             }
             co_return ApiResult::success({{"messages", std::move(out)}});
         }});
@@ -5013,6 +5032,63 @@ std::string field_description(const Capability* target, const std::string& field
     }
     const std::string description = text_of(*schema, "description");
     return description.substr(0, description.find(" ("));
+}
+
+// The call a stored Ask Orama proposal makes when the person confirms it (lake#942): the
+// capability as Lake's registry titles it and the exact input confirm_ask_proposal runs, after
+// proposal_input fills the conversation's account and workspace and canonical_input renames
+// deprecated fields, as Registry::call would. `fields` is that input field by field with the
+// schema's own description; `input_sha256` binds the capability and input, and confirm runs only
+// the call whose digest the person sends back. The model's `impact` is never part of it. Empty
+// when Lake cannot say what would run: no such capability, or input that is not an object or that
+// canonical_input refuses. Such a proposal cannot be confirmed.
+std::optional<json> proposal_call(const ApiContext& context,
+                                  const json& proposal,
+                                  const std::string& customer_id,
+                                  const std::string& workspace_id) {
+    const std::string capability = text_of(proposal, "capability");
+    const auto target = !capability.empty() && context.registry != nullptr
+                            ? context.registry->find(capability)
+                            : nullptr;
+    if (!target) {
+        return std::nullopt;
+    }
+    const json proposed = proposal_input(target.get(), proposal, customer_id, workspace_id);
+    if (!proposed.is_object()) {
+        return std::nullopt;
+    }
+    auto canonical = canonical_input(*target, proposed);
+    if (!canonical) {
+        return std::nullopt;
+    }
+    json fields = json::array();
+    for (const auto& [name, value] : canonical->items()) {
+        fields.push_back({{"name", name},
+                          {"description", field_description(target.get(), name)},
+                          {"value", value}});
+    }
+    const std::string digest = control::identity_crypto::sha256_hex(
+        json{{"capability", capability}, {"input", *canonical}}.dump());
+    return json{{"capability", capability},
+                {"title", target->title},
+                {"kind", std::string(to_string(target->kind))},
+                {"input", std::move(*canonical)},
+                {"fields", std::move(fields)},
+                {"input_sha256", digest}};
+}
+
+// One entry per proposal of a stored answer's payload, in order: its proposal_call, or null when
+// it has none.
+json ask_proposal_calls(const ApiContext& context,
+                        const json& payload,
+                        const std::string& customer_id,
+                        const std::string& workspace_id) {
+    json calls = json::array();
+    for (const json& proposal : payload.value("proposals", json::array())) {
+        const auto call = proposal_call(context, proposal, customer_id, workspace_id);
+        calls.push_back(call ? *call : json());
+    }
+    return calls;
 }
 
 // Every required top-level field `input` leaves out, in the schema's order, by the rule
@@ -5382,12 +5458,30 @@ liquid::runtime::task<ApiResult> confirm_ask_proposal(const json& input, ApiCont
             "not_found", "That proposal is not in this conversation.", "/message_id");
     }
     const std::string capability = proposal.value("capability", std::string());
-    context.audit_details = {
-        {"ask_confirm", true}, {"conversation_id", conversation_id}, {"capability", capability}};
+    // Only the exact call the person was shown runs (lake#942): the capability and input Lake
+    // derived from the stored proposal, named by the digest get_ask_conversation answered with it,
+    // never the model's `impact`. A proposal Lake cannot state as a call cannot be confirmed.
+    const auto call = proposal_call(context, proposal, customer_id, workspace_id);
+    if (!call) {
+        co_return ApiResult::failure("invalid_input",
+                                     "Lake cannot show exactly what this proposal runs, so it "
+                                     "cannot be confirmed. Ask Orama again.",
+                                     "/index");
+    }
+    if (input.at("input_sha256") != call->at("input_sha256")) {
+        co_return ApiResult::failure(
+            "conflict",
+            "This is not the call you were shown; read the conversation again and review it.",
+            "/input_sha256");
+    }
+    context.audit_details = {{"ask_confirm", true},
+                             {"conversation_id", conversation_id},
+                             {"capability", capability},
+                             {"input_sha256", call->at("input_sha256")}};
     // A proposal runs in the conversation's account and workspace when its input names none (an
-    // MCP connection's call_mcp_tool from Ask Orama, lake#652).
-    const auto target = context.registry != nullptr ? context.registry->find(capability) : nullptr;
-    const json proposed = proposal_input(target.get(), proposal, customer_id, workspace_id);
+    // MCP connection's call_mcp_tool from Ask Orama, lake#652); proposal_call filled them.
+    const auto target = context.registry->find(capability);
+    const json& proposed = call->at("input");
     const ApiResult done = called(co_await call_capability(context, capability, proposed));
     context.audit_details["ok"] = done.ok;
     // Input the capability refused is said plainly, naming what is missing (lake#794). The stored
@@ -5398,9 +5492,7 @@ liquid::runtime::task<ApiResult> confirm_ask_proposal(const json& input, ApiCont
     std::string why;
     if (!done.ok) {
         if (done.error.code == "invalid_input" && !done.error.path.empty()) {
-            const json checked =
-                target ? canonical_input(*target, proposed).value_or(proposed) : proposed;
-            why = proposal_problem_text(target.get(), capability, done.error, checked);
+            why = proposal_problem_text(target.get(), capability, done.error, proposed);
         } else {
             why = done.error.message;
             if (!why.empty() && why.back() != '.') {
@@ -5683,14 +5775,22 @@ void register_conversation_capabilities(Registry& registry) {
         .title = "Confirm an Ask Orama proposal",
         .description =
             "Run proposal `index` of the Ask Orama message `message_id` in your conversation, as "
-            "you: only a proposal Lake stored there can be run. The outcome is stored in the "
-            "conversation (`message_id` is that outcome message) and answered with `ok`; a "
-            "capability that refused is `ok: false` with its `error`.",
-        .input_schema =
-            customer_input_schema({{"conversation_id", {{"type", "string"}}},
-                                   {"message_id", {{"type", "string"}}},
-                                   {"index", {{"type", "integer"}, {"minimum", 0}}}},
-                                  json::array({"conversation_id", "message_id", "index"})),
+            "you: only a proposal Lake stored there can be run, and only as the exact call "
+            "get_ask_conversation answered for it in `proposal_calls` (capability and input), "
+            "named by its `input_sha256`; another digest is refused with `conflict` and nothing "
+            "runs. The outcome is stored in the conversation (`message_id` is that outcome "
+            "message) and answered with `ok`; a capability that refused is `ok: false` with its "
+            "`error`.",
+        .input_schema = customer_input_schema(
+            {{"conversation_id", {{"type", "string"}}},
+             {"message_id", {{"type", "string"}}},
+             {"index", {{"type", "integer"}, {"minimum", 0}}},
+             {"input_sha256",
+              {{"type", "string"},
+               {"description",
+                "the input_sha256 of the proposal's entry in get_ask_conversation's "
+                "proposal_calls: the exact call you reviewed"}}}},
+            json::array({"conversation_id", "message_id", "index", "input_sha256"})),
         .output_schema = {{"type", "object"},
                           {"properties",
                            {{"ok", {{"type", "boolean"}}},

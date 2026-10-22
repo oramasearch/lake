@@ -137,3 +137,51 @@ export function confirmOutcomes(
   }
   return { confirmed, refused };
 }
+
+/** One field of the call a proposal makes, as Lake states it: the capability schema's description
+ * and the exact value. */
+export type ProposalCallField = { name: string; description: string; value: unknown };
+
+/** The exact call Confirm runs for one stored proposal (lake#942), Lake's own statement of it from
+ * get_ask_conversation's `proposal_calls`, never the model's `impact`: the capability, its registry
+ * title and kind, every input field, and the digest Confirm sends back so only this call runs. */
+export type ProposalCall = { capability: string; title: string; kind: string; fields: ProposalCallField[]; input_sha256: string };
+
+/** Lake's call for proposal `index` of `message`, or null when Lake states none or states it in a
+ * shape this page does not know. A null call is shown as not confirmable: Confirm is never offered
+ * for a proposal whose exact arguments the person cannot see. */
+export function proposalCall(message: { proposal_calls?: unknown }, index: number): ProposalCall | null {
+  const calls = message.proposal_calls;
+  const call = Array.isArray(calls) ? (calls[index] as Partial<ProposalCall> | null | undefined) : null;
+  if (!call || typeof call !== "object") return null;
+  if (typeof call.capability !== "string" || !call.capability) return null;
+  if (typeof call.input_sha256 !== "string" || !/^[0-9a-f]{64}$/.test(call.input_sha256)) return null;
+  if (!Array.isArray(call.fields)) return null;
+  const fields: ProposalCallField[] = [];
+  for (const field of call.fields as unknown[]) {
+    if (!field || typeof field !== "object" || !("value" in field)) return null;
+    const { name, description, value } = field as { name?: unknown; description?: unknown; value: unknown };
+    if (typeof name !== "string" || !name) return null;
+    fields.push({ name, description: typeof description === "string" ? description : "", value });
+  }
+  return {
+    capability: call.capability,
+    title: typeof call.title === "string" ? call.title : "",
+    kind: typeof call.kind === "string" ? call.kind : "",
+    fields,
+    input_sha256: call.input_sha256,
+  };
+}
+
+/** `text` with every control, format, bidirectional or non-space whitespace character (a
+ * right-to-left override, a zero-width space) written as its `\u{…}` code point, so nothing in it
+ * can hide or reorder what is shown (lake#942). Spaces and line breaks stay. */
+export function visibleText(text: string): string {
+  return text.replace(/[\p{C}\p{Z}]/gu, (c) => (c === " " || c === "\n" ? c : `\\u{${c.codePointAt(0)!.toString(16)}}`));
+}
+
+/** A field's value as Confirm shows it (lake#942): JSON, so a string keeps its quotes and its
+ * leading or trailing spaces show and an object or array is laid out, then visibleText. */
+export function shownValue(value: unknown): string {
+  return visibleText(JSON.stringify(value, null, 2) ?? String(value));
+}

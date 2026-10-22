@@ -299,10 +299,15 @@ void check_web_app(HttpEvidence& http,
                        {"trace_id", ""}};
     const json sent = http.call("send_ask_message",
                                 with({{"agent", "schema-agent"}, {"message", "What do I have?"}}));
+    const json asked =
+        http.call("get_ask_conversation", with({{"conversation_id", sent.at("conversation_id")}}))
+            .at("messages")
+            .back();
     http.call("confirm_ask_proposal",
               with({{"conversation_id", sent.at("conversation_id")},
                     {"message_id", sent.at("reply_id")},
-                    {"index", 0}}));
+                    {"index", 0},
+                    {"input_sha256", asked.at("proposal_calls").at(0).at("input_sha256")}}));
 
     // Background turns: the Project Agent's build of a project, and an Agent Creator Agent proposal.
     const auto task = [&](std::string agent, std::string kind, std::string conversation) {
