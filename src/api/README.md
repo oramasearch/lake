@@ -697,3 +697,6 @@ Repository file writes (lake#962, LSR-096) use `repository_write_authorizer` fro
 `drive_capabilities.cpp`: each destination and replaced, moved or deleted descendant is checked
 against the tree supplied under `LiquidCustomerStores`' mutation lock. Drive writes, restores, conflict resolutions, raw
 commits, methodology changes and `lake` store drives share it. See [drive.md](../../docs/api/drive.md).
+`finish_call` keeps full dynamic-secret events in private central audit and publishes only successful
+events through `TiledLog::append_audit_event`, which emits a digest commitment (lake#953, LSR-087).
+Denied and failed calls append no public leaf; both registry call variants share this finalizer.

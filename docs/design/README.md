@@ -81,3 +81,5 @@ Folder-sharing role attenuation and non-admin recipient restrictions (lake#955) 
 
 Repository mutation destination and descendant authorization (lake#962, LSR-096) is recorded in
 [status.md](status.md) and [the Drive contract](../api/drive.md).
+`status.md` records the source-only dynamic-secret transparency privacy fix (lake#953): digest
+commitments for successful calls and private audit for denials and failures.

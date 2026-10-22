@@ -4,6 +4,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <chrono>
 #include <memory>
 #include <optional>
@@ -11,6 +12,7 @@
 #include <vector>
 
 #include <nlohmann/json.hpp>
+#include <openssl/evp.h>
 
 #include "api/secret_records_api.hpp"
 #include "api/workspace_records_api.hpp"
@@ -20,6 +22,8 @@
 #include "lake/api/server.hpp"
 #include "lake/control/memory_store.hpp"
 #include "lake/control/secret_records.hpp"
+#include "lake/transparency/log.hpp"
+#include "temporary_directory.hpp"
 #include "workspace_fixture.hpp"
 
 namespace {
@@ -489,6 +493,108 @@ lake::api::SecretLeaseSweep sweep(const ApiContext& context) {
     const auto swept = liquid::runtime::block_on(lake::api::expire_secret_leases(context));
     EXPECT_TRUE(swept);
     return swept ? *swept : lake::api::SecretLeaseSweep{};
+}
+
+TEST_F(SecretsCapabilities, DynamicSecretTransparencyPublishesOnlySuccessfulCommitments) {
+    lake::transparency::TiledLog log(lake::test::fixture_path("secret-commitments"), "lake");
+    context.transparency_log = &log;
+    context.device = "private-client-fingerprint";
+    context.authentication_method = "private-auth-method";
+
+    const auto leased = call("lease_dynamic_secret", {{"mount_id", mount_id}, {"role", "reader"}});
+    ASSERT_TRUE(leased.ok) << leased.error.message;
+    const std::string lease_id = leased.value.at("lease").at("id");
+    const auto check_commitment = [&](std::size_t width) {
+        const auto event = store->latest_audit_event();
+        ASSERT_TRUE(event);
+        EXPECT_EQ(event->draft.customer_id, customer_id);
+        EXPECT_EQ(event->draft.device, context.device);
+        EXPECT_EQ(event->draft.principal, context.acting_identity);
+        EXPECT_EQ(event->draft.outcome, "success");
+        ApiContext visitor;
+        visitor.store = store.get();
+        visitor.instance_kek = context.instance_kek;
+        visitor.transparency_log = &log;
+        const auto tile =
+            registry.call("transparency_tile", {{"index", 0}, {"width", width}}, visitor);
+        ASSERT_TRUE(tile.ok) << tile.error.message;
+        std::string encoded = tile.value.at("tile");
+        std::ranges::replace(encoded, '-', '+');
+        std::ranges::replace(encoded, '_', '/');
+        while (encoded.size() % 4 != 0) {
+            encoded.push_back('=');
+        }
+        std::vector<std::byte> bytes(encoded.size() / 4 * 3);
+        const int decoded_size =
+            EVP_DecodeBlock(reinterpret_cast<unsigned char*>(bytes.data()),
+                            reinterpret_cast<const unsigned char*>(encoded.data()),
+                            static_cast<int>(encoded.size()));
+        ASSERT_GE(decoded_size, 0);
+        bytes.resize(static_cast<std::size_t>(decoded_size) - (encoded.ends_with("==")  ? 2U
+                                                               : encoded.ends_with('=') ? 1U
+                                                                                        : 0U));
+        std::size_t offset = std::string_view("LAKE-TILE-1\n").size();
+        for (std::size_t index = 0; index < width; ++index) {
+            ASSERT_GE(bytes.size() - offset, 4U);
+            std::size_t size = 0;
+            for (int part = 0; part < 4; ++part) {
+                size = (size << 8) | std::to_integer<unsigned char>(bytes[offset++]);
+            }
+            ASSERT_GE(bytes.size() - offset, size);
+            const std::string entry(reinterpret_cast<const char*>(bytes.data() + offset), size);
+            constexpr std::string_view header = "LAKE-AUDIT-COMMITMENT-1\n";
+            ASSERT_TRUE(entry.starts_with(header));
+            const auto body = json::from_cbor(entry.begin() + header.size(), entry.end());
+            ASSERT_EQ(body.size(), 1U);
+            ASSERT_TRUE(body.contains("digest"));
+            if (index + 1 == width) {
+                EXPECT_EQ(body.at("digest"), event->digest);
+            }
+            offset += size;
+        }
+        EXPECT_EQ(offset, bytes.size());
+        const auto state = log.state();
+        ASSERT_TRUE(state);
+        EXPECT_EQ(state->tree_size, width);
+        const auto scan = log.scan_identity(event->signer, state->tree_size, state->root_hash);
+        ASSERT_TRUE(scan) << scan.error().message;
+        EXPECT_TRUE(scan->matches.empty());
+    };
+    check_commitment(1);
+    ASSERT_TRUE(call("renew_dynamic_secret", {{"lease_id", lease_id}}).ok);
+    check_commitment(2);
+
+    context.operator_credential = false;
+    context.acting_identity = "taap:1:ed25519:another-tenant";
+    for (const std::string action :
+         {"lease_dynamic_secret", "renew_dynamic_secret", "revoke_dynamic_secret"}) {
+        const auto denied =
+            call(action,
+                 action == "lease_dynamic_secret" ? json{{"mount_id", mount_id}, {"role", "reader"}}
+                                                  : json{{"lease_id", lease_id}});
+        EXPECT_FALSE(denied.ok);
+        EXPECT_EQ(denied.error.code, "unauthorized");
+        const auto event = store->latest_audit_event();
+        ASSERT_TRUE(event);
+        EXPECT_EQ(event->draft.customer_id, customer_id);
+        EXPECT_EQ(event->draft.outcome, "denied");
+        ASSERT_TRUE(log.state());
+        EXPECT_EQ(log.state()->tree_size, 2U);
+    }
+    context.operator_credential = true;
+    context.acting_identity = "admin";
+    const auto failed = call("lease_dynamic_secret",
+                             {{"mount_id", mount_id}, {"role", "reader"}, {"lifetime_seconds", 0}});
+    EXPECT_FALSE(failed.ok);
+    ASSERT_TRUE(store->latest_audit_event());
+    EXPECT_EQ(store->latest_audit_event()->draft.outcome, "failure");
+    EXPECT_EQ(log.state()->tree_size, 2U);
+    ASSERT_TRUE(call("revoke_dynamic_secret", {{"lease_id", lease_id}}).ok);
+    check_commitment(3);
+    const auto refused = call("renew_dynamic_secret", {{"lease_id", lease_id}});
+    EXPECT_FALSE(refused.ok);
+    EXPECT_EQ(refused.error.code, "conflict");
+    EXPECT_EQ(log.state()->tree_size, 3U);
 }
 
 // lake#362: a lease is a sealed record of its mount's workspace; the control store keeps only its

@@ -242,14 +242,23 @@ An entry tile is byte-for-byte:
 12 bytes: ASCII "LAKE-TILE-1\n"
 repeated width times:
   4 bytes: unsigned entry length, network byte order; must be greater than zero
-  length bytes: exact canonical-CBOR attestation
+  length bytes: exact admitted entry (attestation or audit commitment)
 EOF: no padding, count field, or trailer
 ```
 
-Alongside canonical liquid attestations, Lake may append an internal `LAKE-AUDIT-EVENT-1\n`
-record followed by canonical CBOR `audit_event/1`. Admission recomputes the event digest before
-the leaf is accepted. The event already carries Lake's signed audit-chain fields; secret values are
-never included. These entries replicate and scan through the same immutable tile and Merkle path.
+Alongside canonical liquid attestations, Lake appends successful dynamic-secret audit commitments
+(lake#953, LSR-087): ASCII `LAKE-AUDIT-COMMITMENT-1\n` followed by canonical CBOR containing
+exactly `{"digest": "<64 lowercase hexadecimal characters>"}`. This is the private signed event's
+SHA-512/256 digest. Full events stay in the private central audit chain, including denied and failed
+attempts; those attempts append nothing publicly. Commitments contain no tenant, principal, object,
+device, request, authentication, timestamp or details fields, and name no identity in scans.
+They replicate and verify through the same immutable tile and Merkle path.
+
+New append and replication admission reject the old `LAKE-AUDIT-EVENT-1\n` full-event format,
+including otherwise valid events. Existing immutable tiles and their checkpoints remain readable
+and verifiable; this change cannot retract previously published records. Replicating a historical
+batch containing an old full-event entry now fails closed. Do not bypass that refusal to copy
+private records into another public log.
 
 A hash tile is byte-for-byte:
 
@@ -381,7 +390,7 @@ verify an older checkpoint even after later appends fill that tile.
 
 Lake's monitor verifies inclusion in the selected checkpoint by recomputing the complete root.
 Lake serves the compact proofs and hash tiles described above. The identity-exit scenario invokes
-the pinned libliquid inclusion verifier directly over a dynamic-secret audit leaf and Lake's proof.
+the pinned libliquid inclusion verifier directly over a dynamic-secret commitment leaf and Lake's proof.
 The registry-exit scenario also verifies an exported bundle offline and exercises retained
 checkpoint trust to reject conflicting roots at the same tree size.
 

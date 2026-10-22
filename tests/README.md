@@ -861,3 +861,13 @@ checks direct/nested/mixed uploads, protected overwrites, recursive deletion/mov
 against real repository refs, then permits an allowed sibling.
 `Drive.MutationChecksTheLockedTreeAndRestoreChecksMain` checks a changed node at commit time and
 historical-ref restore and conflict resolution into protected current main. See [drive.md](../docs/api/drive.md).
+Dynamic-secret transparency privacy (lake#953, LSR-087):
+`SecretsCapabilities.DynamicSecretTransparencyPublishesOnlySuccessfulCommitments` decodes anonymous
+tiles for lease, renew and revoke, compares their digest-only payloads with the private signed events,
+and checks cross-tenant denials and failures append nothing. `TransparencyLog.Audit*` covers raw
+append/replication rejection of full audit records, malformed commitment payloads, replication of
+commitments and identity scans that reveal no principal or signer.
+
+`WorkspaceRecordStores.DynamicSecretsInAWorkspaceKeepTheirInstanceLogLeaf` retains its memory and
+PostgreSQL coverage of central routing, private lifecycle events and ordered instance leaves; its
+public leaves now contain only the matching event digests and exclude tenant and lease identifiers.

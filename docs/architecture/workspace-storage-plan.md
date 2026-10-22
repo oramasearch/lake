@@ -339,7 +339,7 @@ rollback detection ([lake#522](https://github.com/oramasearch/lake/issues/522)).
 
 - **Writers:** lake, for `append_transparency_entries`, `initialize_tuf`, `publish_tuf_metadata`,
   `rotate_tuf_root`, checkpoint publication and timestamp evidence (all `admin` on the instance
-  log); the attestation of each agent session minted; central `dynamic_secret` audit events; and
+  log); the attestation of each agent session minted; digest commitments for successful central `dynamic_secret` audit events; and
   replication batches from peer instances.
 - **Readers:** anyone, anonymously: monitors (`transparency_identity_scan`, `/transparency`),
   relying parties verifying inclusion and consistency proofs and proof bundles (liquid clients),
@@ -361,13 +361,14 @@ S7. The two checks that belonged with it:
 - `dynamic_secret` events still reach the log. `lease_dynamic_secret`, `renew_dynamic_secret` and
   `revoke_dynamic_secret` are in the central list of decision 52's audit routing
   (`src/api/audit_routing.cpp`), although the lease is a record of its mount's workspace, so
-  `finish_call` signs each into the central chain and appends that event as the instance log leaf
-  the identity-exit scenario expects. No leaf was lost. The leaf is the central event's body: the
-  lease, mount and workspace ids, the principal and the operation, never the credential, the role
-  or the mount's name. `WorkspaceRecordStores.DynamicSecretsInAWorkspaceKeepTheirInstanceLogLeaf`
-  proves it with a workspace audit route available, and fails if the three capabilities move to
-  the workspace list. Moving them there would need the log to name a workspace chain's event
-  first.
+  `finish_call` signs each into the private central chain. Successful calls append only the
+  event's digest commitment as the instance log leaf (lake#953, LSR-087); denied and failed calls
+  append nothing publicly. The complete event and all tenant and caller identifiers stay private.
+  `WorkspaceRecordStores.DynamicSecretsInAWorkspaceKeepTheirInstanceLogLeaf` checks ordered
+  commitments against the private events with a workspace audit route available, and fails if the
+  three capabilities move to the workspace list. The identity-exit scenario verifies inclusion.
+  Moving them there would need the log to name a workspace chain's event first. The format and
+  historical-entry admission rules are in [transparency.md](../api/transparency.md).
 
 **Migration.** None.
 

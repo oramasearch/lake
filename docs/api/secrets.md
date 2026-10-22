@@ -271,11 +271,22 @@ record was never written is removed after five minutes: a create stopped between
 and its caller got an error. Counters: `lake_secret_leases_settled_total{outcome}` and
 `lake_secret_lease_sweep_errors_total`.
 
-Each lifecycle call records a signed `dynamic_secret` audit event whose object is the lease ID and
-whose details name only the mount, workspace, lease, operation, and outcome. When a transparency log
-is configured, that signed audit record is also appended as a digest-checked `audit_event/1` entry.
-No generated username, password, ciphertext, or KEK is present in the audit event or log entry. The
-expiry pass is not a capability call and records no audit event.
+Each lifecycle call records a signed `dynamic_secret` audit event whose object names the mount or
+lease and whose details identify the operation and its outcome. When a transparency log
+is configured, only a successful call appends a public commitment containing the event's digest
+(lake#953, LSR-087). Denied and failed calls remain private, including cross-tenant attempts against
+a known mount or lease. The complete signed event stays in the private central audit chain;
+customer, principal, device, request metadata and details never enter a new public leaf.
+No generated username, password, ciphertext, or KEK is present in the audit event or log entry.
+The expiry pass is not a capability call and records no audit event. The commitment format and
+legacy-record admission rules are in [transparency.md](transparency.md).
+
+`SecretsCapabilities.DynamicSecretTransparencyPublishesOnlySuccessfulCommitments` exercises
+lease, renew and revoke, decodes anonymously fetched tiles, checks their digest-only shape against
+the private events, and proves denied and failed calls leave the tree unchanged.
+`TransparencyLog.Audit*` checks raw append, replication admission and identity scans.
+When changing publication, keep both the registry's success gate and log admission checks;
+run these tests and the identity-exit inclusion-proof scenario.
 
 ### Migration and cutover (lake#362)
 

@@ -14,6 +14,8 @@ Capability request bodies use registered byte limits and the credential gate bef
 (lake#944). Public identity bodies default to 1 MiB; anonymous MCP envelopes are capped at
 256 KiB. All share a single JSON parse with depth and element budgets. See
 [HTTP body admission](../serving/http.md#request-body-limits) and [MCP](mcp.md).
+[Secrets](secrets.md#dynamic-leases) and [transparency](transparency.md) document digest-only
+publication of successful dynamic-secret events (lake#953); denied and failed events stay private.
 
 lake#728/#730/#731: [network.md](network.md) documents the fourteen secure-networking capabilities
 for connections, scoped credential rotation, egress rules, tunnel grants, peers, effective rules,
