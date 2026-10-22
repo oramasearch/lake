@@ -196,6 +196,9 @@ constexpr std::array<ErrorCode, 35> documented_error_codes{{
      503,
      "The control-plane store, the workspace or another dependency is not reachable now."},
     {"workspace_not_ready", 503, "The workspace or service exists but is not ready yet."},
+    {"audit_queue_full",
+     503,
+     "The workspace audit queue is full; inspect operation_result before retrying."},
     {"busy", 503, "The resource is busy; retry."},
     {"rate_limited", 429, "Too many requests from this caller, or in all, are waiting; retry."},
     {"usage_limit_reached",
@@ -385,6 +388,9 @@ nlohmann::json ApiResult::envelope() const {
         }
     }
     envelope["duration_ms"] = duration_ms;
+    if (operation_result) {
+        envelope["operation_result"] = *operation_result;
+    }
     return envelope;
 }
 
@@ -393,36 +399,40 @@ nlohmann::json error_envelope_schema() {
     for (const ErrorCode& code : documented_error_codes) {
         codes.push_back(std::string(code.code));
     }
-    return {{"type", "object"},
+    return {
+        {"type", "object"},
+        {"properties",
+         {{"ok", {{"const", false}}},
+          {"error",
+           {{"type", "object"},
             {"properties",
-             {{"ok", {{"const", false}}},
-              {"error",
+             {{"code",
+               {{"type", "string"},
+                {"enum", std::move(codes)},
+                {"description", "what went wrong, one of the codes in docs/api/errors.md"}}},
+              {"message", {{"type", "string"}}},
+              {"path",
+               {{"type", "string"},
+                {"description",
+                 "JSON pointer to the input field at fault; empty when the input is not"}}},
+              {"reason",
+               {{"type", "string"},
+                {"enum", {"missing", "invalid", "expired"}},
+                {"description", "unauthenticated only: why no credential was accepted"}}},
+              {"help",
+               {{"type", "string"},
+                {"description", "unauthenticated only: where to make a new key"}}},
+              {"details",
                {{"type", "object"},
-                {"properties",
-                 {{"code",
-                   {{"type", "string"},
-                    {"enum", std::move(codes)},
-                    {"description", "what went wrong, one of the codes in docs/api/errors.md"}}},
-                  {"message", {{"type", "string"}}},
-                  {"path",
-                   {{"type", "string"},
-                    {"description",
-                     "JSON pointer to the input field at fault; empty when the input is not"}}},
-                  {"reason",
-                   {{"type", "string"},
-                    {"enum", {"missing", "invalid", "expired"}},
-                    {"description", "unauthenticated only: why no credential was accepted"}}},
-                  {"help",
-                   {{"type", "string"},
-                    {"description", "unauthenticated only: where to make a new key"}}},
-                  {"details",
-                   {{"type", "object"},
-                    {"description",
-                     "safe_mode_warning only: {database or connection, mode, statements, "
-                     "confirmation}; repeat the call with safe_mode_confirmation to run them"}}}}},
-                {"required", nlohmann::json::array({"code", "message"})}}},
-              {"duration_ms", {{"type", "number"}}}}},
-            {"required", nlohmann::json::array({"ok", "error", "duration_ms"})}};
+                {"description",
+                 "safe_mode_warning only: {database or connection, mode, statements, "
+                 "confirmation}; repeat the call with safe_mode_confirmation to run them"}}}}},
+            {"required", nlohmann::json::array({"code", "message"})}}},
+          {"duration_ms", {{"type", "number"}}},
+          {"operation_result",
+           {{"type", "object"},
+            {"description", "Original operation envelope when its subsequent audit failed."}}}}},
+        {"required", nlohmann::json::array({"ok", "error", "duration_ms"})}};
 }
 
 nlohmann::json success_envelope_schema(const nlohmann::json& output_schema) {
@@ -1147,8 +1157,11 @@ ApiResult finish_call(const Capability* capability,
     const AuditRoute route = audit_route(name, acted, context);
     auto recorded = record_audit(context, event, route);
     if (!recorded) {
-        return ApiResult::failure("store_error",
-                                  "could not record audit event: " + recorded.error().message);
+        auto failure = ApiResult::failure(
+            recorded.error().code == "audit_queue_full" ? "audit_queue_full" : "store_error",
+            "could not record audit event: " + recorded.error().message);
+        failure.operation_result = result.envelope();
+        return failure;
     }
     if (!*recorded) {
         return result;

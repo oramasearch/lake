@@ -100,6 +100,9 @@ struct ApiResult {
     nlohmann::json value;
     ApiError error;
     double duration_ms = 0.0;
+    // When auditing a completed operation fails, expose its original result so callers can
+    // inspect committed effects before deciding whether to retry.
+    std::optional<nlohmann::json> operation_result;
     static ApiResult success(nlohmann::json output);
     static ApiResult failure(std::string code, std::string message, std::string path = {});
     nlohmann::json envelope() const;

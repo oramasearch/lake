@@ -15,6 +15,7 @@ Every capability answers a failure the same way on REST and MCP:
   `error_envelope` schema lists the same codes as an `enum`.
 - `path` is a JSON pointer to the input field at fault whenever the input is at fault, and empty
   otherwise. It is never put in the message. See [Where `path` comes from](#where-path-comes-from).
+- `operation_result` appears when a completed operation could not be audited; it preserves the original success value or failure envelope. An outer failure does not mean the operation was rolled back.
 - `reason` and `help` appear on `unauthenticated` only.
 - `details` appears on `safe_mode_warning` only: what the database's safe mode would run and the
   confirmation that runs it ([safe mode](safe-mode.md), lake#906).
@@ -57,6 +58,7 @@ Every capability answers a failure the same way on REST and MCP:
 | `crypto_error` | 500 | A signing, hashing or certificate operation failed on the server. |
 | `store_unavailable` | 503 | The control-plane store, the workspace or another dependency is not reachable now. |
 | `workspace_not_ready` | 503 | The workspace or service exists but is not ready yet. |
+| `audit_queue_full` | 503 | The workspace audit queue cannot accept the event; `operation_result` preserves the original operation envelope. Inspect it before retrying a change. See [audit](audit.md#workspace-audit). |
 | `busy` | 503 | The resource is busy; retry. |
 | `rate_limited` | 429 | Too many requests from this caller, or in all, are waiting; retry. Sent with `Retry-After: 1` when a long poll finds the long-request caps full ([http](../serving/http.md#connections-and-workers), lake#534). |
 | `usage_limit_reached` | 429 | The account has used its monthly limit on this dimension (model tokens); an administrator raises or removes it with `set_usage_limit`. The model gateway answers it before it calls the model ([model-gateway.md](model-gateway.md#limits), lake#248). |
