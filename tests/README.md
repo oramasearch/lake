@@ -1,5 +1,12 @@
 # Tests
 
+`test_workspace_records.cpp` runs `DisablingAUserRevokesAgentDelegation` and
+`DisabledUsersCannotDriveAgentOrMcpStreams` on memory and PostgreSQL (lake#951). They exercise
+retained launch/schedule/task credentials, direct disabled rows, lease renewal and queued claims,
+cached-context creation, repeat offboarding, stream-trigger and MCP streaming cleanup, and an
+unaffected person's launch. Run them with `LAKE_TEST_DB_URI` and `ctest --timeout 600 -R
+'DisablingAUserRevokesAgentDelegation|DisabledUsersCannotDriveAgentOrMcpStreams'`.
+
 `test_platform.cpp`'s `LiquidIdFixture` covers deployment rows that name a repository by the liquid
 id `liquid deploy` sends, by lake's UUID, by an unknown id (reported, not skipped) and by a liquid
 id two repositories share (lake#805); `*.RecordsAndFindsLiquidIds` runs the store contract on

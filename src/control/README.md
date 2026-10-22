@@ -1,5 +1,11 @@
 # Control stores
 
+Both stores reject disabled or missing users when resolving agent launch, schedule and task
+credentials (lake#951). Creation, claims and renewal serialize with offboarding on the user row
+(or the memory-store mutex), so a cached stream context cannot create fresh authority afterwards.
+Clerk disablement and account deletion withdraw the person's workloads and invalidate task leases;
+workload history remains. See [Clerk offboarding](../../docs/api/clerk.md#webhooks).
+
 `pki.cpp` verifies tunnel CSRs, signs only the grant URI and bounds the client certificate's expiry.
 `network_records.cpp` supplies empty session/activity pages explicitly pending zetta#1281.
 See [tunnel credentials](../../docs/api/tunnel-grants.md) and migration 0085 in [network.md](../../docs/control-plane/network.md).

@@ -276,6 +276,13 @@ digest only: the connection and its tools stay in the workspace Zetta.
 
 ## A connection's agent and streams
 
+The stream worker requires the person who set the streams to remain present and enabled
+(lake#951, LSR-086). Disabling them immediately blocks input-triggered launches, notifications and
+result publication. On the next reachable pass it clears their streaming settings, subscriptions
+and pending results and updates the dispatch row, while retaining the connection. The existing
+records preserve pending cleanup across restarts and storage outages; another person may set up
+streams again under their own authority. See [offboarding](clerk.md#webhooks).
+
 Optional, per connection (Steve's design in lake#652):
 
 - **Its agent.** `create_mcp_connection_agent {id, prompt, name?}` makes, as the person, a Python

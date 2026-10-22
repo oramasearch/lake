@@ -18,6 +18,7 @@
 #include <openssl/evp.h>
 #include <pqxx/pqxx>
 
+#include "api/agent_stream_runs.hpp"
 #include "api/forge_records_api.hpp"
 #include "api/mcp_connection_internal.hpp"
 #include "api/secret_records_api.hpp"
@@ -40,6 +41,7 @@
 #include "lake/api/usage_recorder.hpp"
 #include "lake/audit/audit.hpp"
 #include "lake/control/agent_runs.hpp"
+#include "lake/control/agent_stream_triggers.hpp"
 #include "lake/control/agent_task_records.hpp"
 #include "lake/control/application_authorization_codes.hpp"
 #include "lake/control/application_credential_records.hpp"
@@ -4547,6 +4549,250 @@ TEST_P(WorkspaceRecordStores, AStreamStartsItsAgentOncePerMessageAsThePersonWhoS
 // against an agent that is gone. Another agent's, another workspace's and a finished launch are
 // left as they are. A launch whose agent was deleted outside lake is withdrawn the first time it
 // reads its agent and the workspace answers not_found.
+// LSR-086: disabling a person ends their delegated authority, including a context already
+// reconstructed by a stream worker. Another person's automation keeps running.
+TEST_P(WorkspaceRecordStores, DisablingAUserRevokesAgentDelegation) {
+    auto store = make_store();
+    if (!store) {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
+    }
+    TwoSpaces t(store, database_uri_);
+    const auto& first = t.spaces[0];
+    const auto& second = t.spaces[1];
+    auto linked = person("offboard");
+    linked.email = store->get_user(first.principal.user_id)->email;
+    ASSERT_TRUE(store->sign_in_clerk(linked));
+    const lake::control::NewAgentLaunch input{.customer_id = first.customer_id,
+                                              .agent_id = "agent-7",
+                                              .mode = "service",
+                                              .scopes = lake::control::agent_launch_scopes,
+                                              .created_by_user_id = first.principal.user_id,
+                                              .created_by_taap_id = first.principal.taap_id,
+                                              .workspace_id = first.workspaces[0]};
+    const lake::control::NewAgentCronSchedule cron{.customer_id = first.customer_id,
+                                                   .agent_id = "agent-7",
+                                                   .cron = "0 9 * * 1",
+                                                   .scopes = input.scopes,
+                                                   .created_by_user_id = input.created_by_user_id,
+                                                   .created_by_taap_id = input.created_by_taap_id,
+                                                   .workspace_id = input.workspace_id};
+    const lake::control::AgentTask task_input{.customer_id = first.customer_id,
+                                              .agent = "agent-ask-orama",
+                                              .workspace_id = first.workspaces[0],
+                                              .scopes = {"list_datasets"},
+                                              .requested_by_user_id = first.principal.user_id,
+                                              .requested_by_taap_id = first.principal.taap_id};
+    const auto launch = store->create_agent_launch(input);
+    const auto schedule = store->create_agent_cron_schedule(cron);
+    const auto task = store->create_agent_task(task_input);
+    const auto waiting = store->create_agent_task(task_input);
+    ASSERT_TRUE(launch);
+    ASSERT_TRUE(schedule);
+    ASSERT_TRUE(task);
+    ASSERT_TRUE(waiting);
+    auto other_input = input;
+    other_input.created_by_user_id = second.principal.user_id;
+    other_input.created_by_taap_id = second.principal.taap_id;
+    const auto bystander = store->create_agent_launch(other_input);
+    ASSERT_TRUE(bystander);
+    const std::string launch_key = "lal." + launch->id + ".0123456789abcdef0123456789abcdef";
+    const std::string schedule_key = "las." + schedule->id + ".0123456789abcdef0123456789abcdef";
+    const std::string task_key = "lat." + task->id + ".0123456789abcdef0123456789abcdef";
+    const auto digest = lake::control::identity_crypto::sha256_hex;
+    if (auto* memory = dynamic_cast<lake::control::InMemoryStore*>(store.get())) {
+        ASSERT_TRUE(
+            memory->set_agent_launch_status(launch->id, "Running", "", "", digest(launch_key)));
+        ASSERT_TRUE(memory->set_agent_cron_schedule_status(
+            schedule->id, "Ready", "", digest(schedule_key)));
+    } else {
+        pqxx::connection connection(database_uri_);
+        pqxx::work tx(connection);
+        tx.exec_params("INSERT INTO agent_launch_status (launch_id, phase, credential_sha256) "
+                       "VALUES ($1::uuid, 'Running', $2)",
+                       launch->id,
+                       digest(launch_key));
+        tx.exec_params(
+            "INSERT INTO agent_cron_schedule_status (schedule_id, phase, credential_sha256) "
+            "VALUES ($1::uuid, 'Ready', $2)",
+            schedule->id,
+            digest(schedule_key));
+        tx.commit();
+    }
+    ASSERT_TRUE(store->claim_agent_task(task->id, task_input.agent, digest(task_key)));
+    ASSERT_TRUE(store->renew_agent_task_lease(task->id, digest(task_key)));
+    for (const auto& key : {launch_key, schedule_key, task_key}) {
+        ASSERT_TRUE(store->context_for(key));
+    }
+    // Already-disabled rows from before this fix must fail even without workload withdrawal.
+    if (!database_uri_.empty()) {
+        const auto set_disabled = [&](bool disabled) {
+            pqxx::connection connection(database_uri_);
+            pqxx::work tx(connection);
+            tx.exec_params("UPDATE users SET disabled_at = CASE WHEN $2 THEN now() ELSE NULL END "
+                           "WHERE id = $1::uuid",
+                           first.principal.user_id,
+                           disabled);
+            tx.commit();
+        };
+        set_disabled(true);
+        for (const auto& key : {launch_key, schedule_key, task_key}) {
+            EXPECT_FALSE(store->context_for(key));
+        }
+        EXPECT_FALSE(store->renew_agent_task_lease(task->id, digest(task_key)));
+        EXPECT_FALSE(store->claim_agent_task(waiting->id, task_input.agent, "late-claim"));
+        EXPECT_FALSE(store->create_agent_launch(input));
+        EXPECT_FALSE(store->create_agent_cron_schedule(cron));
+        EXPECT_FALSE(store->create_agent_task(task_input));
+        set_disabled(false);
+    }
+    ASSERT_TRUE(store->disable_clerk_user(linked.subject));
+    for (const auto& key : {launch_key, schedule_key, task_key}) {
+        const auto principal = store->context_for(key);
+        EXPECT_FALSE(principal) << "disabled user retained delegated access";
+        if (!principal) {
+            EXPECT_TRUE(principal.error().code == "not_found" ||
+                        principal.error().code == "unauthorized");
+        }
+    }
+    EXPECT_EQ(store->get_agent_launch(launch->id)->desired, "absent");
+    EXPECT_FALSE(store->get_agent_launch(launch->id)->stop_reason.empty());
+    EXPECT_EQ(store->get_agent_cron_schedule(schedule->id)->desired, "absent");
+    EXPECT_EQ(store->get_agent_task(task->id)->desired, "absent");
+    EXPECT_EQ(store->get_agent_task(task->id)->phase, "Failed");
+    EXPECT_EQ(store->get_agent_task(waiting->id)->phase, "Failed");
+    EXPECT_TRUE(store->get_agent_task(task->id)->credential_sha256.empty());
+    EXPECT_FALSE(store->renew_agent_task_lease(task->id, digest(task_key))) << "cached context";
+    EXPECT_FALSE(store->claim_agent_task(waiting->id, task_input.agent, "late-claim"));
+    EXPECT_FALSE(store->create_agent_launch(input))
+        << "stream context reconstructed before disable";
+    EXPECT_FALSE(store->create_agent_cron_schedule(cron));
+    EXPECT_FALSE(store->create_agent_task(task_input));
+    EXPECT_EQ(store->get_agent_launch(bystander->id)->desired, "present");
+    const auto generation = store->get_agent_launch(launch->id)->generation;
+    ASSERT_TRUE(store->disable_clerk_user(linked.subject));
+    EXPECT_EQ(store->get_agent_launch(launch->id)->generation, generation) << "idempotent disable";
+}
+
+TEST_P(WorkspaceRecordStores, DisabledUsersCannotDriveAgentOrMcpStreams) {
+    auto store = make_store();
+    if (!store) {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
+    }
+    TwoSpaces t(store, database_uri_);
+    const auto& first = t.spaces[0];
+    const std::string home = first.workspaces[0];
+    auto linked = person("stream-offboard");
+    linked.email = store->get_user(first.principal.user_id)->email;
+    ASSERT_TRUE(store->sign_in_clerk(linked));
+    auto context = t.context(first);
+    auto records = lake::api::workspace_records(context, first.customer_id, home);
+    ASSERT_TRUE(records);
+    lake::api::WorkspaceApiBus bus(context, first.customer_id, home);
+    ASSERT_TRUE(run(bus.create_topic("offboard-in")));
+    t.zetta->answers["get_agent"] = {{"id", "agent-7"}, {"runtime", "python"}};
+    const auto trigger = run(
+        lake::control::record_agent_stream_trigger(*records,
+                                                   {.customer_id = first.customer_id,
+                                                    .agent_id = "agent-7",
+                                                    .topic = "offboard-in",
+                                                    .set_by = first.principal.user_id,
+                                                    .set_by_identity = first.principal.taap_id}));
+    ASSERT_TRUE(trigger);
+    const auto connection =
+        run(lake::control::record_mcp_connection(*records,
+                                                 {.customer_id = first.customer_id,
+                                                  .name = "Offboarding",
+                                                  .prefix = "offboarding",
+                                                  .url = "https://mcp.example.test",
+                                                  .agent_id = "agent-7",
+                                                  .input_topic = "offboard-in",
+                                                  .output_topic = "offboard-out",
+                                                  .notifications_topic = "offboard-notices",
+                                                  .streams_set_by = first.principal.user_id}));
+    ASSERT_TRUE(connection);
+    const auto dispatch_error =
+        lake::api::record_mcp_connection_dispatch(context, home, *connection);
+    ASSERT_FALSE(dispatch_error) << dispatch_error.value_or("");
+    lake::api::ApiContext owner;
+    owner.store = store.get();
+    owner.workspaces = t.service.get();
+    owner.registry = &t.registry;
+    owner.instance_kek = std::string(kek);
+    auto cached = lake::api::stream_person(owner, first.principal.user_id, "agent_stream_trigger");
+    ASSERT_TRUE(cached);
+    ASSERT_TRUE(run(bus.publish("offboard-in", {{"ticket", "before"}}, "before")));
+    lake::api::AgentStreamWorker agent_worker;
+    lake::api::McpStreamWorker mcp_worker;
+    EXPECT_EQ(agent_worker.pass(owner).runs, 1U);
+    EXPECT_EQ(mcp_worker.pass(owner).turns, 1U);
+    const auto before_disable =
+        run(lake::control::list_mcp_connections(*records, first.customer_id));
+    ASSERT_TRUE(before_disable);
+    ASSERT_EQ(before_disable->size(), 1U);
+    ASSERT_EQ(before_disable->front().pending_launches.size(), 1U);
+    const auto pending = before_disable->front().pending_launches.front();
+    if (auto* memory = dynamic_cast<lake::control::InMemoryStore*>(store.get())) {
+        ASSERT_TRUE(memory->set_agent_launch_status(pending, "Succeeded", "done", "", ""));
+    } else {
+        pqxx::connection connection(database_uri_);
+        pqxx::work tx(connection);
+        tx.exec_params(
+            "INSERT INTO agent_launch_status (launch_id, phase) VALUES ($1::uuid, 'Succeeded')",
+            pending);
+        tx.commit();
+    }
+    ASSERT_TRUE(store->disable_clerk_user(linked.subject));
+    EXPECT_FALSE(lake::api::stream_person(owner, first.principal.user_id, "agent_stream_trigger"));
+    EXPECT_FALSE(
+        lake::api::stream_person(owner, lake::control::new_uuid_v4(), "mcp_connection_stream"));
+    ASSERT_TRUE(run(bus.publish("offboard-in", {{"ticket", "after"}}, "after")));
+    // The records still exist before cleanup, but even an already-reconstructed context cannot
+    // launch from the new event. The records themselves durably retain pending cleanup.
+    const auto gap = lake::api::start_stream_runs(
+        owner,
+        *cached,
+        bus,
+        first.customer_id,
+        home,
+        "agent-7",
+        "offboard-in",
+        1,
+        20,
+        [](const lake::control::BusEvent& event) { return event.payload; });
+    EXPECT_TRUE(gap.launched.empty());
+    const auto retained =
+        run(lake::control::list_agent_stream_triggers(*records, first.customer_id));
+    ASSERT_TRUE(retained);
+    ASSERT_EQ(retained->size(), 1U);
+    EXPECT_EQ(store->mcp_stream_dispatch(100)->size(), 1U);
+    lake::api::AgentStreamWorker restarted_agent_worker;
+    lake::api::McpStreamWorker restarted_mcp_worker;
+    const auto stopped = restarted_agent_worker.pass(owner);
+    EXPECT_EQ(stopped.runs, 0U);
+    EXPECT_EQ(stopped.removed, 1U);
+    const auto mcp_stopped = restarted_mcp_worker.pass(owner);
+    EXPECT_EQ(mcp_stopped.turns, 0U);
+    EXPECT_EQ(mcp_stopped.notifications, 0U);
+    EXPECT_EQ(mcp_stopped.results, 0U);
+    ASSERT_TRUE(t.zetta->topics.contains("offboard-out"));
+    EXPECT_TRUE(t.zetta->topics.at("offboard-out").events.empty()) << "no late result publication";
+    const auto triggers =
+        run(lake::control::list_agent_stream_triggers(*records, first.customer_id));
+    ASSERT_TRUE(triggers);
+    EXPECT_TRUE(triggers->empty());
+    const auto connections = run(lake::control::list_mcp_connections(*records, first.customer_id));
+    ASSERT_TRUE(connections);
+    ASSERT_EQ(connections->size(), 1U);
+    EXPECT_TRUE(connections->front().streams_set_by.empty());
+    EXPECT_TRUE(connections->front().input_topic.empty());
+    EXPECT_TRUE(connections->front().pending_launches.empty());
+    const auto dispatch = store->mcp_stream_dispatch(100);
+    ASSERT_TRUE(dispatch);
+    EXPECT_TRUE(dispatch->empty());
+    EXPECT_EQ(restarted_agent_worker.pass(owner).removed, 0U);
+    EXPECT_EQ(restarted_mcp_worker.pass(owner).connections, 0U);
+}
+
 TEST_P(WorkspaceRecordStores, DeletingAnAgentStopsItsLaunchesAndSchedules) {
     auto store = make_store();
     if (!store) {

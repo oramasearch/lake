@@ -7,6 +7,13 @@ environment yet: `Lake/prod` and lake.oramadev.net are the development deploymen
 
 ## Status vocabulary
 
+Agent offboarding (lake#951, LSR-086) is implemented in the source tree, not deployed: disabled
+accounts lose launch/schedule/task credentials and their workloads are withdrawn atomically;
+stream workers deny their authority immediately and remove workspace streaming configuration on
+the next reachable pass. [Clerk](../api/clerk.md#webhooks) documents the contract and regression
+commands for memory and PostgreSQL; both new regression scenarios pass on both stores on macOS,
+and all four cases fail against the unfixed implementation.
+
 | Level | Meaning |
 |---|---|
 | **Implemented** | The source tree contains the capability or surface described by its contract page. |

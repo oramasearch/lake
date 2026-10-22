@@ -67,8 +67,9 @@ vendor the schema and select `identity_links_guard`. See
 Clerk webhooks follow (lake#765, migration `0087_clerk_webhooks`): `POST /identity/clerk-webhook`,
 verified with Lake's own Svix HMAC and `LAKE_CLERK_WEBHOOK_SECRET` (404 without it), applies each
 `svix-id` once: `user.created` provisions the account as a first Clerk sign-in does, `user.updated`
-sets its verified email and name, `user.deleted` disables it (`users.disabled_at`) and revokes its
-sessions without erasing anything; every delivery is audited centrally. Not deployed; the operator
+sets its verified email and name, `user.deleted` disables it (`users.disabled_at`), revokes its
+sessions and delegated agent credentials, and withdraws its agent workloads without erasing its
+account or workspaces (lake#951); every delivery is audited centrally. Not deployed; the operator
 must vendor the schema, select `clerk_webhooks_guard` and configure the endpoint and secret
 (orama-operator#541). See [`docs/api/clerk.md#webhooks`](docs/api/clerk.md#webhooks).
 

@@ -1,5 +1,11 @@
 # API implementation
 
+`stream_person` in `agent_stream_triggers.cpp` is shared with `mcp_connection_streams.cpp` and
+requires a present, enabled account (lake#951). Disabled/missing principals trigger idempotent
+workspace cleanup; storage errors leave records pending for retry. No notifications, launches or
+results are processed under a refused principal. Store creation guards also reject a context
+reconstructed before offboarding. See [Clerk offboarding](../../docs/api/clerk.md#webhooks).
+
 `tunnel_clients.cpp` reads the tunnel client folder (allow-listed `zetta-tunnel-<platform>` files
 with a `SHA256SUMS` line, and `VERSION`) and signs and checks their 15-minute links with
 `signed_link_signature`, the HMAC the Hub's LFS upload links also use (lake#745).

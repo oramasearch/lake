@@ -612,6 +612,9 @@ public:
                                                                     int limit) override;
 
 private:
+    // Caller holds mutex_. Userless system work is allowed; person-owned work needs a live user.
+    Result<void> active_delegator_locked(const std::string& user_id) const;
+    void revoke_agent_delegations_locked(const std::string& user_id);
     Result<void> check_network_scope_locked(const NetworkScope&) const;
     Result<void> check_network_target_locked(const NetworkScope&,
                                              const std::string& kind,

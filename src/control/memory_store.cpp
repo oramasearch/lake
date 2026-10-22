@@ -1735,6 +1735,9 @@ Result<ManagedStore> InMemoryStore::withdraw_store(const std::string& id) {
 
 Result<AgentLaunch> InMemoryStore::create_agent_launch(const NewAgentLaunch& in) {
     std::lock_guard lock(mutex_);
+    if (auto active = active_delegator_locked(in.created_by_user_id); !active) {
+        return std::unexpected(active.error());
+    }
     if (std::ranges::none_of(customers_,
                              [&](const Customer& value) { return value.id == in.customer_id; })) {
         return std::unexpected(StoreError{"not_found", "no customer " + in.customer_id});
@@ -2158,6 +2161,9 @@ InMemoryStore::put_methodology_deployment_status(const std::string& id,
 Result<AgentCronSchedule>
 InMemoryStore::create_agent_cron_schedule(const NewAgentCronSchedule& in) {
     std::lock_guard lock(mutex_);
+    if (auto active = active_delegator_locked(in.created_by_user_id); !active) {
+        return std::unexpected(active.error());
+    }
     if (std::ranges::none_of(customers_,
                              [&](const Customer& value) { return value.id == in.customer_id; })) {
         return std::unexpected(StoreError{"not_found", "no customer " + in.customer_id});
@@ -2324,6 +2330,9 @@ Result<void> InMemoryStore::put_agent_cron_run(const std::string& schedule_id,
 
 Result<AgentTask> InMemoryStore::create_agent_task(const AgentTask& in) {
     std::lock_guard lock(mutex_);
+    if (auto active = active_delegator_locked(in.requested_by_user_id); !active) {
+        return std::unexpected(active.error());
+    }
     if (std::ranges::none_of(workspaces_, [&](const Workspace& workspace) {
             return workspace.id == in.workspace_id && workspace.customer_id == in.customer_id &&
                    workspace.desired != "deleted";
@@ -2447,6 +2456,9 @@ Result<AgentTask> InMemoryStore::claim_agent_task(const std::string& id,
     if (found == agent_tasks_.end() || found->desired != "present") {
         return std::unexpected(StoreError{"not_found", "no agent task " + id});
     }
+    if (auto active = active_delegator_locked(found->requested_by_user_id); !active) {
+        return std::unexpected(active.error());
+    }
     if (found->agent != agent || !found->phase.empty() || found->retry_notice_pending) {
         return std::unexpected(StoreError{"conflict", "the task is not waiting for " + agent});
     }
@@ -2469,9 +2481,13 @@ Result<void> InMemoryStore::renew_agent_task_lease(const std::string& id,
                                                    const std::string& credential_sha256) {
     std::lock_guard lock(mutex_);
     const auto found = std::ranges::find(agent_tasks_, id, &AgentTask::id);
-    if (found == agent_tasks_.end() || found->phase != "Running" || credential_sha256.empty() ||
+    if (found == agent_tasks_.end() || found->desired != "present" || found->phase != "Running" ||
+        credential_sha256.empty() ||
         !constant_time_hex_equal(found->credential_sha256, credential_sha256)) {
         return std::unexpected(StoreError{"conflict", "the task claim is no longer active"});
+    }
+    if (auto active = active_delegator_locked(found->requested_by_user_id); !active) {
+        return std::unexpected(active.error());
     }
     const auto lease = std::chrono::seconds(found->lease_seconds);
     found->lease_until = iso8601_at(std::chrono::system_clock::now() + lease);
@@ -4353,6 +4369,50 @@ Result<std::string> InMemoryStore::update_clerk_user(const ClerkIdentity& input)
     return user_id;
 }
 
+Result<void> InMemoryStore::active_delegator_locked(const std::string& user_id) const {
+    if (user_id.empty()) {
+        return {}; // system work carries no person's authority
+    }
+    const auto user = std::ranges::find(users_, user_id, &User::id);
+    if (user == users_.end() || disabled_users_.contains(user_id) ||
+        deleted_users_.contains(user_id)) {
+        return std::unexpected(StoreError{"unauthorized", "delegating account is not active"});
+    }
+    return {};
+}
+
+void InMemoryStore::revoke_agent_delegations_locked(const std::string& user_id) {
+    const auto now = now_iso8601();
+    for (auto& launch : agent_launches_) {
+        if (launch.created_by_user_id == user_id && launch.desired == "present") {
+            launch.desired = "absent";
+            launch.stop_reason = "Stopped: the account that started this run is disabled.";
+            launch.updated_at = now;
+            ++launch.generation;
+        }
+    }
+    for (auto& schedule : agent_cron_schedules_) {
+        if (schedule.created_by_user_id == user_id && schedule.desired == "present") {
+            schedule.desired = "absent";
+            schedule.updated_at = now;
+            ++schedule.generation;
+        }
+    }
+    for (auto& task : agent_tasks_) {
+        if (task.requested_by_user_id == user_id && task.desired == "present") {
+            task.desired = "absent";
+            task.credential_sha256.clear();
+            task.lease_until.clear();
+            task.retry_notice_pending = false;
+            if (task.phase.empty() || task.phase == "Running") {
+                task.phase = "Failed";
+                task.message = "Stopped: the account that requested this task is disabled.";
+                task.finished_at = now;
+            }
+        }
+    }
+}
+
 Result<std::string> InMemoryStore::disable_clerk_user(const std::string& clerk_subject) {
     std::lock_guard lock(mutex_);
     const std::string subject = "clerk:" + clerk_subject;
@@ -4367,6 +4427,12 @@ Result<std::string> InMemoryStore::disable_clerk_user(const std::string& clerk_s
     }
     disabled_users_.insert(user_id);
     const std::string now = now_iso8601();
+    for (auto& user : users_) {
+        if (user.id == user_id && user.disabled_at.empty()) {
+            user.disabled_at = now;
+        }
+    }
+    revoke_agent_delegations_locked(user_id);
     for (auto& session : sessions_) {
         if (session.user_id == user_id && session.revoked_at.empty()) {
             session.revoked_at = now;
@@ -4812,7 +4878,7 @@ Result<Principal> InMemoryStore::resolve_principal(const std::string& secret) {
         }
         const auto user = std::ranges::find_if(
             users_, [&](const User& row) { return row.id == task->requested_by_user_id; });
-        if (user == users_.end() || user->taap_id.empty()) {
+        if (user == users_.end() || user->taap_id.empty() || !active_delegator_locked(user->id)) {
             return std::unexpected(StoreError{"unauthorized", "task identity is unavailable"});
         }
         return Principal{user->id,
@@ -4844,7 +4910,7 @@ Result<Principal> InMemoryStore::resolve_principal(const std::string& secret) {
         }
         const auto user = std::ranges::find_if(
             users_, [&](const User& row) { return row.id == schedule->created_by_user_id; });
-        if (user == users_.end() || user->taap_id.empty()) {
+        if (user == users_.end() || user->taap_id.empty() || !active_delegator_locked(user->id)) {
             return std::unexpected(StoreError{"unauthorized", "schedule identity is unavailable"});
         }
         return Principal{user->id,
@@ -4897,7 +4963,7 @@ Result<Principal> InMemoryStore::resolve_principal(const std::string& secret) {
         }
         const auto user = std::ranges::find_if(
             users_, [&](const User& row) { return row.id == launch->created_by_user_id; });
-        if (user == users_.end() || user->taap_id.empty()) {
+        if (user == users_.end() || user->taap_id.empty() || !active_delegator_locked(user->id)) {
             return std::unexpected(StoreError{"unauthorized", "launch identity is unavailable"});
         }
         return Principal{user->id,
@@ -8219,6 +8285,8 @@ Result<AccountDeletion> InMemoryStore::delete_account(const std::string& user_id
     user->updated_at = now;
     deleted_users_.insert(user_id);
     disabled_users_.insert(user_id);
+    user->disabled_at = now;
+    revoke_agent_delegations_locked(user_id);
     plan.deleted_at = now;
     return plan;
 }

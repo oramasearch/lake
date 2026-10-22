@@ -1,5 +1,9 @@
 # Design and status
 
+[status.md](status.md) records disabled-account agent offboarding (lake#951), including immediate
+credential refusal and durable workspace-stream cleanup; [Clerk](../api/clerk.md#webhooks) has the
+behavior and verification contract.
+
 Secure-networking store and capability support and its separate operator rollout are tracked in
 [status.md](status.md) and specified in the [control-plane](../control-plane/network.md) and
 [API](../api/network.md) contracts.
