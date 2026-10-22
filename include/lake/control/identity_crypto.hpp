@@ -61,6 +61,7 @@ struct OidcClaims {
     std::string subject;
     std::string email;
     std::string display_name;
+    std::int64_t issued_at = 0; // Clerk rejects templates predating an upstream revocation
 };
 
 std::optional<OidcClaims> verify_oidc_id_token(std::string_view token,

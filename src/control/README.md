@@ -337,3 +337,11 @@ selector in the existing unique subject index; legacy rows are never scanned. Po
 private authentication transactions, with row locks for one-use recovery; memory verifies
 snapshots outside its shared mutex and rechecks them before committing.
 See [the contract and tests](../../docs/api/identity.md#authentication-attempt-limits).
+Clerk revocation (lake#948, migration `0094_clerk_revocation`) keeps user-state ordering and a
+separate account-wide revocation watermark in PostgreSQL and memory. Old template JWTs cannot
+re-exchange after a session event; account restrictions revoke all sessions, tokens and devices, and a newer
+unban/unlock permits only new credentials. See [the contract](../../docs/api/clerk.md#webhooks).
+
+Clerk suspension and permanent disablement use `User::may_act()` for bearer issuance,
+delegation and stream authority. Suspended users' agent credentials are withdrawn just as on
+offboarding; a later unban permits new work without restoring old credentials (lake#948).

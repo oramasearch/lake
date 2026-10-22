@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "lake/api/billing.hpp"
+#include "lake/api/clerk.hpp"
 #include "lake/api/orders.hpp"
 #include "lake/api/regions.hpp"
 #include "lake/api/registry.hpp"
@@ -183,6 +184,10 @@ struct ServerOptions {
     // and sign-up are Clerk's and lake's own identity pages leave the navigation; empty or `xxx`
     // keeps lake's own sign-in, as an on-prem install uses. See docs/api/clerk.md.
     std::string clerk_publishable_key;
+    // LAKE_CLERK_SECRET_KEY: checks current ban/lock state at every template exchange.
+    // Missing key or an unavailable Backend API refuses exchange. Never returned or logged.
+    std::string clerk_secret_key;
+    ClerkGet clerk_http; // injected HTTP responses for isolated tests
     // Clerk webhook signing secret (LAKE_CLERK_WEBHOOK_SECRET, `whsec_…`), an Orama platform key
     // the operator injects from the instance's Clerk configuration. Empty: POST
     // /identity/clerk-webhook answers 404. See docs/api/clerk.md#webhooks (lake#765).

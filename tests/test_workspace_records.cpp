@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>
+#include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <memory>
@@ -363,8 +364,14 @@ namespace {
 
 lake::control::ClerkIdentity person(std::string subject) {
     const auto identity = lake::audit::mint_custodial_identity(std::string(kek));
-    return {subject, subject + "@example.test", "", "browser", identity->taap_id,
-            identity->public_key, identity->wrapped_seed};
+    return {subject,
+            subject + "@example.test",
+            "",
+            "browser",
+            identity->taap_id,
+            identity->public_key,
+            identity->wrapped_seed,
+            static_cast<std::int64_t>(std::time(nullptr))};
 }
 
 // Two spaces, two workspaces each, every workspace Ready at its own endpoint, over one store.
@@ -570,6 +577,8 @@ protected:
         database_uri_ = uri;
         return lake::control::make_postgres_store(database_uri_, std::string(kek));
     }
+    void check_delegation_offboarding(bool suspended);
+    void check_stream_offboarding(bool suspended);
     std::string database_uri_;
 };
 
@@ -4835,7 +4844,7 @@ TEST_P(WorkspaceRecordStores, AStreamStartsItsAgentOncePerMessageAsThePersonWhoS
 // reads its agent and the workspace answers not_found.
 // LSR-086: disabling a person ends their delegated authority, including a context already
 // reconstructed by a stream worker. Another person's automation keeps running.
-TEST_P(WorkspaceRecordStores, DisablingAUserRevokesAgentDelegation) {
+void WorkspaceRecordStores::check_delegation_offboarding(bool suspended) {
     auto store = make_store();
     if (!store) {
         GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
@@ -4929,7 +4938,12 @@ TEST_P(WorkspaceRecordStores, DisablingAUserRevokesAgentDelegation) {
         EXPECT_FALSE(store->create_agent_task(task_input));
         set_disabled(false);
     }
-    ASSERT_TRUE(store->disable_clerk_user(linked.subject));
+    if (suspended) {
+        ASSERT_TRUE(store->apply_clerk_user_state({linked.subject, 2000, true, false}));
+        EXPECT_FALSE(store->get_user(first.principal.user_id)->may_act());
+    } else {
+        ASSERT_TRUE(store->disable_clerk_user(linked.subject));
+    }
     for (const auto& key : {launch_key, schedule_key, task_key}) {
         const auto principal = store->context_for(key);
         EXPECT_FALSE(principal) << "disabled user retained delegated access";
@@ -4953,11 +4967,23 @@ TEST_P(WorkspaceRecordStores, DisablingAUserRevokesAgentDelegation) {
     EXPECT_FALSE(store->create_agent_task(task_input));
     EXPECT_EQ(store->get_agent_launch(bystander->id)->desired, "present");
     const auto generation = store->get_agent_launch(launch->id)->generation;
-    ASSERT_TRUE(store->disable_clerk_user(linked.subject));
+    if (suspended) {
+        ASSERT_TRUE(store->apply_clerk_user_state({linked.subject, 2000, true, false}));
+        EXPECT_FALSE(store->get_user(first.principal.user_id)->may_act());
+    } else {
+        ASSERT_TRUE(store->disable_clerk_user(linked.subject));
+    }
     EXPECT_EQ(store->get_agent_launch(launch->id)->generation, generation) << "idempotent disable";
+    if (suspended) {
+        ASSERT_TRUE(store->apply_clerk_user_state({linked.subject, 3000, false, false}));
+        EXPECT_TRUE(store->get_user(first.principal.user_id)->may_act());
+        for (const auto& key : {launch_key, schedule_key, task_key})
+            EXPECT_FALSE(store->context_for(key)) << "unban must not restore old delegation";
+        EXPECT_TRUE(store->create_agent_launch(input));
+    }
 }
 
-TEST_P(WorkspaceRecordStores, DisabledUsersCannotDriveAgentOrMcpStreams) {
+void WorkspaceRecordStores::check_stream_offboarding(bool suspended) {
     auto store = make_store();
     if (!store) {
         GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
@@ -5025,7 +5051,12 @@ TEST_P(WorkspaceRecordStores, DisabledUsersCannotDriveAgentOrMcpStreams) {
             pending);
         tx.commit();
     }
-    ASSERT_TRUE(store->disable_clerk_user(linked.subject));
+    if (suspended) {
+        ASSERT_TRUE(store->apply_clerk_user_state({linked.subject, 2000, true, false}));
+        EXPECT_FALSE(store->get_user(first.principal.user_id)->may_act());
+    } else {
+        ASSERT_TRUE(store->disable_clerk_user(linked.subject));
+    }
     EXPECT_FALSE(lake::api::stream_person(owner, first.principal.user_id, "agent_stream_trigger"));
     EXPECT_FALSE(
         lake::api::stream_person(owner, lake::control::new_uuid_v4(), "mcp_connection_stream"));
@@ -5075,6 +5106,19 @@ TEST_P(WorkspaceRecordStores, DisabledUsersCannotDriveAgentOrMcpStreams) {
     EXPECT_TRUE(dispatch->empty());
     EXPECT_EQ(restarted_agent_worker.pass(owner).removed, 0U);
     EXPECT_EQ(restarted_mcp_worker.pass(owner).connections, 0U);
+}
+
+TEST_P(WorkspaceRecordStores, DisablingAUserRevokesAgentDelegation) {
+    check_delegation_offboarding(false);
+}
+TEST_P(WorkspaceRecordStores, SuspendedUsersLoseAgentDelegation) {
+    check_delegation_offboarding(true);
+}
+TEST_P(WorkspaceRecordStores, DisabledUsersCannotDriveAgentOrMcpStreams) {
+    check_stream_offboarding(false);
+}
+TEST_P(WorkspaceRecordStores, SuspendedUsersCannotDriveAgentOrMcpStreams) {
+    check_stream_offboarding(true);
 }
 
 TEST_P(WorkspaceRecordStores, DeletingAnAgentStopsItsLaunchesAndSchedules) {

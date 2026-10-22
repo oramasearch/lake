@@ -10520,7 +10520,15 @@ struct ApiServer::Impl {
             request.timeout = oidc_timeout;
             request.public_only = true;
         }
-        OutboundResponse response = outbound_http.request(request);
+        OutboundResponse response;
+        if (clerk && url == clerk->jwks_url && options.clerk_http) {
+            const auto injected = options.clerk_http(url, request.headers);
+            response.status = injected.status;
+            response.body = injected.body;
+            response.error = injected.error;
+        } else {
+            response = outbound_http.request(request);
+        }
         if (!response.error.empty() || response.status < 200 || response.status >= 300) {
             return std::nullopt;
         }
@@ -10688,7 +10696,7 @@ struct ApiServer::Impl {
         }
         ApiContext context = context_for(route);
         context.authentication_method = "clerk";
-        if (!claims) {
+        if (!claims || claims->issued_at <= 0) {
             (void)record_direct_event(context,
                                       audit::EventDraft{
                                           .kind = "authentication",
@@ -10700,6 +10708,39 @@ struct ApiServer::Impl {
                                       });
             co_return co_await back("Your sign-in could not be verified. Please try again.");
         }
+        const auto denied = [&](std::string_view message) {
+            (void)record_direct_event(context,
+                                      audit::EventDraft{.kind = "authentication",
+                                                        .object = "clerk",
+                                                        .action = "sign_in",
+                                                        .outcome = "denied",
+                                                        .method = "clerk",
+                                                        .device = device_name});
+            return back(message);
+        };
+        const ClerkGet get =
+            options.clerk_http
+                ? options.clerk_http
+                : ClerkGet{[this](const std::string& url,
+                                  const std::vector<std::pair<std::string, std::string>>& headers) {
+                      OutboundRequest request{"GET", url, "", headers};
+                      request.timeout = std::chrono::seconds(10);
+                      request.public_only = true;
+                      const auto response = outbound_http.request(request);
+                      return ClerkResponse{response.status, response.body, response.error};
+                  }};
+        const auto upstream = clerk_user_status(claims->subject, options.clerk_secret_key, get);
+        if (!upstream)
+            co_return co_await denied(upstream.error());
+        const auto state = options.store->apply_clerk_user_state(
+            {claims->subject,
+             upstream->updated_at,
+             upstream->banned || upstream->locked || upstream->deprovisioned,
+             false});
+        if (!state)
+            co_return co_await denied("Lake cannot record the Clerk account status right now.");
+        if (upstream->banned || upstream->locked || upstream->deprovisioned)
+            co_return co_await denied("This Clerk account is suspended.");
         const auto minted = audit::mint_custodial_identity(options.instance_kek);
         if (!minted) {
             co_return co_await back("Lake cannot create an identity right now: " +
@@ -10712,9 +10753,10 @@ struct ApiServer::Impl {
                                           device_name,
                                           minted->taap_id,
                                           minted->public_key,
-                                          minted->wrapped_seed});
+                                          minted->wrapped_seed,
+                                          claims->issued_at});
         if (!issued) {
-            co_return co_await back(issued.error().message);
+            co_return co_await denied(issued.error().message);
         }
         if (const auto principal = options.store->context_for(issued->secret)) {
             context.authorized = true;

@@ -5,6 +5,17 @@ vendored copy at `internal/controller/assets/lake-schema.sql` and applies it to 
 Postgres. Change the schema here, then copy it into the operator in the same change; the
 operator's test checks the copy carries the source-of-truth header.
 
+`0094_clerk_revocation` (lake#948, LSR-085) adds `clerk_user_states`: upstream user id, the
+last applied timestamp for that Clerk subject, an independent revocation watermark, suspension
+and terminal deletion. Both timestamps are Clerk milliseconds. Rows remain when an event precedes provisioning;
+revocation prevents re-exchange of old template JWTs and revokes all existing account credentials.
+`users.clerk_suspended` blocks every resolved user principal and every PostgreSQL session issuance
+path, while a newer unban/unlock can clear it without clearing `users.disabled_at` or reviving
+revoked credentials. The first application revokes all existing Clerk-linked sessions, tokens and
+devices and initializes the revocation watermark to migration time: old ignored webhook deliveries
+cannot reliably be replayed. Later schema applications preserve newer credentials. Guard
+`clerk_revocation_guard`; the operator must vendor this schema and select the guard before rollout. See [Clerk](../api/clerk.md#webhooks).
+
 `0088_repository_liquid_ids` (lake#805) adds nullable `repositories.liquid_id`, the id liquid gave
 the repository (32 lowercase hex digits, what `liquid deploy` sends), with the partial index
 `repositories_liquid_id_idx`; it is not unique, because a repository pushed from another's clone

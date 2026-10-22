@@ -905,3 +905,6 @@ legacy refusal, concurrent one-use consumption and worker saturation (lake#969).
 while probing health and reading an unrelated store row; the client-limit HTTP test alternates
 REST/MCP, gives two ingress addresses behind one proxy peer separate budgets and still limits
 direct connections. See [the contract](../docs/api/identity.md#authentication-attempt-limits).
+`SuspendedUsersLoseAgentDelegation` and `SuspendedUsersCannotDriveAgentOrMcpStreams` run the
+offboarding fixtures on both stores with reversible Clerk suspension, including cached contexts,
+lease claims, cleanup across worker restarts, and fresh work after an unban (lake#948).

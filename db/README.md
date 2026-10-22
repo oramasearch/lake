@@ -7,6 +7,13 @@ once (OpenAI's published price plus 30%) as a new publication for the current mo
 an existing instance. The operator must vendor this schema and select
 `model_token_prices_guard` before the new binary is deployed; the operator is not changed here.
 See [model-gateway.md](../docs/api/model-gateway.md#configuration).
+Migration `0094_clerk_revocation` (lake#948, LSR-085) adds `clerk_user_states` (ordered upstream
+account state and an independent revocation watermark), `users.clerk_suspended`, and the guard
+`clerk_revocation_guard`. It revokes Clerk-linked accounts' existing sessions, tokens and devices
+once and rejects pre-migration template JWTs, requiring a fresh sign-in. Reapplication preserves
+credentials issued afterward. The operator must vendor the schema and select this guard before
+rollout, inject `LAKE_CLERK_SECRET_KEY`, and subscribe to Clerk session end/revocation events. See
+[Clerk](../docs/api/clerk.md#webhooks) and [schema.md](../docs/control-plane/schema.md).
 
 Migration `0091_account_deletion` (lake#810) adds `users.deleted_at`, set by `delete_account` when
 an account is deleted (its email and display name are erased in the same statement), and the guard

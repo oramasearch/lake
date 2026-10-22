@@ -823,7 +823,7 @@ std::optional<OidcClaims> verify_oidc_id_token(std::string_view token,
         issued_at > now_unix + 60 || subject.empty() || claims.value("nonce", "") != nonce) {
         return std::nullopt;
     }
-    return OidcClaims{subject, claims.value("email", ""), claims.value("name", "")};
+    return OidcClaims{subject, claims.value("email", ""), claims.value("name", ""), issued_at};
 }
 
 std::expected<VerifiedPasskeyRegistration, std::string>
@@ -1390,7 +1390,7 @@ struct VerifiedIdentityDocument {
 
 constexpr const char* user_columns =
     "id::text, coalesce(taap_id,''), coalesce(email,''), display_name, "
-    "created_at::text, updated_at::text, coalesce(disabled_at::text, '')";
+    "created_at::text, updated_at::text, coalesce(disabled_at::text, ''), clerk_suspended";
 constexpr const char* organization_columns =
     "id::text, coalesce(taap_id,''), display_name, created_at::text, "
     "updated_at::text";
@@ -1545,7 +1545,8 @@ User user_of(const pqxx::row& r) {
                 r[3].as<std::string>(),
                 r[4].as<std::string>(),
                 r[5].as<std::string>(),
-                r[6].as<std::string>()};
+                r[6].as<std::string>(),
+                r[7].as<bool>()};
 }
 Organization organization_of(const pqxx::row& r) {
     return Organization{r[0].as<std::string>(),
@@ -5608,15 +5609,17 @@ public:
 
     // Lock the person before changing their delegated work. Offboarding locks the same row
     // first, so a concurrent create/claim/renew either precedes revocation or is refused.
-    static Result<void> active_delegator(pqxx::work& tx, const std::string& user_id) {
+    static Result<void>
+    active_delegator(pqxx::work& tx, const std::string& user_id, bool exclusive = false) {
         if (user_id.empty()) {
             return {}; // system work carries no person's authority
         }
         const auto user =
-            tx.exec_params("SELECT 1 FROM users WHERE id = $1::uuid AND disabled_at IS NULL "
-                           "AND deleted_at IS NULL FOR SHARE",
+            tx.exec_params(std::string("SELECT ") + user_columns +
+                               " FROM users WHERE id = $1::uuid AND deleted_at IS NULL" +
+                               (exclusive ? " FOR UPDATE" : " FOR SHARE"),
                            user_id);
-        if (user.empty()) {
+        if (user.empty() || !user_of(user[0]).may_act()) {
             return std::unexpected(StoreError{"unauthorized", "delegating account is not active"});
         }
         return {};
@@ -8577,6 +8580,10 @@ public:
         });
     }
     Result<IssuedSession> sign_in_oauth(const OAuthIdentity& in) override {
+        if (in.provider == "clerk" && (in.pool_id.empty() || in.pool_id == "lake")) {
+            return std::unexpected(
+                StoreError{"invalid_input", "Clerk requires its verified template exchange"});
+        }
         return with_tx<IssuedSession>([&](pqxx::work& tx) -> Result<IssuedSession> {
             const std::string subject = in.provider + ":" + in.subject;
             if (in.pool_id != "lake" &&
@@ -8637,6 +8644,11 @@ public:
         if (in.subject.empty()) {
             return std::unexpected(StoreError{"invalid_input", "a Clerk subject is required"});
         }
+        tx.exec_params("INSERT INTO clerk_user_states (subject) VALUES ($1) ON CONFLICT DO NOTHING",
+                       in.subject);
+        const auto state = tx.exec_params(
+            "SELECT suspended, deleted FROM clerk_user_states WHERE subject = $1 FOR UPDATE",
+            in.subject);
         const std::string subject = "clerk:" + in.subject;
         ClerkUserProvisioned result;
         pqxx::result rows =
@@ -8686,6 +8698,21 @@ public:
                            result.user_id,
                            subject);
         }
+        if (state[0][0].as<bool>() || state[0][1].as<bool>()) {
+            revoke_agent_delegations(tx, result.user_id);
+            tx.exec_params("UPDATE users SET clerk_suspended = true, "
+                           "disabled_at = CASE WHEN $2 THEN coalesce(disabled_at, now()) "
+                           "ELSE disabled_at END WHERE id = $1::uuid",
+                           result.user_id,
+                           state[0][1].as<bool>());
+            // A suspended subject may first become linked by this provisioning event.
+            tx.exec_params("UPDATE sessions SET revoked_at = coalesce(revoked_at, now()) "
+                           "WHERE user_id = $1::uuid",
+                           result.user_id);
+            tx.exec_params("UPDATE devices SET revoked_at = coalesce(revoked_at, now()) "
+                           "WHERE user_id = $1::uuid",
+                           result.user_id);
+        }
         result.taap_id =
             tx.exec_params("SELECT coalesce(taap_id, '') FROM users WHERE id = $1::uuid",
                            result.user_id)[0][0]
@@ -8693,10 +8720,23 @@ public:
         return result;
     }
     Result<IssuedSession> sign_in_clerk(const ClerkIdentity& in) override {
+        if (in.issued_at <= 0 || in.subject.empty() || in.subject.size() > 256) {
+            return std::unexpected(
+                StoreError{"invalid_input", "a Clerk subject and token issue time are required"});
+        }
         return with_tx<IssuedSession>([&](pqxx::work& tx) -> Result<IssuedSession> {
             const auto found = clerk_user_tx(tx, in);
-            if (!found) {
+            if (!found)
                 return std::unexpected(found.error());
+            tx.exec_params("SELECT id FROM users WHERE id = $1::uuid FOR UPDATE", found->user_id);
+            const auto state = tx.exec_params(
+                "SELECT max(s.revoked_before) FROM clerk_user_states s JOIN credentials c "
+                "ON c.subject = 'clerk:' || s.subject WHERE c.user_id = $1::uuid "
+                "AND c.pool_id = 'lake' AND c.kind = 'oauth'",
+                found->user_id);
+            if (in.issued_at <= state[0][0].as<std::int64_t>() / 1000) {
+                return std::unexpected(
+                    StoreError{"unauthorized", "the Clerk token predates revocation"});
             }
             return issue_session(tx,
                                  found->user_id,
@@ -8707,6 +8747,100 @@ public:
                                  {"*"},
                                  "",
                                  60 * 60 * 24 * 30);
+        });
+    }
+    Result<void> revoke_clerk_sessions(const std::string& subject,
+                                       std::int64_t revoked_at) override {
+        if (subject.empty() || subject.size() > 256 || revoked_at < 0) {
+            return std::unexpected(StoreError{
+                "invalid_input", "a Clerk subject and revocation timestamp are required"});
+        }
+        return with_tx<void>([&](pqxx::work& tx) -> Result<void> {
+            tx.exec_params(
+                "INSERT INTO clerk_user_states (subject) VALUES ($1) ON CONFLICT DO NOTHING",
+                subject);
+            const auto state = tx.exec_params(
+                "SELECT revoked_before FROM clerk_user_states WHERE subject = $1 FOR UPDATE",
+                subject);
+            if (revoked_at < state[0][0].as<std::int64_t>())
+                return {};
+            tx.exec_params("UPDATE clerk_user_states SET revoked_before = $2 WHERE subject = $1",
+                           subject,
+                           revoked_at);
+            const auto user_id = clerk_user_id(tx, subject);
+            if (user_id) {
+                // The user lock also serializes every other issuance path with this revocation.
+                tx.exec_params("SELECT id FROM users WHERE id = $1::uuid FOR UPDATE", *user_id);
+                tx.exec_params("UPDATE sessions SET revoked_at = coalesce(revoked_at, now()) WHERE "
+                               "user_id = $1::uuid",
+                               *user_id);
+                tx.exec_params("UPDATE devices SET revoked_at = coalesce(revoked_at, now()) WHERE "
+                               "user_id = $1::uuid",
+                               *user_id);
+            }
+            return {};
+        });
+    }
+    Result<bool> apply_clerk_user_state(const ClerkUserState& in) override {
+        if (in.subject.empty() || in.subject.size() > 256 || in.updated_at < 0) {
+            return std::unexpected(
+                StoreError{"invalid_input", "a Clerk subject and state timestamp are required"});
+        }
+        return with_tx<bool>([&](pqxx::work& tx) -> Result<bool> {
+            tx.exec_params(
+                "INSERT INTO clerk_user_states (subject) VALUES ($1) ON CONFLICT DO NOTHING",
+                in.subject);
+            const auto state = tx.exec_params("SELECT updated_at, deleted, suspended FROM "
+                                              "clerk_user_states WHERE subject = $1 FOR UPDATE",
+                                              in.subject);
+            const auto user_id = clerk_user_id(tx, in.subject);
+            const std::int64_t latest = state[0][0].as<std::int64_t>();
+            if (user_id) {
+                // Serialize account-wide suspension with other subjects and all issuance paths.
+                tx.exec_params("SELECT id FROM users WHERE id = $1::uuid FOR UPDATE", *user_id);
+            }
+            // A retry after security state committed must still finish provisioning/profile work.
+            if (in.updated_at == latest && state[0][0].as<std::int64_t>() == latest &&
+                state[0][1].as<bool>() == in.deleted &&
+                state[0][2].as<bool>() == (in.suspended || in.deleted)) {
+                return true;
+            }
+            if (state[0][1].as<bool>() || in.updated_at < latest ||
+                (in.updated_at == latest && !in.suspended && !in.deleted)) {
+                return false;
+            }
+            tx.exec_params("UPDATE clerk_user_states SET updated_at = GREATEST(updated_at, $2), "
+                           "suspended = $3, deleted = $4 WHERE subject = $1",
+                           in.subject,
+                           in.updated_at,
+                           in.suspended || in.deleted,
+                           in.deleted);
+            if (in.suspended || in.deleted) {
+                tx.exec_params("UPDATE clerk_user_states SET revoked_before = "
+                               "GREATEST(revoked_before, $2) WHERE subject = $1",
+                               in.subject,
+                               in.updated_at);
+            }
+            if (user_id) {
+                tx.exec_params("UPDATE users SET clerk_suspended = EXISTS ("
+                               "SELECT 1 FROM clerk_user_states s JOIN credentials c "
+                               "ON c.subject = 'clerk:' || s.subject WHERE c.user_id = $1::uuid "
+                               "AND c.pool_id = 'lake' AND c.kind = 'oauth' AND s.suspended), "
+                               "disabled_at = CASE WHEN $2 THEN coalesce(disabled_at, now()) "
+                               "ELSE disabled_at END WHERE id = $1::uuid",
+                               *user_id,
+                               in.deleted);
+                if (in.suspended || in.deleted) {
+                    revoke_agent_delegations(tx, *user_id);
+                    tx.exec_params("UPDATE sessions SET revoked_at = coalesce(revoked_at, now()) "
+                                   "WHERE user_id = $1::uuid",
+                                   *user_id);
+                    tx.exec_params("UPDATE devices SET revoked_at = coalesce(revoked_at, now()) "
+                                   "WHERE user_id = $1::uuid",
+                                   *user_id);
+                }
+            }
+            return true;
         });
     }
     Result<ClerkUserProvisioned> provision_clerk_user(const ClerkIdentity& in) override {
@@ -9267,7 +9401,15 @@ public:
     // Every credential's principal passes accepted_principal (lake#870): no credential acts as
     // the operator, and a person's credential names a TAAP identity.
     Result<Principal> context_for(const std::string& secret) override {
-        return accepted_principal(resolve_principal(secret));
+        auto principal = accepted_principal(resolve_principal(secret));
+        if (principal && !principal->user_id.empty()) {
+            return with_tx<Principal>([&](pqxx::work& tx) -> Result<Principal> {
+                if (auto active = active_delegator(tx, principal->user_id); !active)
+                    return std::unexpected(active.error());
+                return *principal;
+            });
+        }
+        return principal;
     }
 
     Result<Principal> resolve_principal(const std::string& secret) {
@@ -9317,7 +9459,8 @@ public:
                     // session issued in a pool is checked there before it is returned.
                     "AND (devices.id IS NULL OR devices.revoked_at IS NULL) "
                     // A disabled account's credentials no longer work (lake#765).
-                    "AND (users.id IS NULL OR users.disabled_at IS NULL)",
+                    "AND (users.id IS NULL OR (users.disabled_at IS NULL AND NOT "
+                    "users.clerk_suspended))",
                 *lookup_id);
             if (rows.empty()) {
                 return std::unexpected(StoreError{"not_found", "session is not active"});
@@ -12205,12 +12348,9 @@ private:
         if (random.empty()) {
             return std::unexpected(StoreError{"store_error", "could not create session secret"});
         }
-        // A disabled account (a Clerk user.deleted, lake#765) is issued nothing.
-        if (!tx.exec_params("SELECT 1 FROM users WHERE id = $1::uuid AND disabled_at IS NOT NULL",
-                            user_id)
-                 .empty()) {
-            return std::unexpected(StoreError{"unauthorized", "this account is disabled"});
-        }
+        // Serialize every issuance path with upstream suspension and local disablement.
+        if (auto active = active_delegator(tx, user_id, true); !active)
+            return std::unexpected(active.error());
         const std::string lookup_id = new_uuid_v4();
         const std::string secret = "ls1." + lookup_id + "." + random;
         const std::string secret_hash = identity_crypto::sha256_hex(secret);

@@ -311,7 +311,7 @@ stream_person(const ApiContext& base, const std::string& user_id, std::string me
         return std::unexpected(user.error());
     }
     // The person's identity is a TAAP id, never the operator's (lake#870).
-    if (!user->disabled_at.empty() || !control::valid_principal_id(user->taap_id)) {
+    if (!user->may_act() || !control::valid_principal_id(user->taap_id)) {
         return std::unexpected(
             control::StoreError{"unauthorized", "stream's delegating account is not active"});
     }

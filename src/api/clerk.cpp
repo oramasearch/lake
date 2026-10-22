@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <nlohmann/json.hpp>
 
 namespace lake::api {
 namespace {
@@ -60,6 +61,44 @@ std::optional<ClerkConfig> clerk_config(std::string_view publishable_key) {
             std::string(publishable_key), host, issuer, issuer + "/.well-known/jwks.json"};
     }
     return std::nullopt;
+}
+
+std::expected<ClerkUserStatus, std::string>
+clerk_user_status(const std::string& subject, const std::string& secret_key, const ClerkGet& get) {
+    if (secret_key.empty() || !get) {
+        return std::unexpected("Lake cannot check the Clerk account right now.");
+    }
+    // Clerk identifiers are opaque path components; refuse delimiters and non-ASCII bytes.
+    if (subject.empty() || subject.size() > 256 ||
+        !std::ranges::all_of(subject, [](unsigned char c) {
+            return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+                   c == '_' || c == '-';
+        })) {
+        return std::unexpected("The Clerk user identifier is invalid.");
+    }
+    ClerkResponse response;
+    try {
+        response = get("https://api.clerk.com/v1/users/" + subject,
+                       {{"Authorization", "Bearer " + secret_key}, {"Accept", "application/json"}});
+    } catch (...) {
+        return std::unexpected("Lake cannot check the Clerk account right now.");
+    }
+    if (!response.error.empty() || response.status != 200) {
+        return std::unexpected("Lake cannot check the Clerk account right now.");
+    }
+    const auto user = nlohmann::json::parse(response.body, nullptr, false);
+    if (!user.is_object() || !user.contains("id") || user.at("id") != subject ||
+        !user.contains("banned") || !user.at("banned").is_boolean() || !user.contains("locked") ||
+        !user.at("locked").is_boolean() ||
+        (user.contains("deprovisioned") && !user.at("deprovisioned").is_boolean()) ||
+        !user.contains("updated_at") || !user.at("updated_at").is_number_integer() ||
+        user.at("updated_at").get<std::int64_t>() < 0) {
+        return std::unexpected("Clerk returned an incomplete account status.");
+    }
+    return ClerkUserStatus{user.at("updated_at").get<std::int64_t>(),
+                           user.at("banned").get<bool>(),
+                           user.at("locked").get<bool>(),
+                           user.value("deprovisioned", false)};
 }
 
 } // namespace lake::api

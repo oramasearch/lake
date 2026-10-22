@@ -2,7 +2,7 @@
 --
 -- SOURCE OF TRUTH: oramasearch/lake, db/schema.sql. The operator vendors a byte-identical copy at
 -- internal/controller/assets/lake-schema.sql and applies it to each Lake's Postgres through a
--- PostgresSchema (one transaction, guarded on the `app_forward_auth_guard` table, versioned by
+-- PostgresSchema (one transaction, guarded on the `clerk_revocation_guard` table, versioned by
 -- content hash).
 -- Keep the two files identical; the operator's version string changes exactly when this does.
 --
@@ -4713,6 +4713,37 @@ INSERT INTO schema_migrations (version) VALUES ('0093_root_recovery_participants
     ON CONFLICT DO NOTHING;
 
 -- ---------------------------------------------------------------------------------------------
+-- 0094_clerk_revocation (lake#948, docs/api/clerk.md): ordered upstream account state and a
+-- monotonic revocation watermark prevent re-exchange of templates issued before revocation.
+-- Revocation is account-wide because Clerk templates carry no session id. The operator must
+-- vendor this schema and use clerk_revocation_guard. Revoke legacy Clerk-linked credentials
+-- once: old ignored deliveries cannot be replayed, and their originating sessions are unknown.
+-- ---------------------------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS clerk_user_states (
+    subject text PRIMARY KEY CHECK (length(subject) BETWEEN 1 AND 256),
+    updated_at bigint NOT NULL DEFAULT -1,
+    revoked_before bigint NOT NULL DEFAULT -1,
+    suspended boolean NOT NULL DEFAULT false,
+    deleted boolean NOT NULL DEFAULT false
+);
+ALTER TABLE users ADD COLUMN IF NOT EXISTS clerk_suspended boolean NOT NULL DEFAULT false;
+DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE version = '0094_clerk_revocation') THEN
+        INSERT INTO clerk_user_states (subject, revoked_before)
+        SELECT substring(subject FROM 7), floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint
+        FROM credentials WHERE pool_id = 'lake' AND kind = 'oauth' AND subject LIKE 'clerk:%'
+        ON CONFLICT (subject) DO UPDATE SET revoked_before =
+            GREATEST(clerk_user_states.revoked_before, EXCLUDED.revoked_before);
+        UPDATE sessions SET revoked_at = coalesce(revoked_at, now())
+        WHERE user_id IN (SELECT user_id FROM credentials WHERE pool_id = 'lake'
+                         AND kind = 'oauth' AND subject LIKE 'clerk:%');
+        UPDATE devices SET revoked_at = coalesce(revoked_at, now())
+        WHERE user_id IN (SELECT user_id FROM credentials WHERE pool_id = 'lake'
+                         AND kind = 'oauth' AND subject LIKE 'clerk:%');
+    END IF;
+END $$;
+CREATE TABLE IF NOT EXISTS clerk_revocation_guard (applied_at timestamptz NOT NULL DEFAULT now());
+INSERT INTO schema_migrations (version) VALUES ('0094_clerk_revocation') ON CONFLICT DO NOTHING;
 -- 0095_model_token_prices (LSR-095, lake#961, docs/api/model-gateway.md): exact model input/output
 -- billing classes. Preserve historical GPU-style classes; only model_tokens may use model/direction.
 -- ---------------------------------------------------------------------------------------------

@@ -8,7 +8,7 @@ document rules, confidentiality, and the decisions not to drift past. Read both.
 
 ## Status
 
-Status: 2026-10-21. The current release is **v0.4.0** ([`docs/releases/v0.4.0.md`](docs/releases/v0.4.0.md): the security release from the multi-tenant audit and the pre-launch review, SAML sign-in, OpenID Connect discovery and `delete_account`); before it **v0.3.1** (billing through a shared Stripe account); before that **v0.3.0**
+Status: 2026-10-22. The current release is **v0.4.0** ([`docs/releases/v0.4.0.md`](docs/releases/v0.4.0.md): the security release from the multi-tenant audit and the pre-launch review, SAML sign-in, OpenID Connect discovery and `delete_account`); before it **v0.3.1** (billing through a shared Stripe account); before that **v0.3.0**
 ([`docs/releases/v0.3.0.md`](docs/releases/v0.3.0.md): the lake.live order sheet and the 2026-10-18
 UX review's fixes, with its known issues); v0.2.0 ([`docs/releases/v0.2.0.md`](docs/releases/v0.2.0.md))
 added secure networking, regions, the managed key and own identity, Clerk webhooks, the agents'
@@ -69,8 +69,15 @@ verified with Lake's own Svix HMAC and `LAKE_CLERK_WEBHOOK_SECRET` (404 without 
 `svix-id` once: `user.created` provisions the account as a first Clerk sign-in does, `user.updated`
 sets its verified email and name, `user.deleted` disables it (`users.disabled_at`), revokes its
 sessions and delegated agent credentials, and withdraws its agent workloads without erasing its
-account or workspaces (lake#951); every delivery is audited centrally. Not deployed; the operator
-must vendor the schema, select `clerk_webhooks_guard` and configure the endpoint and secret
+account or workspaces (lake#951); every delivery is audited centrally. Migration
+`0094_clerk_revocation` (lake#948) adds ordered ban/lock/deprovisioning suspension and account-wide
+revocation on Clerk session events, including old-template re-exchange prevention. Suspended
+accounts also lose delegated agent and stream authority. Every template exchange checks Clerk's
+Backend API without caching and requires `LAKE_CLERK_SECRET_KEY`; a newer unban/unlock permits
+only new credentials. Applying 0094 revokes legacy Clerk-linked credentials and rejects
+pre-migration template JWTs once; later schema applications preserve new credentials. Not
+deployed; the operator must vendor the schema, select `clerk_revocation_guard`, subscribe to
+session end/revocation and configure the endpoint, webhook secret and Clerk server key
 (orama-operator#541). See [`docs/api/clerk.md#webhooks`](docs/api/clerk.md#webhooks).
 
 SAML sign-in has an Assertion Consumer Service (lake#836, migration `0092_saml_sign_in`):
@@ -920,6 +927,7 @@ one adapter TU) and the pure renderers in `include/zetta/api/web_ui.hpp`.
   vendored copy at `internal/controller/assets/lake-schema.sql` and applies it per Lake as an
   owned `PostgresSchema` (one transaction, guarded on the table the **newest** migration creates,
   `model_token_prices_guard` in the source tree, versioned by content hash).
+  `clerk_revocation_guard` in the source tree, versioned by content hash).
   Change the schema HERE, then copy it into the operator in the same change; the operator's test
   checks the copy carries the source-of-truth header. Migrations are single-shot today
   (incremental migrations are the PostgresSchema follow-up), so until then a schema change means

@@ -3893,6 +3893,8 @@ Result<IssuedSession> InMemoryStore::sign_in_password(const PasswordSignIn& inpu
                 current->recovery_hashes != credential.recovery_hashes)
                 return std::unexpected(
                     StoreError{"unauthorized", "authentication credentials changed; retry"});
+            if (auto active = active_delegator_locked(current->user_id); !active)
+                return std::unexpected(active.error());
             Device& device = add_device(devices_, current->user_id, input.device_name);
             IssuedSession issued = add_session(
                 sessions_, current->user_id, pool, device.id, "browser", "", {"*"}, "", 86400);
@@ -3928,6 +3930,8 @@ Result<IssuedSession> InMemoryStore::sign_in_taap(const TaapSignIn& input) {
     if (user == users_.end() || credential == passwords_.end()) {
         return std::unexpected(StoreError{"unauthorized", "TAAP identity is not registered"});
     }
+    if (auto active = active_delegator_locked(user->id); !active)
+        return std::unexpected(active.error());
     Device& device = add_device(devices_, user->id, input.device_name);
     IssuedSession issued =
         add_session(sessions_, user->id, input.pool_id, device.id, "taap", "", {"*"}, "", 86400);
@@ -4126,6 +4130,8 @@ Result<IssuedSession> InMemoryStore::sign_in_totp(const PasswordSignIn& input) {
             if (!valid_totp) {
                 current->recovery_hashes.erase(recovery->first);
             }
+            if (auto active = active_delegator_locked(current->user_id); !active)
+                return std::unexpected(active.error());
             Device& device = add_device(devices_, current->user_id, input.device_name);
             IssuedSession issued = add_session(
                 sessions_, current->user_id, pool, device.id, "browser", "", {"*"}, "", 86400);
@@ -4287,6 +4293,8 @@ Result<IssuedSession> InMemoryStore::sign_in_passkey(const PasskeyAssertion& inp
             return std::unexpected(
                 StoreError{"unauthorized", "passkey sign count did not advance"});
         }
+        if (auto active = active_delegator_locked(credential.user_id); !active)
+            return std::unexpected(active.error());
         credential.sign_count = *sign_count;
         Device& device = add_device(devices_, credential.user_id, input.device_name);
         IssuedSession issued = add_session(sessions_,
@@ -4307,6 +4315,10 @@ Result<IssuedSession> InMemoryStore::sign_in_passkey(const PasskeyAssertion& inp
 }
 
 Result<IssuedSession> InMemoryStore::sign_in_oauth(const OAuthIdentity& input) {
+    if (input.provider == "clerk" && (input.pool_id.empty() || input.pool_id == "lake")) {
+        return std::unexpected(
+            StoreError{"invalid_input", "Clerk requires its verified template exchange"});
+    }
     if (input.provider.empty() || input.subject.empty())
         return std::unexpected(StoreError{"invalid_input", "provider and subject are required"});
     std::lock_guard lock(mutex_);
@@ -4319,6 +4331,8 @@ Result<IssuedSession> InMemoryStore::sign_in_oauth(const OAuthIdentity& input) {
     const std::string subject = input.provider + ":" + input.subject;
     for (const auto& credential : oauth_credentials_) {
         if (credential.pool_id == pool && credential.subject == subject) {
+            if (auto active = active_delegator_locked(credential.user_id); !active)
+                return std::unexpected(active.error());
             Device& device = add_device(devices_, credential.user_id, input.device_name);
             IssuedSession issued = add_session(
                 sessions_, credential.user_id, pool, device.id, "browser", "", {"*"}, "", 86400);
@@ -4399,6 +4413,26 @@ Result<ClerkUserProvisioned> InMemoryStore::clerk_user_locked(const ClerkIdentit
                                 now,
                                 now});
     }
+    if (const auto state = clerk_user_states_.find(input.subject);
+        state != clerk_user_states_.end()) {
+        if (state->second.suspended || state->second.deleted) {
+            auto user = std::ranges::find(users_, result.user_id, &User::id);
+            user->clerk_suspended = true;
+            revoke_agent_delegations_locked(result.user_id);
+            const auto now = now_iso8601();
+            for (auto& session : sessions_) {
+                if (session.user_id == result.user_id && session.revoked_at.empty())
+                    session.revoked_at = now;
+            }
+            for (auto& device : devices_) {
+                if (device.user_id == result.user_id && device.revoked_at.empty())
+                    device.revoked_at = now;
+            }
+        }
+        if (state->second.deleted) {
+            disabled_users_.insert(result.user_id);
+        }
+    }
     for (const auto& user : users_) {
         if (user.id == result.user_id) {
             result.taap_id = user.taap_id;
@@ -4408,14 +4442,35 @@ Result<ClerkUserProvisioned> InMemoryStore::clerk_user_locked(const ClerkIdentit
 }
 
 Result<IssuedSession> InMemoryStore::sign_in_clerk(const ClerkIdentity& input) {
-    std::lock_guard lock(mutex_);
-    const auto found = clerk_user_locked(input);
-    if (!found) {
-        return std::unexpected(found.error());
+    if (input.issued_at <= 0 || input.subject.empty() || input.subject.size() > 256) {
+        return std::unexpected(
+            StoreError{"invalid_input", "a Clerk subject and token issue time are required"});
     }
-    if (disabled_users_.contains(found->user_id)) {
+    std::lock_guard lock(mutex_);
+    if (const auto state = clerk_user_states_.find(input.subject);
+        state != clerk_user_states_.end() && (state->second.suspended || state->second.deleted)) {
         return std::unexpected(StoreError{"unauthorized", "this account is disabled"});
     }
+    if (const auto revoked = clerk_revoked_before_.find(input.subject);
+        revoked != clerk_revoked_before_.end() && input.issued_at <= revoked->second / 1000) {
+        return std::unexpected(StoreError{"unauthorized", "the Clerk token predates revocation"});
+    }
+    const auto found = clerk_user_locked(input);
+    if (!found)
+        return std::unexpected(found.error());
+    for (const auto& credential : oauth_credentials_) {
+        if (credential.user_id == found->user_id && credential.pool_id == "lake" &&
+            credential.subject.starts_with("clerk:")) {
+            const auto revoked = clerk_revoked_before_.find(credential.subject.substr(6));
+            if (revoked != clerk_revoked_before_.end() &&
+                input.issued_at <= revoked->second / 1000) {
+                return std::unexpected(
+                    StoreError{"unauthorized", "the Clerk token predates revocation"});
+            }
+        }
+    }
+    if (auto active = active_delegator_locked(found->user_id); !active)
+        return std::unexpected(active.error());
     Device& device = add_device(devices_, found->user_id, input.device_name);
     IssuedSession issued =
         add_session(sessions_, found->user_id, "lake", device.id, "browser", "", {"*"}, "", 86400);
@@ -4423,6 +4478,95 @@ Result<IssuedSession> InMemoryStore::sign_in_clerk(const ClerkIdentity& input) {
         return std::unexpected(StoreError{"store_error", "could not issue session"});
     issued.session.reason.clear();
     return issued;
+}
+
+Result<void> InMemoryStore::revoke_clerk_sessions(const std::string& subject,
+                                                  std::int64_t revoked_at) {
+    if (subject.empty() || subject.size() > 256 || revoked_at < 0) {
+        return std::unexpected(
+            StoreError{"invalid_input", "a Clerk subject and revocation timestamp are required"});
+    }
+    std::lock_guard lock(mutex_);
+    auto [revoked, inserted] = clerk_revoked_before_.try_emplace(subject, -1);
+    if (revoked_at < revoked->second)
+        return {};
+    revoked->second = revoked_at;
+    for (const auto& credential : oauth_credentials_) {
+        if (credential.pool_id == "lake" && credential.subject == "clerk:" + subject) {
+            const auto now = now_iso8601();
+            for (auto& session : sessions_) {
+                if (session.user_id == credential.user_id && session.revoked_at.empty())
+                    session.revoked_at = now;
+            }
+            for (auto& device : devices_) {
+                if (device.user_id == credential.user_id && device.revoked_at.empty())
+                    device.revoked_at = now;
+            }
+        }
+    }
+    return {};
+}
+
+Result<bool> InMemoryStore::apply_clerk_user_state(const ClerkUserState& input) {
+    if (input.subject.empty() || input.subject.size() > 256 || input.updated_at < 0) {
+        return std::unexpected(
+            StoreError{"invalid_input", "a Clerk subject and state timestamp are required"});
+    }
+    std::lock_guard lock(mutex_);
+    const std::string subject = "clerk:" + input.subject;
+    std::string user_id;
+    for (const auto& credential : oauth_credentials_) {
+        if (credential.pool_id == "lake" && credential.subject == subject) {
+            user_id = credential.user_id;
+        }
+    }
+    auto state = clerk_user_states_.find(input.subject);
+    const std::int64_t latest = state == clerk_user_states_.end() ? -1 : state->second.updated_at;
+    // A retry after security state committed must still finish provisioning/profile work.
+    if (state != clerk_user_states_.end() && input.updated_at == latest &&
+        state->second.updated_at == latest && state->second.deleted == input.deleted &&
+        state->second.suspended == (input.suspended || input.deleted)) {
+        return true;
+    }
+    if ((state != clerk_user_states_.end() && state->second.deleted) || input.updated_at < latest ||
+        (input.updated_at == latest && !input.suspended && !input.deleted)) {
+        return false;
+    }
+    if (input.suspended || input.deleted) {
+        auto [revoked, inserted] = clerk_revoked_before_.try_emplace(input.subject, -1);
+        revoked->second = std::max(revoked->second, input.updated_at);
+    }
+    clerk_user_states_[input.subject] = input;
+    clerk_user_states_[input.subject].updated_at = std::max(latest, input.updated_at);
+    clerk_user_states_[input.subject].suspended = input.suspended || input.deleted;
+    if (!user_id.empty()) {
+        bool suspended = false;
+        for (const auto& credential : oauth_credentials_) {
+            if (credential.user_id == user_id && credential.pool_id == "lake" &&
+                credential.subject.starts_with("clerk:")) {
+                const auto linked = clerk_user_states_.find(credential.subject.substr(6));
+                suspended |= linked != clerk_user_states_.end() && linked->second.suspended;
+            }
+        }
+        auto user = std::ranges::find(users_, user_id, &User::id);
+        user->clerk_suspended = suspended;
+        if (input.deleted) {
+            disabled_users_.insert(user_id);
+        }
+        if (input.suspended || input.deleted) {
+            revoke_agent_delegations_locked(user_id);
+            const std::string now = now_iso8601();
+            for (auto& session : sessions_) {
+                if (session.user_id == user_id && session.revoked_at.empty())
+                    session.revoked_at = now;
+            }
+            for (auto& device : devices_) {
+                if (device.user_id == user_id && device.revoked_at.empty())
+                    device.revoked_at = now;
+            }
+        }
+    }
+    return true;
 }
 
 Result<ClerkUserProvisioned> InMemoryStore::provision_clerk_user(const ClerkIdentity& input) {
@@ -4464,7 +4608,7 @@ Result<void> InMemoryStore::active_delegator_locked(const std::string& user_id) 
         return {}; // system work carries no person's authority
     }
     const auto user = std::ranges::find(users_, user_id, &User::id);
-    if (user == users_.end() || disabled_users_.contains(user_id) ||
+    if (user == users_.end() || !user->may_act() || disabled_users_.contains(user_id) ||
         deleted_users_.contains(user_id)) {
         return std::unexpected(StoreError{"unauthorized", "delegating account is not active"});
     }
@@ -4797,6 +4941,8 @@ Result<IssuedSession> InMemoryStore::create_token(const NewToken& input) {
     if (input.is_static && input.reason.empty())
         return std::unexpected(StoreError{"invalid_input", "a static token requires a reason"});
     std::lock_guard lock(mutex_);
+    if (auto active = active_delegator_locked(input.user_id); !active)
+        return std::unexpected(active.error());
     std::string parent_expiry;
     if (!input.parent_session_id.empty()) {
         const auto parent = std::ranges::find(sessions_, input.parent_session_id, &Session::id);
@@ -4896,7 +5042,13 @@ Result<void> InMemoryStore::revoke_device(const std::string& user_id,
 
 // Every credential's principal passes accepted_principal (lake#870).
 Result<Principal> InMemoryStore::context_for(const std::string& secret) {
-    return accepted_principal(resolve_principal(secret));
+    auto principal = accepted_principal(resolve_principal(secret));
+    if (principal && !principal->user_id.empty()) {
+        std::lock_guard lock(mutex_);
+        if (auto active = active_delegator_locked(principal->user_id); !active)
+            return std::unexpected(active.error());
+    }
+    return principal;
 }
 
 Result<Principal> InMemoryStore::resolve_principal(const std::string& secret) {
@@ -5368,6 +5520,8 @@ Result<IssuedSession> InMemoryStore::sign_in_sso(const SsoIdentity& input) {
     if (credential == sso_credentials_.end()) {
         sso_credentials_.push_back(SsoCredential{input.provider_id, input.subject, user_id});
     }
+    if (auto active = active_delegator_locked(user_id); !active)
+        return std::unexpected(active.error());
     Device& device = add_device(devices_, user_id, input.device_name);
     return add_session(
         sessions_, user_id, provider->pool_id, device.id, "browser", "", {"*"}, "", 86400);
@@ -7848,6 +8002,8 @@ Result<IssuedSession> InMemoryStore::recover_with_code(const std::string& pool_i
                 return std::unexpected(
                     StoreError{"unauthorized", "authentication credentials changed; retry"});
             current->recovery_hashes.erase(recovery->first);
+            if (auto active = active_delegator_locked(current->user_id); !active)
+                return std::unexpected(active.error());
             Device& device = add_device(devices_, current->user_id, device_name);
             IssuedSession issued = add_session(
                 sessions_, current->user_id, pool_id, device.id, "browser", "", {"*"}, "", 86400);
@@ -8048,6 +8204,8 @@ Result<IssuedSession> InMemoryStore::complete_recovery(const std::string& recove
             return std::unexpected(
                 StoreError{"conflict", "two administrator approvals are required"});
         }
+        if (auto active = active_delegator_locked(found->attempt.user_id); !active)
+            return std::unexpected(active.error());
         const std::string revoked_at = now_iso8601();
         for (Session& session : sessions_) {
             if (session.user_id == found->attempt.user_id && session.revoked_at.empty()) {

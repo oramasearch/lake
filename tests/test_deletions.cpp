@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <atomic>
 #include <barrier>
+#include <ctime>
 #include <memory>
 #include <string>
 #include <vector>
@@ -50,7 +51,8 @@ lake::control::ClerkIdentity person(std::string subject) {
             "browser",
             identity->taap_id,
             identity->public_key,
-            identity->wrapped_seed};
+            identity->wrapped_seed,
+            static_cast<std::int64_t>(std::time(nullptr))};
 }
 
 // People with personal spaces, their workspaces Ready in fake workspace Zettas, and the registry.

@@ -527,6 +527,9 @@ public:
     Result<IssuedSession> sign_in_oauth(const OAuthIdentity&) override;
     Result<IssuedSession> sign_in_clerk(const ClerkIdentity&) override;
     Result<ClerkUserProvisioned> provision_clerk_user(const ClerkIdentity&) override;
+    Result<bool> apply_clerk_user_state(const ClerkUserState&) override;
+    Result<void> revoke_clerk_sessions(const std::string& subject,
+                                       std::int64_t revoked_at) override;
     Result<std::string> update_clerk_user(const ClerkIdentity&) override;
     Result<std::string> disable_clerk_user(const std::string& subject) override;
     Result<bool> clerk_webhook_applied(const std::string& delivery_id) override;
@@ -780,6 +783,8 @@ private:
     // Accounts disabled by a Clerk user.deleted (lake#765), and the deliveries applied.
     std::set<std::string> disabled_users_;
     std::set<std::string> clerk_webhook_deliveries_;
+    std::map<std::string, ClerkUserState> clerk_user_states_;
+    std::map<std::string, std::int64_t> clerk_revoked_before_;
     // user id -> when its managed seed was destroyed by using its own identity (lake#762).
     std::map<std::string, std::string> managed_seed_destroyed_at_;
     struct IdentityLinkChallengeRecord {
