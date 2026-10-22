@@ -1795,7 +1795,10 @@ liquid::runtime::task<ApiResult> model_completion(const json& input, ApiContext&
     }
     const ModelProviderResponse& response = *ran;
     context.audit_details["provider_status"] = response.status;
-    if (response.status < 200 || response.status >= 300) {
+    // An explicit HTTP refusal is unbilled. A transport failure with no HTTP status is
+    // ambiguous: the provider may have generated an answer, so account for it below.
+    if ((response.status < 200 || response.status >= 300) &&
+        !(response.status == 0 && !response.error.empty())) {
         const ApiError failure =
             model_provider_failure(response.status, response.body, response.error);
         co_return ApiResult::failure(failure.code, failure.message);

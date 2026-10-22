@@ -203,14 +203,17 @@ TEST(ModelGateway, PreparesEachRequestAndAsksAStreamForItsUsage) {
     const auto plain = prepare_model_request("chat/completions", {{"model", "gpt-5.5"}});
     ASSERT_TRUE(plain);
     EXPECT_FALSE(plain->contains("stream_options"))
-        << "an answer that does not stream is unchanged";
+        << "a non-streaming request needs no stream options";
 
     const auto streamed = prepare_model_request(
         "chat/completions",
-        {{"model", "gpt-5.5"}, {"stream", true}, {"stream_options", {{"other", 1}}}});
+        {{"model", "gpt-5.5"}, {"stream", true}, {"stream_options", {{"include_usage", false}}}});
     ASSERT_TRUE(streamed);
     EXPECT_EQ((*streamed)["stream_options"]["include_usage"], true);
-    EXPECT_EQ((*streamed)["stream_options"]["other"], 1) << "the caller's own options are kept";
+    EXPECT_EQ((*streamed)["store"], false);
+    EXPECT_FALSE(prepare_model_request(
+        "chat/completions",
+        {{"model", "gpt-5.5"}, {"stream", true}, {"stream_options", {{"other", 1}}}}));
 
     // The Responses API reports usage in its last event on its own.
     const auto responses =
@@ -232,6 +235,158 @@ TEST(ModelGateway, RefusesABackgroundAnswer) {
     EXPECT_TRUE(prepare_model_request("responses", {{"model", "gpt-5.5"}, {"background", false}}));
     EXPECT_TRUE(
         prepare_model_request("responses", {{"model", "gpt-5.5"}, {"background", nullptr}}));
+}
+
+// Each rejected request would spend the platform key on work outside token accounting.
+TEST(ModelCompletion, RefusesUnmeteredFeaturesBeforeCallingTheProvider) {
+    GatewayRig rig;
+    const auto task = rig.task(rig.home, "agent-project");
+    const std::vector<std::pair<std::string, json>> features{
+        {"background", true},
+        {"tools", json::array({{{"type", "web_search_preview"}}})},
+        {"tools", json::array({{{"type", "file_search"}, {"vector_store_ids", {"vs_other"}}}})},
+        {"tools", json::array({{{"type", "code_interpreter"}, {"container", {{"type", "auto"}}}}})},
+        {"tools", json::array({{{"type", "image_generation"}}})},
+        {"tools", json::array({{{"type", "mcp"}, {"server_url", "https://example.test"}}})},
+        {"tools", json::array({{{"type", "future_paid_tool"}}})},
+        {"previous_response_id", "resp_other"},
+        {"conversation", "conv_other"},
+        {"prompt", {{"id", "pmpt_other"}}},
+        {"store", true},
+        {"store", "false"},
+        {"service_tier", "priority"},
+        {"modalities", {"text", "audio"}},
+        {"audio", {{"voice", "alloy"}, {"format", "wav"}}},
+        {"web_search_options", json::object()},
+        {"future_paid_feature", true},
+        {"Background", true},
+        {"stream_options", {{"future_paid_feature", true}}},
+        {"tools", json::array({{{"type", "function"}, {"name", "f"}, {"container", "auto"}}})},
+        {"tools",
+         json::array(
+             {{{"type", "function"}, {"function", {{"name", "f"}, {"container", "auto"}}}}})},
+        {"tool_choice", {{"type", "web_search_preview"}}},
+        {"input", json::array({{{"type", "item_reference"}, {"id", "msg_other"}}})},
+        {"input", json::array({nullptr})},
+        {"input",
+         json::array({{{"role", "user"},
+                       {"content",
+                        json::array({{{"type", "input_image"},
+                                      {"image_url", "https://example.test/x"}}})}}})},
+        {"input",
+         json::array(
+             {{{"role", "user"},
+               {"content", json::array({{{"type", "input_file"}, {"file_id", "file_other"}}})}}})},
+        {"messages",
+         json::array(
+             {{{"role", "user"},
+               {"content",
+                json::array({{{"type", "input_audio"},
+                              {"input_audio", {{"data", "AA=="}, {"format", "wav"}}}}})}}})},
+        {"messages", json::array({{{"role", "assistant"}, {"audio", {{"id", "audio_other"}}}}})},
+        {"text", {{"format", {{"type", "future_paid_format"}}}}},
+        {"logit_bias", {{"tools", {{"type", "web_search_preview"}}}}},
+    };
+    for (const std::string endpoint : {"chat/completions", "responses", "embeddings"}) {
+        for (const auto& [field, value] : features) {
+            SCOPED_TRACE(endpoint + ": " + field + "=" + value.dump());
+            json request{{"model", endpoint == "embeddings" ? "text-embedding-3-small" : "gpt-5.5"},
+                         {field, value}};
+            auto context = rig.task_context(task);
+            const auto refused = rig.call({{"endpoint", endpoint}, {"request", request}}, context);
+            EXPECT_FALSE(refused.ok);
+            EXPECT_EQ(refused.error.code, "invalid_input");
+            EXPECT_TRUE(refused.error.path.starts_with("/request/"));
+            EXPECT_EQ(rig.fake.calls(), 0U);
+        }
+    }
+}
+
+TEST(ModelGateway, RejectsEncodedFieldsAndReturnsEscapedPointers) {
+    using lake::api::prepare_model_request;
+    const auto encoded = prepare_model_request(
+        "responses",
+        json::parse(
+            R"({"model":"gpt-5.5","\u0074ools":[{"type":"web_search_preview","name":"lookup"}]})"));
+    ASSERT_FALSE(encoded);
+    EXPECT_EQ(encoded.error().path, "/request/tools/0/type");
+    const auto escaped =
+        prepare_model_request("responses", {{"model", "gpt-5.5"}, {"future/paid~feature", true}});
+    ASSERT_FALSE(escaped);
+    EXPECT_EQ(escaped.error().path, "/request/future~1paid~0feature");
+}
+
+TEST(ModelCompletion, CountsTransportFailuresWithoutAnHttpStatus) {
+    GatewayRig rig;
+    const auto task = rig.task(rig.home, "agent-project");
+    // A timeout cannot establish whether the provider generated a billable answer.
+    rig.fake.answer = {0, {}, "outbound request timed out"};
+    auto context = rig.task_context(task);
+    const auto failed = rig.call(chat(), context);
+    EXPECT_FALSE(failed.ok);
+    EXPECT_EQ(failed.error.code, "store_unavailable");
+    ASSERT_EQ(rig.fake.calls(), 1U);
+    const auto input = lake::api::estimated_model_tokens(rig.fake.requests[0].body.size());
+    EXPECT_EQ(context.audit_details["input_tokens"], input);
+    EXPECT_EQ(context.audit_details["usage_reported"], false);
+    static_cast<void>(liquid::runtime::block_on(rig.recorder.flush()));
+    EXPECT_EQ(rig.workspaces.records(rig.home).metric_total("lake_usage",
+                                                            {{"dimension", "model_tokens"}}),
+              static_cast<double>(input));
+}
+
+TEST(ModelGateway, AcceptsTextAndCallerExecutedFunctions) {
+    using lake::api::prepare_model_request;
+    // A schema's property names are data, even when they match disabled provider features.
+    const json parameters{
+        {"type", "object"},
+        {"properties", {{"background", {{"type", "boolean"}}}, {"tools", {{"type", "string"}}}}}};
+    const json function{{"name", "lookup"}, {"parameters", parameters}, {"strict", true}};
+    auto completion = chat()["request"];
+    completion["tools"] = json::array({{{"type", "function"}, {"function", function}}});
+    completion["tool_choice"] = {{"type", "function"}, {"function", {{"name", "lookup"}}}};
+    completion["messages"].push_back(
+        {{"role", "assistant"},
+         {"content", nullptr},
+         {"tool_calls",
+          json::array({{{"id", "call_1"},
+                        {"type", "function"},
+                        {"function", {{"name", "lookup"}, {"arguments", "{}"}}}}})}});
+    completion["messages"].push_back(
+        {{"role", "tool"}, {"tool_call_id", "call_1"}, {"content", "ok"}});
+    completion["response_format"] = {{"type", "json_schema"},
+                                     {"json_schema", {{"name", "result"}, {"schema", parameters}}}};
+    const auto chat_request = prepare_model_request("chat/completions", completion);
+    ASSERT_TRUE(chat_request) << chat_request.error().message;
+    EXPECT_EQ((*chat_request)["tools"], completion["tools"]);
+    EXPECT_EQ((*chat_request)["store"], false);
+
+    json tool = function;
+    tool["type"] = "function";
+    const auto response = prepare_model_request(
+        "responses",
+        {{"model", "gpt-5.5"},
+         {"tools", json::array({tool})},
+         {"tool_choice", {{"type", "function"}, {"name", "lookup"}}},
+         {"input",
+          json::array(
+              {{{"role", "user"},
+                {"content", json::array({{{"type", "input_text"}, {"text", "hello"}}})}},
+               {{"type", "function_call"},
+                {"call_id", "call_1"},
+                {"name", "lookup"},
+                {"arguments", "{}"}},
+               {{"type", "function_call_output"}, {"call_id", "call_1"}, {"output", "ok"}}})},
+         {"text",
+          {{"format", {{"type", "json_schema"}, {"name", "result"}, {"schema", parameters}}}}}});
+    ASSERT_TRUE(response) << response.error().message;
+    EXPECT_EQ((*response)["store"], false);
+    for (const json& input :
+         {json("hello"), json({"hello", "world"}), json({1, 2}), json({{1, 2}, {3, 4}})}) {
+        const auto embedding = prepare_model_request(
+            "embeddings", {{"model", "text-embedding-3-small"}, {"input", input}});
+        ASSERT_TRUE(embedding) << embedding.error().message;
+    }
 }
 
 TEST(ModelGateway, ReadsTheUsageOfEveryAnswerShape) {
@@ -774,6 +929,23 @@ TEST(ModelGatewayRoute, AnswersTheOpenAIShapeForATaskCredential) {
     EXPECT_EQ(answer["object"], "chat.completion");
     EXPECT_EQ(answer["usage"]["prompt_tokens"], 1200);
     EXPECT_EQ(fake.calls(), 1U);
+
+    for (const std::string prefix : {std::string("/openai/v1/"), "/w/" + home + "/openai/v1/"}) {
+        for (const std::string endpoint : {"chat/completions", "responses", "embeddings"}) {
+            json request{{"model", endpoint == "embeddings" ? "text-embedding-3-small" : "gpt-5.5"},
+                         {"tools", json::array({{{"type", "web_search_preview"}}})}};
+            const auto [blocked_status, blocked] = post(prefix + endpoint, credential, request);
+            EXPECT_EQ(blocked_status, 400U) << blocked.dump();
+            EXPECT_EQ(blocked["error"]["code"], "invalid_input");
+            EXPECT_EQ(fake.calls(), 1U);
+            request.erase("tools");
+            request["background"] = true;
+            const auto [async_status, async] = post(prefix + endpoint, credential, request);
+            EXPECT_EQ(async_status, 400U) << async.dump();
+            EXPECT_EQ(async["error"]["param"], "/request/background");
+            EXPECT_EQ(fake.calls(), 1U);
+        }
+    }
 
     const auto [refused_status, refused] =
         post("/openai/v1/chat/completions", "gateway-admin", chat()["request"]);
