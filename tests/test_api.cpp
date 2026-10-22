@@ -3190,7 +3190,7 @@ TEST(IdentityHttp, ApiSignUpIssuesAndResolvesHttpOnlySessions) {
     const std::string enrolled = http_request(server.port(),
                                               "POST",
                                               "/v1/enroll_mfa",
-                                              "{}",
+                                              R"({"password":"correct horse battery staple"})",
                                               "application/json",
                                               cookie,
                                               {},
@@ -8219,7 +8219,7 @@ TEST(Identity, PasswordSessionsTokensAndRevocation) {
     user_context.credential_expires_at_unix = principal->expires_at_unix;
 
     const ApiResult enrollment = *liquid::runtime::block_on(
-        s.registry.call_async("enroll_mfa", json::object(), user_context));
+        s.registry.call_async("enroll_mfa", {{"password", "correct horse battery"}}, user_context));
     ASSERT_TRUE(enrollment.ok) << enrollment.error.message;
     const std::string uri = enrollment.value["otpauth_uri"];
     EXPECT_TRUE(uri.starts_with("otpauth://totp/lake:"));
@@ -8230,6 +8230,13 @@ TEST(Identity, PasswordSessionsTokensAndRevocation) {
     ASSERT_FALSE(secret.empty());
     EXPECT_EQ(secret.find_first_not_of("ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"), std::string::npos)
         << secret;
+    const auto refused = *liquid::runtime::block_on(
+        s.registry.call_async("enroll_mfa", json::object(), user_context));
+    EXPECT_FALSE(refused.ok);
+    const auto wrong_password = *liquid::runtime::block_on(
+        s.registry.call_async("enroll_mfa", {{"password", "wrong password"}}, user_context));
+    EXPECT_FALSE(wrong_password.ok);
+    // Refused replacements leave the original authenticator's seed usable.
     const ApiResult with_authenticator = s.call("verify_mfa",
                                                 {{"email", "ada@example.com"},
                                                  {"password", "correct horse battery"},

@@ -139,7 +139,10 @@ TEST(AccountRecovery, CodesCoolingAndTwoAdministratorApprovalRestoreSignIn) {
     const Account first_admin = create_account(store, "recovery-admin-one");
     const Account second_admin = create_account(store, "recovery-admin-two");
 
-    const auto enrollment = store.enroll_mfa(target.principal.user_id, "lake");
+    const auto enrollment =
+        store.enroll_mfa(target.principal.user_id,
+                         "lake",
+                         {target.issued.session.id, "correct horse battery staple"});
     ASSERT_TRUE(enrollment) << enrollment.error().message;
     ASSERT_FALSE(enrollment->recovery_codes.empty());
     ApiContext anonymous;

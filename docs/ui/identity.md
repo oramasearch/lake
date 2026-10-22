@@ -22,8 +22,8 @@ belong to no workspace and always go unprefixed. Files are under `frontend/src/p
 
 - **Secrets are shown once and never stored.** A new token's secret, the MFA authenticator URI and
   the recovery codes live only in that page's memory and are gone when it is left. Re-enrollment
-  replaces the current seed and recovery codes; disabling requires a fresh TOTP or an unused
-  recovery code.
+  requires the current password and replaces the current seed and recovery codes; disabling
+  requires a fresh TOTP or an unused recovery code.
 - **Passwords and identity documents never go in a URL.** They travel in the JSON body.
 - **The MFA step keeps its input in memory.** When `sign_in_password` answers `mfa_required`, the
   page asks for the code and calls `verify_mfa` with the email and password it still holds.

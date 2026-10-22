@@ -3198,8 +3198,13 @@ TEST_P(HttpResponseIsolation, TheViewerSaysWhoIsSignedInAndWhereTheyAre) {
     const auto chosen = viewer("?workspace_id=" + workspace_id);
     EXPECT_EQ(chosen["workspace_id"], workspace_id);
 
-    const std::string enrolled = connection->request(
-        "POST", "/v1/enroll_mfa", "{}", cookie, "HTTP/1.1", {}, "application/json");
+    const std::string enrolled = connection->request("POST",
+                                                     "/v1/enroll_mfa",
+                                                     nlohmann::json{{"password", password_}}.dump(),
+                                                     cookie,
+                                                     "HTTP/1.1",
+                                                     {},
+                                                     "application/json");
     ASSERT_TRUE(enrolled.starts_with("HTTP/1.1 200")) << enrolled;
     EXPECT_EQ(viewer("")["mfa_enrolled"], true);
 

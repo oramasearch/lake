@@ -349,6 +349,155 @@ protected:
     std::vector<std::string> secrets_;
 };
 
+TEST_P(TokenAttenuation, MfaEnrollmentRejectsUnverifiedSessionsAndTokens) {
+    const auto token = issue(browser_, {"enroll_mfa"}, 60);
+    ASSERT_TRUE(token.contains("secret"));
+    for (const auto& credential : {token, browser_}) {
+        const auto result = call("enroll_mfa", json::object(), credential.at("secret"));
+        EXPECT_FALSE(result.at("ok").get<bool>());
+        EXPECT_FALSE(result.contains("value"));
+    }
+    const auto with_password =
+        call("enroll_mfa", {{"password", "correct horse battery staple"}}, token.at("secret"));
+    EXPECT_FALSE(with_password.at("ok").get<bool>());
+    EXPECT_FALSE(with_password.contains("value"));
+    const auto enrolled = store_->mfa_enrolled(browser_.at("session").at("user_id"), "lake");
+    ASSERT_TRUE(enrolled);
+    EXPECT_FALSE(*enrolled);
+}
+
+TEST_P(TokenAttenuation, MfaEnrollmentPreservesExistingFactorUntilPasswordVerification) {
+    const std::string user_id = browser_.at("session").at("user_id");
+    const std::string session_id = browser_.at("session").at("id");
+    const std::string password = "correct horse battery staple";
+    const auto enrollment = call("enroll_mfa", {{"password", password}}, browser_.at("secret"));
+    ASSERT_TRUE(enrollment.at("ok"));
+    const auto original = enrollment.at("value");
+    ASSERT_EQ(original.at("recovery_codes").size(), 8u);
+    secrets_.push_back(password);
+    secrets_.push_back(original.at("otpauth_uri"));
+    for (const auto& code : original.at("recovery_codes")) {
+        secrets_.push_back(code);
+    }
+
+    const auto scoped = issue(browser_, {"enroll_mfa"}, 60);
+    const auto wildcard = issue(browser_, {"*"}, 60);
+    const auto standing = store_->create_token(
+        {user_id, "lake", "MFA static", "MFA enrollment test", {"enroll_mfa"}, 0, true});
+    ASSERT_TRUE(standing);
+    const json static_token = {{"secret", standing->secret},
+                               {"session", {{"id", standing->session.id}}}};
+    const auto before = store_->list_sessions(user_id, "lake");
+    ASSERT_TRUE(before);
+    std::string original_seed;
+    if (postgres_) {
+        pqxx::connection connection(database_uri_);
+        pqxx::read_transaction tx(connection);
+        original_seed =
+            tx.exec_params("SELECT public_data::text FROM credentials WHERE user_id = $1::uuid "
+                           "AND pool_id = 'lake' AND kind = 'totp'",
+                           user_id)[0][0]
+                .as<std::string>();
+    }
+    // Even possession of the password cannot turn a scoped or wildcard API token into a
+    // recovery credential. Missing proof and a wrong password cannot replace a factor either.
+    for (const auto& token : {scoped, wildcard, static_token}) {
+        const auto result = call("enroll_mfa", {{"password", password}}, token.at("secret"));
+        EXPECT_FALSE(result.at("ok").get<bool>());
+        EXPECT_EQ(result.at("error").at("code"), "unauthorized");
+        EXPECT_FALSE(result.contains("value"));
+        const auto direct =
+            store_->enroll_mfa(user_id, "lake", {token.at("session").at("id"), password});
+        EXPECT_FALSE(direct);
+    }
+    for (const auto& input : {json::object(), json{{"password", "wrong password"}}}) {
+        const auto result = call("enroll_mfa", input, browser_.at("secret"));
+        EXPECT_FALSE(result.at("ok").get<bool>());
+        EXPECT_FALSE(result.contains("value"));
+    }
+    EXPECT_FALSE(store_->enroll_mfa(user_id, "lake", {session_id, "wrong password"}));
+    EXPECT_FALSE(store_->enroll_mfa(user_id, "lake", {"", password}));
+    EXPECT_FALSE(store_->enroll_mfa(user_id, "another-pool", {session_id, password}));
+    EXPECT_FALSE(store_->enroll_mfa(lake::control::new_uuid_v4(), "lake", {session_id, password}));
+    const auto after = store_->list_sessions(user_id, "lake");
+    ASSERT_TRUE(after);
+    EXPECT_EQ(after->size(), before->size()) << "refusals issue no login sessions";
+    for (const auto& code : original.at("recovery_codes")) {
+        EXPECT_TRUE(store_->verify_mfa_code(user_id, "lake", code.get<std::string>()));
+    }
+    if (postgres_) {
+        pqxx::connection connection(database_uri_);
+        pqxx::read_transaction tx(connection);
+        const auto seed =
+            tx.exec_params("SELECT public_data::text FROM credentials WHERE user_id = $1::uuid "
+                           "AND pool_id = 'lake' AND kind = 'totp'",
+                           user_id)[0][0]
+                .as<std::string>();
+        EXPECT_TRUE(seed == original_seed);
+    }
+    const auto user = store_->get_user(user_id);
+    ASSERT_TRUE(user);
+    const auto recovered =
+        call("recover_with_code",
+             {{"email", user->email}, {"code", original.at("recovery_codes").at(0)}},
+             "");
+    ASSERT_TRUE(recovered.at("ok")) << "the original recovery code still works";
+
+    const auto replacement = call("enroll_mfa", {{"password", password}}, browser_.at("secret"));
+    ASSERT_TRUE(replacement.at("ok"));
+    for (const auto& code : original.at("recovery_codes")) {
+        EXPECT_FALSE(store_->verify_mfa_code(user_id, "lake", code.get<std::string>()));
+    }
+    EXPECT_TRUE(store_->verify_mfa_code(
+        user_id, "lake", replacement.at("value").at("recovery_codes").at(0).get<std::string>()));
+    ASSERT_TRUE(store_->revoke_session(user_id, session_id));
+    EXPECT_FALSE(store_->enroll_mfa(user_id, "lake", {session_id, password}));
+}
+
+TEST_P(TokenAttenuation, MfaEnrollmentCannotCrossApplicationPools) {
+    const auto customer =
+        lake::test::personal_customer(*store_, browser_.at("session").at("user_id"));
+    ASSERT_TRUE(customer);
+    const std::string workspace_id = lake::test::ready_workspace(
+        *store_, workspace_dir_, customer->id, "mfa", postgres_ ? database_uri_ : "");
+    const auto application = call("register_application",
+                                  {{"customer_id", customer->id},
+                                   {"workspace_id", workspace_id},
+                                   {"name", "MFA pool"},
+                                   {"allowed_origins", {"https://client.example.test"}},
+                                   {"redirect_uris", {"https://client.example.test/callback"}}},
+                                  operator_secret_);
+    ASSERT_TRUE(application.at("ok"));
+    const std::string pool_id = application.at("value").at("pool_id");
+    const std::string suffix = lake::control::new_uuid_v4();
+    const std::string password = "correct horse battery staple";
+    const auto signup = call(
+        "sign_up_password",
+        with_identity(
+            {{"pool_id", pool_id}, {"email", suffix + "@example.test"}, {"password", password}},
+            *store_,
+            pool_id,
+            suffix,
+            postgres_),
+        "");
+    ASSERT_TRUE(signup.at("ok"));
+    const auto account = signup.at("value");
+    const auto token = issue(account, {"enroll_mfa"}, 60);
+    const auto refused = call("enroll_mfa", {{"password", password}}, token.at("secret"));
+    EXPECT_FALSE(refused.at("ok").get<bool>());
+    EXPECT_FALSE(refused.contains("value"));
+    const std::string user_id = account.at("session").at("user_id");
+    EXPECT_FALSE(store_->enroll_mfa(user_id, "lake", {account.at("session").at("id"), password}));
+    EXPECT_FALSE(store_->enroll_mfa(user_id, pool_id, {browser_.at("session").at("id"), password}));
+    const auto enrollment = call("enroll_mfa", {{"password", password}}, account.at("secret"));
+    ASSERT_TRUE(enrollment.at("ok"));
+    EXPECT_TRUE(store_->verify_mfa_code(
+        user_id, pool_id, enrollment.at("value").at("recovery_codes").at(0).get<std::string>()));
+    const auto lake_enrolled = store_->mfa_enrolled(browser_.at("session").at("user_id"), "lake");
+    ASSERT_TRUE(lake_enrolled);
+    EXPECT_FALSE(*lake_enrolled);
+}
+
 TEST_P(TokenAttenuation, ScopeLifetimeAndRecursiveRevocation) {
     const auto parent = issue(browser_, {"create_token"}, 60);
     ASSERT_TRUE(parent.contains("secret"));

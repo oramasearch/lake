@@ -24,6 +24,16 @@ whose `secret` is the key in RFC 4648 base32 without padding, as the Key Uri For
 authenticator apps decode (lake#773; it was hexadecimal before, so every code an authenticator
 showed was refused; the stored seed is unchanged, so earlier enrollments verify the same), and
 eight recovery codes once; replacing the enrollment invalidates the previous seed and codes.
+Enrollment and replacement require `password`, verified against the account's current password
+on every call, and an active full-authority interactive session (`browser` or `taap`) belonging
+to that user and pool. Tokens (including wildcard and static tokens), device credentials,
+operator credentials and callers without a password credential cannot enroll. A session's age
+does not substitute for the password. Both stores check the proof before changing the seed or
+recovery codes, so a refusal preserves the existing enrollment (lake#959, LSR-093).
+Run `ctest --test-dir <build> --timeout 600 -R MfaEnrollment --output-on-failure` with
+`LAKE_TEST_DB_URI` set to exercise first enrollment, replacement and refusals through REST/MCP
+against memory and PostgreSQL. Keep password and session verification in the store transaction
+when changing enrollment; a caller-side check alone can be bypassed by another store caller.
 Recovery codes are single-use. `disable_mfa` requires a fresh TOTP or unused recovery code and
 revokes the seed and every remaining recovery code. Tokens are named sessions with explicit
 capability-name scopes. Ordinary tokens

@@ -290,6 +290,9 @@ struct MfaEnrollment {
     std::string secret;
     std::vector<std::string> recovery_codes;
 };
+struct MfaEnrollmentProof {
+    std::string session_id, password;
+};
 struct NewToken {
     std::string user_id, pool_id, name, reason;
     std::vector<std::string> scopes;
@@ -2272,8 +2275,11 @@ public:
     begin_identity_proof(const std::string& pool_id, const std::string& identity_document) = 0;
     virtual Result<IssuedSession> sign_in_password(const PasswordSignIn&) = 0;
     virtual Result<IssuedSession> sign_in_taap(const TaapSignIn&) = 0;
+    // Verify an active full-authority interactive session and the current password before
+    // issuing a factor or recovery codes. Failed proof leaves the existing enrollment intact.
     virtual Result<MfaEnrollment> enroll_mfa(const std::string& user_id,
-                                             const std::string& pool_id) = 0;
+                                             const std::string& pool_id,
+                                             const MfaEnrollmentProof& proof) = 0;
     virtual Result<void> disable_mfa(const std::string& user_id,
                                      const std::string& pool_id,
                                      const std::string& code) = 0;

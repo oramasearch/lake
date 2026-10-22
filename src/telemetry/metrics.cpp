@@ -1342,9 +1342,11 @@ public:
     sign_in_taap(const control::TaapSignIn& value) override {
         return call("sign_in_taap", [&] { return store_->sign_in_taap(value); });
     }
-    control::Result<control::MfaEnrollment> enroll_mfa(const std::string& user_id,
-                                                       const std::string& pool_id) override {
-        return call("enroll_mfa", [&] { return store_->enroll_mfa(user_id, pool_id); });
+    control::Result<control::MfaEnrollment>
+    enroll_mfa(const std::string& user_id,
+               const std::string& pool_id,
+               const control::MfaEnrollmentProof& proof) override {
+        return call("enroll_mfa", [&] { return store_->enroll_mfa(user_id, pool_id, proof); });
     }
     control::Result<bool> mfa_enrolled(const std::string& user_id,
                                        const std::string& pool_id) override {
