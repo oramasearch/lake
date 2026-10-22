@@ -799,3 +799,10 @@ pre-open on, runs 32 first uses of liquid's local identity at once, then reads a
 the operator token, waits for the `repositories_preopened` line of each workspace on stderr before
 it stops the server (the pre-open runs beside the requests, lake#614), and checks them. It guards the
 start-time creation of the identity ([`../docs/deployment/store-volume.md`](../docs/deployment/store-volume.md#liquids-local-identity)).
+
+`test_mcp_client.cpp` covers the 64-container response limit, duplicate keys, every transport,
+batches, notifications, old tool records, and recovery after rejection. `test_workspace_records.cpp`
+adds `McpOAuthRejectsDeepMetadataRegistrationAndTokens` for both stores: resource/issuer metadata,
+registration, authorization-code and refresh tokens. Run
+`ctest --test-dir build --timeout 600 -R 'McpClient|McpOAuth' --output-on-failure`. See
+[MCP connections](../docs/api/mcp-connections.md#the-client) (lake#958, LSR-092).

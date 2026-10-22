@@ -35,7 +35,8 @@ where the server declares them, following `nextCursor`; `tools/call`, `resources
 `prompts/get`, `resources/subscribe`; and the server's notifications, which arrive on an answer's
 event stream or on the session's `GET` stream.
 
-**The server is not trusted.** Each bound is in `McpLimits`:
+**The server is not trusted.** Exchange and discovery bounds are in `McpLimits`; JSON nesting
+has the fixed ceiling described below:
 
 | Bound | Default | What happens past it |
 |---|---|---|
@@ -45,6 +46,23 @@ event stream or on the session's `GET` stream.
 | Pages of each list | 10 | the rest is not read |
 | Tools kept per connection | 128, and 512 KiB in all | the rest are skipped, with a reason |
 | A tool's title / description / input schema | 256 B / 2 KiB / 16 KiB | cut at a character / cut / the tool is skipped |
+
+Remote MCP and OAuth JSON may contain at most 64 nested objects/arrays, counting the envelope
+and any batch (lake#958, LSR-092). The parser rejects the entire document before constructing
+a container beyond the limit. This applies to JSON and SSE answers, notifications, the SSE
+early-answer check, resource/issuer metadata, client registration, token exchange and refresh.
+Over-depth SSE events are discarded; ordinary over-depth answers fail as protocol errors.
+Invalid or over-depth OAuth metadata stops discovery instead of activating a fallback.
+A matching answer in a later valid event can still complete a request. The tool conversion helpers also
+check their input iteratively before copying or serializing schemas, including conversion
+of stored tool entries; schema byte limits still apply. Servers exceeding 64 levels must flatten their
+responses, including fields Lake otherwise ignores.
+
+Run `ctest --test-dir build --timeout 600 -R 'McpClient|McpOAuth' --output-on-failure` to verify
+the exact limit, deeper arrays/objects, duplicate keys, escaped brackets, every transport,
+batches, notifications, old records, each OAuth response type, and recovery after rejection.
+`mcp_max_json_depth` and `mcp_parse_json` in `mcp_client.hpp` define the common limit and parser;
+all remote JSON readers must use them.
 
 An answer counts only when it answers the request's own `id`: an answer to another id is ignored. A
 request from the server (`sampling/createMessage`, `roots/list`, `elicitation/create`) is never

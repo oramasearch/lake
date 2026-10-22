@@ -95,6 +95,10 @@ computed themselves (`viewer`, `my_permissions`, `list_packages`, `list_docs`, `
 [../serving/http.md](../serving/http.md#cross-site-requests) the refusal of cross-site requests that
 use the browser session.
 
+Remote [MCP connections](mcp-connections.md#the-client) reject response JSON deeper than 64
+containers before copies or serialization, including SSE notifications and OAuth responses
+(lake#958, LSR-092).
+
 lake#452: [services.md](services.md) documents `list_services`' shared `status` and
 `status_reason`; [web-apps.md](web-apps.md) the public acknowledgement `create_app` requires;
 [workspaces.md](workspaces.md) the two `create_project` name refusals.

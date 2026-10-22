@@ -71,7 +71,54 @@ bool is_event_stream(const McpHttpResponse& response) {
     return lower(response.header("content-type")).starts_with("text/event-stream");
 }
 
+// Check tool conversion inputs without recursive copies or serialization, including inputs
+// to the stored-tool converter. Remote response parsing enforces the same limit at ingress.
+bool within_mcp_json_depth(const json& document) {
+    struct Frame {
+        json::const_iterator next;
+        json::const_iterator end;
+    };
+    std::vector<Frame> parents;
+    const json* value = &document;
+    for (;;) {
+        if (value->is_structured()) {
+            if (parents.size() >= mcp_max_json_depth) {
+                return false;
+            }
+            parents.push_back({value->cbegin(), value->cend()});
+        }
+        while (!parents.empty() && parents.back().next == parents.back().end) {
+            parents.pop_back();
+        }
+        if (parents.empty()) {
+            return true;
+        }
+        value = &*parents.back().next++;
+    }
+}
+
 } // namespace
+
+json mcp_parse_json(std::string_view body) {
+    struct DepthExceeded {};
+    try {
+        return json::parse(
+            body,
+            [](int depth, json::parse_event_t event, json&) {
+                if ((event == json::parse_event_t::object_start ||
+                     event == json::parse_event_t::array_start) &&
+                    depth >= static_cast<int>(mcp_max_json_depth)) {
+                    // Returning false only filters this value and still parses its children.
+                    // Abort instead, so a valid-looking prefix can never be accepted.
+                    throw DepthExceeded{};
+                }
+                return true;
+            },
+            false);
+    } catch (const DepthExceeded&) {
+        return json(json::value_t::discarded);
+    }
+}
 
 bool mcp_supported_protocol_version(std::string_view version) {
     return version == "2025-06-18" || version == "2025-03-26" || version == "2024-11-05";
@@ -343,6 +390,9 @@ bool mcp_tool_name(std::string_view name) {
 }
 
 std::expected<McpTool, std::string> mcp_tool_from(const json& tool, const McpLimits& limits) {
+    if (!within_mcp_json_depth(tool)) {
+        return std::unexpected("a tool exceeds the JSON nesting limit");
+    }
     if (!tool.is_object()) {
         return std::unexpected("an entry that is not an object");
     }
@@ -352,14 +402,16 @@ std::expected<McpTool, std::string> mcp_tool_from(const json& tool, const McpLim
     if (!mcp_tool_name(out.name)) {
         return std::unexpected("tool '" + shown + "': its name is not an MCP tool name");
     }
-    const json annotations = tool.value("annotations", json::object());
+    const json empty = json::object();
+    const json& annotations = tool.contains("annotations") ? tool.at("annotations") : empty;
     out.title = text_field(tool, "title");
     if (out.title.empty()) {
         out.title = text_field(annotations, "title");
     }
     out.title = bounded(out.title, limits.max_title_bytes);
     out.description = bounded(text_field(tool, "description"), limits.max_description_bytes);
-    const json schema = tool.value("inputSchema", json());
+    const json missing;
+    const json& schema = tool.contains("inputSchema") ? tool.at("inputSchema") : missing;
     if (!schema.is_object() || (schema.contains("type") && schema.at("type") != "object")) {
         return std::unexpected("tool '" + shown + "': its input schema is not an object schema");
     }
@@ -371,7 +423,7 @@ std::expected<McpTool, std::string> mcp_tool_from(const json& tool, const McpLim
     if (!out.input_schema.contains("type")) {
         out.input_schema["type"] = "object";
     }
-    const json output = tool.value("outputSchema", json());
+    const json& output = tool.contains("outputSchema") ? tool.at("outputSchema") : missing;
     if (output.is_object() && output.dump().size() <= limits.max_schema_bytes) {
         out.output_schema = output;
     }
@@ -400,7 +452,8 @@ json mcp_tool_json(const McpTool& tool) {
 }
 
 std::optional<McpTool> mcp_tool_from_json(const json& stored) {
-    if (!stored.is_object() || !mcp_tool_name(text_field(stored, "name"))) {
+    if (!within_mcp_json_depth(stored) || !stored.is_object() ||
+        !mcp_tool_name(text_field(stored, "name"))) {
         return std::nullopt;
     }
     McpTool tool;
@@ -544,16 +597,16 @@ std::expected<json, McpClientError> McpClient::answer_from(const McpHttpResponse
             if (++events > options_.limits.max_events) {
                 break;
             }
-            json parsed = json::parse(event.data, nullptr, false);
+            json parsed = mcp_parse_json(event.data);
             if (!parsed.is_discarded()) {
                 messages.push_back(std::move(parsed));
             }
         }
     } else {
-        json parsed = json::parse(response.body, nullptr, false);
+        json parsed = mcp_parse_json(response.body);
         if (parsed.is_discarded()) {
             return std::unexpected(client_error(response.truncated ? "too_large" : "protocol",
-                                                "the answer is not JSON",
+                                                "the answer is not JSON within the nesting limit",
                                                 response.status));
         }
         messages.push_back(std::move(parsed));
@@ -640,7 +693,7 @@ std::expected<json, McpClientError> McpClient::send_streamable(const json& messa
             if (++*events > max_events) {
                 return true;
             }
-            const json parsed = json::parse(event.data, nullptr, false);
+            const json parsed = mcp_parse_json(event.data);
             const auto answers = [&](const json& item) {
                 return item.is_object() && !item.contains("method") &&
                        (item.contains("result") || item.contains("error")) &&
@@ -1111,7 +1164,7 @@ McpClient::listen(std::chrono::milliseconds wait) {
         stream = legacy_->stream.get();
         parser = &legacy_->parser;
         for (SseEvent& event : legacy_->inbox) {
-            json parsed = json::parse(event.data, nullptr, false);
+            json parsed = mcp_parse_json(event.data);
             if (parsed.is_object() && parsed.contains("method") && !parsed.contains("id")) {
                 keep_notification(parsed);
             }
@@ -1166,7 +1219,7 @@ McpClient::listen(std::chrono::milliseconds wait) {
             std::chrono::milliseconds(1), std::min(left, std::chrono::milliseconds(1000))));
         traffic_.received_bytes += read.bytes.size();
         for (const SseEvent& event : parser->feed(read.bytes)) {
-            json parsed = json::parse(event.data, nullptr, false);
+            json parsed = mcp_parse_json(event.data);
             if (parsed.is_object() && parsed.contains("method") && !parsed.contains("id")) {
                 keep_notification(parsed);
             }

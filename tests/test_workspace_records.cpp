@@ -3926,6 +3926,112 @@ TEST_P(WorkspaceRecordStores, McpConnectionsLiveInTheirWorkspaceAndKeepTheirToke
 
 // OAuth 2.1 (lake#652): discovery, dynamic client registration, PKCE S256, the refresh token as
 // a workspace secret written as the person, a state taken once, and refresh with rotation.
+TEST_P(WorkspaceRecordStores, McpOAuthRejectsDeepMetadataRegistrationAndTokens) {
+    auto store = make_store();
+    if (!store) {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
+    }
+    class DeepOAuthHttp : public lake::api::McpHttp {
+    public:
+        std::string path;
+        std::shared_ptr<lake::api::McpHttp> transport = lake::api::make_mcp_http(true);
+        lake::api::McpHttpResponse exchange(const lake::api::McpHttpRequest& request,
+                                            const lake::api::McpEnough& enough) override {
+            auto forwarded = request;
+            if (path == "/.well-known/openid-configuration") {
+                if (request.url.ends_with("/.well-known/oauth-authorization-server")) {
+                    lake::api::McpHttpResponse missing;
+                    missing.status = 404;
+                    return missing;
+                }
+                if (request.url.ends_with(path)) {
+                    forwarded.url = request.url.substr(0, request.url.size() - path.size()) +
+                                    "/.well-known/oauth-authorization-server";
+                }
+            }
+            auto response = transport->exchange(forwarded, enough);
+            if (!path.empty() && request.url.ends_with(path) && !response.body.empty() &&
+                response.body.back() == '}') {
+                response.body.pop_back();
+                response.body +=
+                    ",\"ignored\":" + std::string(128, '[') + "0" + std::string(128, ']') + "}";
+            }
+            return response;
+        }
+        std::unique_ptr<lake::api::McpEventStream>
+        open(const lake::api::McpHttpRequest& request) override {
+            return transport->open(request);
+        }
+    };
+    TwoSpaces t(store, database_uri_);
+    lake::test::McpTestServer server;
+    server.required_bearer = "not-signed-in";
+    auto http = std::make_shared<DeepOAuthHttp>();
+    t.mcp_http = http;
+    const auto& first = t.spaces[0];
+    const auto in = [&](json input) {
+        input["customer_id"] = first.customer_id;
+        input["workspace_id"] = first.workspaces[0];
+        return input;
+    };
+    const auto mount = t.call(first, "create_secret_mount", in({{"name", "depth-oauth"}}));
+    ASSERT_TRUE(mount.ok) << mount.error.message;
+    const auto created =
+        t.call(first,
+               "create_mcp_connection",
+               in({{"name", "Depth"}, {"url", server.url()}, {"auth", {{"kind", "oauth"}}}}));
+    ASSERT_TRUE(created.ok) << created.error.message;
+    const std::string id = created.value.at("id");
+    const auto begin = [&] {
+        return t.call(first,
+                      "begin_mcp_connection_sign_in",
+                      in({{"id", id}, {"mount_id", mount.value.at("id")}}));
+    };
+    for (const std::string path : {"/.well-known/oauth-protected-resource/mcp",
+                                   "/.well-known/oauth-authorization-server",
+                                   "/.well-known/openid-configuration",
+                                   "/register"}) {
+        SCOPED_TRACE(path);
+        http->path = path;
+        EXPECT_FALSE(begin().ok) << "unused fields must also obey the depth limit";
+    }
+    http->path.clear();
+    auto begun = begin();
+    ASSERT_TRUE(begun.ok) << begun.error.message;
+    const auto complete = [&](const lake::api::ApiResult& pending) {
+        const std::string url = pending.value.at("authorization_url");
+        const auto query = lake::test::McpTestServer::form(url.substr(url.find('?') + 1));
+        const auto code = server.issue_code(query.at("client_id"),
+                                            query.at("redirect_uri"),
+                                            query.at("code_challenge"),
+                                            query.at("resource"));
+        return t.call(first,
+                      "complete_mcp_connection_sign_in",
+                      in({{"state", pending.value.at("state")}, {"code", code}}));
+    };
+    http->path = "/token";
+    EXPECT_FALSE(complete(begun).ok);
+    http->path.clear();
+    begun = begin();
+    ASSERT_TRUE(begun.ok) << begun.error.message;
+    const auto done = complete(begun);
+    ASSERT_TRUE(done.ok) << done.error.message;
+    EXPECT_EQ(done.value.at("status"), "connected") << "a later sign-in still works";
+
+    ASSERT_TRUE(t.call(first,
+                       "update_mcp_connection",
+                       in({{"id", id}, {"tools", {{"echo", {{"allowed", true}}}}}}))
+                    .ok);
+    server.required_bearer = "revoked";
+    http->path = "/token";
+    EXPECT_FALSE(
+        t.call(first,
+               "read_mcp_tool",
+               in({{"connection_id", id}, {"tool", "echo"}, {"arguments", {{"text", "refresh"}}}}))
+            .ok);
+    EXPECT_EQ(server.token_grants().back(), "refresh_token");
+}
+
 TEST_P(WorkspaceRecordStores, McpConnectionsSignInWithOAuthAndKeepOnlyARefreshToken) {
     auto store = make_store();
     if (!store) {
