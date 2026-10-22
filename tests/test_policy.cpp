@@ -249,7 +249,7 @@ TEST(Organizations, InvitationsBecomeAttestedMemberships) {
                                           first_user->taap_id,
                                           "owner",
                                           "sha512-256:owner",
-                                          "taap:1:ed25519:grantor",
+                                          "admin",
                                           "request-owner"});
     ASSERT_TRUE(owner) << owner.error().message;
     auto invitation = store.create_invitation({organization->id,
@@ -301,7 +301,7 @@ TEST(Organizations, MemberRoleAndRemovalPreserveAnOwnerAndDerivedAccess) {
                                                            owner->taap_id,
                                                            "owner",
                                                            "sha512-256:owner",
-                                                           owner->taap_id,
+                                                           "admin",
                                                            "owner-membership"});
     ASSERT_TRUE(owner_membership);
     EXPECT_FALSE(store.set_member_role(owner_membership->id, "admin", owner->taap_id));

@@ -6166,8 +6166,32 @@ void InMemoryStore::drop_space_grant_locked(const Membership& membership,
     });
 }
 
+namespace {
+// Called with the store mutex held. Policy admin grants and team ownership do not confer
+// organization ownership; only the reserved operator or a current organization owner may act.
+Result<void> require_organization_owner(const std::vector<Membership>& memberships,
+                                        const std::string& organization_id,
+                                        const std::string& actor) {
+    if (actor == "admin" || std::ranges::any_of(memberships, [&](const Membership& member) {
+            return member.organization_id == organization_id && member.team_id.empty() &&
+                   member.role == "owner" && member.principal_taap_id == actor;
+        })) {
+        return {};
+    }
+    return std::unexpected(
+        StoreError{"unauthorized", "owner changes require an organization owner or the operator"});
+}
+} // namespace
+
 Result<Membership> InMemoryStore::create_membership(const NewMembership& in) {
     std::lock_guard lock(mutex_);
+    if (in.role == "owner") {
+        if (auto allowed =
+                require_organization_owner(memberships_, in.organization_id, in.granted_by_taap_id);
+            !allowed) {
+            return std::unexpected(allowed.error());
+        }
+    }
     if ((in.principal_type != "user" && in.principal_type != "workload") ||
         in.principal_id.empty() || in.principal_taap_id.empty()) {
         return std::unexpected(StoreError{
@@ -6281,6 +6305,13 @@ Result<Membership> InMemoryStore::set_member_role(const std::string& id,
     if (membership == memberships_.end()) {
         return std::unexpected(StoreError{"not_found", "no membership " + id});
     }
+    if (membership->role == "owner" || role == "owner") {
+        if (auto allowed =
+                require_organization_owner(memberships_, membership->organization_id, actor);
+            !allowed) {
+            return std::unexpected(allowed.error());
+        }
+    }
     if (membership->role == "owner" && role != "owner") {
         const auto owner_count = std::ranges::count_if(memberships_, [&](const Membership& item) {
             return item.organization_id == membership->organization_id &&
@@ -6319,7 +6350,6 @@ Result<Membership> InMemoryStore::set_member_role(const std::string& id,
     previous.role = previous_role;
     drop_space_grant_locked(previous, previous_role);
     derive_space_grant_locked(*membership, role);
-    static_cast<void>(actor);
     return *membership;
 }
 
@@ -6328,6 +6358,13 @@ Result<void> InMemoryStore::remove_member(const std::string& id, const std::stri
     const auto membership = std::ranges::find(memberships_, id, &Membership::id);
     if (membership == memberships_.end()) {
         return std::unexpected(StoreError{"not_found", "no membership " + id});
+    }
+    if (membership->role == "owner") {
+        if (auto allowed =
+                require_organization_owner(memberships_, membership->organization_id, actor);
+            !allowed) {
+            return std::unexpected(allowed.error());
+        }
     }
     if (membership->role == "owner") {
         const auto owner_count = std::ranges::count_if(memberships_, [&](const Membership& item) {
@@ -6376,6 +6413,13 @@ Result<void> InMemoryStore::remove_member(const std::string& id, const std::stri
 
 Result<Invitation> InMemoryStore::create_invitation(const NewInvitation& in) {
     std::lock_guard lock(mutex_);
+    if (in.role == "owner") {
+        if (auto allowed =
+                require_organization_owner(memberships_, in.organization_id, in.created_by_taap_id);
+            !allowed) {
+            return std::unexpected(allowed.error());
+        }
+    }
     if ((in.invitee_type != "email" && in.invitee_type != "handle") || in.invitee.empty() ||
         !valid_membership_role(in.role) || in.expires_at.empty()) {
         return std::unexpected(
@@ -6445,6 +6489,13 @@ Result<Membership> InMemoryStore::accept_invitation(const AcceptInvitation& in) 
         invitations_, [&](const Invitation& row) { return row.id == in.invitation_id; });
     if (invitation == invitations_.end()) {
         return std::unexpected(StoreError{"not_found", "no invitation " + in.invitation_id});
+    }
+    if (invitation->role == "owner") {
+        if (auto allowed = require_organization_owner(
+                memberships_, invitation->organization_id, in.accepted_by_taap_id);
+            !allowed) {
+            return std::unexpected(allowed.error());
+        }
     }
     if (invitation->status != "pending") {
         return std::unexpected(StoreError{"conflict", "invitation is not pending"});

@@ -5,6 +5,8 @@
 // runs over the in-memory store and, when LAKE_TEST_DB_URI is set, PostgreSQL.
 
 #include <algorithm>
+#include <atomic>
+#include <barrier>
 #include <memory>
 #include <string>
 #include <vector>
@@ -24,6 +26,7 @@
 #include "lake/control/postgres_store.hpp"
 #include "lake/control/store.hpp"
 #include "lake/control/workspace_records.hpp"
+#include "lake/thread.hpp"
 #include "postgres_fixture.hpp"
 #include "workspace_fixture.hpp"
 
@@ -143,6 +146,243 @@ std::string later() {
 }
 
 } // namespace
+
+// LSR-099: policy administrators may manage ordinary members, but ownership needs the
+// organization's owners. Exercise the same contract through the registry and both stores.
+TEST_P(Deletions, OwnershipRequiresAnOrganizationOwnerOnEveryMembershipPath) {
+    LAKE_STORE_OR_SKIP(store);
+    Lake lake(store, database_uri_);
+    const auto owner = lake.person("owner");
+    const auto admin = lake.person("admin");
+    const auto recipient = lake.person("recipient");
+    const auto second_owner = lake.person("second-owner");
+    const auto created = lake.call(owner, "create_organization_space", {{"display_name", "Owned"}});
+    ASSERT_TRUE(created.ok) << created.error.message;
+    const std::string organization = created.value.at("organization").at("id");
+    const std::string owner_id = created.value.at("membership").at("id");
+    auto member = [&](const Lake::Person& person,
+                      const std::string& team,
+                      const std::string& role,
+                      const std::string& actor) {
+        return store->create_membership({organization,
+                                         team,
+                                         "user",
+                                         person.principal.user_id,
+                                         person.principal.taap_id,
+                                         role,
+                                         "ownership-test/" + person.principal.user_id,
+                                         actor,
+                                         lake::control::new_uuid_v4()});
+    };
+    const auto admin_member = member(admin, "", "admin", owner.principal.taap_id);
+    ASSERT_TRUE(admin_member);
+    const auto other_owner = member(second_owner, "", "owner", owner.principal.taap_id);
+    ASSERT_TRUE(other_owner);
+    const auto team =
+        store->create_team({organization, "team", "Team", owner.principal.taap_id, "r"});
+    ASSERT_TRUE(team);
+    const auto team_admin = member(admin, team->id, "admin", owner.principal.taap_id);
+    const auto team_owner = member(second_owner, team->id, "owner", owner.principal.taap_id);
+    ASSERT_TRUE(team_admin && team_owner);
+    auto refused = [](const auto& result) {
+        EXPECT_FALSE(result);
+        if (!result)
+            EXPECT_EQ(result.error().code, "unauthorized");
+    };
+    for (const std::string scope : {std::string{}, team->id}) {
+        SCOPED_TRACE(scope.empty() ? "organization" : "team");
+        const std::string admin_id = scope.empty() ? admin_member->id : team_admin->id;
+        const std::string target_owner = scope.empty() ? owner_id : team_owner->id;
+        // The organization has two owners: refusal cannot be explained by last-owner checks.
+        refused(store->set_member_role(admin_id, "owner", admin.principal.taap_id));
+        refused(store->set_member_role(target_owner, "admin", admin.principal.taap_id));
+        refused(store->remove_member(target_owner, admin.principal.taap_id));
+        refused(member(recipient, scope, "owner", admin.principal.taap_id));
+        const auto invitation_input =
+            lake::control::NewInvitation{organization,
+                                         scope,
+                                         "email",
+                                         store->get_user(recipient.principal.user_id)->email,
+                                         "owner",
+                                         later(),
+                                         admin.principal.taap_id,
+                                         "r"};
+        refused(store->create_invitation(invitation_input));
+        auto owner_invite = invitation_input;
+        owner_invite.created_by_taap_id = owner.principal.taap_id;
+        const auto invitation = store->create_invitation(owner_invite);
+        ASSERT_TRUE(invitation);
+        refused(store->accept_invitation({invitation->id,
+                                          "user",
+                                          recipient.principal.user_id,
+                                          recipient.principal.taap_id,
+                                          "ownership-test/invite",
+                                          admin.principal.taap_id,
+                                          "r"}));
+        EXPECT_EQ(store->get_invitation(invitation->id)->status, "pending");
+        for (const auto& [name, input] : std::vector<std::pair<std::string, json>>{
+                 {"set_member_role", {{"id", admin_id}, {"role", "owner"}}},
+                 {"set_member_role", {{"id", target_owner}, {"role", "member"}}},
+                 {"remove_member", {{"id", target_owner}}},
+                 {"create_membership",
+                  {{"organization_id", organization},
+                   {"team_id", scope},
+                   {"principal_type", "user"},
+                   {"principal_id", recipient.principal.user_id},
+                   {"principal_taap_id", recipient.principal.taap_id},
+                   {"role", "owner"}}},
+                 {"create_invitation",
+                  {{"organization_id", organization},
+                   {"team_id", scope},
+                   {"invitee_type", "email"},
+                   {"invitee", store->get_user(recipient.principal.user_id)->email},
+                   {"role", "owner"},
+                   {"expires_at", later()}}},
+                 {"accept_invitation",
+                  {{"invitation_id", invitation->id},
+                   {"principal_type", "user"},
+                   {"principal_id", recipient.principal.user_id},
+                   {"principal_taap_id", recipient.principal.taap_id}}}}) {
+            SCOPED_TRACE(name);
+            const auto denied = lake.call(admin, name, input);
+            EXPECT_FALSE(denied.ok);
+            EXPECT_EQ(denied.error.code, "unauthorized") << denied.error.message;
+        }
+        // An owner can approve the invitation; ordinary role management remains available.
+        const auto joined =
+            lake.call(recipient, "join_organization", {{"invitation_id", invitation->id}});
+        ASSERT_TRUE(joined.ok) << joined.error.message;
+        EXPECT_EQ(joined.value.at("role"), "owner");
+        ASSERT_TRUE(store->set_member_role(admin_id, "member", admin.principal.taap_id));
+        ASSERT_TRUE(store->set_member_role(admin_id, "admin", owner.principal.taap_id));
+        ASSERT_TRUE(store->set_member_role(admin_id, "owner", "admin"));
+        ASSERT_TRUE(store->set_member_role(admin_id, "admin", owner.principal.taap_id));
+        ASSERT_TRUE(store->remove_member(joined.value.at("id"), owner.principal.taap_id));
+    }
+    const auto deletion = lake.call(
+        admin,
+        "delete_organization",
+        {{"organization_id", organization}, {"confirm", organization}, {"dry_run", true}});
+    EXPECT_FALSE(deletion.ok);
+    EXPECT_EQ(deletion.error.code, "unauthorized");
+    EXPECT_EQ(store->get_membership(owner_id)->role, "owner");
+    EXPECT_EQ(store->get_membership(admin_member->id)->role, "admin");
+    // A team owner and an administrator with only a direct grant also lack owner authority.
+    ASSERT_TRUE(store->set_member_role(other_owner->id, "admin", owner.principal.taap_id));
+    refused(store->set_member_role(admin_member->id, "owner", second_owner.principal.taap_id));
+    const auto foreign = lake.call(
+        recipient, "create_organization_space", {{"display_name", "Another organization"}});
+    ASSERT_TRUE(foreign.ok) << foreign.error.message;
+    const auto object = store->find_policy_object("organization", organization);
+    ASSERT_TRUE(object);
+    ASSERT_TRUE(store->create_grant({recipient.principal.taap_id,
+                                     object->id,
+                                     "admin",
+                                     "ownership-test/grant",
+                                     owner.principal.taap_id,
+                                     "r"}));
+    const auto denied =
+        lake.call(recipient, "set_member_role", {{"id", admin_member->id}, {"role", "owner"}});
+    EXPECT_FALSE(denied.ok);
+    EXPECT_EQ(denied.error.code, "unauthorized");
+}
+
+TEST_P(Deletions, ConcurrentOwnerRemovalsPreserveOneOwner) {
+    LAKE_STORE_OR_SKIP(store);
+    Lake lake(store, database_uri_);
+    const auto first = lake.person("first-owner");
+    const auto second = lake.person("second-owner");
+    const auto created = lake.call(first, "create_organization_space", {{"display_name", "Owned"}});
+    ASSERT_TRUE(created.ok) << created.error.message;
+    const std::string organization = created.value.at("organization").at("id");
+    const std::string first_id = created.value.at("membership").at("id");
+    const auto member = store->create_membership({organization,
+                                                  "",
+                                                  "user",
+                                                  second.principal.user_id,
+                                                  second.principal.taap_id,
+                                                  "owner",
+                                                  "ownership-test/second",
+                                                  first.principal.taap_id,
+                                                  "r"});
+    ASSERT_TRUE(member);
+    // Separate PostgreSQL store objects model separate Lake processes; one object's mutex
+    // would otherwise serialize the calls before they reach the database.
+    std::shared_ptr<lake::control::Store> competing_store = store;
+    if (GetParam()) {
+        competing_store = lake::control::make_postgres_store(database_uri_, std::string(kek));
+    }
+    std::barrier start(2);
+    std::atomic<int> removed{0};
+    std::atomic<int> conflicts{0};
+    auto leave =
+        [&](lake::control::Store& connection, const std::string& id, const std::string& actor) {
+            start.arrive_and_wait();
+            const auto result = connection.remove_member(id, actor);
+            if (result)
+                ++removed;
+            else if (result.error().code == "conflict")
+                ++conflicts;
+        };
+    lake::Thread a([&] { leave(*store, first_id, first.principal.taap_id); });
+    lake::Thread b([&] { leave(*competing_store, member->id, second.principal.taap_id); });
+    a.join();
+    b.join();
+    EXPECT_EQ(removed.load(), 1);
+    EXPECT_EQ(conflicts.load(), 1);
+    const auto remaining = store->list_memberships(organization, "", 100);
+    ASSERT_TRUE(remaining);
+    ASSERT_EQ(remaining->size(), 1U);
+    EXPECT_EQ(remaining->front().role, "owner");
+}
+
+TEST_P(Deletions, OwnerInvitationsRecheckTheInvitersCurrentAuthority) {
+    LAKE_STORE_OR_SKIP(store);
+    Lake lake(store, database_uri_);
+    const auto owner = lake.person("owner");
+    const auto inviter = lake.person("inviter");
+    const auto recipient = lake.person("recipient");
+    const auto created = lake.call(owner, "create_organization_space", {{"display_name", "Owned"}});
+    ASSERT_TRUE(created.ok) << created.error.message;
+    const std::string organization = created.value.at("organization").at("id");
+    const auto membership = store->create_membership({organization,
+                                                      "",
+                                                      "user",
+                                                      inviter.principal.user_id,
+                                                      inviter.principal.taap_id,
+                                                      "owner",
+                                                      "ownership-test/inviter",
+                                                      owner.principal.taap_id,
+                                                      "r"});
+    ASSERT_TRUE(membership);
+    const auto invitation =
+        store->create_invitation({organization,
+                                  "",
+                                  "email",
+                                  store->get_user(recipient.principal.user_id)->email,
+                                  "owner",
+                                  later(),
+                                  inviter.principal.taap_id,
+                                  "r"});
+    ASSERT_TRUE(invitation);
+    ASSERT_TRUE(store->set_member_role(membership->id, "admin", owner.principal.taap_id));
+    const auto denied =
+        lake.call(recipient, "join_organization", {{"invitation_id", invitation->id}});
+    EXPECT_FALSE(denied.ok);
+    EXPECT_EQ(denied.error.code, "unauthorized");
+    EXPECT_EQ(store->get_invitation(invitation->id)->status, "pending");
+    const auto members = store->list_memberships(organization, "", 100);
+    ASSERT_TRUE(members);
+    EXPECT_EQ(members->size(), 2U);
+    // A current owner can explicitly approve the pending invitation on the recipient's behalf.
+    const auto accepted = lake.call(owner,
+                                    "accept_invitation",
+                                    {{"invitation_id", invitation->id},
+                                     {"principal_type", "user"},
+                                     {"principal_id", recipient.principal.user_id},
+                                     {"principal_taap_id", recipient.principal.taap_id}});
+    EXPECT_TRUE(accepted.ok) << accepted.error.message;
+}
 
 TEST(Deletions, EachIsAuditedInTheLogItsSubjectBelongsTo) {
     using lake::api::AuditLog;

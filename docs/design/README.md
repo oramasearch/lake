@@ -66,3 +66,5 @@ migration `0063`) as implemented and not yet deployed.
 [the contract](../api/mcp-connections.md#the-client) names the readers and regression tests.
 Folder-sharing role attenuation and non-admin recipient restrictions (lake#955) are recorded in
 [status.md](status.md) and [the sharing contract](../api/sharing.md).
+`status.md` records organization owner-only membership changes (LSR-099, lake#965); the
+[API contract](../api/organizations.md#delegated-administration) states the rule and checks.
