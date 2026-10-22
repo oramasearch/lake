@@ -447,6 +447,9 @@ public:
     create_pki_certificate(const NewPkiCertificateRecord& value) override;
     Result<PkiCertificateRecord> get_pki_certificate(const std::string& id) override;
     Result<PkiCertificateRecord> revoke_pki_certificate(const std::string& id) override;
+    Result<bool> has_active_agent_certificate(const std::string& customer_id,
+                                              const std::string& taap_id,
+                                              const std::string& at) override;
     Result<AgentSession> create_agent_session(const NewAgentSession& value) override;
     Result<AgentSession> revoke_agent_session(const std::string& customer_id,
                                               const std::string& id) override;

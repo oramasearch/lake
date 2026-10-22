@@ -5,6 +5,10 @@ credentials (lake#951). Creation, claims and renewal serialize with offboarding 
 (or the memory-store mutex), so a cached stream context cannot create fresh authority afterwards.
 Clerk disablement and account deletion withdraw the person's workloads and invalidate task leases;
 workload history remains. See [Clerk offboarding](../../docs/api/clerk.md#webhooks).
+`agents.cpp` checks the authenticated dispatcher and customer registration before generating or
+signing a session key. `has_active_agent_certificate` selects an unrevoked, unexpired `agent`
+certificate by customer and TAAP subject in memory and PostgreSQL. See
+[agent session keys](../../docs/api/agents.md).
 
 `pki.cpp` verifies tunnel CSRs, signs only the grant URI and bounds the client certificate's expiry.
 `network_records.cpp` supplies empty session/activity pages explicitly pending zetta#1281.

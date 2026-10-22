@@ -13,6 +13,8 @@ zetta#1281 history provider have source-tree support; live relay termination rem
 Agent-task lease recovery is tracked separately from deployment in [status.md](status.md).
 The cascading workspace deletion (lake#514) has its own row in [status.md](status.md).
 The [agent bus contract](../api/agent-bus.md) documents retries and shared-credential limits.
+Dispatcher authority and customer agent registration (lake#957) have their own source-tree row
+in [status.md](status.md); the [agent-session contract](../api/agents.md) describes the checks.
 
 Train → Experiments implementation, local proof and deployment acceptance are tracked separately
 in [status.md](status.md); see its [API](../api/experiments.md) and [UI](../ui/experiments.md) contracts.

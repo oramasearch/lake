@@ -214,6 +214,7 @@ void register_agent_capabilities(Registry& registry) {
                  .scopes = std::move(scopes),
                  .lifetime_seconds = lifetime,
                  .never_expires = never_expires},
+                context.acting_identity,
                 {.configured_seed = context.identity_seed, .instance_kek = context.instance_kek});
             if (!minted) {
                 return from_agent_error(minted.error());

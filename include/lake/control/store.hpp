@@ -2175,6 +2175,10 @@ public:
     create_pki_certificate(const NewPkiCertificateRecord& value) = 0;
     virtual Result<PkiCertificateRecord> get_pki_certificate(const std::string& id) = 0;
     virtual Result<PkiCertificateRecord> revoke_pki_certificate(const std::string& id) = 0;
+    // Customer-admin-issued agent certificates register a durable TAAP identity for delegation.
+    virtual Result<bool> has_active_agent_certificate(const std::string& customer_id,
+                                                      const std::string& taap_id,
+                                                      const std::string& at) = 0;
     virtual Result<AgentSession> create_agent_session(const NewAgentSession& value) = 0;
     // Marks one agent session key revoked; a revoked key never verifies again (lake#234).
     virtual Result<AgentSession> revoke_agent_session(const std::string& customer_id,

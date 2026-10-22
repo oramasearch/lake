@@ -88,6 +88,8 @@ Metering and quota configuration uses the `LAKE_PRICE_*` and `LAKE_STORAGE_QUOTA
 environment variables documented in [`docs/api/metering.md`](docs/api/metering.md).
 Agent claim leases use optional per-library `LAKE_AGENT_LEASE_SECONDS` overrides; renewal,
 bounded retries and the operator handoff are documented in [`docs/api/agent-bus.md`](docs/api/agent-bus.md).
+Session-key dispatcher authority and customer agent registration are documented in
+[`docs/api/agents.md`](docs/api/agents.md).
 Ship app hosts, reserved names, and quotas use `LAKE_APPS_WILDCARD`,
 `LAKE_APPS_RESERVED_NAMES`, `LAKE_APPS_PER_CUSTOMER`, and
 `LAKE_APP_REPLICAS_PER_CUSTOMER`; see [`docs/api/web-apps.md`](docs/api/web-apps.md).

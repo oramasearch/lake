@@ -1,5 +1,9 @@
 # Telemetry implementation
 
+`has_active_agent_certificate` forwards the customer, TAAP identity and issuance instant to the
+wrapped store and preserves its result or error. Agent delegation registration therefore applies
+through the instrumented store too. See [agent session keys](../../docs/api/agents.md).
+
 The network Store wrapper forwards all twenty connection, egress-rule, tunnel-grant and peer
 operations with per-operation labels, preserving actors, scope, records and errors. See
 [network.md](../../docs/control-plane/network.md).

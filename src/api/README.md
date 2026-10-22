@@ -9,6 +9,9 @@ reconstructed before offboarding. See [Clerk offboarding](../../docs/api/clerk.m
 claimed source name to its key (LSR-088, lake#954). Imported forge/artifact claims carry untrusted
 provenance, release evidence cannot satisfy local branch protection, and recreated grants use
 the importer and freshly signed local attestations. See [export.md](../../docs/api/export.md).
+`agent_capabilities.cpp` passes the authenticated acting identity separately to the agent signing
+service. Customer write permission does not allow another dispatcher or a durable agent without
+an active certificate for the customer. See [agent session keys](../../docs/api/agents.md).
 
 `tunnel_clients.cpp` reads the tunnel client folder (allow-listed `zetta-tunnel-<platform>` files
 with a `SHA256SUMS` line, and `VERSION`) and signs and checks their 15-minute links with
