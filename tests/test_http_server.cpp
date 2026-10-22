@@ -3738,7 +3738,7 @@ TEST(HttpServer, AuthenticationClientBudgetFollowsTheIngressAddressAcrossRestAnd
         EXPECT_FALSE(response.empty());
         return response.find("rate_limited") != std::string::npos;
     };
-    for (int i = 0; i < 30; ++i) {
+    for (int i = 0; i < 100; ++i) {
         EXPECT_FALSE(authenticate({{"X-Real-IP", "192.0.2.1"}})) << i;
     }
     EXPECT_TRUE(authenticate({{"X-Real-IP", "192.0.2.1"}}));
@@ -3747,7 +3747,7 @@ TEST(HttpServer, AuthenticationClientBudgetFollowsTheIngressAddressAcrossRestAnd
     EXPECT_FALSE(authenticate({{"X-Real-IP", "192.0.2.2"}}));
     EXPECT_FALSE(authenticate({{"X-Forwarded-For", "192.0.2.1, 192.0.2.3"}}));
     // A direct connection, with neither header, still has a budget.
-    for (int i = 0; i < 30; ++i) {
+    for (int i = 0; i < 100; ++i) {
         EXPECT_FALSE(authenticate({})) << i;
     }
     EXPECT_TRUE(authenticate({}));
@@ -3837,9 +3837,8 @@ TEST(HttpServer, RecoveryWorkCannotBlockHealthOrTheSharedStoreConnection) {
     EXPECT_TRUE(store_ready) << "recovery held the shared store mutex";
     EXPECT_NE(health.get().find("200 OK"), std::string::npos);
     EXPECT_TRUE(store_read.get());
-    EXPECT_NE(wrong.get().find("unauthorized"), std::string::npos);
+    EXPECT_NE(wrong.get().find("unauthenticated"), std::string::npos);
     // A loop of wrong codes now reaches the account budget instead of rehashing eight codes.
-    bool throttled = false;
     for (int i = 0; i < 9; ++i) {
         HttpConnection attempt(server.port());
         const auto response =
@@ -3850,12 +3849,24 @@ TEST(HttpServer, RecoveryWorkCannotBlockHealthOrTheSharedStoreConnection) {
                             "HTTP/1.1",
                             "",
                             "application/json");
-        throttled |= response.find("429") != std::string::npos &&
-                     response.find("rate_limited") != std::string::npos;
+        EXPECT_NE(response.find("unauthenticated"), std::string::npos);
         HttpConnection probe(server.port());
         EXPECT_NE(probe.request("GET", "/healthz").find("200 OK"), std::string::npos);
     }
-    EXPECT_TRUE(throttled);
+    // A correct unused code proves the account is cooling down; wrong and blocked guesses
+    // deliberately have the same public response.
+    HttpConnection correct(server.port());
+    const auto blocked = correct.request(
+        "POST",
+        "/v1/recover_with_code",
+        nlohmann::json{{"email", input.email}, {"code", enrolled->recovery_codes[1]}}.dump(),
+        "",
+        "HTTP/1.1",
+        "",
+        "application/json");
+    EXPECT_NE(blocked.find("401"), std::string::npos);
+    EXPECT_NE(blocked.find("unauthenticated"), std::string::npos);
+    EXPECT_NE(blocked.find("invalid credentials"), std::string::npos);
     auto recovery_acknowledgement = [&](const std::string& email) {
         HttpConnection connection(server.port());
         const auto response = connection.request("POST",

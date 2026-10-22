@@ -259,3 +259,7 @@ its client attempt table across transports. See [the contract](../../../docs/api
 recovery limits. It is never capability input; empty addresses share a bucket. See
 [recovery.md](../../../docs/api/recovery.md#email-recovery-budgets).
 `PaymentNotice::order_subscription` (lake#972) routes verified recurring order events separately from ordinary usage invoices. `ApiContext` and `ServerOptions` carry `order_entitlement_grace_seconds`, default three days. See [orders](../../../docs/api/orders.md#recurring-entitlement-lsr-105-lake972).
+`ApiContext::client_address` carries the trusted ingress-derived address (`order_client_address`)
+to the shared Store-backed registry reservations across REST, MCP and hosted forms. Non-HTTP
+calls share an in-process client bucket. See [the contract](../../../docs/api/identity.md#authentication-attempt-limits)
+(lake#966).

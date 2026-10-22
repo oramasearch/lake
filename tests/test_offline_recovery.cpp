@@ -169,7 +169,8 @@ TEST(AccountRecovery, CodesCoolingAndTwoAdministratorApprovalRestoreSignIn) {
         "recover_with_code",
         {{"email", "recovery-target@example.test"}, {"code", enrollment->recovery_codes.front()}},
         anonymous));
-    EXPECT_EQ(reused_code.error.code, "unauthorized");
+    EXPECT_FALSE(reused_code.ok);
+    EXPECT_EQ(reused_code.error.code, "unauthenticated");
 
     const ApiResult email = registry.call(
         "begin_email_recovery", {{"email", "recovery-target@example.test"}}, anonymous);

@@ -4,6 +4,55 @@ Account restoration beyond MFA sign-in is specified in [`recovery.md`](recovery.
 restores sign-in credentials and sessions; it does not restore end-to-end encrypted repository
 keys. Offline device grants are specified separately in [`offline.md`](offline.md).
 
+## Authentication attempt limits
+
+Password sign-in, MFA sign-in, MFA enrollment, disable and step-up, recovery-code sign-in and
+recovery completion share ten failed attempts per account per fifteen minutes (lake#966,
+LSR-100). Known accounts use their immutable user id across pools; email lookups use the lowercase
+credential email. Unknown email budgets remain scoped to the requested pool. Unknown credentials and an account cooldown both return `unauthenticated` (REST 401)
+with `invalid credentials`. Real credential verification resets account and client failures;
+a password-only response requiring MFA and an accepted email-recovery start do not reset them.
+Email-recovery initiation verifies no credential and does not change these failure counts;
+its mail/token budgets are tracked separately in lake#968.
+
+REST, hosted application forms and MCP also share 100 failed attempts per trusted client address
+per fifteen minutes, across these operations and account-deletion step-up. The HTTP adapter
+reuses the order/recovery address rule: ingress-nginx's rewritten `X-Real-IP`, else the final
+`X-Forwarded-For` hop, else a shared direct-client bucket. It ignores `CF-Connecting-IP` and earlier
+forwarded hops. Deployments must preserve ingress header sanitizing and prevent direct access
+around that ingress. Capability input cannot supply transport metadata; in-process callers share
+a client bucket. TAAP, passkeys and external identity-provider verification are outside these
+password/MFA budgets.
+
+A global ceiling defaults to 1,000 failed verifications per fifteen minutes. Set
+`LAKE_AUTH_GLOBAL_FAILURE_LIMIT` to an integer from 1 through 1,000,000 to change it; invalid
+configuration refuses authentication. Success releases its reservation without spending or
+resetting the global failure count. Client or global exhaustion returns `rate_limited` (REST 429,
+MCP error). Refused requests do not extend a window; a successful account/client verification
+starts its cleared budget's next fifteen-minute window.
+
+Admission reserves capacity before expensive verification, including in-flight work so concurrent
+guesses cannot pass the limit before failures are recorded. PostgreSQL commits admission and
+completion separately from credential verification, sharing budgets across processes and
+connections. Expired windows are pruned; window ids prevent late completions changing a replacement
+window, and 100,000 live hashed keys bound storage. Database errors refuse authentication;
+interrupted requests retain their reservation until expiry. Both stores use the same policy.
+
+A successful TOTP records its matched 30-second step under the factor's row lock (or memory-store
+mutex). Only a later step may succeed, across sign-in, step-up and disable; the previous/current/next
+step tolerance remains. PostgreSQL locks the account before its factor rows so verification
+and account deletion use the same lock order. Step-up also consumes recovery codes. Replacing MFA starts a fresh counter
+for the new seed. PostgreSQL stores this counter in the existing encrypted-seed credential's
+`public_data`, never in the client.
+
+Apply migration `0098_authentication_attempts` before the new binary. The operator must vendor
+`db/schema.sql` and select `authentication_attempts_guard`; no operator files change here.
+To verify, run `ctest --test-dir <build> --timeout 600 -R 'AuthenticationLimits|MfaVerificationLocks' --output-on-failure`
+with `LAKE_TEST_DB_URI` configured. The tests alternate REST and MCP over fresh connections, check
+unrelated accounts, separate PostgreSQL connections, cooldown expiry, and TOTP/recovery replay.
+Keep admission before credential verification and counter consumption inside the successful
+verification transaction when changing these paths; update both stores and these tests together.
+
 ## What
 
 Identity capabilities live in the single registry and are therefore available as REST, OpenAPI,
@@ -663,7 +712,7 @@ by the store) and `TheOperatorDeletesAnAccountAndItsSoleOrganizationsWhenAsked`,
 in-memory store and PostgreSQL. The confirmation in Lake Console is
 [`../ui/settings.md`](../ui/settings.md#deleting-your-account).
 
-## Authentication attempt limits
+## Bounded authentication work and recovery selectors
 
 Password sign-in, `verify_mfa`, `recover_with_code`, MFA enrollment/disablement, sign-up and
 email/token recovery run their store work on the bounded blocking pool. At most two authentication
@@ -673,44 +722,22 @@ private transactions, so an Argon2 calculation or a locked recovery row never ho
 store's shared connection mutex. In-memory verification uses an owned snapshot and rechecks it
 under the lock before issuing or consuming a credential.
 
-Each account gets eight failed attempts per minute, shared across password sign-in, MFA sign-in,
-recovery-code sign-in, fresh MFA verification, enrollment, disablement and token completion. The store checks the budget before verifying a hash. Public password,
-MFA sign-in and recovery-code attempts charge failures even when no recovery selector exists.
-Protected fresh-MFA checks and disablement reject unknown selectors cheaply without charging a
-hash-verification failure. An attempt reserves capacity before verification; successful
-verification refunds only its own reservation and never clears earlier failures. Invalid
-enrollment session proofs are rejected before reserving password-verification capacity.
-Email case variants resolve to the same user budget.
-
-Each client address also gets thirty authentication calls per minute across REST, MCP and hosted
-sign-in forms, including sign-up, email-recovery initiation and token completion. The address
-comes from the trusted ingress hop, as for anonymous orders and email recovery: `X-Real-IP`,
-which ingress-nginx sets itself and overwrites, else the last `X-Forwarded-For` hop, the one the
-nearest proxy appended. Never `CF-Connecting-IP` or the first `X-Forwarded-For` hop, which a
-sender can write. The ingress decides which client address to trust (Cloudflare's ranges), so
-two people behind the same ingress pod keep separate budgets. A request that reaches Lake
-directly, with neither header, counts against one shared `direct` budget, so it is still
-limited. These limits are per process and reset on restart. Each
-table retains at most 4,096 active keys; a full table refuses new keys until expiry instead of
-evicting an account's existing budget.
-
-Email-recovery initiation keeps its uniform public acknowledgement and performs the same token
-hashing for known and unknown addresses. It shares the worker and client bounds, but does not
-consume the password-verification budget, so password throttling does not change that
-operation's acknowledgement or token-hashing work.
+The shared [failure budgets](#authentication-attempt-limits) apply before credential work.
+Email-recovery initiation keeps its uniform acknowledgement without clearing verification
+failures. Registration also reserves client capacity; a successful registration does not clear
+failures from earlier authentication attempts.
 
 New recovery codes have the form `rc1_` followed by 32 lowercase hexadecimal characters
 (128 random bits). The SHA-256 selector in `credentials.subject`, indexed by the existing
 unique `(pool_id, kind, subject)` constraint, selects one Argon2id hash. Unknown selectors and
 malformed codes perform no recovery-code derivation. Password-plus-recovery sign-in performs
 one password derivation and at most one recovery derivation. Every recovery verifier, including
-fresh verification and MFA disablement, uses the same selector rule. Consumption during
-recovery and MFA sign-in locks the selected row and revokes it in the session transaction.
+fresh verification and MFA disablement, uses the same selector rule. Every successful use, including step-up, consumes the selected recovery row under lock.
 
 Earlier 12-character recovery codes are refused: their salted hashes cannot be backfilled with
 a selector. Regenerate codes by enrolling MFA again with the current password from an interactive
 session. The MFA page displays this instruction. Existing TOTP seeds, passwords and passkeys
-continue to work. There is no SQL migration or operator schema handoff.
+continue to work. Selector storage uses existing credential columns; the shared failure budgets require migration `0098_authentication_attempts`.
 
 With `LAKE_TEST_DB_URI` configured, run:
 
@@ -719,7 +746,6 @@ ctest --test-dir <build> --timeout 600 --output-on-failure \
   -R 'AuthenticationLimits|AuthenticationStores|AuthenticationClientBudget|RecoveryWorkCannotBlock|MfaEnrollment'
 ```
 
-The tests exercise both stores, legacy-code refusal, account/client limits, two-worker admission, concurrent
-consumption, and `/healthz` plus unrelated store reads while recovery waits on a locked row.
-When changing a budget, keep it shared across entry points and keep both the memory table and
-the work queue bounded; never add a legacy multi-hash fallback.
+The tests cover shared budgets, selectors, one-use factors, bounded workers, and `/healthz` plus
+unrelated store reads while a recovery row is locked. Keep hash verification outside shared
+connection/store locks and never add a legacy multi-hash fallback.

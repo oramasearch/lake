@@ -23,3 +23,7 @@ native proof together.
 
 `POST /repository/create` and the hub's `POST /api/repos/create` take the repository's workspace
 (lake#315); see [http.md](http.md) and [../api/models.md](../api/models.md).
+
+[HTTP](http.md) also describes shared authentication attempt admission across REST, hosted forms and MCP (lake#966).
+
+[Configuration](configuration.md) documents the global authentication failure ceiling (lake#966).

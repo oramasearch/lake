@@ -1,59 +1,67 @@
 #pragma once
-
 #include <chrono>
-#include <cstddef>
+#include <expected>
 #include <map>
 #include <mutex>
 #include <string>
 
+#include "lake/control/store.hpp"
+
 namespace lake::control {
 
-// Fixed windows retain active buckets until expiry. A full table refuses new keys rather than
-// evicting an account's budget; arbitrary account/client names cannot reset another bucket.
+// The in-memory implementation of the shared reservation policy. Live keys never get evicted.
 class AuthenticationAttempts {
 public:
     using Clock = std::chrono::steady_clock;
-    explicit AuthenticationAttempts(unsigned limit, std::size_t capacity = 4096)
-        : limit_(limit), capacity_(capacity) {}
+    enum class Refusal { exhausted, capacity };
+    explicit AuthenticationAttempts(std::size_t capacity = 100000) : capacity_(capacity) {}
 
-    bool admit(const std::string& key, Clock::time_point now = Clock::now()) {
+    std::expected<std::string, Refusal> reserve(const std::string& key,
+                                                unsigned limit,
+                                                const std::string& new_window,
+                                                Clock::time_point now = Clock::now()) {
         std::lock_guard lock(mutex_);
+        std::erase_if(buckets_, [&](const auto& item) { return item.second.until <= now; });
         auto found = buckets_.find(key);
-        if (found != buckets_.end() && now < found->second.until) {
-            if (found->second.count >= limit_)
-                return false;
-            ++found->second.count;
-            return true;
-        }
         if (found == buckets_.end()) {
-            if (buckets_.size() >= capacity_) {
-                std::erase_if(buckets_,
-                              [now](const auto& item) { return now >= item.second.until; });
-            }
             if (buckets_.size() >= capacity_)
-                return false;
+                return std::unexpected(Refusal::capacity);
+            found = buckets_.emplace(key, Bucket{now + std::chrono::minutes(15), new_window, 0, 0})
+                        .first;
         }
-        buckets_[key] = {now + std::chrono::minutes(1), 1};
-        return true;
+        if (found->second.failures + found->second.pending >= limit)
+            return std::unexpected(Refusal::exhausted);
+        ++found->second.pending;
+        return found->second.window;
     }
 
-    void refund(const std::string& key, Clock::time_point admitted_at) {
+    void finish(const std::string& key,
+                const std::string& window,
+                AuthenticationOutcome outcome,
+                bool reset,
+                Clock::time_point now = Clock::now()) {
         std::lock_guard lock(mutex_);
-        const auto found = buckets_.find(key);
-        if (found != buckets_.end() && admitted_at < found->second.until &&
-            admitted_at >= found->second.until - std::chrono::minutes(1) && found->second.count > 0)
-            --found->second.count;
+        auto found = buckets_.find(key);
+        if (found == buckets_.end() || found->second.window != window || found->second.pending == 0)
+            return;
+        auto& budget = found->second;
+        --budget.pending;
+        if (outcome == AuthenticationOutcome::failure)
+            ++budget.failures;
+        else if (reset && outcome == AuthenticationOutcome::success) {
+            budget.failures = 0;
+            budget.until = now + std::chrono::minutes(15);
+        }
     }
 
 private:
     struct Bucket {
         Clock::time_point until;
-        unsigned count;
+        std::string window;
+        unsigned failures, pending;
     };
-    unsigned limit_;
     std::size_t capacity_;
     std::mutex mutex_;
     std::map<std::string, Bucket> buckets_;
 };
-
 } // namespace lake::control

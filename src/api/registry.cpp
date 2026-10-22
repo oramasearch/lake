@@ -200,7 +200,9 @@ constexpr std::array<ErrorCode, 36> documented_error_codes{{
      503,
      "The workspace audit queue is full; inspect operation_result before retrying."},
     {"busy", 503, "The resource is busy; retry."},
-    {"rate_limited", 429, "Too many requests from this caller, or in all, are waiting; retry."},
+    {"rate_limited",
+     429,
+     "A request limit was reached; retry when capacity or the authentication cooldown permits."},
     {"usage_limit_reached",
      429,
      "The account has used its monthly limit on this dimension (model tokens); an administrator "
@@ -578,6 +580,7 @@ struct CallState {
     std::shared_ptr<const Capability> capability;
     ApiResult result;
     bool proceed = true;
+    std::optional<control::AuthenticationAttempt> authentication;
 };
 
 ApiResult
@@ -867,9 +870,25 @@ CallState prepare_call(std::shared_ptr<const Capability> capability,
         }
     }
     const Capability& entry = *state.capability;
+    if (context.store &&
+        (entry.name == "sign_up_password" || entry.name == "sign_in_password" ||
+         entry.name == "verify_mfa" || entry.name == "recover_with_code" ||
+         entry.name == "begin_email_recovery" || entry.name == "complete_recovery" ||
+         entry.name == "enroll_mfa" || entry.name == "disable_mfa" ||
+         (entry.name == "delete_account" && input.contains("code")))) {
+        const auto gate = context.store->authentication_attempt(
+            "", "", "", context.client_address.empty() ? "in-process" : context.client_address);
+        if (!gate) {
+            state.result = ApiResult::failure(gate.error().code, gate.error().message);
+            state.proceed = false;
+            return state;
+        }
+        state.authentication = *gate;
+    }
     if (input.contains("workspace_id")) {
         context.workspace_id = input.at("workspace_id").is_string()
-            ? input.at("workspace_id").get<std::string>() : std::string();
+                                   ? input.at("workspace_id").get<std::string>()
+                                   : std::string();
     }
     if (auto failure = authentication_failure(entry, context)) {
         state.result = std::move(*failure);
@@ -989,6 +1008,26 @@ CallState prepare_call(std::shared_ptr<const Capability> capability,
         }
     }
     return state;
+}
+
+// Accepted email-recovery requests do not prove identity and cannot clear a guessing budget.
+void finish_authentication(CallState& state, const std::string& name, ApiContext& context) {
+    if (!state.authentication)
+        return;
+    auto outcome = control::AuthenticationOutcome::neutral;
+    if (state.proceed && name != "begin_email_recovery") {
+        if (state.result.ok && name != "sign_up_password")
+            outcome = control::AuthenticationOutcome::success;
+        else if (state.result.error.code == "unauthenticated" ||
+                 state.result.error.code == "unauthorized" ||
+                 state.result.error.code == "not_found" ||
+                 (name == "sign_up_password" && state.result.error.code == "conflict"))
+            outcome = control::AuthenticationOutcome::failure;
+    }
+    const auto finished =
+        context.store->authentication_attempt_finished(*state.authentication, outcome);
+    if (!finished)
+        state.result = ApiResult::failure(finished.error().code, finished.error().message);
 }
 
 // The agent a task, launch or schedule credential belongs to. Those credentials act as the person
@@ -1307,18 +1346,7 @@ Registry::call(const std::string& name, const nlohmann::json& input, ApiContext&
     nlohmann::json task_resolved_input;
     const nlohmann::json& call_input =
         agent_task_input(*capability, workspace_input, context, task_resolved_input);
-    if ((name == "sign_in_password" || name == "verify_mfa" || name == "recover_with_code" ||
-         name == "enroll_mfa" || name == "disable_mfa" || name == "sign_up_password" ||
-         name == "begin_email_recovery" || name == "complete_recovery") &&
-        !context.client_address.empty() &&
-        !authentication_clients_->admit(context.client_address)) {
-        return refuse(name,
-                      ApiResult::failure(
-                          "rate_limited",
-                          "too many authentication attempts from this client; retry in one minute"),
-                      {{"reason", "authentication_client_limit"}},
-                      context);
-    }
+
     CallState state = prepare_call(capability, call_input, context);
     if (state.proceed) {
         const auto start = std::chrono::steady_clock::now();
@@ -1338,6 +1366,7 @@ Registry::call(const std::string& name, const nlohmann::json& input, ApiContext&
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start)
                 .count();
     }
+    finish_authentication(state, name, context);
     return finish_call(
         capability.get(), name, call_input, std::move(state.result), context, state.proceed);
 }
@@ -1402,19 +1431,7 @@ liquid::runtime::task<ApiResult> Registry::call_async(const std::string& name,
     nlohmann::json task_resolved_input;
     const nlohmann::json& call_input =
         agent_task_input(*capability, workspace_input, context, task_resolved_input);
-    if ((name == "sign_in_password" || name == "verify_mfa" || name == "recover_with_code" ||
-         name == "enroll_mfa" || name == "disable_mfa" || name == "sign_up_password" ||
-         name == "begin_email_recovery" || name == "complete_recovery") &&
-        !context.client_address.empty() &&
-        !authentication_clients_->admit(context.client_address)) {
-        co_return refuse(
-            name,
-            ApiResult::failure(
-                "rate_limited",
-                "too many authentication attempts from this client; retry in one minute"),
-            {{"reason", "authentication_client_limit"}},
-            context);
-    }
+
     CallState state = prepare_call(capability, call_input, context);
     if (state.proceed) {
         // A long poll (`wait_ms`) parks on the bus: it gives its HTTP worker back so parked
@@ -1464,6 +1481,7 @@ liquid::runtime::task<ApiResult> Registry::call_async(const std::string& name,
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start)
                 .count();
     }
+    finish_authentication(state, name, context);
     co_return finish_call(
         capability.get(), name, call_input, std::move(state.result), context, state.proceed);
 }

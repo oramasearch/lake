@@ -4896,3 +4896,16 @@ FROM (
 ) orders;
 CREATE TABLE IF NOT EXISTS cloud_order_entitlements_guard (applied_at timestamptz NOT NULL DEFAULT now());
 INSERT INTO schema_migrations (version) VALUES ('0097_cloud_order_entitlements') ON CONFLICT DO NOTHING;
+-- 0098_authentication_attempts (lake#966, LSR-100): shared, bounded authentication budgets.
+CREATE TABLE IF NOT EXISTS authentication_attempts (
+    key_hash text PRIMARY KEY CHECK (key_hash ~ '^[0-9a-f]{64}$'),
+    failures integer NOT NULL CHECK (failures >= 0),
+    pending integer NOT NULL CHECK (pending >= 0),
+    window_id uuid NOT NULL,
+    expires_at timestamptz NOT NULL
+);
+CREATE INDEX IF NOT EXISTS authentication_attempts_expires_idx ON authentication_attempts(expires_at);
+CREATE TABLE IF NOT EXISTS authentication_attempts_guard (
+    applied_at timestamptz NOT NULL DEFAULT now()
+);
+INSERT INTO schema_migrations(version) VALUES ('0098_authentication_attempts') ON CONFLICT DO NOTHING;

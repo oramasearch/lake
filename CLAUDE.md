@@ -69,6 +69,11 @@ grants, audit and repositories stay; `sign_in_taap` with the own key reaches it,
 vendor the schema and select `identity_links_guard`. See
 [`docs/api/identity.md#your-own-identity`](docs/api/identity.md#your-own-identity).
 
+Password, MFA and recovery verification share account/global/client failure budgets with concurrent reservations (lake#966, LSR-100,
+`0098_authentication_attempts`); successful TOTP steps and recovery codes are consumed across
+sign-in and step-up. Not deployed; operator schema vendoring and `authentication_attempts_guard`
+are required. See [`docs/api/identity.md#authentication-attempt-limits`](docs/api/identity.md#authentication-attempt-limits).
+
 Clerk webhooks follow (lake#765, migration `0087_clerk_webhooks`): `POST /identity/clerk-webhook`,
 verified with Lake's own Svix HMAC and `LAKE_CLERK_WEBHOOK_SECRET` (404 without it), applies each
 `svix-id` once: `user.created` provisions the account as a first Clerk sign-in does, `user.updated`

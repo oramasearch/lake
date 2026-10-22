@@ -126,4 +126,4 @@ sign-in routes ([README.md](README.md#what-lake-serves)). Update this table and 
 The MFA page warns that legacy 12-character recovery codes are retired and asks the person to
 enter their current password and re-enroll for new `rc1_` codes (lake#969). Passwords, TOTP and
 passkeys remain available. The recovery-code list wraps long codes inside each grid cell.
-Authentication throttles use the existing error notice; retry after one minute. See [attempt limits](../api/identity.md#authentication-attempt-limits).
+Authentication throttles use the existing error notice; client/global cooldowns last at most fifteen minutes. See [attempt limits](../api/identity.md#authentication-attempt-limits).

@@ -1345,6 +1345,20 @@ public:
         return call("begin_identity_proof",
                     [&] { return store_->begin_identity_proof(pool_id, document); });
     }
+    control::Result<control::AuthenticationAttempt>
+    authentication_attempt(const std::string& pool,
+                           const std::string& email,
+                           const std::string& user,
+                           const std::string& client) override {
+        return call("authentication_attempt",
+                    [&] { return store_->authentication_attempt(pool, email, user, client); });
+    }
+    control::Result<void>
+    authentication_attempt_finished(const control::AuthenticationAttempt& attempt,
+                                    control::AuthenticationOutcome outcome) override {
+        return call("authentication_attempt_finished",
+                    [&] { return store_->authentication_attempt_finished(attempt, outcome); });
+    }
     control::Result<control::IssuedSession>
     sign_in_password(const control::PasswordSignIn& value) override {
         return call("sign_in_password", [&] { return store_->sign_in_password(value); });

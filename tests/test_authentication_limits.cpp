@@ -20,24 +20,24 @@ constexpr auto kek = "00112233445566778899aabbccddeeff00112233445566778899aabbcc
 
 TEST(AuthenticationLimits, ExpiryAndCapacityNeverEvictAnActiveBudget) {
     using Attempts = lake::control::AuthenticationAttempts;
-    Attempts attempts(2, 2);
+    using Outcome = lake::control::AuthenticationOutcome;
+    Attempts attempts(2);
     const auto now = Attempts::Clock::now();
-    EXPECT_TRUE(attempts.admit("a", now));
-    EXPECT_TRUE(attempts.admit("a", now));
-    EXPECT_FALSE(attempts.admit("a", now));
-    EXPECT_TRUE(attempts.admit("b", now));
-    EXPECT_FALSE(attempts.admit("c", now));
-    EXPECT_FALSE(attempts.admit("a", now));
-    EXPECT_TRUE(attempts.admit("c", now + std::chrono::minutes(1)));
-    EXPECT_TRUE(attempts.admit("a", now + std::chrono::minutes(1)));
-    lake::control::AuthenticationAttempts reservations(2);
-    EXPECT_TRUE(reservations.admit("a", now));
-    const auto next_window = now + std::chrono::minutes(1);
-    EXPECT_TRUE(reservations.admit("a", next_window));
-    reservations.refund("a", now);
-    EXPECT_TRUE(reservations.admit("a", next_window));
-    EXPECT_FALSE(reservations.admit("a", next_window))
-        << "an old completion cannot refund a new window";
+    const auto first = attempts.reserve("a", 2, "a-before", now);
+    ASSERT_TRUE(first);
+    EXPECT_TRUE(attempts.reserve("a", 2, "unused", now));
+    EXPECT_FALSE(attempts.reserve("a", 2, "unused", now));
+    attempts.finish("a", *first, Outcome::failure, true, now);
+    EXPECT_FALSE(attempts.reserve("a", 2, "unused", now));
+    EXPECT_TRUE(attempts.reserve("b", 2, "b-before", now));
+    EXPECT_FALSE(attempts.reserve("c", 2, "c-before", now));
+    const auto next_window = now + std::chrono::minutes(15);
+    EXPECT_TRUE(attempts.reserve("c", 2, "c-after", next_window));
+    EXPECT_TRUE(attempts.reserve("a", 2, "a-after", next_window));
+    attempts.finish("a", *first, Outcome::success, true, next_window);
+    EXPECT_TRUE(attempts.reserve("a", 2, "unused", next_window));
+    EXPECT_FALSE(attempts.reserve("a", 2, "unused", next_window))
+        << "an old completion cannot clear a new window";
 }
 
 class AuthenticationStores : public testing::TestWithParam<bool> {
@@ -81,8 +81,9 @@ TEST_P(AuthenticationStores, SelectorsAndOneUseApplyAcrossEveryRecoveryPath) {
     EXPECT_TRUE(
         lake::control::identity_crypto::recovery_selector("RC1_" + codes[0].substr(4)).empty());
     ASSERT_TRUE(store->verify_mfa_code(user_id, "lake", codes[0]));
-    ASSERT_TRUE(store->recover_with_code("lake", email, codes[0], "test"));
     EXPECT_FALSE(store->recover_with_code("lake", email, codes[0], "test"));
+    ASSERT_TRUE(store->recover_with_code("lake", email, codes[3], "test"));
+    EXPECT_FALSE(store->recover_with_code("lake", email, codes[3], "test"));
     ASSERT_TRUE(store->sign_in_totp({"lake", email, password, codes[1], "test"}));
     EXPECT_FALSE(store->verify_mfa_code(user_id, "lake", codes[1]));
     ASSERT_TRUE(store->disable_mfa(user_id, "lake", codes[2]));
@@ -90,7 +91,7 @@ TEST_P(AuthenticationStores, SelectorsAndOneUseApplyAcrossEveryRecoveryPath) {
 }
 
 TEST_P(AuthenticationStores, AccountBudgetSpansCaseVariantsAndAllEntryPoints) {
-    for (int i = 0; i < 8; ++i) {
+    for (int i = 0; i < 10; ++i) {
         if (i % 3 == 0)
             EXPECT_FALSE(
                 store->sign_in_password({"lake", "LIMITS@EXAMPLE.TEST", "wrong", "", "test"}));
@@ -101,19 +102,19 @@ TEST_P(AuthenticationStores, AccountBudgetSpansCaseVariantsAndAllEntryPoints) {
     }
     const auto password_result = store->sign_in_password({"lake", email, password, "", "test"});
     ASSERT_FALSE(password_result);
-    EXPECT_EQ(password_result.error().code, "rate_limited");
+    EXPECT_EQ(password_result.error().code, "unauthenticated");
     const auto recovery = store->recover_with_code("lake", email, codes[0], "test");
     ASSERT_FALSE(recovery);
-    EXPECT_EQ(recovery.error().code, "rate_limited");
+    EXPECT_EQ(recovery.error().code, "unauthenticated");
     const auto totp = store->sign_in_totp({"lake", email, password, codes[0], "test"});
     ASSERT_FALSE(totp);
-    EXPECT_EQ(totp.error().code, "rate_limited");
+    EXPECT_EQ(totp.error().code, "unauthenticated");
     const auto fresh = store->verify_mfa_code(user_id, "lake", codes[0]);
     ASSERT_FALSE(fresh);
-    EXPECT_EQ(fresh.error().code, "rate_limited");
+    EXPECT_EQ(fresh.error().code, "unauthenticated");
     const auto disabled = store->disable_mfa(user_id, "lake", codes[0]);
     ASSERT_FALSE(disabled);
-    EXPECT_EQ(disabled.error().code, "rate_limited");
+    EXPECT_EQ(disabled.error().code, "unauthenticated");
 }
 
 TEST_P(AuthenticationStores, ConcurrentRecoveryConsumesExactlyOnce) {

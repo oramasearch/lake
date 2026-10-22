@@ -665,8 +665,6 @@ public:
 
 private:
     std::vector<std::shared_ptr<const Capability>> entries_;
-    std::shared_ptr<control::AuthenticationAttempts> authentication_clients_ =
-        std::make_shared<control::AuthenticationAttempts>(30);
 };
 
 } // namespace lake::api

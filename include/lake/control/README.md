@@ -35,7 +35,7 @@ refuse it, and counts per kind. `Store` also gains `revoke_invitation`, `get_gra
 `AccountDeletion` and `AccountOrganization` (lake#810) are what `Store::delete_account` removes or
 would remove: the user, its personal space and live workspaces, each organization it is in with its
 role and how many other owners and members it has, counts per kind, and the invoices kept.
-`Store::verify_mfa_code` checks a TOTP or recovery code without changing anything
+`Store::verify_mfa_code` consumes a TOTP time step or recovery code
 ([identity.md](../../../docs/api/identity.md#deleting-an-account)).
 
 `StreamOwner` is a topic's creator; `stream_owners.hpp` keeps it as a sealed record in the
@@ -317,3 +317,9 @@ verification paths; see [the contract](../../../docs/api/identity.md#authenticat
 for unknown accounts or exhausted budgets. `cancel_recovery` takes the signed-in user id and
 checks ownership again in the store. Contracts: [recovery](../../../docs/api/recovery.md).
 `CloudOrderEntitlement` and `CloudOrderSubscriptionEvent` (lake#972) carry signed recurring subscription snapshots. `apply_cloud_order_subscription` matches subscription/customer/order, applies events once under serialization, and retains an access deadline; `cloud_order_entitlement_state` evaluates it at the supplied clock. Both stores share the ordering and expiry rules. See [orders](../../../docs/api/orders.md#recurring-entitlement-lsr-105-lake972).
+`authentication_limits.hpp` implements the in-memory reservation table. PostgreSQL keeps the
+same account/global/client policy in `authentication_attempts`; transports use the public Store
+admission/completion interface. `authentication.hpp` settles outcomes and normalizes credential
+refusals. Capacity includes in-flight work; verified success clears account/client failures,
+while global failures persist. See [the contract](../../../docs/api/identity.md#authentication-attempt-limits)
+(lake#966).

@@ -32,6 +32,7 @@
 
 #include <liquid/identity.hpp>
 
+#include "lake/control/authentication.hpp"
 #include "lake/control/handles.hpp"
 #include "lake/control/identity_crypto.hpp"
 #include "lake/control/own_identity.hpp"
@@ -535,14 +536,14 @@ std::string new_totp_secret() {
     return random_secret();
 }
 
-bool verify_totp(std::string_view secret, std::string_view code) {
+std::optional<std::int64_t> totp_step(std::string_view secret, std::string_view code) {
     if (code.size() != 6 || !std::all_of(code.begin(), code.end(), [](char value) {
             return value >= '0' && value <= '9';
         }))
-        return false;
+        return std::nullopt;
     const std::vector<unsigned char> key = from_hex(secret);
     if (key.empty())
-        return false;
+        return std::nullopt;
     const auto now = std::chrono::duration_cast<std::chrono::seconds>(
                          std::chrono::system_clock::now().time_since_epoch())
                          .count();
@@ -553,21 +554,27 @@ bool verify_totp(std::string_view secret, std::string_view code) {
             message[7 - index] = static_cast<unsigned char>(counter >> (index * 8));
         unsigned int length = 0;
         std::array<unsigned char, EVP_MAX_MD_SIZE> digest{};
-        HMAC(EVP_sha1(),
-             key.data(),
-             static_cast<int>(key.size()),
-             message.data(),
-             message.size(),
-             digest.data(),
-             &length);
+        if (!HMAC(EVP_sha1(),
+                  key.data(),
+                  static_cast<int>(key.size()),
+                  message.data(),
+                  message.size(),
+                  digest.data(),
+                  &length) ||
+            length != 20)
+            return std::nullopt;
         const unsigned start = digest[length - 1] & 0x0f;
         const unsigned value = ((digest[start] & 0x7f) << 24) | (digest[start + 1] << 16) |
                                (digest[start + 2] << 8) | digest[start + 3];
         const std::string expected = std::format("{:06}", value % 1000000);
         if (CRYPTO_memcmp(expected.data(), code.data(), expected.size()) == 0)
-            return true;
+            return static_cast<std::int64_t>(counter);
     }
-    return false;
+    return std::nullopt;
+}
+
+bool verify_totp(std::string_view secret, std::string_view code) {
+    return totp_step(secret, code).has_value();
 }
 
 std::string sha256_hex(std::string_view value) {
@@ -8268,18 +8275,126 @@ public:
             return issued;
         });
     }
+    Result<AuthenticationAttempt>
+    authentication_attempt(const std::string& pool_id,
+                           const std::string& email,
+                           const std::string& user_id,
+                           const std::string& client_address) override {
+        const auto global_limit = authentication_global_failure_limit();
+        if (!global_limit)
+            return std::unexpected(global_limit.error());
+        return with_tx<AuthenticationAttempt>([&](pqxx::work& tx) -> Result<AuthenticationAttempt> {
+            std::string pool = pool_id.empty() ? "lake" : pool_id;
+            std::string subject;
+            if (!client_address.empty()) {
+                subject = "client:" + client_address;
+            } else {
+                const auto rows =
+                    user_id.empty()
+                        ? tx.exec_params("SELECT pool_id, user_id::text FROM credentials WHERE "
+                                         "pool_id = $1 AND kind = 'password' AND subject = "
+                                         "lower($2) AND revoked_at IS NULL",
+                                         pool,
+                                         email)
+                        : tx.exec_params("SELECT pool_id, id::text FROM users WHERE id = $1::uuid",
+                                         user_id);
+                std::string account;
+                if (!rows.empty()) {
+                    pool = rows[0][0].as<std::string>();
+                    account = "user:" + rows[0][1].as<std::string>();
+                } else if (!user_id.empty()) {
+                    account = "user:" + user_id;
+                } else {
+                    const auto normalized = tx.exec_params("SELECT lower($1::text)", email);
+                    account = "email:" + normalized[0][0].as<std::string>();
+                }
+                subject = account.starts_with("user:")
+                              ? nlohmann::json::array({account}).dump()
+                              : nlohmann::json::array({pool, account}).dump();
+            }
+            tx.exec("SELECT pg_advisory_xact_lock(966100)");
+            tx.exec(
+                "DELETE FROM authentication_attempts WHERE expires_at <= statement_timestamp()");
+            const auto reserve =
+                [&](const std::string& key, unsigned limit, bool account) -> Result<std::string> {
+                if (key.size() != 64)
+                    return std::unexpected(
+                        StoreError{"store_error", "could not hash authentication key"});
+                const auto row =
+                    tx.exec_params("SELECT failures, pending, window_id::text FROM "
+                                   "authentication_attempts WHERE key_hash = $1 FOR UPDATE",
+                                   key);
+                if (row.empty()) {
+                    const auto count = tx.exec("SELECT count(*) FROM authentication_attempts");
+                    if (count[0][0].as<unsigned>() >= 100000)
+                        return std::unexpected(authentication_cooldown());
+                    const auto window = new_uuid_v4();
+                    tx.exec_params(
+                        "INSERT INTO authentication_attempts(key_hash, failures, pending, "
+                        "window_id, expires_at) "
+                        "VALUES ($1, 0, 1, $2::uuid, clock_timestamp() + interval '15 minutes')",
+                        key,
+                        window);
+                    return window;
+                }
+                if (row[0][0].as<unsigned>() + row[0][1].as<unsigned>() >= limit)
+                    return std::unexpected(account ? invalid_authentication()
+                                                   : authentication_cooldown());
+                tx.exec_params(
+                    "UPDATE authentication_attempts SET pending = pending + 1 WHERE key_hash = $1",
+                    key);
+                return row[0][2].as<std::string>();
+            };
+            std::string global_window;
+            if (client_address.empty()) {
+                auto global = reserve(
+                    identity_crypto::sha256_hex("global:authentication"), *global_limit, false);
+                if (!global)
+                    return std::unexpected(global.error());
+                global_window = *global;
+            }
+            const auto key = identity_crypto::sha256_hex(subject);
+            const auto window =
+                reserve(key, client_address.empty() ? 10 : 100, client_address.empty());
+            if (!window)
+                return std::unexpected(window.error());
+            return AuthenticationAttempt{key, *window, global_window};
+        });
+    }
+    Result<void> authentication_attempt_finished(const AuthenticationAttempt& attempt,
+                                                 AuthenticationOutcome outcome) override {
+        return with_tx<void>([&](pqxx::work& tx) -> Result<void> {
+            tx.exec("SELECT pg_advisory_xact_lock(966100)");
+            const auto finish = [&](const std::string& key, const std::string& window, bool reset) {
+                tx.exec_params("UPDATE authentication_attempts SET pending = pending - 1, "
+                               "failures = CASE WHEN $3::boolean THEN failures + 1 WHEN "
+                               "$4::boolean THEN 0 ELSE failures END, "
+                               "expires_at = CASE WHEN $4::boolean THEN clock_timestamp() + "
+                               "interval '15 minutes' ELSE expires_at END "
+                               "WHERE key_hash = $1 AND window_id = $2::uuid AND pending > 0",
+                               key,
+                               window,
+                               outcome == AuthenticationOutcome::failure,
+                               reset && outcome == AuthenticationOutcome::success);
+            };
+            finish(attempt.key, attempt.window_id, true);
+            if (!attempt.global_window_id.empty())
+                finish(identity_crypto::sha256_hex("global:authentication"),
+                       attempt.global_window_id,
+                       false);
+            return {};
+        });
+    }
     Result<IssuedSession> sign_in_password(const PasswordSignIn& in) override {
-        return with_authentication_tx<IssuedSession>([&](pqxx::work& tx) -> Result<IssuedSession> {
-            const pqxx::result rows =
-                tx.exec_params("SELECT user_id::text, secret_hash FROM credentials "
-                               "WHERE pool_id = $1 AND kind = 'password' AND subject = lower($2) "
-                               "AND revoked_at IS NULL FOR SHARE",
-                               in.pool_id,
-                               in.email);
-            if (rows.empty())
-                return std::unexpected(StoreError{"not_found", "invalid email or password"});
-            return authentication_attempt(
-                rows[0][0].as<std::string>(), [&]() -> Result<IssuedSession> {
+        return authentication_call(
+            *this, in.pool_id, in.email, "", [&](AuthenticationOutcome&) -> Result<IssuedSession> {
+                return with_authentication_tx<IssuedSession>([&](pqxx::work& tx)
+                                                                 -> Result<IssuedSession> {
+                    const pqxx::result rows = password_credential_tx(tx, in.pool_id, in.email);
+                    if (rows.empty())
+                        return std::unexpected(
+                            StoreError{"not_found", "invalid email or password"});
+
                     if (rows.empty() || !identity_crypto::verify_secret(
                                             rows[0][1].as<std::string>(), in.password)) {
                         return std::unexpected(
@@ -8308,7 +8423,7 @@ public:
                                          "",
                                          60 * 60 * 24 * 30);
                 });
-        });
+            });
     }
 
     Result<IssuedSession> sign_in_taap(const TaapSignIn& input) override {
@@ -8351,198 +8466,149 @@ public:
     Result<MfaEnrollment> enroll_mfa(const std::string& user_id,
                                      const std::string& pool_id,
                                      const MfaEnrollmentProof& proof) override {
-        const std::string pool = pool_id.empty() ? "lake" : pool_id;
-        if (user_id.empty() || proof.session_id.empty() || proof.password.empty()) {
-            return std::unexpected(
-                StoreError{"unauthorized",
-                           "MFA enrollment requires an interactive session and current password"});
-        }
-        MfaEnrollment enrollment;
-        enrollment.secret = identity_crypto::new_totp_secret();
-        for (int index = 0; index < 8; ++index) {
-            const std::string code = identity_crypto::new_recovery_code();
-            if (code.empty()) {
-                return std::unexpected(
-                    StoreError{"store_error", "could not create MFA recovery codes"});
-            }
-            enrollment.recovery_codes.push_back(code);
-        }
-        if (enrollment.secret.empty()) {
-            return std::unexpected(StoreError{"store_error", "could not create TOTP secret"});
-        }
-        return with_authentication_tx<MfaEnrollment>([&](pqxx::work& tx) -> Result<MfaEnrollment> {
-            const auto session = tx.exec_params(
-                "SELECT 1 FROM sessions JOIN users ON users.id = sessions.user_id "
-                "WHERE sessions.id = $1::uuid AND sessions.user_id = $2::uuid "
-                "AND sessions.pool_id = $3 AND sessions.kind IN ('browser', 'taap') "
-                "AND sessions.scopes = ARRAY['*']::text[] AND sessions.parent_session_id IS NULL "
-                "AND sessions.revoked_at IS NULL "
-                "AND (sessions.expires_at IS NULL OR sessions.expires_at > clock_timestamp()) "
-                "AND users.disabled_at IS NULL AND users.deleted_at IS NULL "
-                "FOR SHARE OF sessions, users",
-                proof.session_id,
-                user_id,
-                pool);
-            if (session.empty() || !active_session_lineage(tx, proof.session_id, user_id, pool)) {
-                return std::unexpected(
-                    StoreError{"unauthorized",
-                               "MFA enrollment requires an active interactive sign-in session"});
-            }
-            return authentication_attempt(user_id, [&]() -> Result<MfaEnrollment> {
-                const auto password = tx.exec_params(
-                    "SELECT secret_hash FROM credentials WHERE user_id = $1::uuid AND pool_id = $2 "
-                    "AND kind = 'password' AND revoked_at IS NULL FOR UPDATE",
-                    user_id,
-                    pool);
-                if (password.empty() || !identity_crypto::verify_secret(
-                                            password[0][0].as<std::string>(), proof.password)) {
-                    return std::unexpected(
-                        StoreError{"unauthorized", "MFA enrollment requires the current password"});
+        return authentication_call(
+            *this,
+            pool_id,
+            "",
+            user_id,
+            [&](AuthenticationOutcome& outcome) -> Result<MfaEnrollment> {
+                outcome = AuthenticationOutcome::neutral;
+                const std::string pool = pool_id.empty() ? "lake" : pool_id;
+                if (user_id.empty() || proof.session_id.empty() || proof.password.empty()) {
+                    return std::unexpected(StoreError{
+                        "unauthorized",
+                        "MFA enrollment requires an interactive session and current password"});
                 }
-                const Result<std::string> encrypted =
-                    encrypt_secret(tx, "identity.totp", enrollment.secret);
-                if (!encrypted) {
-                    return std::unexpected(encrypted.error());
-                }
-                tx.exec_params(
-                    "INSERT INTO credentials (user_id, pool_id, kind, subject, public_data) "
-                    "VALUES ($1::uuid, $2, 'totp', $1, jsonb_build_object('encrypted_seed', "
-                    "$3::text)) "
-                    "ON CONFLICT (pool_id, kind, subject) DO UPDATE SET public_data = "
-                    "EXCLUDED.public_data, revoked_at = NULL",
-                    user_id,
-                    pool,
-                    *encrypted);
-                tx.exec_params("UPDATE credentials SET revoked_at = now() WHERE user_id = $1::uuid "
-                               "AND pool_id = $2 AND kind = 'recovery' AND revoked_at IS NULL",
-                               user_id,
-                               pool);
-                for (const std::string& code : enrollment.recovery_codes) {
-                    const std::string hash = identity_crypto::hash_secret(code);
-                    if (hash.empty()) {
+                MfaEnrollment enrollment;
+                enrollment.secret = identity_crypto::new_totp_secret();
+                for (int index = 0; index < 8; ++index) {
+                    const std::string code = identity_crypto::new_recovery_code();
+                    if (code.empty()) {
                         return std::unexpected(
-                            StoreError{"store_error", "could not protect MFA recovery codes"});
+                            StoreError{"store_error", "could not create MFA recovery codes"});
                     }
-                    const auto selector = identity_crypto::recovery_selector(code);
-                    if (selector.empty())
-                        return std::unexpected(
-                            StoreError{"store_error", "could not select recovery code"});
+                    enrollment.recovery_codes.push_back(code);
+                }
+                if (enrollment.secret.empty()) {
+                    return std::unexpected(
+                        StoreError{"store_error", "could not create TOTP secret"});
+                }
+                return with_authentication_tx<MfaEnrollment>([&](pqxx::work& tx)
+                                                                 -> Result<MfaEnrollment> {
+                    if (!lock_authentication_account_tx(tx, user_id))
+                        return std::unexpected(invalid_authentication());
+                    const auto session = tx.exec_params(
+                        "SELECT 1 FROM sessions JOIN users ON users.id = sessions.user_id "
+                        "WHERE sessions.id = $1::uuid AND sessions.user_id = $2::uuid "
+                        "AND sessions.pool_id = $3 AND sessions.kind IN ('browser', 'taap') "
+                        "AND sessions.scopes = ARRAY['*']::text[] AND sessions.parent_session_id "
+                        "IS NULL "
+                        "AND sessions.revoked_at IS NULL "
+                        "AND (sessions.expires_at IS NULL OR sessions.expires_at > "
+                        "clock_timestamp()) "
+                        "AND users.disabled_at IS NULL AND users.deleted_at IS NULL "
+                        "FOR SHARE OF sessions, users",
+                        proof.session_id,
+                        user_id,
+                        pool);
+                    if (session.empty() ||
+                        !active_session_lineage(tx, proof.session_id, user_id, pool)) {
+                        return std::unexpected(StoreError{
+                            "unauthorized",
+                            "MFA enrollment requires an active interactive sign-in session"});
+                    }
+
+                    outcome = AuthenticationOutcome::failure;
+                    const auto password =
+                        tx.exec_params("SELECT secret_hash FROM credentials WHERE user_id = "
+                                       "$1::uuid AND pool_id = $2 "
+                                       "AND kind = 'password' AND revoked_at IS NULL FOR UPDATE",
+                                       user_id,
+                                       pool);
+                    if (password.empty() || !identity_crypto::verify_secret(
+                                                password[0][0].as<std::string>(), proof.password)) {
+                        return std::unexpected(StoreError{
+                            "unauthorized", "MFA enrollment requires the current password"});
+                    }
+                    const Result<std::string> encrypted =
+                        encrypt_secret(tx, "identity.totp", enrollment.secret);
+                    if (!encrypted) {
+                        return std::unexpected(encrypted.error());
+                    }
                     tx.exec_params(
-                        "INSERT INTO credentials (user_id, pool_id, kind, subject, secret_hash) "
-                        "VALUES ($1::uuid, $2, 'recovery', $3, $4)",
+                        "INSERT INTO credentials (user_id, pool_id, kind, subject, public_data) "
+                        "VALUES ($1::uuid, $2, 'totp', $1, jsonb_build_object('encrypted_seed', "
+                        "$3::text)) "
+                        "ON CONFLICT (pool_id, kind, subject) DO UPDATE SET public_data = "
+                        "EXCLUDED.public_data, revoked_at = NULL",
                         user_id,
                         pool,
-                        selector,
-                        hash);
-                }
-                return enrollment;
+                        *encrypted);
+                    tx.exec_params(
+                        "UPDATE credentials SET revoked_at = now() WHERE user_id = $1::uuid "
+                        "AND pool_id = $2 AND kind = 'recovery' AND revoked_at IS NULL",
+                        user_id,
+                        pool);
+                    for (const std::string& code : enrollment.recovery_codes) {
+                        const std::string hash = identity_crypto::hash_secret(code);
+                        if (hash.empty()) {
+                            return std::unexpected(
+                                StoreError{"store_error", "could not protect MFA recovery codes"});
+                        }
+                        const auto selector = identity_crypto::recovery_selector(code);
+                        if (selector.empty())
+                            return std::unexpected(
+                                StoreError{"store_error", "could not select recovery code"});
+                        tx.exec_params("INSERT INTO credentials (user_id, pool_id, kind, subject, "
+                                       "secret_hash) "
+                                       "VALUES ($1::uuid, $2, 'recovery', $3, $4)",
+                                       user_id,
+                                       pool,
+                                       selector,
+                                       hash);
+                    }
+                    return enrollment;
+                });
             });
-        });
     }
     Result<void> verify_mfa_code(const std::string& user_id,
                                  const std::string& pool_id,
                                  const std::string& code) override {
-        return with_authentication_tx<void>([&](pqxx::work& tx) -> Result<void> {
-            const pqxx::result rows =
-                tx.exec_params("SELECT public_data->>'encrypted_seed' FROM credentials "
-                               "WHERE user_id = $1::uuid AND pool_id = $2 AND kind = 'totp' "
-                               "AND revoked_at IS NULL FOR SHARE",
-                               user_id,
-                               pool_id);
-            if (rows.empty()) {
-                return std::unexpected(StoreError{"not_found", "MFA is not enrolled"});
-            }
-            const Result<std::string> seed =
-                decrypt_secret(tx, "identity.totp", rows[0][0].as<std::string>());
-            if (!seed) {
-                return std::unexpected(seed.error());
-            }
-            if (identity_crypto::verify_totp(*seed, code)) {
-                return {};
-            }
-            const pqxx::result recovery_rows =
-                tx.exec_params("SELECT secret_hash FROM credentials WHERE user_id = $1::uuid "
-                               "AND pool_id = $2 AND kind = 'recovery' AND subject = $3 AND $3 <> "
-                               "'' AND revoked_at IS NULL",
-                               user_id,
-                               pool_id,
-                               identity_crypto::recovery_selector(code));
-            if (recovery_rows.empty())
-                return std::unexpected(
-                    StoreError{"unauthorized", "a fresh MFA verification is required"});
-            return authentication_attempt(user_id, [&]() -> Result<void> {
-                if (!identity_crypto::verify_secret(recovery_rows[0][0].as<std::string>(), code))
-                    return std::unexpected(
-                        StoreError{"unauthorized", "a fresh MFA verification is required"});
-                return {};
+        return authentication_call(
+            *this, pool_id, "", user_id, [&](AuthenticationOutcome&) -> Result<void> {
+                return with_authentication_tx<void>([&](pqxx::work& tx) -> Result<void> {
+                    return consume_mfa_tx(tx, user_id, pool_id, code);
+                });
             });
-        });
     }
     Result<void> disable_mfa(const std::string& user_id,
                              const std::string& pool_id,
                              const std::string& code) override {
-        return with_authentication_tx<void>([&](pqxx::work& tx) -> Result<void> {
-            const pqxx::result rows =
-                tx.exec_params("SELECT public_data->>'encrypted_seed' FROM credentials "
-                               "WHERE user_id = $1::uuid AND pool_id = $2 AND kind = 'totp' "
-                               "AND revoked_at IS NULL FOR UPDATE",
-                               user_id,
-                               pool_id);
-            if (rows.empty()) {
-                return std::unexpected(StoreError{"not_found", "MFA is not enrolled"});
-            }
-            const Result<std::string> seed =
-                decrypt_secret(tx, "identity.totp", rows[0][0].as<std::string>());
-            if (!seed) {
-                return std::unexpected(seed.error());
-            }
-            bool verified = identity_crypto::verify_totp(*seed, code);
-            if (!verified) {
-                const pqxx::result recovery_rows =
-                    tx.exec_params("SELECT secret_hash FROM credentials WHERE user_id = $1::uuid "
-                                   "AND pool_id = $2 AND kind = 'recovery' AND subject = $3 AND "
-                                   "$3 <> '' AND revoked_at IS NULL",
-                                   user_id,
-                                   pool_id,
-                                   identity_crypto::recovery_selector(code));
-                if (recovery_rows.empty())
-                    return std::unexpected(
-                        StoreError{"unauthorized", "a fresh MFA verification is required"});
-                const auto checked = authentication_attempt(user_id, [&]() -> Result<void> {
-                    if (!identity_crypto::verify_secret(recovery_rows[0][0].as<std::string>(),
-                                                        code))
-                        return std::unexpected(
-                            StoreError{"unauthorized", "a fresh MFA verification is required"});
+        return authentication_call(
+            *this, pool_id, "", user_id, [&](AuthenticationOutcome&) -> Result<void> {
+                return with_authentication_tx<void>([&](pqxx::work& tx) -> Result<void> {
+                    if (auto verified = consume_mfa_tx(tx, user_id, pool_id, code); !verified)
+                        return std::unexpected(verified.error());
+                    tx.exec_params(
+                        "UPDATE credentials SET revoked_at = now() WHERE user_id = $1::uuid "
+                        "AND pool_id = $2 AND kind IN ('totp', 'recovery') AND revoked_at IS NULL",
+                        user_id,
+                        pool_id);
                     return {};
                 });
-                if (!checked)
-                    return std::unexpected(checked.error());
-                verified = true;
-            }
-            if (!verified) {
-                return std::unexpected(
-                    StoreError{"unauthorized", "a fresh MFA verification is required"});
-            }
-            tx.exec_params(
-                "UPDATE credentials SET revoked_at = now() WHERE user_id = $1::uuid "
-                "AND pool_id = $2 AND kind IN ('totp', 'recovery') AND revoked_at IS NULL",
-                user_id,
-                pool_id);
-            return {};
-        });
+            });
     }
     Result<IssuedSession> sign_in_totp(const PasswordSignIn& in) override {
-        return with_authentication_tx<IssuedSession>([&](pqxx::work& tx) -> Result<IssuedSession> {
-            const pqxx::result password_rows =
-                tx.exec_params("SELECT user_id::text, secret_hash FROM credentials "
-                               "WHERE pool_id = $1 AND kind = 'password' AND subject = lower($2) "
-                               "AND revoked_at IS NULL FOR SHARE",
-                               in.pool_id,
-                               in.email);
-            if (password_rows.empty())
-                return std::unexpected(StoreError{"not_found", "invalid email or password"});
-            return authentication_attempt(
-                password_rows[0][0].as<std::string>(), [&]() -> Result<IssuedSession> {
+        return authentication_call(
+            *this, in.pool_id, in.email, "", [&](AuthenticationOutcome&) -> Result<IssuedSession> {
+                return with_authentication_tx<IssuedSession>([&](pqxx::work& tx)
+                                                                 -> Result<IssuedSession> {
+                    const pqxx::result password_rows =
+                        password_credential_tx(tx, in.pool_id, in.email);
+                    if (password_rows.empty())
+                        return std::unexpected(
+                            StoreError{"not_found", "invalid email or password"});
+
                     if (password_rows.empty() ||
                         !identity_crypto::verify_secret(password_rows[0][1].as<std::string>(),
                                                         in.password)) {
@@ -8551,7 +8617,7 @@ public:
                     }
                     return sign_in_totp_tx(tx, in, password_rows[0][0].as<std::string>());
                 });
-        });
+            });
     }
     Result<WebAuthnChallenge> begin_passkey_registration(const std::string& user_id,
                                                          const std::string& pool_id,
@@ -11741,36 +11807,35 @@ public:
                                             const std::string& email,
                                             const std::string& code,
                                             const std::string& device_name) override {
-        return with_authentication_tx<IssuedSession>([&](pqxx::work& tx) -> Result<IssuedSession> {
-            const pqxx::result user_rows = tx.exec_params(
-                "SELECT user_id::text FROM credentials WHERE pool_id = $1 AND kind = 'password' "
-                "AND subject = lower($2) AND revoked_at IS NULL",
-                pool_id,
-                email);
-            if (user_rows.empty()) {
-                return std::unexpected(
-                    StoreError{"unauthorized", "invalid email or recovery code"});
-            }
-            const std::string user_id = user_rows[0][0].as<std::string>();
-            return authentication_attempt(user_id, [&]() -> Result<IssuedSession> {
-                const pqxx::result recovery_rows = tx.exec_params(
-                    "SELECT id::text, secret_hash FROM credentials WHERE user_id = $1::uuid "
-                    "AND pool_id = $2 AND kind = 'recovery' AND subject = $3 AND $3 <> '' AND "
-                    "revoked_at IS NULL "
-                    "FOR UPDATE",
-                    user_id,
-                    pool_id,
-                    identity_crypto::recovery_selector(code));
-                if (recovery_rows.empty() ||
-                    !identity_crypto::verify_secret(recovery_rows[0][1].as<std::string>(), code))
-                    return std::unexpected(
-                        StoreError{"unauthorized", "invalid email or recovery code"});
-                tx.exec_params("UPDATE credentials SET revoked_at = now() WHERE id = $1::uuid",
-                               recovery_rows[0][0].as<std::string>());
-                return issue_session(
-                    tx, user_id, pool_id, device_name, "browser", "", {"*"}, "", 86400);
+        return authentication_call(
+            *this, pool_id, email, "", [&](AuthenticationOutcome&) -> Result<IssuedSession> {
+                return with_authentication_tx<IssuedSession>([&](pqxx::work& tx)
+                                                                 -> Result<IssuedSession> {
+                    const pqxx::result user_rows = password_credential_tx(tx, pool_id, email);
+                    if (user_rows.empty()) {
+                        return std::unexpected(
+                            StoreError{"unauthorized", "invalid email or recovery code"});
+                    }
+                    const std::string user_id = user_rows[0][0].as<std::string>();
+
+                    const pqxx::result recovery_rows = tx.exec_params(
+                        "SELECT id::text, secret_hash FROM credentials WHERE user_id = $1::uuid "
+                        "AND pool_id = $2 AND kind = 'recovery' AND subject = $3 AND $3 <> '' AND "
+                        "revoked_at IS NULL "
+                        "FOR UPDATE",
+                        user_id,
+                        pool_id,
+                        identity_crypto::recovery_selector(code));
+                    if (recovery_rows.empty() || !identity_crypto::verify_secret(
+                                                     recovery_rows[0][1].as<std::string>(), code))
+                        return std::unexpected(
+                            StoreError{"unauthorized", "invalid email or recovery code"});
+                    tx.exec_params("UPDATE credentials SET revoked_at = now() WHERE id = $1::uuid",
+                                   recovery_rows[0][0].as<std::string>());
+                    return issue_session(
+                        tx, user_id, pool_id, device_name, "browser", "", {"*"}, "", 86400);
+                });
             });
-        });
     }
 
     Result<RecoveryAttempt> begin_email_recovery(const std::string& pool_id,
@@ -12025,15 +12090,30 @@ public:
     Result<IssuedSession> complete_recovery(const std::string& recovery_id,
                                             const std::string& token,
                                             const std::string& device_name) override {
-        return with_authentication_tx<IssuedSession>([&](pqxx::work& tx) -> Result<IssuedSession> {
-            const pqxx::result attempts = tx.exec_params(
-                "SELECT user_id::text, method, status, token_hash, ready_at <= now(), "
-                "expires_at > now() FROM offline_recovery_attempts WHERE id = $1::uuid FOR UPDATE",
-                recovery_id);
-            if (attempts.empty())
-                return std::unexpected(StoreError{"unauthorized", "invalid recovery token"});
-            return authentication_attempt(
-                attempts[0][0].as<std::string>(), [&]() -> Result<IssuedSession> {
+        const auto attempt = get_recovery_attempt(recovery_id);
+        if (!attempt && attempt.error().code != "not_found")
+            return std::unexpected(attempt.error());
+
+        return authentication_call(
+            *this,
+            "",
+            attempt ? "" : recovery_id,
+            attempt ? attempt->user_id : "",
+            [&](AuthenticationOutcome&) -> Result<IssuedSession> {
+                return with_authentication_tx<IssuedSession>([&](pqxx::work& tx)
+                                                                 -> Result<IssuedSession> {
+                    if (!attempt || !lock_authentication_account_tx(tx, attempt->user_id))
+                        return std::unexpected(invalid_authentication());
+                    const pqxx::result attempts = tx.exec_params(
+                        "SELECT user_id::text, method, status, token_hash, ready_at <= now(), "
+                        "expires_at > now() FROM offline_recovery_attempts WHERE id = $1::uuid AND "
+                        "user_id = $2::uuid FOR UPDATE",
+                        recovery_id,
+                        attempt->user_id);
+                    if (attempts.empty())
+                        return std::unexpected(
+                            StoreError{"unauthorized", "invalid recovery token"});
+
                     if (attempts.empty() || attempts[0][3].is_null() ||
                         !identity_crypto::verify_secret(attempts[0][3].as<std::string>(), token)) {
                         return std::unexpected(
@@ -12083,7 +12163,7 @@ public:
                                          "",
                                          86400);
                 });
-        });
+            });
     }
 
     Result<std::vector<RecoveryDelivery>> claim_recovery_deliveries(int limit) override {
@@ -12617,36 +12697,85 @@ private:
         return IssuedSession{session, secret};
     }
 
+    bool lock_authentication_account_tx(pqxx::work& tx, const std::string& user_id) {
+        return !tx.exec_params("SELECT 1 FROM users WHERE id = $1::uuid FOR SHARE", user_id)
+                    .empty();
+    }
+    // Lock the account before its password row, matching deletion and factor consumption.
+    pqxx::result
+    password_credential_tx(pqxx::work& tx, const std::string& pool, const std::string& email) {
+        const auto identity =
+            tx.exec_params("SELECT user_id::text FROM credentials WHERE pool_id = $1 "
+                           "AND kind = 'password' AND subject = lower($2) AND revoked_at IS NULL",
+                           pool,
+                           email);
+        if (identity.empty())
+            return {};
+        const auto user = identity[0][0].as<std::string>();
+        if (!lock_authentication_account_tx(tx, user))
+            return {};
+        return tx.exec_params(
+            "SELECT user_id::text, secret_hash FROM credentials WHERE pool_id = $1 "
+            "AND kind = 'password' AND subject = lower($2) AND user_id = $3::uuid AND revoked_at "
+            "IS NULL FOR SHARE",
+            pool,
+            email,
+            user);
+    }
+
+    Result<void> consume_mfa_tx(pqxx::work& tx,
+                                const std::string& user_id,
+                                const std::string& pool_id,
+                                const std::string& code) {
+        // Lock the account before its factors, matching deletion and session foreign keys.
+        const auto user =
+            tx.exec_params("SELECT 1 FROM users WHERE id = $1::uuid FOR SHARE", user_id);
+        if (user.empty())
+            return std::unexpected(StoreError{"not_found", "MFA is not enrolled"});
+        const auto rows = tx.exec_params(
+            "SELECT id::text, public_data->>'encrypted_seed', "
+            "COALESCE((public_data->>'last_used_step')::bigint, -1) FROM credentials "
+            "WHERE user_id = $1::uuid AND pool_id = $2 AND kind = 'totp' "
+            "AND revoked_at IS NULL FOR UPDATE",
+            user_id,
+            pool_id);
+        if (rows.empty())
+            return std::unexpected(StoreError{"not_found", "MFA is not enrolled"});
+        const auto seed = decrypt_secret(tx, "identity.totp", rows[0][1].as<std::string>());
+        if (!seed)
+            return std::unexpected(seed.error());
+        if (const auto step = identity_crypto::totp_step(*seed, code)) {
+            if (*step <= rows[0][2].as<std::int64_t>())
+                return std::unexpected(StoreError{"unauthorized", "invalid MFA code"});
+            tx.exec_params("UPDATE credentials SET public_data = jsonb_set(public_data, "
+                           "'{last_used_step}', to_jsonb($2::bigint)) WHERE id = $1::uuid",
+                           rows[0][0].as<std::string>(),
+                           *step);
+            return {};
+        }
+        const auto recovery =
+            tx.exec_params("SELECT id::text, secret_hash FROM credentials WHERE user_id = $1::uuid "
+                           "AND pool_id = $2 AND kind = 'recovery' AND subject = $3 AND $3 <> '' "
+                           "AND revoked_at IS NULL FOR UPDATE",
+                           user_id,
+                           pool_id,
+                           identity_crypto::recovery_selector(code));
+        for (const auto& row : recovery) {
+            if (identity_crypto::verify_secret(row[1].as<std::string>(), code)) {
+                tx.exec_params("UPDATE credentials SET revoked_at = now() WHERE id = $1::uuid",
+                               row[0].as<std::string>());
+                return {};
+            }
+        }
+        return std::unexpected(StoreError{"unauthorized", "invalid MFA code"});
+    }
+
     Result<IssuedSession>
     sign_in_totp_tx(pqxx::work& tx, const PasswordSignIn& in, const std::string& user_id) {
-        const pqxx::result rows =
-            tx.exec_params("SELECT public_data->>'encrypted_seed' FROM credentials WHERE user_id "
-                           "= $1::uuid "
-                           "AND pool_id = $2 AND kind = 'totp' AND revoked_at IS NULL FOR SHARE",
-                           user_id,
-                           in.pool_id);
-        if (rows.empty()) {
-            return std::unexpected(StoreError{"not_found", "invalid TOTP code"});
-        }
-        const Result<std::string> seed =
-            decrypt_secret(tx, "identity.totp", rows[0][0].as<std::string>());
-        if (!seed) {
-            return std::unexpected(seed.error());
-        }
-        if (!identity_crypto::verify_totp(*seed, in.totp_code)) {
-            const pqxx::result recovery_rows = tx.exec_params(
-                "SELECT id::text, secret_hash FROM credentials WHERE user_id = $1::uuid "
-                "AND pool_id = $2 AND kind = 'recovery' AND subject = $3 AND $3 <> '' AND "
-                "revoked_at IS NULL "
-                "FOR UPDATE",
-                user_id,
-                in.pool_id,
-                identity_crypto::recovery_selector(in.totp_code));
-            if (recovery_rows.empty() || !identity_crypto::verify_secret(
-                                             recovery_rows[0][1].as<std::string>(), in.totp_code))
+        if (auto verified = consume_mfa_tx(tx, user_id, in.pool_id, in.totp_code); !verified) {
+            if (verified.error().code == "unauthorized" || verified.error().code == "not_found")
                 return std::unexpected(StoreError{"not_found", "invalid TOTP code"});
-            tx.exec_params("UPDATE credentials SET revoked_at = now() WHERE id = $1::uuid",
-                           recovery_rows[0][0].as<std::string>());
+            return std::unexpected(verified.error());
         }
         return issue_session(
             tx, user_id, in.pool_id, in.device_name, "browser", "", {"*"}, "", 60 * 60 * 24 * 30);
