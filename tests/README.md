@@ -916,3 +916,8 @@ change, unbound legacy/imported snapshots, multiple artifacts, malformed snapsho
 evidence and repository-store failures. `RepositoryHttp.PublicRepositoriesAreReadableAndPrivateRepositoriesAreHidden`
 adds a real signed SLSA action environment and checks matching and mismatched release creation.
 See [source binding](../docs/api/forge.md#source-binding-lsr-106).
+`UsageLimits.SignedUpAccountAdminCannotChangeStorageThroughEitherSetter` uses a real password
+sign-up in the in-memory control store to prove account administrators cannot clear, raise or
+lower storage through either setter, using synchronous and asynchronous registry calls, while
+non-storage limits remain editable. `UsageLimits.OperatorAndInstanceAdministratorCanChangeBothStorageSetters`
+checks both privileged callers can set and clear storage (lake#976, LSR-109).

@@ -76,7 +76,8 @@ up exactly.
 
 ## Set a Usage Limit
 
-You need `admin` on the account.
+You need `admin` on the account for non-storage limits. Storage requires the operator credential
+or instance administrator.
 
 1. On **Organization → Usage**, press **Set a limit**.
 2. Choose **What to limit**, enter the limit in the unit shown (GiB for storage, hours for build
@@ -98,8 +99,10 @@ and the meter turns red past it. Nothing is refused.
 
 ## Set the Repository Storage Limit
 
-The storage limit is the repository storage limit. Set it with **Set a limit** and **Storage**, or
-on **Repository Usage by Hour** with **Set storage limit**.
+The operator or instance administrator sets the repository storage limit. Account administrators
+must ask them to change it; both storage setters refuse account-admin credentials, including a
+request to clear or lower the limit. With an operator credential, set it with **Set a limit** and
+**Storage**, or on **Repository Usage by Hour** with **Set storage limit**.
 
 - REST: `POST /v1/set_storage_quota` with
   `{"customer_id": "<customer id>", "quota_bytes": 10737418240}`.
@@ -115,7 +118,8 @@ The value overrides the Lake's default limit for that account; `0` removes the l
   or a smaller copy.
 - Usage shows a warning and the storage meter turns red.
 
-To write again, delete what you no longer need, or ask an admin of the account to raise the limit.
+To write again, delete what you no longer need, or ask the operator or instance administrator to
+raise the repository storage limit.
 
 A **Model Tokens** limit is enforced too: once this month's model tokens reach it, every agent's
 model call is refused (`usage_limit_reached`, HTTP 429) until an admin raises or removes the limit,
@@ -192,7 +196,8 @@ Usage before this measurement started is not in the charts.
 | Call | Needs |
 |---|---|
 | `usage_over_time`, `usage_limits`, `metering_usage` | `read` on the account (any organization member, for the organization's account) |
-| `set_usage_limit`, `set_storage_quota` | `admin` on the account |
+| `set_usage_limit` for dimensions other than `storage` | `admin` on the account |
+| `set_storage_quota`, `set_usage_limit` for `storage` | operator credential or instance administrator |
 | `record_model_usage`, `model_completion` (the model gateway) | the agent run's own credential |
 
 Each read and each limit change is recorded in the central audit log; an agent's report is

@@ -95,3 +95,5 @@ change and verification.
 Release source binding (LSR-106) and its producer rollout requirement are recorded in
 [status.md](status.md); the [forge contract](../api/forge.md#source-binding-lsr-106) specifies
 which signed evidence can satisfy a protected push.
+Storage quota changes through either setter require the operator or instance administrator
+(lake#976, LSR-109); the [status table](status.md) records implementation and deployment separately.

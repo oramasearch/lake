@@ -482,7 +482,8 @@ void register_metering_capabilities(Registry& registry) {
         .name = "set_storage_quota",
         .title = "Set customer storage quota",
         .description =
-            "Set the customer byte quota enforced for new repository writes; zero disables it.",
+            "Operator or instance administrator only. Set the customer byte quota enforced for "
+            "new repository writes; zero disables it.",
         .input_schema = {{"type", "object"},
                          {"properties",
                           {{"customer_id", {{"type", "string"}}},
@@ -500,6 +501,10 @@ void register_metering_capabilities(Registry& registry) {
         .resolve_object = customer_object,
         .resolves_operator_audit_target = true,
         .handler = [](const json& input, ApiContext& context) {
+            if (!context.operator_credential && context.acting_identity != "admin") {
+                return ApiResult::failure("unauthorized",
+                                          "the operator or the instance administrator is required");
+            }
             if (!context.store) {
                 return ApiResult::failure("store_unavailable",
                                           "no control-plane store is configured");
