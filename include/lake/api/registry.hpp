@@ -193,6 +193,9 @@ std::string_view to_string(CapabilityKind kind);
 
 enum class CapabilityTransport { Json, LiquidSync, Acme };
 
+inline constexpr std::size_t default_capability_body_bytes = 1024 * 1024;
+inline constexpr std::size_t maximum_capability_body_bytes = 64 * 1024 * 1024;
+
 struct MeteringConfig {
     std::string currency = "USD";
     std::uint64_t storage_quota_bytes = 0;
@@ -551,6 +554,9 @@ struct Capability {
                                   // additionalProperties false
     nlohmann::json output_schema; // the success value's shape
     CapabilityKind kind = CapabilityKind::Read;
+    // HTTP JSON input defaults to 1 MiB. Bulk inputs opt in here; anonymous callers never
+    // receive a larger allowance. The transport ceiling remains 64 MiB.
+    std::size_t max_body_bytes = default_capability_body_bytes;
     // A long poll: called with `wait_ms` > 0 it parks on a bus, so it gives its HTTP request
     // worker back first (lake#534). Declared here, never inferred from a caller's input.
     bool long_poll = false;
@@ -561,6 +567,9 @@ struct Capability {
     bool post_alias = false;
     CapabilityTransport transport = CapabilityTransport::Json;
     bool requires_auth = true;
+    // A handler that owns its authorization (for example agent model calls) can still require
+    // an accepted credential before HTTP reads its body, without using generic policy grants.
+    bool requires_credential = false;
     std::string object;
     std::string action;
     CapabilityObjectResolver resolve_object;
@@ -620,6 +629,9 @@ public:
     bool add(Capability capability);
     std::shared_ptr<const Capability> find(const std::string& name) const;
     std::vector<std::shared_ptr<const Capability>> list() const;
+    // The credential-only gate, before HTTP reads input. Success does not invoke or audit a
+    // handler; failure is audited once. call/call_async repeat this gate before validation.
+    ApiResult authenticate(const std::string& name, ApiContext& context) const;
     // Authorize (requires_auth vs context.authorized), validate, run, time and
     // audit once.
     ApiResult call(const std::string& name, const nlohmann::json& input, ApiContext& context) const;

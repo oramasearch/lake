@@ -16,6 +16,13 @@ an active certificate for the customer. See [agent session keys](../../docs/api/
 `get_dataset` and `get_model`; Registry enforces customer `read` and credential scopes before
 dispatch. Their anonymous public-repository revision reads retain the repository visibility
 check (lake#970, LSR-104). See [models.md](../../docs/api/models.md).
+Capability and MCP body admission (lake#944) resolves credentials first. `Registry::authenticate`
+shares the credential gate with `call` and `call_async`; the REST, workspace Zetta and model
+gateway adapters call it before body reads. `JsonBodySink` builds a single nlohmann document
+within byte, nesting and element budgets. Capability registrations own `max_body_bytes` (1 MiB
+default, explicit bulk opt-ins); anonymous MCP retains discovery within 256 KiB. OpenAPI and the agent docs publish the
+credential requirement for handlers that own their authorization. See
+[request body limits](../../docs/serving/http.md#request-body-limits).
 
 `tunnel_clients.cpp` reads the tunnel client folder (allow-listed `zetta-tunnel-<platform>` files
 with a `SHA256SUMS` line, and `VERSION`) and signs and checks their 15-minute links with
@@ -334,7 +341,7 @@ to find and validate every Docs and API document example against the registry.
 
 OCI blob upload patches and final puts stream request buffers into the upload file. The adapter
 checks the configured completed-blob limit and `Content-Range`, hashes the completed file without
-loading it into memory, and leaves the common 64 MiB body limit on every other route. See
+loading it into memory, and retains route-specific body budgets on other routes. See
 [the HTTP contract](../../docs/serving/http.md) and [image builds](../../docs/api/builds.md).
 
 The single capability registry defines REST, OpenAPI and MCP behavior. `create_token` validates

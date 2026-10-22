@@ -18,12 +18,13 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <regex>
 #include <set>
 #include <sstream>
 #include <string>
-#include <tuple>
 #include <thread>
+#include <tuple>
 #include <vector>
 
 #include <arpa/inet.h>
@@ -31,6 +32,7 @@
 #include <netinet/in.h>
 #include <spawn.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -1116,7 +1118,8 @@ std::string http_request(
     std::string_view cookie = {},
     std::string_view authorization = {},
     std::string_view host = "localhost",
-    std::initializer_list<std::pair<std::string_view, std::string_view>> extra_headers = {}) {
+    std::initializer_list<std::pair<std::string_view, std::string_view>> extra_headers = {},
+    std::optional<std::size_t> declared_body_bytes = std::nullopt) {
     const int socket_fd = ::socket(AF_INET, SOCK_STREAM, 0);
     if (socket_fd < 0)
         return {};
@@ -1128,10 +1131,16 @@ std::string http_request(
         ::close(socket_fd);
         return {};
     }
+    if (declared_body_bytes) {
+        timeval timeout{1, 0};
+        static_cast<void>(
+            ::setsockopt(socket_fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)));
+    }
     std::string request = std::string(method) + " " + std::string(path) +
                           " HTTP/1.1\r\nHost: " + std::string(host) + "\r\nConnection: close\r\n";
     request += "Content-Type: " + std::string(content_type) + "\r\n";
-    request += "Content-Length: " + std::to_string(body.size()) + "\r\n";
+    request +=
+        "Content-Length: " + std::to_string(declared_body_bytes.value_or(body.size())) + "\r\n";
     if (!cookie.empty())
         request += "Cookie: " + std::string(cookie) + "\r\n";
     if (!authorization.empty())
@@ -1530,15 +1539,21 @@ TEST(HttpServer, NonRegistryJsonBodyLargerThan64MiBIsRejected) {
     options.instance_kek = "bounded-json-instance-kek";
     ApiServer server(options);
     ASSERT_TRUE(server.start()) << server.reason();
-    std::string body = R"({"padding":")";
-    body.append(64 * 1024 * 1024, 'J');
-    body += R"("})";
-
-    const std::string refused = http_request(
-        server.port(), "POST", "/v1/create_customer", body, "application/json", {}, "Bearer admin");
+    // Reject a declared oversized body before the caller uploads it. An ordinary capability
+    // now uses the 1 MiB default, and the server may close as soon as it sends its refusal.
+    const std::string refused = http_request(server.port(),
+                                             "POST",
+                                             "/v1/create_customer",
+                                             {},
+                                             "application/json",
+                                             {},
+                                             "Bearer admin",
+                                             "localhost",
+                                             {},
+                                             64 * 1024 * 1024 + 14);
     EXPECT_NE(refused.find(" 413 "), std::string::npos) << refused;
     EXPECT_EQ(response_json(refused)["error"]["code"], "size_invalid");
-    EXPECT_NE(response_json(refused)["error"]["message"].get<std::string>().find("67108864"),
+    EXPECT_NE(response_json(refused)["error"]["message"].get<std::string>().find("1048576"),
               std::string::npos);
     server.stop();
 }
@@ -4026,6 +4041,10 @@ TEST(Rest, OpenApiCoversEveryCapability) {
     EXPECT_EQ(inclusion_value["properties"]["checkpoint"]["type"], "object");
     EXPECT_TRUE(doc["paths"].contains("/mcp"));
     EXPECT_TRUE(doc["paths"]["/v1/server_info"]["get"]["security"].empty());
+    // Handler-owned authorization still requires a bearer before accepting an HTTP body.
+    const json& gateway = doc["paths"]["/v1/model_completion"]["post"];
+    EXPECT_FALSE(gateway.contains("security")); // inherits the document's bearer requirement
+    EXPECT_TRUE(gateway["responses"].contains("401"));
     const json& push = doc["paths"]["/v1/repositories/{repository_id}/sync/push"]["post"];
     const json& request_header = push["requestBody"]["content"]["application/vnd.liquid.sync-v1"]
                                      ["schema"]["x-liquid-sync-header-schema"];

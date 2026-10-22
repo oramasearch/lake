@@ -23,6 +23,11 @@ revision reads and private revision refusals (lake#970, LSR-104; [contract](../d
 `test_pki.cpp` rejects SAN configuration injection through ACME, SPIFFE and agent issuance
 (lake#946), validates malformed DNS/SPIFFE identifiers, and decodes successful certificates to
 check one SAN with exactly the requested type and bytes. See [PKI](../docs/api/pki.md).
+`test_http_server.cpp` covers pre-body capability admission (lake#944): headers declaring 2 MiB
+receive 413 on public identity routes and 401 on protected routes before any body bytes are sent.
+The tests exercise both URL forms, rejected credentials, workspace Zetta and model gateway
+adapters, anonymous MCP's 256 KiB cap, chunked bodies, depth and element limits, duplicate keys,
+anonymous discovery and authenticated bulk inputs. See [HTTP limits](../docs/serving/http.md#request-body-limits).
 
 `test_platform.cpp`'s `LiquidIdFixture` covers deployment rows that name a repository by the liquid
 id `liquid deploy` sends, by lake's UUID, by an unknown id (reported, not skipped) and by a liquid

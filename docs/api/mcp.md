@@ -11,6 +11,13 @@ serves. Methods:
 | `tools/list` | every JSON registry entry as a tool: `name`, `title`, `description`, `inputSchema`, `outputSchema` (`lake::api::mcp_tools`); at `POST /w/<workspace_id>/mcp`, also the allowed tools of the workspace's MCP connections a person chose to expose, as `<prefix>__<tool>` ([MCP connections](mcp-connections.md#lakes-mcp-re-exports-a-connection-opt-in)) |
 | `tools/call` | `params: {name, arguments}` → `Registry::call` with the request's bearer; result `{content: [{type: text, text}], structuredContent: <envelope>, isError}`. A re-exported `<prefix>__<tool>` runs through `read_mcp_tool` or `call_mcp_tool` as the caller and answers the connected server's own result |
 
+Credentials are resolved before body reads (lake#944). Anonymous callers, including rejected
+credentials, have a 256 KiB envelope limit; discovery and public identity tools remain available.
+Authenticated tool calls use the capability's registered limit (1 MiB by default, up to 64 MiB
+for bulk inputs), counting the whole envelope. Every JSON body has at most 64 container levels
+and 65,536 elements, checked during parsing. Oversized input answers HTTP 413 before dispatch.
+See [request body limits](../serving/http.md#request-body-limits) for admission order and tests.
+
 The [shared envelope decision](README.md) defines both transports: `outputSchema` describes the
 complete successful `structuredContent`, including `ok`, `value`, and `duration_ms`. Capability
 errors carry the shared error envelope with `isError: true` over HTTP 200.

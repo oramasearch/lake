@@ -284,7 +284,7 @@ openapi_document(const Registry& registry, std::string_view version, SchemaAudie
         if (!capability->action.empty()) {
             operation["x-lake-action"] = capability->action;
         }
-        if (!capability->requires_auth)
+        if (!capability->requires_auth && !capability->requires_credential)
             operation["security"] = nlohmann::json::array();
         const std::string method = rest_method(*capability);
         const nlohmann::json input_schema = audience_input_schema(*capability, audience);
@@ -321,7 +321,7 @@ openapi_document(const Registry& registry, std::string_view version, SchemaAudie
                             {"content",
                              {{"application/json",
                                {{"schema", success_envelope_schema(capability->output_schema)}}}}}};
-        if (capability->requires_auth) {
+        if (capability->requires_auth || capability->requires_credential) {
             responses["401"] = error_response(
                 "no credential was accepted: `error.reason` is missing, invalid or expired and "
                 "`error.help` links to the page that makes a new key (docs/api/errors.md)");

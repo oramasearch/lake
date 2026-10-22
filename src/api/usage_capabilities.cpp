@@ -2633,9 +2633,11 @@ void register_usage_capabilities(Registry& registry) {
                                         "recorded",
                                         "streamed"})}},
         .kind = CapabilityKind::Action,
-        // Authorized by the agent's own credential, which the handler checks; like
-        // record_model_usage.
+        .max_body_bytes = maximum_capability_body_bytes,
+        // The shared gate requires a credential before reading the body. The handler checks
+        // that it is the agent's own task, launch or schedule credential, like record_model_usage.
         .requires_auth = false,
+        .requires_credential = true,
         .object = "agent_usage",
         .action = "write",
         .resolve_object = agent_object,

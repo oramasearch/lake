@@ -2965,13 +2965,15 @@ void register_drives_capabilities(Registry& registry) {
                             std::string description,
                             json input,
                             json output,
-                            AsyncCapabilityHandler handler) {
+                            AsyncCapabilityHandler handler,
+                            std::size_t body_limit = default_capability_body_bytes) {
         registry.add(Capability{.name = std::move(name),
                                 .title = std::move(title),
                                 .description = std::move(description),
                                 .input_schema = std::move(input),
                                 .output_schema = std::move(output),
                                 .kind = CapabilityKind::Action,
+                                .max_body_bytes = body_limit,
                                 .object = "customer",
                                 .action = "write",
                                 .resolve_object = customer_object,
@@ -3175,7 +3177,8 @@ void register_drives_capabilities(Registry& registry) {
                       {"complete", {{"type", "boolean"}}},
                       {"size", {{"type", "integer"}}}},
                      json::array({"received", "complete", "size"})),
-           append_drive_upload);
+           append_drive_upload,
+           maximum_capability_body_bytes);
     action(
         "finish_drive_upload",
         "Finish an upload",
@@ -3208,7 +3211,8 @@ void register_drives_capabilities(Registry& registry) {
                json::array({"drive_id", "files"})),
            object_of({{"items", {{"type", "array"}, {"items", entry_schema()}}}},
                      json::array({"items"})),
-           upload_drive_entries);
+           upload_drive_entries,
+           maximum_capability_body_bytes);
     read("read_drive_file",
          "Read a Workspace File",
          "A workspace file's (or a store drive file's) bytes as base64: the whole file, or "
