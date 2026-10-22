@@ -3,6 +3,8 @@
 lake#951: [Clerk offboarding](clerk.md#webhooks) revokes delegated agent credentials and workloads.
 [Agent streams](agent-launches.md#stream-triggers) and [MCP streams](mcp-connections.md#a-connections-agent-and-streams)
 reject missing/disabled people immediately and retain workspace cleanup for the next worker pass.
+[models.md](models.md) specifies authenticated customer reads for workspace dataset and model
+metadata, while public repository revisions remain readable anonymously (lake#970, LSR-104).
 
 lake#728/#730/#731: [network.md](network.md) documents the fourteen secure-networking capabilities
 for connections, scoped credential rotation, egress rules, tunnel grants, peers, effective rules,

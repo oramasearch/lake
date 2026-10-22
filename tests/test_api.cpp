@@ -6625,6 +6625,46 @@ TEST(Models, MetadataAndResolveUseRepositoryHistoryAndProvenance) {
     EXPECT_EQ(file.value["contents"], "fixture weights");
 }
 
+TEST(Models, AnonymousDatasetAndModelRevisionsRequirePublicRepositories) {
+    Surface surface;
+    RepositoryFixtureStore repository_store;
+    surface.ctx.sync_store = &repository_store;
+    const auto user = surface.call("create_user", {{"display_name", "Ada"}});
+    ASSERT_TRUE(user.ok);
+    const auto customer = surface.call(
+        "create_customer",
+        {{"customer_type", "individual"}, {"user_id", user.value["id"]}, {"name", "ada"}});
+    ASSERT_TRUE(customer.ok);
+    for (const std::string visibility : {"public", "private"}) {
+        surface.ctx.authorized = true;
+        surface.ctx.acting_identity = "admin";
+        const auto repository =
+            surface.call("create_repository",
+                         {{"customer_id", customer.value["id"]},
+                          {"workspace_id",
+                           lake::test::repository_workspace(surface.store, customer.value["id"])},
+                          {"name", visibility + "-metadata"},
+                          {"visibility", visibility}});
+        ASSERT_TRUE(repository.ok) << repository.error.message;
+        surface.ctx.authorized = false;
+        surface.ctx.acting_identity.clear();
+        for (const std::string name : {"get_dataset", "get_model"}) {
+            SCOPED_TRACE(name + "/" + visibility);
+            const json input{{"id", repository.value["id"]}, {"revision", "main"}};
+            const auto sync = surface.registry.call(name, input, surface.ctx);
+            const auto async =
+                liquid::runtime::block_on(surface.registry.call_async(name, input, surface.ctx));
+            ASSERT_TRUE(async);
+            for (const auto* result : {&sync, &*async}) {
+                EXPECT_EQ(result->ok, visibility == "public") << result->error.message;
+                if (visibility == "private") {
+                    EXPECT_EQ(result->error.code, "unauthenticated");
+                }
+            }
+        }
+    }
+}
+
 TEST(HuggingFaceHttp, CommonModelAndDatasetCallsUseRepositoryCapabilities) {
     TemporarySyncRoot temporary;
     auto control = std::make_shared<lake::control::InMemoryStore>();

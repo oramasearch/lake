@@ -12,6 +12,10 @@ the importer and freshly signed local attestations. See [export.md](../../docs/a
 `agent_capabilities.cpp` passes the authenticated acting identity separately to the agent signing
 service. Customer write permission does not allow another dispatcher or a durable agent without
 an active certificate for the customer. See [agent session keys](../../docs/api/agents.md).
+`model_capabilities.cpp` requires authentication in the shared workspace customer resolver for
+`get_dataset` and `get_model`; Registry enforces customer `read` and credential scopes before
+dispatch. Their anonymous public-repository revision reads retain the repository visibility
+check (lake#970, LSR-104). See [models.md](../../docs/api/models.md).
 
 `tunnel_clients.cpp` reads the tunnel client folder (allow-listed `zetta-tunnel-<platform>` files
 with a `SHA256SUMS` line, and `VERSION`) and signs and checks their 15-minute links with

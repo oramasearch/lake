@@ -38,6 +38,11 @@ std::expected<std::string, ApiError> repository_object(const json& input, ApiCon
 
 std::expected<std::string, ApiError>
 workspace_dataset_customer(const json& input, ApiContext& context) {
+    // Public repository revisions do not grant access to a workspace. Registry checks the
+    // authenticated caller's customer read policy before dispatching either workspace handler.
+    if (!context.authorized) {
+        return std::unexpected(ApiError{"unauthorized", "authentication is required", {}});
+    }
     if (const std::string customer_id = input.value("customer_id", std::string());
         !customer_id.empty()) {
         return customer_id;
@@ -440,7 +445,8 @@ Capability dataset_capability() {
         .title = "Get dataset",
         .description = "Read a dataset: with `revision`, a dataset repository's files, storage "
                        "savings and provenance; without, a dataset of the workspace named by "
-                       "`customer_id` and `workspace_id` (its columns and rows), by the "
+                       "`customer_id` and `workspace_id` (its schema and summary), requiring "
+                       "authentication and customer read access, by the "
                        "<database>/<dataset> id list_datasets returns (<database>.<dataset> and a "
                        "bare name in `datasets` are read too).",
         .input_schema = {{"type", "object"},
@@ -474,15 +480,15 @@ Capability dataset_capability() {
                         return ApiResult::failure("store_unavailable", std::move(message));
                     });
             }
-            if (!context.workspaces) {
-                co_return ApiResult::failure("store_unavailable",
-                                             "workspaces are not configured on this Lake");
-            }
             const auto customer_id = workspace_dataset_customer(input, context);
             if (!customer_id) {
                 co_return ApiResult::failure(customer_id.error().code,
                                              customer_id.error().message,
                                              customer_id.error().path);
+            }
+            if (!context.workspaces) {
+                co_return ApiResult::failure("store_unavailable",
+                                             "workspaces are not configured on this Lake");
             }
             // One id form with list_datasets (lake#447); `<database>.<name>` and a bare name in
             // `datasets` are read as well.
@@ -530,7 +536,8 @@ Capability model_capability() {
         .description = "Read a model: with `revision`, a model repository's files, storage "
                        "savings and verified provenance; without, a trained model of the "
                        "workspace named by `customer_id` and `workspace_id` (its measures, "
-                       "feature columns and whether it is published), by the id Ship → Models "
+                       "feature columns and whether it is published), requiring authentication "
+                       "and customer read access, by the id Ship → Models "
                        "shows.",
         .input_schema = {{"type", "object"},
                          {"properties",
@@ -563,15 +570,15 @@ Capability model_capability() {
                         return ApiResult::failure("store_unavailable", std::move(message));
                     });
             }
-            if (!context.workspaces) {
-                co_return ApiResult::failure("store_unavailable",
-                                             "workspaces are not configured on this Lake");
-            }
             const auto customer_id = workspace_dataset_customer(input, context);
             if (!customer_id) {
                 co_return ApiResult::failure(customer_id.error().code,
                                              customer_id.error().message,
                                              customer_id.error().path);
+            }
+            if (!context.workspaces) {
+                co_return ApiResult::failure("store_unavailable",
+                                             "workspaces are not configured on this Lake");
             }
             const std::string id = input.at("id");
             auto called = co_await call_workspace(

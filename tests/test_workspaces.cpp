@@ -1546,6 +1546,95 @@ TEST(Workspaces, WorkspaceSqlRunsOnlyOneReadOnlyQuery) {
     }
 }
 
+TEST(Workspaces, DatasetAndModelMetadataRequireAuthenticatedCustomerRead) {
+    Workspaces w;
+    const auto requested = w.run(w.service->request(w.customer_id));
+    ASSERT_TRUE(requested);
+    const auto workspace = w.store->get_service(requested->service_id);
+    ASSERT_TRUE(workspace);
+    ASSERT_TRUE(w.store->set_service_status(workspace->id, "Ready", "", "http://ws:4800"));
+    w.deliver(*workspace, {{"kind", "zetta"}, {"token", "t"}});
+    w.caller->answers["get_dataset"] = {{"database", "datasets"}, {"name", "accounts"}};
+    w.caller->answers["get_model"] = {{"id", "m-1"}, {"feature_columns", {"private_feature"}}};
+    const auto outsider = w.store->sign_in_clerk(minted("outsider"));
+    ASSERT_TRUE(outsider);
+    lake::api::Registry registry;
+    lake::api::register_core_capabilities(registry, "test");
+    for (const std::string name : {"get_dataset", "get_model"}) {
+        for (const bool mcp : {false, true}) {
+            for (const bool path_workspace : {false, true}) {
+                for (const std::string who :
+                     {"anonymous", "outsider", "owner", "scoped", "application"}) {
+                    SCOPED_TRACE(name + "/" + who + (mcp ? "/mcp" : "/rest") +
+                                 (path_workspace ? "/workspace-path" : "/workspace-input"));
+                    lake::api::ApiContext context;
+                    context.store = w.store.get();
+                    context.workspaces = w.service.get();
+                    if (who != "anonymous") {
+                        const auto principal =
+                            w.store->context_for(who == "outsider" ? outsider->secret : w.secret);
+                        ASSERT_TRUE(principal);
+                        context.authorized = true;
+                        context.acting_identity = principal->taap_id;
+                        context.acting_user_id = principal->user_id;
+                        context.session_credential = true;
+                        context.scopes = who == "scoped" ? std::vector<std::string>{"viewer"}
+                                                         : principal->scopes;
+                        if (who == "application") {
+                            // Even a pool session sharing the owner's identity is not a Lake login.
+                            context.application_session = *principal;
+                        }
+                    }
+                    json input{{"id", name == "get_dataset" ? "datasets/accounts" : "m-1"},
+                               {"customer_id", w.customer_id}};
+                    if (path_workspace) {
+                        context.workspace_id = w.workspace_id();
+                        context.path_workspace_id = context.workspace_id;
+                    } else {
+                        input["workspace_id"] = w.workspace_id();
+                    }
+                    const auto before = w.caller->calls.size();
+                    json envelope;
+                    if (mcp) {
+                        // The model_id alias must receive the same authorization as id.
+                        if (name == "get_model") {
+                            input["model_id"] = input["id"];
+                            input.erase("id");
+                        }
+                        auto reply = liquid::runtime::block_on(lake::api::mcp_dispatch_async(
+                            registry,
+                            {{"jsonrpc", "2.0"},
+                             {"id", 1},
+                             {"method", "tools/call"},
+                             {"params", {{"name", name}, {"arguments", input}}}},
+                            context,
+                            "test"));
+                        ASSERT_TRUE(reply);
+                        ASSERT_TRUE(*reply);
+                        envelope = json::parse(**reply).at("result").at("structuredContent");
+                    } else {
+                        auto result =
+                            liquid::runtime::block_on(registry.call_async(name, input, context));
+                        ASSERT_TRUE(result);
+                        envelope = lake::api::rest_envelope(*result);
+                    }
+                    if (who == "owner") {
+                        EXPECT_TRUE(envelope.at("ok")) << envelope;
+                        EXPECT_GT(w.caller->calls.size(), before);
+                    } else {
+                        EXPECT_FALSE(envelope.at("ok")) << envelope;
+                        EXPECT_EQ(envelope["error"]["code"],
+                                  who == "anonymous" ? "unauthenticated" : "unauthorized")
+                            << envelope;
+                        EXPECT_EQ(w.caller->calls.size(), before)
+                            << "denial must precede every workspace exchange";
+                    }
+                }
+            }
+        }
+    }
+}
+
 TEST(Workspaces, ApplicationAgentDatasetToolsUseWorkspaceDatasetIds) {
     Workspaces w;
     lake::control::InMemoryStore& store = *w.store;
