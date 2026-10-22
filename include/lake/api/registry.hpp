@@ -499,6 +499,8 @@ struct ApiContext {
     bool operator_credential = false;
     bool session_credential = false;
     std::string public_host;
+    // Successful OAuth starts pass cookie material to the HTTP adapter, never to the JSON result.
+    std::string oauth_state, oauth_browser_binding;
     // The configured browser-facing origin (LAKE_EXTERNAL_ORIGIN); empty when only public_host is
     // set. The web app's `viewer` reports it with the clone and push origin (lake#561).
     std::string external_origin;

@@ -31,6 +31,10 @@ SAML providers sign people in through Lake's Assertion Consumer Service; see
 
 `start_sso_oidc` creates an authorization-code flow for an enterprise OIDC provider. It reuses
 the identity core's state, PKCE verifier, nonce, one-use callback, and cached JWKS verification.
+The REST start sets the same per-flow HttpOnly browser cookie as OAuth, and the shared callback
+requires its secret before consuming state ([browser binding](identity.md), lake#963). A callback
+opened in another browser answers 403 and cannot install a session; the initiating browser can
+still finish once.
 The provider's endpoints come from its issuer's OpenID Connect discovery document, whose issuer
 must equal the registered one ([identity.md](identity.md#openid-connect-discovery), lake#837).
 Flow creation validates the synthetic `sso-<provider-id>` callback name against that enabled OIDC

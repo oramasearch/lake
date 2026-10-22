@@ -725,3 +725,7 @@ Release source verification (LSR-106) reads the signed action environment only a
 `forge_capabilities.cpp` rejects conflicting source claims and reloads every selected artifact
 before a protected push; stored release snapshots never supply verification authority.
 Unbound legacy releases remain readable. See [forge.md](../../docs/api/forge.md#source-binding-lsr-106).
+OAuth and enterprise OIDC starts pass a per-flow browser binding through `ApiContext` to the
+HTTP response cookie; the shared callback requires it at store consumption (lake#963, LSR-097).
+Both stores reject missing and foreign bindings without consuming the flow; the existing state
+hash includes the binding in Postgres. See [`identity.md`](../../docs/api/identity.md).

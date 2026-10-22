@@ -552,7 +552,9 @@ public:
     Result<void> begin_oauth(const OAuthFlow&) override;
     Result<void> begin_saml(const SamlRequest&) override;
     Result<SamlRequest> consume_saml(const SamlAnswer&) override;
-    Result<OAuthFlow> consume_oauth(const std::string& provider, const std::string& state) override;
+    Result<OAuthFlow> consume_oauth(const std::string& provider,
+                                    const std::string& state,
+                                    const std::string& browser_binding) override;
     Result<IssuedSession> create_token(const NewToken&) override;
     Result<std::vector<Session>> list_sessions(const std::string& user_id,
                                                const std::string& pool_id) override;

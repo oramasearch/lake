@@ -3711,7 +3711,8 @@ void register_identity_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "start_oauth",
         .title = "Start OAuth sign-in",
-        .description = "Create a one-use OAuth authorization flow with PKCE and state. A first "
+        .description = "Create a one-use OAuth authorization flow with PKCE and state. The browser "
+                       "must retain the HTTP response cookie for the callback. A first "
                        "sign-in's identity_document needs identity_proof: a signature by its key "
                        "over begin_identity_proof's challenge.",
         .input_schema = {{"type", "object"},
@@ -3766,13 +3767,17 @@ void register_identity_capabilities(Registry& registry) {
                                     input.value("device_name", "browser"),
                                     input.value("identity_document", ""),
                                     identity_proof_input(input)};
-            if (flow.state.empty() || flow.code_verifier.empty() || flow.nonce.empty()) {
+            flow.browser_binding = control::identity_crypto::random_secret();
+            if (flow.state.empty() || flow.code_verifier.empty() || flow.nonce.empty() ||
+                flow.browser_binding.empty()) {
                 co_return ApiResult::failure("store_error", "could not generate OAuth flow material");
             }
             const auto started = context.store->begin_oauth(flow);
             if (!started) {
                 co_return from_store_error(started.error());
             }
+            context.oauth_state = flow.state;
+            context.oauth_browser_binding = flow.browser_binding;
             co_return ApiResult::success(
                 {{"authorization_url",
                   oauth_authorization_url(*provider, endpoints.value, flow, context.public_host)}});
@@ -3780,7 +3785,8 @@ void register_identity_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "start_sso_oidc",
         .title = "Start enterprise OIDC sign-in",
-        .description = "Create a one-use enterprise OIDC authorization-code flow with PKCE.",
+        .description = "Create a one-use enterprise OIDC authorization-code flow with PKCE. The "
+                       "browser must retain the HTTP response cookie for the callback.",
         .input_schema = {{"type", "object"},
                          {"properties",
                           {{"provider_id", {{"type", "string"}}},
@@ -3821,13 +3827,17 @@ void register_identity_capabilities(Registry& registry) {
                                     control::identity_crypto::random_secret(),
                                     input.value("device_name", "browser"),
                                     input.value("taap_id", "")};
-            if (flow.state.empty() || flow.code_verifier.empty() || flow.nonce.empty()) {
+            flow.browser_binding = control::identity_crypto::random_secret();
+            if (flow.state.empty() || flow.code_verifier.empty() || flow.nonce.empty() ||
+                flow.browser_binding.empty()) {
                 co_return ApiResult::failure("store_error",
                                              "could not generate OIDC flow material");
             }
             const auto started = context.store->begin_oauth(flow);
             if (!started)
                 co_return from_store_error(started.error());
+            context.oauth_state = flow.state;
+            context.oauth_browser_binding = flow.browser_binding;
             co_return ApiResult::success(
                 {{"authorization_url",
                   oauth_authorization_url(*provider, endpoints.value, flow, context.public_host)}});

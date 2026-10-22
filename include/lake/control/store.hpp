@@ -1312,6 +1312,8 @@ struct OAuthFlow {
     // Required with an identity_document outside enterprise (`sso-`) flows (lake#931); never
     // stored with the flow.
     IdentityProof identity_proof;
+    // Independent of URL state and OIDC nonce; delivered only as an HttpOnly browser cookie.
+    std::string browser_binding;
 };
 struct SsoProvider {
     std::string id;
@@ -2389,9 +2391,11 @@ public:
     virtual Result<void> register_oauth_provider(const OAuthProvider&) = 0;
     virtual Result<OAuthProvider> get_oauth_provider(const std::string& pool_id,
                                                      const std::string& provider) = 0;
+    // Both operations require a browser binding; consumption verifies it before spending state.
     virtual Result<void> begin_oauth(const OAuthFlow&) = 0;
     virtual Result<OAuthFlow> consume_oauth(const std::string& provider,
-                                            const std::string& state) = 0;
+                                            const std::string& state,
+                                            const std::string& browser_binding) = 0;
     virtual Result<IssuedSession> create_token(const NewToken&) = 0;
     virtual Result<std::vector<Session>> list_sessions(const std::string& user_id,
                                                        const std::string& pool_id) = 0;

@@ -70,7 +70,28 @@ one it answers `identity_proof_required`. The Postgres store verifies and record
 before creating the user and OAuth credential. A returning linked identity does not need to send
 the document again.
 
-The callback consumes state before exchanging the code. OpenID Connect id tokens must use RS256
+OAuth starts bind each flow to the initiating browser (lake#963, LSR-097). The REST start
+response and the hosted `/apps/<id>/identity/oauth` redirect set a separate, unpredictable HttpOnly cookie;
+its name is `__Host-lake_oauth_<SHA-256(state)>` over HTTPS, with `Secure`, `SameSite=Lax`,
+`Path=/`, no Domain, and a five-minute lifetime. Loopback HTTP development uses `lake_oauth_`
+without `Secure`. Different flows use different cookies, so starting another login does not
+replace an earlier flow's binding. The cookie secret is independent of state, PKCE, and the OIDC
+nonce, and never appears in the authorization URL or JSON result. Start the flow on the host that
+will receive the callback; HTTP clients must retain its cookie. An authorization URL obtained
+through MCP alone cannot complete a browser login.
+
+Both stores require the cookie secret as well as provider and state before consuming a flow.
+Postgres hashes state together with the binding in the existing `state_hash` column; no migration
+or operator schema update is required. Missing or foreign cookies answer 403 before a code exchange
+or session issuance and leave the legitimate flow usable. A successful consumption is atomic and
+one-use. The cookie expires after five minutes. Flows started before this change must be restarted.
+Verify with `OAuth.AuthorizationCodePkceOidcAndCachedJwks`,
+`OAuth.EnterpriseOidcAuthorizationCodeCallback`, and
+`PostgresIdentity.SessionsTokensAndDeviceRevocation`: missing and foreign cookies fail, the
+initiating cookie completes once, and replay fails. Changes to either start handler must preserve
+the cookie output and the store's required binding argument.
+
+The callback consumes bound state before exchanging the code. OpenID Connect id tokens must use RS256
 and pass signature, issuer, audience, expiry, not-before, nonce, subject, and key-id checks. JWKS
 documents are fetched through Corosio with TLS peer and hostname verification on the blocking pool.
 Malformed tokens and failures with a known key never trigger a fetch; unknown key IDs and valid

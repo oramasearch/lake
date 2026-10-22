@@ -89,7 +89,8 @@ std::string http(unsigned short port,
                  std::string_view method,
                  std::string_view target,
                  std::string_view body = {},
-                 std::string_view content_type = {}) {
+                 std::string_view content_type = {},
+                 std::string_view cookie = {}) {
     const int descriptor = ::socket(AF_INET, SOCK_STREAM, 0);
     sockaddr_in address{};
     address.sin_family = AF_INET;
@@ -106,6 +107,9 @@ std::string http(unsigned short port,
                           " HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n";
     if (!content_type.empty()) {
         message += "Content-Type: " + std::string(content_type) + "\r\n";
+    }
+    if (!cookie.empty()) {
+        message += "Cookie: " + std::string(cookie) + "\r\n";
     }
     message += "Content-Length: " + std::to_string(body.size()) + "\r\n\r\n";
     message += body;
@@ -430,6 +434,7 @@ struct OidcLake {
         std::make_shared<lake::control::InMemoryStore>();
     unsigned short port = free_port();
     std::string provider_id;
+    std::string browser_cookie;
     std::unique_ptr<lake::api::ApiServer> server;
 
     OidcLake(const Provider& provider, bool allow_private_addresses = true) {
@@ -472,9 +477,15 @@ struct OidcLake {
             "application/json");
     }
 
+    std::string callback(const std::string& target) {
+        return http(port, "GET", target, {}, {}, browser_cookie);
+    }
+
     // Starts sign-in and follows the provider's redirect: answers Lake's callback target.
     std::string authorize(const Provider& provider) {
         const std::string started = start();
+        browser_cookie = header(started, "Set-Cookie");
+        browser_cookie = browser_cookie.substr(0, browser_cookie.find(';'));
         EXPECT_NE(started.find(" 200 "), std::string::npos) << started;
         const std::string url = json::parse(body_of(started))["value"]["authorization_url"];
         EXPECT_TRUE(url.starts_with(provider.base() + provider.authorize_path() + "?")) << url;
@@ -587,7 +598,7 @@ TEST_P(OidcSignIn, AValidTokenSignsInOnceThroughTheDiscoveredEndpoints) {
     Provider provider(GetParam());
     OidcLake lake(provider);
     const std::string callback = lake.authorize(provider);
-    const std::string signed_in = http(lake.port, "GET", callback);
+    const std::string signed_in = lake.callback(callback);
     ASSERT_NE(signed_in.find(" 302 "), std::string::npos) << signed_in;
     const std::string cookie = header(signed_in, "Set-Cookie");
     ASSERT_TRUE(cookie.starts_with("lake_session=")) << cookie;
@@ -602,11 +613,11 @@ TEST_P(OidcSignIn, AValidTokenSignsInOnceThroughTheDiscoveredEndpoints) {
     EXPECT_EQ(provider.requests(under_issuer + "/jwks"), 0);
 
     // Replayed: the state is used.
-    const std::string replayed = http(lake.port, "GET", callback);
+    const std::string replayed = lake.callback(callback);
     EXPECT_NE(replayed.find(" 403 "), std::string::npos) << replayed;
 
     // A second sign-in reads the cached document.
-    const std::string again = http(lake.port, "GET", lake.authorize(provider));
+    const std::string again = lake.callback(lake.authorize(provider));
     EXPECT_NE(again.find(" 302 "), std::string::npos) << again;
     EXPECT_EQ(provider.requests(provider.discovery_path()), 1);
 }
@@ -617,7 +628,7 @@ TEST_P(OidcSignIn, TamperedWrongAudienceExpiredAndWrongNonceTokensAreRefused) {
     for (const Token token :
          {Token::tampered, Token::wrong_audience, Token::expired, Token::wrong_nonce}) {
         provider.set_token(token);
-        const std::string refused = http(lake.port, "GET", lake.authorize(provider));
+        const std::string refused = lake.callback(lake.authorize(provider));
         EXPECT_NE(refused.find(" 403 "), std::string::npos) << static_cast<int>(token) << refused;
         EXPECT_EQ(header(refused, "Set-Cookie"), "") << static_cast<int>(token);
     }
@@ -711,7 +722,13 @@ TEST(OidcSignInLakeOAuth, AGenericLakeOAuthProviderUsesDiscoveryToo) {
     // The token exchange and the key fetch go to the discovered endpoints; the identity document
     // here is not a TAAP one, so the sign-in itself is refused after verification, as for any
     // first OAuth sign-in without one (docs/deployment/sign-in.md §3).
-    const std::string callback = http(port, "GET", path_of(header(redirected, "Location")));
+    const std::string cookie = header(started, "Set-Cookie");
+    const std::string callback = http(port,
+                                      "GET",
+                                      path_of(header(redirected, "Location")),
+                                      {},
+                                      {},
+                                      cookie.substr(0, cookie.find(';')));
     EXPECT_EQ(provider.requests(provider.token_path()), 1) << callback;
     EXPECT_EQ(provider.requests(provider.keys_path()), 1) << callback;
     server.stop();
