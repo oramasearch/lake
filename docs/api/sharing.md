@@ -13,6 +13,14 @@ be recalled; export or download performs the copy.
 ordinary policy grant. The recipient sees the continuing live object. Other principals receive
 `unauthorized`.
 
+Sharing requires `share` on the folder and every action the requested role grants (lake#955,
+LSR-089). A caller holding only `share` may grant `read` or `share`, but cannot grant `write`.
+Separate direct or inherited grants can supply the required actions. The same check applies to
+`create_drive_share_link`, before any link record or synthetic grant is written. A denied role
+returns `unauthorized` at `/role`; retrying an existing live grant also requires these checks.
+Existing grants and links retain their roles. Review and revoke any previously overbroad shares
+through the normal grant or link revocation capabilities.
+
 ### Naming the Recipient (lake#585)
 
 - **`recipient`**, for people: an email or a handle (`ana` or `@ana`), matched without regard to
@@ -24,6 +32,9 @@ ordinary policy grant. The recipient sees the continuing live object. Other prin
   sees the members' emails.
 - **`principal_taap_id`**, for programs: a TAAP identity, which lake must know as a user or an
   organization (`principal_names`); an unknown one is `invalid_input` at `/principal_taap_id`.
+  Callers without `admin` on the folder may name only the account's people, just as with
+  `recipient`; an outsider returns `unauthorized` at `/principal_taap_id`. Folder admins and the
+  operator may share with any known identity.
 - Exactly one of the two (`invalid_input` at `/recipient` otherwise).
 
 ### The Grant's Attestation (lake#585)
@@ -179,3 +190,16 @@ revocation between listing and download. Run the full native suite with `LAKE_TE
 
 When changing recipient delivery, keep all three operations on `shared_drive_target` and their
 registry schemas; extend the scope/refusal scenario alongside any new path or delivery behavior.
+
+## Permission regression (lake#955)
+
+`Drive.SharingCannotGrantActionsTheCallerDoesNotHold` in `tests/test_api.cpp` checks denied write
+shares through email and TAAP identity, denied write bearer links with no persisted grant or
+link, permitted read/share grants, permitted read links, combined inherited write and direct
+share, rejection of outsiders for non-admins, retries after write revocation, and admin sharing to
+an outsider. Run it with
+`ctest --test-dir <build> --timeout 600 -R Drive.SharingCannotGrantActionsTheCallerDoesNotHold --output-on-failure`.
+
+Keep both sharing handlers on `require_drive_share_role` when changing the role contract.
+`create_grant` requires object admin. Repository imports require customer write and grant only
+on a newly created repository; they cannot add a grant on an existing folder.

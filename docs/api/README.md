@@ -539,3 +539,6 @@ Personal-customer sign-up behavior, naming, quotas, metering, and atomic retry s
 
 [auth.md](auth.md) specifies indexed PostgreSQL session authentication, operator precedence and
 the `0022_session_lookup` rollout. Password hashing and live revocation guarantees are preserved.
+
+Folder sharing (lake#955) caps live grants and bearer-link roles at the caller's actions and
+limits non-admin recipients to the account's people; see [sharing.md](sharing.md).

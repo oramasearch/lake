@@ -813,3 +813,6 @@ adds `McpOAuthRejectsDeepMetadataRegistrationAndTokens` for both stores: resourc
 registration, authorization-code and refresh tokens. Run
 `ctest --test-dir build --timeout 600 -R 'McpClient|McpOAuth' --output-on-failure`. See
 [MCP connections](../docs/api/mcp-connections.md#the-client) (lake#958, LSR-092).
+`Drive.SharingCannotGrantActionsTheCallerDoesNotHold` (`test_api.cpp`, lake#955) checks role
+attenuation for live grants and bearer links, member-only sharing by non-admins, combined grants
+and admin sharing to known outsiders. See [sharing](../docs/api/sharing.md).

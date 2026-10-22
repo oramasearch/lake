@@ -5875,6 +5875,150 @@ TEST(Drive, SharingByEmailOrHandleIsAttestedByLake) {
     EXPECT_EQ(with({{"role", "read"}}).error.code, "invalid_input");
 }
 
+// LSR-089: sharing must attenuate authority for both live grants and bearer links.
+TEST(Drive, SharingCannotGrantActionsTheCallerDoesNotHold) {
+    Surface surface;
+    DriveWorkspaces workspaces(surface);
+    RepositoryFixtureStore repository_store;
+    surface.ctx.sync_store = &repository_store;
+    const auto organization = surface.call(
+        "create_organization", {{"taap_id", "taap:1:ed25519:studio"}, {"display_name", "Studio"}});
+    ASSERT_TRUE(organization.ok);
+    for (const std::string name : {"owner", "sharer", "member", "outsider"}) {
+        const auto user = surface.call("create_user",
+                                       {{"taap_id", "taap:1:ed25519:" + name},
+                                        {"email", name + "@example.com"},
+                                        {"display_name", name}});
+        ASSERT_TRUE(user.ok);
+        if (name != "outsider") {
+            ASSERT_TRUE(surface
+                            .call("create_membership",
+                                  {{"organization_id", organization.value["id"]},
+                                   {"principal_type", "user"},
+                                   {"principal_id", user.value["id"]},
+                                   {"principal_taap_id", user.value["taap_id"]},
+                                   {"role", "member"}})
+                            .ok);
+        }
+    }
+    const auto customer = surface.call("create_customer",
+                                       {{"customer_type", "organization"},
+                                        {"organization_id", organization.value["id"]},
+                                        {"name", "share-authority"}});
+    ASSERT_TRUE(customer.ok);
+    const auto repository = surface.call(
+        "create_repository",
+        {{"customer_id", customer.value["id"]},
+         {"workspace_id", lake::test::repository_workspace(surface.store, customer.value["id"])},
+         {"name", "drive"}});
+    ASSERT_TRUE(repository.ok);
+    const auto repository_object =
+        surface.store.find_policy_object("repository", repository.value["id"]);
+    ASSERT_TRUE(repository_object);
+    ASSERT_TRUE(surface.store.create_grant({"taap:1:ed25519:owner",
+                                            repository_object->id,
+                                            "admin",
+                                            "owner-grant",
+                                            "admin",
+                                            "owner-request"}));
+    const std::string workspace = workspaces.create(customer.value["id"], "home");
+    const json folder{
+        {"repository_id", repository.value["id"]}, {"ref", "main"}, {"path", "shared"}};
+    const auto share = [&](json extra) {
+        json input = folder;
+        input.update(extra);
+        return surface.call("share_drive_folder", input);
+    };
+    const auto link = [&](const std::string& role) {
+        json input = folder;
+        input.update(
+            {{"workspace_id", workspace}, {"role", role}, {"expires_at", "2099-01-01T00:00:00Z"}});
+        return surface.call("create_drive_share_link", input);
+    };
+    surface.ctx.operator_credential = false;
+    surface.ctx.acting_identity = "taap:1:ed25519:owner";
+    const auto delegated =
+        share({{"principal_taap_id", "taap:1:ed25519:sharer"}, {"role", "share"}});
+    ASSERT_TRUE(delegated.ok) << delegated.error.message;
+    const std::string object = delegated.value["object"]["id"];
+    surface.ctx.acting_identity = "taap:1:ed25519:sharer";
+
+    // Both recipient selectors must reject write before creating a grant.
+    for (const json target : {json{{"recipient", "MEMBER@example.com"}},
+                              json{{"principal_taap_id", "taap:1:ed25519:member"}}}) {
+        json input = target;
+        input["role"] = "write";
+        const auto refused = share(input);
+        EXPECT_FALSE(refused.ok);
+        EXPECT_EQ(refused.error.code, "unauthorized");
+        EXPECT_EQ(refused.error.path, "/role");
+    }
+    const auto refused_link = link("write");
+    EXPECT_FALSE(refused_link.ok);
+    EXPECT_EQ(refused_link.error.code, "unauthorized");
+    EXPECT_EQ(refused_link.error.path, "/role");
+    const auto grants = surface.store.list_grants({object}, std::nullopt, 100);
+    ASSERT_TRUE(grants);
+    EXPECT_EQ(grants->size(), 1u);
+    const auto links = surface.call("drive_effective_access",
+                                    {{"repository_id", repository.value["id"]},
+                                     {"workspace_id", workspace},
+                                     {"ref", "main"},
+                                     {"path", "shared"}});
+    ASSERT_TRUE(links.ok) << links.error.message;
+    EXPECT_TRUE(links.value["links"].empty());
+
+    for (const std::string role : {"read", "share"}) {
+        const auto allowed = share({{"recipient", "member@example.com"}, {"role", role}});
+        EXPECT_TRUE(allowed.ok) << allowed.error.message;
+        const auto again = share({{"principal_taap_id", "taap:1:ed25519:member"}, {"role", role}});
+        EXPECT_TRUE(again.ok) << again.error.message;
+        const auto outside =
+            share({{"principal_taap_id", "taap:1:ed25519:outsider"}, {"role", role}});
+        EXPECT_FALSE(outside.ok);
+        EXPECT_EQ(outside.error.code, "unauthorized");
+        EXPECT_EQ(outside.error.path, "/principal_taap_id");
+    }
+    EXPECT_TRUE(link("read").ok);
+
+    // An inherited write grant combines with folder share; write alone cannot re-share.
+    ASSERT_TRUE(surface.store.create_grant({"taap:1:ed25519:sharer",
+                                            repository_object->id,
+                                            "write",
+                                            "write-grant",
+                                            "admin",
+                                            "write-request"}));
+    const auto allowed_write =
+        share({{"principal_taap_id", "taap:1:ed25519:member"}, {"role", "write"}});
+    EXPECT_TRUE(allowed_write.ok) << allowed_write.error.message;
+    EXPECT_TRUE(link("write").ok);
+    EXPECT_FALSE(share({{"principal_taap_id", "taap:1:ed25519:outsider"}, {"role", "write"}}).ok);
+    const auto inherited =
+        surface.store.list_grants({repository_object->id}, "taap:1:ed25519:sharer", 100);
+    ASSERT_TRUE(inherited);
+    ASSERT_EQ(inherited->size(), 1u);
+    ASSERT_TRUE(surface.store.revoke_grant(inherited->front().id, false));
+    const auto retry = share({{"principal_taap_id", "taap:1:ed25519:member"}, {"role", "write"}});
+    EXPECT_FALSE(retry.ok);
+    EXPECT_EQ(retry.error.path, "/role");
+    EXPECT_FALSE(link("write").ok);
+
+    surface.ctx.acting_identity = "taap:1:ed25519:member";
+    // Remove the member's share role, leaving read and write only.
+    const auto member_grants = surface.store.list_grants({object}, "taap:1:ed25519:member", 100);
+    ASSERT_TRUE(member_grants);
+    for (const auto& grant : *member_grants) {
+        if (grant.role == "share") {
+            ASSERT_TRUE(surface.store.revoke_grant(grant.id, false));
+        }
+    }
+    EXPECT_FALSE(share({{"recipient", "owner@example.com"}, {"role", "read"}}).ok);
+    EXPECT_FALSE(link("read").ok);
+
+    surface.ctx.acting_identity = "taap:1:ed25519:owner";
+    EXPECT_TRUE(share({{"principal_taap_id", "taap:1:ed25519:outsider"}, {"role", "write"}}).ok);
+}
+
 TEST(Drive, ShareDownloadsEncodeAcrossBlockBoundaries) {
     Surface surface;
     DriveWorkspaces workspaces(surface);
