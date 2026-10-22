@@ -420,7 +420,8 @@ the workspace and see only its stores (lake#465). See `docs/api/storage.md`.
 
 `registry.cpp` runs the synchronous handlers of capabilities that wait on a repository store
 (repository, Drive, model and dataset objects, search, `replicate_repository`,
-`move_workspace_store`, `remove_space_store`, `delete_workspace`) on a 32-thread pool, and `run_blocking` /
+`move_workspace_store`, `remove_space_store`, `delete_workspace`) and the identity scan
+(`transparency_identity_scan`, lake#941) on a 32-thread pool, and `run_blocking` /
 `blocking_call` (`registry.hpp`, `capabilities.hpp`) run asynchronous handlers' store calls there,
 so a slow workspace Zetta holds up only its own requests (lake#380). `LiquidCustomerStores` admits
 at most four requests per store lane and refuses a moving lane with 503; it lends repositories to

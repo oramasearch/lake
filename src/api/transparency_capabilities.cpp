@@ -16,6 +16,11 @@ namespace {
 
 using nlohmann::json;
 
+// The most tiles one proof bundle page carries, and the most matches one identity scan page
+// returns (lake#941): each read's work is bounded however long the log grows.
+constexpr std::uint64_t proof_bundle_tile_limit = 16;
+constexpr std::size_t identity_scan_page = 100;
+
 ApiResult from_transparency_error(const transparency::Error& error) {
     return ApiResult::failure(error.code, error.message);
 }
@@ -86,18 +91,27 @@ json signed_checkpoint_output_schema() {
 json inclusion_proof_output_schema();
 
 json proof_bundle_output_schema() {
-    return {
-        {"type", "object"},
-        {"properties",
-         {{"checkpoint", {{"type", "object"}}},
-          {"configuration", {{"type", "object"}}},
-          {"identity", {{"type", "object"}}},
-          {"inclusion", inclusion_proof_output_schema()},
-          {"tiles", {{"type", "array"}, {"items", {{"type", "object"}}}}},
-          {"version", {{"type", "string"}, {"const", "lake_transparency_proof_bundle/1"}}}}},
-        {"required",
-         json::array({"checkpoint", "configuration", "identity", "inclusion", "tiles", "version"})},
-        {"additionalProperties", false}};
+    return {{"type", "object"},
+            {"properties",
+             {{"checkpoint", {{"type", "object"}}},
+              {"configuration", {{"type", "object"}}},
+              {"identity", {{"type", "object"}}},
+              {"inclusion", inclusion_proof_output_schema()},
+              {"tiles", {{"type", "array"}, {"items", {{"type", "object"}}}}},
+              {"tile_offset", {{"type", "integer"}, {"minimum", 0}}},
+              {"tile_count", {{"type", "integer"}, {"minimum", 1}}},
+              {"next_tile_offset", {{"type", "integer"}, {"minimum", 1}}},
+              {"version", {{"type", "string"}, {"const", "lake_transparency_proof_bundle/1"}}}}},
+            {"required",
+             json::array({"checkpoint",
+                          "configuration",
+                          "identity",
+                          "inclusion",
+                          "tiles",
+                          "tile_offset",
+                          "tile_count",
+                          "version"})},
+            {"additionalProperties", false}};
 }
 
 json inclusion_proof_output_schema() {
@@ -224,14 +238,38 @@ json scan_value(const transparency::IdentityScan& scan) {
                            {"profile", match.profile},
                            {"subject", match.subject}});
     }
-    return {{"duration_ms", scan.duration_ms},
-            {"entries_scanned", scan.entries_scanned},
-            {"identity", scan.identity},
-            {"matches", std::move(matches)},
-            {"root_hash", scan.root_hash},
-            {"tiles_scanned", scan.tiles_scanned},
-            {"tree_size", scan.tree_size},
-            {"verified", true}};
+    json value = {{"duration_ms", scan.duration_ms},
+                  {"entries_scanned", scan.entries_scanned},
+                  {"identity", scan.identity},
+                  {"matches", std::move(matches)},
+                  {"root_hash", scan.root_hash},
+                  {"tiles_scanned", scan.tiles_scanned},
+                  {"tree_size", scan.tree_size},
+                  {"verified", true}};
+    if (scan.next_index) {
+        value["next_index"] = *scan.next_index;
+    }
+    return value;
+}
+
+// The tiles a proof bundle for `tree_size` entries carries, in order: every entry tile, then each
+// interior-hash level's tiles from level 1 up. One entry per level: its tile and value counts.
+struct BundleLevel {
+    std::uint32_t level = 0;
+    std::uint64_t values = 0;
+    std::uint64_t tiles = 0;
+};
+
+std::vector<BundleLevel> bundle_levels(std::uint64_t tree_size) {
+    std::vector<BundleLevel> levels;
+    for (std::uint32_t level = 0; (tree_size >> level) > 0; ++level) {
+        const std::uint64_t values = tree_size >> level;
+        levels.push_back({level,
+                          values,
+                          (values + transparency::transparency_tile_width - 1) /
+                              transparency::transparency_tile_width});
+    }
+    return levels;
 }
 
 std::expected<nlohmann::json, transparency::Error> sign_checkpoint(const nlohmann::json& checkpoint,
@@ -357,12 +395,18 @@ void register_transparency_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "transparency_proof_bundle",
         .title = "Export transparency proof bundle",
-        .description = "Export identity, trust configuration, checkpoint, tiles, and one inclusion "
-                       "proof for offline verification.",
-        .input_schema = {{"type", "object"},
-                         {"properties", {{"leaf_index", {{"type", "integer"}, {"minimum", 0}}}}},
-                         {"required", json::array({"leaf_index"})},
-                         {"additionalProperties", false}},
+        .description = "Export identity, trust configuration, checkpoint, one inclusion proof and "
+                       "one page of the checkpoint's tiles for offline verification.",
+        .input_schema =
+            {{"type", "object"},
+             {"properties",
+              {{"leaf_index", {{"type", "integer"}, {"minimum", 0}}},
+               {"tree_size", {{"type", "integer"}, {"minimum", 1}}},
+               {"tile_offset", {{"type", "integer"}, {"minimum", 0}}},
+               {"tile_limit",
+                {{"type", "integer"}, {"minimum", 1}, {"maximum", proof_bundle_tile_limit}}}}},
+             {"required", json::array({"leaf_index"})},
+             {"additionalProperties", false}},
         .output_schema = proof_bundle_output_schema(),
         .kind = CapabilityKind::Read,
         .requires_auth = false,
@@ -380,23 +424,48 @@ void register_transparency_capabilities(Registry& registry) {
             if (!context.transparency_log) {
                 return no_tiled_log();
             }
-            const auto checkpoint = context.checkpoints->current();
-            if (!checkpoint) {
-                return from_transparency_error(checkpoint.error());
+            // Later pages name the first page's tree_size, so every page is of one checkpoint.
+            json checkpoint;
+            if (input.contains("tree_size")) {
+                const ApiResult selected = checkpoint_for_proof(
+                    context, input.at("tree_size").get<std::uint64_t>(), checkpoint);
+                if (!selected.ok) {
+                    return selected;
+                }
+            } else {
+                const auto current = context.checkpoints->current();
+                if (!current) {
+                    return from_transparency_error(current.error());
+                }
+                checkpoint = *current;
             }
-            if (!checkpoint->contains("checkpoint") || !checkpoint->at("checkpoint").is_object() ||
-                !checkpoint->at("checkpoint").contains("tree_size") ||
-                !checkpoint->at("checkpoint").at("tree_size").is_number_unsigned()) {
+            if (!checkpoint.contains("checkpoint") || !checkpoint.at("checkpoint").is_object() ||
+                !checkpoint.at("checkpoint").contains("tree_size") ||
+                !checkpoint.at("checkpoint").at("tree_size").is_number_unsigned() ||
+                !checkpoint.at("checkpoint").contains("root_hash") ||
+                !checkpoint.at("checkpoint").at("root_hash").is_string()) {
                 return ApiResult::failure("unrecoverable",
                                           "current checkpoint has no tiled-log commitment");
             }
             const std::uint64_t tree_size =
-                checkpoint->at("checkpoint").at("tree_size").get<std::uint64_t>();
+                checkpoint.at("checkpoint").at("tree_size").get<std::uint64_t>();
             const std::int64_t requested = input.at("leaf_index").get<std::int64_t>();
             if (requested < 0 || static_cast<std::uint64_t>(requested) >= tree_size) {
                 return ApiResult::failure(
                     "invalid_input", "leaf_index is outside the checkpoint", "/leaf_index");
             }
+            const std::vector<BundleLevel> levels = bundle_levels(tree_size);
+            std::uint64_t tile_count = 0;
+            for (const BundleLevel& level : levels) {
+                tile_count += level.tiles;
+            }
+            const std::uint64_t tile_offset = input.value("tile_offset", std::uint64_t{0});
+            if (tile_offset >= tile_count) {
+                return ApiResult::failure(
+                    "invalid_input", "tile_offset is past the checkpoint's tiles", "/tile_offset");
+            }
+            const std::uint64_t tile_end = std::min(
+                tile_count, tile_offset + input.value("tile_limit", proof_bundle_tile_limit));
             auto identity = audit::identity(
                 *context.store,
                 {.configured_seed = context.identity_seed, .instance_kek = context.instance_kek});
@@ -404,51 +473,58 @@ void register_transparency_capabilities(Registry& registry) {
                 return ApiResult::failure(identity.error().code, identity.error().message);
             }
             json tiles = json::array();
-            for (std::uint64_t start = 0; start < tree_size;
-                 start += transparency::transparency_tile_width) {
-                const std::size_t width = static_cast<std::size_t>(std::min<std::uint64_t>(
-                    transparency::transparency_tile_width, tree_size - start));
-                const auto tile = context.transparency_log->tile(
-                    start / transparency::transparency_tile_width, width);
-                if (!tile) {
-                    return from_transparency_error(tile.error());
-                }
-                tiles.push_back(tile_value(*tile));
-            }
-            std::uint64_t hashes = tree_size / 2;
-            for (std::uint32_t level = 1; hashes > 0; ++level) {
-                for (std::uint64_t start = 0; start < hashes;
-                     start += transparency::transparency_tile_width) {
+            std::uint64_t level_first = 0;
+            for (const BundleLevel& level : levels) {
+                const std::uint64_t first = std::max(tile_offset, level_first);
+                const std::uint64_t last = std::min(tile_end, level_first + level.tiles);
+                for (std::uint64_t position = first; position < last; ++position) {
+                    const std::uint64_t index = position - level_first;
                     const std::size_t width = static_cast<std::size_t>(std::min<std::uint64_t>(
-                        transparency::transparency_tile_width, hashes - start));
-                    const auto tile = context.transparency_log->hash_tile(
-                        level, start / transparency::transparency_tile_width, width);
-                    if (!tile) {
-                        return from_transparency_error(tile.error());
+                        transparency::transparency_tile_width,
+                        level.values - index * transparency::transparency_tile_width));
+                    if (level.level == 0) {
+                        const auto tile = context.transparency_log->tile(index, width);
+                        if (!tile) {
+                            return from_transparency_error(tile.error());
+                        }
+                        tiles.push_back(tile_value(*tile));
+                    } else {
+                        const auto tile =
+                            context.transparency_log->hash_tile(level.level, index, width);
+                        if (!tile) {
+                            return from_transparency_error(tile.error());
+                        }
+                        tiles.push_back(hash_tile_value(*tile));
                     }
-                    tiles.push_back(hash_tile_value(*tile));
                 }
-                hashes /= 2;
+                level_first += level.tiles;
             }
             const auto proof = context.transparency_log->inclusion_proof(
                 static_cast<std::uint64_t>(requested), tree_size);
             if (!proof) {
                 return from_transparency_error(proof.error());
             }
-            const std::string root =
-                checkpoint->at("checkpoint").at("root_hash").get<std::string>();
+            const std::string root = checkpoint.at("checkpoint").at("root_hash").get<std::string>();
             if (proof->root_hash != root) {
                 return ApiResult::failure("unrecoverable",
                                           "proof root does not match the selected checkpoint");
             }
             context.audit_details["leaf_index"] = requested;
             context.audit_details["tree_size"] = tree_size;
-            return ApiResult::success({{"checkpoint", *checkpoint},
-                                       {"configuration", context.checkpoints->configuration()},
-                                       {"identity", audit::identity_document(*identity)},
-                                       {"inclusion", inclusion_proof_value(*proof, *checkpoint)},
-                                       {"tiles", std::move(tiles)},
-                                       {"version", "lake_transparency_proof_bundle/1"}});
+            context.audit_details["tile_offset"] = tile_offset;
+            context.audit_details["tiles"] = tile_end - tile_offset;
+            json bundle = {{"checkpoint", checkpoint},
+                           {"configuration", context.checkpoints->configuration()},
+                           {"identity", audit::identity_document(*identity)},
+                           {"inclusion", inclusion_proof_value(*proof, checkpoint)},
+                           {"tiles", std::move(tiles)},
+                           {"tile_offset", tile_offset},
+                           {"tile_count", tile_count},
+                           {"version", "lake_transparency_proof_bundle/1"}};
+            if (tile_end < tile_count) {
+                bundle["next_tile_offset"] = tile_end;
+            }
+            return ApiResult::success(std::move(bundle));
         }});
     registry.add(Capability{
         .name = "transparency_inclusion_proof",
@@ -568,9 +644,12 @@ void register_transparency_capabilities(Registry& registry) {
         .name = "transparency_identity_scan",
         .title = "Scan transparency identity",
         .description =
-            "Verify checkpoint-bound bulk tiles and return every attestation naming one identity.",
+            "Verify checkpoint-bound bulk tiles and return one page of the attestations naming "
+            "one identity.",
         .input_schema = {{"type", "object"},
-                         {"properties", {{"identity", {{"type", "string"}}}}},
+                         {"properties",
+                          {{"identity", {{"type", "string"}}},
+                           {"start_index", {{"type", "integer"}, {"minimum", 0}}}}},
                          {"required", json::array({"identity"})},
                          {"additionalProperties", false}},
         .output_schema = checkpoint_output_schema(),
@@ -604,7 +683,9 @@ void register_transparency_capabilities(Registry& registry) {
             const auto scan = context.transparency_log->scan_identity(
                 identity,
                 checkpoint.at("tree_size").get<std::uint64_t>(),
-                checkpoint.at("root_hash").get<std::string>());
+                checkpoint.at("root_hash").get<std::string>(),
+                input.value("start_index", std::uint64_t{0}),
+                identity_scan_page);
             if (!scan) {
                 return from_transparency_error(scan.error());
             }

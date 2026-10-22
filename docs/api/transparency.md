@@ -301,9 +301,21 @@ and its OpenAPI document describes their query parameters and response envelopes
 
 `transparency_proof_bundle` takes one `leaf_index` in the current checkpoint. It returns
 `version: "lake_transparency_proof_bundle/1"` with Lake's public identity, effective witness
-configuration, the complete signed checkpoint, every exact-width entry and interior-hash tile
+configuration, the complete signed checkpoint, the exact-width entry and interior-hash tiles
 committed by that checkpoint, and the checkpoint-bound inclusion proof for the selected leaf.
-The bundle is self-contained: a verifier does not need to resolve a Lake URL after export.
+Once all its pages are put together, the bundle is self-contained: a verifier does not need to
+resolve a Lake URL after export.
+
+The tiles come a page at a time, so one anonymous call's work does not grow with the log
+(lake#941). They are numbered in a fixed order: every entry tile from index 0, then each
+interior-hash level's tiles from level 1 up. `tile_offset` (default 0) names the first tile of a
+page and `tile_limit` (1 to 16, default 16) how many it carries; a larger `tile_limit` is
+`invalid_input`, and so is a `tile_offset` at or past the end. Each page answers `tile_offset`,
+`tile_count` (the checkpoint's tiles in all) and, while tiles remain, `next_tile_offset`. A
+later page passes the first page's `tree_size`, which selects that signed checkpoint
+(`not_found` without one), so every page is of one checkpoint even after the log grows. A log of up
+to 4,095 entries (16 tiles) is still one page. The verifier puts the pages' `tiles` arrays
+together and verifies them as one bundle.
 
 The liquid verifier first checks the checkpoint signature and configured witness threshold, then
 checks each tile digest and reconstructs the committed root. It locates the canonical attestation
@@ -332,13 +344,32 @@ It reads the current signed checkpoint, fetches its exact tile versions, decodes
 TAAP attestation, and recomputes every leaf and parent hash through the committed Merkle root. It
 returns an entry when the requested TAAP identifier is the issuer or an exact text/list attribute,
 which covers authorship, review, membership, delegation, and registered profile identity fields.
-The response reports tree size, root, tiles and entries read, matching indexes, profiles, issuers,
-subjects, exact base64url attestations, and measured scan duration.
+The response reports tree size, root, the tiles and entries this call read and verified, matching
+indexes, profiles, issuers, subjects, exact base64url attestations, and measured scan duration.
 
-The root check happens after all tile bytes are read. A modified entry, changed order, missing
+Lake keeps what its scans have verified (lake#941): the Merkle frontier, each complete tile's root,
+the leaf hashes of the last, incomplete tile, and which entries name each identity. A scan verifies
+only the entries appended since the last one, from the frontier to the checkpoint's root, so the
+first scan after a start verifies the whole log and later ones only what is new. A checkpoint older
+than what was verified starts again from the first entry. The kept index takes memory in
+proportion to the log: one 8-byte index for each identity an entry names.
+
+The scan reads immutable tile files for the checkpoint's tree size and never takes the append lock,
+so appends, and with them dynamic-secret operations, go on while it runs. One scan runs at a time
+per Lake process; another answers `busy` (503), to be retried. The registry runs it off the server's
+thread, on the pool repository-store calls use.
+
+Matches come 100 a page, in index order. `start_index` (default 0) names the first entry a page
+looks at, and a page with matches left answers `next_index`, the next page's `start_index`.
+
+The root check happens after the new tile bytes are read. A modified, reordered or missing new
 entry, substituted partial tile, malformed record, invalid attestation, or changed tile header
-causes `unrecoverable`; the monitor returns no partial results. Earlier partial tile versions stay
-available, so a monitor can verify an older checkpoint even after later appends fill that tile.
+causes `unrecoverable`; the monitor returns no partial results. A tile the scan reads again, to
+return entries an earlier scan verified or to continue the incomplete last tile, must reach the
+tile root or leaf hashes kept for it, or the scan is `unrecoverable`. A tile already verified that
+holds none of a page's entries is not read again; liquid's verifier, which checks every tile it
+fetches, is the check for those. Earlier partial tile versions stay available, so a monitor can
+verify an older checkpoint even after later appends fill that tile.
 
 Lake's monitor verifies inclusion in the selected checkpoint by recomputing the complete root.
 Lake serves the compact proofs and hash tiles described above. The identity-exit scenario invokes
@@ -439,9 +470,9 @@ authorization object and `authorize`. Public monitoring reads are deliberately u
 | `transparency_checkpoint` | read | `{}` | current signed checkpoint, or `not_found` before one has met the requirements |
 | `transparency_tile` | read | non-negative `index`, optional `level` from 0 through 63, exact `width` from 1 through 1,024 | immutable entry or interior-hash tile as base64url with SHA-256 |
 | `transparency_inclusion_proof` | read | non-negative `leaf_index`, positive checkpoint `tree_size` | compact audit path and complete named checkpoint record |
-| `transparency_proof_bundle` | read | non-negative `leaf_index` in the current checkpoint | public identity, witness configuration, checkpoint, all required tiles, and one inclusion proof for offline verification |
+| `transparency_proof_bundle` | read | non-negative `leaf_index` in the checkpoint; optional checkpoint `tree_size` (default the current one), `tile_offset` (default 0) and `tile_limit` (1 to 16, default 16) | public identity, witness configuration, checkpoint, one inclusion proof, and one page of the checkpoint's tiles with `tile_offset`, `tile_count` and, while tiles remain, `next_tile_offset` |
 | `transparency_consistency_proof` | read | non-negative `old_tree_size` and `new_tree_size`, old no greater than new | compact audit path and complete named new-checkpoint record |
-| `transparency_identity_scan` | read | TAAP `identity` | verified checkpoint/root, scan measurements, and every matching attestation |
+| `transparency_identity_scan` | read | TAAP `identity`, optional `start_index` (default 0) | verified checkpoint/root, scan measurements, up to 100 matching attestations from `start_index` on, and `next_index` while matches remain; `busy` while another scan runs |
 | `timestamp_checkpoint` | action | `{}` | new RFC 4998 evidence record for the current checkpoint signature |
 | `renew_timestamp_evidence` | action | `checkpoint_digest` | evidence record with one appended archive timestamp |
 | `timestamp_evidence` | read | `checkpoint_digest` | verified DER evidence record, token summaries, signature digest, and `renew_after` |
@@ -515,6 +546,13 @@ growth and identity scanning, fetches full and partial tiles, proves the scan is
 growth, and detects a modified tile against the checkpoint root.
 `TransparencyLog.ConcurrentWritersPreserveEveryEntry` verifies that two Lake writers sharing an
 instance serialize their appends without losing entries.
+`TransparencyLog.ScanDoesNotHoldUpAppendsAndVerifiesOnlyNewEntries` appends while a 65,536-entry
+scan runs, gets `busy` from a second scan meanwhile, and requires the next scans to verify only the
+entries appended since. `TransparencyLog.ScanPagesMatchesAndChecksTilesItReadsAgain` pages matches
+and refuses a republished last tile whose verified entries changed.
+`TransparencyScenario.ProofBundleIsPagedByTileRangeAndCapped` exports a 30-tile bundle in two pages
+pinned to one checkpoint, verifies them together with liquid's offline verifier, refuses a
+`tile_limit` over 16, and pages the identity scan through the registry.
 `TransparencyCheckpoint.ValidatesRuntimeConfiguration` covers startup configuration refusal.
 `TransparencyCheckpoint.AirGappedSignsAndServesWithoutOutboundCalls` proves air-gapped checkpoint
 publication does not invoke its outbound client. The witnessed and anchored test verifies a
