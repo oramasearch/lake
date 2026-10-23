@@ -316,7 +316,11 @@ struct RepositoryFixtureStore final : SyncStore {
                              {"author", "taap:1:ed25519:author"},
                              {"message", "initial"},
                              {"occurred_at", "2026-09-04T00:00:00Z"}}}}};
-        output.artifacts = {{{"id", "result-1"}, {"action", "action-1"}}};
+        output.artifacts = {
+            {{"id", "result-1"},
+             {"action", "action-1"},
+             {"verification", "verified"},
+             {"attestations", {{{"issuer", "taap:1:ed25519:builder"}, {"verified", true}}}}}};
         output.git = {{"requested", include_git}};
         return output;
     }
@@ -4644,6 +4648,52 @@ TEST(Forge, PersistsIssueLifecycleAndMapsReviewCommentAnchors) {
     EXPECT_EQ(mapped.value["items"][0]["value"]["anchor"]["disposition"], "shifted");
 }
 
+TEST(Export, ManifestSignerMustBeNamedAfterItsSigningKey) {
+    lake::control::InMemoryStore source;
+    lake::control::InMemoryStore attacker;
+    const lake::audit::IdentityOptions options{.instance_kek = "export-binding-test"};
+    const json manifest = {{"format", "lake_export_manifest/1"}, {"entries", json::array()}};
+    const auto honest = lake::audit::sign_export_manifest(source, manifest, options);
+    const auto resigned = lake::audit::sign_export_manifest(attacker, manifest, options);
+    ASSERT_TRUE(honest);
+    ASSERT_TRUE(resigned);
+    ASSERT_NE((*honest)["identity"]["taap_id"], (*resigned)["identity"]["taap_id"]);
+    ASSERT_TRUE(lake::audit::verify_export_manifest(manifest, *honest));
+    ASSERT_TRUE(lake::audit::verify_export_manifest(manifest, *resigned));
+
+    json forged = *resigned;
+    forged["identity"]["taap_id"] = (*honest)["identity"]["taap_id"];
+    const auto refused = lake::audit::verify_export_manifest(manifest, forged);
+    ASSERT_FALSE(refused);
+    EXPECT_EQ(refused.error().code, "invalid_signature");
+
+    for (const json& bad_name : {json(""),
+                                 json("taap:1:ed25519:unknown"),
+                                 json((*honest)["identity"]["taap_id"].get<std::string>() + "="),
+                                 json(nullptr),
+                                 json(17)}) {
+        json malformed = *honest;
+        malformed["identity"]["taap_id"] = bad_name;
+        EXPECT_FALSE(lake::audit::verify_export_manifest(manifest, malformed));
+    }
+    json malformed = *honest;
+    malformed["identity"]["version"] = 1;
+    EXPECT_FALSE(lake::audit::verify_export_manifest(manifest, malformed));
+    malformed = *honest;
+    malformed["identity"]["public_key"] = "invalid-base64";
+    EXPECT_FALSE(lake::audit::verify_export_manifest(manifest, malformed));
+    malformed = *resigned;
+    malformed["signature"] = (*honest)["signature"];
+    EXPECT_FALSE(lake::audit::verify_export_manifest(manifest, malformed));
+
+    // Identity rotation mints another key-derived name, which must still verify portably.
+    ASSERT_TRUE(lake::audit::rotate_identity(source, options));
+    const auto rotated = lake::audit::sign_export_manifest(source, manifest, options);
+    ASSERT_TRUE(rotated);
+    EXPECT_NE((*rotated)["identity"]["taap_id"], (*honest)["identity"]["taap_id"]);
+    EXPECT_TRUE(lake::audit::verify_export_manifest(manifest, *rotated));
+}
+
 TEST(Export, VerifiesAndRecreatesPortableRepositoryFacts) {
     Surface source;
     RepositoryFixtureStore source_store;
@@ -4687,11 +4737,58 @@ TEST(Export, VerifiesAndRecreatesPortableRepositoryFacts) {
                     .ok);
     source.ctx.acting_identity = "admin";
     source.ctx.operator_credential = true;
+    ASSERT_TRUE(source
+                    .call("create_issue_comment",
+                          {{"repository_id", repository.value["id"]},
+                           {"issue_id",
+                            source.call("list_issues", {{"repository_id", repository.value["id"]}})
+                                .value["items"][0]["id"]},
+                           {"body", "An imported comment"}})
+                    .ok);
+    ASSERT_TRUE(source
+                    .call("create_release",
+                          {{"repository_id", repository.value["id"]},
+                           {"tag", "v1.0.0"},
+                           {"change_id", "change-1"},
+                           {"artifact_ids", json::array({"result-1"})}})
+                    .ok);
+    ASSERT_TRUE(source
+                    .call("set_branch_protection",
+                          {{"repository_id", repository.value["id"]},
+                           {"ref", "refs/heads/main"},
+                           {"required_verification", true}})
+                    .ok);
 
-    const ApiResult exported = source.call(
+    ApiResult exported = source.call(
         "export_repository", {{"repository_id", repository.value["id"]}, {"include_git", true}});
     ASSERT_TRUE(exported.ok) << exported.error.message;
     EXPECT_EQ(exported.value["archive"]["format"], "lake_export/1");
+    const auto resign_archive = [&](json archive) {
+        for (json& entry : archive["manifest"]["entries"]) {
+            entry["sha256"] = lake::control::identity_crypto::sha256_hex(
+                archive["payload"][entry.at("name").get<std::string>()].dump());
+        }
+        const auto signature = lake::audit::sign_export_manifest(
+            source.store, archive["manifest"], {.instance_kek = source.ctx.instance_kek});
+        EXPECT_TRUE(signature);
+        if (signature) {
+            archive["signature"] = *signature;
+        }
+        return archive;
+    };
+    // A valid source signature does not authenticate supplied metadata trust claims.
+    exported.value["archive"]["payload"]["forge"][0]["value"]["import_provenance"] = {
+        {"trust", "trusted"}};
+    exported.value["archive"]["payload"]["artifacts"][0]["import_provenance"] = {
+        {"trust", "trusted"}};
+    for (json& record : exported.value["archive"]["payload"]["forge"]) {
+        if (record["kind"] == "issue" || record["kind"] == "issue_comment") {
+            record["value"]["author"] = "taap:1:ed25519:claimed-author";
+        } else if (record["kind"] == "review") {
+            record["value"]["opened_by"] = "taap:1:ed25519:claimed-opener";
+        }
+    }
+    exported.value["archive"] = resign_archive(exported.value["archive"]);
 
     Surface destination;
     RepositoryFixtureStore destination_store;
@@ -4702,6 +4799,51 @@ TEST(Export, VerifiesAndRecreatesPortableRepositoryFacts) {
         "create_customer",
         {{"customer_type", "individual"}, {"user_id", target_user.value["id"]}, {"name", "grace"}});
     ASSERT_TRUE(target_customer.ok) << target_customer.error.message;
+    const auto customer_object =
+        destination.store.find_policy_object("customer", target_customer.value["id"]);
+    ASSERT_TRUE(customer_object);
+    ASSERT_TRUE(destination.store.create_grant({"taap:1:ed25519:importer",
+                                                customer_object->id,
+                                                "admin",
+                                                "importer-permission",
+                                                "admin",
+                                                "test"}));
+    destination.ctx.acting_identity = "taap:1:ed25519:importer";
+    destination.ctx.operator_credential = false;
+    json forged = exported.value["archive"];
+    lake::control::InMemoryStore attacker;
+    const auto resigned = lake::audit::sign_export_manifest(
+        attacker, forged["manifest"], {.instance_kek = "export-attacker-test"});
+    ASSERT_TRUE(resigned);
+    forged["signature"] = *resigned;
+    forged["signature"]["identity"]["taap_id"] =
+        exported.value["archive"]["signature"]["identity"]["taap_id"];
+    const ApiResult refused =
+        destination.call("import_repository",
+                         {{"customer_id", target_customer.value["id"]},
+                          {"workspace_id", destination.workspace(target_customer.value["id"])},
+                          {"name", "forged-copy"},
+                          {"archive", forged}});
+    ASSERT_FALSE(refused.ok);
+    EXPECT_EQ(refused.error.code, "invalid_signature");
+    EXPECT_TRUE(destination_store.imported.empty());
+    const auto absent = destination.store.list_repositories(target_customer.value["id"], 100);
+    ASSERT_TRUE(absent);
+    EXPECT_TRUE(absent->empty());
+    for (const std::string member : {"artifacts", "forge", "grants"}) {
+        json malformed = exported.value["archive"];
+        malformed["payload"][member] = json::array({nullptr});
+        malformed = resign_archive(std::move(malformed));
+        const auto rejected =
+            destination.call("import_repository",
+                             {{"customer_id", target_customer.value["id"]},
+                              {"workspace_id", destination.workspace(target_customer.value["id"])},
+                              {"name", "malformed-" + member},
+                              {"archive", malformed}});
+        EXPECT_FALSE(rejected.ok);
+        EXPECT_EQ(rejected.error.code, "invalid_input");
+        EXPECT_TRUE(destination_store.imported.empty());
+    }
     const ApiResult imported = destination.call(
         "import_repository",
         {{"customer_id", target_customer.value["id"]},
@@ -4710,21 +4852,88 @@ TEST(Export, VerifiesAndRecreatesPortableRepositoryFacts) {
          {"name", "portable-copy"},
          {"archive", exported.value["archive"]}});
     ASSERT_TRUE(imported.ok) << imported.error.message;
+    const json import_audit = destination.ctx.audit_details;
     const auto portable =
         destination_store.imported.find(target_customer.value["id"].get<std::string>() + "/" +
                                         imported.value["id"].get<std::string>());
     ASSERT_NE(portable, destination_store.imported.end());
     EXPECT_EQ(portable->second.history, exported.value["archive"]["payload"]["history"]);
-    EXPECT_EQ(portable->second.artifacts, exported.value["archive"]["payload"]["artifacts"]);
-    EXPECT_EQ(destination.call("list_issues", {{"repository_id", imported.value["id"]}})
-                  .value["items"]
-                  .size(),
-              1);
+    ASSERT_EQ(portable->second.artifacts.size(),
+              exported.value["archive"]["payload"]["artifacts"].size());
+    EXPECT_EQ(portable->second.artifacts[0]["id"], "result-1");
+    EXPECT_EQ(portable->second.artifacts[0]["action"], "action-1");
+    EXPECT_EQ(portable->second.artifacts[0]["verification"], "untrusted");
+    EXPECT_EQ(portable->second.artifacts[0]["attestations"][0]["verified"], false);
+    EXPECT_EQ(portable->second.artifacts[0]["import_provenance"]["trust"], "untrusted");
+    const auto issues = destination.call("list_issues", {{"repository_id", imported.value["id"]}});
+    ASSERT_TRUE(issues.ok);
+    ASSERT_EQ(issues.value["items"].size(), 1);
+    EXPECT_EQ(issues.value["items"][0]["value"]["author"], destination.ctx.acting_identity);
+    EXPECT_EQ(issues.value["items"][0]["value"]["import_provenance"]["source_author"],
+              "taap:1:ed25519:claimed-author");
+    EXPECT_EQ(issues.value["items"][0]["value"]["import_provenance"]["trust"], "untrusted");
     const ApiResult reviews =
         destination.call("list_reviews", {{"repository_id", imported.value["id"]}});
     ASSERT_EQ(reviews.value["items"].size(), 1);
     EXPECT_EQ(reviews.value["items"][0]["value"]["state"], "approved");
     EXPECT_FALSE(reviews.value["items"][0]["value"].contains("approval"));
+    EXPECT_EQ(reviews.value["items"][0]["value"]["import_provenance"]["trust"], "untrusted");
+    EXPECT_EQ(reviews.value["items"][0]["value"]["opened_by"], destination.ctx.acting_identity);
+    EXPECT_EQ(reviews.value["items"][0]["value"]["import_provenance"]["source_opened_by"],
+              "taap:1:ed25519:claimed-opener");
+    const auto comments =
+        destination.call("list_issue_comments", {{"repository_id", imported.value["id"]}});
+    ASSERT_TRUE(comments.ok) << comments.error.message;
+    ASSERT_EQ(comments.value["items"].size(), 1);
+    EXPECT_EQ(comments.value["items"][0]["value"]["import_provenance"]["trust"], "untrusted");
+    EXPECT_EQ(comments.value["items"][0]["value"]["import_provenance"]["imported_by"],
+              destination.ctx.acting_identity);
+    EXPECT_EQ(comments.value["items"][0]["value"]["author"], destination.ctx.acting_identity);
+    EXPECT_EQ(comments.value["items"][0]["value"]["import_provenance"]["source_author"],
+              "taap:1:ed25519:claimed-author");
+    const auto releases =
+        destination.call("list_releases", {{"repository_id", imported.value["id"]}});
+    ASSERT_TRUE(releases.ok);
+    ASSERT_EQ(releases.value["items"].size(), 1);
+    EXPECT_TRUE(releases.value["items"][0]["value"]["artifacts"].empty());
+    EXPECT_EQ(releases.value["items"][0]["value"]["import_provenance"]["artifacts"][0]["id"],
+              "result-1");
+    const auto target_object =
+        destination.store.find_policy_object("repository", imported.value["id"]);
+    ASSERT_TRUE(target_object);
+    const auto grants = destination.store.list_grants({target_object->id}, std::nullopt, 100);
+    ASSERT_TRUE(grants);
+    ASSERT_EQ(grants->size(), 2);
+    for (const auto& grant : *grants) {
+        EXPECT_EQ(grant.granted_by_taap_id, destination.ctx.acting_identity);
+        EXPECT_FALSE(grant.attestation_digest.empty());
+        EXPECT_NE(grant.attestation_digest, "grant-proof");
+        EXPECT_NE(grant.attestation_digest, "reviewer-proof");
+    }
+    EXPECT_EQ(import_audit["source_signer"],
+              exported.value["archive"]["signature"]["identity"]["taap_id"]);
+    EXPECT_EQ(import_audit["source_trust"], "untrusted");
+    ASSERT_EQ(import_audit["grant_attestations"].size(), 2);
+    for (const auto& attestation : import_audit["grant_attestations"]) {
+        EXPECT_EQ(attestation["statement"]["granted_by"], destination.ctx.acting_identity);
+        EXPECT_EQ(attestation["statement"]["object_id"], target_object->id);
+        EXPECT_TRUE(std::ranges::any_of(*grants, [&](const auto& grant) {
+            return grant.attestation_digest == attestation["digest"].get<std::string>();
+        }));
+    }
+    const auto stored = destination.store.get_repository(imported.value["id"]);
+    ASSERT_TRUE(stored);
+    const auto protection =
+        liquid::runtime::block_on(load_branch_protection(destination.ctx, *stored));
+    ASSERT_TRUE(protection && *protection);
+    const auto publication = evaluate_branch_protection(
+        destination.store,
+        destination.ctx.acting_identity,
+        destination.ctx.authorization_cache,
+        **protection,
+        {.name = "refs/heads/main", .new_head = "change-1", .fast_forward = true});
+    ASSERT_FALSE(publication) << "imported release claims must not authorize publication";
+    EXPECT_EQ(publication.error().code, "conflict");
 
     json altered = exported.value["archive"];
     altered["payload"]["history"]["changes"][0]["message"] = "changed";

@@ -6,6 +6,11 @@ retained launch/schedule/task credentials, direct disabled rows, lease renewal a
 cached-context creation, repeat offboarding, stream-trigger and MCP streaming cleanup, and an
 unaffected person's launch. Run them with `LAKE_TEST_DB_URI` and `ctest --timeout 600 -R
 'DisablingAUserRevokesAgentDelegation|DisabledUsersCannotDriveAgentOrMcpStreams'`.
+`test_api.cpp`'s `Export.*` cases bind manifest signer IDs to their embedded keys (LSR-088,
+lake#954), refuse an archive re-signed by another key before any destination write, and accept
+valid and rotated instance keys. They check local authors and grant attestations naming the importer,
+untrusted provenance on both forge import passes, cleared artifact verification, and release
+evidence retained only as untrusted history. See [export.md](../docs/api/export.md).
 
 `test_platform.cpp`'s `LiquidIdFixture` covers deployment rows that name a repository by the liquid
 id `liquid deploy` sends, by lake's UUID, by an unknown id (reported, not skipped) and by a liquid

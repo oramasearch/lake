@@ -1162,7 +1162,7 @@ Result<void> verify_export_manifest(const nlohmann::json& manifest,
         return std::unexpected(Error{"invalid_input", "export manifest signature is malformed"});
     }
     const auto& identity = signature.at("identity");
-    if (!identity.contains("version") || identity.value("version", "") != "taap_identity/1" ||
+    if (!identity.contains("version") || identity.at("version") != "taap_identity/1" ||
         !identity.contains("taap_id") || !identity.at("taap_id").is_string() ||
         !identity.contains("public_key") || !identity.at("public_key").is_string()) {
         return std::unexpected(Error{"invalid_input", "export signer identity is malformed"});
@@ -1170,6 +1170,16 @@ Result<void> verify_export_manifest(const nlohmann::json& manifest,
     const auto public_key = base64_decode(identity.at("public_key").get<std::string>());
     if (!public_key || public_key->size() != 32) {
         return std::unexpected(Error{"invalid_input", "export signer public key is malformed"});
+    }
+    // A portable signature proves possession of this key, not an unrelated claimed identity.
+    // Use the same derivation as identity_from_seed, including after Lake identity rotation.
+    const auto fingerprint = digest_bytes(*public_key);
+    if (!fingerprint) {
+        return std::unexpected(fingerprint.error());
+    }
+    if (identity.at("taap_id") != "taap:1:ed25519:" + base32(*fingerprint)) {
+        return std::unexpected(
+            Error{"invalid_signature", "export signer identity does not match its public key"});
     }
     return verify_signature(*public_key,
                             export_manifest_signed_bytes(manifest),
