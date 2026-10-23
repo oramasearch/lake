@@ -389,6 +389,101 @@ TEST(ModelGateway, AcceptsTextAndCallerExecutedFunctions) {
     }
 }
 
+// An agent's second tool round sends back the assistant message the provider answered, as the
+// OpenAI SDK dumps it (`message.model_dump(exclude_none=True)` in agent-runtime's loop.py,
+// agent-ask-orama, agent-application and agent-project). The answer below is a chat completion
+// with a tool call as OpenAI returns it; its message carries the output-only `annotations`,
+// `refusal` and `audio`. The gateway drops them and forwards only the closed message fields.
+TEST(ModelCompletion, AcceptsTheProvidersAssistantMessageBackAsHistory) {
+    const json answer = json::parse(R"({
+      "id": "chatcmpl-CUq7tqH1u8wDwLHvGdv0fT1Q",
+      "object": "chat.completion",
+      "created": 1761200000,
+      "model": "gpt-5.5-2026-08-01",
+      "choices": [{
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": null,
+          "tool_calls": [{
+            "id": "call_Zl3kq2f0bS1yYvYp0aR7tq9B",
+            "type": "function",
+            "function": {"name": "workspace_query", "arguments": "{\"sql\":\"select 1\"}"}
+          }],
+          "refusal": null,
+          "annotations": [],
+          "audio": null
+        },
+        "logprobs": null,
+        "finish_reason": "tool_calls"
+      }],
+      "usage": {"prompt_tokens": 120, "completion_tokens": 18, "total_tokens": 138},
+      "service_tier": "default",
+      "system_fingerprint": null
+    })");
+    const json& message = answer["choices"][0]["message"];
+    // What model_dump(exclude_none=True) leaves: the nulls go, the empty annotations stay.
+    json dumped = json::object();
+    for (const auto& [key, value] : message.items()) {
+        if (!value.is_null()) {
+            dumped[key] = value;
+        }
+    }
+    ASSERT_TRUE(dumped.contains("annotations"));
+    // A refusal string, as an answer that refused carries it.
+    json refused = dumped;
+    refused["refusal"] = "I can't help with that.";
+    refused["content"] = "I can't help with that.";
+
+    GatewayRig rig;
+    const auto task = rig.task(rig.home, "agent-runtime");
+    for (const json& history : {message, dumped, refused}) {
+        SCOPED_TRACE(history.dump());
+        auto request = chat()["request"];
+        request["tools"] = json::array(
+            {{{"type", "function"},
+              {"function", {{"name", "workspace_query"}, {"parameters", {{"type", "object"}}}}}}});
+        request["messages"].push_back(history);
+        request["messages"].push_back({{"role", "tool"},
+                                       {"tool_call_id", "call_Zl3kq2f0bS1yYvYp0aR7tq9B"},
+                                       {"content", "[{\"?column?\":1}]"}});
+        const auto before = rig.fake.calls();
+        auto context = rig.task_context(task);
+        const auto second =
+            rig.call({{"endpoint", "chat/completions"}, {"request", request}}, context);
+        ASSERT_TRUE(second.ok) << second.error.code << ": " << second.error.message << " at "
+                               << second.error.path;
+        ASSERT_EQ(rig.fake.calls(), before + 1);
+        const json sent = json::parse(rig.fake.requests.back().body);
+        const json& forwarded = sent.at("messages").at(1);
+        EXPECT_EQ(forwarded.at("role"), "assistant");
+        EXPECT_EQ(forwarded.at("tool_calls"), message.at("tool_calls"));
+        for (const char* output_only : {"annotations", "refusal", "audio"}) {
+            EXPECT_FALSE(forwarded.contains(output_only)) << output_only;
+        }
+        for (const auto& [key, value] : forwarded.items()) {
+            EXPECT_TRUE(key == "role" || key == "content" || key == "tool_calls") << key;
+        }
+    }
+
+    // Only answers' fields are dropped: a user message with them, and stored audio, stay refused.
+    for (const json& history :
+         {json{{"role", "user"}, {"content", "hi"}, {"annotations", json::array()}},
+          json{{"role", "assistant"}, {"content", "hi"}, {"audio", {{"id", "audio_other"}}}},
+          json{{"role", "assistant"}, {"content", "hi"}, {"future_output_field", true}}}) {
+        SCOPED_TRACE(history.dump());
+        auto request = chat()["request"];
+        request["messages"].push_back(history);
+        const auto before = rig.fake.calls();
+        auto context = rig.task_context(task);
+        const auto refused_call =
+            rig.call({{"endpoint", "chat/completions"}, {"request", request}}, context);
+        EXPECT_FALSE(refused_call.ok);
+        EXPECT_EQ(refused_call.error.code, "invalid_input");
+        EXPECT_EQ(rig.fake.calls(), before);
+    }
+}
+
 TEST(ModelGateway, ReadsTheUsageOfEveryAnswerShape) {
     using lake::api::model_usage;
     const auto completion = model_usage(chat_answer.dump(), false);

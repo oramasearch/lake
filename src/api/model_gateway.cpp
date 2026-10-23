@@ -128,6 +128,33 @@ Json token_request_schema(std::string_view endpoint) {
     return closed_object(std::move(properties));
 }
 
+// An agent sends the provider's last assistant message back as history, as the SDK dumped it.
+// OpenAI's chat messages carry fields that only describe an answer: `annotations` (citations,
+// `[]` without a hosted tool), `refusal` (the refusal text) and `audio` (null without audio
+// output). They launch no provider work, so they are dropped here rather than refused, and are
+// never forwarded. A non-null `audio` names audio the provider stored, so it stays and is
+// refused by the closed message schema. Only assistant messages are touched.
+void drop_output_only_message_fields(Json& request) {
+    const auto messages = request.find("messages");
+    if (messages == request.end() || !messages->is_array()) {
+        return;
+    }
+    for (auto& message : *messages) {
+        if (!message.is_object()) {
+            continue;
+        }
+        const auto role = message.find("role");
+        if (role == message.end() || *role != "assistant") {
+            continue;
+        }
+        message.erase("annotations");
+        message.erase("refusal");
+        if (const auto audio = message.find("audio"); audio != message.end() && audio->is_null()) {
+            message.erase(audio);
+        }
+    }
+}
+
 std::optional<ApiError> token_request_error(std::string_view endpoint, const Json& request) {
     const auto validate = [](const Json& schema,
                              const Json& value,
@@ -351,6 +378,9 @@ std::expected<nlohmann::json, ApiError> prepare_model_request(std::string_view e
     if (streamed && endpoint == "embeddings") {
         return std::unexpected(
             ApiError{"invalid_input", "stream: embeddings do not stream", "/request/stream"});
+    }
+    if (endpoint == "chat/completions") {
+        drop_output_only_message_fields(request);
     }
     if (auto error = token_request_error(endpoint, request)) {
         return std::unexpected(*error);

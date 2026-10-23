@@ -613,7 +613,9 @@ and the OpenAI-compatible `/openai/v1/*` route over a real server, all against a
 LSR-094 (lake#960) checks hosted tools, media, asynchronous work, stored references and unknown
 fields on every endpoint before the fake provider is called, including global and workspace HTTP
 routes; positive cases preserve text, function history and application schemas. Transport failures
-without an HTTP status are counted by estimate against the originating workspace.
+without an HTTP status are counted by estimate against the originating workspace. A chat
+completion's assistant message sent back as history, with OpenAI's output-only `annotations`,
+`refusal` and null `audio`, is accepted and forwarded without them.
 Streaming (lake#665): a stream's usage read piece by piece however the pieces cut its events, a
 relayed stream counted from its last event and one without usage audited `usage_reported: false`,
 and the route over a real server and its outbound client against a loopback provider that holds its

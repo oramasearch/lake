@@ -81,6 +81,15 @@ generation endpoints, including when omitted. Background generation remains refu
 null are accepted for SDK compatibility. There is no stored-response retrieval route and no
 customer ownership registry for provider objects, so their identifiers cannot be reused here.
 
+An agent sends the provider's assistant message back as history on its next tool round, as the
+OpenAI SDK dumps it (`message.model_dump(exclude_none=True)`). OpenAI's chat answer carries fields
+that only describe the answer: `annotations` (`[]` without a hosted tool), `refusal` and `audio`.
+On an `assistant` message the gateway drops `annotations` and `refusal`, and `audio` when it is
+null, before validating; they are never forwarded. A non-null `audio` names audio the provider
+stored and is refused, as is any other unknown field, and the same fields on another role are
+refused. Verify with `ModelCompletion.AcceptsTheProvidersAssistantMessageBackAsHistory`, which
+replays a chat completion with a tool call as OpenAI returns it.
+
 This deliberately narrows OpenAI compatibility: a provider adding a field does not enable it on
 Lake. Extend the endpoint schemas in `src/api/model_gateway.cpp` only after verifying that its
 charges are represented in workspace usage, with a refusal test and a supported-request test.
