@@ -61,6 +61,12 @@ contract in `docs/api/identity.md` updated with changes to token derivation.
 Audit filters select exact request IDs and continue after event IDs in append order. Both stores
 and the telemetry wrapper preserve these filters; see `docs/build/testing.md`.
 
+`agents::Service::mint` takes the authenticated acting identity separately from `MintRequest`.
+It requires the dispatcher to match and calls `Store::has_active_agent_certificate` to verify
+customer registration before signing. The lookup matches customer, TAAP subject, `agent` profile,
+revocation and expiry at issuance in both stores and through telemetry. See
+[agent session keys](../../../docs/api/agents.md).
+
 `agent_bus.hpp` is the agent bus (`docs/api/agent-bus.md`). `AgentBus` is the pub/sub interface,
 with a Zetta implementation and an in-memory one for tests. `AgentTaskBus` is lake's side of it.
 `Store::claim_agent_task`, `record_agent_task_event`, `fail_agent_task` and `stale_agent_tasks`

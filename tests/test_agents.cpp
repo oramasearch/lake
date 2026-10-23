@@ -26,7 +26,9 @@
 #include "lake/audit/audit.hpp"
 #include "lake/control/agents.hpp"
 #include "lake/control/memory_store.hpp"
+#include "lake/control/pki.hpp"
 #include "lake/control/postgres_store.hpp"
+#include "lake/telemetry/metrics.hpp"
 #include "lake/transparency/log.hpp"
 #include "temporary_directory.hpp"
 
@@ -156,6 +158,38 @@ std::string create_customer(lake::control::Store& store, std::string suffix) {
     return customer ? customer->id : std::string{};
 }
 
+void grant_dispatcher(lake::control::Store& store,
+                      const std::string& customer_id,
+                      const std::string& dispatcher,
+                      const std::string& role = "admin") {
+    const auto object = store.find_policy_object("customer", customer_id);
+    ASSERT_TRUE(object) << object.error().message;
+    const auto granted = store.create_grant(
+        {dispatcher, object->id, role, "agent-test-grant", "admin", "agent-test"});
+    ASSERT_TRUE(granted) << granted.error().message;
+}
+
+lake::control::PkiCertificateRecord register_agent(lake::control::Store& store,
+                                                   const std::string& customer_id,
+                                                   const std::string& agent,
+                                                   const std::string& expires_at,
+                                                   const std::string& profile = "agent") {
+    lake::control::pki::Service pki;
+    if (!store.get_pki_authority(customer_id, std::string(instance_kek))) {
+        const auto authority = pki.create_authority(store, customer_id, instance_kek);
+        EXPECT_TRUE(authority) << authority.error().message;
+    }
+    const auto certificate = store.create_pki_certificate({customer_id,
+                                                           profile,
+                                                           agent,
+                                                           lake::control::new_uuid_v4(),
+                                                           "test-public-certificate",
+                                                           expires_at,
+                                                           {}});
+    EXPECT_TRUE(certificate) << certificate.error().message;
+    return certificate.value_or(lake::control::PkiCertificateRecord{});
+}
+
 void exercise_agent_session(lake::control::Store& store,
                             const std::string& customer_id,
                             const std::string& instance,
@@ -180,6 +214,10 @@ void exercise_agent_session(lake::control::Store& store,
     context.instance_kek = std::string(instance_kek);
     const std::string durable_agent = "taap:1:ed25519:durable-agent-" + instance;
     const std::string dispatcher = "taap:1:ed25519:dispatcher-" + instance;
+    grant_dispatcher(store, customer_id, dispatcher);
+    register_agent(store, customer_id, durable_agent, "2027-01-01T00:00:00Z");
+    context.acting_identity = dispatcher;
+    context.operator_credential = false;
 
     auto minted = registry.call("mint_agent_session_key",
                                 {{"customer_id", customer_id},
@@ -309,6 +347,11 @@ void exercise_non_expiring_session(lake::control::Store& store,
                        {"durable_agent_taap_id", "taap:1:ed25519:durable-" + instance},
                        {"never_expires", true},
                        {"scopes", json::array({"drip:write"})}};
+    const std::string dispatcher = request.at("dispatcher_taap_id");
+    grant_dispatcher(store, customer_id, dispatcher);
+    register_agent(store, customer_id, request.at("durable_agent_taap_id"), "2027-01-01T00:00:00Z");
+    context.acting_identity = dispatcher;
+    context.operator_credential = false;
 
     const auto off = registry.call("mint_agent_session_key", request, context);
     ASSERT_FALSE(off.ok) << "off by default";
@@ -365,7 +408,110 @@ void exercise_non_expiring_session(lake::control::Store& store,
     std::filesystem::remove_all(root);
 }
 
+// Exercise the registry and the signing service against the same customer-scoped registration.
+void exercise_delegation_authority(lake::control::Store& store, const std::string& suffix) {
+    const std::string customer = create_customer(store, "authority-" + suffix);
+    const std::string other_customer = create_customer(store, "foreign-" + suffix);
+    const std::string dispatcher = "taap:1:ed25519:writer-" + suffix;
+    const std::string agent = "taap:1:ed25519:registered-" + suffix;
+    const std::string foreign_agent = "taap:1:ed25519:foreign-" + suffix;
+    const std::string unknown_agent = "taap:1:ed25519:unknown-" + suffix;
+    grant_dispatcher(store, customer, dispatcher, "write");
+    const auto certificate = register_agent(store, customer, agent, "2027-01-01T00:00:00Z");
+    register_agent(store, other_customer, foreign_agent, "2027-01-01T00:00:00Z");
+    register_agent(store, customer, unknown_agent, "2027-01-01T00:00:00Z", "client");
+    const auto now = std::chrono::sys_days{std::chrono::year{2026} / std::chrono::September / 5};
+    lake::control::agents::Service agents([now] { return now; });
+    const auto root = lake::test::fixture_path("agent-authority-" + suffix);
+    std::filesystem::create_directories(root);
+    lake::transparency::TiledLog log(root, "authority-" + suffix);
+    lake::api::Registry registry;
+    lake::api::register_core_capabilities(registry, "test");
+    lake::api::ApiContext context;
+    context.store = &store;
+    context.agents = &agents;
+    context.transparency_log = &log;
+    context.authorized = true;
+    context.acting_identity = dispatcher;
+    context.instance_kek = std::string(instance_kek);
+    json request{{"customer_id", customer},
+                 {"dispatcher_taap_id", dispatcher},
+                 {"durable_agent_taap_id", agent},
+                 {"scopes", json::array({"drip:write"})}};
+    const auto refused = [&](const json& input) {
+        context.request_id.clear();
+        const auto result = registry.call("mint_agent_session_key", input, context);
+        EXPECT_FALSE(result.ok);
+        EXPECT_EQ(result.error.code, "unauthorized") << result.error.message;
+        EXPECT_FALSE(result.value.contains("private_key"));
+        const auto state = log.state();
+        ASSERT_TRUE(state) << state.error().message;
+        EXPECT_EQ(state->tree_size, 0U);
+    };
+    auto forged = request;
+    forged["dispatcher_taap_id"] = "taap:1:ed25519:victim";
+    refused(forged);
+    // Operator credentials have no acting TAAP identity and cannot name a dispatcher either.
+    context.acting_identity = "admin";
+    context.operator_credential = true;
+    refused(request);
+    context.acting_identity = dispatcher;
+    context.operator_credential = false;
+    for (const auto& unregistered :
+         {foreign_agent, unknown_agent, std::string("taap:1:ed25519:absent")}) {
+        auto input = request;
+        input["durable_agent_taap_id"] = unregistered;
+        refused(input);
+    }
+    ASSERT_TRUE(store.revoke_pki_certificate(certificate.id));
+    refused(request);
+    // A certificate that expires at the issuance instant is already expired.
+    register_agent(store, customer, agent, "2026-09-05T00:00:00Z");
+    refused(request);
+    // The same checks protect direct service callers and never-expiring session keys.
+    const lake::audit::IdentityOptions options{.instance_kek = std::string(instance_kek)};
+    lake::control::agents::MintRequest mint_request{.customer_id = customer,
+                                                    .durable_agent_taap_id = agent,
+                                                    .dispatcher_taap_id = dispatcher,
+                                                    .scopes = {"drip:write"},
+                                                    .never_expires = true};
+    auto direct = agents.mint(store, mint_request, dispatcher, options);
+    ASSERT_FALSE(direct);
+    EXPECT_EQ(direct.error().code, "unauthorized");
+    register_agent(store, customer, agent, "2027-01-01T00:00:00Z");
+    for (const std::string identity : {"", "admin", "taap:1:ed25519:other"}) {
+        direct = agents.mint(store, mint_request, identity, options);
+        ASSERT_FALSE(direct);
+        EXPECT_EQ(direct.error().code, "unauthorized");
+    }
+    direct = agents.mint(store, mint_request, dispatcher, options);
+    ASSERT_TRUE(direct) << direct.error().message;
+    context.request_id.clear();
+    const auto minted = registry.call("mint_agent_session_key", request, context);
+    ASSERT_TRUE(minted.ok) << minted.error.message;
+    EXPECT_EQ(minted.value.at("dispatcher_taap_id"), dispatcher);
+    EXPECT_EQ(minted.value.at("durable_agent_taap_id"), agent);
+}
+
 } // namespace
+
+TEST(AgentSessions, RefusesUnprovenDispatcherAndUnregisteredDurableAgent) {
+    lake::telemetry::Metrics metrics;
+    auto store = lake::telemetry::instrument_store(std::make_shared<lake::control::InMemoryStore>(),
+                                                   metrics);
+    exercise_delegation_authority(*store, "memory");
+}
+
+TEST(PostgresAgentSessions, RefusesUnprovenDispatcherAndUnregisteredDurableAgent) {
+    const char* uri = lake::test::postgres_uri();
+    if (uri == nullptr || *uri == '\0') {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
+    }
+    lake::telemetry::Metrics metrics;
+    auto store = lake::telemetry::instrument_store(
+        lake::control::make_postgres_store(uri, std::string(instance_kek)), metrics);
+    exercise_delegation_authority(*store, lake::control::new_uuid_v4().substr(0, 8));
+}
 
 TEST(AgentSessions, MintsAttributesUsesAndExpiresSessionKey) {
     lake::control::InMemoryStore store;

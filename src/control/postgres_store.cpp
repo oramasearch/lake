@@ -10170,6 +10170,21 @@ public:
         });
     }
 
+    Result<bool> has_active_agent_certificate(const std::string& customer_id,
+                                              const std::string& taap_id,
+                                              const std::string& at) override {
+        return with_tx<bool>([&](pqxx::work& tx) -> Result<bool> {
+            const auto rows = tx.exec_params(
+                "SELECT EXISTS (SELECT 1 FROM pki_certificates "
+                "WHERE customer_id = $1::uuid AND subject = $2 AND profile = 'agent' "
+                "AND revoked_at IS NULL AND expires_at > $3::timestamptz)",
+                customer_id,
+                taap_id,
+                at);
+            return rows[0][0].as<bool>();
+        });
+    }
+
     Result<AgentSession> create_agent_session(const NewAgentSession& input) override {
         if (input.id.empty() || input.customer_id.empty() || input.durable_agent_taap_id.empty() ||
             input.dispatcher_taap_id.empty() || input.session_taap_id.empty() ||

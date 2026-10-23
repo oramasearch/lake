@@ -989,6 +989,12 @@ public:
     revoke_pki_certificate(const std::string& id) override {
         return call("revoke_pki_certificate", [&] { return store_->revoke_pki_certificate(id); });
     }
+    control::Result<bool> has_active_agent_certificate(const std::string& customer_id,
+                                                       const std::string& taap_id,
+                                                       const std::string& at) override {
+        return call("has_active_agent_certificate",
+                    [&] { return store_->has_active_agent_certificate(customer_id, taap_id, at); });
+    }
     control::Result<control::AgentSession>
     create_agent_session(const control::NewAgentSession& value) override {
         return call("create_agent_session", [&] { return store_->create_agent_session(value); });

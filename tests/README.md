@@ -11,6 +11,10 @@ lake#954), refuse an archive re-signed by another key before any destination wri
 valid and rotated instance keys. They check local authors and grant attestations naming the importer,
 untrusted provenance on both forge import passes, cleared artifact verification, and release
 evidence retained only as untrusted history. See [export.md](../docs/api/export.md).
+`test_agents.cpp` runs dispatcher and durable-agent registration checks against memory and
+PostgreSQL: an authenticated customer writer cannot name another dispatcher or an agent without
+an active certificate for that customer. It also checks direct service calls and non-expiring
+keys. See [agent session keys](../docs/api/agents.md#verify-and-change).
 
 `test_platform.cpp`'s `LiquidIdFixture` covers deployment rows that name a repository by the liquid
 id `liquid deploy` sends, by lake's UUID, by an unknown id (reported, not skipped) and by a liquid

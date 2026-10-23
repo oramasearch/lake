@@ -48,8 +48,10 @@ class Service {
 public:
     explicit Service(Clock clock = {});
 
+    // acting_identity comes from authentication, independently of the requested dispatcher.
     Result<MintedSession> mint(Store& store,
                                const MintRequest& request,
+                               const std::string& acting_identity,
                                const audit::IdentityOptions& identity_options) const;
     Result<VerifiedDrip> verify_drip(const AgentSession& session,
                                      std::span<const std::byte> canonical_body,

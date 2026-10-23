@@ -333,12 +333,26 @@ Service::Service(Clock clock)
 
 Result<MintedSession> Service::mint(Store& store,
                                     const MintRequest& request,
+                                    const std::string& acting_identity,
                                     const audit::IdentityOptions& identity_options) const {
     auto valid = validate(request);
     if (!valid) {
         return std::unexpected(valid.error());
     }
+    if (!valid_taap_id(acting_identity) || request.dispatcher_taap_id != acting_identity) {
+        return std::unexpected(
+            Error{"unauthorized", "dispatcher must be the authenticated acting identity"});
+    }
     const auto issued = clock_();
+    const auto registered = store.has_active_agent_certificate(
+        request.customer_id, request.durable_agent_taap_id, std::format("{:%FT%TZ}", issued));
+    if (!registered) {
+        return std::unexpected(Error{registered.error().code, registered.error().message});
+    }
+    if (!*registered) {
+        return std::unexpected(
+            Error{"unauthorized", "durable agent needs an active certificate for this customer"});
+    }
     const auto expires = issued + std::chrono::seconds(request.lifetime_seconds);
     const std::string issued_at = std::format("{:%FT%TZ}", issued);
     const std::string expires_at =

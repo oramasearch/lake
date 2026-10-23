@@ -7087,6 +7087,17 @@ Result<PkiCertificateRecord> InMemoryStore::revoke_pki_certificate(const std::st
     return *found;
 }
 
+Result<bool> InMemoryStore::has_active_agent_certificate(const std::string& customer_id,
+                                                         const std::string& taap_id,
+                                                         const std::string& at) {
+    std::lock_guard lock(mutex_);
+    return std::ranges::any_of(pki_certificates_, [&](const PkiCertificateRecord& certificate) {
+        return certificate.customer_id == customer_id && certificate.subject == taap_id &&
+               certificate.profile == "agent" && certificate.revoked_at.empty() &&
+               certificate.expires_at > at;
+    });
+}
+
 Result<AgentSession> InMemoryStore::create_agent_session(const NewAgentSession& input) {
     std::lock_guard lock(mutex_);
     const auto customer = std::ranges::find_if(

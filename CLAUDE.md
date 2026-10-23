@@ -793,6 +793,9 @@ delegated to a durable agent by a canonical `delegation/1` attestation. The atte
 to the tiled transparency log before public session metadata is persisted; the private seed is
 returned once and never stored. Drip verification binds the session signature back to the durable
 agent and rejects the key at expiry. Its contract is `docs/api/agents.md`.
+New delegations require the dispatcher to equal the authenticated acting TAAP identity and the
+durable agent to have an active customer-issued agent certificate (lake#957, no migration).
+Existing agents need an administrator to issue that certificate before minting another session.
 
 ## Creating users
 
