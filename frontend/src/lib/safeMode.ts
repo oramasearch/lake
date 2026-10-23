@@ -6,14 +6,19 @@
 
 export type SafeMode = "off" | "warn_writes" | "warn_all";
 
-/** The levels in the order the menu lists them. Warn Writes is the workspace's default. */
+/** The levels in the order the menu lists them. */
 export const SAFE_MODES: { mode: SafeMode; label: string; help: string }[] = [
   { mode: "off", label: "Off", help: "Run every query without asking." },
   { mode: "warn_writes", label: "Warn Writes", help: "Ask before a query that changes data." },
   { mode: "warn_all", label: "Warn All", help: "Ask before every query." },
 ];
 
-export const DEFAULT_SAFE_MODE: SafeMode = "warn_writes";
+/** The level a target has until someone sets one (Steve, 2026-10-23): a database is Off, so no
+ * automated write waits for a person; a saved connection is Warn Writes, which prompts for nothing
+ * because sources are read-only, until someone chooses Warn All. */
+export function defaultSafeMode(target: SafeModeTarget): SafeMode {
+  return "database" in target ? "off" : "warn_writes";
+}
 
 export function isSafeMode(value: unknown): value is SafeMode {
   return value === "off" || value === "warn_writes" || value === "warn_all";

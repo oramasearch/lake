@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
-  DEFAULT_SAFE_MODE,
+  defaultSafeMode,
   SAFE_MODES,
   isSafeMode,
   queryDatabase,
@@ -27,7 +27,8 @@ test("three levels, Warn Writes by default, said in words", () => {
       ["warn_all", "Warn All"],
     ],
   );
-  assert.equal(DEFAULT_SAFE_MODE, "warn_writes");
+  assert.equal(defaultSafeMode({ database: "sales" }), "off");
+  assert.equal(defaultSafeMode({ connection: "warehouse" }), "warn_writes");
   assert.equal(safeModeLabel("warn_all"), "Warn All");
   assert.equal(safeModeLabel("loud"), "Unknown");
   assert.equal(isSafeMode("off"), true);

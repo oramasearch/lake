@@ -9,7 +9,7 @@ import { Modal } from "@/lib/overlay";
 import { useToast } from "@/lib/toast";
 import { Banner, Button, cx } from "@/lib/ui";
 import {
-  DEFAULT_SAFE_MODE,
+  defaultSafeMode,
   SAFE_MODES,
   type SafeMode,
   type SafeModeTarget,
@@ -50,7 +50,7 @@ export function SafeModeControl({ target, variant = "field" }: { target: SafeMod
     };
   }, [open]);
 
-  const mode: SafeMode | null = saving ?? (isSafeMode(level.data?.mode) ? level.data.mode : level.data ? DEFAULT_SAFE_MODE : null);
+  const mode: SafeMode | null = saving ?? (isSafeMode(level.data?.mode) ? level.data.mode : level.data && target ? defaultSafeMode(target) : null);
   const unavailable = !target || !name || level.isError;
   const why = !target || !name ? "Name a database to see its safe mode." : level.isError ? (level.error as Error).message : "";
   const label = mode ? safeModeLabel(mode) : unavailable ? "Safe mode" : "…";

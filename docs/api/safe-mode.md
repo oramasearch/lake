@@ -11,8 +11,8 @@ can control it / change it per database."*
 
 | Level | `mode` | What it does |
 |---|---|---|
-| Off | `off` | Every statement runs without asking. |
-| Warn Writes | `warn_writes` | **The default.** A statement that changes data is refused with `safe_mode_warning` until confirmed. Remote sources are read-only, so their reads run without a prompt. |
+| Off | `off` | Every statement runs without asking. **The default for a database.** |
+| Warn Writes | `warn_writes` | **The default for a saved connection.** A statement that changes data is refused with `safe_mode_warning` until confirmed. Remote sources are read-only, so their reads run without a prompt. |
 | Warn All | `warn_all` | Every statement is refused with `safe_mode_warning` until confirmed. |
 
 A warning is a confirmation by the person running the call, not an approval by someone else.
