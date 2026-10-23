@@ -882,6 +882,10 @@ Model entitlement and model/direction billing (LSR-095, lake#961) are documented
 billing additionally requires positive model input and output rates. `model_tokens` classes
 preserve raw counts and bill each direction separately. `test_model_gateway.cpp` and
 `test_billing.cpp` cover provider-call refusal and invoice amounts, including a missing price.
+`ModelCompletion.ASeededInstanceCallsTheDefaultModelsWithBillingOnAtTheSeededPrices` makes a model
+call with billing on against a fresh PostgreSQL control plane, priced only by the rates migration
+0095 seeds, and checks the bill; `PostgresBilling.ModelTokenPricesAreSeededOnceOnFreshAndExistingInstances`
+checks the seed on a fresh database and on a simulated existing one, and that it runs once.
 
 `RecordModelUsage.UnpricedReportsCannotPoisonABilledAccountsLedger` rejects unpriced reports
 before recording, permits priced outside reports without granting provider access, and retains

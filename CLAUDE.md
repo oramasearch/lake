@@ -375,7 +375,9 @@ The model gateway restricts calls to exact models in `LAKE_MODEL_GATEWAY_MODELS`
 lake#961), including with billing off. Billing-on additionally requires positive published rates
 for each model's input and output tokens; usage keeps raw counts under model/direction classes,
 while provider snapshot names remain audit detail. Missing used-class rates refuse a bill.
-Migration `0095_model_token_prices` permits model/direction classes in prices and invoice lines.
+Migration `0095_model_token_prices` permits model/direction classes in prices and invoice lines,
+and seeds the default models' rates once (OpenAI's published price plus 30%, Steve 2026-10-23) as a
+new publication for the current month on a fresh and an existing instance.
 Not deployed; the operator must vendor the schema and select `model_token_prices_guard`.
 See [`docs/api/model-gateway.md`](docs/api/model-gateway.md).
 

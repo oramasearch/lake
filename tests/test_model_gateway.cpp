@@ -15,11 +15,12 @@
 #include <atomic>
 #include <cctype>
 #include <chrono>
-#include <sstream>
-#include <thread>
+#include <format>
 #include <memory>
 #include <mutex>
+#include <sstream>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -33,7 +34,9 @@
 #include "lake/api/usage_recorder.hpp"
 #include "lake/control/identity_crypto.hpp"
 #include "lake/control/memory_store.hpp"
+#include "lake/control/postgres_store.hpp"
 #include "one_thread_io.hpp"
+#include "postgres_fixture.hpp"
 #include "workspace_fixture.hpp"
 
 namespace {
@@ -108,9 +111,9 @@ std::string space(lake::control::Store& store, const std::string& handle) {
 }
 
 struct GatewayRig {
-    std::shared_ptr<lake::control::InMemoryStore> store =
-        std::make_shared<lake::control::InMemoryStore>();
-    lake::test::RecordWorkspaces workspaces{store};
+    std::shared_ptr<lake::control::Store> store = std::make_shared<lake::control::InMemoryStore>();
+    std::string database_uri;
+    lake::test::RecordWorkspaces workspaces{store, database_uri};
     std::string customer = space(*store, "gateway-" + lake::control::new_uuid_v4().substr(0, 8));
     std::string home = workspaces.create(customer, "home");
     std::string lab = workspaces.create(customer, "lab");
@@ -119,6 +122,11 @@ struct GatewayRig {
     FakeProvider fake;
 
     GatewayRig() {
+        lake::api::register_core_capabilities(registry, "test");
+    }
+    // Over a PostgreSQL control store at `uri`, with the rows the schema seeds.
+    GatewayRig(std::shared_ptr<lake::control::Store> backing, std::string uri)
+        : store(std::move(backing)), database_uri(std::move(uri)) {
         lake::api::register_core_capabilities(registry, "test");
     }
 
@@ -297,6 +305,101 @@ TEST(ModelCompletion, BillingRequiresBothPositiveExactModelPricesBeforeDispatch)
     auto& records = rig.workspaces.records(rig.home);
     EXPECT_EQ(records.metric_total("lake_usage", {{"class", "gpt-5.5/input"}}), 1200);
     EXPECT_EQ(records.metric_total("lake_usage", {{"class", "gpt-5.5/output"}}), 300);
+}
+
+// The default gateway models' token prices the schema seeds (migration 0095, Steve 2026-10-23):
+// OpenAI's published standard price, https://developers.openai.com/api/docs/pricing read
+// 2026-10-23, plus 30%, in millionths of a dollar per million tokens (docs/api/billing.md#rates).
+struct SeededModelPrice {
+    const char* model;
+    std::uint64_t input;
+    std::uint64_t output;
+};
+constexpr SeededModelPrice seeded_model_prices[] = {
+    {"gpt-5.5", 6'500'000, 39'000'000},          // $5.00 / $30.00
+    {"gpt-5", 1'625'000, 13'000'000},            // $1.25 / $10.00
+    {"gpt-4o", 3'250'000, 13'000'000},           // $2.50 / $10.00
+    {"text-embedding-3-small", 26'000, 26'000}}; // $0.02, no output tokens
+
+// A fresh control plane (the schema applied to an empty PostgreSQL database, as the operator
+// applies it) can make a model call with billing on, for every default model, and the bill prices
+// the call's input and output at the seeded rates.
+TEST(ModelCompletion, ASeededInstanceCallsTheDefaultModelsWithBillingOnAtTheSeededPrices) {
+    const char* uri = lake::test::postgres_uri();
+    if (uri == nullptr || std::string(uri).empty()) {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not set";
+    }
+    std::shared_ptr<lake::control::Store> store =
+        lake::control::make_postgres_store(uri, std::string(kek));
+    ASSERT_TRUE(store->ping());
+    GatewayRig rig(store, uri);
+    lake::api::register_billing_capabilities(rig.registry);
+    auto admin = rig.admin();
+
+    const std::chrono::year_month_day today{
+        std::chrono::floor<std::chrono::days>(std::chrono::system_clock::now())};
+    const std::string period =
+        std::format("{:04}-{:02}", int(today.year()), unsigned(today.month()));
+    const auto listed = rig.registry.call("price_list", {{"period", period}}, admin);
+    ASSERT_TRUE(listed.ok) << listed.error.message;
+    ASSERT_TRUE(listed.value["list"].is_object()) << listed.value.dump();
+    const auto rate = [&](const std::string& name) -> json {
+        for (const json& price : listed.value["list"]["prices"]) {
+            if (price["dimension"] == "model_tokens" && price["class"] == name) {
+                return price;
+            }
+        }
+        return nullptr;
+    };
+    for (const auto& seeded : seeded_model_prices) {
+        SCOPED_TRACE(seeded.model);
+        EXPECT_TRUE(
+            lake::api::gateway_model_allowed(rig.admin().model_gateway_models, seeded.model));
+        const json input = rate(std::string(seeded.model) + "/input");
+        const json output = rate(std::string(seeded.model) + "/output");
+        ASSERT_TRUE(input.is_object());
+        ASSERT_TRUE(output.is_object());
+        EXPECT_EQ(input["unit_micros"], seeded.input);
+        EXPECT_EQ(output["unit_micros"], seeded.output);
+        EXPECT_EQ(input["per"], 1'000'000);
+        EXPECT_EQ(output["per"], 1'000'000);
+        auto context = rig.admin();
+        EXPECT_TRUE(lake::api::validate_gateway_model(seeded.model, context));
+    }
+    EXPECT_EQ(std::size(seeded_model_prices), lake::api::default_gateway_models().size());
+
+    // A gpt-5.5 call answered with 1,200 input and 300 output tokens (chat_answer).
+    const auto task = rig.task(rig.home, "agent-project");
+    auto context = rig.task_context(task);
+    const auto answered = rig.call(chat(), context);
+    ASSERT_TRUE(answered.ok) << answered.error.code << ": " << answered.error.message;
+    EXPECT_EQ(rig.fake.calls(), 1U);
+    static_cast<void>(liquid::runtime::block_on(rig.recorder.flush()));
+
+    auto billed = liquid::runtime::block_on(rig.registry.call_async(
+        "bill_preview", {{"customer_id", rig.customer}, {"period", period}}, admin));
+    ASSERT_TRUE(billed);
+    const ApiResult preview = std::move(*billed);
+    ASSERT_TRUE(preview.ok) << preview.error.code << ": " << preview.error.message;
+    const auto line = [&](const std::string& name) -> json {
+        for (const json& entry : preview.value["lines"]) {
+            if (entry["dimension"] == "model_tokens" && entry["class"] == name) {
+                return entry;
+            }
+        }
+        return nullptr;
+    };
+    const json input = line("gpt-5.5/input");
+    const json output = line("gpt-5.5/output");
+    ASSERT_TRUE(input.is_object()) << preview.value.dump();
+    ASSERT_TRUE(output.is_object()) << preview.value.dump();
+    EXPECT_EQ(input["quantity"], 1200);
+    EXPECT_EQ(input["unit_micros"], 6'500'000);
+    EXPECT_EQ(input["per"], 1'000'000);
+    EXPECT_EQ(input["amount_micros"], 7'800) << "1,200 tokens at $6.50 a million";
+    EXPECT_EQ(output["quantity"], 300);
+    EXPECT_EQ(output["unit_micros"], 39'000'000);
+    EXPECT_EQ(output["amount_micros"], 11'700) << "300 tokens at $39.00 a million";
 }
 
 TEST(RecordModelUsage, UnpricedReportsCannotPoisonABilledAccountsLedger) {

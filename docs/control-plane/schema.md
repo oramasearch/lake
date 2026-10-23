@@ -1347,6 +1347,13 @@ Migration `0095_model_token_prices` (LSR-095, lake#961) extends the `class` chec
 workload resource classes are unchanged. No records are rewritten. The new constraints preserve
 all existing class names, and reapplying the schema is idempotent.
 
+It also seeds the default gateway models' input and output prices (OpenAI's published price plus
+30%, Steve 2026-10-23), once, while `0095_model_token_prices` is not yet recorded: a new
+publication for the current UTC month with the rates of the list in force (none on a fresh
+instance) plus the model rates, and the model rates added to any later list; an operator's rate for
+the same class is kept. The rates and their source are in
+[model-gateway.md](../api/model-gateway.md#configuration).
+
 The operator must vendor `db/schema.sql` and select `model_token_prices_guard` before the new
 Lake binary is deployed. The operator is not edited here. `PostgresBilling.ModelDirectionPricesAndInvoiceLinesRoundTrip`
 checks persisted rates and invoice lines, the migration marker and guard, and the GPU constraint.

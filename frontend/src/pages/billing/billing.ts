@@ -199,6 +199,17 @@ export const LIST_RATES: { dimension: string; class?: string; unit_micros: numbe
   { dimension: "predictions", unit_micros: 10_000, per: 1000 },
   { dimension: "searches", unit_micros: 10_000, per: 1000 },
   { dimension: "model_tokens", unit_micros: 9_000_000, per: 1_000_000 },
+  // The default gateway models (migration 0095_model_token_prices, Steve 2026-10-23): OpenAI's
+  // published price per million tokens (https://developers.openai.com/api/docs/pricing, read
+  // 2026-10-23) plus 30%. An embedding reports no output tokens; the gateway needs both rates.
+  { dimension: "model_tokens", class: "gpt-5.5/input", unit_micros: 6_500_000, per: 1_000_000 },
+  { dimension: "model_tokens", class: "gpt-5.5/output", unit_micros: 39_000_000, per: 1_000_000 },
+  { dimension: "model_tokens", class: "gpt-5/input", unit_micros: 1_625_000, per: 1_000_000 },
+  { dimension: "model_tokens", class: "gpt-5/output", unit_micros: 13_000_000, per: 1_000_000 },
+  { dimension: "model_tokens", class: "gpt-4o/input", unit_micros: 3_250_000, per: 1_000_000 },
+  { dimension: "model_tokens", class: "gpt-4o/output", unit_micros: 13_000_000, per: 1_000_000 },
+  { dimension: "model_tokens", class: "text-embedding-3-small/input", unit_micros: 26_000, per: 1_000_000 },
+  { dimension: "model_tokens", class: "text-embedding-3-small/output", unit_micros: 26_000, per: 1_000_000 },
   { dimension: "volumes", unit_micros: 200_000, per: 2_628_000 },
 ];
 

@@ -42,7 +42,7 @@ The rates apply to every account; there is nothing to choose or sign up for.
 | Speech to text | $0.0072 per minute |
 | API and MCP calls | $2.00 per million |
 | Model predictions | $0.01 per 1,000 |
-| Model tokens | Separate input and output rates for each model, as published on the price list |
+| Model tokens | Separate input and output rates for each model: GPT-5.5 $6.50 / $39.00 per million input / output tokens, GPT-5 $1.625 / $13.00, GPT-4o $3.25 / $13.00, text-embedding-3-small $0.026 |
 | Service and store volumes | $0.20 per GiB-month |
 
 Model tokens recorded before per-model pricing retain their historical rate. Current model calls

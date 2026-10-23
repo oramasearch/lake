@@ -72,6 +72,9 @@ The gateway accepts only configured models with positive published prices when b
 external reports also require prices before recording, so callers cannot insert unpriced classes
 that block invoicing. The price-list editor preserves published model rates. The operator must
 set rates for its provider costs; the old $9 blended example applies to historical unclassed usage.
+The default models are priced at OpenAI's published per-token price plus 30% (Steve, 2026-10-23),
+seeded by migration `0095_model_token_prices`; the rates and their source are in
+[billing.md](../api/billing.md#rates).
 See [the model gateway](../api/model-gateway.md#configuration).
 
 Fixed on 2026-10-11: compute was priced per job at an assumed 2 vCPU and 4 GiB; it is now metered as

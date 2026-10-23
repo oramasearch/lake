@@ -248,6 +248,28 @@ with `store_unavailable`. Even an embedding model needs both rates, although it 
 output tokens. Publish approved rates with `set_price_list` before enabling a model. Choose rates
 for the configured provider; an allowlist entry never derives prices from its name.
 
+**The default models are priced by the schema** (Steve, 2026-10-23: the provider's published
+per-token price plus 30%). Migration `0095_model_token_prices` seeds them once, on a fresh and an
+existing control plane alike, in millionths of a US dollar per 1,000,000 tokens, from
+OpenAI's published standard price ([pricing](https://developers.openai.com/api/docs/pricing), read 2026-10-23):
+
+| Model | OpenAI input / output (per 1M) | Lake input / output (per 1M) | `unit_micros` input / output |
+|---|---|---|---|
+| `gpt-5.5` | $5.00 / $30.00 (under 272K context) | $6.50 / $39.00 | 6500000 / 39000000 |
+| `gpt-5` | $1.25 / $10.00 | $1.625 / $13.00 | 1625000 / 13000000 |
+| `gpt-4o` | $2.50 / $10.00 | $3.25 / $13.00 | 3250000 / 13000000 |
+| `text-embedding-3-small` | $0.02 / none | $0.026 / $0.026 | 26000 / 26000 |
+
+An embedding reports no output tokens, so its output rate bills nothing; it exists because the
+gateway needs both. Cached input is billed at the input rate. `gpt-5.5` above 272K tokens of context
+costs the provider $10.00 / $45.00 and is still billed at the rates above. The seed writes a new
+publication for the UTC month it runs in, holding the rates of the list then in force (none on a
+fresh instance) plus these, and adds them to any list published for a later month; a rate already
+published for one of these classes is kept, and a list in another currency is left alone. It runs
+only while `0095_model_token_prices` is not recorded, so re-applying the schema never re-adds a
+rate an operator later removed. Change a rate with `set_price_list`; when OpenAI's prices move,
+publish the new rates (provider price × 1.3) and update this table.
+
 The operator can change the allowlist by setting `LAKE_MODEL_GATEWAY_MODELS` and restarting Lake.
 Publish model/direction rates through `set_price_list`; the gateway reads the effective list on
 every call. Migration `0095_model_token_prices` extends the price and invoice class checks for
@@ -291,6 +313,12 @@ incomplete prices, and raw usage labelled by the requested model despite a provi
 input/output invoice amounts and refuses bills after a used model's prices are removed.
 `PostgresBilling.ModelDirectionPricesAndInvoiceLinesRoundTrip` verifies the migration, persisted
 rates and invoice lines, and continued rejection of model/direction classes on GPU prices.
+`PostgresBilling.ModelTokenPricesAreSeededOnceOnFreshAndExistingInstances` checks the seeded rates
+on a fresh database, and on a simulated existing one that the list in force is kept, a new one
+carries its rates plus the seeded ones (an operator's own model rate kept), a later list gets them,
+and a second run adds nothing. `ModelCompletion.ASeededInstanceCallsTheDefaultModelsWithBillingOnAtTheSeededPrices`
+makes a model call with billing on against a freshly seeded PostgreSQL control plane and checks
+the bill prices its input and output at the seeded rates.
 
 `RecordModelUsage.UnpricedReportsCannotPoisonABilledAccountsLedger` verifies that rejected reports
 record no model tokens, priced outside reports grant no gateway access, and billing-off reports
