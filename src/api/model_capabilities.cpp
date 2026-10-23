@@ -1,4 +1,6 @@
 #include "lake/api/capabilities.hpp"
+
+#include "lake/api/drive.hpp"
 #include "lake/search/index.hpp"
 
 #include <algorithm>
@@ -862,12 +864,14 @@ void register_model_capabilities(Registry& registry) {
                 uploaded += operation.contents.size();
             }
             record_workspace_transfer(context, repository->workspace_id, uploaded, 0);
+            auto authorize = repository_write_authorizer(*repository, operations, context);
             const auto committed = context.sync_store->commit_repository_files(
                 repository->customer_id,
                 repository->id,
                 input.value("revision", "main"),
                 input.value("message", "Hugging Face upload"),
-                std::move(operations));
+                std::move(operations),
+                std::move(authorize));
             if (!committed) {
                 return sync_error(committed.error());
             }

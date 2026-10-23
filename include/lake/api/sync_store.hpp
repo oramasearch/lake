@@ -72,6 +72,11 @@ struct RepositoryTreeEntry {
     std::string last_changed_at;
 };
 
+// Invoked under the repository's mutation lock, before any bytes or nodes change. The tree is
+// the immutable working root that will be committed to main; errors abort the batch.
+using RepositoryWriteAuthorizer =
+    std::function<SyncStoreResult<void>(const std::vector<RepositoryTreeEntry>&)>;
+
 struct RepositoryFile {
     std::string path;
     std::string blob;
@@ -403,7 +408,8 @@ public:
                                 const std::string& repository_id,
                                 const std::string& conflict_id,
                                 const std::string& resolution,
-                                std::vector<std::byte> blob) = 0;
+                                std::vector<std::byte> blob,
+                                RepositoryWriteAuthorizer) = 0;
     virtual SyncStoreResult<RepositoryStorageSummary> repository_storage(const std::string&,
                                                                          const std::string&) {
         return std::unexpected(SyncStoreError{"unsupported", "repository storage is unavailable"});
@@ -413,7 +419,8 @@ public:
                             const std::string&,
                             const std::string&,
                             const std::string&,
-                            std::vector<RepositoryWriteOperation>) {
+                            std::vector<RepositoryWriteOperation>,
+                            RepositoryWriteAuthorizer) {
         return std::unexpected(SyncStoreError{"unsupported", "repository writes are unavailable"});
     }
     virtual SyncStoreResult<std::uint64_t> stage_repository_file(const std::string&,
@@ -441,7 +448,8 @@ public:
     restore_repository_file(const std::string& customer_id,
                             const std::string& repository_id,
                             const std::string& change_id,
-                            const std::string& path) = 0;
+                            const std::string& path,
+                            RepositoryWriteAuthorizer) = 0;
 
     virtual SyncStoreResult<RepositoryPortableData> export_portable(
         const std::string& customer_id, const std::string& repository_id, bool include_git) = 0;

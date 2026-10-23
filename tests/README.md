@@ -854,3 +854,10 @@ configured `LAKE_TEST_DB_URI`; the [API contract](../docs/api/organizations.md) 
 
 The policy and billing fixtures establish the first owner of an operator-created organization
 with the reserved operator; subsequent owner grants require an existing organization owner.
+
+
+`DrivesHttp.NestedMutationsRefuseProtectedDescendantsBeforeChangingMain` (lake#962, LSR-096)
+checks direct/nested/mixed uploads, protected overwrites, recursive deletion/move and raw commits
+against real repository refs, then permits an allowed sibling.
+`Drive.MutationChecksTheLockedTreeAndRestoreChecksMain` checks a changed node at commit time and
+historical-ref restore and conflict resolution into protected current main. See [drive.md](../docs/api/drive.md).

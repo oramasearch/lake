@@ -691,3 +691,9 @@ it. Tool conversion checks depth iteratively before its schema copies. See
 Folder live grants and bearer links share `require_drive_share_role` in `drive_capabilities.cpp`
 (lake#955): every delegated action must be held by the caller; non-admin identity recipients must
 belong to the account. See [the contract](../../docs/api/sharing.md).
+
+
+Repository file writes (lake#962, LSR-096) use `repository_write_authorizer` from
+`drive_capabilities.cpp`: each destination and replaced, moved or deleted descendant is checked
+against the tree supplied under `LiquidCustomerStores`' mutation lock. Drive writes, restores, conflict resolutions, raw
+commits, methodology changes and `lake` store drives share it. See [drive.md](../../docs/api/drive.md).

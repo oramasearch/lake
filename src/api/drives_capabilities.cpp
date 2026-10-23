@@ -795,7 +795,8 @@ liquid::runtime::task<StoreOpened> open_store(ApiContext& context,
             co_return refuse("invalid_input", "the store names no repository");
         }
         co_return StoreOpened{
-            repository_store_contents(context.sync_store, customer_id, found->repository_id),
+            repository_store_contents(
+                context.sync_store, customer_id, found->repository_id, "main", context),
             std::nullopt};
     }
     if (!context.store_browser) {
@@ -1361,8 +1362,12 @@ liquid::runtime::task<ApiResult> create_drive(const json& input, ApiContext& con
                 [store, customer_id, repository_id] {
                     std::vector<RepositoryWriteOperation> operations{
                         {.kind = RepositoryWriteKind::Folder, .path = ""}};
-                    return store->commit_repository_files(
-                        customer_id, repository_id, "main", "Create drive", std::move(operations));
+                    return store->commit_repository_files(customer_id,
+                                                          repository_id,
+                                                          "main",
+                                                          "Create drive",
+                                                          std::move(operations),
+                                                          {});
                 },
                 [](std::string message) -> SyncStoreResult<std::string> {
                     return std::unexpected(SyncStoreError{"store_unavailable", std::move(message)});
