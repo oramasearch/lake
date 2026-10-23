@@ -5,6 +5,11 @@ the [2026-10-01 deployment record](../deployment/dev-2026-10-01.md) and the Open
 [`openapi-2026-10-02.json`](../deployment/observed/openapi-2026-10-02.json). There is no production
 environment yet: `Lake/prod` and lake.oramadev.net are the development deployment.
 
+Workspace `get_dataset` and `get_model` require an authenticated Lake caller with customer
+`read` before any workspace exchange (lake#970, LSR-104). Anonymous repository revision reads
+still require public visibility. Implemented in the source tree; not deployed. The contract and
+regression checks are in [models.md](../api/models.md#verification).
+
 ## Status vocabulary
 
 Agent offboarding (lake#951, LSR-086) is implemented in the source tree, not deployed: disabled

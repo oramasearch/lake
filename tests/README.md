@@ -15,6 +15,11 @@ evidence retained only as untrusted history. See [export.md](../docs/api/export.
 PostgreSQL: an authenticated customer writer cannot name another dispatcher or an agent without
 an active certificate for that customer. It also checks direct service calls and non-expiring
 keys. See [agent session keys](../docs/api/agents.md#verify-and-change).
+`Workspaces.DatasetAndModelMetadataRequireAuthenticatedCustomerRead` in `test_workspaces.cpp`
+checks customer authorization before dataset/model workspace exchanges through REST dispatch and
+MCP, including URL workspace context and the model alias. `test_api.cpp`'s
+`Models.AnonymousDatasetAndModelRevisionsRequirePublicRepositories` retains anonymous public
+revision reads and private revision refusals (lake#970, LSR-104; [contract](../docs/api/models.md)).
 
 `test_platform.cpp`'s `LiquidIdFixture` covers deployment rows that name a repository by the liquid
 id `liquid deploy` sends, by lake's UUID, by an unknown id (reported, not skipped) and by a liquid
