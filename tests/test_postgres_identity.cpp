@@ -564,13 +564,17 @@ TEST(PostgresIdentity, SessionsTokensAndDeviceRevocation) {
                                              "oidc-nonce",
                                              "integration browser",
                                              oauth_document.document,
-                                             oauth_document.proof});
+                                             oauth_document.proof,
+                                             "browser-binding"});
     ASSERT_TRUE(started) << started.error().message;
-    const auto flow = store->consume_oauth(provider_name, state);
+    EXPECT_FALSE(store->consume_oauth(provider_name, state, ""));
+    EXPECT_FALSE(store->consume_oauth(provider_name, state, "another-browser"));
+    EXPECT_FALSE(store->consume_oauth("another-provider", state, "browser-binding"));
+    const auto flow = store->consume_oauth(provider_name, state, "browser-binding");
     ASSERT_TRUE(flow) << flow.error().message;
     EXPECT_EQ(flow->code_verifier, "pkce-verifier");
     EXPECT_EQ(flow->nonce, "oidc-nonce");
-    EXPECT_FALSE(store->consume_oauth(provider_name, state));
+    EXPECT_FALSE(store->consume_oauth(provider_name, state, "browser-binding"));
     const auto oauth =
         store->sign_in_oauth({"lake",
                               provider_name,

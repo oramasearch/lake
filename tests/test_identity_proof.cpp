@@ -83,7 +83,8 @@ protected:
                 "oidc-nonce",
                 "browser",
                 document,
-                std::move(proof)};
+                std::move(proof),
+                "browser-binding"};
     }
 
     int users_with(const std::string& taap_id) {
@@ -199,7 +200,7 @@ TEST_F(PostgresIdentityProof, AProofIsUsedOnce) {
     EXPECT_EQ(signed_up.error().code, "unauthorized");
     EXPECT_EQ(users_with(person.signer.identity().taap_id), 0);
     // The spent proof is never a flow the callback can consume.
-    EXPECT_FALSE(store->consume_oauth("stub-" + suffix, "identity_proof:"));
+    EXPECT_FALSE(store->consume_oauth("stub-" + suffix, "identity_proof:", "browser-binding"));
 
     // A proof a sign-up spent cannot start an OAuth flow, and a retried sign-up is a conflict.
     TestIdentity other = lake::test::test_identity("other-" + suffix);
@@ -219,12 +220,12 @@ TEST_F(PostgresIdentityProof, AFirstOAuthSignInNeedsTheProofToo) {
     ASSERT_FALSE(refused);
     EXPECT_EQ(refused.error().code, "identity_proof_required");
     // No flow was created, so no callback can bind the document.
-    EXPECT_FALSE(store->consume_oauth("stub-" + suffix, "unproven-" + suffix));
+    EXPECT_FALSE(store->consume_oauth("stub-" + suffix, "unproven-" + suffix, "browser-binding"));
 
     const auto started = store->begin_oauth(
         oauth_flow(victim.document, lake::test::prove_identity(*store, "lake", victim), "proven"));
     ASSERT_TRUE(started) << started.error().message;
-    const auto flow = store->consume_oauth("stub-" + suffix, "proven-" + suffix);
+    const auto flow = store->consume_oauth("stub-" + suffix, "proven-" + suffix, "browser-binding");
     ASSERT_TRUE(flow) << flow.error().message;
     const auto signed_in = store->sign_in_oauth({"lake",
                                                  "stub-" + suffix,

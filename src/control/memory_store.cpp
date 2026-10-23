@@ -4855,7 +4855,7 @@ Result<OAuthProvider> InMemoryStore::get_oauth_provider(const std::string& pool_
 
 Result<void> InMemoryStore::begin_oauth(const OAuthFlow& input) {
     if (input.pool_id.empty() || input.provider.empty() || input.state.empty() ||
-        input.code_verifier.empty() || input.nonce.empty()) {
+        input.code_verifier.empty() || input.nonce.empty() || input.browser_binding.empty()) {
         return std::unexpected(StoreError{"invalid_input", "OAuth flow material is incomplete"});
     }
     std::lock_guard lock(mutex_);
@@ -4879,11 +4879,20 @@ Result<void> InMemoryStore::begin_oauth(const OAuthFlow& input) {
 }
 
 Result<OAuthFlow> InMemoryStore::consume_oauth(const std::string& provider,
-                                               const std::string& state) {
+                                               const std::string& state,
+                                               const std::string& browser_binding) {
+    if (state.empty() || browser_binding.empty()) {
+        return std::unexpected(StoreError{"unauthorized", "OAuth browser binding is required"});
+    }
+    const std::string binding_hash = identity_crypto::sha256_hex(browser_binding);
+    if (binding_hash.empty()) {
+        return std::unexpected(StoreError{"unauthorized", "OAuth browser binding is invalid"});
+    }
     std::lock_guard lock(mutex_);
     for (OAuthFlowRecord& record : oauth_flows_) {
-        if (record.flow.provider == provider && record.flow.state == state && !record.used &&
-            record.expires_at > std::chrono::steady_clock::now()) {
+        if (record.flow.provider == provider && record.flow.state == state &&
+            identity_crypto::sha256_hex(record.flow.browser_binding) == binding_hash &&
+            !record.used && record.expires_at > std::chrono::steady_clock::now()) {
             record.used = true;
             return record.flow;
         }

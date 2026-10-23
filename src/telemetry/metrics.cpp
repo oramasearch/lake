@@ -1469,8 +1469,10 @@ public:
         return call("begin_oauth", [&] { return store_->begin_oauth(value); });
     }
     control::Result<control::OAuthFlow> consume_oauth(const std::string& provider,
-                                                      const std::string& state) override {
-        return call("consume_oauth", [&] { return store_->consume_oauth(provider, state); });
+                                                      const std::string& state,
+                                                      const std::string& browser_binding) override {
+        return call("consume_oauth",
+                    [&] { return store_->consume_oauth(provider, state, browser_binding); });
     }
     control::Result<control::IssuedSession> create_token(const control::NewToken& value) override {
         return call("create_token", [&] { return store_->create_token(value); });

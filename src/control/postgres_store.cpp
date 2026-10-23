@@ -9140,7 +9140,7 @@ public:
     }
     Result<void> begin_oauth(const OAuthFlow& in) override {
         if (in.pool_id.empty() || in.provider.empty() || in.state.empty() ||
-            in.code_verifier.empty() || in.nonce.empty()) {
+            in.code_verifier.empty() || in.nonce.empty() || in.browser_binding.empty()) {
             return std::unexpected(
                 StoreError{"invalid_input", "OAuth flow material is incomplete"});
         }
@@ -9164,7 +9164,7 @@ public:
                 }
                 // No user exists yet to record the proof against in identity_taap_assertions, so it
                 // is spent as a flow row that can never be consumed: already used, its state hash
-                // derived from the proof (a real flow's is the hash of a random state).
+                // derived from the proof; real flows hash state with their browser binding.
                 try {
                     tx.exec_params(
                         "INSERT INTO identity_oauth_flows (pool_id, provider, state_hash, "
@@ -9184,7 +9184,10 @@ public:
             if (!encrypted) {
                 return std::unexpected(encrypted.error());
             }
-            const std::string state_hash = identity_crypto::sha256_hex(in.state);
+            // The existing lookup digest binds the browser without storing its secret. The
+            // length prefix keeps arbitrary callback state and cookie bytes unambiguous.
+            const std::string state_hash = identity_crypto::sha256_hex(
+                std::to_string(in.state.size()) + ":" + in.state + ":" + in.browser_binding);
             if (state_hash.empty()) {
                 return std::unexpected(StoreError{"store_error", "could not hash OAuth state"});
             }
@@ -9203,9 +9206,14 @@ public:
         });
     }
     Result<OAuthFlow> consume_oauth(const std::string& provider,
-                                    const std::string& state) override {
+                                    const std::string& state,
+                                    const std::string& browser_binding) override {
+        if (state.empty() || browser_binding.empty()) {
+            return std::unexpected(StoreError{"unauthorized", "OAuth browser binding is required"});
+        }
         return with_tx<OAuthFlow>([&](pqxx::work& tx) -> Result<OAuthFlow> {
-            const std::string state_hash = identity_crypto::sha256_hex(state);
+            const std::string state_hash = identity_crypto::sha256_hex(
+                std::to_string(state.size()) + ":" + state + ":" + browser_binding);
             if (state_hash.empty()) {
                 return std::unexpected(
                     StoreError{"unauthorized", "OAuth state is invalid or expired"});

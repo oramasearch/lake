@@ -10448,7 +10448,8 @@ struct ApiServer::Impl {
         }
         co_return co_await redirect(
             route,
-            result.value.value("authorization_url", "/apps/" + application->id + "/sign-in"));
+            result.value.value("authorization_url", "/apps/" + application->id + "/sign-in"),
+            oauth_browser_cookie(route, context));
     }
 
     // The public keys are read from the application's workspace Zetta (lake#352).
@@ -10837,6 +10838,26 @@ struct ApiServer::Impl {
             route, destination.empty() ? std::string(account_landing) : destination, cookie);
     }
 
+    static std::string oauth_cookie_name(const boost::http::route_params& route,
+                                         const std::string& state) {
+        return std::string(request_is_https(route) ? "__Host-lake_oauth_" : "lake_oauth_") +
+               control::identity_crypto::sha256_hex(state);
+    }
+
+    static std::string oauth_browser_cookie(const boost::http::route_params& route,
+                                            const ApiContext& context) {
+        if (context.oauth_state.empty() || context.oauth_browser_binding.empty()) {
+            return {};
+        }
+        std::string cookie = oauth_cookie_name(route, context.oauth_state) + "=" +
+                             context.oauth_browser_binding +
+                             "; HttpOnly; SameSite=Lax; Path=/; Max-Age=300";
+        if (request_is_https(route)) {
+            cookie += "; Secure";
+        }
+        return cookie;
+    }
+
     boost::http::route_task serve_oauth_callback(boost::http::route_params& route) {
         namespace http = boost::http;
         std::string provider_name;
@@ -10851,7 +10872,8 @@ struct ApiServer::Impl {
             co_return co_await oauth_error(
                 route, http::status::bad_request, "OAuth callback is incomplete");
         }
-        const auto flow = options.store->consume_oauth(provider_name, state);
+        const std::string binding = cookie_value(route, oauth_cookie_name(route, state));
+        const auto flow = options.store->consume_oauth(provider_name, state, binding);
         if (!flow) {
             co_return co_await oauth_error(
                 route, http::status::forbidden, "OAuth state is invalid or expired");
@@ -15165,6 +15187,10 @@ struct ApiServer::Impl {
             body = rest_envelope(result).dump();
             if (!result.ok && result.error.code == "unauthenticated") {
                 www_authenticate = bearer_challenge(result);
+            }
+            if (result.ok &&
+                (capability->name == "start_oauth" || capability->name == "start_sso_oidc")) {
+                set_cookie = oauth_browser_cookie(route, ctx);
             }
             const bool browser_sign_in =
                 capability->name == "sign_up_password" || capability->name == "sign_in_password" ||

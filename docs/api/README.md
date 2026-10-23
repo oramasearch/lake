@@ -1,5 +1,8 @@
 # The `/v1` API and MCP
 
+lake#963: [OAuth and enterprise OIDC](identity.md) require the initiating browser's per-flow
+HttpOnly cookie at callback, in addition to state, PKCE and nonce.
+
 lake#951: [Clerk offboarding](clerk.md#webhooks) revokes delegated agent credentials and workloads.
 [Agent streams](agent-launches.md#stream-triggers) and [MCP streams](mcp-connections.md#a-connections-agent-and-streams)
 reject missing/disabled people immediately and retain workspace cleanup for the next worker pass.
