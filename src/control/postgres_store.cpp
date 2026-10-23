@@ -11676,6 +11676,8 @@ public:
                                                            -> Result<RecoveryAttempt> {
             // Atomic upserts serialize budgets across replicas. Spend before account lookup,
             // and commit even unknown/throttled requests, so they cannot evade the client cap.
+            // The client's budget is spent first and the global budget only for a request the
+            // client's budget admits, so one client cannot spend the instance's budget alone.
             const auto spend = [&](const std::string& key, int limit) {
                 return !tx.exec_params(
                               "INSERT INTO offline_recovery_budgets AS budget (id, started_at, "
@@ -11693,12 +11695,20 @@ public:
                               limit)
                             .empty();
             };
-            if (!spend("global", 300)) {
+            // While the global budget is spent, no client row is created, so varying addresses
+            // cannot grow the table past the global cap.
+            if (!tx.exec("SELECT 1 FROM offline_recovery_budgets WHERE id = 'global' "
+                         "AND requests >= 300 "
+                         "AND started_at > clock_timestamp() - interval '1 hour'")
+                     .empty()) {
                 return RecoveryAttempt{};
             }
             tx.exec("DELETE FROM offline_recovery_budgets WHERE id <> 'global' "
                     "AND started_at <= clock_timestamp() - interval '1 hour'");
             if (!spend("client/" + client_hash, 30)) {
+                return RecoveryAttempt{};
+            }
+            if (!spend("global", 300)) {
                 return RecoveryAttempt{};
             }
             const pqxx::result users = tx.exec_params(

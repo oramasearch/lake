@@ -45,13 +45,20 @@ Both stores enforce these limits before creating a token, delivery or notice:
 - Admit at most 30 requests per client address per hour and 300 requests globally per hour.
   Unknown addresses and duplicates spend these budgets too. A window starts with its first
   admitted request and resets after an hour; denied requests do not extend it.
+- Spend the client's budget first, and the global budget only for a request the client's budget
+  admits. A client past its 30 spends nothing more, so one client cannot use up the instance's
+  300 and block email recovery for every other account. While the global budget is spent, a
+  request spends nothing and creates no client bucket.
 
 The HTTP adapter supplies the existing ingress-derived address (`order_client_address`) to
 REST and MCP; capability inputs cannot supply it. Deployments must keep ingress-nginx's
 sanitizing of `X-Real-IP`/the final forwarded hop and prevent direct access around that ingress,
-as for the order form. No address means a shared direct-client bucket. PostgreSQL retains only
+as for the order form. Lake does not check that the header came from the ingress: it takes
+`X-Real-IP` from whatever peer sent it. A caller that reaches lake's pods without passing the
+ingress (inside the cluster, for example) can name a new address with each request and so is held
+only by the global and per-account budgets. No address means a shared direct-client bucket. PostgreSQL retains only
 the SHA-256 address digest and expires idle client buckets after an hour; the global cap bounds
-new rows even when a caller varies addresses. Budgets persist across store instances and replicas.
+new rows even when a caller varies addresses, because no client row is created while it is spent. Budgets persist across store instances and replicas.
 
 PostgreSQL serializes account starts by locking the user row; budget upserts are atomic.
 The memory store uses its mutex. Cancellation and completion serialize on the attempt, so a
@@ -89,7 +96,8 @@ account path and both repository-key outcomes on Postgres.
 
 `Stores/EmailRecoveryLimits.*` runs the same contract against memory and PostgreSQL: concurrent
 first starts and address case variants create one delivery and device notice; duplicates preserve
-attempt timing after mail is claimed; unknown addresses spend client/global budgets; a new store
+attempt timing after mail is claimed; unknown addresses spend client/global budgets; one client
+sending 400 requests spends only 30 of the global budget, so another client still recovers; a new store
 instance keeps the budget and an elapsed window resets it; owner cancellation refuses another
 account, invalidates already delivered tokens, removes pending mail and cannot be reversed by
 administrator approval. PostgreSQL moves a cancelled attempt beyond its cooling period before

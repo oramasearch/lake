@@ -506,8 +506,10 @@ TEST_P(EmailRecoveryLimits, UnknownAddressesSpendClientAndGlobalBudgets) {
     anonymous.recovery_client_address = "192.0.2.2";
     EXPECT_EQ(begin().value, accepted.value);
     ASSERT_EQ(store->claim_recovery_deliveries(100)->size(), 1U);
+    // The throttled 31st request of 192.0.2.1 spent no global budget: 31 are spent so far,
+    // and 269 more distinct clients spend the rest of the 300.
     const auto second = account("global-recovery-target");
-    for (int i = 32; i < 300; ++i) {
+    for (int i = 31; i < 300; ++i) {
         anonymous.recovery_client_address = "client-" + std::to_string(i);
         EXPECT_EQ(begin("unknown@example.test").value, accepted.value);
     }
@@ -529,6 +531,28 @@ TEST_P(EmailRecoveryLimits, UnknownAddressesSpendClientAndGlobalBudgets) {
         ASSERT_TRUE(begin("global-recovery-target@example.test").ok);
         EXPECT_EQ(store->claim_recovery_deliveries(100)->size(), 1U);
     }
+}
+
+TEST_P(EmailRecoveryLimits, OneClientExhaustingItsBudgetLeavesAnotherClientAbleToRecover) {
+    // One client sends more than the whole instance's hourly budget. Only the 30 requests its
+    // own budget admits spend the global budget, so another client can still start recovery.
+    const auto accepted = begin("unknown@example.test");
+    ASSERT_TRUE(accepted.ok) << accepted.error.message;
+    for (int i = 1; i < 400; ++i) {
+        EXPECT_EQ(begin("unknown@example.test").value, accepted.value);
+    }
+    EXPECT_EQ(begin().value, accepted.value);
+    EXPECT_TRUE(store->claim_recovery_deliveries(100)->empty());
+    anonymous.recovery_client_address = "198.51.100.7";
+    const auto other = begin();
+    ASSERT_TRUE(other.ok) << other.error.message;
+    EXPECT_EQ(other.value, accepted.value);
+    const auto deliveries = store->claim_recovery_deliveries(100);
+    ASSERT_TRUE(deliveries);
+    ASSERT_EQ(deliveries->size(), 1U);
+    const auto attempt = store->get_recovery_attempt(deliveries->front().recovery_id);
+    ASSERT_TRUE(attempt);
+    EXPECT_EQ(attempt->user_id, target.principal.user_id);
 }
 
 INSTANTIATE_TEST_SUITE_P(Stores, EmailRecoveryLimits, testing::Bool(), [](const auto& info) {

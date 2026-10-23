@@ -8076,8 +8076,16 @@ Result<RecoveryAttempt> InMemoryStore::begin_email_recovery(const std::string& p
         return true;
     };
     // Empty attempts are accepted without disclosing whether an account or budget exists.
-    if (!spend("global", 300) ||
-        !spend("client/" + identity_crypto::sha256_hex(client_address), 30)) {
+    // The client's own budget is spent first, and the global budget only for a request the
+    // client's budget admits, so one client cannot spend the instance's hourly budget alone.
+    // While the global budget is spent, no client bucket is created, so varying addresses
+    // cannot grow the buckets past the global cap.
+    if (const auto global = recovery_budgets_.find("global");
+        global != recovery_budgets_.end() && global->second.requests >= 300) {
+        return RecoveryAttempt{};
+    }
+    if (!spend("client/" + identity_crypto::sha256_hex(client_address), 30) ||
+        !spend("global", 300)) {
         return RecoveryAttempt{};
     }
     const auto password = std::ranges::find_if(passwords_, [&](const PasswordCredential& value) {
