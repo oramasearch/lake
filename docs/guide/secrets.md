@@ -283,7 +283,9 @@ owns until you grant them access on it.
 
 Every call is one signed audit event naming the caller, mount, workspace, secret name and version,
 or key and version. Values, plaintext, ciphertext, signatures and MACs are never in the audit. Lease
-lifecycle events are also appended to Lake's transparency log ([Activity and Audit](/docs/activity)).
+lifecycle events stay in private audit. Successful calls also publish a digest commitment to Lake's
+transparency log, without caller, account, mount or workspace details. Denied and failed calls
+publish nothing ([Activity and Audit](/docs/activity)).
 
 ## Troubleshooting
 

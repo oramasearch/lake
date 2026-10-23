@@ -1153,7 +1153,7 @@ ApiResult finish_call(const Capability* capability,
     if (!*recorded) {
         return result;
     }
-    if (kind == "dynamic_secret" && context.transparency_log) {
+    if (result.ok && kind == "dynamic_secret" && context.transparency_log) {
         auto appended = context.transparency_log->append_audit_event(**recorded);
         if (!appended) {
             return ApiResult::failure("store_error",

@@ -40,6 +40,7 @@ using nlohmann::json;
 constexpr std::string_view tile_header = "LAKE-TILE-1\n";
 constexpr std::string_view hash_tile_header = "LAKE-HASH-TILE-1\n";
 constexpr std::string_view audit_entry_header = "LAKE-AUDIT-EVENT-1\n";
+constexpr std::string_view audit_commitment_header = "LAKE-AUDIT-COMMITMENT-1\n";
 
 class AppendLock {
 public:
@@ -545,15 +546,43 @@ void add_identity(std::vector<std::string>& identities, const std::string& value
     identities.push_back(value);
 }
 
-Result<VerifiedAttestation> verify_attestation(std::span<const std::byte> encoded) {
-    const bool audit_entry =
-        encoded.size() > audit_entry_header.size() &&
-        std::ranges::equal(encoded.first(audit_entry_header.size()),
-                           audit_entry_header,
-                           [](std::byte left, char right) {
-                               return left == std::byte{static_cast<unsigned char>(right)};
-                           });
-    if (audit_entry) {
+// Historical full audit entries remain readable, but new admission permits only commitments.
+Result<VerifiedAttestation> verify_attestation(std::span<const std::byte> encoded,
+                                               bool allow_legacy_audit = false) {
+    const auto has_header = [encoded](std::string_view header) {
+        return encoded.size() >= header.size() &&
+               std::ranges::equal(
+                   encoded.first(header.size()), header, [](std::byte left, char right) {
+                       return left == std::byte{static_cast<unsigned char>(right)};
+                   });
+    };
+    if (has_header(audit_commitment_header)) {
+        const auto body = encoded.subspan(audit_commitment_header.size());
+        const json commitment = json::from_cbor(body, true, false);
+        if (!commitment.is_object() || commitment.size() != 1 || !commitment.contains("digest") ||
+            !commitment.at("digest").is_string()) {
+            return std::unexpected(Error{"invalid_input", "audit commitment is malformed"});
+        }
+        const std::string digest = commitment.at("digest");
+        if (digest.size() != 64 || !std::ranges::all_of(digest, [](char digit) {
+                return (digit >= '0' && digit <= '9') || (digit >= 'a' && digit <= 'f');
+            })) {
+            return std::unexpected(Error{"invalid_input", "audit commitment digest is malformed"});
+        }
+        // Re-encoding rejects duplicate keys and other encodings that hide unparsed bytes.
+        const auto canonical = json::to_cbor(commitment);
+        if (!std::ranges::equal(body, canonical, [](std::byte left, std::uint8_t right) {
+                return std::to_integer<std::uint8_t>(left) == right;
+            })) {
+            return std::unexpected(Error{"invalid_input", "audit commitment is not canonical"});
+        }
+        return VerifiedAttestation{.profile = "audit_commitment/1"};
+    }
+    if (has_header(audit_entry_header)) {
+        if (!allow_legacy_audit) {
+            return std::unexpected(
+                Error{"invalid_input", "private audit events cannot be appended to a public log"});
+        }
         const auto body = encoded.subspan(audit_entry_header.size());
         const json event = json::from_cbor(body, true, false);
         if (!event.is_object() || event.value("version", "") != "audit_event/1" ||
@@ -672,7 +701,7 @@ Result<std::vector<Bytes>> validated_entries(const std::vector<std::string>& att
         }
         const std::string key = hex(*digest);
         if (!verification_cache.contains(key)) {
-            const auto verified = verify_attestation(*bytes);
+            const auto verified = verify_attestation(*bytes, false);
             if (!verified) {
                 return std::unexpected(verified.error());
             }
@@ -1233,10 +1262,24 @@ Result<AppendResult> TiledLog::append(const std::vector<std::string>& attestatio
 }
 
 Result<AppendResult> TiledLog::append_audit_event(const audit::Event& event) {
-    const std::vector<std::uint8_t> body = json::to_cbor(audit::to_json(event));
+    if (event.draft.outcome != "success") {
+        return std::unexpected(
+            Error{"invalid_input", "only successful audit events may publish a commitment"});
+    }
+    json recorded = audit::to_json(event);
+    recorded.erase("digest");
+    const auto recorded_bytes = json::to_cbor(recorded);
+    const auto digest = sha512_256(std::as_bytes(std::span(recorded_bytes)));
+    if (!digest) {
+        return std::unexpected(digest.error());
+    }
+    if (hex(*digest) != event.digest) {
+        return std::unexpected(Error{"invalid_input", "audit event digest does not verify"});
+    }
+    const auto body = json::to_cbor(json{{"digest", event.digest}});
     Bytes entry;
-    entry.reserve(audit_entry_header.size() + body.size());
-    for (const char value : audit_entry_header) {
+    entry.reserve(audit_commitment_header.size() + body.size());
+    for (const char value : audit_commitment_header) {
         entry.push_back(std::byte{static_cast<unsigned char>(value)});
     }
     entry.insert(entry.end(),
@@ -1628,7 +1671,7 @@ Result<IdentityScan> TiledLog::scan_identity(const std::string& identity,
             const std::string key = hex(*digest);
             auto verified = verification_cache.find(key);
             if (verified == verification_cache.end()) {
-                const auto value = verify_attestation(entry);
+                const auto value = verify_attestation(entry, true);
                 if (!value) {
                     return std::unexpected(Error{"unrecoverable",
                                                  "transparency tile contains an "
@@ -1727,7 +1770,7 @@ Result<IdentityScan> TiledLog::scan_identity(const std::string& identity,
             loaded_tile = tile_index;
         }
         const Bytes& entry = loaded[static_cast<std::size_t>(match - tile_start)];
-        const auto verified = verify_attestation(entry);
+        const auto verified = verify_attestation(entry, true);
         if (!verified) {
             return std::unexpected(Error{"unrecoverable",
                                          "transparency tile contains an invalid TAAP "

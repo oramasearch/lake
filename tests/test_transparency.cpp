@@ -686,6 +686,96 @@ public:
 
 } // namespace
 
+TEST(TransparencyLog, AuditAdmissionRejectsPrivateEventsAndMalformedCommitments) {
+    lake::control::InMemoryStore store;
+    const auto event = lake::audit::record(store,
+                                           {.kind = "dynamic_secret",
+                                            .principal = "taap:1:ed25519:private-member",
+                                            .object = "secret_mount/private-mount",
+                                            .action = "lease_dynamic_secret",
+                                            .outcome = "success",
+                                            .device = "private-fingerprint"},
+                                           {});
+    ASSERT_TRUE(event) << event.error().message;
+    const auto encode = [](std::string_view header, const json& body) {
+        const auto cbor = json::to_cbor(body);
+        std::string bytes(header);
+        bytes.append(reinterpret_cast<const char*>(cbor.data()), cbor.size());
+        return bytes;
+    };
+    const std::string legacy = encode("LAKE-AUDIT-EVENT-1\n", lake::audit::to_json(*event));
+    lake::transparency::TiledLog log(lake::test::fixture_path("audit-admission"), "lake");
+    const auto base = log.state();
+    ASSERT_TRUE(base);
+    const auto appended = log.append({base64url(std::as_bytes(std::span(legacy)))});
+    EXPECT_FALSE(appended) << "raw private audit records cannot be published";
+    lake::transparency::LogReplicationBatch batch{
+        .base = *base,
+        .head = {.tree_size = 1, .root_hash = sha256(std::string(1, '\0') + legacy)},
+        .source_tree_size = 1,
+        .attestations = {base64url(std::as_bytes(std::span(legacy)))}};
+    lake::transparency::TiledLog replica(lake::test::fixture_path("audit-admission-replica"),
+                                         "lake");
+    const auto replicated = replica.apply_replication_batch(batch);
+    EXPECT_FALSE(replicated) << "replication must not admit private audit records either";
+    ASSERT_TRUE(replica.state());
+    EXPECT_EQ(replica.state()->tree_size, 0U);
+    for (const std::string outcome : {"denied", "failure", "", "SUCCESS"}) {
+        auto draft = event->draft;
+        draft.outcome = outcome;
+        const auto refused = lake::audit::record(store, draft, {});
+        ASSERT_TRUE(refused) << refused.error().message;
+        EXPECT_FALSE(log.append_audit_event(*refused)) << outcome;
+    }
+    for (const json body : {json{{"digest", "customer/private"}},
+                            json{{"digest", std::string(64, 'g')}},
+                            json{{"digest", std::string(64, 'A')}},
+                            json{{"digest", 42}},
+                            json{{"digest", event->digest}, {"device", "private-fingerprint"}}}) {
+        const auto bytes = encode("LAKE-AUDIT-COMMITMENT-1\n", body);
+        EXPECT_FALSE(log.append({base64url(std::as_bytes(std::span(bytes)))}));
+    }
+    // Duplicate keys must not hide private bytes behind the one parsed digest field.
+    const auto hidden = json::to_cbor(json{{"digest", "private-fingerprint"}});
+    const auto valid = json::to_cbor(json{{"digest", event->digest}});
+    std::string duplicate("LAKE-AUDIT-COMMITMENT-1\n");
+    duplicate.push_back(static_cast<char>(0xa2));
+    duplicate.append(reinterpret_cast<const char*>(hidden.data() + 1), hidden.size() - 1);
+    duplicate.append(reinterpret_cast<const char*>(valid.data() + 1), valid.size() - 1);
+    EXPECT_FALSE(log.append({base64url(std::as_bytes(std::span(duplicate)))}));
+    auto malformed = *event;
+    malformed.digest = "private-metadata";
+    EXPECT_FALSE(log.append_audit_event(malformed));
+    ASSERT_TRUE(log.state());
+    EXPECT_EQ(log.state()->tree_size, 0U);
+}
+
+TEST(TransparencyLog, AuditCommitmentsReplicateAndRemainAbsentFromIdentityScans) {
+    lake::control::InMemoryStore store;
+    const auto event = lake::audit::record(store,
+                                           {.kind = "dynamic_secret",
+                                            .principal = "taap:1:ed25519:private-member",
+                                            .object = "secret_mount/private-mount",
+                                            .outcome = "success"},
+                                           {});
+    ASSERT_TRUE(event);
+    lake::transparency::TiledLog source(lake::test::fixture_path("audit-source"), "lake");
+    ASSERT_TRUE(source.append_audit_event(*event));
+    const auto batch = source.replication_batch(0);
+    ASSERT_TRUE(batch);
+    lake::transparency::TiledLog replica(lake::test::fixture_path("audit-replica"), "lake");
+    ASSERT_TRUE(replica.apply_replication_batch(*batch));
+    const auto tile = replica.tile(0, 1);
+    ASSERT_TRUE(tile);
+    EXPECT_EQ(tile->encoded, source.tile(0, 1)->encoded);
+    for (const std::string identity : {event->draft.principal, event->signer}) {
+        const auto scan =
+            replica.scan_identity(identity, batch->head.tree_size, batch->head.root_hash);
+        ASSERT_TRUE(scan) << scan.error().message;
+        EXPECT_TRUE(scan->matches.empty());
+    }
+}
+
 TEST(TransparencyLog, BulkTilesDetectTamperingAndScanOneHundredThousandEntries) {
     TemporaryRoot temporary;
     lake::transparency::TiledLog log(temporary.path(), "monitor-instance");

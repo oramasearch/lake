@@ -447,7 +447,9 @@ Dynamic-secret leases follow (lake#362, migration `0058`): each lease is a seale
 mount's workspace, and PostgreSQL keeps only `secret_lease_routes` (lease → mount, workspace, and
 `due_at`), the content-free route and due index. Renew, revoke and the owner loop's expiry pass
 rewrite a lease at the revision read, so a renewal never revives a revoked or expired lease; the
-pass claims due routes and reads only the workspaces that hold them. See
+pass claims due routes and reads only the workspaces that hold them. Successful lifecycle events
+publish only their digest commitments in the transparency log (lake#953); complete events, denials
+and failures remain in private central audit. See
 `docs/api/secrets.md#dynamic-leases`.
 Forge records follow (lake#341, migration `0054`): issues, reviews, comments, releases, webhooks,
 exports and branch protection rules live in the workspace Zetta of their repository's workspace,
@@ -680,7 +682,8 @@ encrypt/decrypt/rewrap, Ed25519 signing, HMAC-SHA-256 and stored child derivatio
 rotation that rewraps data keys without rewriting secret ciphertext. The mount, secret and key
 pages render metadata only. Every operation uses policy authorization and the signed registry
 audit path, including denials. Renewable and revocable dynamic-secret leases encrypt the generated
-credential and mirror their signed lifecycle audit rows into the transparency log.
+credential and publish only their successful lifecycle events' digest commitments in the transparency
+log (lake#953); complete events, denials and failures remain in private audit.
 Customer PKI adds persisted private roots and online intermediates, SPIFFE X.509 and JWT SVIDs,
 client, device, OpenSSH user and OpenSSH host certificates, and a customer-scoped RFC 8555 ACME
 HTTP-01 flow. Migration `0013_pki` holds the durable state. ACME consumes one-use nonces, verifies

@@ -3462,8 +3462,8 @@ TEST_P(WorkspaceRecordStores, DynamicLeasesLiveInTheirMountsWorkspace) {
 // leaf a relying party expects for each dynamic-secret lease, renewal and revocation (the
 // identity-exit scenario), even though the lease itself is a record of its mount's workspace and a
 // workspace audit route is available. The three capabilities stay in the central chain, so
-// finish_call appends the recorded central event as the leaf; the leaf carries routing ids only,
-// never the credential, the role or the mount's name.
+// finish_call appends only the recorded central event's digest commitment. Complete events and
+// routing identifiers stay in private audit (lake#953, LSR-087).
 TEST_P(WorkspaceRecordStores, DynamicSecretsInAWorkspaceKeepTheirInstanceLogLeaf) {
     auto store = make_store();
     if (!store) {
@@ -3512,7 +3512,7 @@ TEST_P(WorkspaceRecordStores, DynamicSecretsInAWorkspaceKeepTheirInstanceLogLeaf
     ASSERT_TRUE(admin("revoke_dynamic_secret", {{"lease_id", lease_id}}).ok);
     EXPECT_EQ(recorder.pending(), queued) << "no dynamic-secret event is queued for the workspace";
 
-    // Each leaf is exactly the central event's body, in order: lease, renew, revoke.
+    // Each leaf commits to the private central event, in order: lease, renew, revoke.
     const auto events =
         lake::test::audit_events(*t.store, {.object = "dynamic_secret/" + lease_id, .limit = 10});
     ASSERT_TRUE(events) << events.error().message;
@@ -3529,27 +3529,48 @@ TEST_P(WorkspaceRecordStores, DynamicSecretsInAWorkspaceKeepTheirInstanceLogLeaf
         encoded.push_back('=');
     }
     std::string leaves((encoded.size() / 4) * 3, '\0');
-    ASSERT_GE(EVP_DecodeBlock(reinterpret_cast<unsigned char*>(leaves.data()),
-                              reinterpret_cast<const unsigned char*>(encoded.data()),
-                              static_cast<int>(encoded.size())),
-              0);
-    std::size_t previous = 0;
+    const int decoded_size = EVP_DecodeBlock(reinterpret_cast<unsigned char*>(leaves.data()),
+                                             reinterpret_cast<const unsigned char*>(encoded.data()),
+                                             static_cast<int>(encoded.size()));
+    ASSERT_GE(decoded_size, 0);
+    leaves.resize(static_cast<std::size_t>(decoded_size) - (encoded.ends_with("==")  ? 2U
+                                                            : encoded.ends_with('=') ? 1U
+                                                                                     : 0U));
+    constexpr std::string_view tile_header = "LAKE-TILE-1\n";
+    ASSERT_TRUE(leaves.starts_with(tile_header));
+    std::size_t offset = tile_header.size();
     std::set<std::string> operations;
     for (const auto& event : *events) {
         EXPECT_EQ(event.draft.kind, "dynamic_secret");
+        EXPECT_EQ(event.draft.customer_id, space.customer_id);
+        EXPECT_EQ(event.draft.object, "dynamic_secret/" + lease_id);
+        EXPECT_EQ(event.draft.details.at("workspace_id"), workspace);
         operations.insert(event.draft.details.value("operation", ""));
-        const std::vector<std::uint8_t> body = json::to_cbor(lake::audit::to_json(event));
-        const auto at = leaves.find(std::string(body.begin(), body.end()));
-        ASSERT_NE(at, std::string::npos) << event.draft.action << " has no instance log leaf";
-        EXPECT_GE(at, previous);
-        previous = at;
+        ASSERT_GE(leaves.size() - offset, 4U);
+        std::size_t size = 0;
+        for (int part = 0; part < 4; ++part) {
+            size = (size << 8) | static_cast<unsigned char>(leaves[offset++]);
+        }
+        ASSERT_GE(leaves.size() - offset, size);
+        const std::string_view entry(leaves.data() + offset, size);
+        constexpr std::string_view header = "LAKE-AUDIT-COMMITMENT-1\n";
+        ASSERT_TRUE(entry.starts_with(header));
+        EXPECT_EQ(json::from_cbor(entry.begin() + header.size(), entry.end()),
+                  (json{{"digest", event.digest}}));
+        offset += size;
     }
+    EXPECT_EQ(offset, leaves.size());
     EXPECT_EQ(operations, (std::set<std::string>{"lease", "renew", "revoke"}));
-    // Content-free: the lease id names the event; the credential, role and mount name never
-    // reach the public log.
-    EXPECT_NE(leaves.find(lease_id), std::string::npos);
-    for (const std::string& secret : {username, password, role, mount_name}) {
-        EXPECT_EQ(leaves.find(secret), std::string::npos) << secret;
+    // Neither credentials nor tenant and routing identifiers reach the public log.
+    for (const std::string& private_value : {username,
+                                             password,
+                                             role,
+                                             mount_name,
+                                             lease_id,
+                                             space.customer_id,
+                                             workspace,
+                                             mount.value.at("id").get<std::string>()}) {
+        EXPECT_EQ(leaves.find(private_value), std::string::npos);
     }
 }
 
