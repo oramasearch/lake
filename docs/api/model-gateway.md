@@ -66,6 +66,40 @@ The path is `/openai/v1/`, not `/v1/`, because `/v1/<name>` is the capability re
 ([README](README.md)). Like the OCI registry at `/v2/` and the Hub routes at `/api/models/`, the
 gateway is a protocol route named for its protocol.
 
+### Supported requests
+
+The gateway accepts a closed set of synchronous, token-metered fields (lake#960, LSR-094).
+Unknown fields are `invalid_input` before the provider is called, including unknown fields inside
+messages, content parts, tools and stream options. Chat and Responses accept text and function
+tools executed by the caller. Embeddings accept text or token arrays. Function parameter schemas
+and structured-output schemas remain application data; their property names are unrestricted.
+
+Provider-hosted tools (search, file search, code execution, image generation and remote MCP),
+audio/image/file inputs or outputs, priority service tiers, saved prompts, conversations and
+stored-response references are refused. `store` must be false or null and is sent as false on
+generation endpoints, including when omitted. Background generation remains refused; false and
+null are accepted for SDK compatibility. There is no stored-response retrieval route and no
+customer ownership registry for provider objects, so their identifiers cannot be reused here.
+
+An agent sends the provider's assistant message back as history on its next tool round, as the
+OpenAI SDK dumps it (`message.model_dump(exclude_none=True)`). OpenAI's chat answer carries fields
+that only describe the answer: `annotations` (`[]` without a hosted tool), `refusal` and `audio`.
+On an `assistant` message the gateway drops `annotations` and `refusal`, and `audio` when it is
+null, before validating; they are never forwarded. A non-null `audio` names audio the provider
+stored and is refused, as is any other unknown field, and the same fields on another role are
+refused. Verify with `ModelCompletion.AcceptsTheProvidersAssistantMessageBackAsHistory`, which
+replays a chat completion with a tool call as OpenAI returns it.
+
+This deliberately narrows OpenAI compatibility: a provider adding a field does not enable it on
+Lake. Extend the endpoint schemas in `src/api/model_gateway.cpp` only after verifying that its
+charges are represented in workspace usage, with a refusal test and a supported-request test.
+Model eligibility and pricing are handled separately by lake#961 (LSR-095).
+
+Verify with `ModelCompletion.RefusesUnmeteredFeaturesBeforeCallingTheProvider` and
+`ModelGateway.AcceptsTextAndCallerExecutedFunctions`, plus the OpenAI route rejection checks in
+`ModelGatewayRoute.AnswersTheOpenAIShapeForATaskCredential`. REST, MCP and both OpenAI route
+forms call the same preparation function before any provider work.
+
 ### Streaming
 
 `stream: true` is accepted. For a chat completion Lake adds `stream_options.include_usage: true`, so
@@ -105,7 +139,7 @@ and `code`, and the JSON pointer of the field at fault as `param`:
 
 | Code | Status | When |
 |---|---|---|
-| `invalid_input` | 400 | the body is not a JSON object, names no `model`, streams an embedding, or sets `background` |
+| `invalid_input` | 400 | an unsupported field, content or tool; no `model`; streamed embeddings; background work or stored references |
 | `unauthenticated`, `unauthorized` | 401, 403 | no credential, or one that is not a run's (above), or a `/w/<workspace>/` path naming another workspace than the run's |
 | `not_found` | 404 | a `/w/<workspace>/` path naming a workspace that does not exist |
 | `usage_limit_reached` | 429 | the account's monthly `model_tokens` limit is used up ([Limits](#limits)) |
@@ -146,6 +180,9 @@ are the labels `usage_over_time` breaks `model_tokens` down by (`by_agent`, `by_
 which the Usage dashboard and an agent's page show, and the bill prices `model_tokens` at one rate
 ([billing.md](billing.md#price-list)). A refused call, by Lake or by the provider, counts nothing.
 A call the provider answered counts even when its answer did not arrive whole (lake#939).
+A transport failure without an HTTP status is also counted by estimate against the originating
+run: a lost response cannot establish that the provider did no billable work (lake#960).
+An explicit non-success HTTP response counts nothing.
 
 ### An answer without usage
 
