@@ -332,7 +332,16 @@ order event for the central audit pass. Ordinary usage invoice processing stays 
 
 ### Operator handoff required before release
 
-Lake supplies **`cloud_order_desired_state`**, a view containing every `cloud_orders` column plus:
+Lake supplies **`cloud_order_desired_state`**, a view containing every `cloud_orders` column as of
+`0097_cloud_order_entitlements`, named one by one, plus the two below. The columns are listed rather
+than `cloud_orders.*`, so a later `ALTER TABLE cloud_orders ADD COLUMN` cannot break applying the
+schema again; a later migration that wants a new column in the view appends it after
+`desired_state`.
+
+The unique index `cloud_orders_subscription_unique` on `stripe_subscription_id` makes a subscription
+belong to one order. Creating it fails, and with it the whole schema apply, if two existing orders
+already share a subscription id; such rows must be corrected first. On the existing Lakes every order
+is test data.
 
 | Column | Values |
 |---|---|

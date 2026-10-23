@@ -10,6 +10,8 @@
 #include <chrono>
 #include <cstdint>
 #include <format>
+#include <fstream>
+#include <iterator>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -2088,6 +2090,41 @@ TEST(OrdersEntitlement, DesiredStateExpiresWithoutAnotherWebhookAndRestoresOnRen
         EXPECT_EQ(rows[0][0].as<std::string>(), "present");
         EXPECT_EQ(rows[0][1].as<std::string>(), "active");
     }
+}
+
+// The desired-state view names its columns, so a later column on cloud_orders cannot make
+// applying the schema again fail (lake#972 review).
+TEST(OrdersEntitlement, DesiredStateViewSurvivesALaterColumnOnCloudOrders) {
+    const char* uri = lake::test::postgres_uri();
+    if (uri == nullptr || *uri == '\0') {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
+    }
+    std::ifstream file(LAKE_TEST_SOURCE_DIR "/db/schema.sql");
+    const std::string schema(std::istreambuf_iterator<char>(file), {});
+    ASSERT_FALSE(schema.empty());
+    pqxx::connection connection(uri);
+    const auto columns = [&](pqxx::work& tx, const std::string& relation) {
+        std::vector<std::string> names;
+        for (const auto& row :
+             tx.exec_params("SELECT column_name FROM information_schema.columns WHERE "
+                            "table_schema = current_schema() AND table_name = $1 "
+                            "ORDER BY ordinal_position",
+                            relation))
+            names.push_back(row[0].as<std::string>());
+        return names;
+    };
+    pqxx::work tx(connection);
+    auto expected = columns(tx, "cloud_orders");
+    expected.push_back("entitlement_state");
+    expected.push_back("desired_state");
+    EXPECT_EQ(columns(tx, "cloud_order_desired_state"), expected)
+        << "the view lists every cloud_orders column, then its two own";
+    tx.exec("ALTER TABLE cloud_orders ADD COLUMN later_column text");
+    tx.exec(schema);
+    EXPECT_EQ(columns(tx, "cloud_order_desired_state"), expected)
+        << "a later column leaves the view as it was";
+    tx.exec(schema);
+    tx.commit();
 }
 
 TEST(OrdersEntitlement, CurrentSubscriptionItemsAndExpandedReferencesAreReadSafely) {

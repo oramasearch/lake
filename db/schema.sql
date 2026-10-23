@@ -4856,15 +4856,35 @@ CREATE UNIQUE INDEX IF NOT EXISTS cloud_orders_subscription_unique ON cloud_orde
     WHERE stripe_subscription_id IS NOT NULL;
 
 -- Read this view on every reconcile, including already-ready orders. No expiry worker is required.
+-- The columns are listed, never `*`: Postgres fixes a view's columns when it is created, so a
+-- later `ALTER TABLE cloud_orders ADD COLUMN` would make this CREATE OR REPLACE VIEW try to insert
+-- a column before `entitlement_state` and fail the whole schema apply. A later migration that wants
+-- a new column in the view appends it after `desired_state`.
 CREATE OR REPLACE VIEW cloud_order_desired_state AS
-SELECT orders.*, CASE
+SELECT
+    id, created_at, updated_at, offer, path, cloud_provider, region, contact_name, contact_email,
+    company, details, quantity, amount_cents, currency, included_credit_cents,
+    stripe_checkout_session_id, stripe_customer_id, stripe_subscription_id, state, host,
+    failure_reason, claimed_by, claimed_at, organization_id, support_emailed_state,
+    customer_emailed_state, email_attempts, email_error, email_retry_at, subscription_status,
+    paid_through, entitlement_access_until, subscription_event_created, entitlement_grace_seconds,
+    entitlement_retry_invoice_id,
+    entitlement_state, CASE
     WHEN path <> 'checkout' THEN 'unmanaged'
     WHEN state IN ('paid', 'provisioning', 'ready') AND entitlement_state IN ('active', 'grace')
         THEN 'present'
     ELSE 'suspended'
 END AS desired_state
 FROM (
-    SELECT cloud_orders.*, CASE
+    SELECT
+        id, created_at, updated_at, offer, path, cloud_provider, region, contact_name, contact_email,
+        company, details, quantity, amount_cents, currency, included_credit_cents,
+        stripe_checkout_session_id, stripe_customer_id, stripe_subscription_id, state, host,
+        failure_reason, claimed_by, claimed_at, organization_id, support_emailed_state,
+        customer_emailed_state, email_attempts, email_error, email_retry_at, subscription_status,
+        paid_through, entitlement_access_until, subscription_event_created, entitlement_grace_seconds,
+        entitlement_retry_invoice_id,
+        CASE
         WHEN path <> 'checkout' THEN 'not_applicable'
         WHEN stripe_subscription_id IS NULL OR stripe_customer_id IS NULL OR entitlement_access_until = 0
             THEN 'suspended'
