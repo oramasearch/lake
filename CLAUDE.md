@@ -234,6 +234,12 @@ capability that already covered it. Each runs the `workspace_query`/`workspace_a
 where the engine's name collides or says too little (`gate` is `check_pipeline`, `run` is
 `start_run`, `search` is `search_workspace_index`). Those two stay, with an `enum` on `capability`.
 Not deployed. See `docs/api/engine-capabilities.md`.
+Each database and connection has a safe mode (lake#906, no migration): `get_safe_mode` and
+`set_safe_mode` (Off, Warn Writes by default, Warn All) pass through to the workspace Zetta, which
+keeps the level; its `safe_mode_warning` reaches REST (409) and MCP with `error.details` (database
+or connection, mode, statements, confirmation), and the same call with `safe_mode_confirmation` runs
+it. The web app has the control in Data → Query's status bar and on each connection, and a dialog
+with the statements, Run and Cancel. Needs zetta#1373. Not deployed. See `docs/api/safe-mode.md`.
 Agents are designed in Design → Agents and trained in Train → Agents (lake#653, no migration):
 Design → Agents (was Agent Library; `/design/agent-library` and `/train/agents/new` redirect) lists
 Orama's agents read-only beside the workspace's own, with New agent, Duplicate, Edit and the Agent

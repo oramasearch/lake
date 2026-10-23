@@ -69,6 +69,9 @@ struct ApiError {
     // where to get a new one.
     std::string reason;
     std::string help;
+    // `safe_mode_warning` only: what the workspace would run and the confirmation that runs it
+    // ({database|connection, mode, statements, confirmation}), as the workspace Zetta sent it.
+    nlohmann::json details = nullptr;
 };
 
 // Every error code a capability answers, with its REST status and what it tells the caller

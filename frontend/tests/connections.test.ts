@@ -51,11 +51,14 @@ test("old Datasets links go to Connections", () => {
 });
 
 test("the empty state's figures and the tables reachable", () => {
-  assert.deepEqual(tablesFigure([]), { value: "0", failed: 0 }, "no connections: nothing reachable");
-  assert.deepEqual(tablesFigure([{ tables: [1, 2] }, undefined]), { value: "—", failed: 0 }, "waits for every answer");
-  assert.deepEqual(tablesFigure([{ tables: [1, 2] }, { tables: [1], truncated: true }]), { value: "3+", failed: 0 });
-  assert.deepEqual(tablesFigure([{ tables: [1] }, "failed"]), { value: "1", failed: 1 });
-  assert.deepEqual(tablesFigure(["failed"]), { value: "—", failed: 1 });
+  assert.deepEqual(tablesFigure([]), { value: "0", failed: 0, warned: 0 }, "no connections: nothing reachable");
+  assert.deepEqual(tablesFigure([{ tables: [1, 2] }, undefined]), { value: "—", failed: 0, warned: 0 }, "waits for every answer");
+  assert.deepEqual(tablesFigure([{ tables: [1, 2] }, { tables: [1], truncated: true }]), { value: "3+", failed: 0, warned: 0 });
+  assert.deepEqual(tablesFigure([{ tables: [1] }, "failed"]), { value: "1", failed: 1, warned: 0 });
+  assert.deepEqual(tablesFigure(["failed"]), { value: "—", failed: 1, warned: 0 });
+  // A connection whose safe mode asks first (lake#906) is neither counted nor failed.
+  assert.deepEqual(tablesFigure([{ tables: [1, 2] }, "warned"]), { value: "2", failed: 0, warned: 1 });
+  assert.deepEqual(tablesFigure(["warned"]), { value: "—", failed: 0, warned: 1 });
 });
 
 test("add: only the chosen kind's filled-in fields reach create_connection", () => {

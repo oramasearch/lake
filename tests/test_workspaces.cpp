@@ -5334,3 +5334,181 @@ TEST(EngineCapabilities, ANamedCallReachesTheWorkspaceEngineAsWorkspaceActDoes) 
     scopes = {"workspace_act"};
     EXPECT_TRUE(call("delete_connection", {{"name", "warehouse"}}).ok);
 }
+
+// A database's safe mode (lake#906, docs/api/safe-mode.md): the level is the workspace Zetta's,
+// read and set through it by name; Lake keeps no copy.
+TEST(SafeMode, TheLevelIsReadAndSetInTheWorkspace) {
+    ReadyWorkspace r;
+    const auto get = r.registry.find("get_safe_mode");
+    const auto set = r.registry.find("set_safe_mode");
+    ASSERT_TRUE(get);
+    ASSERT_TRUE(set);
+    EXPECT_EQ(get->action, "read");
+    EXPECT_EQ(set->action, "write");
+    EXPECT_EQ(lake::api::engine_capability_group("set_safe_mode"), "Connections");
+    EXPECT_EQ(set->input_schema["properties"]["mode"]["enum"],
+              json::array({"off", "warn_writes", "warn_all"}));
+    EXPECT_EQ(set->input_schema["additionalProperties"], false);
+    EXPECT_FALSE(set->input_schema["properties"].contains("safe_mode_confirmation"));
+
+    r.w.caller->answers["get_safe_mode"] = {{"mode", "warn_writes"}};
+    const auto read = r.call("get_safe_mode", {{"database", "datasets"}});
+    ASSERT_TRUE(read.ok) << read.error.message;
+    EXPECT_EQ(read.value["mode"], "warn_writes");
+    EXPECT_EQ(r.w.caller->capability, "get_safe_mode");
+    EXPECT_TRUE(r.w.caller->read);
+    EXPECT_EQ(r.w.caller->input, (json{{"database", "datasets"}}));
+
+    r.w.caller->answers["set_safe_mode"] = {{"mode", "warn_all"}};
+    const auto changed =
+        r.call("set_safe_mode", {{"connection", "warehouse"}, {"mode", "warn_all"}});
+    ASSERT_TRUE(changed.ok) << changed.error.message;
+    EXPECT_EQ(r.w.caller->capability, "set_safe_mode");
+    EXPECT_FALSE(r.w.caller->read);
+    EXPECT_EQ(r.w.caller->input, (json{{"connection", "warehouse"}, {"mode", "warn_all"}}));
+
+    // The same through workspace_query and workspace_act.
+    EXPECT_TRUE(r.call("workspace_query",
+                       {{"capability", "get_safe_mode"}, {"input", {{"connection", "warehouse"}}}})
+                    .ok);
+    EXPECT_TRUE(r.call("workspace_act",
+                       {{"capability", "set_safe_mode"},
+                        {"input", {{"database", "datasets"}, {"mode", "off"}}}})
+                    .ok);
+    EXPECT_EQ(r.sent("set_safe_mode"), (json{{"database", "datasets"}, {"mode", "off"}}));
+
+    // A level that does not exist never reaches the workspace.
+    const std::size_t before = r.w.caller->calls.size();
+    const auto loud = r.call("set_safe_mode", {{"database", "datasets"}, {"mode", "loud"}});
+    ASSERT_FALSE(loud.ok);
+    EXPECT_EQ(loud.error.code, "invalid_input");
+    EXPECT_EQ(loud.error.path, "/mode");
+    EXPECT_EQ(r.w.caller->calls.size(), before);
+}
+
+// The workspace's safe_mode_warning reaches REST and MCP unchanged, details included, and the
+// same call with the confirmation runs (lake#906).
+TEST(SafeMode, AWarningCarriesItsStatementsAndTheConfirmationRunsTheCall) {
+    ReadyWorkspace r;
+    const json details{{"connection", "warehouse"},
+                       {"mode", "warn_all"},
+                       {"statements", json::array({"SELECT * FROM accounts"})},
+                       {"confirmation", "9f3a1c"}};
+    const auto warn = [&](const std::string& capability) {
+        r.w.caller->failure = lake::control::ZettaControlError{
+            "safe_mode_warning", "safe mode warn_all: confirm the statement first", "", details};
+        r.w.caller->failure_for = capability;
+    };
+    const auto settle = [&] {
+        r.w.caller->failure.reset();
+        r.w.caller->failure_for.clear();
+    };
+    const auto status = lake::api::find_error_code("safe_mode_warning");
+    ASSERT_NE(status, nullptr);
+    EXPECT_EQ(status->status, 409);
+
+    // A named engine capability that runs a statement on a connection.
+    warn("list_source_tables");
+    const auto tables = r.call("list_source_tables", {{"connection", "warehouse"}});
+    ASSERT_FALSE(tables.ok);
+    EXPECT_EQ(tables.error.code, "safe_mode_warning");
+    EXPECT_EQ(tables.error.path, "") << "no field is at fault, though the message quotes none";
+    EXPECT_EQ(tables.error.details, details);
+    EXPECT_EQ(tables.envelope()["error"]["details"], details);
+    EXPECT_EQ(lake::api::rest_status(tables), 409);
+    EXPECT_EQ(lake::api::rest_envelope(tables)["error"]["details"]["confirmation"], "9f3a1c");
+    settle();
+    EXPECT_TRUE(r.registry.find("list_source_tables")
+                    ->input_schema["properties"]
+                    .contains("safe_mode_confirmation"));
+    const auto listed = r.call("list_source_tables",
+                               {{"connection", "warehouse"}, {"safe_mode_confirmation", "9f3a1c"}});
+    ASSERT_TRUE(listed.ok) << listed.error.message;
+    EXPECT_EQ(r.sent("list_source_tables")["safe_mode_confirmation"], "9f3a1c");
+
+    // workspace_act passes the confirmation inside `input`.
+    warn("create_dataset_from_query");
+    const json pull{{"connection", "warehouse"},
+                    {"query", "SELECT * FROM accounts"},
+                    {"table_name", "accounts"}};
+    const auto refused =
+        r.call("workspace_act", {{"capability", "create_dataset_from_query"}, {"input", pull}});
+    ASSERT_FALSE(refused.ok);
+    EXPECT_EQ(refused.error.code, "safe_mode_warning");
+    EXPECT_EQ(refused.error.details, details);
+    settle();
+    json confirmed = pull;
+    confirmed["safe_mode_confirmation"] = "9f3a1c";
+    const auto pulled = r.call("workspace_act",
+                               {{"capability", "create_dataset_from_query"}, {"input", confirmed}});
+    ASSERT_TRUE(pulled.ok) << pulled.error.message;
+    EXPECT_EQ(r.sent("create_dataset_from_query")["safe_mode_confirmation"], "9f3a1c");
+    EXPECT_TRUE(r.registry.find("create_dataset_from_query")
+                    ->input_schema["properties"]
+                    .contains("safe_mode_confirmation"));
+
+    // workspace_sql under Warn All, and the read the confirmation runs.
+    const json sql_details{{"database", "datasets"},
+                           {"mode", "warn_all"},
+                           {"statements", json::array({"SELECT * FROM datasets.accounts"})},
+                           {"confirmation", "77aa"}};
+    r.w.caller->failure = lake::control::ZettaControlError{
+        "safe_mode_warning", "safe mode warn_all", "", sql_details};
+    r.w.caller->failure_for = "sql";
+    const auto query =
+        r.call("workspace_sql",
+               {{"statement", "SELECT * FROM datasets.accounts"}, {"database", "datasets"}});
+    ASSERT_FALSE(query.ok);
+    EXPECT_EQ(query.error.code, "safe_mode_warning");
+    EXPECT_EQ(query.error.details, sql_details);
+    EXPECT_FALSE(r.sent("sql").contains("safe_mode_confirmation"));
+    settle();
+    const auto ran = r.call("workspace_sql",
+                            {{"statement", "SELECT * FROM datasets.accounts"},
+                             {"database", "datasets"},
+                             {"safe_mode_confirmation", "77aa"}});
+    ASSERT_TRUE(ran.ok) << ran.error.message;
+    EXPECT_EQ(r.sent("sql")["safe_mode_confirmation"], "77aa");
+    // A confirmation is the warning's text; the workspace checks that it matches.
+    const auto odd =
+        r.call("workspace_sql", {{"statement", "SELECT 1"}, {"safe_mode_confirmation", 7}});
+    ASSERT_FALSE(odd.ok);
+    EXPECT_EQ(odd.error.path, "/safe_mode_confirmation");
+
+    // MCP answers the same envelope.
+    warn("list_source_tables");
+    lake::api::ApiContext context;
+    context.store = r.w.store.get();
+    context.workspaces = r.w.service.get();
+    context.authorized = true;
+    context.acting_identity = "admin";
+    context.operator_credential = true;
+    context.request_id = lake::control::new_uuid_v4();
+    const json request{{"jsonrpc", "2.0"},
+                       {"id", 1},
+                       {"method", "tools/call"},
+                       {"params",
+                        {{"name", "list_source_tables"},
+                         {"arguments",
+                          {{"customer_id", r.w.customer_id},
+                           {"workspace_id", r.w.workspace_id()},
+                           {"connection", "warehouse"}}}}}};
+    const auto answered =
+        liquid::runtime::block_on(lake::api::mcp_dispatch_async(r.registry, request, context, "t"));
+    ASSERT_TRUE(answered);
+    ASSERT_TRUE(*answered);
+    const json reply = json::parse(**answered);
+    EXPECT_EQ(reply["result"]["isError"], true);
+    EXPECT_EQ(reply["result"]["structuredContent"]["error"]["code"], "safe_mode_warning");
+    EXPECT_EQ(reply["result"]["structuredContent"]["error"]["details"], details);
+    settle();
+
+    // Any other refusal carries no details.
+    r.w.caller->failure =
+        lake::control::ZettaControlError{"engine_error", "no table", "", {{"revision", 3}}};
+    r.w.caller->failure_for = "list_source_tables";
+    const auto other = r.call("list_source_tables", {{"connection", "warehouse"}});
+    ASSERT_FALSE(other.ok);
+    EXPECT_TRUE(other.error.details.is_null());
+    EXPECT_FALSE(other.envelope()["error"].contains("details"));
+}
