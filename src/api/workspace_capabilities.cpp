@@ -49,6 +49,12 @@ call_workspace(ApiContext& context,
                std::string capability,
                bool read,
                nlohmann::json input) {
+    if (capability == "save_graph") {
+        if (std::string problem = pipeline::check_size(input); !problem.empty()) {
+            co_return control::ZettaControlResult<nlohmann::json>(
+                std::unexpected(control::ZettaControlError{"invalid_input", std::move(problem)}));
+        }
+    }
     const auto timing = context.workspace_call_timing;
     const std::size_t round = timing
         ? timing->completed_rounds.load(std::memory_order_relaxed) + 1 : 0;
@@ -2121,6 +2127,7 @@ void register_pipeline_capabilities(Registry& registry) {
                                                {"value", json::object()},
                                                {"edits",
                                                 {{"type", "array"},
+                                                 {"maxItems", pipeline::maximum_edits},
                                                  {"items", {{"type", "object"}}}}}},
                                               json::array({"project", "graph"})),
         .output_schema = {{"type", "object"}},
@@ -2146,28 +2153,44 @@ void register_pipeline_capabilities(Registry& registry) {
             if (!*read) {
                 co_return ApiResult::failure((*read).error().code, (*read).error().message);
             }
-            auto current = pipeline::from_json(**read);
-            if (!current) {
-                co_return ApiResult::failure("store_error", current.error());
+            // Own the graph and edits in the pool task: parsing, validation and serialization
+            // must not hold the HTTP executor, including when a stored graph exceeds our budget.
+            auto prepared = co_await blocking_call(
+                [value = std::move(**read), input, project, graph]() -> ApiResult {
+                    auto current = pipeline::from_json(value);
+                    if (!current) {
+                        return ApiResult::failure("invalid_input", current.error());
+                    }
+                    const std::size_t before = current->steps.size();
+                    const json edits = input.value("edits", json());
+                    if (edits.is_null() && !input.contains("op")) {
+                        return ApiResult::failure(
+                            "invalid_input", "give an op or a list of edits", "/op");
+                    }
+                    auto edited = edits.is_null()
+                                      ? pipeline::apply(*current, pipeline::edit_from_json(input))
+                                      : pipeline::apply_all(*current, edits);
+                    if (!edited) {
+                        return ApiResult::failure("invalid_input", edited.error());
+                    }
+                    json save{{"project", project},
+                              {"graph", current->graph_id.empty() ? graph : current->graph_id},
+                              {"nodes", pipeline::steps_json(*edited)},
+                              {"edges", pipeline::edges_json(*edited)}};
+                    if (edited->name != current->name) {
+                        save["new_name"] = edited->name;
+                    }
+                    json result{{"save", std::move(save)}, {"name", edited->name}};
+                    if (edited->steps.size() > before) {
+                        result["step"] = edited->steps.back().id;
+                    }
+                    return ApiResult::success(std::move(result));
+                },
+                [](const std::string& message) { return ApiResult::failure("busy", message); });
+            if (!prepared.ok) {
+                co_return prepared;
             }
-            const std::size_t before = current->steps.size();
-            const json edits = input.value("edits", json());
-            if (edits.is_null() && !input.contains("op")) {
-                co_return ApiResult::failure("invalid_input", "give an op or a list of edits", "/op");
-            }
-            auto edited = edits.is_null()
-                              ? pipeline::apply(*current, pipeline::edit_from_json(input))
-                              : pipeline::apply_all(*current, edits);
-            if (!edited) {
-                co_return ApiResult::failure("invalid_input", edited.error());
-            }
-            json save{{"project", project},
-                      {"graph", current->graph_id.empty() ? graph : current->graph_id},
-                      {"nodes", pipeline::steps_json(*edited)},
-                      {"edges", pipeline::edges_json(*edited)}};
-            if (edited->name != current->name) {
-                save["new_name"] = edited->name;
-            }
+            json save = std::move(prepared.value["save"]);
             auto saved =
                 co_await call_workspace(context, customer, "save_graph", false, std::move(save));
             if (!saved) {
@@ -2177,9 +2200,9 @@ void register_pipeline_capabilities(Registry& registry) {
                 co_return ApiResult::failure((*saved).error().code, (*saved).error().message);
             }
             json value = **saved;
-            value["name"] = edited->name;
-            if (edited->steps.size() > before) {
-                value["step"] = edited->steps.back().id;
+            value["name"] = std::move(prepared.value["name"]);
+            if (prepared.value.contains("step")) {
+                value["step"] = std::move(prepared.value["step"]);
             }
             co_return ApiResult::success(std::move(value));
         }});
@@ -5593,7 +5616,7 @@ liquid::runtime::task<ApiResult> render_pipeline(const json& input, ApiContext& 
     const std::string workspace_id = input.at("workspace_id");
     const std::string project = input.at("project");
     const std::string graph_name = input.at("graph");
-    const ApiResult read = called(
+    ApiResult read = called(
         co_await call_capability(context,
                                  "workspace_query",
                                  {{"customer_id", customer_id},
@@ -5602,7 +5625,12 @@ liquid::runtime::task<ApiResult> render_pipeline(const json& input, ApiContext& 
     if (!read.ok) {
         co_return read;
     }
-    const auto graph = pipeline::from_json(read.value);
+    auto parsed = co_await run_blocking(
+        [value = std::move(read.value)] { return pipeline::from_json(value); });
+    if (!parsed) {
+        co_return ApiResult::failure("busy", parsed.error().message);
+    }
+    auto graph = std::move(*parsed);
     if (!graph) {
         co_return ApiResult::failure("invalid_input",
                                      "the pipeline cannot be drawn: " + graph.error());
@@ -5616,7 +5644,7 @@ liquid::runtime::task<ApiResult> render_pipeline(const json& input, ApiContext& 
         json latest;
         for (const json& run : runs.value.value("runs", json::array())) {
             const std::string of = run.value("graph", std::string());
-            if ((of == graph_name || of == read.value.value("graph_id", std::string())) &&
+            if ((of == graph_name || of == graph->graph_id) &&
                 (!latest.is_object() ||
                  run.value("created", std::string()) >= latest.value("created", std::string()))) {
                 latest = run;
@@ -5635,8 +5663,15 @@ liquid::runtime::task<ApiResult> render_pipeline(const json& input, ApiContext& 
                              "/design/pipeline?customer_id=" + oauth_url_encode(customer_id) +
                              "&project=" + oauth_url_encode(project) +
                              "&graph=" + oauth_url_encode(graph->name) + "&step=";
-    co_return ApiResult::success(
-        {{"svg", pipeline::render_svg(*graph, status, input.value("step", std::string()), base)}});
+    co_return co_await blocking_call(
+        [graph = std::move(*graph),
+         status = std::move(status),
+         selected = input.value("step", std::string()),
+         base] {
+            return ApiResult::success(
+                {{"svg", pipeline::render_svg(graph, status, selected, base)}});
+        },
+        [](const std::string& message) { return ApiResult::failure("busy", message); });
 }
 
 } // namespace

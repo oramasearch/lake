@@ -23,6 +23,7 @@
 #include "lake/api/capabilities.hpp"
 #include "lake/api/datasets.hpp"
 #include "lake/api/mcp.hpp"
+#include "lake/api/pipeline.hpp"
 #include "lake/api/registry.hpp"
 #include "lake/api/rest.hpp"
 #include "lake/api/web_ui.hpp"
@@ -30,10 +31,10 @@
 #include "lake/control/agent_bus.hpp"
 #include "lake/control/agent_library.hpp"
 #include "lake/control/agent_runs.hpp"
-#include "lake/control/methodologies.hpp"
 #include "lake/control/builds.hpp"
 #include "lake/control/identity_crypto.hpp"
 #include "lake/control/memory_store.hpp"
+#include "lake/control/methodologies.hpp"
 #include "lake/control/zetta_workspace.hpp"
 #include "stream_fixture.hpp"
 #include "temporary_directory.hpp"
@@ -1024,7 +1025,7 @@ TEST(Workspaces, EditPipelineReadsValidatesAndSavesTheWholeGraph) {
 
     lake::api::Registry registry;
     lake::api::register_core_capabilities(registry, "test");
-    const auto call = [&](json input) {
+    const auto call = [&](json input, const std::string& capability = "edit_pipeline") {
         lake::api::ApiContext context;
         context.store = &store;
         context.workspaces = w.service.get();
@@ -1036,8 +1037,7 @@ TEST(Workspaces, EditPipelineReadsValidatesAndSavesTheWholeGraph) {
         input["project"] = "retention";
         input["workspace_id"] = w.workspace_id();
         input["graph"] = "churn";
-        auto completed =
-            liquid::runtime::block_on(registry.call_async("edit_pipeline", input, context));
+        auto completed = liquid::runtime::block_on(registry.call_async(capability, input, context));
         EXPECT_TRUE(completed);
         return std::move(*completed);
     };
@@ -1085,6 +1085,69 @@ TEST(Workspaces, EditPipelineReadsValidatesAndSavesTheWholeGraph) {
     EXPECT_NE(half.error.message.find("edit 2"), std::string::npos);
     EXPECT_EQ(w.caller->calls.size(), saves + 1) << "read, refused, nothing saved";
     EXPECT_FALSE(call(json::object()).ok) << "an op or edits";
+    // A saturated bounded pool refuses graph work without running it on the caller's executor.
+    const int previous = lake::api::detail::blocking_task_limit().exchange(0);
+    const auto busy_edit = call({{"op", "rename"}, {"name", "renamed"}});
+    const auto busy_render = call(json::object(), "render_pipeline");
+    lake::api::detail::blocking_task_limit().store(previous);
+    EXPECT_EQ(busy_edit.error.code, "busy");
+    EXPECT_EQ(busy_render.error.code, "busy");
+
+    // Stored graphs can predate Lake's limits or arrive through a direct engine client.
+    const json original = w.caller->answers["get_graph"];
+    for (const auto& [field, limit] : {std::pair{"nodes", lake::api::pipeline::maximum_steps},
+                                       std::pair{"edges", lake::api::pipeline::maximum_edges}}) {
+        w.caller->answers["get_graph"] = original;
+        json& stored = w.caller->answers["get_graph"];
+        stored["nodes"] = json::array();
+        stored["edges"] = json::array();
+        if (std::string_view(field) == "nodes") {
+            for (std::size_t index = 0; index <= limit; ++index) {
+                stored["nodes"].push_back({{"id", std::to_string(index)}, {"kind", "connect"}});
+            }
+        } else {
+            // A valid acyclic dense graph, just beyond the edge budget.
+            for (std::size_t index = 0; index < 450; ++index) {
+                stored["nodes"].push_back({{"id", std::to_string(index)}, {"kind", "connect"}});
+                for (std::size_t to = index + 1; to < 450 && stored["edges"].size() <= limit;
+                     ++to) {
+                    stored["edges"].push_back({{"from", std::to_string(index)},
+                                               {"to", std::to_string(to)},
+                                               {"kind", "data_flow"}});
+                }
+            }
+        }
+        const auto calls_before = w.caller->calls.size();
+        const auto oversized = call({{"op", "rename"}, {"name", "renamed"}});
+        EXPECT_FALSE(oversized.ok);
+        EXPECT_EQ(oversized.error.code, "invalid_input");
+        EXPECT_EQ(w.caller->calls.size(), calls_before + 1) << "no save of an oversized graph";
+        const auto drawn = call(json::object(), "render_pipeline");
+        EXPECT_FALSE(drawn.ok);
+        EXPECT_EQ(drawn.error.code, "invalid_input");
+
+        // Both named save_pipeline and the generic engine spelling reach the same guard.
+        json arguments{{"project", "retention"},
+                       {"graph", "churn"},
+                       {"nodes", json::array()},
+                       {"edges", json::array()}};
+        arguments[field] = json::array_t(limit + 1, json::object());
+        const auto saves_before = w.caller->calls.size();
+        EXPECT_FALSE(call(arguments, "save_pipeline").ok);
+        EXPECT_FALSE(
+            call({{"capability", "save_graph"}, {"input", arguments}}, "workspace_act").ok);
+        EXPECT_EQ(w.caller->calls.size(), saves_before);
+        // Exercise the shared forwarding guard independently of registry/body schema budgets.
+        lake::api::ApiContext direct;
+        direct.workspaces = w.service.get();
+        direct.workspace_id = w.workspace_id();
+        const auto forwarded = liquid::runtime::block_on(
+            lake::api::call_workspace(direct, w.customer_id, "save_graph", false, arguments));
+        ASSERT_TRUE(forwarded);
+        ASSERT_FALSE(*forwarded);
+        EXPECT_EQ(forwarded->error().code, "invalid_input");
+        EXPECT_EQ(w.caller->calls.size(), saves_before);
+    }
 }
 
 TEST(Workspaces, SearchIndexAnswersOnlyForAPublishedIndex) {

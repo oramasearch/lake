@@ -7,6 +7,9 @@ behavior and verification contract.
 LSR-104) separately from deployment; [models.md](../api/models.md) specifies the access contract.
 [PKI SAN validation](../api/pki.md#certificate-identities) is implemented in the source tree
 (lake#946); [status.md](status.md) keeps that fix separate from deployed PKI behavior.
+[status.md](status.md) records bounded pipeline processing (lake#967); the
+[API contract](../api/workspaces.md#pipeline-work-budgets) defines limits and worker-pool refusal.
+
 [status.md](status.md) tracks bounded JSON admission (lake#944) separately from deployment;
 [HTTP limits](../serving/http.md#request-body-limits) defines its credential and parser budgets.
 

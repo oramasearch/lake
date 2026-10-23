@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <format>
+#include <queue>
 #include <set>
 #include <span>
 
@@ -37,9 +38,13 @@ std::string url_encode(std::string_view input) {
 
 // A new step id: the kind and the first free number, so ids stay readable ("model-2").
 std::string fresh_id(const Graph& graph, std::string_view kind) {
+    std::set<std::string_view> ids;
+    for (const Step& step : graph.steps) {
+        ids.insert(step.id);
+    }
     for (int number = 1;; ++number) {
         std::string candidate = std::format("{}-{}", kind, number);
-        if (graph.step(candidate) == nullptr) {
+        if (!ids.contains(candidate)) {
             return candidate;
         }
     }
@@ -56,9 +61,28 @@ const Step* Graph::step(std::string_view id) const {
     return nullptr;
 }
 
-std::expected<Graph, std::string> from_json(const nlohmann::json& value) {
+std::string check_size(const nlohmann::json& value) {
     if (!value.is_object()) {
-        return std::unexpected(std::string("the pipeline is not an object"));
+        return "the pipeline is not an object";
+    }
+    for (const auto& [key, limit] :
+         {std::pair{"nodes", maximum_steps}, std::pair{"edges", maximum_edges}}) {
+        const auto found = value.find(key);
+        if (found != value.end()) {
+            if (!found->is_array()) {
+                return std::string(key) + " must be an array";
+            }
+            if (found->size() > limit) {
+                return "a pipeline allows at most " + std::to_string(limit) + " " + key;
+            }
+        }
+    }
+    return {};
+}
+
+std::expected<Graph, std::string> from_json(const nlohmann::json& value) {
+    if (std::string problem = check_size(value); !problem.empty()) {
+        return std::unexpected(std::move(problem));
     }
     Graph graph;
     graph.graph_id = text(value, "graph_id");
@@ -106,42 +130,50 @@ nlohmann::json edges_json(const Graph& graph) {
 }
 
 std::vector<std::string> topological_order(const Graph& graph) {
-    std::map<std::string, int> incoming;
-    for (const Step& step : graph.steps) {
-        incoming[step.id] = 0;
+    if (graph.steps.size() > maximum_steps || graph.edges.size() > maximum_edges) {
+        return {};
     }
-    for (const Edge& edge : graph.edges) {
-        if (incoming.contains(edge.to) && incoming.contains(edge.from)) {
-            ++incoming[edge.to];
-        }
-    }
-    std::vector<std::string> order;
-    std::set<std::string> placed;
-    // Repeatedly take the first step, in graph order, whose predecessors are all placed.
-    while (order.size() < graph.steps.size()) {
-        bool progressed = false;
-        for (const Step& step : graph.steps) {
-            if (placed.contains(step.id) || incoming[step.id] != 0) {
-                continue;
-            }
-            order.push_back(step.id);
-            placed.insert(step.id);
-            for (const Edge& edge : graph.edges) {
-                if (edge.from == step.id && incoming.contains(edge.to)) {
-                    --incoming[edge.to];
-                }
-            }
-            progressed = true;
-            break;
-        }
-        if (!progressed) {
+    std::map<std::string_view, std::size_t> indices;
+    for (std::size_t index = 0; index < graph.steps.size(); ++index) {
+        if (!indices.emplace(graph.steps[index].id, index).second) {
             return {};
         }
     }
-    return order;
+    std::vector<std::size_t> incoming(graph.steps.size());
+    std::vector<std::vector<std::size_t>> outgoing(graph.steps.size());
+    for (const Edge& edge : graph.edges) {
+        const auto from = indices.find(edge.from), to = indices.find(edge.to);
+        if (from != indices.end() && to != indices.end()) {
+            outgoing[from->second].push_back(to->second);
+            ++incoming[to->second];
+        }
+    }
+    // Kahn's algorithm, with the earliest original index winning every ready-step tie.
+    std::priority_queue<std::size_t, std::vector<std::size_t>, std::greater<>> ready;
+    for (std::size_t index = 0; index < incoming.size(); ++index) {
+        if (incoming[index] == 0) {
+            ready.push(index);
+        }
+    }
+    std::vector<std::string> order;
+    order.reserve(graph.steps.size());
+    while (!ready.empty()) {
+        const auto index = ready.top();
+        ready.pop();
+        order.push_back(graph.steps[index].id);
+        for (const auto next : outgoing[index]) {
+            if (--incoming[next] == 0) {
+                ready.push(next);
+            }
+        }
+    }
+    return order.size() == graph.steps.size() ? order : std::vector<std::string>();
 }
 
 std::string validate(const Graph& graph) {
+    if (graph.steps.size() > maximum_steps || graph.edges.size() > maximum_edges) {
+        return "the pipeline exceeds the step or edge limit";
+    }
     std::set<std::string> ids;
     for (const Step& step : graph.steps) {
         if (step.id.empty()) {
@@ -176,11 +208,16 @@ std::string validate(const Graph& graph) {
     return {};
 }
 
-std::expected<Graph, std::string> apply(Graph graph, const Edit& edit) {
+namespace {
+
+std::expected<void, std::string> mutate(Graph& graph, const Edit& edit) {
     const auto find = [&](const std::string& id) {
         return std::ranges::find_if(graph.steps, [&](const Step& step) { return step.id == id; });
     };
     if (edit.op == "add_step") {
+        if (graph.steps.size() >= maximum_steps) {
+            return std::unexpected("the pipeline exceeds the step limit");
+        }
         if (!known(edit.kind, step_kinds)) {
             return std::unexpected("choose a step kind");
         }
@@ -209,6 +246,9 @@ std::expected<Graph, std::string> apply(Graph graph, const Edit& edit) {
             return edge.from == edit.step || edge.to == edit.step;
         });
     } else if (edit.op == "add_edge") {
+        if (graph.edges.size() >= maximum_edges) {
+            return std::unexpected("the pipeline exceeds the edge limit");
+        }
         graph.edges.push_back(
             {edit.from, edit.to, edit.kind.empty() ? std::string("data_flow") : edit.kind});
     } else if (edit.op == "remove_edge") {
@@ -240,6 +280,18 @@ std::expected<Graph, std::string> apply(Graph graph, const Edit& edit) {
     } else {
         return std::unexpected("unknown edit '" + edit.op + "'");
     }
+    return {};
+}
+
+} // namespace
+
+std::expected<Graph, std::string> apply(Graph graph, const Edit& edit) {
+    if (graph.steps.size() > maximum_steps || graph.edges.size() > maximum_edges) {
+        return std::unexpected("the pipeline exceeds the step or edge limit");
+    }
+    if (auto changed = mutate(graph, edit); !changed) {
+        return std::unexpected(changed.error());
+    }
     if (std::string problem = validate(graph); !problem.empty()) {
         return std::unexpected(std::move(problem));
     }
@@ -263,6 +315,13 @@ std::expected<Graph, std::string> apply_all(Graph graph, const nlohmann::json& e
     if (!edits.is_array() || edits.empty()) {
         return std::unexpected(std::string("there are no edits to apply"));
     }
+    if (edits.size() > maximum_edits) {
+        return std::unexpected("a pipeline batch allows at most " + std::to_string(maximum_edits) +
+                               " edits");
+    }
+    if (graph.steps.size() > maximum_steps || graph.edges.size() > maximum_edges) {
+        return std::unexpected("the pipeline exceeds the step or edge limit");
+    }
     std::size_t position = 0;
     for (const nlohmann::json& value : edits) {
         ++position;
@@ -272,12 +331,11 @@ std::expected<Graph, std::string> apply_all(Graph graph, const nlohmann::json& e
         Edit edit = edit_from_json(value);
         // An added step takes the id the edit names, so later edits can refer to it.
         const std::string wanted = text(value, "id");
-        auto applied = apply(std::move(graph), edit);
+        auto applied = mutate(graph, edit);
         if (!applied) {
             return std::unexpected("edit " + std::to_string(position) + " (" + edit.op +
                                    "): " + applied.error());
         }
-        graph = std::move(*applied);
         if (edit.op == "add_step" && !wanted.empty() && graph.step(wanted) == nullptr) {
             graph.steps.back().id = wanted;
         }
@@ -292,6 +350,13 @@ std::string render_svg(const Graph& graph,
                        const std::map<std::string, std::string>& status,
                        std::string_view selected,
                        std::string_view link_base) {
+    if (graph.steps.size() > maximum_steps || graph.edges.size() > maximum_edges) {
+        return {};
+    }
+    std::map<std::string_view, const Step*> steps;
+    for (const Step& step : graph.steps) {
+        steps.emplace(step.id, &step);
+    }
     constexpr int column_width = 200, box_width = 164, box_height = 56, row_height = 84, top = 36,
                   left = 18;
     // Columns: the stage kinds that have steps, in canonical order; a step of an unknown kind goes
@@ -315,7 +380,7 @@ std::string render_svg(const Graph& graph,
     std::map<std::string, std::pair<int, int>> position; // id → (x, y) of the box's top-left
     std::map<std::string, int> filled;
     for (const std::string& id : order) {
-        const Step* step = graph.step(id);
+        const Step* step = steps.at(id);
         const std::string column = known(step->kind, step_kinds) ? step->kind : "other";
         const auto index = std::ranges::find(columns, column) - columns.begin();
         position[id] = {left + static_cast<int>(index) * column_width,

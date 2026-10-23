@@ -23,6 +23,11 @@ revision reads and private revision refusals (lake#970, LSR-104; [contract](../d
 `test_pki.cpp` rejects SAN configuration injection through ACME, SPIFFE and agent issuance
 (lake#946), validates malformed DNS/SPIFFE identifiers, and decodes successful certificates to
 check one SAN with exactly the requested type and bytes. See [PKI](../docs/api/pki.md).
+`Pipeline.*` checks pipeline budgets, original-index topology order, atomic final validation and
+validation of a reversed 50,000-step chain within one second (lake#967).
+`Workspaces.EditPipelineReadsValidatesAndSavesTheWholeGraph` checks oversized stored graphs on
+edit/render, both save spellings and bounded-pool saturation.
+
 `test_http_server.cpp` covers pre-body capability admission (lake#944): headers declaring 2 MiB
 receive 413 on public identity routes and 401 on protected routes before any body bytes are sent.
 The tests exercise both URL forms, rejected credentials, workspace Zetta and model gateway
