@@ -208,6 +208,12 @@ struct RepositoryArtifactMember {
     std::string reason;
 };
 
+// Set only by result-bound SLSA verification, never by a generic attestation signature.
+struct RepositoryArtifactSource {
+    std::string repository_id;
+    std::string change_id;
+};
+
 struct RepositoryArtifact {
     std::string id;
     std::string action;
@@ -224,6 +230,7 @@ struct RepositoryArtifact {
     std::vector<RepositoryArtifactAttestation> attestations;
     std::optional<RepositoryArtifactTrace> trace;
     std::vector<RepositoryArtifactMember> members;
+    std::optional<RepositoryArtifactSource> verified_source;
 };
 
 struct RepositoryArtifactPage {

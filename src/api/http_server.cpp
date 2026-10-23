@@ -4671,6 +4671,19 @@ private:
             if (!provenance) {
                 return std::unexpected(error_of(provenance.error()));
             }
+            // These environment claims are covered by both the action/result binding and the
+            // SLSA signature. Generic signed statements do not establish source provenance.
+            if (provenance->verified && provenance->statement.slsa_provenance) {
+                const auto& environment = provenance->statement.slsa_provenance->build_definition
+                                              .external_parameters.environment;
+                const auto repository_id = environment.find("LAKE_SOURCE_REPOSITORY_ID");
+                const auto change_id = environment.find("LAKE_SOURCE_CHANGE_ID");
+                if (repository_id != environment.end() && change_id != environment.end() &&
+                    !repository_id->second.empty() && !change_id->second.empty()) {
+                    artifact.verified_source =
+                        RepositoryArtifactSource{repository_id->second, change_id->second};
+                }
+            }
             append_attestation(artifact,
                                provenance->attestation,
                                provenance->statement,

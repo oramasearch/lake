@@ -720,3 +720,8 @@ MFA verification/enrollment/disablement, recovery-code sign-in and sign-up. The 
 client budget, keyed on the address from the trusted ingress hop (`order_client_address`), spans
 REST, MCP and hosted forms.
 See [authentication limits](../../docs/api/identity.md#authentication-attempt-limits).
+Release source verification (LSR-106) reads the signed action environment only after
+`build::verify_provenance` verifies the selected result in `http_server.cpp`.
+`forge_capabilities.cpp` rejects conflicting source claims and reloads every selected artifact
+before a protected push; stored release snapshots never supply verification authority.
+Unbound legacy releases remain readable. See [forge.md](../../docs/api/forge.md#source-binding-lsr-106).

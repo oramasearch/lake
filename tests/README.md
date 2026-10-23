@@ -910,3 +910,9 @@ direct connections. See [the contract](../docs/api/identity.md#authentication-at
 `SuspendedUsersLoseAgentDelegation` and `SuspendedUsersCannotDriveAgentOrMcpStreams` run the
 offboarding fixtures on both stores with reversible Clerk suspension, including cached contexts,
 lease claims, cleanup across worker restarts, and fresh work after an unban (lake#948).
+`Forge.ReleaseRejectsArtifactsBoundToAnotherSource` and
+`Forge.RequiredVerificationRechecksEveryReleaseArtifactSource` cover LSR-106: wrong repository or
+change, unbound legacy/imported snapshots, multiple artifacts, malformed snapshots, disappearing
+evidence and repository-store failures. `RepositoryHttp.PublicRepositoriesAreReadableAndPrivateRepositoriesAreHidden`
+adds a real signed SLSA action environment and checks matching and mismatched release creation.
+See [source binding](../docs/api/forge.md#source-binding-lsr-106).
