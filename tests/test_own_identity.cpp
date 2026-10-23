@@ -21,6 +21,7 @@
 #include <nlohmann/json.hpp>
 #include <pqxx/pqxx>
 
+#include "identity/taap.hpp"
 #include <liquid/liquid.hpp>
 
 #include "identity/taap.hpp"
@@ -507,6 +508,63 @@ TEST(OwnIdentity, ARotatedSuccessorDocumentIsRefused) {
         lake::control::own_identity::verify_document(base64url(*successor_encoded));
     EXPECT_FALSE(refused);
     EXPECT_FALSE(lake::control::own_identity::verify_document("not a document"));
+}
+
+namespace {
+
+// What a client sends to sign_in_taap: the signed body and the signature as JSON.
+nlohmann::json
+taap_sign_in_signature(liquid::signer& signer, const std::string& nonce, std::int64_t issued_at) {
+    const std::string body = "lake\n" + nonce + "\n" + std::to_string(issued_at);
+    std::vector<std::byte> bytes(body.size());
+    std::ranges::transform(body, bytes.begin(), [](char c) { return std::byte(c); });
+    auto signature = liquid::runtime::block_on(signer.sign("lake_sign_in", std::move(bytes)));
+    EXPECT_TRUE(signature);
+    return {{"algorithm", signature->algorithm},
+            {"signing_key_identifier", signature->signing_key_identifier},
+            {"signing_key_label", signature->signing_key_label},
+            {"signature_purpose", signature->signature_purpose},
+            {"signed_at", signature->signed_at},
+            {"bytes", base64url(signature->bytes)}};
+}
+
+} // namespace
+
+// liquid#383: a self-signed identity document that carries another person's TAAP identifier with
+// the attacker's own key must not sign in as that person. Only an initial document whose
+// identifier is derived from its own key proves the name.
+TEST(OwnIdentity, ASignInDocumentNamingAnotherIdentityIsRefused) {
+    auto victim = person_at(lake::test::fixture_path("taap-sign-in-victim"));
+    auto attacker = person_at(lake::test::fixture_path("taap-sign-in-attacker"));
+    const std::int64_t now = std::chrono::duration_cast<std::chrono::seconds>(
+                                 std::chrono::system_clock::now().time_since_epoch())
+                                 .count();
+    const std::string nonce = "taap-sign-in-forgery-nonce";
+
+    const auto honest = lake::control::identity_crypto::verify_taap_sign_in(
+        victim.document, "lake", nonce, now, taap_sign_in_signature(victim.signer, nonce, now));
+    ASSERT_TRUE(honest) << honest.error();
+    EXPECT_EQ(honest->taap_id, victim.signer.identity().taap_id);
+
+    auto forged = attacker.signer.document();
+    ASSERT_TRUE(forged);
+    forged->subject.taap_id = victim.signer.identity().taap_id;
+    forged->subject.fingerprint = victim.signer.identity().fingerprint;
+    auto body = liquid::identity_detail::canonical_document(*forged, false);
+    ASSERT_TRUE(body);
+    auto resigned = liquid::runtime::block_on(attacker.signer.sign("identity_document", *body));
+    ASSERT_TRUE(resigned);
+    forged->signatures = {*resigned};
+    auto forged_encoded = liquid::encode_identity_document(*forged);
+    ASSERT_TRUE(forged_encoded);
+    const auto refused = lake::control::identity_crypto::verify_taap_sign_in(
+        base64url(*forged_encoded),
+        "lake",
+        nonce,
+        now,
+        taap_sign_in_signature(attacker.signer, nonce, now));
+    EXPECT_FALSE(refused) << "signed in as " << refused->taap_id;
+    EXPECT_FALSE(lake::control::own_identity::verify_document(base64url(*forged_encoded)));
 }
 
 // A liquid push signed by the person's own key, linked to their account, is attributed to the

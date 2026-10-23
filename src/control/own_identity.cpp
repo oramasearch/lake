@@ -238,7 +238,11 @@ verify_challenge_signature(std::string_view document_text,
     // `liquid sign artifact <digest>` signs the digest text as a canonical CBOR text string.
     const auto body =
         as_bytes(nlohmann::json::to_cbor(nlohmann::json(std::string(challenge_text))));
-    const auto verified = liquid::verify(document->subject, "artifact", body, *signed_value);
+    // The document travels with the request, so the signer's name is bound to its key through it
+    // (liquid#383). Only an initial document proves its own name; verify_document already refused
+    // a successor, and the carried-chain verifier refuses one too.
+    const auto verified = liquid::verify(
+        document->subject, std::span{&*document, 1}, "artifact", body, *signed_value);
     if (!verified || !*verified) {
         return std::unexpected(StoreError{
             "unauthorized",

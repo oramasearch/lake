@@ -132,17 +132,26 @@ decision 65): without one, Lake mints a **managed key** for the account (as for 
 sign-in) and the person can switch to their own identity later ([Your own
 identity](#your-own-identity)). With one, and always in an application pool, password sign-up takes
 the client-held TAAP/1 document as a base64url-encoded canonical-CBOR `identity_document`. lake decodes and verifies its self-signature through libliquid's public
-`decode_identity_document`, `encode_identity_document`, and `verify_document` APIs, hashes the
-complete canonical record with SHA-512/256, writes `identity_documents`, and binds the resulting
-`taap_id` to the new user. A document is public, so sign-up takes one only with `identity_proof`, a
-fresh signature by its key ([Proving you hold the key](#proving-you-hold-the-key)). lake never
-receives a person's private key.
+`decode_identity_document`, `encode_identity_document`, and `verify_document` APIs, requires an
+initial document (its identifier must be derived from its own key, liquid#383), hashes the complete
+canonical record with SHA-512/256, writes `identity_documents`, and binds the resulting `taap_id` to
+the new user. A document is public, so sign-up takes one only with `identity_proof`, a fresh
+signature by its key ([Proving you hold the key](#proving-you-hold-the-key)). A rotated successor
+document is refused at sign-up, because without its chain it does not prove which identity it
+belongs to. lake never receives a person's private key.
 
 `sign_in_taap` lets that registered user return without a password. The client signs
 `pool_id + "\n" + nonce + "\n" + issued_at` with the key in its liquid identity document. Lake
-verifies the canonical document and `lake_sign_in` signature through libliquid, accepts a five
-minute freshness window, and records the assertion digest before issuing a one-day session.
-Assertion digests are one-use, so replay fails while the timestamp remains fresh.
+verifies the canonical document, then the `lake_sign_in` signature against that document as a
+carried identity chain (`liquid::verify(actor, chain, ...)`), accepts a five minute freshness window,
+and records the assertion digest before issuing a one-day session. Assertion digests are one-use,
+so replay fails while the timestamp remains fresh.
+
+The chain check is what binds the presented `taap_id` to the signing key (liquid#383). Before it,
+Lake checked only the document's self-signature and then the signature with the document's own key,
+so a self-signed document carrying a registered person's identifier with someone else's key signed
+in as that person. `OwnIdentity.ASignInDocumentNamingAnotherIdentityIsRefused` builds that forged
+document and is refused; the honest initial document signs in.
 
 ### Signing in with a TAAP key: the key must be the identity's
 

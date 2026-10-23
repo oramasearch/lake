@@ -23,6 +23,13 @@ TAAP purpose is `drip`, its signing key identifier is the session TAAP identity,
 signature covers the supplied canonical body under the `TAAP/1 drip` domain. Callers apply the
 returned scopes to the drip operation they intend to perform.
 
+The session key has no identity document chain: Lake minted it and stored its public half, and that
+stored key is the binding. The check therefore uses `liquid::verify_key_signature` against the
+stored key, not `liquid::verify`, which since liquid#383 attributes a signature only through an
+identity chain and would report an unknown signer. The `delegation/1` attestation is signed by
+Lake's instance key, which is not a liquid identity chain either; mint checks its profile schema and
+its signature against that key the same way.
+
 The input and output binary values use unpadded base64url. The returned private value is the
 32-byte Ed25519 seed. It is deliberately absent from later reads, audit details, and the
 `agent_sessions` table.
