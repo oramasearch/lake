@@ -1298,6 +1298,8 @@ TEST(TransparencyRegistry, ReplicationAuthenticatesTheBatchHeadBeforeWriting) {
     source_context.authorized = true;
     source_context.operator_credential = true;
     source_context.acting_identity = "admin";
+    // lake#915: every replica below pulls from a configured peer, so each refusal is this test's.
+    source_context.replication_peers = {"https://source.example"};
     const std::string entry = signed_attestation("taap:1:ed25519:replication-auth", 41);
     ASSERT_TRUE(source.append({entry, entry, entry}));
     const auto head = source.state();
