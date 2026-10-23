@@ -22,7 +22,9 @@ import {
   breakdownName,
   change,
   formatValue,
+  firstLimitDimension,
   fromLimit,
+  limitDimensions,
   limitNote,
   limitScale,
   limitTone,
@@ -220,7 +222,7 @@ export default function UsagePage() {
           )}
         </>
       )}
-      {limitOpen && <SetLimit customerId={limitOpen} limits={limits.find((q) => q.data?.customer_id === limitOpen)?.data ?? null} reading={reading} onClose={() => setLimitOpen(null)} />}
+      {limitOpen && <SetLimit customerId={limitOpen} limits={limits.find((q) => q.data?.customer_id === limitOpen)?.data ?? null} reading={reading} administrator={viewer.administrator} onClose={() => setLimitOpen(null)} />}
     </Page>
   );
 }
@@ -381,10 +383,11 @@ function LimitsCard({ limits, spaceNames, onSet }: { limits: Limits[]; spaceName
   );
 }
 
-function SetLimit({ customerId, limits, reading, onClose }: { customerId: string; limits: Limits | null; reading: Reading | null; onClose: () => void }) {
+function SetLimit({ customerId, limits, reading, administrator, onClose }: { customerId: string; limits: Limits | null; reading: Reading | null; administrator: boolean; onClose: () => void }) {
   const toast = useToast();
-  const dimensions = reading?.dimensions ?? [];
-  const [dimension, setDimension] = useState(dimensions[0]?.dimension ?? "storage");
+  // Storage's limit is the storage quota, the operator's alone (lake#976): an account is not offered it.
+  const dimensions = limitDimensions(reading?.dimensions ?? [], administrator);
+  const [dimension, setDimension] = useState(() => firstLimitDimension(reading?.dimensions ?? [], administrator));
   const unit = dimensions.find((d) => d.dimension === dimension)?.unit ?? "bytes";
   const existing = limits?.limits.find((l) => l.dimension === dimension);
   const [amount, setAmount] = useState(existing ? fromLimit(existing.limit, unit) : "");
@@ -401,6 +404,10 @@ function SetLimit({ customerId, limits, reading, onClose }: { customerId: string
   };
   const submit = async () => {
     setError(null);
+    if (!dimension) {
+      setError(new ApiError(400, "invalid_input", "choose what to limit", "/dimension"));
+      return;
+    }
     const limit = amount.trim() === "" || amount.trim() === "0" ? 0 : toLimit(amount, unit);
     if (limit === null) {
       setError(new ApiError(400, "invalid_input", `the limit must be a number of ${scale.label}`, "/limit"));
@@ -427,7 +434,11 @@ function SetLimit({ customerId, limits, reading, onClose }: { customerId: string
   return (
     <Modal
       title="Set a Usage Limit"
-      subtitle="A limit warns as usage nears it. Two are enforced: above the storage limit new repository writes are refused, and existing content stays readable; at the model tokens limit agents' model calls are refused until the month ends."
+      subtitle={
+        administrator
+          ? "A limit warns as usage nears it. Two are enforced: above the storage limit new repository writes are refused, and existing content stays readable; at the model tokens limit agents' model calls are refused until the month ends."
+          : "A limit warns as usage nears it. At the model tokens limit agents' model calls are refused until the month ends. The storage limit is set by the instance administrator."
+      }
       onClose={onClose}
       width={520}
       footer={
