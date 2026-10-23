@@ -1377,7 +1377,7 @@ struct VerifiedIdentityDocument {
 
 constexpr const char* user_columns =
     "id::text, coalesce(taap_id,''), coalesce(email,''), display_name, "
-    "created_at::text, updated_at::text";
+    "created_at::text, updated_at::text, coalesce(disabled_at::text, '')";
 constexpr const char* organization_columns =
     "id::text, coalesce(taap_id,''), display_name, created_at::text, "
     "updated_at::text";
@@ -1531,7 +1531,8 @@ User user_of(const pqxx::row& r) {
                 r[2].as<std::string>(),
                 r[3].as<std::string>(),
                 r[4].as<std::string>(),
-                r[5].as<std::string>()};
+                r[5].as<std::string>(),
+                r[6].as<std::string>()};
 }
 Organization organization_of(const pqxx::row& r) {
     return Organization{r[0].as<std::string>(),
@@ -5511,6 +5512,56 @@ public:
         return launch_from(rows[0]);
     }
 
+    // Lock the person before changing their delegated work. Offboarding locks the same row
+    // first, so a concurrent create/claim/renew either precedes revocation or is refused.
+    static Result<void> active_delegator(pqxx::work& tx, const std::string& user_id) {
+        if (user_id.empty()) {
+            return {}; // system work carries no person's authority
+        }
+        const auto user =
+            tx.exec_params("SELECT 1 FROM users WHERE id = $1::uuid AND disabled_at IS NULL "
+                           "AND deleted_at IS NULL FOR SHARE",
+                           user_id);
+        if (user.empty()) {
+            return std::unexpected(StoreError{"unauthorized", "delegating account is not active"});
+        }
+        return {};
+    }
+
+    static void revoke_agent_delegations(pqxx::work& tx, const std::string& user_id) {
+        const auto launches = tx.exec_params(
+            "UPDATE agent_launches SET desired = 'absent', generation = generation + 1, "
+            "stop_reason = 'Stopped: the account that started this run is disabled.', "
+            "updated_at = now() WHERE created_by_user_id = $1::uuid AND desired = 'present' "
+            "RETURNING id::text",
+            user_id);
+        const auto schedules = tx.exec_params(
+            "UPDATE agent_cron_schedules SET desired = 'absent', generation = generation + 1, "
+            "updated_at = now() WHERE created_by_user_id = $1::uuid AND desired = 'present' "
+            "RETURNING id::text",
+            user_id);
+        tx.exec_params("UPDATE agent_tasks SET desired = 'absent' "
+                       "WHERE requested_by_user_id = $1::uuid AND desired = 'present'",
+                       user_id);
+        tx.exec_params(
+            "INSERT INTO agent_task_status AS ts (task_id, phase, notice, finished_at) "
+            "SELECT id, 'Failed', 'Stopped: the account that requested this task is disabled.', "
+            "now() "
+            "FROM agent_tasks WHERE requested_by_user_id = $1::uuid "
+            "ON CONFLICT (task_id) DO UPDATE SET credential_sha256 = '', lease_until = NULL, "
+            "retry_notice_pending = false, "
+            "phase = CASE WHEN ts.phase IN ('', 'Running') THEN 'Failed' ELSE ts.phase END, "
+            "notice = CASE WHEN ts.phase IN ('', 'Running') THEN "
+            "'Stopped: the account that requested this task is disabled.' ELSE ts.notice END, "
+            "finished_at = coalesce(ts.finished_at, now()), updated_at = now()",
+            user_id);
+        for (const pqxx::result* rows : {&launches, &schedules}) {
+            for (const pqxx::row& row : *rows) {
+                tx.exec_params("SELECT pg_notify('lake_services', $1)", row[0].as<std::string>());
+            }
+        }
+    }
+
     // A launch credential (lake#231): the launch must be present, the operator must have written
     // the credential's digest, and the digests must match. It acts as the person who launched.
     Result<Principal> launch_principal(const std::string& secret) {
@@ -5523,7 +5574,9 @@ public:
                 "SELECT COALESCE(ls.credential_sha256, ''), array_to_json(l.scopes)::text, "
                 "COALESCE(users.id::text, ''), COALESCE(users.taap_id, '') FROM agent_launches l "
                 "LEFT JOIN agent_launch_status ls ON ls.launch_id = l.id LEFT JOIN users ON "
-                "users.id = l.created_by_user_id WHERE l.id = $1::uuid AND l.desired = 'present'",
+                "users.id = l.created_by_user_id WHERE l.id = $1::uuid AND l.desired = 'present' "
+                "AND users.id IS NOT NULL AND users.disabled_at IS NULL AND users.deleted_at IS "
+                "NULL",
                 parsed->first);
             if (rows.empty() || !constant_time_hex_equal(identity_crypto::sha256_hex(secret),
                                                          rows[0][0].as<std::string>())) {
@@ -5551,6 +5604,9 @@ public:
             return std::unexpected(StoreError{"invalid_input", "agent launch is invalid"});
         }
         return with_tx<AgentLaunch>([&](pqxx::work& tx) -> Result<AgentLaunch> {
+            if (auto active = active_delegator(tx, in.created_by_user_id); !active) {
+                return std::unexpected(active.error());
+            }
             const pqxx::result customers =
                 tx.exec_params("SELECT 1 FROM customers WHERE id = $1::uuid", in.customer_id);
             if (customers.empty()) {
@@ -6177,7 +6233,8 @@ public:
                 "COALESCE(users.id::text, ''), COALESCE(users.taap_id, '') FROM "
                 "agent_cron_schedules s LEFT JOIN agent_cron_schedule_status ss ON "
                 "ss.schedule_id = s.id LEFT JOIN users ON users.id = s.created_by_user_id "
-                "WHERE s.id = $1::uuid AND s.desired = 'present'",
+                "WHERE s.id = $1::uuid AND s.desired = 'present' AND users.id IS NOT NULL "
+                "AND users.disabled_at IS NULL AND users.deleted_at IS NULL",
                 parsed->first);
             if (rows.empty() || !constant_time_hex_equal(identity_crypto::sha256_hex(secret),
                                                          rows[0][0].as<std::string>())) {
@@ -6204,6 +6261,9 @@ public:
             return std::unexpected(StoreError{"invalid_input", "agent schedule is invalid"});
         }
         return with_tx<AgentCronSchedule>([&](pqxx::work& tx) -> Result<AgentCronSchedule> {
+            if (auto active = active_delegator(tx, in.created_by_user_id); !active) {
+                return std::unexpected(active.error());
+            }
             const pqxx::result customers =
                 tx.exec_params("SELECT 1 FROM customers WHERE id = $1::uuid", in.customer_id);
             if (customers.empty()) {
@@ -6427,6 +6487,9 @@ public:
             return std::unexpected(StoreError{"invalid_input", "agent task is invalid"});
         }
         return with_tx<AgentTask>([&](pqxx::work& tx) -> Result<AgentTask> {
+            if (auto active = active_delegator(tx, in.requested_by_user_id); !active) {
+                return std::unexpected(active.error());
+            }
             // The request, its message and answer go to the task's workspace (lake#374): the row
             // keeps the default empty body.
             const std::string id = in.id.empty() ? new_uuid_v4() : in.id;
@@ -6563,6 +6626,13 @@ public:
                 StoreError{"invalid_input", "agent lease must be 60..3600 seconds"});
         }
         return with_tx<AgentTask>([&](pqxx::work& tx) -> Result<AgentTask> {
+            const auto task = one_task(tx, id);
+            if (!task) {
+                return std::unexpected(task.error());
+            }
+            if (auto active = active_delegator(tx, task->requested_by_user_id); !active) {
+                return std::unexpected(active.error());
+            }
             // The unique row and conditional update serialize first claims and reclaims.
             const pqxx::result claimed = tx.exec_params(
                 "INSERT INTO agent_task_status (task_id, phase, credential_sha256, started_at, "
@@ -6594,6 +6664,17 @@ public:
     Result<void> renew_agent_task_lease(const std::string& id,
                                         const std::string& credential_sha256) override {
         return with_tx<void>([&](pqxx::work& tx) -> Result<void> {
+            const auto task = one_task(tx, id);
+            if (!task) {
+                return std::unexpected(task.error());
+            }
+            if (task->desired != "present") {
+                return std::unexpected(
+                    StoreError{"conflict", "the task claim is no longer active"});
+            }
+            if (auto active = active_delegator(tx, task->requested_by_user_id); !active) {
+                return std::unexpected(active.error());
+            }
             const auto rows = tx.exec_params(
                 "UPDATE agent_task_status SET lease_until = now() + make_interval(secs => "
                 "lease_seconds), "
@@ -6730,7 +6811,9 @@ public:
                 "SELECT COALESCE(ts.credential_sha256, ''), array_to_json(t.scopes)::text, "
                 "COALESCE(users.id::text, ''), COALESCE(users.taap_id, '') FROM agent_tasks t "
                 "LEFT JOIN agent_task_status ts ON ts.task_id = t.id LEFT JOIN users ON users.id = "
-                "t.requested_by_user_id WHERE t.id = $1::uuid AND t.desired = 'present'",
+                "t.requested_by_user_id WHERE t.id = $1::uuid AND t.desired = 'present' "
+                "AND users.id IS NOT NULL AND users.disabled_at IS NULL AND users.deleted_at IS "
+                "NULL",
                 parsed->first);
             if (rows.empty() || !constant_time_hex_equal(identity_crypto::sha256_hex(secret),
                                                          rows[0][0].as<std::string>())) {
@@ -8510,6 +8593,7 @@ public:
             tx.exec_params("UPDATE users SET disabled_at = coalesce(disabled_at, now()) "
                            "WHERE id = $1::uuid",
                            *user_id);
+            revoke_agent_delegations(tx, *user_id);
             tx.exec_params("UPDATE sessions SET revoked_at = now() WHERE user_id = $1::uuid "
                            "AND revoked_at IS NULL",
                            *user_id);
@@ -10748,6 +10832,7 @@ public:
                 "disabled_at = coalesce(disabled_at, now()) WHERE id = $1::uuid "
                 "RETURNING deleted_at::text",
                 user_id);
+            revoke_agent_delegations(tx, user_id);
             plan.deleted_at = deleted[0][0].as<std::string>();
             return plan;
         });

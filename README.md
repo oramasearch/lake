@@ -177,6 +177,8 @@ when it calls a capability undeployed that the observed OpenAPI lists.
 [`docs/ui/front-door.md`](docs/ui/front-door.md) for the customer journey.
 [`docs/api/auth.md`](docs/api/auth.md) describes bearer credentials and the session migration;
 its [measurement proof](docs/build/session-authentication.md) records the regression coverage.
+[Clerk offboarding](docs/api/clerk.md#webhooks) describes account disablement and revocation of
+delegated agent access, including workspace-stream cleanup.
 [`docs/control-plane/network.md`](docs/control-plane/network.md) describes secure-networking
 desired state, audit, rollout and the operator handoff; [`docs/api/network.md`](docs/api/network.md)
 defines its permission-checked REST and MCP capabilities; [`docs/ui/network.md`](docs/ui/network.md)

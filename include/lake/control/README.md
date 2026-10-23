@@ -1,5 +1,10 @@
 # Public control types
 
+`User::disabled_at` retains offboarding state for administrative reads and the stream workers.
+Person-owned agent creation, claims, renewal and credential resolution require an active account;
+offboarding withdraws its launches/schedules and invalidates its tasks in the same store operation
+([Clerk offboarding](../../../docs/api/clerk.md#webhooks), lake#951).
+
 `network_records.hpp` defines the scoped session/activity provider and its explicit pending
 default. `pki::Service` can ensure a persisted customer authority and sign a tunnel CSR without
 handling the recipient's private key. `network.hpp` carries public client/relay CA fields and

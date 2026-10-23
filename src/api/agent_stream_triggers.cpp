@@ -296,15 +296,24 @@ std::expected<std::string, ApiError> customer_object(const json& input, ApiConte
 
 } // namespace
 
-std::optional<ApiContext>
+control::Result<ApiContext>
 stream_person(const ApiContext& base, const std::string& user_id, std::string method) {
-    if (user_id.empty() || base.store == nullptr) {
-        return std::nullopt;
+    if (base.store == nullptr) {
+        return std::unexpected(
+            control::StoreError{"store_unavailable", "control store is unavailable"});
+    }
+    if (user_id.empty()) {
+        return std::unexpected(
+            control::StoreError{"unauthorized", "stream has no delegating account"});
     }
     const auto user = base.store->get_user(user_id);
+    if (!user) {
+        return std::unexpected(user.error());
+    }
     // The person's identity is a TAAP id, never the operator's (lake#870).
-    if (!user || !control::valid_principal_id(user->taap_id)) {
-        return std::nullopt;
+    if (!user->disabled_at.empty() || !control::valid_principal_id(user->taap_id)) {
+        return std::unexpected(
+            control::StoreError{"unauthorized", "stream's delegating account is not active"});
     }
     ApiContext context = base;
     context.authorized = true;
@@ -448,7 +457,19 @@ AgentStreamPass AgentStreamWorker::pass(ApiContext& context) {
                     trigger.topic;
                 const auto person = stream_person(context, trigger.set_by, "agent_stream_trigger");
                 if (!person) {
-                    report.problems.push_back(label + ": the person who set it is no longer known");
+                    if (person.error().code == "not_found" ||
+                        person.error().code == "unauthorized") {
+                        const auto removed = control::settled(
+                            liquid::runtime::block_on(control::remove_agent_stream_trigger(
+                                *records, customer.id, trigger.id)));
+                        if (!removed) {
+                            report.problems.push_back(label + ": " + removed.error().message);
+                        } else {
+                            ++report.removed;
+                        }
+                    } else {
+                        report.problems.push_back(label + ": " + person.error().message);
+                    }
                     continue;
                 }
                 const StreamRuns runs =

@@ -39,6 +39,8 @@ template <class T> using Result = std::expected<T, StoreError>;
 
 struct User {
     std::string id, taap_id, email, display_name, created_at, updated_at;
+    // Retained for administration; a disabled user cannot supply delegated authority.
+    std::string disabled_at;
 };
 struct Organization {
     std::string id, taap_id, display_name, created_at, updated_at;
@@ -2309,7 +2311,9 @@ public:
     // subject; not_found when none is linked, conflict when another account has the email.
     virtual Result<std::string> update_clerk_user(const ClerkIdentity&) = 0;
     // user.deleted: disables the account linked to the subject and revokes every session, token
-    // and device of it. Nothing is erased. Answers the account's user id.
+    // and device of it. Withdraws its launches/schedules and invalidates tasks and leases in
+    // the same operation (lake#951); stream workers refuse the disabled user before cleanup.
+    // Account and workspace data remain. Answers the account's user id.
     virtual Result<std::string> disable_clerk_user(const std::string& subject) = 0;
     // Whether a webhook delivery (its svix-id) was already applied, and recording that it was.
     virtual Result<bool> clerk_webhook_applied(const std::string& delivery_id) = 0;

@@ -99,10 +99,19 @@ account is disabled.
   the username) of the account linked to the subject. It never links or relinks an account. An
   email another account has is refused.
 - **`user.deleted`** disables the linked account (`users.disabled_at`) and revokes every session,
-  token and device of it in one transaction. **Nothing is erased**: the account, its workspaces and its
+  token and device of it in one transaction. It also withdraws its agent launches and schedules,
+  removes task credentials and leases, and prevents queued tasks from being claimed (lake#951,
+  LSR-086). Agent credential resolution and new person-owned launches, schedules and tasks require
+  an active account, including accounts disabled before this change. Creation, claims and lease
+  renewals lock that account against concurrent offboarding. **Nothing is erased**: the account, its workspaces and its
   audit stay; deleting data is a separate, confirmed step. A disabled account is issued no session
   (`issue_session`) and its credentials no longer resolve (`context_for`), so Clerk sign-in, TAAP
   sign-in and tokens all stop.
+  Agent stream triggers and MCP streams refuse that person's authority immediately. Their sealed
+  workspace records retain pending cleanup across restarts: on the next reachable worker pass,
+  agent triggers are removed and MCP streaming settings, subscriptions and pending results are
+  cleared. A storage outage leaves those records for retry and grants no authority; other workspace
+  data and the MCP connection remain. The same agent-workload withdrawal runs on account deletion.
 - Other event types are acknowledged and ignored. `session.revoked` is not acted on: a Lake session
   is Lake's own, not tied to a Clerk session id.
 - **Audit:** every delivery is one central event, object `clerk`, method `clerk_webhook`, action
@@ -122,6 +131,12 @@ timestamps and a replayed `svix-id`; on both stores, `user.created` giving the s
 first sign-in (and a later sign-in reaching it), linking by verified email only, `user.updated`,
 and `user.deleted` disabling the account with its session no longer working; and the route's `404`
 without the secret, `401` to a forged delivery and `200` creating the account.
+
+`ctest --test-dir build --timeout 600 -R 'DisablingAUserRevokesAgentDelegation|DisabledUsersCannotDriveAgentOrMcpStreams'`
+checks retained launch, schedule and running-task credentials, queued claims, cached stream
+contexts, direct disabled-account state, repeat offboarding and another person's unaffected launch
+on memory and PostgreSQL. Keep the store checks and the shared stream-person resolver together
+when changing offboarding; workload cleanup alone does not protect previously disabled accounts.
 
 ## Configuration
 
