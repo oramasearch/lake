@@ -4231,9 +4231,11 @@ TEST(HttpServer, ClerkExchangeRefusesAForgedTokenAndSignOutEndsClerkToo) {
     options.worker_coroutines = 1;
     options.instance_kek = "clerk-http-test-kek";
     options.store = std::make_shared<lake::control::InMemoryStore>();
-    // base64("127.0.0.1$"): a Frontend API host that refuses connections, so the JWKS fetch fails
-    // fast and every token is refused.
+    // base64("127.0.0.1$"); the isolated JWKS response trusts no signing keys.
     options.clerk_publishable_key = "pk_test_MTI3LjAuMC4xJA";
+    options.clerk_http = [](const auto&, const auto&) {
+        return lake::api::ClerkResponse{200, R"({"keys":[]})", ""};
+    };
     lake::api::ApiServer server(options);
     ASSERT_TRUE(server.start()) << server.reason();
     HttpConnection connection(server.port());
@@ -4279,7 +4281,7 @@ TEST(HttpServer, ClerkSessionExchangeIsAbsentWithoutClerk) {
 TEST(HttpServer, ClerkWebhookIsSignedAndAbsentWithoutItsSecret) {
     const std::string secret = "whsec_bGFrZSBjbGVyayB3ZWJob29rIHRlc3Qgc2VjcmV0ISE=";
     const std::string body =
-        R"({"type":"user.created","object":"event","data":{"id":"user_http","first_name":"H",)"
+        R"({"type":"user.created","timestamp":1,"object":"event","data":{"banned":false,"locked":false,"id":"user_http","first_name":"H",)"
         R"("primary_email_address_id":"idn_1","email_addresses":[{"id":"idn_1",)"
         R"("email_address":"http-hook@example.test","verification":{"status":"verified"}}]}})";
     const std::string timestamp =

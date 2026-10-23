@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstring>
+#include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <map>
@@ -119,7 +120,8 @@ lake::control::ClerkIdentity person(std::string subject) {
             "browser",
             identity->taap_id,
             identity->public_key,
-            identity->wrapped_seed};
+            identity->wrapped_seed,
+            static_cast<std::int64_t>(std::time(nullptr))};
 }
 
 // Two spaces with one Ready workspace each (and a second one in the first space), every workspace

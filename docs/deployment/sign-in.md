@@ -49,6 +49,10 @@ from the instance's secret key, every hour and on any change:
 - the webhook endpoint `https://<host>/identity/clerk-webhook` and its signing secret, given to Lake
   as `LAKE_CLERK_WEBHOOK_SECRET`;
 - `LAKE_CLERK_PUBLISHABLE_KEY`, derived from the instance's Frontend API host;
+- lake#948 additionally requires `LAKE_CLERK_SECRET_KEY` from that same instance for an uncached
+  account restriction check at exchange, the `0094_clerk_revocation` schema with `clerk_revocation_guard`, and
+  subscriptions to `session.revoked`, `session.removed` and `session.ended`; operator adoption is
+  a rollout prerequisite, and exchange fails closed until the server key is injected;
 - on a production instance, the DNS records Clerk asks for, as `CloudflareDNSRecord`s in the Lake's
   zone.
 

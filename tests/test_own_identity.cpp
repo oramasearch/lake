@@ -7,6 +7,7 @@
 #include "repository_test_support.hpp"
 #include "temporary_directory.hpp"
 
+#include <ctime>
 #include <gtest/gtest.h>
 
 #include <algorithm>
@@ -480,7 +481,8 @@ TEST(OwnIdentity, AClerkSignInStartsWithAManagedKey) {
                                              "browser",
                                              minted->taap_id,
                                              minted->public_key,
-                                             minted->wrapped_seed});
+                                             minted->wrapped_seed,
+                                             static_cast<std::int64_t>(std::time(nullptr))});
     ASSERT_TRUE(issued) << issued.error().message;
     const auto principal = store.context_for(issued->secret);
     ASSERT_TRUE(principal);

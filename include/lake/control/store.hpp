@@ -43,6 +43,11 @@ struct User {
     std::string id, taap_id, email, display_name, created_at, updated_at;
     // Retained for administration; a disabled user cannot supply delegated authority.
     std::string disabled_at;
+    bool clerk_suspended = false;
+
+    bool may_act() const {
+        return disabled_at.empty() && !clerk_suspended;
+    }
 };
 struct Organization {
     std::string id, taap_id, display_name, created_at, updated_at;
@@ -323,6 +328,14 @@ struct OAuthIdentity {
 struct ClerkIdentity {
     std::string subject, email, display_name, device_name;
     std::string custodial_taap_id, custodial_public_key, custodial_wrapped_seed;
+    std::int64_t issued_at = 0; // verified Clerk JWT iat; required only for exchange
+};
+// Upstream account state, ordered by Clerk's user updated_at (milliseconds).
+struct ClerkUserState {
+    std::string subject;
+    std::int64_t updated_at = 0;
+    bool suspended = false;
+    bool deleted = false;
 };
 // What a Clerk user event did to Lake (lake#765, docs/api/clerk.md#webhooks).
 struct ClerkUserProvisioned {
@@ -2336,6 +2349,14 @@ public:
     // user.created: what a first sign_in_clerk does to the account, without a session. Repeating
     // it finds the same account.
     virtual Result<ClerkUserProvisioned> provision_clerk_user(const ClerkIdentity&) = 0;
+    // Retain state even before provisioning. Only a newer update can lift suspension;
+    // deletion is permanent. Suspension revokes all sessions and devices atomically. A current
+    // identical state returns true so retries can finish profile/provisioning work; false is stale.
+    virtual Result<bool> apply_clerk_user_state(const ClerkUserState&) = 0;
+    // Retain a millisecond revocation watermark before exchange too; revoke all account
+    // credentials.
+    virtual Result<void> revoke_clerk_sessions(const std::string& subject,
+                                               std::int64_t revoked_at) = 0;
     // user.updated: the email (when non-empty) and display name of the account linked to the
     // subject; not_found when none is linked, conflict when another account has the email.
     virtual Result<std::string> update_clerk_user(const ClerkIdentity&) = 0;

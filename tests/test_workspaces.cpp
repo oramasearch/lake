@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <chrono>
+#include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -118,7 +119,8 @@ lake::control::ClerkIdentity minted(std::string subject) {
                                         "browser",
                                         identity->taap_id,
                                         identity->public_key,
-                                        identity->wrapped_seed};
+                                        identity->wrapped_seed,
+                                        static_cast<std::int64_t>(std::time(nullptr))};
 }
 
 // A store with one signed-in person and their personal customer, and the service over it.

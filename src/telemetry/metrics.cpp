@@ -1406,6 +1406,15 @@ public:
     provision_clerk_user(const control::ClerkIdentity& value) override {
         return call("provision_clerk_user", [&] { return store_->provision_clerk_user(value); });
     }
+    control::Result<bool> apply_clerk_user_state(const control::ClerkUserState& value) override {
+        return call("apply_clerk_user_state",
+                    [&] { return store_->apply_clerk_user_state(value); });
+    }
+    control::Result<void> revoke_clerk_sessions(const std::string& subject,
+                                                std::int64_t revoked_at) override {
+        return call("revoke_clerk_sessions",
+                    [&] { return store_->revoke_clerk_sessions(subject, revoked_at); });
+    }
     control::Result<std::string> update_clerk_user(const control::ClerkIdentity& value) override {
         return call("update_clerk_user", [&] { return store_->update_clerk_user(value); });
     }
