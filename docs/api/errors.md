@@ -16,6 +16,8 @@ Every capability answers a failure the same way on REST and MCP:
 - `path` is a JSON pointer to the input field at fault whenever the input is at fault, and empty
   otherwise. It is never put in the message. See [Where `path` comes from](#where-path-comes-from).
 - `reason` and `help` appear on `unauthenticated` only.
+- `details` appears on `safe_mode_warning` only: what the database's safe mode would run and the
+  confirmation that runs it ([safe mode](safe-mode.md), lake#906).
 
 ## Codes
 
@@ -41,6 +43,7 @@ Every capability answers a failure the same way on REST and MCP:
 | `locked` | 409 | Another writer holds the repository reference; retry. |
 | `unrecoverable` | 409 | The request cannot succeed as asked, such as recovering a key only a lost device held. |
 | `not_approved` | 409 | The workspace action needs an approval it does not have yet: approve the plan or the decision first. |
+| `safe_mode_warning` | 409 | The database's safe mode warns on what the call would run. `details` is `{database` or `connection, mode, statements, confirmation}`; the same call repeated with `safe_mode_confirmation` set to `confirmation` runs the statements ([safe mode](safe-mode.md)). |
 | `gate_blocked` | 409 | A pipeline gate refused the run; the message names the failing check. |
 | `sign_in_required` | 409 | An MCP connection's server needs a person to sign in again, or its credential is missing or refused ([MCP connections](mcp-connections.md#signing-in)). |
 | `invalid_chain` | 409 | The audit log's hash chain is broken: an event is missing or was changed. |

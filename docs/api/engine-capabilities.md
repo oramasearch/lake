@@ -187,6 +187,13 @@ The groups are the ones `llms.txt` and `llms-full.txt` list them under.
 | `list_source_tables` | same | read |
 | `create_connection` | same | write |
 | `delete_connection` | same | write |
+| `get_safe_mode` | same | read |
+| `set_safe_mode` | same | write |
+
+`get_safe_mode` and `set_safe_mode` are a database's or connection's safe mode (lake#906,
+[safe-mode.md](safe-mode.md)); Lake describes their input itself until the vendored engine schema
+carries them. Every capability here whose input takes `database` or `connection` also takes
+`safe_mode_confirmation`, sent after a `safe_mode_warning`.
 
 ### Agents
 

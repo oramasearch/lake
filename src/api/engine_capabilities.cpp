@@ -71,6 +71,7 @@ constexpr auto engine_names = std::to_array<EngineName>({
     {"get_trace", "get_trace", "Engine"},
     {"list_traces", "list_traces", "Engine"},
     {"list_source_tables", "list_source_tables", "Connections"},
+    {"get_safe_mode", "get_safe_mode", "Connections"},
     {"list_dataset_generators", "list_dataset_generators", "Datasets"},
     {"list_agents", "list_agents", "Agents"},
     {"get_agent", "get_agent", "Agents"},
@@ -107,6 +108,7 @@ constexpr auto engine_names = std::to_array<EngineName>({
     {"run", "start_run", "Training and runs"},
     {"create_connection", "create_connection", "Connections"},
     {"delete_connection", "delete_connection", "Connections"},
+    {"set_safe_mode", "set_safe_mode", "Connections"},
     {"create_dataset_from_query", "create_dataset_from_query", "Datasets"},
     {"upload_dataset", "upload_dataset", "Datasets"},
     {"delete_project", "delete_project", "Projects and pipelines"},
@@ -232,7 +234,49 @@ std::string lake_note(std::string_view engine) {
     if (engine == "get_experiment") {
         return "The solutions holdout experiment, not a training experiment (get_experiment).";
     }
+    if (engine == "get_safe_mode" || engine == "set_safe_mode") {
+        return "The level is kept in the workspace, never in Lake (docs/api/safe-mode.md).";
+    }
     return {};
+}
+
+// The safe mode levels (lake#906): `off` runs everything, `warn_writes` (the default) warns before
+// a statement that changes data, `warn_all` before every statement.
+json safe_mode_selector() {
+    return {{"database",
+             {{"type", "string"},
+              {"minLength", 1},
+              {"description", "a database of the workspace (give this or `connection`)"}}},
+            {"connection",
+             {{"type", "string"},
+              {"minLength", 1},
+              {"description", "a saved connection by name (give this or `database`)"}}}};
+}
+
+// Lake's description of an engine capability the vendored engine schema does not carry yet: the
+// safe mode pair (lake#906), built against the contract zetta#1373 publishes. Empty for any other
+// name, whose fields then go to the engine as sent.
+std::optional<std::pair<json, std::string>> lake_described(std::string_view engine) {
+    if (engine == "get_safe_mode") {
+        return std::pair<json, std::string>{
+            {{"type", "object"}, {"properties", safe_mode_selector()}},
+            "A database's or connection's safe mode: answers {mode}, one of `off`, `warn_writes` "
+            "(the default: warn before a statement that changes data) or `warn_all` (warn before "
+            "every statement)."};
+    }
+    if (engine == "set_safe_mode") {
+        json properties = safe_mode_selector();
+        properties["mode"] = {{"type", "string"},
+                              {"enum", json::array({"off", "warn_writes", "warn_all"})},
+                              {"description", "the level: off, warn_writes or warn_all"}};
+        return std::pair<json, std::string>{
+            {{"type", "object"}, {"properties", std::move(properties)}, {"required", {"mode"}}},
+            "Set a database's or connection's safe mode, by someone allowed to change the "
+            "workspace. `off` runs every statement; `warn_writes` answers safe_mode_warning before "
+            "a statement that changes data; `warn_all` before every statement. The change is "
+            "audited in the workspace."};
+    }
+    return std::nullopt;
 }
 
 // The engine's description in a Lake caller's terms: issue references and permission notes
@@ -319,6 +363,13 @@ json lake_input_schema(std::string_view engine,
         properties["decision"] = {
             {"type", json::array({"string", "null"})},
             {"description", "the decision this project serves, kept by Lake in the workspace"}};
+    }
+    // A call that runs statements against a database or a connection may be answered with a
+    // safe_mode_warning; the same call with the warning's confirmation runs them (lake#906).
+    if ((properties.contains("database") || properties.contains("connection")) &&
+        engine != "get_safe_mode" && engine != "set_safe_mode" &&
+        !properties.contains("safe_mode_confirmation")) {
+        properties["safe_mode_confirmation"] = safe_mode_confirmation_schema();
     }
     if (engine == "create_dataset_from_query" && !properties.contains("if_exists")) {
         properties["if_exists"] = {
@@ -414,18 +465,24 @@ void register_engine_capabilities(Registry& registry) {
         // nothing, so they are reads. `chat` is a GET in the engine but loads a model: an action.
         const bool read = workspace_read_allowed(engine) && engine != "chat";
         const auto operation = operations.find(engine);
-        const bool described = operation != operations.end() && operation->is_object();
+        const bool from_engine = operation != operations.end() && operation->is_object();
+        const auto from_lake = from_engine ? std::nullopt : lake_described(engine);
+        const bool described = from_engine || from_lake.has_value();
         std::vector<std::pair<std::string, std::string>> aliases;
-        json schema = lake_input_schema(
-            engine,
-            described ? operation->value("input_schema", json::object()) : json::object(),
-            aliases);
+        json schema =
+            lake_input_schema(engine,
+                              from_engine ? operation->value("input_schema", json::object())
+                              : from_lake ? from_lake->first
+                                          : json::object(),
+                              aliases);
         if (!described) {
             // Nothing invented: the caller's fields go to the engine as sent.
             schema.erase("additionalProperties");
         }
-        std::string description =
-            described ? lake_terms(operation->value("description", std::string())) : std::string();
+        std::string description = from_engine
+                                      ? lake_terms(operation->value("description", std::string()))
+                                  : from_lake ? from_lake->second
+                                              : std::string();
         if (!described) {
             description = "The workspace engine publishes no input schema for " + engine +
                           "; the fields are passed to it as sent.";
@@ -441,7 +498,7 @@ void register_engine_capabilities(Registry& registry) {
         }
         registry.add(Capability{
             .name = std::string(name.lake),
-            .title = title_of(name, described ? *operation : json::object()),
+            .title = title_of(name, from_engine ? *operation : json::object()),
             .description = std::move(description),
             .input_schema = std::move(schema),
             .output_schema = {{"type", "object"}},

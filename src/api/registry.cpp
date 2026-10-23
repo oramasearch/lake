@@ -120,7 +120,7 @@ void log_database_diagnostic(std::string_view code, std::string_view message) {
     std::println(stderr, "{}", entry.dump());
 }
 
-constexpr std::array<ErrorCode, 34> documented_error_codes{{
+constexpr std::array<ErrorCode, 35> documented_error_codes{{
     {"invalid_input", 400, "The input is at fault; `path` points at the field."},
     {"secret_required",
      400,
@@ -163,6 +163,11 @@ constexpr std::array<ErrorCode, 34> documented_error_codes{{
      409,
      "The workspace action needs an approval it does not have yet: approve the plan or the "
      "decision first."},
+    {"safe_mode_warning",
+     409,
+     "The database's safe mode warns on what the call would run: `details` names the database or "
+     "connection, the level, the exact statements and a `confirmation`; repeat the same call with "
+     "`safe_mode_confirmation` set to it to run them."},
     {"gate_blocked", 409, "A pipeline gate refused the run; the message names the failing check."},
     {"sign_in_required",
      409,
@@ -373,6 +378,9 @@ nlohmann::json ApiResult::envelope() const {
         if (!error.help.empty()) {
             envelope["error"]["help"] = error.help;
         }
+        if (!error.details.is_null()) {
+            envelope["error"]["details"] = error.details;
+        }
     }
     envelope["duration_ms"] = duration_ms;
     return envelope;
@@ -404,7 +412,12 @@ nlohmann::json error_envelope_schema() {
                     {"description", "unauthenticated only: why no credential was accepted"}}},
                   {"help",
                    {{"type", "string"},
-                    {"description", "unauthenticated only: where to make a new key"}}}}},
+                    {"description", "unauthenticated only: where to make a new key"}}},
+                  {"details",
+                   {{"type", "object"},
+                    {"description",
+                     "safe_mode_warning only: {database or connection, mode, statements, "
+                     "confirmation}; repeat the call with safe_mode_confirmation to run them"}}}}},
                 {"required", nlohmann::json::array({"code", "message"})}}},
               {"duration_ms", {{"type", "number"}}}}},
             {"required", nlohmann::json::array({"ok", "error", "duration_ms"})}};

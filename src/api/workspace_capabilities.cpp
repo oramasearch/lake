@@ -224,7 +224,7 @@ using nlohmann::json;
 // The Zetta capabilities lake's pages may call on a customer's workspace (docs/api/workspaces.md).
 // Reads need `read` on the customer, actions `write`. Anything else is refused, so a lake caller
 // can never reach Zetta's administrative surface (sql, users, cloud provisioning) through lake.
-constexpr std::array<std::string_view, 48> workspace_reads = {"server_info",
+constexpr std::array<std::string_view, 49> workspace_reads = {"server_info",
                                                               "get_run_metrics",
                                                               "compare_runs",
                                                               "get_study",
@@ -254,6 +254,9 @@ constexpr std::array<std::string_view, 48> workspace_reads = {"server_info",
                                                               "get_trace",
                                                               "list_traces",
                                                               "list_source_tables",
+                                                              // A database's safe mode
+                                                              // (lake#906).
+                                                              "get_safe_mode",
                                                               "list_dataset_generators",
                                                               "list_agents",
                                                               "get_agent",
@@ -288,7 +291,7 @@ constexpr std::array<std::string_view, 48> workspace_reads = {"server_info",
                                                               "list_ledger",
                                                               "get_monitor",
                                                               "get_roi_readout"};
-constexpr std::array<std::string_view, 45> workspace_actions = {"create_project",
+constexpr std::array<std::string_view, 46> workspace_actions = {"create_project",
                                                                 "create_study",
                                                                 "stop_study",
                                                                 "stop_trial",
@@ -306,6 +309,7 @@ constexpr std::array<std::string_view, 45> workspace_actions = {"create_project"
                                                                 "run",
                                                                 "create_connection",
                                                                 "delete_connection",
+                                                                "set_safe_mode",
                                                                 "create_dataset_from_query",
                                                                 "upload_dataset",
                                                                 "delete_project",
@@ -812,6 +816,12 @@ liquid::runtime::task<ApiResult> workspace_call(bool read, json input, ApiContex
         // Name the inner capability in the audit event before any refusal, so a person's
         // activity says what a refused workspace call tried to do (lake#445).
         set_audit(context, read ? "workspace.query" : "workspace.act", input, capability);
+        // A call repeated after a safe mode warning says so in the audit (lake#906); the
+        // workspace Zetta audits the confirmed statements themselves.
+        if (const json inner = input.value("input", json::object());
+            inner.is_object() && inner.value("safe_mode_confirmation", json()).is_string()) {
+            context.audit_details["safe_mode_confirmed"] = true;
+        }
         if (read ? !workspace_read_allowed(capability)
                  : !workspace_action_allowed(capability)) {
             co_return ApiResult::failure("invalid_input",
@@ -3130,10 +3140,15 @@ void register_sql_capability(Registry& registry) {
                        "the table's columns, and a parse error gives the position where it "
                        "stopped. list_datasets (through workspace_query) names the tables. "
                        "Anything but a read is refused; the workspace's administrative SQL is not "
-                       "reachable. A long statement can be sent as POST with a JSON body.",
-        .input_schema = customer_input_schema(
-            {{"statement", {{"type", "string"}}}, {"database", {{"type", "string"}}}},
-            json::array({"statement"})),
+                       "reachable. A long statement can be sent as POST with a JSON body. When "
+                       "the database's safe mode warns (Warn All warns on every read), the call "
+                       "answers safe_mode_warning with the statement and a confirmation; the same "
+                       "call with `safe_mode_confirmation` runs it.",
+        .input_schema =
+            customer_input_schema({{"statement", {{"type", "string"}}},
+                                   {"database", {{"type", "string"}}},
+                                   {"safe_mode_confirmation", safe_mode_confirmation_schema()}},
+                                  json::array({"statement"})),
         .output_schema = {{"type", "object"}},
         .kind = CapabilityKind::Read,
         // A statement of any length travels as a JSON body (lake#594), as the engine's own sql
@@ -3157,6 +3172,12 @@ void register_sql_capability(Registry& registry) {
             if (const std::string database = input.value("database", std::string());
                 !database.empty()) {
                 query["database"] = database;
+            }
+            if (const std::string confirmation =
+                    input.value("safe_mode_confirmation", std::string());
+                !confirmation.empty()) {
+                query["safe_mode_confirmation"] = confirmation;
+                context.audit_details["safe_mode_confirmed"] = true;
             }
             co_return take(co_await zetta(context, input.at("customer_id"), "sql", true, query));
         }});
@@ -7102,10 +7123,29 @@ engine_input_enum(const json& openapi, std::string_view capability, std::string_
     return std::nullopt;
 }
 
+json safe_mode_confirmation_schema() {
+    return {{"type", "string"},
+            {"minLength", 1},
+            {"description",
+             "the `confirmation` a safe_mode_warning answered: repeat the same call with it to run "
+             "the statements the warning showed"}};
+}
+
 ApiResult workspace_failure(const control::ZettaControlError& error,
                             const json& input,
                             std::string_view prefix,
                             const std::map<std::string, std::string>& renamed) {
+    // The database's safe mode warned (lake#906): the refusal reaches the caller unchanged, its
+    // details included, so a person sees the statements and can repeat the call with
+    // `safe_mode_confirmation`. No field is at fault.
+    if (error.code == "safe_mode_warning") {
+        ApiResult warned = ApiResult::failure(
+            error.code,
+            error.message.empty() ? "the database's safe mode asks to confirm this call first"
+                                  : error.message);
+        warned.error.details = error.details.is_object() ? error.details : json::object();
+        return warned;
+    }
     std::string message = engine_words_in_lake_terms(error.message);
     std::string field;
     // The engine's schema check leads with a pointer: "/format: instance not found in required

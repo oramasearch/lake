@@ -9,6 +9,8 @@ import { Banner, Button, Card, Empty, ErrorBlock, Kbd, Skeleton } from "@/lib/ui
 import { WorkspaceFrame, qs, useSpaceRead, useWorkspace, useWsPath } from "./workspace";
 import { ObjectTable } from "./datasets";
 import { cappedStatement, limitRefused } from "./columns";
+import { queryDatabase } from "@/lib/safeMode";
+import { SafeModeControl, useSafeModeRead } from "@/pages/connections/SafeMode";
 
 /** The most rows the page shows. The engine is asked for one more (`LIMIT`, zetta#1021), so the page
  * can say there are more without reading the whole table. */
@@ -52,10 +54,22 @@ function QueryContent() {
   // A plain SELECT with no LIMIT of its own is sent with `LIMIT 501`. An engine older than zetta#1039
   // refuses LIMIT; then the statement goes as written and the page shows the first rows itself.
   const capped = cappedStatement(statement, SHOWN);
-  const first = useSpaceRead<{ columns?: string[]; rows?: Row[] }>("workspace_sql", { statement: capped, database: database || undefined }, { enabled: !!statement });
+  // A database whose safe mode warns (lake#906) answers safe_mode_warning; the dialog shows the
+  // statement, and Run sends the same read again with the warning's confirmation.
+  const [firstConfirmed, setFirstConfirmed] = useState<string | undefined>(undefined);
+  const first = useSpaceRead<{ columns?: string[]; rows?: Row[] }>("workspace_sql", { statement: capped, database: database || undefined, safe_mode_confirmation: firstConfirmed }, { enabled: !!statement });
   const asWritten = capped !== statement && first.isError && limitRefused(first.error);
-  const whole = useSpaceRead<{ columns?: string[]; rows?: Row[] }>("workspace_sql", { statement, database: database || undefined }, { enabled: !!statement && asWritten });
+  const [wholeConfirmed, setWholeConfirmed] = useState<string | undefined>(undefined);
+  const whole = useSpaceRead<{ columns?: string[]; rows?: Row[] }>("workspace_sql", { statement, database: database || undefined, safe_mode_confirmation: wholeConfirmed }, { enabled: !!statement && asWritten });
   const result = asWritten ? whole : first;
+  const sent = asWritten ? statement : capped;
+  const safe = useSafeModeRead(result.error, `${database}\n${sent}`);
+  const confirmation = safe.confirmation;
+  if (asWritten ? confirmation !== wholeConfirmed : confirmation !== firstConfirmed) {
+    if (asWritten) setWholeConfirmed(confirmation);
+    else setFirstConfirmed(confirmation);
+  }
+  const target = queryDatabase(draft.database, draft.statement);
   const rows = result.data?.rows ?? [];
   // With the cap, more than SHOWN rows back means the statement has more than that many.
   const more = rows.length > SHOWN;
@@ -114,10 +128,17 @@ function QueryContent() {
               </Button>
             </div>
           </div>
+          {/* The editor's status bar: the database's safe mode, changed in place (lake#906). */}
+          <div className="flex min-h-9 flex-wrap items-center gap-2 border-t border-hairline bg-raised px-2 py-1 text-[12px] text-ink-3" aria-label="Query status">
+            <SafeModeControl variant="status" target={target ? { database: target } : null} />
+            {target && <span className="font-mono">{target}</span>}
+          </div>
         </form>
       </Card>
+      {safe.dialog}
+      {statement && safe.notice}
       {statement && result.isLoading && <Skeleton />}
-      {statement && result.isError && <ErrorBlock error={result.error} what="the query" />}
+      {statement && result.isError && !safe.notice && !safe.dialog && <ErrorBlock error={result.error} what="the query" />}
       {statement && result.data && (
         <Card label="Results" title={counted}>
           {more && <Banner tone="quiet">Showing the first {SHOWN}. Add LIMIT and OFFSET to page through the rest.</Banner>}

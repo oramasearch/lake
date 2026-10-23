@@ -257,6 +257,10 @@ call_workspace(ApiContext& context,
 // takes. Answers the renames made, as {engine field: caller field}.
 std::map<std::string, std::string> canonical_workspace_input(std::string_view capability,
                                                              nlohmann::json& input);
+// A database's safe mode (lake#906, docs/api/safe-mode.md): the `safe_mode_confirmation` field a
+// call that runs statements against a database or connection accepts, the hex a
+// `safe_mode_warning` answered in `details.confirmation`.
+nlohmann::json safe_mode_confirmation_schema();
 // A workspace engine refusal as a lake error (docs/api/errors.md): the code in lake's vocabulary
 // and `path` set whenever the engine's message names an input field or a value the caller sent,
 // below `prefix` (`/input` for workspace_query and workspace_act). `renamed` maps the engine's
