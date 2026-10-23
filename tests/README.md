@@ -933,7 +933,7 @@ lifted, on both stores.
 
 The Stripe ownership fixture in `test_stripe.cpp` includes the event timestamp, customer, subscription and recurring period required to accept an order renewal; all ownership assertions remain in place.
 
-`TokenAttenuation.AuthenticationLimits*` alternates REST/MCP and connections to prove account and client budgets on memory/PostgreSQL, cooldown expiry, resets only after full credential verification, persistent/configurable global failures, pending concurrent requests and single-use TOTP/recovery codes (lake#966).
+`TokenAttenuation.AuthenticationLimits*` alternates REST/MCP and connections to prove account and client budgets on memory/PostgreSQL, cooldown expiry, resets only after full credential verification, no instance-wide ceiling (failures against other accounts never refuse a sign-in), pending concurrent requests and single-use TOTP/recovery codes (lake#966).
 
 `PostgresProvisioning.MfaVerificationLocksTheAccountBeforeItsFactors` holds an account row
 as deletion does and checks that authentication waits without holding its factor rows,

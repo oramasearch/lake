@@ -318,8 +318,8 @@ for unknown accounts or exhausted budgets. `cancel_recovery` takes the signed-in
 checks ownership again in the store. Contracts: [recovery](../../../docs/api/recovery.md).
 `CloudOrderEntitlement` and `CloudOrderSubscriptionEvent` (lake#972) carry signed recurring subscription snapshots. `apply_cloud_order_subscription` matches subscription/customer/order, applies events once under serialization, and retains an access deadline; `cloud_order_entitlement_state` evaluates it at the supplied clock. Both stores share the ordering and expiry rules. See [orders](../../../docs/api/orders.md#recurring-entitlement-lsr-105-lake972).
 `authentication_limits.hpp` implements the in-memory reservation table. PostgreSQL keeps the
-same account/global/client policy in `authentication_attempts`; transports use the public Store
+same per-account and per-client policy in `authentication_attempts`; transports use the public Store
 admission/completion interface. `authentication.hpp` settles outcomes and normalizes credential
-refusals. Capacity includes in-flight work; verified success clears account/client failures,
-while global failures persist. See [the contract](../../../docs/api/identity.md#authentication-attempt-limits)
+refusals. Capacity includes in-flight work; verified success clears account/client failures;
+there is no instance-wide ceiling. See [the contract](../../../docs/api/identity.md#authentication-attempt-limits)
 (lake#966).

@@ -1,7 +1,4 @@
 #pragma once
-#include <charconv>
-#include <cstdlib>
-
 #include "lake/control/store.hpp"
 
 namespace lake::control {
@@ -12,18 +9,6 @@ inline StoreError invalid_authentication() {
 inline StoreError authentication_cooldown() {
     return {"rate_limited", "authentication temporarily refused; retry after fifteen minutes"};
 }
-inline Result<unsigned> authentication_global_failure_limit() {
-    const char* configured = std::getenv("LAKE_AUTH_GLOBAL_FAILURE_LIMIT");
-    if (!configured)
-        return 1000;
-    const std::string_view text(configured);
-    unsigned limit = 0;
-    const auto [end, error] = std::from_chars(text.data(), text.data() + text.size(), limit);
-    if (error != std::errc{} || end != text.data() + text.size() || limit == 0 || limit > 1000000)
-        return std::unexpected(StoreError{"store_error", "invalid LAKE_AUTH_GLOBAL_FAILURE_LIMIT"});
-    return limit;
-}
-
 // Reservations include in-flight work so concurrent guesses cannot outrun a failure limit.
 // A failed completion write refuses the request; an interrupted request retains its reservation.
 template <class Verify>

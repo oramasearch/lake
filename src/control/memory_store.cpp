@@ -3954,9 +3954,6 @@ InMemoryStore::authentication_attempt(const std::string& pool_id,
                                       const std::string& email,
                                       const std::string& user_id,
                                       const std::string& client_address) {
-    const auto global_limit = authentication_global_failure_limit();
-    if (!global_limit)
-        return std::unexpected(global_limit.error());
     std::lock_guard lock(mutex_);
     const auto now = std::chrono::steady_clock::now();
     std::string pool = pool_id.empty() ? "lake" : pool_id;
@@ -3987,33 +3984,18 @@ InMemoryStore::authentication_attempt(const std::string& pool_id,
                                        : authentication_cooldown());
         return *window;
     };
-    std::string global_window;
-    const auto global_key = identity_crypto::sha256_hex("global:authentication");
-    if (client_address.empty()) {
-        auto global = reserve(global_key, *global_limit, false);
-        if (!global)
-            return std::unexpected(global.error());
-        global_window = *global;
-    }
+    // Only per-account and per-client budgets: no instance-wide ceiling, so failures against
+    // other accounts can never lock everyone out of sign-in (lake#966).
     auto window = reserve(key, client_address.empty() ? 10 : 100, client_address.empty());
-    if (!window) {
-        if (!global_window.empty())
-            authentication_budgets_.finish(
-                global_key, global_window, AuthenticationOutcome::neutral, false, now);
+    if (!window)
         return std::unexpected(window.error());
-    }
-    return AuthenticationAttempt{key, *window, global_window};
+    return AuthenticationAttempt{key, *window};
 }
 
 Result<void> InMemoryStore::authentication_attempt_finished(const AuthenticationAttempt& attempt,
                                                             AuthenticationOutcome outcome) {
     std::lock_guard lock(mutex_);
     authentication_budgets_.finish(attempt.key, attempt.window_id, outcome, true);
-    if (!attempt.global_window_id.empty())
-        authentication_budgets_.finish(identity_crypto::sha256_hex("global:authentication"),
-                                       attempt.global_window_id,
-                                       outcome,
-                                       false);
     return {};
 }
 

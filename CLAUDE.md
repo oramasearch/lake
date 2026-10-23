@@ -69,7 +69,7 @@ grants, audit and repositories stay; `sign_in_taap` with the own key reaches it,
 vendor the schema and select `identity_links_guard`. See
 [`docs/api/identity.md#your-own-identity`](docs/api/identity.md#your-own-identity).
 
-Password, MFA and recovery verification share account/global/client failure budgets with concurrent reservations (lake#966, LSR-100,
+Password, MFA and recovery verification share per-account and per-client failure budgets (no instance-wide ceiling) with concurrent reservations (lake#966, LSR-100,
 `0098_authentication_attempts`); successful TOTP steps and recovery codes are consumed across
 sign-in and step-up. Not deployed; operator schema vendoring and `authentication_attempts_guard`
 are required. See [`docs/api/identity.md#authentication-attempt-limits`](docs/api/identity.md#authentication-attempt-limits).

@@ -481,3 +481,4 @@ Migration `0096_email_recovery_limits` (lake#968, LSR-102) adds `cancelled` reco
 this schema and select `email_recovery_limits_guard` before rollout. See
 [recovery.md](../docs/api/recovery.md#email-recovery-budgets).
 Migration `0098_authentication_attempts` adds hashed account/global/client failure budgets and pending reservations and `authentication_attempts_guard` (lake#966). Apply before the binary; the operator must vendor this schema and select the guard.
+Migration `0098_authentication_attempts` adds hashed per-account and per-client failure budgets and pending reservations and `authentication_attempts_guard` (lake#966). Apply before the binary; the operator must vendor this schema and select the guard.

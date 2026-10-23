@@ -496,4 +496,4 @@ A protected download without a credential redirects to `/sign-in`. The explicit 
 stays at `/login` (a web app page) with `POST /session` retaining its existing operator credential
 contract. See [the front-door contract](../ui/front-door.md).
 
-Password, MFA and recovery calls share [authentication attempt limits](../api/identity.md#authentication-attempt-limits) across REST, hosted forms and MCP (lake#966). Client admission reuses the trusted ingress address from `order_client_address`; account/global admission reserves capacity in the store before credential work.
+Password, MFA and recovery calls share [authentication attempt limits](../api/identity.md#authentication-attempt-limits) across REST, hosted forms and MCP (lake#966). Client admission reuses the trusted ingress address from `order_client_address`; account admission reserves capacity in the store before credential work.

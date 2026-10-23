@@ -586,7 +586,6 @@ TEST_P(TokenAttenuation, AuthenticationLimitsSerializeConcurrentAdmissions) {
     ASSERT_EQ(admitted.size(), 10u);
     auto stale = admitted.front();
     stale.window_id = lake::control::new_uuid_v4();
-    stale.global_window_id = lake::control::new_uuid_v4();
     ASSERT_TRUE(store_->authentication_attempt_finished(
         stale, lake::control::AuthenticationOutcome::success));
     EXPECT_FALSE(other->authentication_attempt("lake", user->email, "", ""))
@@ -653,14 +652,16 @@ TEST_P(TokenAttenuation, AuthenticationLimitsConsumeTotpAcrossSignInAndStepUp) {
         {"lake", user->email, "correct horse battery staple", fresh_code, "replay step-up"}));
 }
 
-struct AuthenticationFailureLimitEnv {
+// LAKE_AUTH_GLOBAL_FAILURE_LIMIT configured an instance-wide failure ceiling that is gone
+// (lake#966): a test sets it to show nothing reads it any more.
+struct RetiredGlobalFailureLimitEnv {
     std::optional<std::string> previous;
-    explicit AuthenticationFailureLimitEnv(const char* limit) {
+    explicit RetiredGlobalFailureLimitEnv(const char* limit) {
         if (const auto* value = std::getenv("LAKE_AUTH_GLOBAL_FAILURE_LIMIT"))
             previous = value;
         setenv("LAKE_AUTH_GLOBAL_FAILURE_LIMIT", limit, 1);
     }
-    ~AuthenticationFailureLimitEnv() {
+    ~RetiredGlobalFailureLimitEnv() {
         if (previous)
             setenv("LAKE_AUTH_GLOBAL_FAILURE_LIMIT", previous->c_str(), 1);
         else
@@ -718,28 +719,23 @@ TEST_P(TokenAttenuation, AuthenticationLimitsResetClientFailuresAfterVerifiedSig
     }
 }
 
-TEST_P(TokenAttenuation, AuthenticationLimitsGlobalFailuresSurviveOtherAccountsSuccesses) {
-    AuthenticationFailureLimitEnv configured("3");
+TEST_P(TokenAttenuation, AuthenticationLimitsHaveNoGlobalCeiling) {
+    // Failures against other accounts never refuse this account's sign-in: only the account's
+    // own budget (10) and the client's (100) apply, and the retired setting is not read.
+    RetiredGlobalFailureLimitEnv configured("3");
     const auto user = store_->get_user(browser_.at("session").at("user_id"));
     ASSERT_TRUE(user);
-    for (unsigned i = 0; i < 3; ++i) {
+    for (unsigned i = 0; i < 12; ++i) {
         const auto failed = store_->sign_in_password(
             {"lake", std::to_string(i) + "@unknown.test", "wrong", "", "test"});
         ASSERT_FALSE(failed);
         ASSERT_EQ(failed.error().code, "unauthenticated");
-        if (i < 2)
-            ASSERT_TRUE(store_->sign_in_password(
-                {"lake", user->email, "correct horse battery staple", "", "valid"}));
     }
-    auto blocked = store_->sign_in_password(
-        {"lake", user->email, "correct horse battery staple", "", "global cooldown"});
-    ASSERT_FALSE(blocked);
-    EXPECT_EQ(blocked.error().code, "rate_limited");
+    ASSERT_TRUE(store_->sign_in_password(
+        {"lake", user->email, "correct horse battery staple", "", "after others failed"}));
     setenv("LAKE_AUTH_GLOBAL_FAILURE_LIMIT", "0", 1);
-    blocked = store_->sign_in_password(
-        {"lake", user->email, "correct horse battery staple", "", "invalid config"});
-    ASSERT_FALSE(blocked);
-    EXPECT_EQ(blocked.error().code, "store_error");
+    ASSERT_TRUE(store_->sign_in_password(
+        {"lake", user->email, "correct horse battery staple", "", "setting not read"}));
 }
 
 TEST_P(TokenAttenuation, MfaEnrollmentRejectsUnverifiedSessionsAndTokens) {

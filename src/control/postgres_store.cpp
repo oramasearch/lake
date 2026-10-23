@@ -8280,9 +8280,6 @@ public:
                            const std::string& email,
                            const std::string& user_id,
                            const std::string& client_address) override {
-        const auto global_limit = authentication_global_failure_limit();
-        if (!global_limit)
-            return std::unexpected(global_limit.error());
         return with_tx<AuthenticationAttempt>([&](pqxx::work& tx) -> Result<AuthenticationAttempt> {
             std::string pool = pool_id.empty() ? "lake" : pool_id;
             std::string subject;
@@ -8345,20 +8342,14 @@ public:
                     key);
                 return row[0][2].as<std::string>();
             };
-            std::string global_window;
-            if (client_address.empty()) {
-                auto global = reserve(
-                    identity_crypto::sha256_hex("global:authentication"), *global_limit, false);
-                if (!global)
-                    return std::unexpected(global.error());
-                global_window = *global;
-            }
+            // Only per-account and per-client budgets: no instance-wide ceiling, so failures
+            // against other accounts can never lock everyone out of sign-in (lake#966).
             const auto key = identity_crypto::sha256_hex(subject);
             const auto window =
                 reserve(key, client_address.empty() ? 10 : 100, client_address.empty());
             if (!window)
                 return std::unexpected(window.error());
-            return AuthenticationAttempt{key, *window, global_window};
+            return AuthenticationAttempt{key, *window};
         });
     }
     Result<void> authentication_attempt_finished(const AuthenticationAttempt& attempt,
@@ -8378,10 +8369,6 @@ public:
                                reset && outcome == AuthenticationOutcome::success);
             };
             finish(attempt.key, attempt.window_id, true);
-            if (!attempt.global_window_id.empty())
-                finish(identity_crypto::sha256_hex("global:authentication"),
-                       attempt.global_window_id,
-                       false);
             return {};
         });
     }

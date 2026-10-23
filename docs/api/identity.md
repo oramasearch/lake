@@ -24,11 +24,10 @@ around that ingress. Capability input cannot supply transport metadata; in-proce
 a client bucket. TAAP, passkeys and external identity-provider verification are outside these
 password/MFA budgets.
 
-A global ceiling defaults to 1,000 failed verifications per fifteen minutes. Set
-`LAKE_AUTH_GLOBAL_FAILURE_LIMIT` to an integer from 1 through 1,000,000 to change it; invalid
-configuration refuses authentication. Success releases its reservation without spending or
-resetting the global failure count. Client or global exhaustion returns `rate_limited` (REST 429,
-MCP error). Refused requests do not extend a window; a successful account/client verification
+There is no instance-wide ceiling: one would let anyone lock every person out of sign-in by
+guessing at accounts that are not theirs. Failures against one account or from one client never
+refuse another account's sign-in from another client. Client exhaustion returns `rate_limited`
+(REST 429, MCP error). Refused requests do not extend a window; a successful account/client verification
 starts its cleared budget's next fifteen-minute window.
 
 Admission reserves capacity before expensive verification, including in-flight work so concurrent

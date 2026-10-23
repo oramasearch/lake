@@ -60,7 +60,7 @@ Every capability answers a failure the same way on REST and MCP:
 | `workspace_not_ready` | 503 | The workspace or service exists but is not ready yet. |
 | `audit_queue_full` | 503 | The workspace audit queue cannot accept the event; `operation_result` preserves the original operation envelope. Inspect it before retrying a change. See [audit](audit.md#workspace-audit). |
 | `busy` | 503 | The resource is busy; retry. |
-| `rate_limited` | 429 | A request limit was reached. Authentication callers retry after the fifteen-minute client/global [cooldown](identity.md#authentication-attempt-limits); waiting-request limits retry when capacity permits. Long-poll capacity refusals send `Retry-After: 1` ([HTTP](../serving/http.md#connections-and-workers), lake#534). |
+| `rate_limited` | 429 | A request limit was reached. Authentication callers retry after the fifteen-minute client [cooldown](identity.md#authentication-attempt-limits); waiting-request limits retry when capacity permits. Long-poll capacity refusals send `Retry-After: 1` ([HTTP](../serving/http.md#connections-and-workers), lake#534). |
 | `usage_limit_reached` | 429 | The account has used its monthly limit on this dimension (model tokens); an administrator raises or removes it with `set_usage_limit`. The model gateway answers it before it calls the model ([model-gateway.md](model-gateway.md#limits), lake#248). |
 
 `not_supported` was 500, `engine_error` 500, `quota_exceeded` 500, and a missing or rejected

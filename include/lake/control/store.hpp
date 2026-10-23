@@ -39,7 +39,7 @@ template <class T> using Result = std::expected<T, StoreError>;
 
 enum class AuthenticationOutcome { failure, success, neutral };
 struct AuthenticationAttempt {
-    std::string key, window_id, global_window_id;
+    std::string key, window_id;
 };
 
 struct User {
