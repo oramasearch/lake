@@ -846,8 +846,8 @@ one adapter TU) and the pure renderers in `include/zetta/api/web_ui.hpp`.
   placeholders until lake has a node to marshal onto.
 - **The console is the web app** in `frontend/` (React, Vite, Tailwind, TypeScript), built and
   embedded by CMake and served by the `web_app` middleware: a browser's GET of any page path gets
-  its `index.html` (`Content-Security-Policy: frame-ancestors 'self'`), anything else the route or
-  the 404. It calls **only `/v1` capabilities**, so it can never do what the API cannot; do not add
+  its `index.html` (`Content-Security-Policy: frame-ancestors 'self'; img-src 'self' data:`), anything
+  else the route or the 404. Markdown never loads an image (`docs/serving/http.md#images`, lake#943). It calls **only `/v1` capabilities**, so it can never do what the API cannot; do not add
   a server page or an HTML form handler. Build, page rules and checks: `docs/ui/web-app.md`. The
   server routes the app relies on (the cookie-setting sign-in routes and the download routes) are
   listed there and in `docs/serving/http.md`.

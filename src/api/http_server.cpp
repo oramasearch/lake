@@ -668,18 +668,29 @@ std::string server_timing_of(const boost::http::route_params& route) {
     return server_timing;
 }
 
-boost::http::route_task send_text(boost::http::route_params& route,
-                                  boost::http::status status,
-                                  std::string body,
-                                  std::string_view content_type,
-                                  std::string_view cache_control) {
+// Every page lake answers: only lake frames it (the Ask Orama panel, lake#258), so no clickjacking,
+// and it shows images only from lake itself and `data:` URLs (lake#943), so no Markdown an agent or
+// another person wrote can make the browser send anything to another server by naming an image
+// (docs/serving/http.md#images).
+constexpr std::string_view page_content_security_policy =
+    "frame-ancestors 'self'; img-src 'self' data:";
+// The web app's pages with Clerk on, whose sign-in shows images from Clerk's image host.
+constexpr std::string_view clerk_page_content_security_policy =
+    "frame-ancestors 'self'; img-src 'self' data: https://img.clerk.com";
+
+boost::http::route_task
+send_text(boost::http::route_params& route,
+          boost::http::status status,
+          std::string body,
+          std::string_view content_type,
+          std::string_view cache_control,
+          std::string_view content_security_policy = page_content_security_policy) {
     namespace http = boost::http;
     route.status(status);
     route.res.set(http::field::content_type, content_type);
     route.res.set(http::field::cache_control, cache_control);
     if (content_type.starts_with("text/html")) {
-        // Only lake frames lake's pages (the Ask Orama panel, lake#258): no clickjacking.
-        route.res.set("Content-Security-Policy", "frame-ancestors 'self'");
+        route.res.set("Content-Security-Policy", content_security_policy);
     }
     route.res.set("Server-Timing", server_timing_of(route));
     stamp_response_headers(route, body);
@@ -13696,7 +13707,8 @@ struct ApiServer::Impl {
                          boost::http::status::ok,
                          std::move(html),
                          "text/html; charset=utf-8",
-                         "private, no-store");
+                         "private, no-store",
+                         clerk ? clerk_page_content_security_policy : page_content_security_policy);
     }
 
     boost::http::route_task serve_web_app_file(boost::http::route_params& route, std::string path) {

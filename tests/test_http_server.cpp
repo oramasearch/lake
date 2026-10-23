@@ -367,7 +367,10 @@ TEST(WebAppHttp, BrowsersGetTheAppAndCustomDomainsTheirHostedSignIn) {
         const std::string page = get(connection, path, true);
         ASSERT_TRUE(page.starts_with("HTTP/1.1 200")) << path << "\n" << page.substr(0, 300);
         EXPECT_EQ(response_header(page, "content-type"), "text/html; charset=utf-8") << path;
-        EXPECT_EQ(response_header(page, "content-security-policy"), "frame-ancestors 'self'")
+        // Framed only by lake, and images only from lake (lake#943): Markdown an agent wrote can
+        // make the browser contact no other server.
+        EXPECT_EQ(response_header(page, "content-security-policy"),
+                  "frame-ancestors 'self'; img-src 'self' data:")
             << path;
         // The page carries this request's viewer, so it is personal and never stored by a cache.
         EXPECT_EQ(response_header(page, "cache-control"), "private, no-store") << path;
@@ -435,7 +438,8 @@ TEST(WebAppHttp, BrowsersGetTheAppAndCustomDomainsTheirHostedSignIn) {
             EXPECT_NE(page.find("Client one"), std::string::npos) << path;
             EXPECT_NE(page.find("--accent:#123456"), std::string::npos) << path;
             EXPECT_EQ(page.find("<div id=\"root\">"), std::string::npos) << path;
-            EXPECT_EQ(response_header(page, "content-security-policy"), "frame-ancestors 'self'");
+            EXPECT_EQ(response_header(page, "content-security-policy"),
+                      "frame-ancestors 'self'; img-src 'self' data:");
         }
     }
     EXPECT_NE(get(hosted, "/repositories", true).find("<div id=\"root\">"), std::string::npos)
@@ -3766,6 +3770,12 @@ TEST(HttpServer, ClerkExchangeRefusesAForgedTokenAndSignOutEndsClerkToo) {
     EXPECT_EQ(viewer["clerk"]["enabled"], true);
     EXPECT_EQ(viewer["clerk"]["publishable_key"], "pk_test_MTI3LjAuMC4xJA");
     EXPECT_EQ(viewer["password_sign_up"], false);
+    // Clerk's sign-in shows its images from Clerk's image host, and from nowhere else (lake#943).
+    const std::string page = connection.request(
+        "GET", "/sign-in", {}, {}, "HTTP/1.1", {}, "text/plain", {{"Accept", "text/html"}});
+    ASSERT_TRUE(page.starts_with("HTTP/1.1 200")) << page.substr(0, 300);
+    EXPECT_EQ(response_header(page, "content-security-policy"),
+              "frame-ancestors 'self'; img-src 'self' data: https://img.clerk.com");
 
     const std::string refused =
         connection.request("POST", "/identity/clerk-session", "token=not.a.jwt&device_name=b");

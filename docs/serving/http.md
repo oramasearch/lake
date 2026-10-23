@@ -25,7 +25,7 @@ tick.
 |---|---|
 | any request whose `Host` is `LAKE_APEX_HOST`, apart from the stylesheet, fonts and probes | the region picker, before every other route, inside the order sheet (lake#831); `POST` with `region` sets the `lake_region` preference cookie and redirects to the region's host with the same path and query ([`../api/regions.md`](../api/regions.md#the-apex-picker), lake#757) |
 | on `LAKE_APEX_HOST`: `GET /order/<offer>`, `GET /order/price-list`, `POST /order`, `GET /orders/<id>?token=…` | the order sheet's forms, the published price list, an order (recorded, then Stripe Checkout or the confirmation; 32 KiB, rate limited, honeypot), and an order's status by its signed link ([`../api/orders.md`](../api/orders.md#routes), lake#831) |
-| a browser's `GET` or `HEAD` of any other path (`Accept: text/html`) | the web app's `index.html` (`no-cache`, `Content-Security-Policy: frame-ancestors 'self'`): `/`, `/repositories`, `/w/<workspace_id>/design/projects` and every other page are the app's ([`../ui/web-app.md`](../ui/web-app.md)); the same path asked for by anything else is the 404 |
+| a browser's `GET` or `HEAD` of any other path (`Accept: text/html`) | the web app's `index.html` (`no-cache`, `Content-Security-Policy: frame-ancestors 'self'; img-src 'self' data:`, [images](#images)): `/`, `/repositories`, `/w/<workspace_id>/design/projects` and every other page are the app's ([`../ui/web-app.md`](../ui/web-app.md)); the same path asked for by anything else is the 404 |
 | `GET /ui/<file>` | the app's content-hashed files (`public, max-age=31536000, immutable`) |
 | `GET /style-<hash>.css`, `GET /fonts/<IBM Plex face>-<hash>.woff2` | content-hashed design-system assets (`public, max-age=31536000, immutable`) linked by the hosted application pages |
 | `GET /style.css`, `GET /fonts/<IBM Plex face>.woff2` | compatibility aliases for direct and older links (`no-cache`) |
@@ -359,6 +359,31 @@ that the live instance is repaired; this source change does not redeploy it.
 path;
 `ctest --test-dir build`. The focused idle-close proof is
 `ctest --test-dir build -R HttpServer.IdleKeepAliveCloseWritesNothingToStderr --output-on-failure`.
+
+## Images
+
+Every HTML page lake answers (the web app, the hosted application pages, the region picker) carries
+`Content-Security-Policy: frame-ancestors 'self'; img-src 'self' data:` (`send_text`). Only lake
+frames its pages, and the browser loads images only from lake's own origin and `data:` URLs (the
+Drive image previews). With Clerk on, the web app's pages add `https://img.clerk.com`, the host
+Clerk's sign-in form shows its logos and provider icons from.
+
+Why (lake#943, LSR-082): an agent's reply is Markdown, and an agent may have read untrusted content
+(a document, a dataset row, an MCP tool's result) that tells it to name an image at an address
+carrying workspace data. A browser that loaded that image would send the data to the address's
+server without anyone clicking. The console's Markdown never loads an image at all; it shows
+`Image: <alt>` with the address in the tooltip ([web app](../ui/web-app.md#markdown)). The policy is
+the second line: no page lake serves can load an image from another origin, whatever renders it.
+
+Verify: `ctest --test-dir build -R 'WebAppHttp.BrowsersGetTheApp|HttpServer.ClerkExchange'`, which read
+the header on the web app's pages, the hosted application pages and the Clerk variant; and
+`npm test` in `frontend/` (`tests/markdown-images.test.ts`). By hand:
+`curl -sI -H 'Accept: text/html' http://127.0.0.1:4900/ | grep -i content-security-policy`.
+
+Change it here and in the tests together. An image host is added only for a page that needs it,
+never for every page; a host that fetches arbitrary addresses for its callers (an image proxy)
+reopens the leak, so any such host is a known weakness to record here. `img.clerk.com` is Clerk's
+image service and is allowed only where Clerk's sign-in is mounted.
 
 ## Cross-site requests
 

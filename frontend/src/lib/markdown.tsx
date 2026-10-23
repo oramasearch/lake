@@ -2,12 +2,14 @@
  * remark-gfm: raw HTML stays text, every heading gets a stable lowercase anchor (a repeated one
  * numbered -2, -3, …; docs/ui/forge.md), links to app pages stay in the app and every other link
  * is a plain link, so server routes such as /llms.txt load from the server. Unsafe link schemes are
- * dropped by react-markdown's URL filter. */
+ * dropped by react-markdown's URL filter. An image is never loaded, only named (markdownImages.ts,
+ * lake#943). */
 import { Children, isValidElement, type ReactNode } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Link } from "react-router-dom";
 import { isServerRoute } from "@/routes";
+import { inertImages } from "./markdownImages";
 
 /** The text of a heading's children. */
 function textOf(node: ReactNode): string {
@@ -65,6 +67,7 @@ export function Markdown({ children, inline, as = "div", headingLinks }: { child
       );
     };
   const components: Components = {
+    ...inertImages,
     h1: ({ children: c }) => <h1 id={anchor(c)}>{c}</h1>,
     h2: linked("h2"),
     h3: linked("h3"),

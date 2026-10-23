@@ -1344,6 +1344,11 @@ legend {
   margin-top: var(--lake-space-6);
   font-size: var(--lake-text-24);
 }
+/* An image Markdown names but never loads (markdownImages.ts, lake#943). */
+.markdown-image {
+  color: var(--lake-text-secondary);
+  font-style: italic;
+}
 .heading-anchor {
   margin-left: var(--lake-space-2);
   color: var(--lake-text-tertiary);
