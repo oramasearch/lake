@@ -6,6 +6,8 @@ answers every browser page request with `index.html`. The app then calls only la
 capabilities, the same ones REST and MCP callers use, with the same authorization and audit. It
 can do nothing the API cannot.
 
+- How to test every page by hand, as a person or an agent with a browser: the UI test runbook,
+  [test-runbook/](test-runbook/README.md). A change to what a page shows updates its cases there.
 - How the app is built, its kit and the rules for a page: [web-app.md](web-app.md).
   Tests and scripts that read outside `frontend/` fail unless the image's `frontend` stage copies
   what they read ([web-app.md](web-app.md#reads-outside-frontend-lake693), lake#693).

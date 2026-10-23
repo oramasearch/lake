@@ -5,6 +5,10 @@ code, and walk every page a customer uses. Use it after every roll that changes 
 sees, and before saying a UI change is done: a green test suite is not evidence that the real site
 works.
 
+The full manual test of every page, with its personas, test data and cases, is the
+[UI test runbook](../ui/test-runbook/README.md). This page is how to sign in for it and the
+scripted checks.
+
 ## 1. Pick a test user
 
 Use a Clerk user that exists for testing, never someone else's account. On dev:
