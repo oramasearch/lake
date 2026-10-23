@@ -211,9 +211,48 @@ handlers. Lake therefore sets that parser ceiling to the larger of 64 MiB and
 | Route class | Effective limit and handling |
 |---|---|
 | OCI blob upload `PATCH` and final `PUT`, for every supported repository-name shape | `LAKE_MAX_REGISTRY_BLOB_BYTES` for the completed upload, 4 GiB by default. Incoming buffers append directly to the upload file. `Content-Range` must begin at the stored offset and cover the bytes received. |
-| REST capability JSON and MCP JSON-RPC | 64 MiB. JSON sinks count bytes before parsing; oversized capability input returns HTTP 413 with `size_invalid` and the byte limit. |
+| REST capability JSON | `Capability::max_body_bytes`, 1 MiB by default; registered bulk inputs allow up to 64 MiB only with an accepted credential. The registry's credential gate runs before the body is read. |
+| MCP JSON-RPC | Anonymous or rejected credentials: 256 KiB for the entire envelope. Accepted credentials: the registered tool's body limit, at most 64 MiB. Discovery and public identity tools remain anonymous within the small budget. |
 | Forms and other string bodies | 64 MiB. The common string reader counts bytes while receiving them. |
 | Liquid sync, model and dataset publication, drive uploads, packages, debug artifacts, SCIM and other specialized adapters | 64 MiB or a smaller route-specific bound. Their bounded buffers and parsers remain in force. |
+
+JSON admission (lake#944, LSR-083) resolves the bearer or browser session before reading input.
+Credentials are resolved again after transfer so a revocation or expiry during the upload is
+still enforced by the final registry gate.
+Protected REST calls without an accepted credential answer 401 and `WWW-Authenticate` before
+reading a body, including malformed input and a declared 2 MiB body. Application-pool sessions
+retain their existing restrictions. Public identity capabilities such as `sign_in_password`
+allow at most 1 MiB, even with an operator credential. A declared oversized body answers 413
+from its headers; chunked bodies count every received byte and stop at the same limit.
+
+The shared JSON reader builds one nlohmann document directly, with at most 64 nested containers
+and 65,536 elements (containers, object keys and scalar values, including duplicate keys). It
+aborts parsing when either structure limit is reached. Byte and structure failures answer 413
+on REST and MCP; malformed JSON answers 400. REST capability refusals are audited without body
+contents.
+The hosted passkey and SCIM JSON adapters use this reader with the 1 MiB default as well.
+
+Larger registered inputs are audio/transcripts, repository and drive file uploads, model gateway
+requests, generic workspace calls, and the engine's dataset, model, workflow and agent-source
+imports. The workspace Zetta proxy and model gateway also apply the credential gate before
+reading input. All URL-prefixed forms use the same handlers and limits.
+
+MCP must read its envelope to learn the tool name. Lake resolves credentials first and reads
+anonymous envelopes incrementally within 256 KiB, then applies the registry's capability gate.
+Authenticated envelopes are bounded by the largest registered input while receiving, then by
+the selected tool's limit before dispatch. The limit counts the whole wire envelope, including
+whitespace and unknown fields; exported tools and other MCP methods keep the 1 MiB default.
+The depth and element caps apply during the single parse, before dispatch on every path.
+
+To change an allowance, set `max_body_bytes` beside the capability registration, retain the
+anonymous ceilings and update its API contract. `HttpServer.CapabilityAdmissionPrecedesTheBody`
+proves 413/401 responses with a declared 2 MiB body and no body bytes sent, for both URL forms,
+missing/rejected credentials, MCP and the alternate authenticated adapters.
+`JsonStructureLimitsApplyToRestAndMcp`, `ChunkedJsonCannotBypassBodyBudgets` and
+`McpAnonymousBudgetPreservesDiscoveryAndBulkInputsRequireCredentials` cover structural limits,
+chunked transfer, duplicate keys, anonymous discovery, the allowed nesting boundary and bulk
+allowances. Run these through `ctest --test-dir build -R 'HttpServer.*(Admission|Json|Budget)'
+--timeout 600 --output-on-failure`, then run the full suite.
 
 OCI limit failures return HTTP 413 with `BLOB_UPLOAD_INVALID` and the configured byte count.
 Transport and storage failures distinguish reading the request from appending the upload. A failed

@@ -1,5 +1,10 @@
 # Serving contracts
 
+Capability JSON admission (lake#944) authenticates protected REST calls before body reads, uses
+registered body limits (1 MiB default), and parses one document under depth and element caps.
+Anonymous MCP discovery remains available within 256 KiB. The [HTTP contract](http.md#request-body-limits)
+records the exceptions, alternate adapters and regression tests.
+
 [http.md](http.md) defines the Beast2 server, its connections apart from its request workers
 with the connection cap, idle and header timeouts (lake#534), route inventory, response rules, per-route body
 limits, and the `500` answer and `handler_exception` log line for a handler that throws. OCI blob uploads stream to storage under the configurable registry limit; all other body

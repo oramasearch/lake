@@ -319,6 +319,163 @@ private:
     int descriptor_;
 };
 
+// Send headers alone: a refusal must arrive before the caller supplies any JSON bytes.
+TEST(HttpServer, CapabilityAdmissionPrecedesTheBody) {
+    auto store = std::make_shared<lake::control::InMemoryStore>();
+    const auto user = store->create_user({"taap:body-admission", "", "Body admission"});
+    ASSERT_TRUE(user);
+    const auto customer = store->create_customer({"individual", user->id, "", "body-admission"});
+    ASSERT_TRUE(customer);
+    const auto workspace = store->create_workspace({customer->id, "body", "dev", user->taap_id});
+    ASSERT_TRUE(workspace);
+    lake::api::ServerOptions options;
+    options.port = 0;
+    options.store = store;
+    options.admin_token = "body-operator";
+    lake::api::ApiServer server(options);
+    ASSERT_TRUE(server.start()) << server.reason();
+
+    for (const std::string prefix : {std::string(), "/w/" + workspace->id}) {
+        for (const auto& [path, status] : std::vector<std::pair<std::string, std::string>>{
+                 {"/v1/sign_in_password", "413"},
+                 {"/v1/create_repository", "401"},
+                 {"/v1/model_completion", "401"},
+                 {"/openai/v1/responses", "401"},
+                 {"/workspaces/" + customer->id + "/zetta/v1/create_project", "401"},
+                 {"/mcp", "413"}}) {
+            for (const std::string credential :
+                 {std::string(), std::string("Authorization: Bearer rejected\r\n")}) {
+                const int fd = connect_loopback(server.port());
+                ASSERT_GE(fd, 0);
+                timeval timeout{1, 0};
+                ASSERT_EQ(::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)), 0);
+                ASSERT_TRUE(send_all(fd,
+                                     "POST " + prefix + path + " HTTP/1.1\r\nHost: localhost\r\n" +
+                                         credential +
+                                         "Content-Type: application/json\r\n"
+                                         "Content-Length: 2097152\r\n\r\n"));
+                const std::string response = read_response(fd, false);
+                ::close(fd);
+                EXPECT_TRUE(response.starts_with("HTTP/1.1 " + status)) << prefix + path << '\n'
+                                                                        << response;
+                if (status == "401") {
+                    EXPECT_NE(response_header(response, "www-authenticate").find("Bearer"),
+                              std::string::npos);
+                }
+            }
+        }
+    }
+}
+
+TEST(HttpServer, JsonStructureLimitsApplyToRestAndMcp) {
+    lake::api::ServerOptions options;
+    options.port = 0;
+    options.admin_token = "structure-operator";
+    options.store = std::make_shared<lake::control::InMemoryStore>();
+    lake::api::ApiServer server(options);
+    ASSERT_TRUE(server.start()) << server.reason();
+    const std::string deep = std::string(80, '[') + "0" + std::string(80, ']');
+    std::string wide = "[";
+    for (int i = 0; i < 70000; ++i) {
+        wide += "0,";
+    }
+    wide.back() = ']';
+    std::string duplicates = "{";
+    for (int i = 0; i < 40000; ++i) {
+        duplicates += "\"a\":0,";
+    }
+    duplicates.back() = '}';
+    for (const std::string& input : {deep, wide, duplicates}) {
+        for (const std::string path : {"/v1/sign_in_password", "/mcp"}) {
+            HttpConnection connection(server.port());
+            const std::string response = connection.request(
+                "POST", path, "{\"unused\":" + input + "}", {}, "HTTP/1.1", {}, "application/json");
+            EXPECT_TRUE(response.starts_with("HTTP/1.1 413")) << path << '\n' << response;
+        }
+    }
+}
+
+TEST(HttpServer, ChunkedJsonCannotBypassBodyBudgets) {
+    lake::api::ServerOptions options;
+    options.port = 0;
+    options.store = std::make_shared<lake::control::InMemoryStore>();
+    lake::api::ApiServer server(options);
+    ASSERT_TRUE(server.start()) << server.reason();
+    for (const auto& [path, limit] : std::vector<std::pair<std::string, std::size_t>>{
+             {"/mcp", 256 * 1024}, {"/v1/sign_in_password", 1024 * 1024}}) {
+        const int fd = connect_loopback(server.port());
+        ASSERT_GE(fd, 0);
+        timeval timeout{1, 0};
+        ASSERT_EQ(::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)), 0);
+        ASSERT_TRUE(send_all(fd,
+                             "POST " + path +
+                                 " HTTP/1.1\r\nHost: localhost\r\n"
+                                 "Content-Type: application/json\r\n"
+                                 "Transfer-Encoding: chunked\r\n\r\n" +
+                                 std::format("{:x}\r\n", limit + 100)));
+        // An unfinished chunk of whitespace is still bounded. There is no JSON document to parse.
+        ASSERT_TRUE(send_all(fd, std::string(limit + 1, ' ')));
+        const std::string response = read_response(fd, false);
+        ::close(fd);
+        EXPECT_TRUE(response.starts_with("HTTP/1.1 413")) << path << '\n' << response;
+    }
+}
+
+TEST(HttpServer, McpAnonymousBudgetPreservesDiscoveryAndBulkInputsRequireCredentials) {
+    lake::api::ServerOptions options;
+    options.port = 0;
+    options.admin_token = "bulk-operator";
+    options.store = std::make_shared<lake::control::InMemoryStore>();
+    lake::api::ApiServer server(options);
+    ASSERT_TRUE(server.start()) << server.reason();
+    HttpConnection connection(server.port());
+    const auto post = [&](const std::string& path,
+                          const std::string& body,
+                          std::string_view token = {}) {
+        return connection.request("POST", path, body, {}, "HTTP/1.1", token, "application/json");
+    };
+    const std::string initialized =
+        post("/mcp", R"({"jsonrpc":"2.0","id":1,"method":"initialize"})");
+    ASSERT_TRUE(initialized.starts_with("HTTP/1.1 200")) << initialized;
+    const std::string nested = std::string(63, '[') + "0" + std::string(63, ']');
+    const std::string bounded =
+        post("/mcp", "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\",\"extra\":" + nested + "}");
+    EXPECT_TRUE(bounded.starts_with("HTTP/1.1 200")) << bounded;
+    const std::string protected_tool = post(
+        "/mcp",
+        R"({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"create_repository","arguments":{}}})");
+    ASSERT_TRUE(protected_tool.starts_with("HTTP/1.1 200")) << protected_tool;
+    EXPECT_EQ(nlohmann::json::parse(
+                  response_body(protected_tool))["result"]["structuredContent"]["error"]["code"],
+              "unauthenticated");
+
+    // A registered audio input may exceed the default; validation still runs after parsing.
+    const std::string bulk =
+        nlohmann::json{{"audio_base64", std::string(2 * 1024 * 1024, 'A')}}.dump();
+    const std::string admitted = post("/v1/transcribe", bulk, "bulk-operator");
+    EXPECT_TRUE(admitted.starts_with("HTTP/1.1 400")) << admitted.substr(0, 400);
+    const std::string tool =
+        nlohmann::json{{"jsonrpc", "2.0"},
+                       {"id", 3},
+                       {"method", "tools/call"},
+                       {"params",
+                        {{"name", "transcribe"},
+                         {"arguments", {{"audio_base64", std::string(2 * 1024 * 1024, 'A')}}}}}}
+            .dump();
+    const std::string mcp_admitted = post("/mcp", tool, "bulk-operator");
+    EXPECT_TRUE(mcp_admitted.starts_with("HTTP/1.1 200")) << mcp_admitted.substr(0, 400);
+    const std::string small_tool =
+        nlohmann::json{{"jsonrpc", "2.0"},
+                       {"id", 4},
+                       {"method", "tools/call"},
+                       {"params",
+                        {{"name", "sign_in_password"},
+                         {"arguments", {{"padding", std::string(2 * 1024 * 1024, 'A')}}}}}}
+            .dump();
+    const std::string refused = post("/mcp", small_tool, "bulk-operator");
+    EXPECT_TRUE(refused.starts_with("HTTP/1.1 413")) << refused.substr(0, 400);
+}
+
 // The web app owns every page (docs/ui/web-app.md, lake#561): a browser opening a former server
 // page gets the app's index.html, anything else the 404; a retired form is gone; /w/<workspace>/ is
 // checked only where the API and a workspace's Zetta are reached; and an identity application's
@@ -1216,7 +1373,7 @@ TEST_P(HttpResponseIsolation, AMalformedBodyIsAuditedLikeAnyFailedCall) {
     EXPECT_EQ(malformed->front().draft.details.value("body_bytes", 0),
               static_cast<int>(std::string("{\"name\":\"").size() + secret.size()));
 
-    // An unauthenticated caller's malformed body is recorded too, as anonymous.
+    // An unauthenticated caller is refused and audited before its malformed body is read.
     const std::string anonymous_id = "anonymous-malformed-" + suffix;
     const std::string anonymous = connection->request("POST",
                                                       "/v1/create_token",
@@ -1226,11 +1383,14 @@ TEST_P(HttpResponseIsolation, AMalformedBodyIsAuditedLikeAnyFailedCall) {
                                                       {},
                                                       "application/json",
                                                       {{"X-Request-Id", anonymous_id}});
-    EXPECT_TRUE(anonymous.starts_with("HTTP/1.1 400")) << anonymous.substr(0, 300);
+    EXPECT_TRUE(anonymous.starts_with("HTTP/1.1 401")) << anonymous.substr(0, 300);
     const auto anonymous_events = store_->list_audit_events({.request_id = anonymous_id});
     ASSERT_TRUE(anonymous_events);
     ASSERT_EQ(anonymous_events->size(), 1U);
     EXPECT_EQ(anonymous_events->front().draft.principal, "anonymous");
+    EXPECT_EQ(anonymous_events->front().draft.details.value("error_code", ""), "unauthenticated");
+    EXPECT_EQ(anonymous_events->front().draft.details.value("input", ""), "unread");
+    EXPECT_EQ(anonymous_events->front().draft.details.value("body_bytes", -1), 0);
 
     // Audit verification still holds after the refusals were signed in.
     const auto all = lake::test::audit_events(*store_);

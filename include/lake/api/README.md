@@ -1,5 +1,11 @@
 # Public API types
 
+`Capability::max_body_bytes` declares the JSON wire allowance (1 MiB default, 64 MiB ceiling).
+`Registry::authenticate` applies the shared credential gate before an HTTP body is read, auditing
+only refusals; the full registry call still validates and authorizes the operation.
+`requires_credential` retains that early gate for handlers that own their authorization. Anonymous
+MCP envelopes have a separate 256 KiB cap. See [body admission](../../../docs/serving/http.md#request-body-limits).
+
 `tunnel_clients.hpp` declares the tunnel client downloads (lake#745): the platform allow-list,
 `read_tunnel_clients`, the signed-link helpers (`signed_link_signature`, `signed_link_matches`) and
 the link check. `ApiContext.tunnel_clients_dir` and `ServerOptions.tunnel_clients_dir` name the folder

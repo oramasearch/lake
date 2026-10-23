@@ -1168,6 +1168,7 @@ void register_workspace_call(Registry& registry, bool read) {
             json::array({"capability"})),
         .output_schema = {{"type", "object"}},
         .kind = CapabilityKind::Action,
+        .max_body_bytes = maximum_capability_body_bytes,
         .object = "customer",
         .action = read ? "read" : "write",
         .resolve_object = customer_object,

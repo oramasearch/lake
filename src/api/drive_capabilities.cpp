@@ -1453,6 +1453,7 @@ void register_drive_capabilities(Registry& registry) {
              {"additionalProperties", false}},
         .output_schema = {{"type", "object"}},
         .kind = CapabilityKind::Action,
+        .max_body_bytes = maximum_capability_body_bytes,
         .object = "drive folder",
         .action = "write",
         .resolve_object = drive_upload_object,

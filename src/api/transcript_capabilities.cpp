@@ -579,6 +579,7 @@ void register_transcript_capabilities(Registry& registry) {
                           {"required", json::array({"text", "model"})},
                           {"additionalProperties", false}},
         .kind = CapabilityKind::Action,
+        .max_body_bytes = maximum_capability_body_bytes,
         // Whoever may write the workspace may dictate in it: its usage is the workspace's.
         .object = "customer",
         .action = "write",
@@ -603,6 +604,7 @@ void register_transcript_capabilities(Registry& registry) {
             json::array({"title", "source"})),
         .output_schema = transcript_schema(),
         .kind = CapabilityKind::Action,
+        .max_body_bytes = maximum_capability_body_bytes,
         .object = "customer",
         .action = "write",
         .resolve_object = customer_object,
@@ -675,6 +677,7 @@ void register_transcript_capabilities(Registry& registry) {
             json::array({"id"})),
         .output_schema = transcript_schema(),
         .kind = CapabilityKind::Action,
+        .max_body_bytes = maximum_capability_body_bytes,
         .object = "customer",
         .action = "write",
         .resolve_object = customer_object,

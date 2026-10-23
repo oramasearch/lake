@@ -503,6 +503,12 @@ void register_engine_capabilities(Registry& registry) {
             .input_schema = std::move(schema),
             .output_schema = {{"type", "object"}},
             .kind = read ? CapabilityKind::Read : CapabilityKind::Action,
+            // Dataset rows, model weights and source/workflow imports carry bulk JSON.
+            .max_body_bytes = name.lake == "upload_dataset" || name.lake == "register_model" ||
+                                      name.lake == "import_n8n" || name.lake == "create_agent" ||
+                                      name.lake == "update_agent"
+                                  ? maximum_capability_body_bytes
+                                  : default_capability_body_bytes,
             // A read's input can be large or nested (validate_experiment's search space): a JSON
             // body is taken as well as the query string.
             .post_alias = read,

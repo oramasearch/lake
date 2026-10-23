@@ -1,6 +1,6 @@
 // lake — the HTTP adapter. Beast2 (HTTP/1) on Capy + Corosio, the same stack
 // Zetta serves with (zetta/src/core/api/http_server.cpp). This is the ONE
-// translation unit that knows about beast2 / boost::http / Boost.JSON. It
+// translation unit that knows about beast2 / boost::http. It
 // serves the hello page, the registry's JSON and binary HTTP renderings, the
 // OpenAPI document and MCP (POST /mcp). Every capability call goes through
 // Registry::call so authorization, validation and audit remain centralized.
@@ -80,14 +80,12 @@
 #include <boost/corosio/tls_context.hpp>
 #include <boost/corosio/tls_stream.hpp>
 #include <boost/http/field.hpp>
-#include <boost/http/json/json_sink.hpp>
 #include <boost/http/request.hpp>
 #include <boost/http/request_parser.hpp>
 #include <boost/http/response_parser.hpp>
 #include <boost/http/serializer.hpp>
 #include <boost/http/server/cors.hpp>
 #include <boost/http/server/router.hpp>
-#include <boost/json.hpp>
 #include <boost/url.hpp>
 #include <nlohmann/json.hpp>
 #include <openssl/evp.h>
@@ -939,8 +937,7 @@ bool constant_time_equal(std::string_view a, std::string_view b) {
 }
 
 // A capy WriteSink that collects a request body into a std::string — for the
-// form-urlencoded bodies the sign-in and hosted-page forms post (json_sink parses
-// JSON, which form bodies are not).
+// form-urlencoded bodies the sign-in and hosted-page forms post.
 struct StringBodySink {
     std::string data;
     std::size_t limit = maximum_sync_body_size;
@@ -968,35 +965,63 @@ struct StringBodySink {
     }
 };
 
-struct JsonBodySink {
-    boost::http::json_sink parser;
-    std::size_t size = 0;
-    std::size_t limit = maximum_sync_body_size;
+// Buffer bounded bytes, then build the registry's document directly. Parser callbacks abort
+// before another container, key or value can exceed the structural budget (including duplicate
+// object keys). Returning false would merely discard a subtree and keep parsing it.
+struct JsonBodySink : StringBodySink {
+    bool structure_too_large = false;
+    nlohmann::json document;
 
-    template <boost::capy::ConstBufferSequence CB>
-    boost::capy::immediate<boost::capy::io_result<std::size_t>> write_some(const CB& buffers) {
-        return write(buffers);
+    explicit JsonBodySink(std::size_t max_bytes = default_capability_body_bytes) {
+        limit = max_bytes;
     }
 
-    template <boost::capy::ConstBufferSequence CB>
-    boost::capy::immediate<boost::capy::io_result<std::size_t>> write(const CB& buffers) {
-        const std::size_t incoming = boost::capy::buffer_size(buffers);
-        if (size > limit || incoming > limit - size) {
-            return {{std::make_error_code(std::errc::file_too_large), 0}};
+    std::error_code parse() {
+        if (data.empty()) {
+            return {};
         }
-        auto [error, written] = parser.write(buffers).await_resume();
-        size += written;
-        return {{error, written}};
+        struct LimitExceeded {};
+        std::size_t elements = 0;
+        const auto budget = [&](int depth, nlohmann::json::parse_event_t event, nlohmann::json&) {
+            using Event = nlohmann::json::parse_event_t;
+            const bool container = event == Event::object_start || event == Event::array_start;
+            if ((container && depth >= 64) ||
+                ((container || event == Event::key || event == Event::value) &&
+                 ++elements > 65536)) {
+                throw LimitExceeded{};
+            }
+            return true;
+        };
+        try {
+            document = nlohmann::json::parse(data, budget, false);
+        } catch (const LimitExceeded&) {
+            structure_too_large = true;
+            return std::make_error_code(std::errc::file_too_large);
+        }
+        return {};
     }
 
-    boost::capy::immediate<boost::capy::io_result<>> write_eof() {
-        return parser.write_eof();
-    }
-
-    boost::json::value release() {
-        return parser.release();
+    nlohmann::json release() {
+        std::string().swap(data);
+        return std::move(document);
     }
 };
+
+bool declared_body_exceeds(const boost::http::route_params& route, std::size_t limit) {
+    const std::string_view value = route.req.value_or(boost::http::field::content_length, "");
+    std::uint64_t length = 0;
+    const auto parsed = std::from_chars(value.data(), value.data() + value.size(), length);
+    return parsed.ec == std::errc{} && parsed.ptr == value.data() + value.size() && length > limit;
+}
+
+boost::capy::io_task<std::size_t> read_json_body(boost::http::route_params& route,
+                                                 JsonBodySink& sink) {
+    if (declared_body_exceeds(route, sink.limit)) {
+        co_return {std::make_error_code(std::errc::file_too_large), 0};
+    }
+    auto [error, bytes] = co_await boost::capy::push_to(route.req_body, sink);
+    co_return {error ? error : sink.parse(), bytes};
+}
 
 bool body_is_too_large(const std::error_code& error) {
     return error == std::errc::file_too_large || error.message() == "body too large";
@@ -2481,19 +2506,9 @@ std::string browser_session_cookie(const boost::http::route_params& route,
     return cookie;
 }
 
-nlohmann::json to_nlohmann(const boost::json::value& value) {
-    return nlohmann::json::parse(boost::json::serialize(value), nullptr, false);
-};
-
-// A request body as JSON, or a discarded value when it is not JSON: the parser throws on a body
-// that ends inside a value (`{"name":"x`), which must be the caller's 400, not lake's 500
-// (lake#18).
+// Invalid JSON is discarded; structural budget failures are returned by read_json_body.
 nlohmann::json body_json(JsonBodySink& sink) {
-    try {
-        return to_nlohmann(sink.release());
-    } catch (const std::exception&) {
-        return nlohmann::json(nlohmann::json::value_t::discarded);
-    }
+    return sink.release();
 }
 
 // RFC 6750's challenge for a refused bearer, naming why and where a new key is made (lake#450).
@@ -10272,15 +10287,28 @@ struct ApiServer::Impl {
         nlohmann::json input = {{"pool_id", application->pool_id}};
         if (capability == "sign_in_passkey") {
             JsonBodySink sink;
-            auto [read_error, bytes_read] = co_await boost::capy::push_to(route.req_body, sink);
+            auto [read_error, bytes_read] = co_await read_json_body(route, sink);
             if (read_error || bytes_read == 0) {
+                co_return co_await send_text(
+                    route,
+                    body_is_too_large(read_error) ? http::status::payload_too_large
+                                                  : http::status::bad_request,
+                    error_body(body_is_too_large(read_error) ? "size_invalid" : "invalid_input",
+                               "JSON body is required within its byte and structure limits"),
+                    "application/json; charset=utf-8",
+                    "no-store");
+            }
+            const auto document = body_json(sink);
+            if (!document.is_object()) {
                 co_return co_await send_text(route,
-                                             http::status::bad_request,
-                                             error_body("invalid_input", "JSON body is required"),
+                                             sink.structure_too_large
+                                                 ? http::status::payload_too_large
+                                                 : http::status::bad_request,
+                                             error_body("invalid_input", "JSON object is required"),
                                              "application/json; charset=utf-8",
                                              "no-store");
             }
-            input.update(to_nlohmann(sink.release()));
+            input.update(document);
             input["pool_id"] = application->pool_id;
         }
         ApiContext context = context_for(route);
@@ -14391,14 +14419,18 @@ struct ApiServer::Impl {
             capability = users ? "scim_upsert_user" : "scim_upsert_group";
             success_status = http::status::created;
             JsonBodySink sink;
-            auto [read_error, bytes_read] = co_await boost::capy::push_to(route.req_body, sink);
+            auto [read_error, bytes_read] = co_await read_json_body(route, sink);
             if (read_error || bytes_read == 0) {
                 co_return co_await send_scim(
                     route,
                     refuse_unread_body(
                         route,
                         capability,
-                        ApiResult::failure("invalid_input", "SCIM resource body is required"),
+                        ApiResult::failure(body_is_too_large(read_error) ? "size_invalid"
+                                                                         : "invalid_input",
+                                           body_is_too_large(read_error)
+                                               ? "JSON exceeds its byte or structure limit"
+                                               : "SCIM resource body is required"),
                         read_error ? "unreadable" : "empty",
                         bytes_read),
                     success_status);
@@ -14443,14 +14475,18 @@ struct ApiServer::Impl {
         } else {
             capability = users ? "scim_patch_user" : "scim_patch_group";
             JsonBodySink sink;
-            auto [read_error, bytes_read] = co_await boost::capy::push_to(route.req_body, sink);
+            auto [read_error, bytes_read] = co_await read_json_body(route, sink);
             if (read_error || bytes_read == 0) {
                 co_return co_await send_scim(
                     route,
                     refuse_unread_body(
                         route,
                         capability,
-                        ApiResult::failure("invalid_input", "SCIM PATCH body is required"),
+                        ApiResult::failure(body_is_too_large(read_error) ? "size_invalid"
+                                                                         : "invalid_input",
+                                           body_is_too_large(read_error)
+                                               ? "JSON exceeds its byte or structure limit"
+                                               : "SCIM PATCH body is required"),
                         read_error ? "unreadable" : "empty",
                         bytes_read),
                     success_status);
@@ -14579,13 +14615,23 @@ struct ApiServer::Impl {
                     input[std::string(parameter.key)] = std::string(parameter.value);
                 }
             } else {
-                JsonBodySink sink;
-                auto [read_error, bytes_read] = co_await boost::capy::push_to(route.req_body, sink);
+                const ApiResult admitted =
+                    registry.authenticate(read ? "workspace_query" : "workspace_act", context);
+                if (!admitted.ok) {
+                    co_return co_await send_authentication_failure(route, admitted);
+                }
+                const auto named = registry.find(capability);
+                const auto target =
+                    named ? named : registry.find(read ? "workspace_query" : "workspace_act");
+                JsonBodySink sink(capability_body_limit(*target, context));
+                auto [read_error, bytes_read] = co_await read_json_body(route, sink);
                 std::string reason;
                 std::string message;
                 if (read_error) {
-                    reason = "unreadable";
-                    message = "could not read the request body as JSON";
+                    reason = body_is_too_large(read_error) ? "too_large" : "unreadable";
+                    message = body_is_too_large(read_error)
+                                  ? "JSON exceeds its byte or structure limit"
+                                  : "could not read the request body as JSON";
                 } else if (bytes_read > 0) {
                     input = body_json(sink);
                     if (input.is_discarded() || !input.is_object()) {
@@ -14596,21 +14642,27 @@ struct ApiServer::Impl {
                 if (!reason.empty()) {
                     // Audited as the workspace action it was meant to be (lake#18): the reason
                     // and the body's size, never its contents.
-                    status = http::status::bad_request;
+                    status = body_is_too_large(read_error) ? http::status::payload_too_large
+                                                           : http::status::bad_request;
+                    const std::string code =
+                        body_is_too_large(read_error) ? "size_invalid" : "invalid_input";
                     const ApiResult refused =
                         registry.refuse(read ? "workspace_query" : "workspace_act",
-                                        ApiResult::failure("invalid_input", message),
+                                        ApiResult::failure(code, message),
                                         {{"capability", capability},
                                          {"input", reason},
                                          {"body_bytes", static_cast<std::uint64_t>(bytes_read)}},
                                         context);
-                    if (refused.error.code != "invalid_input") {
+                    if (refused.error.code != code) {
                         status = http::int_to_status(static_cast<unsigned>(rest_status(refused)));
                     }
                     body = error_body(refused.error.code, refused.error.message);
                 }
             }
             if (body.empty()) {
+                if (!get) {
+                    context = context_for(route);
+                }
                 scoped_input["capability"] = capability;
                 scoped_input["input"] = input;
                 auto completed = co_await registry.call_async(
@@ -14749,9 +14801,22 @@ struct ApiServer::Impl {
                                                       : nlohmann::json(result.error.path)}}}}
                 .dump();
         };
+        ApiContext ctx = context_for(route);
+        const ApiResult admitted = registry.authenticate("model_completion", ctx);
+        if (!admitted.ok) {
+            if (admitted.error.code == "unauthenticated") {
+                route.res.set(http::field::www_authenticate, bearer_challenge(admitted));
+            }
+            co_return co_await send_text(
+                route,
+                http::int_to_status(static_cast<unsigned>(rest_status(admitted))),
+                openai_error(admitted),
+                "application/json; charset=utf-8",
+                "no-store");
+        }
         nlohmann::json request;
-        JsonBodySink sink;
-        auto [read_error, bytes_read] = co_await boost::capy::push_to(route.req_body, sink);
+        JsonBodySink sink(capability_body_limit(*registry.find("model_completion"), ctx));
+        auto [read_error, bytes_read] = co_await read_json_body(route, sink);
         // A body lake cannot read is audited as a failed model_completion (lake#18).
         const auto refused = [&](ApiResult failure, std::string_view reason) {
             const ApiResult result = refuse_unread_body(
@@ -14781,7 +14846,7 @@ struct ApiServer::Impl {
             }
         }
         if (body.empty()) {
-            ApiContext ctx = context_for(route);
+            ctx = context_for(route);
             const auto stream_field = request.find("stream");
             const bool streamed = stream_field != request.end() && stream_field->is_boolean() &&
                                   stream_field->get<bool>();
@@ -14872,9 +14937,33 @@ struct ApiServer::Impl {
             ctx);
     }
 
+    boost::http::route_task send_authentication_failure(boost::http::route_params& route,
+                                                        const ApiResult& result) {
+        if (result.error.code == "unauthenticated") {
+            route.res.set(boost::http::field::www_authenticate, bearer_challenge(result));
+        }
+        return send_text(route,
+                         boost::http::int_to_status(static_cast<unsigned>(rest_status(result))),
+                         rest_envelope(result).dump(),
+                         "application/json; charset=utf-8",
+                         "no-store");
+    }
+
+    std::size_t capability_body_limit(const Capability& capability,
+                                      const ApiContext& context) const {
+        return std::min(capability.max_body_bytes,
+                        context.authorized ? maximum_sync_body_size : std::size_t{1024 * 1024});
+    }
+
     boost::http::route_task serve_capability(boost::http::route_params& route,
                                              std::shared_ptr<const Capability> capability) {
         namespace http = boost::http;
+        ApiContext ctx = context_for(route);
+        const ApiResult admitted = registry.authenticate(capability->name, ctx);
+        if (!admitted.ok) {
+            co_return co_await send_authentication_failure(route, admitted);
+        }
+        const std::size_t limit = capability_body_limit(*capability, ctx);
         nlohmann::json input = nlohmann::json::object();
         std::string body;
         std::string set_cookie;
@@ -14887,8 +14976,8 @@ struct ApiServer::Impl {
                 query.emplace_back(parameter.key, parameter.value);
             input = rest_input_from_query(*capability, query);
         } else {
-            JsonBodySink sink;
-            auto [read_error, bytes_read] = co_await boost::capy::push_to(route.req_body, sink);
+            JsonBodySink sink(limit);
+            auto [read_error, bytes_read] = co_await read_json_body(route, sink);
             std::optional<ApiResult> unread;
             std::string reason;
             if (read_error) {
@@ -14897,7 +14986,10 @@ struct ApiServer::Impl {
                 reason = body_is_too_large(read_error) ? "too_large" : "unreadable";
                 unread = body_is_too_large(read_error)
                              ? ApiResult::failure("size_invalid",
-                                                  "request body exceeds the 67108864 byte limit")
+                                                  sink.structure_too_large
+                                                      ? "JSON exceeds the depth or element limit"
+                                                      : "request body exceeds the " +
+                                                            std::to_string(limit) + " byte limit")
                              : ApiResult::failure("invalid_input",
                                                   "could not read the request body as JSON: " +
                                                       read_error.message());
@@ -14912,7 +15004,10 @@ struct ApiServer::Impl {
             }
             if (unread) {
                 const ApiResult refused =
-                    refuse_unread_body(route, capability->name, *unread, reason, bytes_read);
+                    registry.refuse(capability->name,
+                                    *unread,
+                                    {{"input", reason}, {"body_bytes", bytes_read}},
+                                    ctx);
                 if (refused.error.code != unread->error.code) {
                     status = http::int_to_status(static_cast<unsigned>(rest_status(refused)));
                 }
@@ -14920,7 +15015,9 @@ struct ApiServer::Impl {
             }
         }
         if (body.empty()) {
-            ApiContext ctx = context_for(route);
+            if (route.req.method() != http::method::get) {
+                ctx = context_for(route);
+            }
             auto completed = co_await registry.call_async(capability->name, input, ctx);
             const ApiResult result =
                 completed ? std::move(*completed)
@@ -14990,25 +15087,65 @@ struct ApiServer::Impl {
         std::string content_type = "application/json; charset=utf-8";
         std::string session_id;
         http::status status = http::status::ok;
-        JsonBodySink sink;
-        auto [read_error, bytes_read] = co_await boost::capy::push_to(route.req_body, sink);
+        ApiContext ctx = context_for(route);
+        // The tool name is in the envelope: anonymous discovery and identity calls may read
+        // only this small budget before their capability gate can be selected.
+        std::size_t limit = 256 * 1024;
+        if (ctx.authorized) {
+            for (const auto& capability : registry.list()) {
+                limit = std::max(limit, capability_body_limit(*capability, ctx));
+            }
+        }
+        JsonBodySink sink(limit);
+        auto [read_error, bytes_read] = co_await read_json_body(route, sink);
         nlohmann::json request;
         if (body_is_too_large(read_error)) {
             status = http::status::payload_too_large;
-            body = nlohmann::json{{"jsonrpc", "2.0"},
-                                  {"id", nullptr},
-                                  {"error",
-                                   {{"code", -32700},
-                                    {"message", "request body exceeds the 67108864 byte limit"}}}}
-                       .dump();
+            body =
+                nlohmann::json{
+                    {"jsonrpc", "2.0"},
+                    {"id", nullptr},
+                    {"error",
+                     {{"code", -32700},
+                      {"message",
+                       sink.structure_too_large
+                           ? "JSON exceeds the depth or element limit"
+                           : "request body exceeds the " + std::to_string(limit) + " byte limit"}}}}
+                    .dump();
         } else if (read_error || bytes_read == 0 || (request = body_json(sink)).is_discarded()) {
-            status = http::status::bad_request;
+            status = sink.structure_too_large ? http::status::payload_too_large
+                                              : http::status::bad_request;
             body = nlohmann::json{{"jsonrpc", "2.0"},
                                   {"id", nullptr},
                                   {"error", {{"code", -32700}, {"message", "parse error"}}}}
                        .dump();
         } else {
-            ApiContext ctx = context_for(route);
+            ctx = context_for(route);
+            // Each tool keeps its own input allowance even on the authenticated endpoint.
+            // Budget the entire wire envelope, including whitespace and unknown fields, so
+            // padding or duplicate keys cannot bypass the registered limit.
+            std::size_t dispatch_limit = default_capability_body_bytes;
+            if (request.is_object() && request.value("method", nlohmann::json()) == "tools/call" &&
+                request.contains("params") && request["params"].is_object() &&
+                request["params"].contains("name") && request["params"]["name"].is_string()) {
+                const auto capability = registry.find(request["params"]["name"].get<std::string>());
+                if (capability) {
+                    dispatch_limit = capability_body_limit(*capability, ctx);
+                }
+            }
+            if (bytes_read > dispatch_limit) {
+                co_return co_await send_text(
+                    route,
+                    http::status::payload_too_large,
+                    nlohmann::json{
+                        {"jsonrpc", "2.0"},
+                        {"id", nullptr},
+                        {"error",
+                         {{"code", -32602}, {"message", "MCP input exceeds its body limit"}}}}
+                        .dump(),
+                    "application/json; charset=utf-8",
+                    "no-store");
+            }
             auto completed = co_await mcp_dispatch_async(registry, request, ctx, version_string());
             if (!completed) {
                 status = http::status::internal_server_error;

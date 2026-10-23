@@ -806,10 +806,36 @@ void admit_application_session(const Capability& entry, ApiContext& context) {
     context.scopes = admitted ? session.scopes : std::vector<std::string>{};
 }
 
+std::optional<ApiResult> authentication_failure(const Capability& entry, ApiContext& context) {
+    admit_application_session(entry, context);
+    // A bearer key lake rejected (unknown, revoked, expired, mistyped) is refused on every
+    // capability a visitor may call: lake's own public reads (object `server`: `viewer`,
+    // `server_info`, the Docs; lake#594) and the public reads of repositories and their content
+    // (`allows_anonymous_public_read`, lake#775). A client whose key was revoked learns so instead
+    // of reading a visitor's answer, such as an empty repository list. A browser's stale session
+    // cookie is still a visitor, and the capabilities that verify their own bearer (SCIM
+    // providers, sign-in, the agents' calls) are left to do so.
+    const bool rejected_bearer = !context.authorized && !context.credential_rejection.empty() &&
+                                 context.authentication_method == "bearer" &&
+                                 (entry.object == "server" || entry.allows_anonymous_public_read);
+    if (context.application_session && !entry.serves_application_pools && entry.requires_auth &&
+        !entry.allows_anonymous_public_read) {
+        return ApiResult::failure(
+            "unauthorized",
+            "an identity application's session reaches only its own sign-in (sessions, devices, "
+            "tokens, MFA and passkeys); " +
+                entry.name + " needs a Lake account's credential");
+    } else if (((entry.requires_auth || entry.requires_credential) && !context.authorized &&
+                !entry.allows_anonymous_public_read) ||
+               rejected_bearer) {
+        return unauthenticated(context);
+    }
+    return std::nullopt;
+}
+
 CallState prepare_call(std::shared_ptr<const Capability> capability,
                        const nlohmann::json& input,
                        ApiContext& context) {
-    admit_application_session(*capability, context);
     if (context.request_id.empty()) {
         context.request_id = control::new_uuid_v4();
     }
@@ -835,28 +861,8 @@ CallState prepare_call(std::shared_ptr<const Capability> capability,
         context.workspace_id = input.at("workspace_id").is_string()
             ? input.at("workspace_id").get<std::string>() : std::string();
     }
-    // A bearer key lake rejected (unknown, revoked, expired, mistyped) is refused on every
-    // capability a visitor may call: lake's own public reads (object `server`: `viewer`,
-    // `server_info`, the Docs; lake#594) and the public reads of repositories and their content
-    // (`allows_anonymous_public_read`, lake#775). A client whose key was revoked learns so instead
-    // of reading a visitor's answer, such as an empty repository list. A browser's stale session
-    // cookie is still a visitor, and the capabilities that verify their own bearer (SCIM
-    // providers, sign-in, the agents' calls) are left to do so.
-    const bool rejected_bearer = !context.authorized && !context.credential_rejection.empty() &&
-                                 context.authentication_method == "bearer" &&
-                                 (entry.object == "server" || entry.allows_anonymous_public_read);
-    if (context.application_session && !entry.serves_application_pools && entry.requires_auth &&
-        !entry.allows_anonymous_public_read) {
-        state.result = ApiResult::failure(
-            "unauthorized",
-            "an identity application's session reaches only its own sign-in (sessions, devices, "
-            "tokens, MFA and passkeys); " +
-                entry.name + " needs a Lake account's credential");
-        state.proceed = false;
-    } else if ((entry.requires_auth && !context.authorized &&
-                !entry.allows_anonymous_public_read) ||
-               rejected_bearer) {
-        state.result = unauthenticated(context);
+    if (auto failure = authentication_failure(entry, context)) {
+        state.result = std::move(*failure);
         state.proceed = false;
     } else if (ApiResult validation = validate_input(entry, input); !validation.ok) {
         state.result = validation;
@@ -1217,7 +1223,8 @@ std::expected<nlohmann::json, ApiError> canonical_input(const Capability& capabi
 }
 
 bool Registry::add(Capability capability) {
-    if (capability.name.empty() || find(capability.name))
+    if (capability.name.empty() || find(capability.name) || capability.max_body_bytes == 0 ||
+        capability.max_body_bytes > maximum_capability_body_bytes)
         return false;
     // A deprecated alias is listed in the schema, so OpenAPI and MCP show it (docs/api/naming.md).
     for (const auto& [alias, name] : capability.input_aliases) {
@@ -1308,6 +1315,17 @@ Registry::call(const std::string& name, const nlohmann::json& input, ApiContext&
     }
     return finish_call(
         capability.get(), name, call_input, std::move(state.result), context, state.proceed);
+}
+
+ApiResult Registry::authenticate(const std::string& name, ApiContext& context) const {
+    const auto capability = find(name);
+    if (!capability) {
+        return ApiResult::failure("unknown_capability", "no capability named " + name);
+    }
+    if (auto failure = authentication_failure(*capability, context)) {
+        return refuse(name, std::move(*failure), {{"input", "unread"}, {"body_bytes", 0}}, context);
+    }
+    return ApiResult::success(nlohmann::json::object());
 }
 
 ApiResult Registry::refuse(const std::string& name,

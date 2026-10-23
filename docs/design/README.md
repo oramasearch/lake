@@ -7,6 +7,8 @@ behavior and verification contract.
 LSR-104) separately from deployment; [models.md](../api/models.md) specifies the access contract.
 [PKI SAN validation](../api/pki.md#certificate-identities) is implemented in the source tree
 (lake#946); [status.md](status.md) keeps that fix separate from deployed PKI behavior.
+[status.md](status.md) tracks bounded JSON admission (lake#944) separately from deployment;
+[HTTP limits](../serving/http.md#request-body-limits) defines its credential and parser budgets.
 
 Secure-networking store and capability support and its separate operator rollout are tracked in
 [status.md](status.md) and specified in the [control-plane](../control-plane/network.md) and
