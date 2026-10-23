@@ -518,7 +518,8 @@ TEST(PostgresIdentity, SessionsTokensAndDeviceRevocation) {
     ASSERT_TRUE(token) << token.error().message;
     EXPECT_TRUE(store->context_for(token->secret));
 
-    const auto enrolled = store->enroll_mfa(context->user_id, "lake");
+    const auto enrolled = store->enroll_mfa(
+        context->user_id, "lake", {sign_up->session.id, "correct horse battery staple"});
     ASSERT_TRUE(enrolled) << enrolled.error().message;
     ASSERT_EQ(enrolled->recovery_codes.size(), 8);
     const auto mfa_required = store->sign_in_password(
@@ -842,7 +843,8 @@ TEST(PostgresOfflineRecovery, GrantsRecoveryPathsAndRepositoryKeyCustody) {
                           anonymous)
                     .ok);
 
-    const auto enrolled = store->enroll_mfa(target_principal->user_id, "lake");
+    const auto enrolled = store->enroll_mfa(
+        target_principal->user_id, "lake", {target->session.id, "correct horse battery staple"});
     ASSERT_TRUE(enrolled) << enrolled.error().message;
     const lake::api::ApiResult code = *liquid::runtime::block_on(
         registry.call_async("recover_with_code",

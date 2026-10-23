@@ -502,7 +502,8 @@ public:
     Result<IssuedSession> sign_in_password(const PasswordSignIn&) override;
     Result<IssuedSession> sign_in_taap(const TaapSignIn&) override;
     Result<MfaEnrollment> enroll_mfa(const std::string& user_id,
-                                     const std::string& pool_id) override;
+                                     const std::string& pool_id,
+                                     const MfaEnrollmentProof& proof) override;
     Result<void> disable_mfa(const std::string& user_id,
                              const std::string& pool_id,
                              const std::string& code) override;

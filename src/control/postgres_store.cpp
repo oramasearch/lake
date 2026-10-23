@@ -8126,7 +8126,14 @@ public:
         });
     }
     Result<MfaEnrollment> enroll_mfa(const std::string& user_id,
-                                     const std::string& pool_id) override {
+                                     const std::string& pool_id,
+                                     const MfaEnrollmentProof& proof) override {
+        const std::string pool = pool_id.empty() ? "lake" : pool_id;
+        if (user_id.empty() || proof.session_id.empty() || proof.password.empty()) {
+            return std::unexpected(
+                StoreError{"unauthorized",
+                           "MFA enrollment requires an interactive session and current password"});
+        }
         MfaEnrollment enrollment;
         enrollment.secret = identity_crypto::new_totp_secret();
         for (int index = 0; index < 8; ++index) {
@@ -8141,6 +8148,33 @@ public:
             return std::unexpected(StoreError{"store_error", "could not create TOTP secret"});
         }
         return with_tx<MfaEnrollment>([&](pqxx::work& tx) -> Result<MfaEnrollment> {
+            const auto session = tx.exec_params(
+                "SELECT 1 FROM sessions JOIN users ON users.id = sessions.user_id "
+                "WHERE sessions.id = $1::uuid AND sessions.user_id = $2::uuid "
+                "AND sessions.pool_id = $3 AND sessions.kind IN ('browser', 'taap') "
+                "AND sessions.scopes = ARRAY['*']::text[] AND sessions.parent_session_id IS NULL "
+                "AND sessions.revoked_at IS NULL "
+                "AND (sessions.expires_at IS NULL OR sessions.expires_at > clock_timestamp()) "
+                "AND users.disabled_at IS NULL AND users.deleted_at IS NULL "
+                "FOR SHARE OF sessions, users",
+                proof.session_id,
+                user_id,
+                pool);
+            if (session.empty() || !active_session_lineage(tx, proof.session_id, user_id, pool)) {
+                return std::unexpected(
+                    StoreError{"unauthorized",
+                               "MFA enrollment requires an active interactive sign-in session"});
+            }
+            const auto password = tx.exec_params(
+                "SELECT secret_hash FROM credentials WHERE user_id = $1::uuid AND pool_id = $2 "
+                "AND kind = 'password' AND revoked_at IS NULL FOR SHARE",
+                user_id,
+                pool);
+            if (password.empty() ||
+                !identity_crypto::verify_secret(password[0][0].as<std::string>(), proof.password)) {
+                return std::unexpected(
+                    StoreError{"unauthorized", "MFA enrollment requires the current password"});
+            }
             const Result<std::string> encrypted =
                 encrypt_secret(tx, "identity.totp", enrollment.secret);
             if (!encrypted) {
@@ -8152,12 +8186,12 @@ public:
                 "ON CONFLICT (pool_id, kind, subject) DO UPDATE SET public_data = "
                 "EXCLUDED.public_data, revoked_at = NULL",
                 user_id,
-                pool_id,
+                pool,
                 *encrypted);
             tx.exec_params("UPDATE credentials SET revoked_at = now() WHERE user_id = $1::uuid "
                            "AND pool_id = $2 AND kind = 'recovery' AND revoked_at IS NULL",
                            user_id,
-                           pool_id);
+                           pool);
             for (const std::string& code : enrollment.recovery_codes) {
                 const std::string hash = identity_crypto::hash_secret(code);
                 if (hash.empty()) {
@@ -8168,7 +8202,7 @@ public:
                     "INSERT INTO credentials (user_id, pool_id, kind, subject, secret_hash) "
                     "VALUES ($1::uuid, $2, 'recovery', $3, $4)",
                     user_id,
-                    pool_id,
+                    pool,
                     identity_crypto::random_secret(),
                     hash);
             }

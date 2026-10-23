@@ -3926,39 +3926,51 @@ Result<IssuedSession> InMemoryStore::sign_in_taap(const TaapSignIn& input) {
 }
 
 Result<MfaEnrollment> InMemoryStore::enroll_mfa(const std::string& user_id,
-                                                const std::string& pool_id) {
+                                                const std::string& pool_id,
+                                                const MfaEnrollmentProof& proof) {
+    std::lock_guard lock(mutex_);
+    const std::string pool = pool_id.empty() ? "lake" : pool_id;
+    const auto session = std::ranges::find(sessions_, proof.session_id, &Session::id);
+    if (proof.session_id.empty() || session == sessions_.end() || session->user_id != user_id ||
+        session->pool_id != pool || (session->kind != "browser" && session->kind != "taap") ||
+        session->scopes != std::vector<std::string>{"*"} || !session->parent_session_id.empty() ||
+        !active_session_lineage(sessions_, devices_, *session) ||
+        disabled_users_.contains(user_id) || deleted_users_.contains(user_id)) {
+        return std::unexpected(StoreError{
+            "unauthorized", "MFA enrollment requires an active interactive sign-in session"});
+    }
+    const auto credential = std::ranges::find_if(passwords_, [&](const auto& value) {
+        return value.user_id == user_id && value.pool_id == pool;
+    });
+    if (credential == passwords_.end() || proof.password.empty() ||
+        !identity_crypto::verify_secret(credential->password, proof.password)) {
+        return std::unexpected(
+            StoreError{"unauthorized", "MFA enrollment requires the current password"});
+    }
     MfaEnrollment enrollment;
     enrollment.secret = identity_crypto::new_totp_secret();
     if (enrollment.secret.empty()) {
         return std::unexpected(StoreError{"store_error", "could not create TOTP secret"});
     }
+    std::vector<std::string> recovery_hashes;
     for (int index = 0; index < 8; ++index) {
         const std::string code = identity_crypto::random_secret().substr(0, 12);
         if (code.size() != 12) {
             return std::unexpected(
                 StoreError{"store_error", "could not create MFA recovery codes"});
         }
-        enrollment.recovery_codes.push_back(code);
-    }
-    std::lock_guard lock(mutex_);
-    for (auto& credential : passwords_) {
-        if (credential.user_id == user_id && credential.pool_id == pool_id) {
-            credential.totp_secret = enrollment.secret;
-            credential.recovery_hashes.clear();
-            for (const std::string& code : enrollment.recovery_codes) {
-                const std::string hash = identity_crypto::hash_secret(code);
-                if (hash.empty()) {
-                    credential.totp_secret.clear();
-                    credential.recovery_hashes.clear();
-                    return std::unexpected(
-                        StoreError{"store_error", "could not protect MFA recovery codes"});
-                }
-                credential.recovery_hashes.push_back(hash);
-            }
-            return enrollment;
+        const std::string hash = identity_crypto::hash_secret(code);
+        if (hash.empty()) {
+            return std::unexpected(
+                StoreError{"store_error", "could not protect MFA recovery codes"});
         }
+        enrollment.recovery_codes.push_back(code);
+        recovery_hashes.push_back(hash);
     }
-    return std::unexpected(StoreError{"not_found", "password credential not found"});
+    // Stage the complete replacement so any failure above preserves the original factor/codes.
+    credential->totp_secret = enrollment.secret;
+    credential->recovery_hashes = std::move(recovery_hashes);
+    return enrollment;
 }
 
 Result<bool> InMemoryStore::mfa_enrolled(const std::string& user_id, const std::string& pool_id) {

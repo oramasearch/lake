@@ -3394,9 +3394,11 @@ void register_identity_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "enroll_mfa",
         .title = "Enroll TOTP",
-        .description = "Enroll TOTP MFA and return its otpauth URI and recovery codes once.",
+        .description = "Enroll or replace TOTP MFA after verifying the current password in an "
+                       "interactive sign-in session; return its URI and recovery codes once.",
         .input_schema = {{"type", "object"},
-                         {"properties", json::object()},
+                         {"properties", {{"password", {{"type", "string"}, {"minLength", 1}}}}},
+                         {"required", json::array({"password"})},
                          {"additionalProperties", false}},
         .output_schema = {{"type", "object"},
                           {"properties",
@@ -3407,10 +3409,14 @@ void register_identity_capabilities(Registry& registry) {
         .object = "principal",
         .action = "write",
         .resolve_object = self_object,
-        .async_handler = [](const json&, ApiContext& context) -> liquid::runtime::task<ApiResult> {
+        .async_handler = [](const json& input,
+                            ApiContext& context) -> liquid::runtime::task<ApiResult> {
             if (!context.store)
                 co_return no_store();
-            auto result = context.store->enroll_mfa(context.acting_user_id, context.pool_id);
+            auto result = context.store->enroll_mfa(
+                context.acting_user_id,
+                context.pool_id,
+                {context.credential_session_id, input.at("password").get<std::string>()});
             if (!result)
                 co_return from_store_error(result.error());
             const ApiResult event = session_answer(

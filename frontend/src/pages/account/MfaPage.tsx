@@ -27,6 +27,7 @@ function Manage() {
   const toast = useToast();
   const [enrollment, setEnrollment] = useState<Enrollment | null>(null);
   const [enrolling, setEnrolling] = useState(false);
+  const [password, setPassword] = useState("");
   const [code, setCode] = useState("");
   const [disabling, setDisabling] = useState(false);
   const [error, setError] = useState<unknown>(null);
@@ -35,10 +36,11 @@ function Manage() {
     setEnrolling(true);
     setError(null);
     try {
-      setEnrollment(await act<Enrollment>("enroll_mfa", {}, NO_WORKSPACE));
+      setEnrollment(await act<Enrollment>("enroll_mfa", { password }, NO_WORKSPACE));
     } catch (e) {
       setError(e);
     } finally {
+      setPassword("");
       setEnrolling(false);
     }
   };
@@ -62,7 +64,7 @@ function Manage() {
     <Page
       eyebrow="Account"
       title="Multi-Factor Authentication"
-      sub="Enroll or replace a TOTP authenticator for password sign-in. A new enrollment replaces existing recovery codes."
+      sub="Confirm your password to enroll or replace a TOTP authenticator. A new enrollment replaces existing recovery codes."
     >
       {error ? <Notice tone="danger">{messageOf(error)}</Notice> : null}
       {enrollment && (
@@ -105,16 +107,16 @@ function Manage() {
           actions={viewer.mfa_enrolled !== undefined ? <Status value={viewer.mfa_enrolled ? "enabled" : "not enrolled"} tone={viewer.mfa_enrolled ? "success" : "warning"} /> : undefined}
         >
           <p className="mt-0 text-[13px] text-ink-2">Add the authenticator URI to your authenticator app, and keep the recovery codes somewhere safe.</p>
-          <form
-            onSubmit={(e) => {
-              e.preventDefault();
-              void enroll();
-            }}
-          >
-            <Button type="submit" variant="primary" loading={enrolling}>
-              <ShieldCheck size={14} aria-hidden /> Enroll or replace MFA
-            </Button>
-          </form>
+          <Form onSubmit={enroll}>
+            <Field label="Current password" error={fieldError(error, "password")} required>
+              <input type="password" name="password" autoComplete="current-password" value={password} onChange={(e) => setPassword(e.target.value)} />
+            </Field>
+            <div>
+              <Button type="submit" variant="primary" loading={enrolling}>
+                <ShieldCheck size={14} aria-hidden /> Enroll or replace MFA
+              </Button>
+            </div>
+          </Form>
         </Card>
       </Split>
     </Page>
