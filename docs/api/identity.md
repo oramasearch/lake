@@ -72,8 +72,10 @@ the document again.
 
 The callback consumes state before exchanging the code. OpenID Connect id tokens must use RS256
 and pass signature, issuer, audience, expiry, not-before, nonce, subject, and key-id checks. JWKS
-documents are fetched through Corosio with TLS peer and hostname verification, cached for one hour,
-and refreshed once when verification fails so key rotation is picked up. GitHub instead verifies
+documents are fetched through Corosio with TLS peer and hostname verification on the blocking pool.
+Malformed tokens and failures with a known key never trigger a fetch; unknown key IDs and valid
+tokens using keys older than an hour share a single-flight refresh with a 60-second cooldown,
+including failures ([bounded key refresh](clerk.md#bounded-key-refresh-lake956-lsr-090), lake#956). GitHub instead verifies
 the returned access token through `https://api.github.com/user`. Google and GitHub use their fixed
 public endpoints; every other provider's endpoints come from its OpenID Connect discovery document
 (below). Provider registration and each OAuth callback create one signed registry-compatible audit

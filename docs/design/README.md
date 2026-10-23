@@ -15,6 +15,8 @@ text and caller-executed functions (lake#960); [status.md](status.md) records so
 [status.md](status.md) tracks bounded JSON admission (lake#944) separately from deployment;
 [HTTP limits](../serving/http.md#request-body-limits) defines its credential and parser budgets.
 
+Clerk/OIDC bounded JWKS refresh and the Clerk exchange attempt limit (lake#956) are tracked in [status.md](status.md) and specified in [Clerk](../api/clerk.md#bounded-key-refresh-lake956-lsr-090).
+
 Secure-networking store and capability support and its separate operator rollout are tracked in
 [status.md](status.md) and specified in the [control-plane](../control-plane/network.md) and
 [API](../api/network.md) contracts.

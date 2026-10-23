@@ -7890,7 +7890,7 @@ struct ApiServer::Impl {
     std::string mcp_tool_digest;
     // What each MCP session last listed (lake#684).
     McpSessionLists mcp_session_lists;
-    mutable OutboundHttpClient outbound_http;
+    std::shared_ptr<OutboundHttpClient> outbound_http = std::make_shared<OutboundHttpClient>();
     // How invoices are paid where billing is on (docs/api/billing.md#payment-providers).
     std::shared_ptr<PaymentProviders> payments;
     // The apex order sheet (lake#831, docs/api/orders.md): the anonymous form's limit, the key its
@@ -7920,11 +7920,12 @@ struct ApiServer::Impl {
     // The workspace Zettas' object transport (configure_workspace_stores), for workspace files;
     // null without workspaces.
     std::shared_ptr<control::ObjectTransport> object_transport;
-    struct CachedJwks {
-        std::string document;
-        std::chrono::steady_clock::time_point fetched_at;
+    std::shared_ptr<OidcJwks> oidc_jwks = std::make_shared<OidcJwks>();
+    struct ClerkAttempts {
+        std::chrono::steady_clock::time_point started;
+        unsigned count = 0;
     };
-    std::map<std::string, CachedJwks> jwks_cache;
+    std::map<std::string, ClerkAttempts> clerk_attempts;
     std::optional<ClerkConfig> clerk;
     boost::corosio::io_context io_context;
     // Lake#534: connections apart from the request workers (src/api/http_connections.hpp).
@@ -8754,7 +8755,7 @@ struct ApiServer::Impl {
                        std::string body,
                        std::vector<std::pair<std::string, std::string>> headers,
                        std::chrono::seconds timeout) {
-                    OutboundResponse response = outbound_http.request(
+                    OutboundResponse response = outbound_http->request(
                         {"POST", url, std::move(body), std::move(headers), timeout});
                     return TranscriptPostResponse{
                         response.status, std::move(response.body), std::move(response.error)};
@@ -8774,7 +8775,7 @@ struct ApiServer::Impl {
                     oidc_timeout};
                 request.body_limit = 256 * 1024;
                 request.public_only = !options.oidc_allow_private_addresses;
-                OutboundResponse response = outbound_http.request(request);
+                OutboundResponse response = outbound_http->request(request);
                 return OidcFetchResponse{
                     response.status, std::move(response.body), std::move(response.error)};
             },
@@ -8841,7 +8842,7 @@ struct ApiServer::Impl {
                             return true;
                         };
                     }
-                    OutboundResponse response = outbound_http.request(std::move(request));
+                    OutboundResponse response = outbound_http->request(std::move(request));
                     if (on_body && (response.status < 200 || response.status >= 300)) {
                         response.body = std::move(*refusal);
                     }
@@ -8865,7 +8866,7 @@ struct ApiServer::Impl {
                             keys,
                             options.public_host,
                             [this](const StripeRequest& request) {
-                                OutboundResponse response = outbound_http.request(
+                                OutboundResponse response = outbound_http->request(
                                     {request.method, request.url, request.body, request.headers});
                                 return StripeResponse{response.status,
                                                       std::move(response.body),
@@ -8915,12 +8916,12 @@ struct ApiServer::Impl {
     transparency::Result<nlohmann::json> submit_transparency(const std::string& endpoint,
                                                              const nlohmann::json& request) const {
         const OutboundResponse response =
-            outbound_http.request({"POST",
-                                   endpoint,
-                                   request.dump(),
-                                   {{"Accept", "application/json"},
-                                    {"Content-Type", "application/json"},
-                                    {"User-Agent", "lake-transparency/1"}}});
+            outbound_http->request({"POST",
+                                    endpoint,
+                                    request.dump(),
+                                    {{"Accept", "application/json"},
+                                     {"Content-Type", "application/json"},
+                                     {"User-Agent", "lake-transparency/1"}}});
         if (!response.error.empty()) {
             return std::unexpected(transparency::Error{
                 "store_unavailable", "transparency endpoint request failed: " + response.error});
@@ -8941,11 +8942,11 @@ struct ApiServer::Impl {
     transparency::TsaReply send_timestamp_request(std::string_view endpoint,
                                                   std::string_view request_der) const {
         const OutboundResponse response =
-            outbound_http.request({"POST",
-                                   std::string(endpoint),
-                                   std::string(request_der),
-                                   {{"Content-Type", "application/timestamp-query"},
-                                    {"Accept", "application/timestamp-reply"}}});
+            outbound_http->request({"POST",
+                                    std::string(endpoint),
+                                    std::string(request_der),
+                                    {{"Content-Type", "application/timestamp-query"},
+                                     {"Accept", "application/timestamp-reply"}}});
         return transparency::TsaReply{response.status, response.body, response.error};
     }
 
@@ -9027,7 +9028,7 @@ struct ApiServer::Impl {
         request.timeout =
             std::min<std::chrono::seconds>(options.replication_timeout, std::chrono::seconds(60));
         request.public_only = !options.replication_allow_private_addresses;
-        const OutboundResponse response = outbound_http.request(std::move(request));
+        const OutboundResponse response = outbound_http->request(std::move(request));
         if (!response.error.empty()) {
             return std::unexpected(ApiError{
                 "store_unavailable", "replication peer request failed: " + response.error, {}});
@@ -9451,7 +9452,7 @@ struct ApiServer::Impl {
             OutboundRequest request{"POST", url, payload, std::move(outbound_headers)};
             request.timeout = std::chrono::seconds(10);
             request.public_only = !options.webhook_allow_private_addresses;
-            const OutboundResponse response = outbound_http.request(std::move(request));
+            const OutboundResponse response = outbound_http->request(std::move(request));
             return WebhookDeliveryResult{response.status, response.error};
         };
         if (route.req.count(boost::http::field::user_agent) != 0) {
@@ -10504,40 +10505,54 @@ struct ApiServer::Impl {
                          "public, max-age=300");
     }
 
-    // `public_only` for an identity provider's keys (lake#837): HTTPS to public addresses only,
-    // unless LAKE_OIDC_ALLOW_PRIVATE_ADDRESSES is set. Clerk's, which the operator configures, is
-    // not limited.
-    std::optional<std::string>
-    jwks_for(const std::string& url, bool refresh, bool public_only = false) {
-        const auto found = jwks_cache.find(url);
-        if (!refresh && found != jwks_cache.end() &&
-            std::chrono::steady_clock::now() - found->second.fetched_at < std::chrono::hours(1)) {
-            return found->second.document;
+    // The offloaded task owns its cache and transport even if shutdown abandons its response.
+    OidcJwks::Fetch jwks_fetch() const {
+        if (options.oidc_jwks_fetch) {
+            return options.oidc_jwks_fetch;
         }
-        OutboundRequest request{
-            "GET", url, "", {{"Accept", "application/json"}, {"User-Agent", "lake-oauth/1"}}};
-        if (public_only) {
+        return [client = outbound_http,
+                clerk_http = options.clerk_http,
+                clerk_url = clerk ? clerk->jwks_url : std::string()](
+                   const std::string& endpoint, bool restricted) -> std::optional<std::string> {
+            OutboundRequest request{
+                "GET",
+                endpoint,
+                "",
+                {{"Accept", "application/json"}, {"User-Agent", "lake-oauth/1"}}};
             request.timeout = oidc_timeout;
-            request.public_only = true;
+            request.public_only = restricted;
+            if (clerk_http && endpoint == clerk_url) {
+                const auto response = clerk_http(endpoint, request.headers);
+                return response.error.empty() && response.status >= 200 && response.status < 300
+                           ? std::optional(response.body)
+                           : std::nullopt;
+            }
+            const auto response = client->request(std::move(request));
+            if (!response.error.empty() || response.status < 200 || response.status >= 300) {
+                return std::nullopt;
+            }
+            return response.body;
+        };
+    }
+
+    // IO-thread-only, bounded address state. Never evict an active bucket to admit a new client.
+    // Keyed on the address the trusted ingress hop reports (order_client_address): the socket peer
+    // is the ingress pod, which every user shares. Direct clients share the "direct" bucket.
+    bool allow_clerk_exchange(const boost::http::route_params& route) {
+        const auto now = std::chrono::steady_clock::now();
+        std::erase_if(clerk_attempts, [&](const auto& item) {
+            return now - item.second.started >= std::chrono::minutes(1);
+        });
+        const auto client = order_client_address(route);
+        if (!clerk_attempts.contains(client) && clerk_attempts.size() >= 4096) {
+            return false;
         }
-        OutboundResponse response;
-        if (clerk && url == clerk->jwks_url && options.clerk_http) {
-            const auto injected = options.clerk_http(url, request.headers);
-            response.status = injected.status;
-            response.body = injected.body;
-            response.error = injected.error;
-        } else {
-            response = outbound_http.request(request);
+        const auto entry = clerk_attempts.try_emplace(client, ClerkAttempts{now}).first;
+        if (entry->second.count >= 60) {
+            return false;
         }
-        if (!response.error.empty() || response.status < 200 || response.status >= 300) {
-            return std::nullopt;
-        }
-        const nlohmann::json document = nlohmann::json::parse(response.body, nullptr, false);
-        if (document.is_discarded() || !document.contains("keys") || !document["keys"].is_array()) {
-            return std::nullopt;
-        }
-        jwks_cache[url] = {response.body, std::chrono::steady_clock::now()};
-        return response.body;
+        ++entry->second.count;
+        return true;
     }
 
     boost::http::route_task oauth_error(boost::http::route_params& route,
@@ -10672,6 +10687,15 @@ struct ApiServer::Impl {
                                          "application/json; charset=utf-8",
                                          "no-store");
         }
+        if (!allow_clerk_exchange(route)) {
+            route.res.set("Retry-After", "60");
+            co_return co_await send_text(
+                route,
+                http::status::too_many_requests,
+                error_body("rate_limited", "Too many sign-in attempts. Please try again."),
+                "application/json; charset=utf-8",
+                "no-store");
+        }
         auto [read_error, body] = co_await read_string_body(route);
         if (read_error) {
             co_return http::route_error(read_error);
@@ -10684,14 +10708,13 @@ struct ApiServer::Impl {
         const std::string audience(clerk_token_template);
         std::optional<control::identity_crypto::OidcClaims> claims;
         if (!token.empty()) {
-            for (const bool refresh : {false, true}) {
-                const std::optional<std::string> jwks = jwks_for(clerk->jwks_url, refresh);
-                claims = jwks ? control::identity_crypto::verify_oidc_id_token(
-                                    token, *jwks, clerk->issuer, audience, "")
-                              : std::nullopt;
-                if (claims) {
-                    break;
-                }
+            auto ran = co_await run_blocking(
+                [cache = oidc_jwks, fetch = jwks_fetch(), token, config = *clerk, audience] {
+                    return cache->verify(
+                        token, config.jwks_url, config.issuer, audience, "", false, fetch, true);
+                });
+            if (ran) {
+                claims = std::move(*ran);
             }
         }
         ApiContext context = context_for(route);
@@ -10721,15 +10744,23 @@ struct ApiServer::Impl {
         const ClerkGet get =
             options.clerk_http
                 ? options.clerk_http
-                : ClerkGet{[this](const std::string& url,
-                                  const std::vector<std::pair<std::string, std::string>>& headers) {
+                : ClerkGet{[client = outbound_http](
+                               const std::string& url,
+                               const std::vector<std::pair<std::string, std::string>>& headers) {
                       OutboundRequest request{"GET", url, "", headers};
                       request.timeout = std::chrono::seconds(10);
                       request.public_only = true;
-                      const auto response = outbound_http.request(request);
+                      const auto response = client->request(request);
                       return ClerkResponse{response.status, response.body, response.error};
                   }};
-        const auto upstream = clerk_user_status(claims->subject, options.clerk_secret_key, get);
+        auto checked =
+            co_await run_blocking([get, subject = claims->subject, key = options.clerk_secret_key] {
+                return clerk_user_status(subject, key, get);
+            });
+        if (!checked) {
+            co_return co_await denied("Lake cannot verify the Clerk account status right now.");
+        }
+        const auto upstream = std::move(*checked);
         if (!upstream)
             co_return co_await denied(upstream.error());
         const auto state = options.store->apply_clerk_user_state(
@@ -10852,7 +10883,7 @@ struct ApiServer::Impl {
                                        {"User-Agent", "lake-oauth/1"}},
                                       oidc_timeout};
         token_request.public_only = public_only;
-        const OutboundResponse token_response = outbound_http.request(token_request);
+        const OutboundResponse token_response = outbound_http->request(token_request);
         if (!token_response.error.empty() || token_response.status < 200 ||
             token_response.status >= 300) {
             co_return co_await oauth_error(
@@ -10877,12 +10908,12 @@ struct ApiServer::Impl {
                                                "GitHub did not return an access token");
             }
             const OutboundResponse user_response =
-                outbound_http.request({"GET",
-                                       endpoints.user,
-                                       "",
-                                       {{"Accept", "application/vnd.github+json"},
-                                        {"Authorization", "Bearer " + access_token},
-                                        {"User-Agent", "lake-oauth/1"}}});
+                outbound_http->request({"GET",
+                                        endpoints.user,
+                                        "",
+                                        {{"Accept", "application/vnd.github+json"},
+                                         {"Authorization", "Bearer " + access_token},
+                                         {"User-Agent", "lake-oauth/1"}}});
             const nlohmann::json user = nlohmann::json::parse(user_response.body, nullptr, false);
             if (!user_response.error.empty() || user_response.status < 200 ||
                 user_response.status >= 300 || user.is_discarded() || !user.contains("id")) {
@@ -10895,18 +10926,17 @@ struct ApiServer::Impl {
             identity.display_name = user.value("name", user.value("login", std::string()));
         } else {
             const std::string id_token = token.value("id_token", "");
-            std::optional<std::string> jwks = jwks_for(endpoints.jwks, false, public_only);
-            auto claims =
-                jwks ? control::identity_crypto::verify_oidc_id_token(
-                           id_token, *jwks, provider->issuer, provider->client_id, flow->nonce)
-                     : std::nullopt;
-            if (!claims) {
-                jwks = jwks_for(endpoints.jwks, true, public_only);
-                claims =
-                    jwks ? control::identity_crypto::verify_oidc_id_token(
-                               id_token, *jwks, provider->issuer, provider->client_id, flow->nonce)
-                         : std::nullopt;
-            }
+            auto ran = co_await run_blocking([cache = oidc_jwks,
+                                              fetch = jwks_fetch(),
+                                              id_token,
+                                              url = endpoints.jwks,
+                                              issuer = provider->issuer,
+                                              audience = provider->client_id,
+                                              nonce = flow->nonce,
+                                              public_only] {
+                return cache->verify(id_token, url, issuer, audience, nonce, public_only, fetch);
+            });
+            const auto claims = ran ? std::move(*ran) : std::nullopt;
             if (!claims) {
                 co_return co_await oauth_error(
                     route, http::status::forbidden, "OpenID Connect id token verification failed");
@@ -13749,7 +13779,7 @@ struct ApiServer::Impl {
             options.resend_http
                 ? options.resend_http
                 : ResendHttp([this](const ResendRequest& request) {
-                      OutboundResponse response = outbound_http.request(
+                      OutboundResponse response = outbound_http->request(
                           {request.method, request.url, request.body, request.headers});
                       return ResendResponse{
                           response.status, std::move(response.body), std::move(response.error)};

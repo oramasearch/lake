@@ -26,7 +26,7 @@ every page and API call is resolved by `context_for` as before.
 2. With a Clerk session present, the page asks Clerk for a token from the **`lake` JWT template**
    and posts it once, as an ordinary form, to `POST /identity/clerk-session`.
 3. lake verifies the token with `identity_crypto::verify_oidc_id_token` against the instance JWKS
-   (`<issuer>/.well-known/jwks.json`, cached for an hour and refreshed once on a miss): RS256,
+   (`<issuer>/.well-known/jwks.json`, with the bounded refresh policy below): RS256,
    `iss` equal to the instance issuer, `aud` equal to `lake`, `exp` in the future, and `nbf` and
    `iat` not more than 60 seconds ahead. Clerk's default session token has no `aud` and is
    refused; only the template token is accepted.
@@ -253,3 +253,41 @@ exchange route with signed template tokens and an isolated HTTP double. Run
   *Create account* again.
 - Keep the verifier strict: any change to the claims lake reads belongs in both the template and
   `serve_clerk_session`, with a test in `tests/test_clerk.cpp`.
+
+## Bounded key refresh (lake#956, LSR-090)
+
+Clerk and generic OIDC share `OidcJwks`. Before any network request, it rejects tokens over
+16 KiB, malformed JWTs, absent key IDs, unsupported algorithms and invalid issuer, audience,
+nonce or time claims, including Clerk's required positive `iat`. Present time claims must be
+integers within the verifier's signed range; token JSON nesting is limited to 16 levels.
+A failed signature with a cached key never refreshes the JWKS. An unknown
+key ID can trigger one fetch per URL and address policy per 60 seconds, including failed fetches.
+Only one fetch can run at a time; other requests needing that fetch fail closed and can retry.
+A valid token using keys older than an hour also renews through this same gate. Key rotation can
+therefore require a retry after the cooldown. A failed refresh never authenticates an unknown key.
+
+Verification, JWKS fetching and the uncached Backend API account-status check run on the bounded
+blocking pool, so a slow Clerk endpoint does not
+hold the inbound I/O thread. An offloaded task owns its cache and transport through shutdown,
+even if its response is abandoned. All JWKS HTTP requests have the OIDC ten-second deadline.
+`ServerOptions.oidc_jwks_fetch` substitutes the transport in tests.
+
+`POST /identity/clerk-session` accepts 60 attempts per minute per client address, counting
+successes and failures before reading the body. Further attempts answer 429 with `Retry-After: 60`
+and do not add an authentication audit row. The address comes from the trusted ingress hop, as the
+order sheet's does ([orders](orders.md#abuse-protection), lake#838): `X-Real-IP`, which
+ingress-nginx always sets itself, else the last `X-Forwarded-For` hop. The socket peer is the
+ingress pod, so keying on it would put every user in one bucket. A client that reaches Lake
+without either header shares one `direct` bucket, which is still limited. Lake trusts these
+headers only because the ingress is its one way in; a deployment that exposes Lake's port
+directly lets a sender choose its bucket. The address map holds at most 4,096 active buckets,
+refuses new addresses when full, and releases buckets after a minute without evicting active
+limits.
+
+Verify with `ctest --test-dir build --timeout 600 -R 'OidcJwks|HttpServer.Clerk'`.
+The fake fetch tests send 100 invalid tokens per case, advance a monotonic clock across the
+cooldown, hold one refresh open during concurrent attempts, and exercise key rotation and failed
+fetches. The HTTP tests hold JWKS and Backend API requests open while health requests complete,
+and send 61 exchanges from each of two ingress-reported addresses and a direct client over one
+socket peer. Change the limits in `oidc_jwks.cpp` and `http_server.cpp`, updating these tests and
+this contract together.

@@ -18,6 +18,7 @@ add_executable(lake-tests test_main.cpp test_web_ui.cpp test_web_app.cpp test_ma
   test_forge_scenario.cpp
   test_handles.cpp
   test_policy.cpp
+  test_oidc_jwks.cpp
   test_oauth.cpp
   test_clerk.cpp
   test_own_identity.cpp

@@ -29,6 +29,8 @@ default, explicit bulk opt-ins); anonymous MCP retains discovery within 256 KiB.
 credential requirement for handlers that own their authorization. See
 [request body limits](../../docs/serving/http.md#request-body-limits).
 
+`oidc_jwks.cpp` shares a validated-token, single-flight JWKS cache across Clerk and OIDC. Refresh attempts (including failures) have a 60-second cooldown; network work runs on the blocking pool. Clerk exchanges also have a bounded per-socket-peer rate limit. See [Clerk](../../docs/api/clerk.md#bounded-key-refresh-lake956-lsr-090).
+
 `tunnel_clients.cpp` reads the tunnel client folder (allow-listed `zetta-tunnel-<platform>` files
 with a `SHA256SUMS` line, and `VERSION`) and signs and checks their 15-minute links with
 `signed_link_signature`, the HMAC the Hub's LFS upload links also use (lake#745).
