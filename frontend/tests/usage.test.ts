@@ -7,8 +7,10 @@ import {
   billingNote,
   breakdownName,
   change,
+  firstLimitDimension,
   formatValue,
   fromLimit,
+  limitDimensions,
   limitNote,
   limitTone,
   mergeReadings,
@@ -196,4 +198,23 @@ test("a limit says what it does at its line: storage and model tokens refuse, th
   assert.equal(limitNote({ dimension: "storage", enforced: true, warn_percent: 80 }), "Enforced on new repository writes");
   assert.equal(limitNote({ dimension: "model_tokens", enforced: true, warn_percent: 80 }), "This month; agents' model calls are refused at the limit");
   assert.equal(limitNote({ dimension: "cpu", enforced: false, warn_percent: 75 }), "This month; warns from 75%");
+});
+
+test("only the operator is offered the storage limit, and the form never starts on it (lake#976)", () => {
+  const dimensions = [{ dimension: "storage" }, { dimension: "api_calls" }, { dimension: "model_tokens" }];
+  // An account administrator saving storage is refused, so the form does not offer it.
+  assert.deepEqual(
+    limitDimensions(dimensions, false).map((d) => d.dimension),
+    ["api_calls", "model_tokens"],
+  );
+  assert.equal(firstLimitDimension(dimensions, false), "api_calls");
+  // The operator (the instance administrator) sets the storage quota, but chooses it on purpose.
+  assert.deepEqual(
+    limitDimensions(dimensions, true).map((d) => d.dimension),
+    ["storage", "api_calls", "model_tokens"],
+  );
+  assert.equal(firstLimitDimension(dimensions, true), "api_calls");
+  assert.equal(firstLimitDimension([{ dimension: "storage" }], true), "storage");
+  assert.equal(firstLimitDimension([{ dimension: "storage" }], false), "");
+  assert.equal(firstLimitDimension([], false), "");
 });

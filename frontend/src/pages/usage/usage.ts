@@ -361,6 +361,20 @@ export function limitNote(limit: { dimension: string; enforced: boolean; warn_pe
   return limit.dimension === "model_tokens" ? "This month; agents' model calls are refused at the limit" : "Enforced on new repository writes";
 }
 
+/** The dimensions the limit form offers (lake#976): storage's limit is the repository storage quota,
+ * which only the operator or the instance administrator may set, so only they are offered it; an
+ * account administrator saving it would be refused. */
+export function limitDimensions<D extends { dimension: string }>(dimensions: D[], administrator: boolean): D[] {
+  return administrator ? dimensions : dimensions.filter((d) => d.dimension !== "storage");
+}
+
+/** The dimension the limit form starts on: the first one offered that is not storage, so nobody sets
+ * the storage quota without choosing it; "" when nothing is offered. */
+export function firstLimitDimension(dimensions: { dimension: string }[], administrator: boolean): string {
+  const offered = limitDimensions(dimensions, administrator);
+  return (offered.find((d) => d.dimension !== "storage") ?? offered[0])?.dimension ?? "";
+}
+
 /** A link to the Usage dashboard for some workspaces, a range and the dimension to chart. */
 export function usageLink(opts: { workspaces?: string[]; range?: RangeKey; dimension?: string; customerId?: string } = {}): string {
   const params = new URLSearchParams();

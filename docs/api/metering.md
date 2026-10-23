@@ -386,7 +386,9 @@ read never counts as zero. It needs `read` on the customer and is audited centra
 
 `set_usage_limit {customer_id, dimension, limit, warn_percent?}` (needs `admin` on the customer,
 audited as `metering.limit.set`) sets the account's limit on one dimension in its unit; `0` removes
-it. Limits are rows of `customer_usage_limits` (migration `0072_usage_limits`), content-free account
+it. The `storage` dimension requires the operator credential or the instance administrator,
+including when lowering or removing the limit. Account administrators can change other dimensions.
+Limits are rows of `customer_usage_limits` (migration `0072_usage_limits`), content-free account
 configuration like the storage quota. **Storage's limit is the repository storage quota**:
 `set_usage_limit` with `storage` sets `set_storage_quota`'s quota, still enforced on new repository
 writes (below), and keeps its warning percentage. **The `model_tokens` limit is enforced by the
@@ -509,10 +511,25 @@ Fractional byte-based charges round up to one micro-unit. Arithmetic saturates a
 64-bit maximum rather than wrapping.
 
 `set_storage_quota` stores a customer-specific integer byte quota through the registry. It
-requires `admin` on that customer, is represented in OpenAPI and MCP with the same schema, and
-records `metering.quota.set` in the signed audit stream. Its value overrides
+requires the operator credential or the instance administrator, is represented in OpenAPI and MCP
+with the same schema, and records `metering.quota.set` in the signed audit stream. Its value overrides
 `LAKE_STORAGE_QUOTA_BYTES` for that customer; an explicit value of `0` disables the customer's
 quota. Customers without an override retain the process configuration.
+
+Account administrators cannot set, raise, lower or clear this override through either
+`set_storage_quota` or `set_usage_limit` with `dimension: "storage"`; these calls return
+`unauthorized` before changing the quota or warning settings. This keeps an account using the
+shared repository store within the operator's configured limit (lake#976, LSR-109). An operator
+must configure a finite process default or account override to bound that account's writes.
+
+`UsageLimits.SignedUpAccountAdminCannotChangeStorageThroughEitherSetter` proves a newly signed-up
+account administrator cannot clear, raise or lower the quota through either setter, through both
+registry entry points, and can still administer non-storage limits.
+`UsageLimits.OperatorAndInstanceAdministratorCanChangeBothStorageSetters` proves both privileged
+callers can set and clear the quota. Run `ctest --test-dir build -R 'UsageLimits|Metering' --timeout
+600 --output-on-failure` after building `lake-tests`. Change these authorization checks only with
+both setter paths and their tests together; the store methods themselves are internal persistence
+operations without caller identity.
 
 ## Quota behavior
 

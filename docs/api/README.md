@@ -581,3 +581,6 @@ signed delivery failure evidence and `audit_queue_full` with the original operat
 Password, MFA and recovery entry points share bounded authentication work and account/client
 attempt budgets (lake#969); new recovery codes use a selector, and legacy codes require
 regeneration. See [authentication attempt limits](identity.md#authentication-attempt-limits).
+Storage quota overrides require the operator credential or instance administrator through both
+`set_storage_quota` and the `storage` dimension of `set_usage_limit` (lake#976, LSR-109).
+See [metering.md](metering.md#quota-behavior) for authorization and focused proof.

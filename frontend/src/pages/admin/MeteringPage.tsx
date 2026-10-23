@@ -33,7 +33,8 @@ export default function MeteringPage() {
           : "What you store and the compute you have used, measured from your repositories, container images and workspaces."
       }
       actions={
-        usage.data ? (
+        // The storage quota is the operator's or the instance administrator's alone (lake#976).
+        usage.data && viewer.administrator ? (
           <Button variant="primary" onClick={() => setLimitOpen(true)}>
             <Gauge size={14} aria-hidden /> Set storage limit
           </Button>

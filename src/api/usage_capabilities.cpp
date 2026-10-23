@@ -2464,7 +2464,8 @@ void register_usage_capabilities(Registry& registry) {
         .description =
             "Set the account's limit on one dimension of usage, in the dimension's unit; 0 removes "
             "it. Storage's limit is the repository storage quota (set_storage_quota), enforced on "
-            "new repository writes; every other limit is per UTC calendar month and warns from "
+            "new repository writes and set only by the operator or instance administrator; every "
+            "other limit is per UTC calendar month and warns from "
             "`warn_percent` (default 80) without refusing anything.",
         .input_schema = {{"type", "object"},
                          {"properties",
@@ -2492,6 +2493,11 @@ void register_usage_capabilities(Registry& registry) {
         .resolve_object = customer_object,
         .resolves_operator_audit_target = true,
         .handler = [](const json& input, ApiContext& context) {
+            if (input.at("dimension") == "storage" && !context.operator_credential &&
+                context.acting_identity != "admin") {
+                return ApiResult::failure("unauthorized",
+                                          "the operator or the instance administrator is required");
+            }
             if (!context.store) {
                 return ApiResult::failure("store_unavailable",
                                           "no control-plane store is configured");

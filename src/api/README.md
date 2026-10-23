@@ -729,3 +729,7 @@ OAuth and enterprise OIDC starts pass a per-flow browser binding through `ApiCon
 HTTP response cookie; the shared callback requires it at store consumption (lake#963, LSR-097).
 Both stores reject missing and foreign bindings without consuming the flow; the existing state
 hash includes the binding in Postgres. See [`identity.md`](../../docs/api/identity.md).
+Storage quota writes in `metering_capabilities.cpp` and the `storage` branch of
+`set_usage_limit` in `usage_capabilities.cpp` require the operator credential or instance
+administrator before either persistence write (lake#976, LSR-109). Other usage dimensions keep
+customer-admin authorization; REST and MCP share the registry handlers.

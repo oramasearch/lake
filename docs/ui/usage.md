@@ -52,7 +52,10 @@ Top to bottom:
   **Set a limit** opens a dialog: what to limit, the limit in a person's unit (GiB, hours,
   vCPU-hours, GiB-hours, GPU-hours, instance-hours or a count, `toLimit`), and the warning
   percentage. Empty or 0 removes
-  it.
+  it. Storage's limit is the repository storage quota, which only the operator or the instance
+  administrator sets (lake#976), so the dialog offers **Storage** only when `viewer.administrator`
+  is true (`limitDimensions`), and it starts on the first other dimension for everyone
+  (`firstLimitDimension`). Repository Usage by Hour shows **Set storage limit** only to them too.
 - **Not Measured Yet.** The reading's `not_measured` sentences, as a quiet banner. Since lake#658
   it names only what is still not measured: workloads the operator has not reported, the engine
   storage of a workspace whose Zetta is older and unreported model tokens (lake#248). App traffic
@@ -93,7 +96,7 @@ tables scroll in their own box.
 
 `frontend/tests/usage.test.ts`: windows and their previous periods, units, changes, two accounts
 added up, the stacked series with Other, the CSV, limits in a person's units and what each does,
-links, one thing's
+the storage limit offered only to the operator and never the dialog's first choice, links, one thing's
 usage, and the workspace selection. `npx tsc --noEmit -p .`, `npm test` and `npm run build` in
 `frontend/`.
 
