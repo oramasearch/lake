@@ -10,10 +10,14 @@ Commitment admission accepts exactly one canonical CBOR digest field containing 
 hexadecimal characters. Commitments contribute no identities to scans.
 
 `validated_entries` is shared by raw append and replication and refuses legacy full audit records.
-The scan verifier still understands existing `LAKE-AUDIT-EVENT-1\n` tiles so their published roots
-remain verifiable. Existing public records cannot be retracted, and replication of old full-event
-batches is refused. Keep new admissions stricter than historical reads when changing this format.
+Identity scans also refuse existing `LAKE-AUDIT-EVENT-1\n` tiles (lake#974, LSR-107): a
+self-digest authenticates neither signer nor principal. Existing tiles and Merkle proofs stay
+readable; public records cannot be retracted. No path attributes these legacy events to identities.
+Remote replication authenticates each head against a trusted signed checkpoint before calling
+`apply_replication_batch`; that low-level method validates entries and Merkle consistency only.
 
 Run `SecretsCapabilities.DynamicSecretTransparencyPublishesOnlySuccessfulCommitments`,
 `TransparencyLog.Audit*`, `IdentityExit.*` and `Transparency*` with CTest before changing admission,
-publication or proof handling; use the full suite before handing off a change.
+publication or proof handling. `TransparencyLog.AuditLegacyForgedSignatureCannotClaimVerifiedIdentities`
+covers valid-self-digest forgeries and historical scan refusal. Full suites run on the integration
+branch.

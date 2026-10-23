@@ -707,3 +707,7 @@ Model entitlement and model/direction billing (LSR-095, lake#961) are documented
 billing additionally requires positive model input and output rates. `model_tokens` classes
 preserve raw counts and bill each direction separately. `test_model_gateway.cpp` and
 `test_billing.cpp` cover provider-call refusal and invoice amounts, including a missing price.
+
+`replication_capabilities.cpp` authenticates replicated heads against trusted signed checkpoints
+before log writes; partial heads require a consistency proof (lake#974, LSR-107). See the
+[replication contract](../../docs/api/replication.md).

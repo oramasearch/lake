@@ -546,9 +546,8 @@ void add_identity(std::vector<std::string>& identities, const std::string& value
     identities.push_back(value);
 }
 
-// Historical full audit entries remain readable, but new admission permits only commitments.
-Result<VerifiedAttestation> verify_attestation(std::span<const std::byte> encoded,
-                                               bool allow_legacy_audit = false) {
+// Audit digests prove Merkle consistency, not signer or principal authenticity.
+Result<VerifiedAttestation> verify_attestation(std::span<const std::byte> encoded) {
     const auto has_header = [encoded](std::string_view header) {
         return encoded.size() >= header.size() &&
                std::ranges::equal(
@@ -579,34 +578,8 @@ Result<VerifiedAttestation> verify_attestation(std::span<const std::byte> encode
         return VerifiedAttestation{.profile = "audit_commitment/1"};
     }
     if (has_header(audit_entry_header)) {
-        if (!allow_legacy_audit) {
-            return std::unexpected(
-                Error{"invalid_input", "private audit events cannot be appended to a public log"});
-        }
-        const auto body = encoded.subspan(audit_entry_header.size());
-        const json event = json::from_cbor(body, true, false);
-        if (!event.is_object() || event.value("version", "") != "audit_event/1" ||
-            !event.contains("digest") || !event.at("digest").is_string() ||
-            !event.contains("signer") || !event.at("signer").is_string() ||
-            !event.contains("principal") || !event.at("principal").is_string() ||
-            !event.contains("object") || !event.at("object").is_string()) {
-            return std::unexpected(Error{"invalid_input", "audit event entry is malformed"});
-        }
-        json stored_event = event;
-        const std::string expected_digest = stored_event.at("digest");
-        stored_event.erase("digest");
-        const std::vector<std::uint8_t> stored_bytes = json::to_cbor(stored_event);
-        const auto digest = sha512_256(std::as_bytes(std::span(stored_bytes)));
-        if (!digest || hex(*digest) != expected_digest) {
-            return std::unexpected(
-                Error{"invalid_input", "audit event entry digest does not verify"});
-        }
-        VerifiedAttestation output{.profile = "audit_event/1",
-                                   .issuer = event.at("signer"),
-                                   .subject = event.at("object")};
-        add_identity(output.identities, output.issuer);
-        add_identity(output.identities, event.at("principal"));
-        return output;
+        return std::unexpected(
+            Error{"invalid_input", "full audit events have no authenticated identity binding"});
     }
     const auto statement = liquid::decode_attestation(encoded);
     if (!statement) {
@@ -701,7 +674,7 @@ Result<std::vector<Bytes>> validated_entries(const std::vector<std::string>& att
         }
         const std::string key = hex(*digest);
         if (!verification_cache.contains(key)) {
-            const auto verified = verify_attestation(*bytes, false);
+            const auto verified = verify_attestation(*bytes);
             if (!verified) {
                 return std::unexpected(verified.error());
             }
@@ -1671,7 +1644,7 @@ Result<IdentityScan> TiledLog::scan_identity(const std::string& identity,
             const std::string key = hex(*digest);
             auto verified = verification_cache.find(key);
             if (verified == verification_cache.end()) {
-                const auto value = verify_attestation(entry, true);
+                const auto value = verify_attestation(entry);
                 if (!value) {
                     return std::unexpected(Error{"unrecoverable",
                                                  "transparency tile contains an "
@@ -1770,7 +1743,7 @@ Result<IdentityScan> TiledLog::scan_identity(const std::string& identity,
             loaded_tile = tile_index;
         }
         const Bytes& entry = loaded[static_cast<std::size_t>(match - tile_start)];
-        const auto verified = verify_attestation(entry, true);
+        const auto verified = verify_attestation(entry);
         if (!verified) {
             return std::unexpected(Error{"unrecoverable",
                                          "transparency tile contains an invalid TAAP "

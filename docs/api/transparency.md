@@ -255,9 +255,12 @@ device, request, authentication, timestamp or details fields, and name no identi
 They replicate and verify through the same immutable tile and Merkle path.
 
 New append and replication admission reject the old `LAKE-AUDIT-EVENT-1\n` full-event format,
-including otherwise valid events. Existing immutable tiles and their checkpoints remain readable
-and verifiable; this change cannot retract previously published records. Replicating a historical
-batch containing an old full-event entry now fails closed. Do not bypass that refusal to copy
+including otherwise valid events. Existing immutable tiles, checkpoints and Merkle proofs remain
+readable and verifiable; this change cannot retract previously published records. Identity scans refuse any historical full
+audit event (lake#974, LSR-107): its self-digest cannot authenticate its signer or principal, and
+no trusted identity-bound signature verifier is configured for these legacy leaves. Scans return
+`unrecoverable` without partial matches rather than report these claims as verified identities.
+Replicating a historical batch containing an old full-event entry now fails closed. Do not bypass that refusal to copy
 private records into another public log.
 
 A hash tile is byte-for-byte:
@@ -597,3 +600,7 @@ capability belongs in the single registry and this page. Do not add an unsigned 
 overwrite a stored metadata or tile version. The current evidence policy accepts SHA-256 only. A
 future digest-policy change must add an RFC 4998 hash-renewal chain before the old algorithm is
 outside policy; it must never reinterpret or discard an existing archive timestamp.
+
+Replication requires a trusted signed checkpoint covering every imported head; partial batches
+carry a consistency proof to that checkpoint. The [replication contract](replication.md) describes
+admission, compatibility and the focused regression tests (lake#974, LSR-107).

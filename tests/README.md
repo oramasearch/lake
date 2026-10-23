@@ -890,3 +890,8 @@ checks the seed on a fresh database and on a simulated existing one, and that it
 `RecordModelUsage.UnpricedReportsCannotPoisonABilledAccountsLedger` rejects unpriced reports
 before recording, permits priced outside reports without granting provider access, and retains
 billing-off reporting.
+
+`TransparencyLog.AuditLegacyForgedSignatureCannotClaimVerifiedIdentities` refuses a forged audit
+signature with a valid self-digest on append, replication and historical scans.
+`TransparencyRegistry.ReplicationAuthenticatesTheBatchHeadBeforeWriting` checks trusted checkpoint
+authentication, proof rejection without writes, and honest partial catch-up (lake#974, LSR-107).

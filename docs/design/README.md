@@ -85,3 +85,7 @@ Repository mutation destination and descendant authorization (lake#962, LSR-096)
 [status.md](status.md) and [the Drive contract](../api/drive.md).
 `status.md` records the source-only dynamic-secret transparency privacy fix (lake#953): digest
 commitments for successful calls and private audit for denials and failures.
+
+`status.md` records checkpoint-authenticated log replication and refusal of legacy full-event
+identity scans (lake#974, LSR-107); [replication](../api/replication.md) describes the compatibility
+change and verification.

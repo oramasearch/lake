@@ -199,3 +199,8 @@ tools/docs/check-status.py --observed https://lake.oramadev.net/v1/openapi.json
 ```
 
 then update this page's Status line and link to name the new snapshot.
+
+Source-tree hardening (lake#974, LSR-107): transparency identity scans refuse historical full audit
+events whose self-digests do not authenticate identities. Log replication requires trusted signed
+checkpoints covering each batch head, with consistency proofs for partial batches. Existing tiles
+and Merkle proofs remain readable; unsigned replication responses are refused. Not deployed.
