@@ -713,3 +713,8 @@ preserve raw counts and bill each direction separately. `test_model_gateway.cpp`
 `replication_capabilities.cpp` authenticates replicated heads against trusted signed checkpoints
 before log writes; partial heads require a consistency proof (lake#974, LSR-107). See the
 [replication contract](../../docs/api/replication.md).
+`authentication_work.hpp` reserves at most two jobs on the blocking pool for password sign-in,
+MFA verification/enrollment/disablement, recovery-code sign-in and sign-up. The registry's
+client budget, keyed on the address from the trusted ingress hop (`order_client_address`), spans
+REST, MCP and hosted forms.
+See [authentication limits](../../docs/api/identity.md#authentication-attempt-limits).

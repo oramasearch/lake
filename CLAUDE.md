@@ -1029,8 +1029,11 @@ cluster runs that image. `v0.1.0` is `oramasearch/lake:20261012a`, also tagged `
 
 ## Open decisions
 
-- **Blocking store calls run inline on the io thread** (one statement each). Offload to a
-  pool, as Zetta does, when latency shows; not before.
+- **Blocking store calls generally run inline on the io thread** (one statement each).
+  Password/MFA/recovery verification and MFA enrollment run on the bounded blocking pool with
+  two authentication jobs at most (lake#969); PostgreSQL uses private authentication transactions
+  so hashing cannot hold the shared store mutex. Other store calls remain inline until measured.
+  See [authentication limits](docs/api/identity.md#authentication-attempt-limits).
 - **Broader Zetta linkage.** The operator-control and Loki HTTP clients link the client-only
   transport from the authorized bridge source path. Any further Zetta target remains a separate
   decision and must preserve one copy of the networking stack.

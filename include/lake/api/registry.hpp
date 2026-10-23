@@ -18,6 +18,7 @@
 
 #include "lake/api/regions.hpp"
 #include "lake/api/sync_store.hpp"
+#include "lake/control/authentication_limits.hpp"
 #include "lake/control/policy.hpp"
 #include "lake/control/store_contents.hpp"
 #include "lake/control/workspace_store.hpp"
@@ -368,6 +369,7 @@ struct ApiContext {
     std::string acting_identity; // TAAP id, "admin" for operator, empty otherwise
     std::string acting_user_id;  // database user id for identity operations
     std::string request_id;
+    std::string client_address; // the ingress-derived client address; keys authentication budgets
     std::string request_path;  // the page route, for web UI navigation; never used to authorize
     std::string request_query; // its query string, for the same; never used to authorize
     // Set by the HTTP server for a request: gives its request worker back, counted against the
@@ -659,6 +661,8 @@ public:
 
 private:
     std::vector<std::shared_ptr<const Capability>> entries_;
+    std::shared_ptr<control::AuthenticationAttempts> authentication_clients_ =
+        std::make_shared<control::AuthenticationAttempts>(30);
 };
 
 } // namespace lake::api

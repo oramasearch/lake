@@ -3872,22 +3872,35 @@ Result<IssuedSession> InMemoryStore::sign_up_password(const NewPasswordUser& inp
 }
 
 Result<IssuedSession> InMemoryStore::sign_in_password(const PasswordSignIn& input) {
-    std::lock_guard lock(mutex_);
+    std::unique_lock lock(mutex_);
     const std::string pool = input.pool_id.empty() ? "lake" : input.pool_id;
-    for (const auto& credential : passwords_) {
-        if (credential.pool_id != pool || lower(credential.email) != lower(input.email))
-            continue;
-        if (!identity_crypto::verify_secret(credential.password, input.password))
-            return std::unexpected(StoreError{"unauthorized", "invalid email or password"});
-        if (!credential.totp_secret.empty())
-            return std::unexpected(StoreError{"mfa_required", "TOTP verification is required"});
-        Device& device = add_device(devices_, credential.user_id, input.device_name);
-        IssuedSession issued = add_session(
-            sessions_, credential.user_id, pool, device.id, "browser", "", {"*"}, "", 86400);
-        if (issued.secret.empty())
-            return std::unexpected(StoreError{"store_error", "could not issue session"});
-        issued.session.reason.clear();
-        return issued;
+    const auto candidate = std::ranges::find_if(passwords_, [&](const PasswordCredential& value) {
+        return value.pool_id == pool && lower(value.email) == lower(input.email);
+    });
+    if (candidate != passwords_.end()) {
+        const PasswordCredential credential = *candidate;
+        return authentication_attempt(credential.user_id, [&]() -> Result<IssuedSession> {
+            lock.unlock();
+            if (!identity_crypto::verify_secret(credential.password, input.password))
+                return std::unexpected(StoreError{"unauthorized", "invalid email or password"});
+            if (!credential.totp_secret.empty())
+                return std::unexpected(StoreError{"mfa_required", "TOTP verification is required"});
+            lock.lock();
+            const auto current =
+                std::ranges::find(passwords_, credential.user_id, &PasswordCredential::user_id);
+            if (current == passwords_.end() || current->password != credential.password ||
+                current->totp_secret != credential.totp_secret ||
+                current->recovery_hashes != credential.recovery_hashes)
+                return std::unexpected(
+                    StoreError{"unauthorized", "authentication credentials changed; retry"});
+            Device& device = add_device(devices_, current->user_id, input.device_name);
+            IssuedSession issued = add_session(
+                sessions_, current->user_id, pool, device.id, "browser", "", {"*"}, "", 86400);
+            if (issued.secret.empty())
+                return std::unexpected(StoreError{"store_error", "could not issue session"});
+            issued.session.reason.clear();
+            return issued;
+        });
     }
     return std::unexpected(StoreError{"unauthorized", "invalid email or password"});
 }
@@ -3928,7 +3941,7 @@ Result<IssuedSession> InMemoryStore::sign_in_taap(const TaapSignIn& input) {
 Result<MfaEnrollment> InMemoryStore::enroll_mfa(const std::string& user_id,
                                                 const std::string& pool_id,
                                                 const MfaEnrollmentProof& proof) {
-    std::lock_guard lock(mutex_);
+    std::unique_lock lock(mutex_);
     const std::string pool = pool_id.empty() ? "lake" : pool_id;
     const auto session = std::ranges::find(sessions_, proof.session_id, &Session::id);
     if (proof.session_id.empty() || session == sessions_.end() || session->user_id != user_id ||
@@ -3942,35 +3955,52 @@ Result<MfaEnrollment> InMemoryStore::enroll_mfa(const std::string& user_id,
     const auto credential = std::ranges::find_if(passwords_, [&](const auto& value) {
         return value.user_id == user_id && value.pool_id == pool;
     });
-    if (credential == passwords_.end() || proof.password.empty() ||
-        !identity_crypto::verify_secret(credential->password, proof.password)) {
+    if (credential == passwords_.end())
         return std::unexpected(
             StoreError{"unauthorized", "MFA enrollment requires the current password"});
-    }
-    MfaEnrollment enrollment;
-    enrollment.secret = identity_crypto::new_totp_secret();
-    if (enrollment.secret.empty()) {
-        return std::unexpected(StoreError{"store_error", "could not create TOTP secret"});
-    }
-    std::vector<std::string> recovery_hashes;
-    for (int index = 0; index < 8; ++index) {
-        const std::string code = identity_crypto::random_secret().substr(0, 12);
-        if (code.size() != 12) {
+    return authentication_attempt(user_id, [&]() -> Result<MfaEnrollment> {
+        const std::string password_hash = credential->password;
+        lock.unlock();
+        if (proof.password.empty() ||
+            !identity_crypto::verify_secret(password_hash, proof.password))
             return std::unexpected(
-                StoreError{"store_error", "could not create MFA recovery codes"});
+                StoreError{"unauthorized", "MFA enrollment requires the current password"});
+        MfaEnrollment enrollment;
+        enrollment.secret = identity_crypto::new_totp_secret();
+        if (enrollment.secret.empty()) {
+            return std::unexpected(StoreError{"store_error", "could not create TOTP secret"});
         }
-        const std::string hash = identity_crypto::hash_secret(code);
-        if (hash.empty()) {
+        std::map<std::string, std::string> recovery_hashes;
+        for (int index = 0; index < 8; ++index) {
+            const std::string code = identity_crypto::new_recovery_code();
+            if (code.empty()) {
+                return std::unexpected(
+                    StoreError{"store_error", "could not create MFA recovery codes"});
+            }
+            const std::string hash = identity_crypto::hash_secret(code);
+            if (hash.empty()) {
+                return std::unexpected(
+                    StoreError{"store_error", "could not protect MFA recovery codes"});
+            }
+            enrollment.recovery_codes.push_back(code);
+            const auto selector = identity_crypto::recovery_selector(code);
+            if (selector.empty())
+                return std::unexpected(StoreError{"store_error", "could not select recovery code"});
+            recovery_hashes.emplace(selector, hash);
+        }
+        lock.lock();
+        const auto current = std::ranges::find(passwords_, user_id, &PasswordCredential::user_id);
+        const auto active = std::ranges::find(sessions_, proof.session_id, &Session::id);
+        if (current == passwords_.end() || current->password != password_hash ||
+            active == sessions_.end() || !active_session_lineage(sessions_, devices_, *active) ||
+            disabled_users_.contains(user_id) || deleted_users_.contains(user_id))
             return std::unexpected(
-                StoreError{"store_error", "could not protect MFA recovery codes"});
-        }
-        enrollment.recovery_codes.push_back(code);
-        recovery_hashes.push_back(hash);
-    }
-    // Stage the complete replacement so any failure above preserves the original factor/codes.
-    credential->totp_secret = enrollment.secret;
-    credential->recovery_hashes = std::move(recovery_hashes);
-    return enrollment;
+                StoreError{"unauthorized", "MFA enrollment proof changed; retry"});
+        // Stage the complete replacement so any failure above preserves the original factor/codes.
+        current->totp_secret = enrollment.secret;
+        current->recovery_hashes = std::move(recovery_hashes);
+        return enrollment;
+    });
 }
 
 Result<bool> InMemoryStore::mfa_enrolled(const std::string& user_id, const std::string& pool_id) {
@@ -3988,19 +4018,37 @@ Result<bool> InMemoryStore::mfa_enrolled(const std::string& user_id, const std::
 Result<void> InMemoryStore::verify_mfa_code(const std::string& user_id,
                                             const std::string& pool_id,
                                             const std::string& code) {
-    std::lock_guard lock(mutex_);
-    for (const auto& credential : passwords_) {
-        if (credential.user_id != user_id || credential.pool_id != pool_id ||
-            credential.totp_secret.empty()) {
-            continue;
+    std::unique_lock lock(mutex_);
+    const auto candidate = std::ranges::find_if(passwords_, [&](const PasswordCredential& value) {
+        return value.user_id == user_id && value.pool_id == pool_id && !value.totp_secret.empty();
+    });
+    if (candidate != passwords_.end()) {
+        const PasswordCredential credential = *candidate;
+        lock.unlock();
+        const auto recovery =
+            credential.recovery_hashes.find(identity_crypto::recovery_selector(code));
+        if (!identity_crypto::verify_totp(credential.totp_secret, code)) {
+            if (recovery == credential.recovery_hashes.end())
+                return std::unexpected(
+                    StoreError{"unauthorized", "a fresh MFA verification is required"});
+            const auto checked = authentication_attempt(user_id, [&]() -> Result<void> {
+                if (!identity_crypto::verify_secret(recovery->second, code))
+                    return std::unexpected(
+                        StoreError{"unauthorized", "a fresh MFA verification is required"});
+                return {};
+            });
+            if (!checked)
+                return std::unexpected(checked.error());
         }
-        if (identity_crypto::verify_totp(credential.totp_secret, code) ||
-            std::ranges::any_of(credential.recovery_hashes, [&](const std::string& hash) {
-                return identity_crypto::verify_secret(hash, code);
-            })) {
-            return {};
-        }
-        return std::unexpected(StoreError{"unauthorized", "a fresh MFA verification is required"});
+        lock.lock();
+        const auto current =
+            std::ranges::find(passwords_, credential.user_id, &PasswordCredential::user_id);
+        if (current == passwords_.end() || current->password != credential.password ||
+            current->totp_secret != credential.totp_secret ||
+            current->recovery_hashes != credential.recovery_hashes)
+            return std::unexpected(
+                StoreError{"unauthorized", "authentication credentials changed; retry"});
+        return {};
     }
     return std::unexpected(StoreError{"not_found", "MFA is not enrolled"});
 }
@@ -4008,54 +4056,84 @@ Result<void> InMemoryStore::verify_mfa_code(const std::string& user_id,
 Result<void> InMemoryStore::disable_mfa(const std::string& user_id,
                                         const std::string& pool_id,
                                         const std::string& code) {
-    std::lock_guard lock(mutex_);
-    for (auto& credential : passwords_) {
-        if (credential.user_id != user_id || credential.pool_id != pool_id ||
-            credential.totp_secret.empty()) {
-            continue;
-        }
+    std::unique_lock lock(mutex_);
+    const auto candidate = std::ranges::find_if(passwords_, [&](const PasswordCredential& value) {
+        return value.user_id == user_id && value.pool_id == pool_id && !value.totp_secret.empty();
+    });
+    if (candidate != passwords_.end()) {
+        const PasswordCredential credential = *candidate;
+        lock.unlock();
         const bool valid_totp = identity_crypto::verify_totp(credential.totp_secret, code);
-        const auto recovery = std::find_if(
-            credential.recovery_hashes.begin(),
-            credential.recovery_hashes.end(),
-            [&](const std::string& hash) { return identity_crypto::verify_secret(hash, code); });
-        if (valid_totp || recovery != credential.recovery_hashes.end()) {
-            credential.totp_secret.clear();
-            credential.recovery_hashes.clear();
-            return {};
+        const auto recovery =
+            credential.recovery_hashes.find(identity_crypto::recovery_selector(code));
+        if (!valid_totp) {
+            if (recovery == credential.recovery_hashes.end())
+                return std::unexpected(
+                    StoreError{"unauthorized", "a fresh MFA verification is required"});
+            const auto checked = authentication_attempt(user_id, [&]() -> Result<void> {
+                if (!identity_crypto::verify_secret(recovery->second, code))
+                    return std::unexpected(
+                        StoreError{"unauthorized", "a fresh MFA verification is required"});
+                return {};
+            });
+            if (!checked)
+                return std::unexpected(checked.error());
         }
+        lock.lock();
+        const auto current =
+            std::ranges::find(passwords_, credential.user_id, &PasswordCredential::user_id);
+        if (current == passwords_.end() || current->password != credential.password ||
+            current->totp_secret != credential.totp_secret ||
+            current->recovery_hashes != credential.recovery_hashes)
+            return std::unexpected(
+                StoreError{"unauthorized", "authentication credentials changed; retry"});
+        current->totp_secret.clear();
+        current->recovery_hashes.clear();
+        return {};
     }
     return std::unexpected(StoreError{"unauthorized", "a fresh MFA verification is required"});
 }
 
 Result<IssuedSession> InMemoryStore::sign_in_totp(const PasswordSignIn& input) {
-    std::lock_guard lock(mutex_);
+    std::unique_lock lock(mutex_);
     const std::string pool = input.pool_id.empty() ? "lake" : input.pool_id;
-    for (auto& credential : passwords_) {
-        if (credential.pool_id != pool || lower(credential.email) != lower(input.email))
-            continue;
-        const bool valid_totp =
-            identity_crypto::verify_totp(credential.totp_secret, input.totp_code);
-        auto recovery =
-            std::find_if(credential.recovery_hashes.begin(),
-                         credential.recovery_hashes.end(),
-                         [&](const std::string& hash) {
-                             return identity_crypto::verify_secret(hash, input.totp_code);
-                         });
-        if (!identity_crypto::verify_secret(credential.password, input.password) ||
-            (!valid_totp && recovery == credential.recovery_hashes.end())) {
-            return std::unexpected(StoreError{"unauthorized", "invalid credentials or TOTP code"});
-        }
-        if (!valid_totp) {
-            credential.recovery_hashes.erase(recovery);
-        }
-        Device& device = add_device(devices_, credential.user_id, input.device_name);
-        IssuedSession issued = add_session(
-            sessions_, credential.user_id, pool, device.id, "browser", "", {"*"}, "", 86400);
-        if (issued.secret.empty())
-            return std::unexpected(StoreError{"store_error", "could not issue session"});
-        issued.session.reason.clear();
-        return issued;
+    const auto candidate = std::ranges::find_if(passwords_, [&](const PasswordCredential& value) {
+        return value.pool_id == pool && lower(value.email) == lower(input.email);
+    });
+    if (candidate != passwords_.end()) {
+        const PasswordCredential credential = *candidate;
+        return authentication_attempt(credential.user_id, [&]() -> Result<IssuedSession> {
+            lock.unlock();
+            const bool valid_totp =
+                identity_crypto::verify_totp(credential.totp_secret, input.totp_code);
+            auto recovery = credential.recovery_hashes.find(
+                identity_crypto::recovery_selector(input.totp_code));
+            if (!identity_crypto::verify_secret(credential.password, input.password) ||
+                (!valid_totp &&
+                 (recovery == credential.recovery_hashes.end() ||
+                  !identity_crypto::verify_secret(recovery->second, input.totp_code)))) {
+                return std::unexpected(
+                    StoreError{"unauthorized", "invalid credentials or TOTP code"});
+            }
+            lock.lock();
+            const auto current =
+                std::ranges::find(passwords_, credential.user_id, &PasswordCredential::user_id);
+            if (current == passwords_.end() || current->password != credential.password ||
+                current->totp_secret != credential.totp_secret ||
+                current->recovery_hashes != credential.recovery_hashes)
+                return std::unexpected(
+                    StoreError{"unauthorized", "authentication credentials changed; retry"});
+            if (!valid_totp) {
+                current->recovery_hashes.erase(recovery->first);
+            }
+            Device& device = add_device(devices_, current->user_id, input.device_name);
+            IssuedSession issued = add_session(
+                sessions_, current->user_id, pool, device.id, "browser", "", {"*"}, "", 86400);
+            if (issued.secret.empty())
+                return std::unexpected(StoreError{"store_error", "could not issue session"});
+            issued.session.reason.clear();
+            return issued;
+        });
     }
     return std::unexpected(StoreError{"unauthorized", "invalid credentials or TOTP code"});
 }
@@ -7746,27 +7824,40 @@ Result<IssuedSession> InMemoryStore::recover_with_code(const std::string& pool_i
                                                        const std::string& email,
                                                        const std::string& code,
                                                        const std::string& device_name) {
-    std::lock_guard lock(mutex_);
-    for (PasswordCredential& credential : passwords_) {
-        if (credential.pool_id != pool_id || lower(credential.email) != lower(email)) {
-            continue;
-        }
-        const auto recovery =
-            std::ranges::find_if(credential.recovery_hashes, [&](const std::string& hash) {
-                return identity_crypto::verify_secret(hash, code);
-            });
-        if (recovery == credential.recovery_hashes.end()) {
-            break;
-        }
-        credential.recovery_hashes.erase(recovery);
-        Device& device = add_device(devices_, credential.user_id, device_name);
-        IssuedSession issued = add_session(
-            sessions_, credential.user_id, pool_id, device.id, "browser", "", {"*"}, "", 86400);
-        if (issued.secret.empty()) {
-            return std::unexpected(StoreError{"store_error", "could not issue recovery session"});
-        }
-        issued.session.reason.clear();
-        return issued;
+    std::unique_lock lock(mutex_);
+    const auto candidate = std::ranges::find_if(passwords_, [&](const PasswordCredential& value) {
+        return value.pool_id == pool_id && lower(value.email) == lower(email);
+    });
+    if (candidate != passwords_.end()) {
+        const PasswordCredential credential = *candidate;
+        return authentication_attempt(credential.user_id, [&]() -> Result<IssuedSession> {
+            lock.unlock();
+            const auto recovery =
+                credential.recovery_hashes.find(identity_crypto::recovery_selector(code));
+            if (recovery == credential.recovery_hashes.end() ||
+                !identity_crypto::verify_secret(recovery->second, code)) {
+                return std::unexpected(
+                    StoreError{"unauthorized", "invalid email or recovery code"});
+            }
+            lock.lock();
+            const auto current =
+                std::ranges::find(passwords_, credential.user_id, &PasswordCredential::user_id);
+            if (current == passwords_.end() || current->password != credential.password ||
+                current->totp_secret != credential.totp_secret ||
+                current->recovery_hashes != credential.recovery_hashes)
+                return std::unexpected(
+                    StoreError{"unauthorized", "authentication credentials changed; retry"});
+            current->recovery_hashes.erase(recovery->first);
+            Device& device = add_device(devices_, current->user_id, device_name);
+            IssuedSession issued = add_session(
+                sessions_, current->user_id, pool_id, device.id, "browser", "", {"*"}, "", 86400);
+            if (issued.secret.empty()) {
+                return std::unexpected(
+                    StoreError{"store_error", "could not issue recovery session"});
+            }
+            issued.session.reason.clear();
+            return issued;
+        });
     }
     return std::unexpected(StoreError{"unauthorized", "invalid email or recovery code"});
 }
@@ -7795,6 +7886,11 @@ Result<RecoveryAttempt> InMemoryStore::begin_email_recovery(const std::string& p
         return std::unexpected(
             StoreError{"invalid_input", "email recovery cooling period is too short"});
     }
+    const std::string token = identity_crypto::random_secret();
+    const std::string token_hash = identity_crypto::hash_secret(token);
+    if (token.empty() || token_hash.empty()) {
+        return std::unexpected(StoreError{"store_error", "could not create recovery token"});
+    }
     std::lock_guard lock(mutex_);
     const auto password = std::ranges::find_if(passwords_, [&](const PasswordCredential& value) {
         return value.pool_id == pool_id && lower(value.email) == lower(email);
@@ -7805,11 +7901,6 @@ Result<RecoveryAttempt> InMemoryStore::begin_email_recovery(const std::string& p
     const auto now = std::chrono::system_clock::now();
     const auto ready = now + std::chrono::seconds(cooling_seconds);
     const auto expires = ready + std::chrono::hours(24);
-    const std::string token = identity_crypto::random_secret();
-    const std::string token_hash = identity_crypto::hash_secret(token);
-    if (token.empty() || token_hash.empty()) {
-        return std::unexpected(StoreError{"store_error", "could not create recovery token"});
-    }
     RecoveryAttempt attempt{new_uuid_v4(),
                             password->user_id,
                             {},
@@ -7928,55 +8019,68 @@ Result<RecoveryAttempt> InMemoryStore::approve_admin_recovery(const std::string&
 Result<IssuedSession> InMemoryStore::complete_recovery(const std::string& recovery_id,
                                                        const std::string& token,
                                                        const std::string& device_name) {
-    std::lock_guard lock(mutex_);
-    const auto found = std::ranges::find_if(recovery_attempts_, [&](const RecoveryRecord& value) {
+    std::unique_lock lock(mutex_);
+    auto found = std::ranges::find_if(recovery_attempts_, [&](const RecoveryRecord& value) {
         return value.attempt.id == recovery_id;
     });
-    if (found == recovery_attempts_.end() || found->attempt.status == "completed" ||
-        found->token_hash.empty() || !identity_crypto::verify_secret(found->token_hash, token)) {
+    if (found == recovery_attempts_.end())
         return std::unexpected(StoreError{"unauthorized", "invalid recovery token"});
-    }
-    const auto now = std::chrono::system_clock::now();
-    if (now < found->ready_at) {
-        return std::unexpected(StoreError{"conflict", "recovery cooling period has not ended"});
-    }
-    if (now >= found->expires_at) {
-        return std::unexpected(StoreError{"conflict", "recovery token has expired"});
-    }
-    if (found->attempt.method == "admin" && found->approvals.size() != 2) {
-        return std::unexpected(StoreError{"conflict", "two administrator approvals are required"});
-    }
-    const std::string revoked_at = now_iso8601();
-    for (Session& session : sessions_) {
-        if (session.user_id == found->attempt.user_id && session.revoked_at.empty()) {
-            session.revoked_at = revoked_at;
+    return authentication_attempt(found->attempt.user_id, [&]() -> Result<IssuedSession> {
+        const auto token_hash = found->token_hash;
+        lock.unlock();
+        const bool valid = !token_hash.empty() && identity_crypto::verify_secret(token_hash, token);
+        lock.lock();
+        found = std::ranges::find_if(recovery_attempts_, [&](const RecoveryRecord& value) {
+            return value.attempt.id == recovery_id;
+        });
+        if (found == recovery_attempts_.end() || found->attempt.status == "completed" ||
+            found->token_hash != token_hash || !valid) {
+            return std::unexpected(StoreError{"unauthorized", "invalid recovery token"});
         }
-    }
-    const auto password = std::ranges::find_if(passwords_, [&](const PasswordCredential& value) {
-        return value.user_id == found->attempt.user_id;
+        const auto now = std::chrono::system_clock::now();
+        if (now < found->ready_at) {
+            return std::unexpected(StoreError{"conflict", "recovery cooling period has not ended"});
+        }
+        if (now >= found->expires_at) {
+            return std::unexpected(StoreError{"conflict", "recovery token has expired"});
+        }
+        if (found->attempt.method == "admin" && found->approvals.size() != 2) {
+            return std::unexpected(
+                StoreError{"conflict", "two administrator approvals are required"});
+        }
+        const std::string revoked_at = now_iso8601();
+        for (Session& session : sessions_) {
+            if (session.user_id == found->attempt.user_id && session.revoked_at.empty()) {
+                session.revoked_at = revoked_at;
+            }
+        }
+        const auto password =
+            std::ranges::find_if(passwords_, [&](const PasswordCredential& value) {
+                return value.user_id == found->attempt.user_id;
+            });
+        if (password == passwords_.end()) {
+            return std::unexpected(StoreError{"not_found", "password credential not found"});
+        }
+        found->attempt.status = "completed";
+        found->attempt.completed_at = revoked_at;
+        add_recovery_notifications(
+            recovery_notifications_, devices_, found->attempt, "account_recovery_completed");
+        Device& device = add_device(devices_, found->attempt.user_id, device_name);
+        IssuedSession issued = add_session(sessions_,
+                                           found->attempt.user_id,
+                                           password->pool_id,
+                                           device.id,
+                                           "browser",
+                                           "",
+                                           {"*"},
+                                           "",
+                                           86400);
+        if (issued.secret.empty()) {
+            return std::unexpected(StoreError{"store_error", "could not issue recovery session"});
+        }
+        issued.session.reason.clear();
+        return issued;
     });
-    if (password == passwords_.end()) {
-        return std::unexpected(StoreError{"not_found", "password credential not found"});
-    }
-    found->attempt.status = "completed";
-    found->attempt.completed_at = revoked_at;
-    add_recovery_notifications(
-        recovery_notifications_, devices_, found->attempt, "account_recovery_completed");
-    Device& device = add_device(devices_, found->attempt.user_id, device_name);
-    IssuedSession issued = add_session(sessions_,
-                                       found->attempt.user_id,
-                                       password->pool_id,
-                                       device.id,
-                                       "browser",
-                                       "",
-                                       {"*"},
-                                       "",
-                                       86400);
-    if (issued.secret.empty()) {
-        return std::unexpected(StoreError{"store_error", "could not issue recovery session"});
-    }
-    issued.session.reason.clear();
-    return issued;
 }
 
 Result<std::vector<RecoveryDelivery>> InMemoryStore::claim_recovery_deliveries(int limit) {

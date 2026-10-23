@@ -3709,6 +3709,180 @@ INSTANTIATE_TEST_SUITE_P(HttpServer,
                                                              : "ReusedConnection");
                          });
 
+TEST(HttpServer, AuthenticationClientBudgetFollowsTheIngressAddressAcrossRestAndMcp) {
+    auto store = std::make_shared<lake::control::InMemoryStore>();
+    lake::api::ApiServer server({.port = 0, .store = store});
+    ASSERT_TRUE(server.start()) << server.reason();
+    // Every request comes from the same socket peer, as it would through one ingress pod.
+    int attempt = 0;
+    auto authenticate = [&](std::vector<std::pair<std::string, std::string>> headers) {
+        HttpConnection connection(server.port());
+        const nlohmann::json arguments{{"email", std::to_string(attempt) + "@example.test"},
+                                       {"code", "wrong"}};
+        const bool mcp = attempt++ % 2 != 0;
+        const auto payload =
+            mcp ? nlohmann::json{{"jsonrpc", "2.0"},
+                                 {"id", attempt},
+                                 {"method", "tools/call"},
+                                 {"params",
+                                  {{"name", "recover_with_code"}, {"arguments", arguments}}}}
+                : arguments;
+        const auto response = connection.request("POST",
+                                                 mcp ? "/mcp" : "/v1/recover_with_code",
+                                                 payload.dump(),
+                                                 "",
+                                                 "HTTP/1.1",
+                                                 "",
+                                                 "application/json",
+                                                 std::move(headers));
+        EXPECT_FALSE(response.empty());
+        return response.find("rate_limited") != std::string::npos;
+    };
+    for (int i = 0; i < 30; ++i) {
+        EXPECT_FALSE(authenticate({{"X-Real-IP", "192.0.2.1"}})) << i;
+    }
+    EXPECT_TRUE(authenticate({{"X-Real-IP", "192.0.2.1"}}));
+    // A second client behind the same proxy peer keeps its own budget, whether the ingress names
+    // it in X-Real-IP or as the last X-Forwarded-For hop (the first hop is the sender's to write).
+    EXPECT_FALSE(authenticate({{"X-Real-IP", "192.0.2.2"}}));
+    EXPECT_FALSE(authenticate({{"X-Forwarded-For", "192.0.2.1, 192.0.2.3"}}));
+    // A direct connection, with neither header, still has a budget.
+    for (int i = 0; i < 30; ++i) {
+        EXPECT_FALSE(authenticate({})) << i;
+    }
+    EXPECT_TRUE(authenticate({}));
+    HttpConnection probe(server.port());
+    EXPECT_NE(probe.request("GET", "/healthz").find("200 OK"), std::string::npos);
+}
+
+TEST(HttpServer, RecoveryWorkCannotBlockHealthOrTheSharedStoreConnection) {
+    const auto uri = lake::test::postgres_uri();
+    if (!uri)
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
+    constexpr auto instance_kek =
+        "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+    auto store = std::shared_ptr<lake::control::Store>(
+        lake::control::make_postgres_store(uri, instance_kek));
+    auto identity = lake::test::test_identity("recovery-http-worker");
+    lake::control::NewPasswordUser input{"lake",
+                                         "recovery-probe@example.test",
+                                         "a long test password",
+                                         "Recovery",
+                                         "test",
+                                         identity.document};
+    input.identity_proof = lake::test::prove_identity(*store, "lake", identity);
+    const auto signed_up = store->sign_up_password(input);
+    ASSERT_TRUE(signed_up) << signed_up.error().message;
+    const auto enrolled = store->enroll_mfa(
+        signed_up->session.user_id, "lake", {signed_up->session.id, input.password});
+    ASSERT_TRUE(enrolled) << enrolled.error().message;
+    const std::string wrong_code = "rc1_00000000000000000000000000000000";
+    // Make a known selector point at a different code's valid hash: this wrong attempt reaches
+    // the expensive verifier after the row lock is released, without knowing a recovery code.
+    pqxx::connection lock_connection(uri);
+    {
+        pqxx::work setup(lock_connection);
+        setup.exec_params(
+            "UPDATE credentials SET subject = $2 WHERE kind = 'recovery' AND subject = $1",
+            lake::control::identity_crypto::recovery_selector(enrolled->recovery_codes[0]),
+            lake::control::identity_crypto::recovery_selector(wrong_code));
+        setup.commit();
+    }
+    pqxx::work held(lock_connection);
+    held.exec_params(
+        "SELECT id FROM credentials WHERE kind = 'recovery' AND subject = $1 FOR UPDATE",
+        lake::control::identity_crypto::recovery_selector(wrong_code));
+    lake::api::ApiServer server({.port = 0, .store = store, .instance_kek = instance_kek});
+    ASSERT_TRUE(server.start()) << server.reason();
+    auto wrong = std::async(std::launch::async, [&] {
+        HttpConnection connection(server.port());
+        return connection.request(
+            "POST",
+            "/v1/recover_with_code",
+            nlohmann::json{{"email", input.email}, {"code", wrong_code}}.dump(),
+            "",
+            "HTTP/1.1",
+            "",
+            "application/json");
+    });
+    bool waiting = false;
+    pqxx::connection observer(uri);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!waiting && std::chrono::steady_clock::now() < deadline) {
+        pqxx::read_transaction query(observer);
+        waiting =
+            query
+                .exec("SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE datname = "
+                      "current_database() "
+                      "AND wait_event_type = 'Lock' AND cardinality(pg_blocking_pids(pid)) > 0)")[0]
+                                                                                                 [0]
+                .as<bool>();
+        if (!waiting)
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    auto health = std::async(std::launch::async, [&] {
+        HttpConnection connection(server.port());
+        return connection.request("GET", "/healthz");
+    });
+    auto store_read =
+        std::async(std::launch::async, [&] { return store->get_user(signed_up->session.user_id); });
+    const bool health_ready =
+        health.wait_for(std::chrono::milliseconds(500)) == std::future_status::ready;
+    const bool store_ready =
+        store_read.wait_for(std::chrono::milliseconds(500)) == std::future_status::ready;
+    // Always release the lock before assertions so the unfixed implementation fails promptly.
+    held.abort();
+    EXPECT_TRUE(waiting) << "recovery request never reached its locked credential";
+    EXPECT_TRUE(health_ready) << "recovery blocked the HTTP executor";
+    EXPECT_TRUE(store_ready) << "recovery held the shared store mutex";
+    EXPECT_NE(health.get().find("200 OK"), std::string::npos);
+    EXPECT_TRUE(store_read.get());
+    EXPECT_NE(wrong.get().find("unauthorized"), std::string::npos);
+    // A loop of wrong codes now reaches the account budget instead of rehashing eight codes.
+    bool throttled = false;
+    for (int i = 0; i < 9; ++i) {
+        HttpConnection attempt(server.port());
+        const auto response =
+            attempt.request("POST",
+                            "/v1/recover_with_code",
+                            nlohmann::json{{"email", input.email}, {"code", wrong_code}}.dump(),
+                            "",
+                            "HTTP/1.1",
+                            "",
+                            "application/json");
+        throttled |= response.find("429") != std::string::npos &&
+                     response.find("rate_limited") != std::string::npos;
+        HttpConnection probe(server.port());
+        EXPECT_NE(probe.request("GET", "/healthz").find("200 OK"), std::string::npos);
+    }
+    EXPECT_TRUE(throttled);
+    auto recovery_acknowledgement = [&](const std::string& email) {
+        HttpConnection connection(server.port());
+        const auto response = connection.request("POST",
+                                                 "/v1/begin_email_recovery",
+                                                 nlohmann::json{{"email", email}}.dump(),
+                                                 "",
+                                                 "HTTP/1.1",
+                                                 "",
+                                                 "application/json");
+        return nlohmann::json::parse(response_body(response));
+    };
+    const auto known = recovery_acknowledgement(input.email);
+    const auto unknown = recovery_acknowledgement("missing@example.test");
+    EXPECT_TRUE(known.at("ok"));
+    EXPECT_TRUE(unknown.at("ok"));
+    EXPECT_EQ(known.at("value"), unknown.at("value"))
+        << "account throttling must not reveal registered email";
+    pqxx::read_transaction queued(observer);
+    EXPECT_EQ(queued
+                  .exec_params("SELECT count(*) FROM offline_recovery_attempts WHERE "
+                               "user_id = $1::uuid AND method = 'email'",
+                               signed_up->session.user_id)[0][0]
+                  .as<int>(),
+              1)
+        << "verification lockout must still allow the account to begin email recovery";
+}
+
 } // namespace
 
 TEST(HttpServer, ResponseResetPreservesCurrentProtocolAndCors) {

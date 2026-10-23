@@ -122,3 +122,8 @@ browser instead, and this one's next call shows *Your session has ended*.
 Add behaviour to the registry first, then call it from the page with `act`/`useRead` and
 `NO_WORKSPACE`. Never add a sign-in path that sets the cookie outside a capability or the server's
 sign-in routes ([README.md](README.md#what-lake-serves)). Update this table and the page table in [README.md](README.md#pages).
+
+The MFA page warns that legacy 12-character recovery codes are retired and asks the person to
+enter their current password and re-enroll for new `rc1_` codes (lake#969). Passwords, TOTP and
+passkeys remain available. The recovery-code list wraps long codes inside each grid cell.
+Authentication throttles use the existing error notice; retry after one minute. See [attempt limits](../api/identity.md#authentication-attempt-limits).

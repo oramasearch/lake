@@ -245,3 +245,8 @@ Model entitlement and model/direction billing (LSR-095, lake#961) are documented
 billing additionally requires positive model input and output rates. `model_tokens` classes
 preserve raw counts and bill each direction separately. `test_model_gateway.cpp` and
 `test_billing.cpp` cover provider-call refusal and invoice amounts, including a missing price.
+`authentication_work.hpp` limits authentication to two queued/running blocking jobs; its permit
+outlives the callable, so disconnects cannot release capacity early (lake#969).
+`ApiContext::client_address` is the address the trusted ingress hop decided (the HTTP server's
+`order_client_address`, `direct` without one), and the registry shares
+its client attempt table across transports. See [the contract](../../../docs/api/identity.md#authentication-attempt-limits).

@@ -573,3 +573,6 @@ preserve raw counts and bill each direction separately. `test_model_gateway.cpp`
 [transparency](transparency.md) refuses legacy full-event identity scans (lake#974, LSR-107).
 [audit.md](audit.md#workspace-audit) documents per-customer and per-workspace queue limits,
 signed delivery failure evidence and `audit_queue_full` with the original operation result (LSR-098).
+Password, MFA and recovery entry points share bounded authentication work and account/client
+attempt budgets (lake#969); new recovery codes use a selector, and legacy codes require
+regeneration. See [authentication attempt limits](identity.md#authentication-attempt-limits).
