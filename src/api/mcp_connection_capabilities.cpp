@@ -479,6 +479,7 @@ void forget_token(const std::string& connection_id) {
 struct TokenAnswer {
     json body;
     std::string error;
+    bool invalid_document = false;
 };
 
 // One POST to an OAuth endpoint, form-encoded (token) or JSON (registration).
@@ -501,7 +502,7 @@ TokenAnswer oauth_post(McpHttp& http,
     if (response.status == 0) {
         return {json(), response.error.empty() ? "no answer" : response.error};
     }
-    json parsed = json::parse(response.body, nullptr, false);
+    json parsed = mcp_parse_json(response.body);
     if (response.status < 200 || response.status >= 300) {
         const std::string reason = parsed.is_object() ? text(parsed, "error") : std::string();
         return {json(),
@@ -509,7 +510,7 @@ TokenAnswer oauth_post(McpHttp& http,
                     (reason.empty() ? std::string() : " (" + reason.substr(0, 80) + ")")};
     }
     if (!parsed.is_object()) {
-        return {json(), "the answer is not a JSON object"};
+        return {json(), "the answer is not a JSON object within the nesting limit", true};
     }
     return {std::move(parsed), {}};
 }
@@ -527,9 +528,9 @@ TokenAnswer oauth_get(McpHttp& http, const std::string& url, std::chrono::millis
         return {json(),
                 response.status == 0 ? response.error : "HTTP " + std::to_string(response.status)};
     }
-    json parsed = json::parse(response.body, nullptr, false);
+    json parsed = mcp_parse_json(response.body);
     if (!parsed.is_object()) {
-        return {json(), "the answer is not a JSON object"};
+        return {json(), "the answer is not a JSON object within the nesting limit", true};
     }
     return {std::move(parsed), {}};
 }
@@ -2235,6 +2236,9 @@ Discovered discover_oauth(McpHttp& http,
     const std::string resource_url =
         metadata_url.empty() ? well_known(*server, "oauth-protected-resource") : metadata_url;
     TokenAnswer resource = oauth_get(http, resource_url, timeout);
+    if (resource.invalid_document) {
+        return {json(), "invalid protected resource metadata: " + resource.error};
+    }
     std::string issuer;
     std::string resource_id = server->origin() + server->path.substr(0, server->path.find('?'));
     if (resource.error.empty()) {
@@ -2259,7 +2263,7 @@ Discovered discover_oauth(McpHttp& http,
     }
     TokenAnswer metadata =
         oauth_get(http, well_known(*issuer_url, "oauth-authorization-server"), timeout);
-    if (!metadata.error.empty()) {
+    if (!metadata.error.empty() && !metadata.invalid_document) {
         metadata = oauth_get(http, well_known(*issuer_url, "openid-configuration"), timeout);
     }
     if (!metadata.error.empty()) {

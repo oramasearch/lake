@@ -659,3 +659,8 @@ holds `OidcDiscovery`, which reads and caches each issuer's `/.well-known/openid
 a fetch `http_server.cpp` injects (the outbound client, public addresses only unless
 `LAKE_OIDC_ALLOW_PRIVATE_ADDRESSES`). `ApiContext::oidc_discovery` carries it to `start_oauth` and
 `start_sso_oidc`, which read it on the blocking pool, and the OAuth callback uses it directly.
+
+`mcp_client.cpp` supplies `mcp_parse_json`, shared with `mcp_connection_capabilities.cpp` for
+OAuth responses. It aborts before constructing a container at depth 65; every remote JSON reader uses
+it. Tool conversion checks depth iteratively before its schema copies. See
+[MCP connection limits](../../docs/api/mcp-connections.md#the-client) (lake#958, LSR-092).

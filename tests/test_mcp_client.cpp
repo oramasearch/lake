@@ -3,6 +3,7 @@
 // transport, honest and hostile.
 
 #include <chrono>
+#include <deque>
 #include <string>
 #include <vector>
 
@@ -18,6 +19,194 @@ using json = nlohmann::json;
 using lake::api::McpClient;
 using lake::api::McpClientOptions;
 using lake::test::McpTestServer;
+
+std::string nested_arrays(std::size_t depth) {
+    return std::string(depth, '[') + "0" + std::string(depth, ']');
+}
+
+TEST(McpClient, RemoteJsonRejectsNestingBeforeBuildingAnUnboundedDocument) {
+    using lake::api::mcp_parse_json;
+    EXPECT_FALSE(mcp_parse_json(nested_arrays(64)).is_discarded());
+    EXPECT_TRUE(mcp_parse_json(nested_arrays(65)).is_discarded());
+    EXPECT_TRUE(mcp_parse_json(nested_arrays(100'000)).is_discarded());
+    std::string objects = "0";
+    for (int i = 0; i < 65; ++i) {
+        objects = "{\"x\":" + objects + "}";
+    }
+    EXPECT_TRUE(mcp_parse_json(objects).is_discarded());
+    EXPECT_TRUE(
+        mcp_parse_json("{\"result\":{},\"ignored\":" + nested_arrays(64) + "}").is_discarded())
+        << "a valid prefix must not survive rejection";
+    EXPECT_TRUE(
+        mcp_parse_json("{\"ignored\":" + nested_arrays(64) + ",\"ignored\":null,\"result\":{}}")
+            .is_discarded())
+        << "duplicate keys cannot hide excessive nesting";
+    EXPECT_TRUE(mcp_parse_json("[}").is_discarded());
+    EXPECT_EQ(mcp_parse_json(R"({"text":"[ { \" escaped brackets } ]"})").at("text"),
+              "[ { \" escaped brackets } ]");
+    EXPECT_EQ(mcp_parse_json("{\"ok\":true}").at("ok"), true);
+}
+
+class DepthTestStream : public lake::api::McpEventStream {
+public:
+    explicit DepthTestStream(std::shared_ptr<std::deque<std::string>> events)
+        : events_(std::move(events)) {
+        head_.status = 200;
+        head_.headers["content-type"] = "text/event-stream";
+    }
+    const lake::api::McpHttpResponse& head() const override {
+        return head_;
+    }
+    Read read(std::chrono::milliseconds) override {
+        if (events_->empty()) {
+            return {{}, true, {}};
+        }
+        std::string bytes = std::move(events_->front());
+        events_->pop_front();
+        return {std::move(bytes), false, {}};
+    }
+
+private:
+    lake::api::McpHttpResponse head_;
+    std::shared_ptr<std::deque<std::string>> events_;
+};
+
+// Exercise both response parsers, the early-answer callback, and both notification readers
+// without asking a test server's own JSON serializer to process the hostile document.
+class DepthTestHttp : public lake::api::McpHttp {
+public:
+    std::string transport = "json";
+    std::string result = "{}";
+    std::string before_answer;
+    std::string after_answer;
+    bool batch = false;
+    bool early_answer = false;
+    auto stream_events() {
+        return events_;
+    }
+    lake::api::McpHttpResponse exchange(const lake::api::McpHttpRequest& request,
+                                        const lake::api::McpEnough& enough) override {
+        lake::api::McpHttpResponse response;
+        response.status = 200;
+        response.headers["content-type"] = "application/json";
+        const json message = json::parse(request.body);
+        if (!message.contains("id")) {
+            response.status = 202;
+            return response;
+        }
+        const std::string value = message.at("method") == "initialize"
+                                      ? R"({"protocolVersion":"2025-06-18","capabilities":{}})"
+                                      : result;
+        std::string body =
+            "{\"jsonrpc\":\"2.0\",\"id\":" + message.at("id").dump() + ",\"result\":" + value + "}";
+        if (batch) {
+            body = "[" + body + "]";
+        }
+        if (transport == "legacy") {
+            events_->push_back(before_answer + "data: " + body + "\n\n" + after_answer);
+            response.status = 202;
+        } else if (transport == "sse") {
+            response.headers["content-type"] = "text/event-stream";
+            response.body = before_answer + "data: " + body + "\n\n";
+            early_answer = enough && enough(response.body);
+        } else {
+            response.body = std::move(body);
+        }
+        return response;
+    }
+    std::unique_ptr<lake::api::McpEventStream> open(const lake::api::McpHttpRequest&) override {
+        if (transport == "legacy" && !opened_) {
+            events_->push_back("event: endpoint\ndata: /messages\n\n");
+        }
+        opened_ = true;
+        return std::make_unique<DepthTestStream>(events_);
+    }
+
+private:
+    bool opened_ = false;
+    std::shared_ptr<std::deque<std::string>> events_ = std::make_shared<std::deque<std::string>>();
+};
+
+TEST(McpClient, EveryTransportRejectsDeepResultsAndTheNextRequestStillWorks) {
+    for (const std::string transport : {"json", "sse", "legacy"}) {
+        for (const bool batch : {false, true}) {
+            SCOPED_TRACE(transport + (batch ? " batch" : " single"));
+            auto http = std::make_shared<DepthTestHttp>();
+            http->transport = transport;
+            http->batch = batch;
+            McpClientOptions options;
+            options.url = "https://mcp.example/mcp";
+            options.transport = transport == "legacy" ? "sse" : "streamable_http";
+            McpClient client(http, options);
+            ASSERT_TRUE(client.initialize());
+            // Envelope + result + optional batch consume two or three container levels.
+            http->result = "{\"value\":" + nested_arrays(batch ? 61 : 62) + "}";
+            EXPECT_TRUE(client.call_tool("echo", json::object()));
+            if (transport == "sse") {
+                EXPECT_TRUE(http->early_answer);
+            }
+            http->result = "{\"value\":" + nested_arrays(128) + "}";
+            EXPECT_FALSE(client.call_tool("echo", json::object()));
+            if (transport == "sse") {
+                EXPECT_FALSE(http->early_answer);
+            }
+            http->result = "{\"ok\":true}";
+            const auto next = client.call_tool("echo", json::object());
+            ASSERT_TRUE(next);
+            EXPECT_EQ(next->at("ok"), true);
+        }
+    }
+}
+
+TEST(McpClient, DeepNotificationsAreDroppedOnResponsesAndBothListeningStreams) {
+    const std::string deep =
+        "data: {\"method\":\"notifications/message\",\"params\":{\"x\":" + nested_arrays(128) +
+        "}}\n\n";
+    const std::string normal =
+        "data: {\"method\":\"notifications/message\",\"params\":{\"ok\":true}}\n\n";
+    for (const std::string transport : {"sse", "legacy"}) {
+        SCOPED_TRACE(transport);
+        auto http = std::make_shared<DepthTestHttp>();
+        http->transport = transport;
+        McpClientOptions options;
+        options.url = "https://mcp.example/mcp";
+        options.transport = transport == "legacy" ? "sse" : "streamable_http";
+        McpClient client(http, options);
+        ASSERT_TRUE(client.initialize());
+        http->before_answer = deep + normal;
+        if (transport == "legacy") {
+            http->after_answer = deep + normal;
+        }
+        ASSERT_TRUE(client.call_tool("echo", json::object()));
+        auto notifications = client.take_notifications();
+        ASSERT_EQ(notifications.size(), 1U);
+        EXPECT_EQ(notifications[0].params.at("ok"), true);
+        if (transport != "legacy") {
+            http->stream_events()->push_back(deep + normal);
+        }
+        const auto listened = client.listen(std::chrono::milliseconds(10));
+        ASSERT_TRUE(listened);
+        ASSERT_EQ(listened->size(), 1U);
+        EXPECT_EQ(listened->at(0).params.at("ok"), true);
+    }
+}
+
+TEST(McpClient, ToolSchemasAndOldRecordsAreCheckedBeforeCopiesAndSerialization) {
+    const json boundary =
+        json::parse("{\"name\":\"echo\",\"inputSchema\":{\"x\":" + nested_arrays(62) + "}}");
+    EXPECT_TRUE(lake::api::mcp_tool_from(boundary, {}));
+    for (const std::string key : {"inputSchema", "outputSchema", "annotations"}) {
+        json tool{{"name", "echo"}, {"inputSchema", {{"type", "object"}}}};
+        tool[key] = json::parse("{\"x\":" + nested_arrays(128) + "}");
+        EXPECT_FALSE(lake::api::mcp_tool_from(tool, {})) << key;
+    }
+    const json stored =
+        json::parse("{\"name\":\"echo\",\"input_schema\":{\"x\":" + nested_arrays(128) + "}}");
+    EXPECT_FALSE(lake::api::mcp_tool_from_json(stored));
+    const json stored_boundary =
+        json::parse("{\"name\":\"echo\",\"input_schema\":{\"x\":" + nested_arrays(62) + "}}");
+    EXPECT_TRUE(lake::api::mcp_tool_from_json(stored_boundary));
+}
 
 TEST(McpClient, EventStreamsParseAsTheWhatwgRulesSay) {
     lake::api::SseParser parser;

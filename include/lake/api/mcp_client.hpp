@@ -32,6 +32,12 @@ namespace lake::api {
 inline constexpr std::string_view mcp_client_protocol_version = "2025-06-18";
 bool mcp_supported_protocol_version(std::string_view version);
 
+// Remote MCP and OAuth documents may contain at most this many nested objects/arrays.
+// The parser rejects the whole document before constructing a container beyond the limit;
+// malformed or over-depth input returns a discarded value, never a partial document.
+inline constexpr std::size_t mcp_max_json_depth = 64;
+nlohmann::json mcp_parse_json(std::string_view body);
+
 // How an exchange with a server is bounded.
 struct McpLimits {
     std::chrono::milliseconds timeout{30'000};        // one HTTP exchange, end to end

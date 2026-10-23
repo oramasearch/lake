@@ -219,3 +219,7 @@ move (`transfer_to_workspace_store`, `switch_workspace_store`, `create_repositor
 `MethodologyServer` (`registry.hpp`, `ServerOptions::methodology_server`, lake#690) sends one
 prediction request to a served methodology model's Service; the HTTP server injects one over its
 outbound client (plain http to `*.svc.cluster.local` only), tests inject a fake.
+
+`mcp_client.hpp` declares `mcp_max_json_depth` (64 nested containers) and `mcp_parse_json` for
+remote MCP and OAuth response bodies. Invalid or over-depth JSON returns a discarded value.
+See [MCP connection limits](../../../docs/api/mcp-connections.md#the-client) (lake#958, LSR-092).
