@@ -518,8 +518,23 @@ TEST(SchemaConformance, EveryToolAndRequiredOutputUsesHttpContract) {
     lake::test::StreamWorkspace streams(store, customer.id);
     lake::test::ExperimentWorkspace experiments(store, customer.id);
     experiments.caller->fallback = streams.caller;
+    // Billing reads model usage even with an empty price list, so every fixture workspace answers.
+    const auto repository_home = checked(store->get_workspace(repository.workspace_id));
+    const auto repository_service = checked(store->get_service(repository_home.zetta_service_id));
+    ASSERT_TRUE(
+        store->set_service_status(repository_service.id, "Ready", "", "http://repositories.test"));
+    std::ofstream(std::filesystem::path(experiments.service->config().service_dir) /
+                  (repository_service.slug + ".json"))
+        << json{{"kind", "zetta"}, {"token", "repository-fixture-secret"}}.dump();
     const auto objects = std::make_shared<lake::test::FakeZettaObjects>();
     objects->add_node("http://experiments.test", "experiment-service-secret");
+    lake::control::BillingPlan gateway_prices;
+    gateway_prices.id = "usage-200001-00000000000000001";
+    gateway_prices.name = "Usage";
+    gateway_prices.currency = "USD";
+    gateway_prices.prices = {{"model_tokens", 6, 1, 0, "gpt-5.5/input"},
+                             {"model_tokens", 36, 1, 0, "gpt-5.5/output"}};
+    checked(store->put_billing_plan(gateway_prices));
     lake::api::ApiServer server(
         {.port = 0,
          .node_name = "schema-test",
@@ -874,8 +889,15 @@ TEST(SchemaConformance, EveryToolAndRequiredOutputUsesHttpContract) {
               "?customer_id=" + customer.id +
                   "&from=2026-10-01T00:00:00Z&to=2026-10-02T00:00:00Z&granularity=hour");
     // Billing (lake#564, lake#635): the price list, a preview, and a month invoiced and paid.
-    http.call("set_price_list",
-              {{"prices", json::array({{{"dimension", "calls"}, {"unit_micros", 1000}}})}});
+    http.call(
+        "set_price_list",
+        {{"prices",
+          json::array(
+              {{{"dimension", "calls"}, {"unit_micros", 1000}},
+               {{"dimension", "model_tokens"}, {"class", "gpt-5.5/input"}, {"unit_micros", 6}},
+               {{"dimension", "model_tokens"},
+                {"class", "gpt-5.5/output"},
+                {"unit_micros", 36}}})}});
     http.call("price_list");
     http.read("price_list", "");
     http.call("price_list", {{"include_history", true}});

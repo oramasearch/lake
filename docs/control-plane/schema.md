@@ -1338,3 +1338,25 @@ share's evidence digest stays in `pki_recovery_shares`. A ceremony begun before 
 no rows here and cannot be completed. Additive and idempotent; guard
 `root_recovery_participants_guard`. The operator vendors the schema and selects that guard before a
 lake with this change is rolled.
+
+## Model token prices migration
+
+Migration `0095_model_token_prices` (LSR-095, lake#961) extends the `class` checks on
+`billing_plan_prices` and `billing_invoice_lines` to accept exact `<model>/input` and
+`<model>/output` names for `model_tokens`. Other dimensions retain their GPU-style class checks;
+workload resource classes are unchanged. No records are rewritten. The new constraints preserve
+all existing class names, and reapplying the schema is idempotent.
+
+It also seeds the default gateway models' input and output prices (OpenAI's published price plus
+30%, Steve 2026-10-23), once, while `0095_model_token_prices` is not yet recorded: a new
+publication for the current UTC month with the rates of the list in force (none on a fresh
+instance) plus the model rates, and the model rates added to any later list; an operator's rate for
+the same class is kept. The rates and their source are in
+[model-gateway.md](../api/model-gateway.md#configuration).
+
+The operator must vendor `db/schema.sql` and select `model_token_prices_guard` before the new
+Lake binary is deployed. The operator is not edited here. `PostgresBilling.ModelDirectionPricesAndInvoiceLinesRoundTrip`
+checks persisted rates and invoice lines, the migration marker and guard, and the GPU constraint.
+The [gateway contract](../api/model-gateway.md#configuration) explains the allowlist and required
+input/output prices. Change model entitlement in Lake configuration and published prices; changing
+class syntax also requires updating the API schema and both database checks.

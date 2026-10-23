@@ -237,3 +237,8 @@ See [MCP connection limits](../../../docs/api/mcp-connections.md#the-client) (la
 under the repository lock with the immutable tree being committed to main. `drive.hpp` declares
 `repository_write_authorizer` for destination and recursive descendant checks; its context must
 outlive the synchronous store call. See [drive.md](../../../docs/api/drive.md).
+Model entitlement and model/direction billing (LSR-095, lake#961) are documented in
+[`model-gateway.md`](../../../docs/api/model-gateway.md). The configured exact model/provider allowlist applies before dispatch on every transport;
+billing additionally requires positive model input and output rates. `model_tokens` classes
+preserve raw counts and bill each direction separately. `test_model_gateway.cpp` and
+`test_billing.cpp` cover provider-call refusal and invoice amounts, including a missing price.

@@ -169,6 +169,13 @@ struct ModelProviderResponse {
 // run_blocking.
 using ModelProvider = std::function<ModelProviderResponse(const ModelProviderRequest& request)>;
 
+// Exact gateway model names and their provider protocol. An empty list disables all models.
+struct GatewayModel {
+    std::string name;
+    std::string provider = "openai";
+};
+std::vector<GatewayModel> default_gateway_models();
+
 // A served methodology model (lake#690, docs/api/methodologies.md#serving-its-model): one request
 // to its serve pod's Service, `endpoint` (only ever what
 // control::methodology_deployment_endpoint_valid accepts) plus `path` (/predict or /explain).
@@ -392,6 +399,7 @@ struct ApiContext {
     // The model gateway's provider (model_completion, docs/api/model-gateway.md); empty when this
     // lake has no OpenAI key.
     ModelProvider model_provider;
+    std::vector<GatewayModel> model_gateway_models = default_gateway_models();
     // The caller's event stream (lake#665): set by the `/openai/v1/*` route, a streamed
     // model_completion hands it each piece of the provider's event stream as it arrives, instead of
     // answering the whole stream as `events`. Called on the outbound client's thread; false says

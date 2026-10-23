@@ -9422,6 +9422,7 @@ struct ApiServer::Impl {
         ctx.oidc_discovery = oidc_discovery;
         ctx.store_browser = store_browser;
         ctx.model_provider = model_provider;
+        ctx.model_gateway_models = options.model_gateway_models;
         ctx.payments = payments;
         ctx.object_transport = object_transport;
         ctx.artifact_catalog = [this] {

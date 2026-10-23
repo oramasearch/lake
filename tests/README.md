@@ -877,3 +877,16 @@ commitments and identity scans that reveal no principal or signer.
 `WorkspaceRecordStores.DynamicSecretsInAWorkspaceKeepTheirInstanceLogLeaf` retains its memory and
 PostgreSQL coverage of central routing, private lifecycle events and ordered instance leaves; its
 public leaves now contain only the matching event digests and exclude tenant and lease identifiers.
+Model entitlement and model/direction billing (LSR-095, lake#961) are documented in
+[`model-gateway.md`](../docs/api/model-gateway.md). The configured exact model/provider allowlist applies before dispatch on every transport;
+billing additionally requires positive model input and output rates. `model_tokens` classes
+preserve raw counts and bill each direction separately. `test_model_gateway.cpp` and
+`test_billing.cpp` cover provider-call refusal and invoice amounts, including a missing price.
+`ModelCompletion.ASeededInstanceCallsTheDefaultModelsWithBillingOnAtTheSeededPrices` makes a model
+call with billing on against a fresh PostgreSQL control plane, priced only by the rates migration
+0095 seeds, and checks the bill; `PostgresBilling.ModelTokenPricesAreSeededOnceOnFreshAndExistingInstances`
+checks the seed on a fresh database and on a simulated existing one, and that it runs once.
+
+`RecordModelUsage.UnpricedReportsCannotPoisonABilledAccountsLedger` rejects unpriced reports
+before recording, permits priced outside reports without granting provider access, and retains
+billing-off reporting.

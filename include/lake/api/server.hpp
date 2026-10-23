@@ -226,6 +226,8 @@ struct ServerOptions {
     // not_supported.
     std::string model_provider_url;
     ModelProvider model_provider;
+    // Exact model/provider allowlist (LAKE_MODEL_GATEWAY_MODELS); empty disables model calls.
+    std::vector<GatewayModel> model_gateway_models = default_gateway_models();
     // An injected client for served methodology models (tests, lake#690); empty: the server's
     // outbound client, plain http to the serve Service inside the cluster.
     MethodologyServer methodology_server;

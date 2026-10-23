@@ -4711,3 +4711,83 @@ CREATE TABLE IF NOT EXISTS root_recovery_participants_guard (
 );
 INSERT INTO schema_migrations (version) VALUES ('0093_root_recovery_participants')
     ON CONFLICT DO NOTHING;
+
+-- ---------------------------------------------------------------------------------------------
+-- 0095_model_token_prices (LSR-095, lake#961, docs/api/model-gateway.md): exact model input/output
+-- billing classes. Preserve historical GPU-style classes; only model_tokens may use model/direction.
+-- ---------------------------------------------------------------------------------------------
+ALTER TABLE billing_plan_prices DROP CONSTRAINT IF EXISTS billing_plan_prices_class_check;
+ALTER TABLE billing_plan_prices ADD CONSTRAINT billing_plan_prices_class_check CHECK (
+    class ~ '^([a-z0-9][a-z0-9-]{0,31})?$' OR
+    (dimension = 'model_tokens' AND class COLLATE "C" ~ '^[!-~]{1,128}/(input|output)$')
+);
+ALTER TABLE billing_invoice_lines DROP CONSTRAINT IF EXISTS billing_invoice_lines_class_check;
+ALTER TABLE billing_invoice_lines ADD CONSTRAINT billing_invoice_lines_class_check CHECK (
+    class ~ '^([a-z0-9][a-z0-9-]{0,31})?$' OR
+    (dimension = 'model_tokens' AND class COLLATE "C" ~ '^[!-~]{1,128}/(input|output)$')
+);
+CREATE TABLE IF NOT EXISTS model_token_prices_guard (
+    applied_at timestamptz NOT NULL DEFAULT now()
+);
+-- The default gateway models' token prices (Steve, 2026-10-23): OpenAI's published standard
+-- price per million tokens, https://developers.openai.com/api/docs/pricing, read 2026-10-23,
+-- plus 30%, in millionths of a US dollar per 1,000,000 tokens (docs/api/billing.md#rates):
+--   gpt-5.5                 $5.00 in, $30.00 out  ->  6500000 / 39000000 (under 272K context)
+--   gpt-5                   $1.25 in, $10.00 out  ->  1625000 / 13000000
+--   gpt-4o                  $2.50 in, $10.00 out  ->  3250000 / 13000000
+--   text-embedding-3-small  $0.02 in, no output   ->    26000 /    26000 (an embedding reports
+--                                                       no output tokens; the gateway needs both)
+-- Applied once, the first time this migration runs, on a fresh and an existing control plane
+-- alike. Publications are kept as published, so a new one is written for this UTC month: the
+-- rates of the list in force now (none on a fresh instance) plus these. A list published for a
+-- later month gets them too. A rate an operator already published for one of these classes is
+-- never replaced. A list in another currency is left for the operator.
+DO $model_token_prices$
+DECLARE
+    this_month        text := to_char(now() AT TIME ZONE 'UTC', 'YYYYMM');
+    seeded_id         text := 'usage-' || to_char(now() AT TIME ZONE 'UTC', 'YYYYMM') || '-' ||
+                              lpad(floor(extract(epoch FROM clock_timestamp()) * 1000000)
+                                       ::bigint::text, 17, '0');
+    in_force_id       text;
+    in_force_currency text;
+    seed_classes      text[] := ARRAY['gpt-5.5/input', 'gpt-5.5/output',
+                                      'gpt-5/input', 'gpt-5/output',
+                                      'gpt-4o/input', 'gpt-4o/output',
+                                      'text-embedding-3-small/input',
+                                      'text-embedding-3-small/output'];
+    seed_micros       bigint[] := ARRAY[6500000, 39000000,
+                                        1625000, 13000000,
+                                        3250000, 13000000,
+                                        26000,
+                                        26000];
+BEGIN
+    IF EXISTS (SELECT 1 FROM schema_migrations WHERE version = '0095_model_token_prices') THEN
+        RETURN;
+    END IF;
+    SELECT p.id, p.currency INTO in_force_id, in_force_currency FROM billing_plans p
+     WHERE p.id ~ '^usage-[0-9]{6}-[0-9]{17}$' AND substr(p.id, 7, 6) <= this_month
+     ORDER BY p.id DESC LIMIT 1;
+    IF in_force_currency IS NULL OR in_force_currency = 'USD' THEN
+        INSERT INTO billing_plans (id, name, description, currency)
+        VALUES (seeded_id, 'Usage',
+                'Usage price list from ' || substr(this_month, 1, 4) || '-' ||
+                    substr(this_month, 5, 2),
+                'USD');
+        INSERT INTO billing_plan_prices (plan_id, dimension, class, unit_micros, per, included)
+        SELECT seeded_id, pp.dimension, pp.class, pp.unit_micros, pp.per, pp.included
+          FROM billing_plan_prices pp WHERE pp.plan_id = in_force_id;
+        INSERT INTO billing_plan_prices (plan_id, dimension, class, unit_micros, per)
+        SELECT seeded_id, 'model_tokens', s.class, s.unit_micros, 1000000
+          FROM unnest(seed_classes, seed_micros) AS s(class, unit_micros)
+            ON CONFLICT DO NOTHING;
+    END IF;
+    INSERT INTO billing_plan_prices (plan_id, dimension, class, unit_micros, per)
+    SELECT p.id, 'model_tokens', s.class, s.unit_micros, 1000000
+      FROM billing_plans p
+     CROSS JOIN unnest(seed_classes, seed_micros) AS s(class, unit_micros)
+     WHERE p.id ~ '^usage-[0-9]{6}-[0-9]{17}$' AND substr(p.id, 7, 6) > this_month
+       AND p.currency = 'USD'
+        ON CONFLICT DO NOTHING;
+END
+$model_token_prices$;
+INSERT INTO schema_migrations (version) VALUES ('0095_model_token_prices') ON CONFLICT DO NOTHING;

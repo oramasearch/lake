@@ -370,12 +370,23 @@ month with breakdowns by workspace and kind; `usage_limits` and `set_usage_limit
 per-dimension limits in `customer_usage_limits` (storage's stays the enforced quota; the others
 warn); `record_model_usage` takes an agent's own credential. Usage is a dashboard in the web app. No
 billing here. See `docs/api/metering.md#usage-over-time`.
+
+The model gateway restricts calls to exact models in `LAKE_MODEL_GATEWAY_MODELS` (LSR-095,
+lake#961), including with billing off. Billing-on additionally requires positive published rates
+for each model's input and output tokens; usage keeps raw counts under model/direction classes,
+while provider snapshot names remain audit detail. Missing used-class rates refuse a bill.
+Migration `0095_model_token_prices` permits model/direction classes in prices and invoice lines,
+and seeds the default models' rates once (OpenAI's published price plus 30%, Steve 2026-10-23) as a
+new publication for the current month on a fresh and an existing instance.
+Not deployed; the operator must vendor the schema and select `model_token_prices_guard`.
+See [`docs/api/model-gateway.md`](docs/api/model-gateway.md).
+
 Billing follows, for Orama Cloud only (lake#564, decision 56, migration `0073_billing`): billing
 records live in PostgreSQL as multitenancy (`billing_plans`, `billing_plan_prices`,
 `billing_invoices`, `billing_invoice_lines`) and usage stays in each workspace Zetta, read through
 `usage_over_time`; an invoice freezes only the quantity and rate billed per dimension. Lake is
-priced by usage only (lake#635, no migration): one price list, one rate per usage dimension, no
-plans, no fee, nothing included, every account billed at it; each publication is a `billing_plans`
+priced by usage only (lake#635, no migration): one price list with dimension, GPU-class and
+model-direction rates, no plans, no fee, nothing included, every account billed at it; each publication is a `billing_plans`
 row, a month is billed at the list in force at its end, `billing_subscriptions` is unused, and Metis
 is priced by sales, not here. Time is priced and billed per minute on the month's summed seconds
 (lake#637). Nine capabilities (`price_list`, `set_price_list`, `billing_account`, `bill_preview`,
@@ -908,7 +919,7 @@ one adapter TU) and the pure renderers in `include/zetta/api/web_ui.hpp`.
 - **Schema.** `db/schema.sql` is the source of truth; the operator carries a byte-identical
   vendored copy at `internal/controller/assets/lake-schema.sql` and applies it per Lake as an
   owned `PostgresSchema` (one transaction, guarded on the table the **newest** migration creates,
-  `network_guard` in the source tree, versioned by content hash).
+  `model_token_prices_guard` in the source tree, versioned by content hash).
   Change the schema HERE, then copy it into the operator in the same change; the operator's test
   checks the copy carries the source-of-truth header. Migrations are single-shot today
   (incremental migrations are the PostgresSchema follow-up), so until then a schema change means

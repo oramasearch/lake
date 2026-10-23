@@ -702,3 +702,8 @@ commits, methodology changes and `lake` store drives share it. See [drive.md](..
 `finish_call` keeps full dynamic-secret events in private central audit and publishes only successful
 events through `TiledLog::append_audit_event`, which emits a digest commitment (lake#953, LSR-087).
 Denied and failed calls append no public leaf; both registry call variants share this finalizer.
+Model entitlement and model/direction billing (LSR-095, lake#961) are documented in
+[`model-gateway.md`](../../docs/api/model-gateway.md). The configured exact model/provider allowlist applies before dispatch on every transport;
+billing additionally requires positive model input and output rates. `model_tokens` classes
+preserve raw counts and bill each direction separately. `test_model_gateway.cpp` and
+`test_billing.cpp` cover provider-call refusal and invoice amounts, including a missing price.

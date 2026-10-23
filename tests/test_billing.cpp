@@ -828,7 +828,7 @@ TEST(Billing, ComputeIsPricedAsCpuRamGpuAndGpuMemory) {
                 {{{"dimension", "cpu"}, {"class", "h100"}, {"unit_micros", 1}, {"per", 60000}}}))
             .path,
         "/prices/0/class")
-        << "only GPU and GPU memory have classes";
+        << "CPU has no classes";
     EXPECT_EQ(
         refused(
             json::array({{{"dimension", "gpu"}, {"class", "l4"}, {"unit_micros", 1}, {"per", 60}},
@@ -957,4 +957,62 @@ TEST(UsageContract, TransferFromAnyRecorderCallerIsShownAndBilled) {
     ASSERT_NE(billed, nullptr) << bill.value.dump();
     EXPECT_EQ((*billed)["quantity"], 4 * gib);
     EXPECT_EQ((*billed)["amount_micros"], 200'000) << "4 GiB at $0.05";
+}
+
+// LSR-095: the bill reads the model/direction classes instead of blending all model tokens.
+TEST(Billing, ModelInputAndOutputHaveExactPricesAndCannotFallBackToTheBlendedRate) {
+    BillingRig rig;
+    const auto last = this_month() - std::chrono::months{1};
+    const std::string period = month_name(first_of(last));
+    const std::chrono::sys_time<std::chrono::hours> day{first_of(last)};
+    const json prices = json::array(
+        {{{"dimension", "model_tokens"}, {"unit_micros", 9'000'000}, {"per", 1'000'000}},
+         {{"dimension", "model_tokens"},
+          {"class", "gpt-5.5/input"},
+          {"unit_micros", 6'000'000},
+          {"per", 1'000'000}},
+         {{"dimension", "model_tokens"},
+          {"class", "gpt-5.5/output"},
+          {"unit_micros", 36'000'000},
+          {"per", 1'000'000}},
+         {{"dimension", "model_tokens"},
+          {"class", "text-embedding-3-small/input"},
+          {"unit_micros", 24'000},
+          {"per", 1'000'000}}});
+    ASSERT_TRUE(rig.call("set_price_list", {{"effective_from", period}, {"prices", prices}}).ok);
+    rig.recorder.add(rig.home, "model_tokens", 100, {{"class", "gpt-5.5/input"}}, day);
+    rig.recorder.add(rig.lab, "model_tokens", 200, {{"class", "gpt-5.5/output"}}, day);
+    rig.recorder.add(
+        rig.home, "model_tokens", 1000, {{"class", "text-embedding-3-small/input"}}, day);
+    // Unclassed usage from before this change retains the historical default tariff.
+    rig.recorder.add(rig.home, "model_tokens", 10, {{"model", "legacy-model"}}, day);
+    rig.flush();
+    const json input{{"customer_id", rig.customer}, {"period", period}};
+    const auto preview = rig.call("bill_preview", input);
+    ASSERT_TRUE(preview.ok) << preview.error.message;
+    ASSERT_NE(class_line(preview.value, "model_tokens", "gpt-5.5/input"), nullptr);
+    EXPECT_EQ(class_line(preview.value, "model_tokens", "gpt-5.5/input")->at("amount_micros"), 600);
+    EXPECT_EQ(class_line(preview.value, "model_tokens", "gpt-5.5/output")->at("amount_micros"),
+              7200);
+    EXPECT_EQ(class_line(preview.value, "model_tokens", "text-embedding-3-small/input")
+                  ->at("amount_micros"),
+              24);
+    EXPECT_EQ(class_line(preview.value, "model_tokens", "")->at("quantity"), 10);
+    const auto issued = rig.call("issue_invoice", input);
+    ASSERT_TRUE(issued.ok) << issued.error.message;
+    EXPECT_EQ(issued.value["total_micros"], 7914);
+
+    // A later list that omits a used class cannot bill it at the default or silently erase it.
+    auto incomplete = prices;
+    incomplete.erase(2);
+    ASSERT_TRUE(
+        rig.call("set_price_list", {{"effective_from", period}, {"prices", incomplete}}).ok);
+    const auto refused = rig.call("bill_preview", input);
+    EXPECT_FALSE(refused.ok);
+    EXPECT_EQ(refused.error.code, "conflict");
+    ASSERT_TRUE(
+        rig.call("set_price_list", {{"effective_from", period}, {"prices", json::array()}}).ok);
+    const auto empty = rig.call("bill_preview", input);
+    EXPECT_FALSE(empty.ok);
+    EXPECT_EQ(empty.error.code, "conflict");
 }

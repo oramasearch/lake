@@ -139,7 +139,7 @@ and `code`, and the JSON pointer of the field at fault as `param`:
 
 | Code | Status | When |
 |---|---|---|
-| `invalid_input` | 400 | an unsupported field, content or tool; no `model`; streamed embeddings; background work or stored references |
+| `invalid_input` | 400 | an unsupported field, content or tool; no allowed/priced `model`; streamed embeddings; background work or stored references |
 | `unauthenticated`, `unauthorized` | 401, 403 | no credential, or one that is not a run's (above), or a `/w/<workspace>/` path naming another workspace than the run's |
 | `not_found` | 404 | a `/w/<workspace>/` path naming a workspace that does not exist |
 | `usage_limit_reached` | 429 | the account's monthly `model_tokens` limit is used up ([Limits](#limits)) |
@@ -177,8 +177,11 @@ Each answered call adds two values to the run's workspace's `lake_usage` counter
 ([metering.md](metering.md#usage-over-time)): `model_tokens` with `kind: input` and with
 `kind: output`, each labelled `agent`, `launch_id` (the task, launch or schedule id) and `model`. Those
 are the labels `usage_over_time` breaks `model_tokens` down by (`by_agent`, `by_launch`, `by_model`),
-which the Usage dashboard and an agent's page show, and the bill prices `model_tokens` at one rate
-([billing.md](billing.md#price-list)). A refused call, by Lake or by the provider, counts nothing.
+which the Usage dashboard and an agent's page show. `model` is the exact requested name;
+provider snapshot names are audit detail (`answered_model`). Each value also carries a billing
+`class`: `<model>/input` or `<model>/output`, exposed in `by_class` and priced separately
+([billing.md](billing.md#price-list)). Raw token counts and monthly token limits are unchanged.
+A refused call, by Lake or by the provider, counts nothing.
 A call the provider answered counts even when its answer did not arrive whole (lake#939).
 A transport failure without an HTTP status is also counted by estimate against the originating
 run: a lost response cannot establish that the provider did no billable work (lake#960).
@@ -229,6 +232,51 @@ The prompt and the answer are never in the audit.
 |---|---|
 | `LAKE_OPENAI_API_KEY` | Orama's provider key, a platform environment variable of the Lake pod (on the dev cluster, `spec.env` from Secret `lake-prod-openai`). Unset, the gateway answers `not_supported` |
 | `LAKE_MODEL_PROVIDER_URL` | an OpenAI-compatible base URL; default `https://api.openai.com/v1` |
+| `LAKE_MODEL_GATEWAY_MODELS` | JSON array of exact model/provider objects, such as `[{"model":"gpt-5.5","provider":"openai"}]`; absent defaults to `gpt-5.5`, `gpt-5`, `gpt-4o`, and `text-embedding-3-small`; `[]` disables all model calls |
+
+Only the `openai` provider protocol is supported, using the configured base URL and key.
+Malformed configuration, duplicate model names and unsupported providers stop startup. Names are
+case-sensitive and never trimmed, decoded or expanded to snapshot or fine-tuning aliases. An
+unlisted name returns `invalid_input` at `/request/model` before any provider call, through the
+OpenAI routes (including workspace paths), REST and MCP alike (LSR-095, lake#961).
+
+With billing off, the configured allowlist is sufficient. With billing on, the current UTC month's
+published price list must also have exactly one positive `model_tokens` price for each of
+`<model>/input` and `<model>/output`, with positive `per`. A missing list, blended rate alone,
+missing direction or zero rate refuses the model with `invalid_input`; a failed price read refuses
+with `store_unavailable`. Even an embedding model needs both rates, although it normally reports no
+output tokens. Publish approved rates with `set_price_list` before enabling a model. Choose rates
+for the configured provider; an allowlist entry never derives prices from its name.
+
+**The default models are priced by the schema** (Steve, 2026-10-23: the provider's published
+per-token price plus 30%). Migration `0095_model_token_prices` seeds them once, on a fresh and an
+existing control plane alike, in millionths of a US dollar per 1,000,000 tokens, from
+OpenAI's published standard price ([pricing](https://developers.openai.com/api/docs/pricing), read 2026-10-23):
+
+| Model | OpenAI input / output (per 1M) | Lake input / output (per 1M) | `unit_micros` input / output |
+|---|---|---|---|
+| `gpt-5.5` | $5.00 / $30.00 (under 272K context) | $6.50 / $39.00 | 6500000 / 39000000 |
+| `gpt-5` | $1.25 / $10.00 | $1.625 / $13.00 | 1625000 / 13000000 |
+| `gpt-4o` | $2.50 / $10.00 | $3.25 / $13.00 | 3250000 / 13000000 |
+| `text-embedding-3-small` | $0.02 / none | $0.026 / $0.026 | 26000 / 26000 |
+
+An embedding reports no output tokens, so its output rate bills nothing; it exists because the
+gateway needs both. Cached input is billed at the input rate. `gpt-5.5` above 272K tokens of context
+costs the provider $10.00 / $45.00 and is still billed at the rates above. The seed writes a new
+publication for the UTC month it runs in, holding the rates of the list then in force (none on a
+fresh instance) plus these, and adds them to any list published for a later month; a rate already
+published for one of these classes is kept, and a list in another currency is left alone. It runs
+only while `0095_model_token_prices` is not recorded, so re-applying the schema never re-adds a
+rate an operator later removed. Change a rate with `set_price_list`; when OpenAI's prices move,
+publish the new rates (provider price × 1.3) and update this table.
+
+The operator can change the allowlist by setting `LAKE_MODEL_GATEWAY_MODELS` and restarting Lake.
+Publish model/direction rates through `set_price_list`; the gateway reads the effective list on
+every call. Migration `0095_model_token_prices` extends the price and invoice class checks for
+model/direction names while retaining GPU restrictions. Before deployment the operator must
+vendor `db/schema.sql` and select `model_token_prices_guard`; this change does not edit the operator.
+The default list deliberately restricts previously
+accepted arbitrary names; add other approved models explicitly.
 
 Agent pods need neither: they reach the model through Lake. The operator's
 `spec.agents.openaiSecretName`, which used to put the key into every agent pod, is left unset once the
@@ -245,4 +293,33 @@ lake#658). Lake makes no other model call (no clean-up or naming of its own).
 ## `record_model_usage`
 
 `record_model_usage` stays for a model call made outside Lake, such as a model an agent runs itself.
-A call through the gateway is already counted and must not be reported again.
+A call through the gateway is already counted and must not be reported again. New reports use the
+same model/direction billing classes; they do not dispatch a provider call or grant model access.
+With billing on, a report without positive exact input and output prices is refused with
+`invalid_input` at `/model_name` before any tokens are recorded. This prevents an agent from
+inserting an unpriced class that blocks the account's invoice. Reporting a priced outside model
+does not require or change the gateway allowlist, because it grants no provider access. With
+billing off, outside reports are accepted as before.
+
+## Verifying model entitlement and pricing
+
+Run `ModelCompletion.RejectsUnlistedModelsBeforeEveryEndpointCallsTheProvider`,
+`ModelCompletion.BillingRequiresBothPositiveExactModelPricesBeforeDispatch`,
+`ModelGateway.ParsesAnExactModelAllowlistAndRejectsBadConfiguration`, and
+`ModelGatewayRoute.AnswersTheOpenAIShapeForATaskCredential`. They cover unknown and altered names,
+configuration replacement and disabling, each endpoint, protocol and REST routes, missing or
+incomplete prices, and raw usage labelled by the requested model despite a provider snapshot.
+`Billing.ModelInputAndOutputHaveExactPricesAndCannotFallBackToTheBlendedRate` verifies separate
+input/output invoice amounts and refuses bills after a used model's prices are removed.
+`PostgresBilling.ModelDirectionPricesAndInvoiceLinesRoundTrip` verifies the migration, persisted
+rates and invoice lines, and continued rejection of model/direction classes on GPU prices.
+`PostgresBilling.ModelTokenPricesAreSeededOnceOnFreshAndExistingInstances` checks the seeded rates
+on a fresh database, and on a simulated existing one that the list in force is kept, a new one
+carries its rates plus the seeded ones (an operator's own model rate kept), a later list gets them,
+and a second run adds nothing. `ModelCompletion.ASeededInstanceCallsTheDefaultModelsWithBillingOnAtTheSeededPrices`
+makes a model call with billing on against a freshly seeded PostgreSQL control plane and checks
+the bill prices its input and output at the seeded rates.
+
+`RecordModelUsage.UnpricedReportsCannotPoisonABilledAccountsLedger` verifies that rejected reports
+record no model tokens, priced outside reports grant no gateway access, and billing-off reports
+still work.
