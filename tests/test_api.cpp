@@ -8941,7 +8941,8 @@ TEST(Identity, PasswordSessionsTokensAndRevocation) {
 
     const ApiResult stale_disable = *liquid::runtime::block_on(
         s.registry.call_async("disable_mfa", {{"code", first_recovery}}, user_context));
-    EXPECT_EQ(stale_disable.error.code, "unauthorized");
+    // Credential failures share the generic 401 (lake#966).
+    EXPECT_EQ(stale_disable.error.code, "unauthenticated");
     const ApiResult disabled = *liquid::runtime::block_on(
         s.registry.call_async("disable_mfa", {{"code", second_recovery}}, user_context));
     ASSERT_TRUE(disabled.ok) << disabled.error.message;
