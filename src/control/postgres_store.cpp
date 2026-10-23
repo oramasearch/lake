@@ -2387,8 +2387,41 @@ public:
                        membership.granted_by_taap_id);
     }
 
+    // Serialize membership decisions within an organization before reading authority or owner
+    // counts. The row lock also coordinates with organization deletion.
+    static void lock_membership_organization(pqxx::work& tx, const std::string& organization_id) {
+        tx.exec_params("SELECT id FROM organizations WHERE id = $1::uuid FOR UPDATE",
+                       organization_id);
+    }
+
+    static Result<void> require_organization_owner(pqxx::work& tx,
+                                                   const std::string& organization_id,
+                                                   const std::string& actor) {
+        if (actor == "admin") {
+            return {};
+        }
+        const auto owners = tx.exec_params(
+            "SELECT id FROM memberships WHERE organization_id = $1::uuid AND team_id IS NULL "
+            "AND role = 'owner' AND principal_taap_id = $2 FOR SHARE",
+            organization_id,
+            actor);
+        if (!owners.empty()) {
+            return {};
+        }
+        return std::unexpected(StoreError{
+            "unauthorized", "owner changes require an organization owner or the operator"});
+    }
+
     Result<Membership> create_membership(const NewMembership& in) override {
         return with_tx<Membership>([&](pqxx::work& tx) -> Result<Membership> {
+            lock_membership_organization(tx, in.organization_id);
+            if (in.role == "owner") {
+                if (auto allowed =
+                        require_organization_owner(tx, in.organization_id, in.granted_by_taap_id);
+                    !allowed) {
+                    return std::unexpected(allowed.error());
+                }
+            }
             if (in.principal_type == "user") {
                 const pqxx::result users =
                     tx.exec_params("SELECT 1 FROM users WHERE id = $1::uuid AND taap_id = $2",
@@ -2506,6 +2539,12 @@ public:
                 return std::unexpected(
                     StoreError{"invalid_input", "role must be owner, admin, or member"});
             }
+            const auto scope = tx.exec_params(
+                "SELECT organization_id::text FROM memberships WHERE id = $1::uuid", id);
+            if (scope.empty()) {
+                return std::unexpected(StoreError{"not_found", "no membership " + id});
+            }
+            lock_membership_organization(tx, scope[0][0].as<std::string>());
             const pqxx::result rows =
                 tx.exec_params(std::string("SELECT ") + membership_columns +
                                    " FROM memberships WHERE id = $1::uuid FOR UPDATE",
@@ -2514,6 +2553,13 @@ public:
                 return std::unexpected(StoreError{"not_found", "no membership " + id});
             }
             const Membership membership = membership_of(rows[0]);
+            if (membership.role == "owner" || role == "owner") {
+                if (auto allowed =
+                        require_organization_owner(tx, membership.organization_id, actor);
+                    !allowed) {
+                    return std::unexpected(allowed.error());
+                }
+            }
             if (membership.role == "owner" && role != "owner") {
                 const pqxx::result owners = tx.exec_params(
                     "SELECT count(*) FROM memberships WHERE organization_id = $1::uuid "
@@ -2565,13 +2611,18 @@ public:
                     membership_columns,
                 id,
                 role);
-            static_cast<void>(actor);
             return membership_of(updated[0]);
         });
     }
 
     Result<void> remove_member(const std::string& id, const std::string& actor) override {
         return with_tx<void>([&](pqxx::work& tx) -> Result<void> {
+            const auto scope = tx.exec_params(
+                "SELECT organization_id::text FROM memberships WHERE id = $1::uuid", id);
+            if (scope.empty()) {
+                return std::unexpected(StoreError{"not_found", "no membership " + id});
+            }
+            lock_membership_organization(tx, scope[0][0].as<std::string>());
             const pqxx::result rows =
                 tx.exec_params(std::string("SELECT ") + membership_columns +
                                    " FROM memberships WHERE id = $1::uuid FOR UPDATE",
@@ -2580,6 +2631,13 @@ public:
                 return std::unexpected(StoreError{"not_found", "no membership " + id});
             }
             const Membership membership = membership_of(rows[0]);
+            if (membership.role == "owner") {
+                if (auto allowed =
+                        require_organization_owner(tx, membership.organization_id, actor);
+                    !allowed) {
+                    return std::unexpected(allowed.error());
+                }
+            }
             if (membership.role == "owner") {
                 const pqxx::result owners = tx.exec_params(
                     "SELECT count(*) FROM memberships WHERE organization_id = $1::uuid "
@@ -2623,6 +2681,14 @@ public:
 
     Result<Invitation> create_invitation(const NewInvitation& in) override {
         return with_tx<Invitation>([&](pqxx::work& tx) -> Result<Invitation> {
+            lock_membership_organization(tx, in.organization_id);
+            if (in.role == "owner") {
+                if (auto allowed =
+                        require_organization_owner(tx, in.organization_id, in.created_by_taap_id);
+                    !allowed) {
+                    return std::unexpected(allowed.error());
+                }
+            }
             if (!in.team_id.empty()) {
                 const pqxx::result teams =
                     tx.exec_params("SELECT 1 FROM teams WHERE id = $1::uuid AND "
@@ -2934,6 +3000,14 @@ public:
 
     Result<Membership> accept_invitation(const AcceptInvitation& in) override {
         return with_tx<Membership>([&](pqxx::work& tx) -> Result<Membership> {
+            const auto scope =
+                tx.exec_params("SELECT organization_id::text FROM invitations WHERE id = $1::uuid",
+                               in.invitation_id);
+            if (scope.empty()) {
+                return std::unexpected(
+                    StoreError{"not_found", "no invitation " + in.invitation_id});
+            }
+            lock_membership_organization(tx, scope[0][0].as<std::string>());
             const pqxx::result invitations =
                 tx.exec_params(std::string("SELECT ") + invitation_columns +
                                    " FROM invitations WHERE id = $1::uuid FOR UPDATE",
@@ -2943,6 +3017,13 @@ public:
                     StoreError{"not_found", "no invitation " + in.invitation_id});
             }
             Invitation invitation = invitation_of(invitations[0]);
+            if (invitation.role == "owner") {
+                if (auto allowed = require_organization_owner(
+                        tx, invitation.organization_id, in.accepted_by_taap_id);
+                    !allowed) {
+                    return std::unexpected(allowed.error());
+                }
+            }
             if (invitation.status != "pending") {
                 return std::unexpected(StoreError{"conflict", "invitation is not pending"});
             }

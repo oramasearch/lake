@@ -591,7 +591,7 @@ TEST(Billing, OwnersAndAdminsSetTheBillingContact) {
                                              user->taap_id,
                                              role,
                                              "sha512-256:" + role,
-                                             "taap:1:ed25519:billing-org-grantor",
+                                             "admin",
                                              "request-" + role}));
         auto context = rig.owner_context();
         context.acting_identity = user->taap_id;

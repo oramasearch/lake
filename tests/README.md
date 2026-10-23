@@ -825,3 +825,14 @@ registration, authorization-code and refresh tokens. Run
 `Drive.SharingCannotGrantActionsTheCallerDoesNotHold` (`test_api.cpp`, lake#955) checks role
 attenuation for live grants and bearer links, member-only sharing by non-admins, combined grants
 and admin sharing to known outsiders. See [sharing](../docs/api/sharing.md).
+`test_deletions.cpp` runs `OwnershipRequiresAnOrganizationOwnerOnEveryMembershipPath` and
+`OwnerInvitationsRecheckTheInvitersCurrentAuthority` over memory and PostgreSQL (LSR-099,
+lake#965): admin self-promotion, owner tenure, both scopes, invitation acceptance and stale
+inviter authority, direct admin grants, foreign-organization owners, owner approval, the operator
+and deletion refusal. `ConcurrentOwnerRemovalsPreserveOneOwner` covers owner counts across independent PostgreSQL
+connections.
+Run with `ctest --test-dir build --timeout 600 -R 'OwnershipRequires|OwnerInvitations|ConcurrentOwnerRemovals'` and a
+configured `LAKE_TEST_DB_URI`; the [API contract](../docs/api/organizations.md) explains the rule.
+
+The policy and billing fixtures establish the first owner of an operator-created organization
+with the reserved operator; subsequent owner grants require an existing organization owner.

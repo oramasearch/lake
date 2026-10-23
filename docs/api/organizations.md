@@ -73,6 +73,20 @@ teams, members, invitations, and grants below that organization, but cannot act 
 organization or on a customer that merely parents it. A customer administrator can create an
 organization with `customer_id`; the new organization object becomes a child of that customer.
 
+Only a current **organization-scope owner**, or the instance operator, may create an `owner`
+membership or invitation, assign `owner`, or change or remove an existing owner, including a
+team owner (LSR-099, lake#965). A team owner or a direct `admin` grant does not satisfy this rule.
+Both stores check ownership inside the membership write. PostgreSQL serializes these
+writes on the organization row, so authority and the last-owner count cannot be raced by another
+membership change. Organization creation and personal-account conversion establish the initial
+owner atomically; an operator can establish an owner's membership on an operator-created organization.
+
+`accept_invitation` requires owner authority for an owner invitation. `join_organization` uses
+the inviter's authority and rechecks their current ownership when the recipient joins. If the
+inviter has lost ownership, acceptance is refused with `unauthorized` and the invitation stays
+pending; a current owner may approve it through `accept_invitation`. Administrators can still
+create, change and remove ordinary admin/member memberships and invitations.
+
 **An organization's own account.** When the organization has its own account (the `organization`
 customer whose `organization_id` is that organization), an organization-scope membership also
 derives the same grant, with the same evidence, on that account's customer object. Owners and
@@ -166,3 +180,17 @@ capabilities with a browser session; the type-the-handle confirmation is the web
 organization behavior in the store interface first, then expose a capability with object/action
 metadata for the web app to call. Schema changes require the
 numbered migration and operator copy described in [`../control-plane/schema.md`](../control-plane/schema.md).
+
+## Ownership regression checks
+
+With `LAKE_TEST_DB_URI` set, run:
+
+```sh
+ctest --test-dir build --timeout 600 --output-on-failure -R 'OwnershipRequires|OwnerInvitations|ConcurrentOwnerRemovals'
+```
+
+The memory/PostgreSQL cases in `test_deletions.cpp` refuse admin self-promotion, owner demotion
+and removal, owner membership/invitation creation and acceptance, and organization deletion.
+They exercise organization and team scopes, direct admin grants, stale inviter authority,
+current-owner approval and the operator. Keep both store implementations and these cases
+aligned when changing membership authority.

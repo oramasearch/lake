@@ -321,3 +321,10 @@ reader (no DTDs or entities), Exclusive XML Canonicalization 1.0, XML Signature 
 the provider's registered certificate, and the response, assertion and condition checks, with no
 XML library. Both stores keep the outstanding AuthnRequests and the accepted assertion ids
 (`begin_saml`, `consume_saml`; migration `0092_saml_sign_in`), each accepted once.
+
+Ownership changes in both stores require a current organization-scope owner or the reserved
+operator (LSR-099, lake#965). The checks cover membership creation, invitation creation and
+acceptance, role changes and removal; PostgreSQL locks the organization before reading owner
+authority and counts. Self-service joins recheck the inviter. See the
+[ownership contract](../../docs/api/organizations.md#delegated-administration) and the shared
+regressions in `tests/test_deletions.cpp`.
