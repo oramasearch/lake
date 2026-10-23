@@ -228,7 +228,8 @@ row; no workspace is called). It stays central when:
 - this lake has no workspace audit: no workspace Zettas are configured, so the server has no
   `AuditRecorder` and every event is central (local development and the single-store tests).
 
-A workspace event is never written centrally instead, whatever happens to its workspace.
+A workspace event is never written centrally instead. Queue overflow writes a separate,
+content-free delivery failure to the central chain, as described below.
 
 ## Workspace audit
 
@@ -247,10 +248,30 @@ workspace round trip is added to any call. The owner loop flushes the queue ever
 held, and once more when the server drains. A flush signs each workspace's events in order and
 appends them to its chain, one conditional `put_record` each.
 
-**Loss window.** On a crash, the events queued since the last successful flush: one second, plus
-any write that kept failing. A workspace that is not ready keeps its events, in order, for the
-next flush; the events of a deleted workspace are dropped and counted. An event beyond the bound is
-dropped and counted. Counters: `lake_audit_workspace_events_written_total`,
+**Capacity and delivery failure (LSR-098, lake#964).** The process holds at most
+`audit_max_pending` events (minimum two), including events currently being flushed. One customer
+can hold at most half that capacity, across all its workspaces; one workspace at most a quarter
+(each allocation is at least one). At the default 65,536, these limits are 32,768 and 16,384.
+An unavailable workspace cannot exhaust another customer's allocation by adding requests or
+creating more workspaces. These are ceilings, not guaranteed reservations against many customers
+exhausting the process together. Change the process limit through `ServerOptions::audit_max_pending`;
+the customer and workspace limits follow it.
+
+A rejected event returns `audit_queue_full` (HTTP 503). Before returning, Lake signs a separate
+central `audit_delivery_failed` event containing only the customer, principal, request ID,
+workspace ID, omitted event ID, original operation outcome and error code. It carries no workspace
+payload, object name or audit details. If that central write fails too, the error explicitly says
+that delivery evidence could not be recorded. REST and MCP preserve the completed operation's
+original envelope in `operation_result`; a successful operation may already have changed state,
+so inspect this result before retrying. Push and reference authorization use the same rejection
+path and refuse publication when their audit cannot be accepted.
+
+Accepted events keep their capacity while a flush runs, so arrivals cannot evict failed writes.
+A workspace that is not ready keeps its accepted events in order for the next flush; deleted
+workspaces release theirs and increment the deletion counter. Queued payloads remain in memory:
+a durable payload retry queue is a follow-up. On a crash the loss window is the interval since the
+last successful flush, plus any failing writes. The signed delivery failure records an overflow
+gap; it does not reconstruct the omitted payload. Counters: `lake_audit_workspace_events_written_total`,
 `lake_audit_workspace_flush_errors_total`, `lake_audit_workspace_conflicts_total`,
 `lake_audit_workspace_dropped_total{reason="bound"|"workspace_deleted"}`, and the gauge
 `lake_audit_workspace_pending`.
@@ -346,3 +367,12 @@ These steps are for the coordinator and are not run by this change.
 5. Rerun step 4 after any rollback to an older image: events it wrote centrally are assigned and
    copied on the next run.
 6. Nothing is dropped. Replacing the copied central rows by digest-only rows is a later decision.
+
+## Verify queue isolation
+
+`WorkspaceRecordStores.AuditQueueIsolatesUnavailableCustomersDuringFlush` fills two unavailable
+workspaces of one customer, rejects more events from that customer, and writes another customer's
+events while requests arrive during the flush. `AuditQueueOverflowPreservesResultsAndSignedDeliveryEvidence`
+checks a committed transcript, an unavailable workspace failure, signed content-free evidence and
+the direct push/reference recording path. Both run against memory and PostgreSQL. Run with
+`ctest --test-dir build --timeout 600 -R 'AuditQueue|AuditEventsAboutAWorkspace' --output-on-failure`.

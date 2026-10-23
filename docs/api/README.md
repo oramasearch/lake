@@ -571,3 +571,5 @@ preserve raw counts and bill each direction separately. `test_model_gateway.cpp`
 `test_billing.cpp` cover provider-call refusal and invoice amounts, including a missing price.
 [Replication](replication.md) requires trusted signed checkpoints covering every batch head;
 [transparency](transparency.md) refuses legacy full-event identity scans (lake#974, LSR-107).
+[audit.md](audit.md#workspace-audit) documents per-customer and per-workspace queue limits,
+signed delivery failure evidence and `audit_queue_full` with the original operation result (LSR-098).

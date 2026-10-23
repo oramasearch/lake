@@ -1896,20 +1896,26 @@ TEST_P(WorkspaceRecordStores, AuditEventsAboutAWorkspaceLiveInItsOwnChain) {
     EXPECT_EQ(recorder.pending(), 0U) << "a call naming a deleted workspace is refused centrally";
     EXPECT_EQ(central(after_delete).size(), 1U);
 
-    // Bounded: an event beyond the bound is dropped and counted, never written centrally.
+    // Bounded: rejection is explicit and signs only delivery failure evidence centrally.
     lake::api::AuditRecorder bounded(t.store.get(), t.service.get(), std::string(kek), "", 1);
     const std::string kept = lake::control::new_uuid_v4();
     const std::string dropped = lake::control::new_uuid_v4();
     for (const auto& request_id : {kept, dropped}) {
-        call_with(t.context(first), &bounded, "get_ask_conversation",
-                  {{"customer_id", first.customer_id},
-                   {"workspace_id", home},
-                   {"conversation_id", lake::control::new_uuid_v4()}},
-                  request_id);
+        const auto result = call_with(t.context(first),
+                                      &bounded,
+                                      "get_ask_conversation",
+                                      {{"customer_id", first.customer_id},
+                                       {"workspace_id", home},
+                                       {"conversation_id", lake::control::new_uuid_v4()}},
+                                      request_id);
+        if (request_id == dropped) {
+            EXPECT_EQ(result.error.code, "audit_queue_full");
+        }
     }
     EXPECT_EQ(bounded.pending(), 1U);
     EXPECT_EQ(bounded.totals().dropped, 1U);
-    EXPECT_TRUE(central(dropped).empty());
+    ASSERT_EQ(central(dropped).size(), 1U);
+    EXPECT_EQ(central(dropped).front().draft.action, "audit_delivery_failed");
 
     // Without a workspace audit (no AuditRecorder: a lake with no workspace Zettas), every
     // event is central.
@@ -1920,6 +1926,157 @@ TEST_P(WorkspaceRecordStores, AuditEventsAboutAWorkspaceLiveInItsOwnChain) {
                {"conversation_id", lake::control::new_uuid_v4()}},
               single_store);
     EXPECT_EQ(central(single_store).size(), 1U);
+}
+
+TEST(AuditRecorder, OverflowReportsWhenDeliveryEvidenceCannotBeRecorded) {
+    lake::api::AuditRecorder recorder(nullptr, nullptr, "", "", 2);
+    ASSERT_TRUE(recorder.add("customer", "workspace", lake::audit::pending({.action = "kept"})));
+    lake::api::ApiContext context;
+    context.audit_recorder = &recorder;
+    const auto rejected =
+        lake::api::record_audit(context,
+                                {.action = "workspace_query"},
+                                {lake::api::AuditLog::Workspace, "customer", "workspace"});
+    ASSERT_FALSE(rejected);
+    EXPECT_EQ(rejected.error().code, "audit_queue_full");
+    EXPECT_NE(rejected.error().message.find("evidence could not be recorded"), std::string::npos);
+    EXPECT_TRUE(recorder.add(
+        "other-customer", "other-workspace", lake::audit::pending({.action = "retained"})));
+}
+
+// LSR-098: an unavailable customer's workspaces cannot consume another customer's share,
+// including while a flush has detached the queues and new requests arrive.
+TEST_P(WorkspaceRecordStores, AuditQueueIsolatesUnavailableCustomersDuringFlush) {
+    auto store = make_store();
+    if (!store) {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
+    }
+    TwoSpaces t(store, database_uri_);
+    const auto& first = t.spaces[0];
+    const auto& second = t.spaces[1];
+    lake::api::AuditRecorder recorder(t.store.get(), t.service.get(), std::string(kek), "", 8);
+    const auto event = [] {
+        return lake::audit::pending({.kind = "capability",
+                                     .principal = "test",
+                                     .action = "workspace_query",
+                                     .outcome = "failure"});
+    };
+    for (const auto& workspace : first.workspaces) {
+        const auto row = t.store->get_workspace(workspace);
+        ASSERT_TRUE(row);
+        t.status(row->zetta_service_id, "Pending", "http://" + workspace + ".test");
+        EXPECT_TRUE(recorder.add(first.customer_id, workspace, event()));
+        EXPECT_TRUE(recorder.add(first.customer_id, workspace, event()));
+        EXPECT_FALSE(recorder.add(first.customer_id, workspace, event()));
+    }
+    EXPECT_FALSE(recorder.add(first.customer_id, lake::control::new_uuid_v4(), event()))
+        << "more workspaces do not bypass the customer allocation";
+    const auto workspace = second.workspaces[0];
+    ASSERT_TRUE(recorder.add(second.customer_id, workspace, event()));
+    auto context = t.context(second);
+    auto records = lake::api::workspace_records(context, second.customer_id, workspace);
+    ASSERT_TRUE(records);
+    auto& tables = t.zetta->records["http://" + workspace + ".test"];
+    const auto key =
+        records->index_of(lake::control::WorkspaceAuditCodec::collection, "sequence:1");
+    bool during_flush = false;
+    tables.before_put[key] = [&](lake::test::RecordTables&) {
+        during_flush = true;
+        EXPECT_EQ(recorder.pending(), 5U);
+        EXPECT_FALSE(recorder.add(first.customer_id, first.workspaces[0], event()));
+        EXPECT_TRUE(recorder.add(second.customer_id, workspace, event()));
+        EXPECT_FALSE(recorder.add(second.customer_id, workspace, event()));
+    };
+    liquid::runtime::block_on(recorder.flush());
+    EXPECT_TRUE(during_flush);
+    EXPECT_EQ(tables.rows("audit_events").size(), 1U);
+    EXPECT_EQ(recorder.pending(), 5U);
+    EXPECT_EQ(recorder.totals().dropped, 5U);
+    liquid::runtime::block_on(recorder.flush());
+    EXPECT_EQ(tables.rows("audit_events").size(), 2U);
+    EXPECT_EQ(recorder.pending(), 4U);
+    EXPECT_EQ(recorder.totals().dropped, 5U) << "accepted retries are never evicted";
+    for (const auto& stopped : first.workspaces) {
+        t.ready(stopped);
+    }
+    liquid::runtime::block_on(recorder.flush());
+    EXPECT_EQ(recorder.pending(), 0U);
+    EXPECT_EQ(recorder.totals().written, 6U);
+    EXPECT_TRUE(recorder.add(first.customer_id, first.workspaces[0], event()))
+        << "successful writes release the customer's allocation";
+}
+
+TEST_P(WorkspaceRecordStores, AuditQueueOverflowPreservesResultsAndSignedDeliveryEvidence) {
+    auto store = make_store();
+    if (!store) {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
+    }
+    TwoSpaces t(store, database_uri_);
+    const auto& first = t.spaces[0];
+    const auto workspace = first.workspaces[0];
+    lake::api::AuditRecorder recorder(t.store.get(), t.service.get(), std::string(kek), "", 2);
+    ASSERT_TRUE(
+        recorder.add(first.customer_id, workspace, lake::audit::pending({.action = "kept"})));
+    auto context = t.context(first);
+    context.audit_recorder = &recorder;
+    context.request_id = lake::control::new_uuid_v4();
+    const auto completed =
+        liquid::runtime::block_on(t.registry.call_async("create_transcript",
+                                                        {{"customer_id", first.customer_id},
+                                                         {"workspace_id", workspace},
+                                                         {"title", "Private title"},
+                                                         {"source", "text"},
+                                                         {"text", "Private workspace content"}},
+                                                        context));
+    ASSERT_TRUE(completed);
+    EXPECT_FALSE(completed->ok);
+    EXPECT_EQ(completed->error.code, "audit_queue_full");
+    const auto envelope = completed->envelope();
+    ASSERT_TRUE(envelope.contains("operation_result"));
+    EXPECT_EQ(envelope["operation_result"]["ok"], true);
+    const auto id = envelope["operation_result"]["value"]["id"];
+    const auto read =
+        t.call(first,
+               "get_transcript",
+               {{"customer_id", first.customer_id}, {"workspace_id", workspace}, {"id", id}});
+    EXPECT_TRUE(read.ok) << read.error.message;
+    const auto evidence = lake::test::audit_events(*t.store, {.request_id = context.request_id});
+    ASSERT_TRUE(evidence);
+    ASSERT_EQ(evidence->size(), 1U);
+    const auto& entry = evidence->front();
+    EXPECT_EQ(entry.draft.action, "audit_delivery_failed");
+    EXPECT_EQ(entry.draft.details["operation_outcome"], "success");
+    EXPECT_EQ(entry.draft.details["workspace_id"], workspace);
+    EXPECT_FALSE(entry.draft.details["event_id"].get<std::string>().empty());
+    EXPECT_EQ(entry.draft.details.size(), 4U);
+    EXPECT_EQ(lake::audit::to_json(entry).dump().find("Private"), std::string::npos);
+    EXPECT_TRUE(lake::audit::verify_event(*t.store, entry));
+
+    const auto row = t.store->get_workspace(workspace);
+    t.status(row->zetta_service_id, "Pending", "http://" + workspace + ".test");
+    context.request_id = lake::control::new_uuid_v4();
+    const auto failed = liquid::runtime::block_on(t.registry.call_async(
+        "get_transcript",
+        {{"customer_id", first.customer_id}, {"workspace_id", workspace}, {"id", id}},
+        context));
+    ASSERT_TRUE(failed);
+    EXPECT_EQ(failed->error.code, "audit_queue_full");
+    EXPECT_EQ(failed->envelope()["operation_result"]["error"]["code"], "workspace_not_ready");
+
+    // Direct push/reference callers use the same record_audit path and receive the failure too.
+    const auto direct =
+        lake::api::record_audit(context,
+                                {.customer_id = first.customer_id,
+                                 .principal = context.acting_identity,
+                                 .object = "private-reference",
+                                 .action = "reference_update",
+                                 .outcome = "success",
+                                 .request_id = lake::control::new_uuid_v4(),
+                                 .details = {{"private", "payload"}}},
+                                lake::api::workspace_audit_route(context, workspace));
+    EXPECT_FALSE(direct);
+    EXPECT_EQ(direct.error().code, "audit_queue_full");
+    EXPECT_EQ(recorder.pending(), 1U);
 }
 
 // lake#317, migration 0063: the central events recorded before the split that are about a

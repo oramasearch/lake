@@ -123,7 +123,9 @@ the workspace of the repository, mount, application, app, build or task its inpu
 central chain; `Registry::call`'s `finish_call` and the push and branch protection events in
 `capabilities.cpp` record through `record_audit`. `audit_recorder.cpp` is the `AuditRecorder`: a
 workspace event is queued without I/O, `ApiServer::drain` flushes it into the workspace's chain
-every `audit_flush_interval`, and `ApiServer::stop` flushes it once more. `audit_logs.cpp` reads
+every `audit_flush_interval`, and `ApiServer::stop` flushes it once more. Customer and workspace
+allocations include in-flight events; overflow returns `audit_queue_full` and signs content-free
+central delivery failure evidence. Registry failures preserve the operation in `operation_result`. `audit_logs.cpp` reads
 both logs for `audit`, `my_audit`, `export_audit`, `verify_audit` and the `/activity` and `/audit`
 pages, every workspace concurrently in one round. See [audit](../../docs/api/audit.md#which-log).
 

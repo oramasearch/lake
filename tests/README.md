@@ -646,6 +646,10 @@ refusals and missing, malformed and unknown `workspace_id` central, sealed recor
 workspace's endpoint only, a second replica's appends never forking the chain, verify, export,
 `audit` and `my_audit`, a workspace that is not ready, workspace deletion, the bound, tampering,
 a lake without workspaces), and `TheOneShotCopyMovesWorkspaceAuditEvents` the copy in both stores.
+`AuditQueueIsolatesUnavailableCustomersDuringFlush` and
+`AuditQueueOverflowPreservesResultsAndSignedDeliveryEvidence` cover customer/workspace limits,
+accepted retries during a flush, signed overflow evidence and preserved operation outcomes (LSR-098),
+including direct push/reference recording.
 `AuditRouting.EveryRegisteredCapabilityIsClassified` (`test_audit_isolation.cpp`) holds every
 registered capability to one of the two tables. `PostgresAudit.MigrationRecordsEachWorkspaceEventsOwnerForTheCopy`
 covers `0063_audit_workspaces`. `PostgresSync.*` and `PlatformFixture.*` read pushes, branch

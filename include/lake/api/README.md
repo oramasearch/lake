@@ -102,6 +102,9 @@ and `metering_max_pending` configure it. A null recorder (no workspaces) records
 every registered capability, `audit_route` for one call and `workspace_audit_route` for an event
 recorded outside the registry, and `record_audit`. `audit_recorder.hpp` declares `AuditRecorder`,
 the bounded queue of workspace audit events on their way to each workspace's chain;
+Customer and workspace queue allocations include in-flight writes; `record_audit` returns
+`audit_queue_full` with signed central delivery failure evidence on overflow, and `ApiResult`
+preserves the completed operation envelope in `operation_result`.
 `ApiContext::audit_recorder` points at the server's (null: no workspaces, every event central),
 `ApiContext::audit_workspace_id` carries the workspace a call acted on, and
 `ServerOptions::audit_flush_interval` (one second) and `audit_max_pending` (65,536) configure it.

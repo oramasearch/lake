@@ -203,4 +203,7 @@ then update this page's Status line and link to name the new snapshot.
 Source-tree hardening (lake#974, LSR-107): transparency identity scans refuse historical full audit
 events whose self-digests do not authenticate identities. Log replication requires trusted signed
 checkpoints covering each batch head, with consistency proofs for partial batches. Existing tiles
-and Merkle proofs remain readable; unsigned replication responses are refused. Not deployed.
+and Merkle proofs remain readable; unsigned replication responses are refused. Not deployed. workspace allocations include in-flight events; overflow reports `audit_queue_full`, preserves
+Workspace audit queue isolation (LSR-098, lake#964) is implemented in the source tree: customer
+the operation result and signs content-free central delivery evidence. Not deployed. A durable
+payload retry queue remains a follow-up. See [audit](../api/audit.md#workspace-audit).

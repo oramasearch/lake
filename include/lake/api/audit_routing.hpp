@@ -93,6 +93,8 @@ AuditRoute workspace_audit_route(const ApiContext& context, const std::string& w
 // Records `draft` where `route` says. A workspace event is queued in the AuditRecorder (no I/O on
 // the request path) and answers nullopt; a central event is signed, chained and stored now and
 // answers the event.
+// Queue rejection returns audit_queue_full after signing content-free delivery failure evidence
+// centrally. The workspace event itself is never written centrally.
 audit::Result<std::optional<audit::Event>> record_audit(const ApiContext& context,
                                                         const audit::EventDraft& draft,
                                                         const AuditRoute& route);
