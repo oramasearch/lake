@@ -125,10 +125,13 @@ agents and whether each runs on your Lake ([Agents](/docs/agents)).
 
 ## Confirm a Proposal
 
-An answer that wants to change something shows **Proposed:** with the capability and its impact,
-and a **Confirm** button.
+An answer that wants to change something shows exactly what **Confirm** runs: the capability and
+every value it is called with, such as who an invitation goes to and with which role. Below them is
+Ask Orama's explanation, which Lake does not check. Ask Orama can be misled by what it reads, so
+trust the values, not the explanation.
 
-1. Read the proposal: what it calls and with which input.
+1. Read the call: the capability and each value. Confirm runs exactly these, as you, and nothing
+   else.
 2. Press **Confirm**. Lake runs it as you and adds *Done: …* or *That did not work: …* to the
    conversation. A proposal that worked shows **Confirmed** and is never offered again. One that
    did not work shows why. When the cause may pass on its own (your workspace was not reachable,
@@ -147,11 +150,13 @@ the proposed change**, which opens the pipeline page where you apply or discard 
 review before **Confirm and deploy** ([Apps](/docs/apps)); a training experiment goes to the Experiments Agent,
 whose experiment you edit and confirm before it starts ([Experiments](/docs/experiments)).
 
-Through the API, confirm with `POST /v1/confirm_ask_proposal`, naming the stored message and the
-proposal's position in it:
+Through the API, read the conversation with `get_ask_conversation`: each message with proposals
+has `proposal_calls`, the exact call each one runs with its `input_sha256`. Confirm with
+`POST /v1/confirm_ask_proposal`, naming the stored message, the proposal's position in it and the
+digest of the call you reviewed; another digest is refused and nothing runs:
 
 ```json
-{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "conversation_id": "<conversation id>", "message_id": "<message id>", "index": 0}
+{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "conversation_id": "<conversation id>", "message_id": "<message id>", "index": 0, "input_sha256": "<input_sha256>"}
 ```
 
 Through MCP, call `confirm_ask_proposal`. A capability that refuses is still a successful confirm,

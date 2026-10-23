@@ -2761,10 +2761,13 @@ TEST_P(HttpResponseIsolation, TheWebAppTalksToAskOramaThroughCapabilities) {
     EXPECT_EQ(messages[1]["content"], "You have no repositories yet. I can create one.");
     EXPECT_EQ(messages[1]["payload"]["task_id"], task);
     const std::string message_id = messages[1]["id"];
+    const std::string input_sha256 = messages[1]["proposal_calls"][0]["input_sha256"];
 
-    const auto [forged_response, forged] =
-        call("confirm_ask_proposal",
-             {{"conversation_id", conversation}, {"message_id", message_id}, {"index", 7}});
+    const auto [forged_response, forged] = call("confirm_ask_proposal",
+                                                {{"conversation_id", conversation},
+                                                 {"message_id", message_id},
+                                                 {"index", 7},
+                                                 {"input_sha256", input_sha256}});
     EXPECT_TRUE(forged_response.starts_with("HTTP/1.1 404")) << forged_response;
     EXPECT_EQ(forged["error"]["message"], "That proposal is not in this conversation.");
     EXPECT_TRUE(store_->list_repositories(customer_id, 10)->empty());
@@ -2774,7 +2777,8 @@ TEST_P(HttpResponseIsolation, TheWebAppTalksToAskOramaThroughCapabilities) {
                                  {"workspace_id", workspace_id},
                                  {"conversation_id", conversation},
                                  {"message_id", message_id},
-                                 {"index", 0}};
+                                 {"index", 0},
+                                 {"input_sha256", input_sha256}};
     const std::vector<std::vector<std::pair<std::string, std::string>>> foreign{
         {{"Origin", "https://reports.example.test"}},
         {{"Origin", "null"}},
@@ -2830,9 +2834,11 @@ TEST_P(HttpResponseIsolation, TheWebAppTalksToAskOramaThroughCapabilities) {
                             {{"Origin", "https://reports.example.test"}});
     EXPECT_TRUE(bearer_listed.starts_with("HTTP/1.1 200")) << bearer_listed.substr(0, 300);
 
-    const auto [confirmed_response, confirmed] =
-        call("confirm_ask_proposal",
-             {{"conversation_id", conversation}, {"message_id", message_id}, {"index", 0}});
+    const auto [confirmed_response, confirmed] = call("confirm_ask_proposal",
+                                                      {{"conversation_id", conversation},
+                                                       {"message_id", message_id},
+                                                       {"index", 0},
+                                                       {"input_sha256", input_sha256}});
     ASSERT_TRUE(confirmed_response.starts_with("HTTP/1.1 200")) << confirmed_response;
     EXPECT_EQ(confirmed["value"]["ok"], true) << confirmed_response;
     EXPECT_EQ(confirmed["value"]["capability"], "create_repository");
@@ -2860,6 +2866,127 @@ TEST_P(HttpResponseIsolation, TheWebAppTalksToAskOramaThroughCapabilities) {
     ASSERT_TRUE(none.starts_with("HTTP/1.1 200")) << none;
     EXPECT_TRUE(nlohmann::json::parse(response_body(none))["value"]["task"].is_null());
     EXPECT_TRUE(latest("churn").starts_with("HTTP/1.1 400"));
+}
+
+// lake#942: an Ask Orama proposal's `impact` is the model's writing and can hide who an action
+// reaches. The conversation answers Lake's own statement of the exact call each proposal runs
+// (`proposal_calls`), and confirm runs only the call whose digest the person sends back.
+TEST_P(HttpResponseIsolation, AskOramaConfirmShowsAndRunsOnlyTheExactCall) {
+    auto connection = connect();
+    const std::string cookie = sign_in(*connection);
+    const std::string customer_id =
+        nlohmann::json::parse(
+            response_body(connection->request("GET", "/v1/list_customers", "", cookie)))
+            .at("value")
+            .at("items")
+            .at(0)
+            .at("id");
+    const auto [org_response, org] =
+        post_v1(*connection,
+                cookie,
+                "create_organization_space",
+                {{"display_name", "Acme Research"},
+                 {"name", "acme-" + lake::control::new_uuid_v4().substr(0, 8)}});
+    ASSERT_TRUE(org.value("ok", false)) << org_response;
+    const std::string organization_id = org["value"]["organization"]["id"];
+    select_workspace(*connection, customer_id);
+    const std::string workspace_id = connection->workspace_id;
+    const auto call = [&](const std::string& name, nlohmann::json input) {
+        input["customer_id"] = customer_id;
+        input["workspace_id"] = workspace_id;
+        return post_v1(*connection, cookie, name, input);
+    };
+    const auto conversation_messages = [&](const std::string& conversation) {
+        return nlohmann::json::parse(response_body(connection->request(
+            "GET",
+            "/v1/get_ask_conversation?customer_id=" + customer_id +
+                "&workspace_id=" + workspace_id + "&conversation_id=" + conversation,
+            "",
+            cookie)))["value"]["messages"];
+    };
+
+    // Content read during the turn steered the model: it invites an outsider as an owner and
+    // calls it a sharing fix.
+    const nlohmann::json invitation{{"organization_id", organization_id},
+                                    {"invitee_type", "email"},
+                                    {"invitee", "outsider@evil.test"},
+                                    {"role", "owner"},
+                                    {"expires_at", "2099-01-01T00:00:00Z"}};
+    const std::string impact = "Fixes sharing for your team; nothing else changes.";
+    agents_->answer = {
+        {"ok", true},
+        {"reply", "I found the sharing problem."},
+        {"proposals",
+         nlohmann::json::array(
+             {{{"capability", "create_invitation"}, {"input", invitation}, {"impact", impact}}})},
+        {"reads", nlohmann::json::array()},
+        {"delegations", nlohmann::json::array()}};
+    const auto [sent_response, sent] = call("send_ask_message", {{"message", "Fix sharing."}});
+    ASSERT_TRUE(sent_response.starts_with("HTTP/1.1 200")) << sent_response;
+    const std::string conversation = sent["value"]["conversation_id"];
+    const std::string task = sent["value"]["task_id"];
+    run_agent_task(*connection, task);
+    ASSERT_TRUE(call("settle_ask_turn",
+                     {{"conversation_id", conversation}, {"task_id", task}, {"kind", "ask"}})
+                    .first.starts_with("HTTP/1.1 200"));
+    const auto messages = conversation_messages(conversation);
+    ASSERT_EQ(messages.size(), 2U) << messages.dump();
+    const nlohmann::json& reply = messages[1];
+    const std::string message_id = reply["id"];
+
+    // What Confirm shows: the recipient, role and organization the handler uses, apart from the
+    // model's words.
+    ASSERT_TRUE(reply.contains("proposal_calls")) << reply.dump();
+    ASSERT_TRUE(reply["proposal_calls"].is_array()) << reply.dump();
+    ASSERT_EQ(reply["proposal_calls"].size(), 1U) << reply.dump();
+    const nlohmann::json& shown = reply["proposal_calls"][0];
+    EXPECT_EQ(shown["capability"], "create_invitation");
+    EXPECT_EQ(shown["title"], "Create invitation");
+    EXPECT_EQ(shown["kind"], "action");
+    EXPECT_EQ(shown["input"], invitation);
+    nlohmann::json fields = nlohmann::json::object();
+    for (const auto& field : shown["fields"]) {
+        fields[field["name"].get<std::string>()] = field["value"];
+    }
+    EXPECT_EQ(fields, invitation) << "every field is shown, with its exact value";
+    EXPECT_EQ(shown.dump().find("Fixes sharing"), std::string::npos)
+        << "the model's impact is no part of the call";
+    const std::string digest = shown["input_sha256"];
+    EXPECT_EQ(digest.size(), 64U);
+    const auto invitations = [&] {
+        return store_->list_invitations(organization_id, "", 10).value();
+    };
+    ASSERT_TRUE(invitations().empty());
+
+    // A confirm that names no call, or another call, runs nothing and stores nothing.
+    const auto [unnamed_response, unnamed] =
+        call("confirm_ask_proposal",
+             {{"conversation_id", conversation}, {"message_id", message_id}, {"index", 0}});
+    EXPECT_TRUE(unnamed_response.starts_with("HTTP/1.1 400")) << unnamed_response;
+    const auto [other_response, other] = call("confirm_ask_proposal",
+                                              {{"conversation_id", conversation},
+                                               {"message_id", message_id},
+                                               {"index", 0},
+                                               {"input_sha256", std::string(64, '0')}});
+    EXPECT_TRUE(other_response.starts_with("HTTP/1.1 409")) << other_response;
+    EXPECT_EQ(other["error"]["path"], "/input_sha256") << other_response;
+    EXPECT_TRUE(invitations().empty()) << "nothing ran";
+    EXPECT_EQ(conversation_messages(conversation).size(), 2U) << "no outcome is stored";
+
+    // The call shown is the call that runs.
+    const auto [confirmed_response, confirmed] = call("confirm_ask_proposal",
+                                                      {{"conversation_id", conversation},
+                                                       {"message_id", message_id},
+                                                       {"index", 0},
+                                                       {"input_sha256", digest}});
+    ASSERT_TRUE(confirmed_response.starts_with("HTTP/1.1 200")) << confirmed_response;
+    EXPECT_EQ(confirmed["value"]["ok"], true) << confirmed_response;
+    const auto created = invitations();
+    ASSERT_EQ(created.size(), 1U);
+    EXPECT_EQ(created[0].invitee, fields["invitee"].get<std::string>());
+    EXPECT_EQ(created[0].invitee_type, fields["invitee_type"].get<std::string>());
+    EXPECT_EQ(created[0].role, fields["role"].get<std::string>());
+    EXPECT_EQ(created[0].organization_id, fields["organization_id"].get<std::string>());
 }
 
 // lake#794: a proposal whose input the capability's schema refuses is never offered. The reply
@@ -2961,7 +3088,10 @@ TEST_P(HttpResponseIsolation, AskOramaOffersOnlyProposalsTheCapabilitySchemaAcce
     const std::string message_id = reply["id"];
     const auto [refused_response, refused] =
         call("confirm_ask_proposal",
-             {{"conversation_id", conversation}, {"message_id", message_id}, {"index", 0}});
+             {{"conversation_id", conversation},
+              {"message_id", message_id},
+              {"index", 0},
+              {"input_sha256", reply["proposal_calls"][0]["input_sha256"]}});
     ASSERT_TRUE(refused_response.starts_with("HTTP/1.1 200")) << refused_response;
     EXPECT_EQ(refused["value"]["ok"], false) << refused_response;
     // The refusal fails the same way every time, so the person is told to ask again, the stored
@@ -2982,7 +3112,10 @@ TEST_P(HttpResponseIsolation, AskOramaOffersOnlyProposalsTheCapabilitySchemaAcce
     // Input the capability itself refuses is said plainly, naming the field.
     const auto [topic_response, topic] =
         call("confirm_ask_proposal",
-             {{"conversation_id", conversation}, {"message_id", message_id}, {"index", 1}});
+             {{"conversation_id", conversation},
+              {"message_id", message_id},
+              {"index", 1},
+              {"input_sha256", reply["proposal_calls"][1]["input_sha256"]}});
     ASSERT_TRUE(topic_response.starts_with("HTTP/1.1 200")) << topic_response;
     EXPECT_EQ(topic["value"]["ok"], false);
     EXPECT_EQ(topic["value"]["error"],
@@ -3095,9 +3228,12 @@ TEST_P(HttpResponseIsolation, AskOramaKeepsTheTurnWhenAProposalIsMalformed) {
     expect_turn(messages[1], "I can do that.");
 
     // Confirming the valid proposal fills customer_id and workspace_id from the conversation.
-    const auto [confirmed_response, confirmed] = call(
-        "confirm_ask_proposal",
-        {{"conversation_id", conversation}, {"message_id", messages[1]["id"]}, {"index", 0}});
+    const auto [confirmed_response, confirmed] =
+        call("confirm_ask_proposal",
+             {{"conversation_id", conversation},
+              {"message_id", messages[1]["id"]},
+              {"index", 0},
+              {"input_sha256", messages[1]["proposal_calls"][0]["input_sha256"]}});
     ASSERT_TRUE(confirmed_response.starts_with("HTTP/1.1 200")) << confirmed_response;
     EXPECT_EQ(confirmed["value"]["ok"], true) << confirmed_response;
     const auto repositories = store_->list_repositories(customer_id, 10);
@@ -3193,9 +3329,12 @@ TEST_P(HttpResponseIsolation, AskOramaOffersTryAgainOnlyForATransientRefusal) {
         return lake::control::ZettaControlResult<nlohmann::json>(std::unexpected(
             lake::control::ZettaControlError{"store_unavailable", "the workspace is not reachable"}));
     };
-    const auto [refused_response, refused] = call(
-        "confirm_ask_proposal",
-        {{"conversation_id", conversation}, {"message_id", messages[1]["id"]}, {"index", 0}});
+    const auto [refused_response, refused] =
+        call("confirm_ask_proposal",
+             {{"conversation_id", conversation},
+              {"message_id", messages[1]["id"]},
+              {"index", 0},
+              {"input_sha256", messages[1]["proposal_calls"][0]["input_sha256"]}});
     ASSERT_TRUE(refused_response.starts_with("HTTP/1.1 200")) << refused_response;
     EXPECT_EQ(refused["value"]["ok"], false) << refused_response;
     EXPECT_EQ(refused["value"]["code"], "store_unavailable") << refused_response;
