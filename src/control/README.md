@@ -11,6 +11,9 @@ certificate by customer and TAAP subject in memory and PostgreSQL. See
 [agent session keys](../../docs/api/agents.md).
 
 `pki.cpp` verifies tunnel CSRs, signs only the grant URI and bounds the client certificate's expiry.
+It encodes every DNS/URI SAN as a typed ASN.1 value, validates ACME DNS and X.509 SPIFFE
+identities, and rejects URI SAN delimiters before signing (lake#946). See
+[PKI](../../docs/api/pki.md#certificate-identities).
 `network_records.cpp` supplies empty session/activity pages explicitly pending zetta#1281.
 See [tunnel credentials](../../docs/api/tunnel-grants.md) and migration 0085 in [network.md](../../docs/control-plane/network.md).
 

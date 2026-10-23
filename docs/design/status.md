@@ -43,6 +43,10 @@ end-to-end runs of [orama-bridge#136](https://github.com/oramasearch/orama-bridg
 
 ## Area status
 
+PKI SAN encoding now uses typed ASN.1 values and rejects malformed ACME DNS and X.509 SPIFFE
+identities (lake#946, LSR-084); the issuance tests check the certificate's single requested SAN.
+This source change has not been deployed. See [PKI identities](../api/pki.md#certificate-identities).
+
 | Area | Implemented | Exercised locally | Deployed | Exercised in deployment | Capabilities | Contract |
 |---|---|---|---|---|---|---|
 | Secure networking (`0084_network`, `0085_network_tunnel_ca`, lake#727, lake#728, lake#730, lake#731) | Yes: scoped stores, signed atomic audit, rollout backfill and fourteen REST/MCP capabilities, including per-app credential scope and rotation requests, recipient-only CSR signing, bounded client certificates and admin grant/revoke; session/activity reads explicitly pending zetta#1281 through a provider; the console's Network section calls all fourteen (lake#729) | Store, credential, registry and transport tests; [scoped credential proof](../build/scoped-credentials-proof.md), [tunnel proof](../build/tunnel-grants-proof.md); `frontend/tests/network.test.ts` | No; operator schema adoption and native role reconciliation required | No; live read/write/revocation and relay termination proof belongs to the operator/coordinator | `create_network_connection`, `list_network_connections`, `rotate_network_connection_credential`, `remove_network_connection`, `create_network_egress_rule`, `list_network_egress_rules`, `grant_network_tunnel`, `issue_network_tunnel_certificate`, `list_network_tunnel_grants`, `revoke_network_tunnel`, `list_network_tunnel_sessions`, `list_network_peers`, `network_rules`, `network_activity` | [control plane](../control-plane/network.md), [API](../api/network.md), [scoped credentials](../api/scoped-credentials.md), [tunnel credentials](../api/tunnel-grants.md), [UI](../ui/network.md), [guide](../guide/network.md) |
