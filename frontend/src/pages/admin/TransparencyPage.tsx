@@ -1,6 +1,6 @@
-/** Transparency Monitor (`/transparency?identity=`): public. Verifies the current checkpoint and
- * scans its tiles for attestations naming one TAAP identity (web_ui_transparency,
- * serve_transparency_page). */
+/** Transparency Monitor (`/transparency?identity=&start=`): public. Verifies the current
+ * checkpoint and scans its tiles for attestations naming one TAAP identity, 100 a page from entry
+ * `start` (web_ui_transparency, serve_transparency_page). */
 import { Fingerprint, Search, ShieldCheck } from "lucide-react";
 import { useRead, type Row } from "@/lib/api";
 import { Button, Card, CopyBlock, DataTable, Empty, ErrorBlock, Mono, Page, Skeleton, Stat, StatRow, Status } from "@/lib/ui";
@@ -8,7 +8,8 @@ import { PanelEmpty, useMetaTrail, useParam, useQuerySubmit } from "@/pages/orga
 
 export default function TransparencyPage() {
   const identity = useParam("identity");
-  const scan = useRead<Row>(identity ? "transparency_identity_scan" : null, { identity });
+  const start = useParam("start");
+  const scan = useRead<Row>(identity ? "transparency_identity_scan" : null, start ? { identity, start_index: Number(start) } : { identity });
   const submit = useQuerySubmit("/transparency");
   useMetaTrail("public monitor", "Transparency");
   const s = scan.data;
@@ -38,7 +39,7 @@ export default function TransparencyPage() {
             <Stat label="Checkpoint" value={s.tree_size ?? 0} sub="entries" icon={ShieldCheck} />
             <Stat label="Tiles read" value={s.tiles_scanned ?? 0} />
             <Stat label="Scan" value={`${Number(s.duration_ms ?? 0).toFixed(3)} ms`} sub={<Status value="verified" tone="success" />} />
-            <Stat label="Matches" value={matches.length} icon={Fingerprint} />
+            <Stat label="Matches" value={matches.length} icon={Fingerprint} sub={s.next_index != null || start ? "on this page" : undefined} />
           </StatRow>
           <Card label="Checkpoint root" className="mb-4">
             <CopyBlock value={String(s.root_hash ?? "")} />
@@ -60,6 +61,11 @@ export default function TransparencyPage() {
               ]}
             />
           </Card>
+          {s.next_index != null && (
+            <nav className="pagination mt-3 flex gap-2" aria-label="Scan pages">
+              <Button to={`/transparency?${new URLSearchParams({ identity, start: String(s.next_index) })}`}>Next</Button>
+            </nav>
+          )}
         </>
       )}
       <p className="muted mt-3 text-[12.5px]">

@@ -20,11 +20,12 @@
 namespace lake::api {
 namespace {
 
-// Capabilities that wait on a repository store run off the server's thread (lake#380). Their
-// handlers reach shared state only through the control store, the repository store (one lane
-// per store), search (which reaches stores only through the repository store), and the
-// recorders, all of which lock.
-bool waits_on_repository_store(const Capability& capability) {
+// Capabilities that wait on a repository store run off the server's thread (lake#380), and so
+// does the anonymous identity scan, whose first call after a start verifies the whole
+// transparency log (lake#941). Their handlers reach shared state only through the control store,
+// the repository store (one lane per store), search (which reaches stores only through the
+// repository store), the transparency log and checkpoints, and the recorders, all of which lock.
+bool runs_off_server_thread(const Capability& capability) {
     const std::string_view object = capability.object;
     return object.starts_with("repository") || object.find("drive") != std::string_view::npos ||
            object == "model" ||
@@ -33,7 +34,8 @@ bool waits_on_repository_store(const Capability& capability) {
            object == "space store removal" ||
            capability.name == "replicate_repository" ||
            // Deleting a workspace closes its store, waiting on its lane.
-           capability.name == "delete_workspace";
+           capability.name == "delete_workspace" ||
+           capability.name == "transparency_identity_scan";
 }
 
 bool contains_database_diagnostic(std::string_view message) {
@@ -1383,7 +1385,7 @@ liquid::runtime::task<ApiResult> Registry::call_async(const std::string& name,
                 } else {
                     state.result = std::move(*completed);
                 }
-            } else if (capability->handler && waits_on_repository_store(*capability)) {
+            } else if (capability->handler && runs_off_server_thread(*capability)) {
                 const CapabilityHandler& handler = capability->handler;
                 auto completed = co_await run_blocking([&handler, &call_input, &context] {
                     const StoreRequestScope scope(context);

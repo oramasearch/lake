@@ -4,7 +4,9 @@
 #include <cstdint>
 #include <expected>
 #include <filesystem>
+#include <limits>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -76,6 +78,9 @@ struct IdentityMatch {
     std::string attestation;
 };
 
+// One page of an identity scan. `tiles_scanned` and `entries_scanned` count what this call read
+// and verified; entries an earlier scan verified are not verified again. `next_index` is set when
+// matches remain past this page: the next page starts there.
 struct IdentityScan {
     std::string identity;
     std::uint64_t tree_size = 0;
@@ -84,6 +89,7 @@ struct IdentityScan {
     std::uint64_t entries_scanned = 0;
     double duration_ms = 0.0;
     std::vector<IdentityMatch> matches;
+    std::optional<std::uint64_t> next_index;
 };
 
 class TiledLog {
@@ -101,9 +107,16 @@ public:
     Result<LogState> state_at(std::uint64_t tree_size) const;
     Result<LogReplicationBatch> replication_batch(std::uint64_t after_tree_size) const;
     Result<AppendResult> apply_replication_batch(const LogReplicationBatch& batch);
-    Result<IdentityScan> scan_identity(const std::string& identity,
-                                       std::uint64_t tree_size,
-                                       const std::string& root_hash) const;
+    // Verifies the log through `tree_size` against `root_hash` and returns up to `limit` entries
+    // naming `identity`, from entry `start_index` on. What it verifies is kept for the next call,
+    // so a scan verifies only the entries appended since the last one; it reads immutable tiles
+    // and never holds the append lock. One scan runs at a time: another answers `busy`.
+    Result<IdentityScan>
+    scan_identity(const std::string& identity,
+                  std::uint64_t tree_size,
+                  const std::string& root_hash,
+                  std::uint64_t start_index = 0,
+                  std::size_t limit = std::numeric_limits<std::size_t>::max()) const;
 
     [[nodiscard]] const std::filesystem::path& directory() const;
 
