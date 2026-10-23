@@ -671,3 +671,6 @@ a fetch `http_server.cpp` injects (the outbound client, public addresses only un
 OAuth responses. It aborts before constructing a container at depth 65; every remote JSON reader uses
 it. Tool conversion checks depth iteratively before its schema copies. See
 [MCP connection limits](../../docs/api/mcp-connections.md#the-client) (lake#958, LSR-092).
+Folder live grants and bearer links share `require_drive_share_role` in `drive_capabilities.cpp`
+(lake#955): every delegated action must be held by the caller; non-admin identity recipients must
+belong to the account. See [the contract](../../docs/api/sharing.md).

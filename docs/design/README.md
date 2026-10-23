@@ -64,3 +64,5 @@ migration `0063`) as implemented and not yet deployed.
 
 [status.md](status.md) records the remote MCP/OAuth JSON nesting budget (lake#958, LSR-092);
 [the contract](../api/mcp-connections.md#the-client) names the readers and regression tests.
+Folder-sharing role attenuation and non-admin recipient restrictions (lake#955) are recorded in
+[status.md](status.md) and [the sharing contract](../api/sharing.md).

@@ -596,6 +596,32 @@ std::expected<void, ApiError> require_drive_write(const json& input, ApiContext&
     return {};
 }
 
+// Live grants and bearer links delegate only actions the caller holds on this folder.
+std::expected<void, ApiError> require_drive_share_role(const DriveLocation& location,
+                                                       std::string_view role,
+                                                       ApiContext& context) {
+    if (context.operator_credential) {
+        return {};
+    }
+    // ensure_folder_location may have materialized policy objects since registry authorization.
+    control::AuthorizationCache cache;
+    for (const std::string action : {"read", "write", "admin", "deploy", "review", "share"}) {
+        if (action != "share" && !control::role_allows(role, action)) {
+            continue;
+        }
+        const auto decision = control::authorize(
+            *context.store, context.acting_identity, location.object.id, action, cache);
+        if (!decision) {
+            return std::unexpected(ApiError{decision.error().code, decision.error().message, {}});
+        }
+        if (!decision->allowed) {
+            return std::unexpected(ApiError{
+                "unauthorized", "sharing requires every action granted by the role", "/role"});
+        }
+    }
+    return {};
+}
+
 // A drive write is a change like a push's, so the search index follows it as it follows a push
 // (lake#584): the repository's branch tips are published again. A failure is recorded in the audit
 // details and never fails the write; search then names the repository's workspace as stale or
@@ -1908,12 +1934,13 @@ void register_drive_capabilities(Registry& registry) {
         .name = "share_drive_folder",
         .title = "Share drive folder",
         .description =
-            "Give a person (or an organization) a live grant on a folder, with a role. Name them "
-            "by `recipient`: their email or handle, one of the account's people (drive_share_people "
-            "lists them). A program may name a TAAP identity Lake knows in `principal_taap_id` "
-            "instead. Lake writes and signs the grant's attestation itself and answers it with its "
-            "digest, which the grant keeps as evidence; `attestation_digest` is optional, and only "
-            "the digest Lake answered for this same share is accepted.",
+            "Give a person or organization a live grant on a folder. Name one of the account's "
+            "people by `recipient` (email or handle; `drive_share_people` lists them), or a known "
+            "TAAP identity by `principal_taap_id`. Sharing outside the account requires folder "
+            "admin. The caller must hold every action the role grants. Lake signs the grant's "
+            "attestation and answers its digest, kept on the grant as evidence. "
+            "`attestation_digest` is optional; only the digest Lake answered for this same share "
+            "is accepted.",
         .input_schema =
             {{"type", "object"},
              {"properties",
@@ -1929,7 +1956,7 @@ void register_drive_capabilities(Registry& registry) {
                 {{"type", "string"},
                  {"description",
                   "For programs: a person's or organization's TAAP identity that Lake knows. Send "
-                  "this or `recipient`."}}},
+                  "this or `recipient`; sharing outside the account requires folder admin."}}},
                {"role", {{"type", "string"}, {"enum", json::array({"read", "write", "share"})}}},
                {"attestation_digest",
                 {{"type", "string"},
@@ -1956,6 +1983,11 @@ void register_drive_capabilities(Registry& registry) {
                 return ApiResult::failure(
                     location.error().code, location.error().message, location.error().path);
             }
+            const std::string role = input.at("role");
+            if (auto allowed = require_drive_share_role(*location, role, context); !allowed) {
+                return ApiResult::failure(
+                    allowed.error().code, allowed.error().message, allowed.error().path);
+            }
             Recipient recipient;
             if (input.contains("recipient")) {
                 auto resolved = resolve_recipient(
@@ -1979,10 +2011,34 @@ void register_drive_capabilities(Registry& registry) {
                                               "(their email or handle) instead",
                                               "/principal_taap_id");
                 }
+                if (!context.operator_credential) {
+                    control::AuthorizationCache cache;
+                    const auto administers = control::authorize(*context.store,
+                                                                context.acting_identity,
+                                                                location->object.id,
+                                                                "admin",
+                                                                cache);
+                    if (!administers) {
+                        return store_error(administers.error());
+                    }
+                    if (!administers->allowed) {
+                        const auto people = repository_people(context, location->repository);
+                        if (!people) {
+                            return ApiResult::failure(people.error().code, people.error().message);
+                        }
+                        if (std::ranges::none_of(*people, [&](const auto& person) {
+                                return person.taap_id == taap_id;
+                            })) {
+                            return ApiResult::failure(
+                                "unauthorized",
+                                "only a folder admin may share outside the account",
+                                "/principal_taap_id");
+                        }
+                    }
+                }
                 recipient.taap_id = taap_id;
                 recipient.display_name = names->at(taap_id);
             }
-            const std::string role = input.at("role");
             const auto attestation = share_attestation(context, *location, recipient.taap_id, role);
             if (!attestation) {
                 return ApiResult::failure(attestation.error().code, attestation.error().message);
@@ -2273,6 +2329,12 @@ void register_drive_capabilities(Registry& registry) {
             if (!location) {
                 co_return ApiResult::failure(
                     location.error().code, location.error().message, location.error().path);
+            }
+            if (auto allowed = require_drive_share_role(
+                    *location, input.at("role").get<std::string>(), context);
+                !allowed) {
+                co_return ApiResult::failure(
+                    allowed.error().code, allowed.error().message, allowed.error().path);
             }
             const auto workspace = share_link_workspace(
                 context, input.at("workspace_id"), location->repository.customer_id,
