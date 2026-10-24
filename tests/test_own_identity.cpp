@@ -774,11 +774,13 @@ void expect_taap_sign_in_binds_the_key(lake::control::Store& store,
     EXPECT_EQ(store.context_for(own_key.value.value("secret", ""))->user_id,
               victim_session.acting_user_id);
 
-    // The forged document verifies in liquid, which is the root cause; Lake refuses it.
+    // liquid refuses the forged document: its identifier is not the one its key derives
+    // (liquid#383, liquid#448). Lake refuses it on its own as well (bound_taap_key), whatever
+    // liquid answers.
     const std::string forged = forged_document(attacker, victim_id);
     const auto liquid_accepts = liquid::verify_document(decoded_document(forged));
-    EXPECT_TRUE(liquid_accepts && *liquid_accepts)
-        << "the forged document should pass liquid's self-signature check";
+    EXPECT_FALSE(liquid_accepts && *liquid_accepts)
+        << "liquid accepted a document naming another identity's identifier";
     ApiContext intruder;
     const ApiResult impersonated =
         harness.call("sign_in_taap", sign_in_taap_input(attacker.signer, forged), intruder);
