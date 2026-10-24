@@ -69,6 +69,12 @@ selects the Postgres store. `server_info` reports which one as `store` (`memory`
 | `LAKE_RESEND_API_KEY` | Orama's Resend API key (`re_...`), a platform environment variable (on a Lake CR, `spec.env` with `valueFrom.secretKeyRef`), never a workspace secret and never logged: order email to support and customers. Unset, orders are still recorded and their email waits until lake restarts with it | [`../api/orders.md`](../api/orders.md#email) |
 | `LAKE_RESEND_FROM` | the sender of order email; default `Lake <orders@lake.live>`; its domain must be verified in Resend | [`../api/orders.md`](../api/orders.md#email) |
 | `LAKE_SUPPORT_EMAIL` | where order forms, paid orders and failures are emailed; default `support@orama.com` | [`../api/orders.md`](../api/orders.md#email) |
+| `LAKE_BALANCE_FIRST_TOP_UP_USD` | where billing is on, the first top-up of the prepaid balance, whole US dollars (default 20); a new account adds exactly this before anything that costs money | [`../api/billing.md`](../api/billing.md#balance) |
+| `LAKE_BALANCE_MINIMUM_TOP_UP_USD` | the smallest later top-up and auto top-up, whole dollars (default 20) | [`../api/billing.md`](../api/billing.md#balance) |
+| `LAKE_BALANCE_OVERDRAFT_USD` | how far below $0 a balance may go before paid work is refused with `402 payment_required`, whole dollars (default 50); the operator sets one account's with `set_balance_overdraft` | [`../api/billing.md`](../api/billing.md#the-gate) |
+| `LAKE_BALANCE_WARNING_USD` | how close counts as close, whole dollars (default 10): the balance is `low` under it, and the "close to its limit" email goes within it of the overdraft | [`../api/billing.md`](../api/billing.md#emails) |
+| `LAKE_BALANCE_REFRESH_SECONDS` | how often the store root's owner refreshes every account's charges from usage, 30 to 86400 (default 300) | [`../api/billing.md`](../api/billing.md#charges) |
+| `LAKE_AUTO_TOP_UPS_PER_DAY` | the most auto top-ups one account starts in a UTC day, 1 to 100 (default 5) | [`../api/billing.md`](../api/billing.md#auto-top-up) |
 | `LAKE_APPS_RUNTIME_IMAGE` | required base image for `build_app`; supplied by the operator from `spec.apps.runtimeImage` and recorded as `APP_RUNTIME_IMAGE` | [`../api/builds.md`](../api/builds.md) |
 | `LAKE_APPS_RESERVED_NAMES` | comma-separated additional Ship app names to refuse; surrounding whitespace is ignored | [`../api/web-apps.md`](../api/web-apps.md) |
 | `LAKE_APPS_PER_CUSTOMER` | maximum live Ship apps per account; zero means no configured limit | [`../api/web-apps.md`](../api/web-apps.md) |
@@ -107,6 +113,15 @@ are unset, repository pages explain the missing configuration and show no termin
 `Host`, `Forwarded`, and `X-Forwarded-*` headers never select the destination for a
 credential-bearing sync command. Changing either value requires a restart. No new API capability is
 introduced; clone and push use the existing sync registry.
+
+### Prepaid balance
+
+The six `LAKE_BALANCE_*` and `LAKE_AUTO_TOP_UPS_PER_DAY` variables are read only where
+`LAKE_BILLING` is on, at start; an invalid value (not a whole number, out of range) stops lake
+with a message naming the variable. The balance's emails go through Resend with
+`LAKE_RESEND_API_KEY` from `LAKE_RESEND_FROM`; without the key they wait, and the rest of the
+balance works. On a Lake CR they are `spec.env` entries the operator sets with each version that
+needs them ([`../api/billing.md`](../api/billing.md#balance), lake#1114).
 
 ## Build and test variables
 

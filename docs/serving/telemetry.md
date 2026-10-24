@@ -29,6 +29,11 @@ The exported metric families are:
   request refused before any route (`workers_busy`, `store_root_wait`, `bad_url`, `bad_request`,
   `header_too_large`)
   is also logged and counted in `lake_http_requests_total` with that reason as its route
+- `lake_balance_refreshes_total`, `lake_balance_refresh_errors_total`, `lake_balance_held_total`
+  (a usage read failed and the balance was held), `lake_balance_emails_total{outcome}` (`sent`,
+  `failed`), `lake_balance_auto_top_ups_total{outcome}` (`started`, `failed`) and the gauge
+  `lake_balance_accounts`: the prepaid balance's refresh by the store root's owner
+  ([billing](../api/billing.md#charges), lake#1114)
 - `lake_cloud_orders_total{offer,path}`, `lake_cloud_orders_refused_total{reason}` (`honeypot`,
   `rate`, `size`) and `lake_cloud_order_emails_total{recipient,outcome}` (`sent`, `failed`): the
   apex order sheet's orders and their email ([orders](../api/orders.md#metrics), lake#831). The

@@ -1,4 +1,5 @@
 #include "lake/api/registry.hpp"
+#include "lake/api/balance.hpp"
 
 #include <algorithm>
 #include <array>
@@ -122,7 +123,7 @@ void log_database_diagnostic(std::string_view code, std::string_view message) {
     std::println(stderr, "{}", entry.dump());
 }
 
-constexpr std::array<ErrorCode, 36> documented_error_codes{{
+constexpr std::array<ErrorCode, 37> documented_error_codes{{
     {"invalid_input", 400, "The input is at fault; `path` points at the field."},
     {"secret_required",
      400,
@@ -155,6 +156,12 @@ constexpr std::array<ErrorCode, 36> documented_error_codes{{
     {"method_not_allowed",
      405,
      "The capability exists but takes the other HTTP method: reads GET, actions POST."},
+    {"payment_required",
+     402,
+     "The account's prepaid balance is past its overdraft limit, or it has not made its first "
+     "top-up: nothing that costs money starts until funds are added. `details` gives the "
+     "balance, the limit, how much to add and the Add funds link; reading, signing in, stopping "
+     "and deleting stay open."},
     {"conflict", 409, "The change conflicts with existing state, such as a name already taken."},
     {"already_exists", 409, "A repository object or reference with this identity already exists."},
     {"locked", 409, "Another writer holds the repository reference; retry."},
@@ -393,48 +400,68 @@ nlohmann::json ApiResult::envelope() const {
     if (operation_result) {
         envelope["operation_result"] = *operation_result;
     }
+    if (warnings.is_array() && !warnings.empty()) {
+        envelope["warnings"] = warnings;
+    }
     return envelope;
 }
+
+namespace {
+// What an answer may carry beside its value or error (lake#1114): the account's balance warning.
+nlohmann::json warnings_schema() {
+    return {{"type", "array"},
+            {"description",
+             "Beside the answer: while the account's prepaid balance is low, negative or blocked, "
+             "{code: balance_low | balance_negative | balance_blocked, message, customer_id, "
+             "balance_micros, add_micros, add_funds_url}"},
+            {"items",
+             {{"type", "object"},
+              {"properties", {{"code", {{"type", "string"}}}, {"message", {{"type", "string"}}}}},
+              {"required", nlohmann::json::array({"code", "message"})}}}};
+}
+} // namespace
 
 nlohmann::json error_envelope_schema() {
     nlohmann::json codes = nlohmann::json::array();
     for (const ErrorCode& code : documented_error_codes) {
         codes.push_back(std::string(code.code));
     }
-    return {
-        {"type", "object"},
-        {"properties",
-         {{"ok", {{"const", false}}},
-          {"error",
-           {{"type", "object"},
+    return {{"type", "object"},
             {"properties",
-             {{"code",
-               {{"type", "string"},
-                {"enum", std::move(codes)},
-                {"description", "what went wrong, one of the codes in docs/api/errors.md"}}},
-              {"message", {{"type", "string"}}},
-              {"path",
-               {{"type", "string"},
-                {"description",
-                 "JSON pointer to the input field at fault; empty when the input is not"}}},
-              {"reason",
-               {{"type", "string"},
-                {"enum", {"missing", "invalid", "expired"}},
-                {"description", "unauthenticated only: why no credential was accepted"}}},
-              {"help",
-               {{"type", "string"},
-                {"description", "unauthenticated only: where to make a new key"}}},
-              {"details",
+             {{"ok", {{"const", false}}},
+              {"error",
                {{"type", "object"},
-                {"description",
-                 "safe_mode_warning only: {database or connection, mode, statements, "
-                 "confirmation}; repeat the call with safe_mode_confirmation to run them"}}}}},
-            {"required", nlohmann::json::array({"code", "message"})}}},
-          {"duration_ms", {{"type", "number"}}},
-          {"operation_result",
-           {{"type", "object"},
-            {"description", "Original operation envelope when its subsequent audit failed."}}}}},
-        {"required", nlohmann::json::array({"ok", "error", "duration_ms"})}};
+                {"properties",
+                 {{"code",
+                   {{"type", "string"},
+                    {"enum", std::move(codes)},
+                    {"description", "what went wrong, one of the codes in docs/api/errors.md"}}},
+                  {"message", {{"type", "string"}}},
+                  {"path",
+                   {{"type", "string"},
+                    {"description",
+                     "JSON pointer to the input field at fault; empty when the input is not"}}},
+                  {"reason",
+                   {{"type", "string"},
+                    {"enum", {"missing", "invalid", "expired"}},
+                    {"description", "unauthenticated only: why no credential was accepted"}}},
+                  {"help",
+                   {{"type", "string"},
+                    {"description", "unauthenticated only: where to make a new key"}}},
+                  {"details",
+                   {{"type", "object"},
+                    {"description",
+                     "safe_mode_warning: {database or connection, mode, statements, confirmation}; "
+                     "repeat the call with safe_mode_confirmation to run them. payment_required: "
+                     "{customer_id, balance_micros, overdraft_micros, add_micros, add_funds_url, "
+                     "reason}"}}}}},
+                {"required", nlohmann::json::array({"code", "message"})}}},
+              {"duration_ms", {{"type", "number"}}},
+              {"operation_result",
+               {{"type", "object"},
+                {"description", "Original operation envelope when its subsequent audit failed."}}},
+              {"warnings", warnings_schema()}}},
+            {"required", nlohmann::json::array({"ok", "error", "duration_ms"})}};
 }
 
 nlohmann::json success_envelope_schema(const nlohmann::json& output_schema) {
@@ -443,7 +470,10 @@ nlohmann::json success_envelope_schema(const nlohmann::json& output_schema) {
                                : nlohmann::json{{"type", "object"}};
     return {{"type", "object"},
             {"properties",
-             {{"ok", {{"const", true}}}, {"value", value}, {"duration_ms", {{"type", "number"}}}}},
+             {{"ok", {{"const", true}}},
+              {"value", value},
+              {"duration_ms", {{"type", "number"}}},
+              {"warnings", warnings_schema()}}},
             {"required", nlohmann::json::array({"ok", "value", "duration_ms"})}};
 }
 
@@ -1290,6 +1320,11 @@ bool Registry::add(Capability capability) {
                                   "`. Accepted while callers move.";
         properties[alias] = std::move(property);
     }
+    // The one list of capabilities that start paid work (lake#1114) marks them, engine
+    // capabilities registered from a schema included.
+    if (starts_paid_work(capability.name)) {
+        capability.starts_paid_work = true;
+    }
     entries_.push_back(std::make_shared<const Capability>(std::move(capability)));
     return true;
 }
@@ -1320,6 +1355,50 @@ public:
 private:
     std::optional<control::ObjectRequestScope> scope_;
 };
+
+// Counts the Registry calls a context is inside, so only the outermost answer is warned.
+class DepthGuard {
+public:
+    explicit DepthGuard(ApiContext& context) : context_(context) {
+        ++context_.registry_depth;
+    }
+    ~DepthGuard() {
+        --context_.registry_depth;
+    }
+    DepthGuard(const DepthGuard&) = delete;
+    DepthGuard& operator=(const DepthGuard&) = delete;
+
+private:
+    ApiContext& context_;
+};
+
+// The balance gate (lake#1114, docs/api/billing.md#the-gate): a capability that starts paid work
+// is refused 402 payment_required, before its handler, while the account it charges is blocked.
+// One place for every capability: the handlers never check.
+void gate_paid_work(CallState& state,
+                    const Capability& capability,
+                    const nlohmann::json& input,
+                    ApiContext& context) {
+    if (!state.proceed || !capability.starts_paid_work || !context.balance) {
+        return;
+    }
+    if (auto refused = balance_refusal(capability, input, context)) {
+        state.result = std::move(*refused);
+        state.proceed = false;
+    }
+}
+
+// The balance warning on the outermost answer while the account is low, negative or blocked.
+void warn_about_balance(CallState& state, const nlohmann::json& input, ApiContext& context) {
+    if (!context.balance || context.registry_depth != 1 ||
+        (!state.proceed && state.result.error.code != "payment_required")) {
+        return;
+    }
+    nlohmann::json warning = balance_warning(input, context);
+    if (!warning.is_null()) {
+        state.result.warnings = nlohmann::json::array({std::move(warning)});
+    }
+}
 } // namespace
 
 ApiResult
@@ -1347,7 +1426,9 @@ Registry::call(const std::string& name, const nlohmann::json& input, ApiContext&
     const nlohmann::json& call_input =
         agent_task_input(*capability, workspace_input, context, task_resolved_input);
 
+    const DepthGuard registry_depth(context);
     CallState state = prepare_call(capability, call_input, context);
+    gate_paid_work(state, *capability, call_input, context);
     if (state.proceed) {
         const auto start = std::chrono::steady_clock::now();
         try {
@@ -1367,6 +1448,7 @@ Registry::call(const std::string& name, const nlohmann::json& input, ApiContext&
                 .count();
     }
     finish_authentication(state, name, context);
+    warn_about_balance(state, call_input, context);
     return finish_call(
         capability.get(), name, call_input, std::move(state.result), context, state.proceed);
 }
@@ -1432,7 +1514,9 @@ liquid::runtime::task<ApiResult> Registry::call_async(const std::string& name,
     const nlohmann::json& call_input =
         agent_task_input(*capability, workspace_input, context, task_resolved_input);
 
+    const DepthGuard registry_depth(context);
     CallState state = prepare_call(capability, call_input, context);
+    gate_paid_work(state, *capability, call_input, context);
     if (state.proceed) {
         // A long poll (`wait_ms`) parks on the bus: it gives its HTTP worker back so parked
         // callers never fill the short-request workers (lake#534). Only a capability declared a
@@ -1482,6 +1566,7 @@ liquid::runtime::task<ApiResult> Registry::call_async(const std::string& name,
                 .count();
     }
     finish_authentication(state, name, context);
+    warn_about_balance(state, call_input, context);
     co_return finish_call(
         capability.get(), name, call_input, std::move(state.result), context, state.proceed);
 }

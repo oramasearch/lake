@@ -8,7 +8,7 @@
  * (`viewer.billing`). */
 import { type ChangeEvent, useMemo, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
-import { FileText, Receipt, Tags } from "lucide-react";
+import { FileText, Receipt, Tags, Wallet } from "lucide-react";
 import { act, useRead } from "@/lib/api";
 import { useSession } from "@/lib/session";
 import { useTrail } from "@/lib/trail";
@@ -17,6 +17,7 @@ import { Modal } from "@/lib/overlay";
 import { date } from "@/lib/format";
 import { Banner, Button, Card, DataTable, Empty, ErrorBlock, Field, fieldError, Form, KeyValue, Page, Skeleton, Split, Stat, StatRow, Status } from "@/lib/ui";
 import { useSpacePermissions } from "@/pages/apps/shared";
+import { addFundsPath, balanceTone, dollarsToMicros, historyRows, microsToDollars, returnNotice, type BalanceAnswer } from "./balance";
 import { addressLines, asksForBillingEmail, billedNote, contactDraft, contactSavedMessage, countryOptions, invoiceTone, lineSentence, monthLabel, months, money, owed, paymentSummary, priceLabel, quantityLabel, type Account, type Bill, type ContactDraft, type ContactSaved, type Invoice, type Line, type PriceListAnswer } from "./billing";
 
 export default function BillingPage() {
@@ -34,6 +35,8 @@ export default function BillingPage() {
   const hasList = !!account.data?.price_list;
   const bill = useRead<Bill>(customerId && hasList ? "bill_preview" : null, { customer_id: customerId }, { workspace: null, staleTime: 60_000 });
   const permissions = useSpacePermissions(customerId);
+  const balance = useRead<BalanceAnswer>(customerId ? "account_balance" : null, { customer_id: customerId }, { workspace: null, staleTime: 30_000 });
+  const returned = returnNotice(params);
 
   if (!customerId) {
     return (
@@ -76,6 +79,8 @@ export default function BillingPage() {
             <Stat label="Due" value={due.length ? due.map((d) => money(d.micros, d.currency)).join(" + ") : "Nothing"} tone={due.length ? "bad" : undefined} sub={`${(invoices.data?.invoices ?? []).filter((i) => i.state === "due").length} invoices due`} />
             <Stat label="Payment" value={paymentSummary(account.data.provider).value} sub={paymentSummary(account.data.provider).sub} />
           </StatRow>
+          {returned && <Banner tone={returned.tone}>{returned.text}</Banner>}
+          <BalanceCard balance={balance} customerId={customerId} canEdit={permissions.canAdmin} />
           {account.data.provider.reason && (
             <Banner tone="quiet" title="Invoice Only">
               {operator ? account.data.provider.reason : "Card payment is not set up on this Lake yet. Orama sends payment details with each invoice and records your payment."}
@@ -95,6 +100,7 @@ export default function BillingPage() {
             side={
               <>
                 {asksForBillingEmail(account.data) && <Banner tone="info">Add a billing email so invoices are emailed to you.</Banner>}
+                {balance.data && <AutoTopUpCard balance={balance.data} customerId={customerId} canEdit={permissions.canAdmin} onSaved={() => void balance.refetch()} />}
                 <InvoicesCard invoices={invoices} customerId={customerId} operator={operator} />
                 <ContactCard account={account.data} customerId={customerId} canEdit={permissions.canAdmin} checking={permissions.loading} />
                 {bill.data && bill.data.not_measured.length > 0 && (
@@ -365,5 +371,125 @@ function IssueInvoice({ customerId, onClose }: { customerId: string; onClose: ()
         </Field>
       </Form>
     </Modal>
+  );
+}
+
+/** The prepaid balance (lake#1114, docs/ui/balance.md): the balance, its state and limit, Add funds,
+ * and the history of credits and charges, newest first. */
+function BalanceCard({ balance, customerId, canEdit }: { balance: ReturnType<typeof useRead<BalanceAnswer>>; customerId: string; canEdit: boolean }) {
+  if (balance.isError) return <ErrorBlock error={balance.error} retry={() => void balance.refetch()} what="this account's balance" />;
+  if (!balance.data) return <Skeleton lines={3} />;
+  const b = balance.data;
+  const rows = historyRows(b.credits, b.charges);
+  return (
+    <Card
+      label="Balance"
+      actions={
+        canEdit ? (
+          <Button variant="primary" to={addFundsPath(customerId)}>
+            <Wallet size={14} aria-hidden /> Add funds
+          </Button>
+        ) : null
+      }
+      padded={false}
+      footer={
+        b.refresh_error ? (
+          <span>Charges could not be refreshed just now ({b.refresh_error}); the balance is kept as it was until they can.</span>
+        ) : b.refreshed_at ? (
+          <span>Charges refreshed {date(b.refreshed_at)}. Usage is charged at the published rates every few minutes.</span>
+        ) : undefined
+      }
+    >
+      <div className="p-4">
+        <StatRow cols={3}>
+          <Stat label="Balance" value={money(b.balance_micros, "USD")} sub={<Status value={b.exempt ? "covered by your order" : b.state} tone={b.exempt ? "success" : balanceTone(b.state)} />} />
+          <Stat label="Added" value={money(b.credits_micros ?? 0, "USD")} sub="Top-ups" />
+          <Stat label="Limit" value={money(b.limit_micros, "USD")} sub="Paid work stops below it" />
+        </StatRow>
+      </div>
+      <DataTable
+        rows={rows}
+        rowKey={(r) => r.key}
+        empty={
+          <div className="p-4">
+            <Empty icon={Wallet} title="No funds yet">
+              Add funds to start. Lake is prepaid: what you use is paid from your balance.
+            </Empty>
+          </div>
+        }
+        columns={[
+          { key: "label", label: "History", render: (r) => (<div><span className="font-semibold text-ink">{r.label}</span><div className="text-[12px] text-ink-3">{r.detail}</div></div>) },
+          { key: "when", label: "Date", render: (r) => <span className="text-ink-2">{date(r.when)}</span> },
+          { key: "amount", label: "Amount", numeric: true, render: (r) => <span className="font-mono">{r.amount_micros > 0 ? "+" : ""}{money(r.amount_micros, "USD")}</span> },
+        ]}
+      />
+    </Card>
+  );
+}
+
+/** Auto top-up (lake#1114), off by default: owners and admins turn it on with a threshold and an
+ * amount; the first time, Stripe saves a card (Lake never sees it). A declined charge turns it off. */
+function AutoTopUpCard({ balance, customerId, canEdit, onSaved }: { balance: BalanceAnswer; customerId: string; canEdit: boolean; onSaved: () => void }) {
+  const toast = useToast();
+  const auto = balance.auto_top_up;
+  const minimum = balance.minimum_top_up_micros ?? 20_000_000;
+  const [threshold, setThreshold] = useState(microsToDollars(auto?.threshold_micros ?? 5_000_000));
+  const [amount, setAmount] = useState(microsToDollars(auto?.amount_micros ?? minimum));
+  const [error, setError] = useState<unknown>(null);
+  const [busy, setBusy] = useState(false);
+  const thresholdMicros = dollarsToMicros(threshold);
+  const amountMicros = dollarsToMicros(amount);
+  const problem = thresholdMicros === null ? "Enter the threshold in dollars." : amountMicros === null ? "Enter the amount in dollars." : amountMicros < minimum ? `Each auto top-up is at least ${money(minimum, "USD")}.` : null;
+  const save = async (enabled: boolean) => {
+    setError(null);
+    setBusy(true);
+    try {
+      const saved = await act<{ checkout_url?: string }>("set_auto_top_up", enabled ? { customer_id: customerId, enabled, threshold_micros: thresholdMicros, amount_micros: amountMicros } : { customer_id: customerId, enabled });
+      if (saved.checkout_url) {
+        window.location.assign(saved.checkout_url);
+        return;
+      }
+      toast(enabled ? "Auto top-up is on" : "Auto top-up is off");
+      onSaved();
+    } catch (e) {
+      setError(e);
+    } finally {
+      setBusy(false);
+    }
+  };
+  if (!auto) return null;
+  return (
+    <Card label="Auto Top-Up" actions={<Status value={auto.enabled ? "on" : auto.awaiting_card ? "waiting for card" : "off"} tone={auto.enabled ? "success" : "neutral"} />}>
+      {auto.off_reason && !auto.enabled && (
+        <Banner tone="warn" title="Turned Off">
+          The last auto top-up failed ({auto.off_reason}), so it was turned off. Add funds yourself, and turn it on again when your card works.
+        </Banner>
+      )}
+      <p className="muted m-0 mb-3 text-[13px]">When your balance falls below the threshold, Lake adds the amount from your saved card: one at a time, and a few a day at most.</p>
+      {canEdit ? (
+        <Form onSubmit={() => save(true)} error={error}>
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            <Field label="When the balance falls below (USD)">
+              <input name="threshold" inputMode="decimal" value={threshold} onChange={(e) => setThreshold(e.target.value)} />
+            </Field>
+            <Field label="Add (USD)" error={problem && amount ? problem : undefined}>
+              <input name="amount" inputMode="decimal" value={amount} onChange={(e) => setAmount(e.target.value)} />
+            </Field>
+          </div>
+          <div className="flex flex-wrap justify-end gap-2">
+            {auto.enabled && (
+              <Button onClick={() => void save(false)} disabled={busy}>
+                Turn off
+              </Button>
+            )}
+            <Button type="submit" variant="primary" loading={busy} disabled={!!problem}>
+              {auto.enabled ? "Save" : auto.card_saved ? "Turn on" : "Save a card and turn on"}
+            </Button>
+          </div>
+        </Form>
+      ) : (
+        <p className="muted m-0 text-[13px]">{auto.enabled ? `On: adds ${money(auto.amount_micros, "USD")} below ${money(auto.threshold_micros, "USD")}.` : "Off."} An owner or admin changes it.</p>
+      )}
+    </Card>
   );
 }

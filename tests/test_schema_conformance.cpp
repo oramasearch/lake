@@ -65,6 +65,13 @@ struct SchemaPaymentProvider final : lake::api::PaymentProvider {
     bool records_payments_by_hand() const override {
         return true;
     }
+    // The balance's checkouts (lake#1114), so start_top_up and set_auto_top_up answer.
+    std::expected<lake::api::CheckoutSession, std::string>
+    create_balance_checkout(const lake::api::PaymentAccount&,
+                            const lake::api::BalanceCheckoutRequest& request) override {
+        return lake::api::CheckoutSession{"cs_schema_" + request.purpose,
+                                          "https://checkout.schema.test/" + request.purpose};
+    }
 };
 
 class HttpEvidence {
@@ -569,6 +576,16 @@ TEST(SchemaConformance, EveryToolAndRequiredOutputUsesHttpContract) {
              lake::api::fixed_payment_providers(std::make_shared<SchemaPaymentProvider>()),
          .store_root = root.string()});
     ASSERT_TRUE(server.start()) << server.reason();
+    // The account has topped up (lake#1114), so the calls that start paid work run past the
+    // balance's gate; PaidWork.* covers the gate itself.
+    {
+        lake::control::BalanceCredit credit;
+        credit.customer_id = customer.id;
+        credit.amount_micros = 20'000'000;
+        credit.provider = "stripe";
+        credit.reference = "cs_schema_first_top_up";
+        checked(store->apply_balance_credit(credit));
+    }
     HttpEvidence http(server.port());
     for (const auto& tool : http.document.at("tools")) {
         http.call(tool.at("name"), json::object(), false);
@@ -906,9 +923,25 @@ TEST(SchemaConformance, EveryToolAndRequiredOutputUsesHttpContract) {
     http.call("set_billing_contact",
               {{"customer_id", customer.id}, {"email", "billing@example.com"}, {"country", "DE"}});
     http.call("bill_preview", {{"customer_id", customer.id}});
-    // January at a list with no rates, so its invoice reads no workspace's usage.
+    // The prepaid balance (lake#1114): this account topped up above.
+    http.call("account_balance", {{"customer_id", customer.id}});
+    http.read("account_balance", "?customer_id=" + customer.id);
+    http.call("refresh_account_balance", {{"customer_id", customer.id}});
+    http.call("set_balance_overdraft",
+              {{"customer_id", customer.id}, {"overdraft_micros", 75'000'000}});
+    http.call("set_balance_overdraft", {{"customer_id", customer.id}});
+    http.call("start_top_up", {{"customer_id", customer.id}, {"amount_micros", 25'000'000}});
+    http.call("set_auto_top_up", {{"customer_id", customer.id}, {"enabled", true}});
+    http.call("set_auto_top_up", {{"customer_id", customer.id}, {"enabled", false}});
+    // January at a list with no rates, so its invoice reads no workspace's usage. Issued to an
+    // account that has not topped up, so it is collected through the provider and can be resent.
+    const auto payer_user = checked(store->create_user(
+        {"taap:1:ed25519:schema-invoices", "invoices@example.test", "Invoices"}));
+    const auto payer =
+        checked(store->create_customer({"individual", payer_user.id, "", "schema-invoices"}));
+    checked(store->set_billing_contact({payer.id, "invoices@example.com"}));
     http.call("set_price_list", {{"effective_from", "2026-01"}, {"prices", json::array()}});
-    http.call("issue_invoice", {{"customer_id", customer.id}, {"period", "2026-01"}});
+    http.call("issue_invoice", {{"customer_id", payer.id}, {"period", "2026-01"}});
     lake::control::Invoice month;
     month.customer_id = customer.id;
     month.plan_id = "usage-202602-00000000000000001";
@@ -921,10 +954,10 @@ TEST(SchemaConformance, EveryToolAndRequiredOutputUsesHttpContract) {
     const auto due = checked(store->create_invoice(month));
     http.call("list_invoices", {{"customer_id", customer.id}});
     http.read("list_invoices", "?customer_id=" + customer.id);
-    const auto invoices = checked(store->list_invoices(customer.id));
+    const auto invoices = checked(store->list_invoices(payer.id));
     const std::string january = invoices.back().id;
-    http.call("get_invoice", {{"customer_id", customer.id}, {"invoice_id", january}});
-    http.read("get_invoice", "?customer_id=" + customer.id + "&invoice_id=" + january);
+    http.call("get_invoice", {{"customer_id", payer.id}, {"invoice_id", january}});
+    http.read("get_invoice", "?customer_id=" + payer.id + "&invoice_id=" + january);
     http.call("resend_invoice", {{"invoice_id", january}});
     http.call("record_invoice_payment", {{"invoice_id", january}, {"reference", "W1"}});
     http.call("void_invoice", {{"invoice_id", due.id}, {"note", "issued twice"}});

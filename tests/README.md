@@ -641,6 +641,15 @@ finish statements: an unpaid order is never claimed, a paid one is claimed once 
 by its claimant), a paid order of more than one refused by both stores, and the pages and routes
 over HTTP with a fake Stripe and a fake Resend.
 
+The prepaid balance (lake#1114): `test_balance.cpp` covers the view and its math, top-ups credited
+once per payment from signed Stripe events, the first-top-up rule, charges equal to the month's bill
+with a failed read holding the balance, an invoice paid by the balance freezing its month, the 402
+gate and its exemptions, the answer warning, the emails once per crossing (a fake Resend sender),
+auto top-up (off by default, one charge per crossing, the daily limit, a decline turning it off),
+the Stripe requests and events, and `PaidWorkContract`, which fails on a capability that starts paid
+work without being on the list. `test_postgres.cpp`'s `*.AccountBalancesFollowTheContract` run the
+store contract on both stores.
+
 The audit split by subject (decision 52, lake#317): `test_workspace_records.cpp`'s
 `AuditEventsAboutAWorkspaceLiveInItsOwnChain` covers the `AuditRecorder` and the readers across two
 accounts with two workspaces each (a call writes nothing until the flush, control-plane calls,

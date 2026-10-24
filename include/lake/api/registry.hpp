@@ -104,6 +104,11 @@ struct ApiResult {
     // When auditing a completed operation fails, expose its original result so callers can
     // inspect committed effects before deciding whether to retry.
     std::optional<nlohmann::json> operation_result;
+    // What the caller should know beside the answer (lake#1114: the account's balance is low,
+    // negative or blocked), as an array of {code, message, ...}; null when there is nothing. Set
+    // by Registry::call for the outermost call, the one shared answer path, so REST and MCP carry
+    // it on every capability without a capability doing anything.
+    nlohmann::json warnings = nullptr;
     static ApiResult success(nlohmann::json output);
     static ApiResult failure(std::string code, std::string message, std::string path = {});
     nlohmann::json envelope() const;
@@ -218,6 +223,7 @@ struct MeteringConfig {
 
 class Registry;
 class PaymentProviders; // lake/api/billing.hpp
+struct BalanceRuntime;  // lake/api/balance.hpp
 
 // Repository-store work never runs on the server's thread (lake#380): a workspace's store is in
 // its workspace Zetta, and a slow or hung Zetta, a lease wait or a switch must hold up only the
@@ -554,6 +560,12 @@ struct ApiContext {
     // and `server_info` report its status. Null: billing is off.
     std::shared_ptr<PaymentProviders> payments;
     int order_entitlement_grace_seconds = 3 * 86400;
+    // The prepaid balance where billing is on (lake#1114, docs/api/billing.md#balance): its
+    // settings, mailer and link origin. Null: billing is off, and no call is gated or warned.
+    std::shared_ptr<const BalanceRuntime> balance;
+    // How many Registry calls this context is inside (1 for the outermost): only the outermost
+    // answer carries the balance warning.
+    int registry_depth = 0;
 };
 
 using CapabilityHandler =
@@ -614,6 +626,12 @@ struct Capability {
     // session as no credential at all, because grants name a bare TAAP identity, which an
     // application pool may share with a Lake account.
     bool serves_application_pools = false;
+    // It creates, starts or grows something that costs money (lake#1114): Registry::call refuses it
+    // with 402 payment_required while the account it charges is past its overdraft or has never
+    // topped up. Registry::add sets it for every name in paid_work_capabilities()
+    // (lake/api/balance.hpp), the one list, so engine capabilities registered from a schema are
+    // marked too.
+    bool starts_paid_work = false;
 };
 
 // The input with every deprecated alias moved onto its canonical field, or invalid_input when a

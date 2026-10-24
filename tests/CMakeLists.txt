@@ -38,6 +38,7 @@ add_executable(lake-tests test_main.cpp test_web_ui.cpp test_web_app.cpp test_ma
   test_audio_duration.cpp
   test_model_gateway.cpp
   test_billing.cpp
+  test_balance.cpp
   test_stripe.cpp
   test_sealed_delivery.cpp
   test_workspace_deletion.cpp

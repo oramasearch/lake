@@ -56,3 +56,8 @@ The store decorator forwards email recovery's trusted client address and owner c
 checks as direct stores. See [recovery.md](../../docs/api/recovery.md#email-recovery-budgets).
 The instrumented store forwards `apply_cloud_order_subscription` and records its normal call/error metrics (lake#972); signed entitlement updates therefore use the same observability as Checkout updates. See [orders](../../docs/api/orders.md#recurring-entitlement-lsr-105-lake972).
 The store wrapper forwards `authentication_attempt` so telemetry preserves shared account and client admission (lake#966).
+
+`metrics.cpp`'s `InstrumentedStore` forwards every store call with its timing, the prepaid
+balance's (lake#1114) included. The owner loop's balance refresh counts
+`lake_balance_refreshes_total`, `lake_balance_held_total`, `lake_balance_emails_total{outcome}` and
+`lake_balance_auto_top_ups_total{outcome}`, and sets `lake_balance_accounts`.

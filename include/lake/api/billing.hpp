@@ -79,6 +79,43 @@ struct PaymentNotice {
     bool foreign = false;
     // A verified recurring order event, handled separately from usage invoices and Checkout.
     std::optional<control::CloudOrderSubscriptionEvent> order_subscription;
+    // A notice about an account's prepaid balance (lake#1114, docs/api/billing.md#balance).
+    struct Balance {
+        // credit: a top-up was paid (`credit_kind` top_up or auto_top_up, `amount_cents`);
+        // card_saved: a card for auto top-up was saved (`payment_method`, Stripe's pm_ id);
+        // auto_top_up_failed: an off-session charge failed (`message`).
+        std::string kind;
+        std::string customer_id; // lake's account
+        std::string reference;   // the Checkout Session, SetupIntent or PaymentIntent
+        std::string credit_kind;
+        std::int64_t amount_cents = 0;
+        std::string payment_method;
+        std::string message;
+    };
+    std::optional<Balance> balance;
+};
+
+// A hosted checkout for an account's balance (lake#1114): `purpose` top_up pays `amount_cents`
+// into the balance; card_setup saves a card for auto top-up and charges nothing. Lake never sees
+// the card: the provider keeps it on the account's customer.
+struct BalanceCheckoutRequest {
+    std::string purpose = "top_up"; // top_up | card_setup
+    std::int64_t amount_cents = 0;
+    std::string success_url;
+    std::string cancel_url;
+    // Each attempt's own key part, so starting again is a new session, never a replay.
+    std::string attempt;
+};
+// A charge of a saved payment method with nobody present (auto top-up): `idempotency_key` is one
+// per account and crossing, so a refresh never charges twice.
+struct OffSessionCharge {
+    std::string payment_method;
+    std::int64_t amount_cents = 0;
+    std::string idempotency_key;
+};
+struct OffSessionResult {
+    std::string id;     // pi_...
+    std::string status; // succeeded, processing; anything that needs a person is an error
 };
 
 // A subscription to pay for an order through the provider's hosted checkout (lake#831): one line,
@@ -171,6 +208,23 @@ public:
     virtual std::expected<CheckoutSession, std::string> create_checkout(const CheckoutRequest&) {
         return std::unexpected(std::string("card payment is not set up on this Lake"));
     }
+    // Starts a hosted checkout for the account's balance (lake#1114): a top-up in payment mode,
+    // or saving a card for auto top-up in setup mode, on the account's provider customer
+    // (`provider_customer_id`). The manual provider has none.
+    virtual std::expected<CheckoutSession, std::string>
+    create_balance_checkout(const PaymentAccount& account, const BalanceCheckoutRequest& request) {
+        static_cast<void>(account);
+        static_cast<void>(request);
+        return std::unexpected(std::string("card payment is not set up on this Lake"));
+    }
+    // Charges the account's saved payment method off-session for an auto top-up. An error, a
+    // decline, or a charge that needs the person to authenticate is an error with the reason.
+    virtual std::expected<OffSessionResult, std::string>
+    charge_saved_payment_method(const PaymentAccount& account, const OffSessionCharge& charge) {
+        static_cast<void>(account);
+        static_cast<void>(charge);
+        return std::unexpected(std::string("card payment is not set up on this Lake"));
+    }
 };
 
 // Invoice only: lake issues the invoice and Orama collects payment outside lake (a bank transfer,
@@ -254,6 +308,33 @@ void register_billing_capabilities(Registry& registry,
 
 // Whether this registry bills: the billing capabilities are registered.
 bool billing_registered(const Registry* registry);
+
+// The account as the provider sees it (lake#857, lake#856): its billing contact and the provider's
+// id for it, created and kept first. The balance's checkouts and auto top-ups use it too.
+std::expected<PaymentAccount, ApiResult> billing_payment_account(ApiContext& context,
+                                                                 PaymentProvider& provider,
+                                                                 const control::Customer& customer,
+                                                                 std::uint64_t attempt);
+
+// One month's bill for an account (`period` YYYY-MM) at the list in force for it, worked out from
+// usage_over_time as bill_preview does: the total and the list. `audited` false reads usage
+// without a capability call of its own, for the balance's refresh by the store root's owner.
+// An error when no list is published or the usage cannot be read; `complete` false when a
+// workspace did not answer.
+struct MonthBill {
+    std::string period;
+    std::string price_list_id;
+    std::uint64_t total_micros = 0;
+    bool complete = true;
+    std::string unread; // the workspaces that did not answer, by name
+};
+liquid::runtime::task<std::expected<MonthBill, ApiResult>> account_month_bill(
+    ApiContext& context, const std::string& customer_id, std::string period, bool audited);
+
+// Where the payment provider is now, as the billing capabilities resolve it: the provider, or an
+// ApiResult saying why there is none.
+liquid::runtime::task<std::expected<std::shared_ptr<PaymentProvider>, ApiResult>>
+current_payment_provider(PaymentProviders& providers, ApiContext& context);
 
 // How this lake's invoices are paid, for `viewer` and `server_info`: {provider, title,
 // online_payment, reason, checked_at} from the last time lake read the provider's keys; null where

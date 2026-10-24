@@ -3422,6 +3422,162 @@ void billing_contact_contract(lake::control::Store& store, const std::string& cu
         "not_found");
 }
 
+// The prepaid balance's contract (migration 0099, lake#1114), on either store: an account starts
+// with no row at $0, the row's fields change only against the version read, a credit is recorded
+// once per event and once per payment and resets the crossings' marks, a month an invoice froze is
+// never replaced by a refresh, and the store's checks refuse what the table refuses.
+void account_balance_contract(lake::control::Store& store, const std::string& customer_id) {
+    auto fresh = store.account_balance(customer_id);
+    ASSERT_TRUE(fresh) << fresh.error().message;
+    EXPECT_EQ(fresh->version, 0);
+    EXPECT_EQ(fresh->balance_micros(), 0);
+    EXPECT_TRUE(fresh->first_top_up_at.empty());
+    EXPECT_FALSE(fresh->paid_order);
+    EXPECT_FALSE(fresh->auto_top_up) << "auto top-up is off by default";
+    EXPECT_EQ(fresh->auto_top_up_threshold_micros, 5'000'000);
+    EXPECT_EQ(fresh->auto_top_up_amount_micros, 20'000'000);
+    EXPECT_EQ(store.account_balance(lake::control::new_uuid_v4()).error().code, "not_found");
+
+    auto next = *fresh;
+    next.overdraft_limit_micros = 75'000'000;
+    next.negative_notified_at = "2026-10-24T01:02:03Z";
+    next.auto_top_up_pending = "lake-auto-top-up-x-1";
+    next.auto_top_up_day = "2026-10-24";
+    next.auto_top_ups_today = 1;
+    auto written = store.update_account_balance(next, 0);
+    ASSERT_TRUE(written) << written.error().message;
+    EXPECT_GT(written->version, 0);
+    EXPECT_EQ(written->overdraft_limit_micros, 75'000'000);
+    EXPECT_EQ(written->negative_notified_at.substr(0, 19), "2026-10-24T01:02:03");
+    EXPECT_EQ(written->auto_top_up_day, "2026-10-24");
+    EXPECT_EQ(store.update_account_balance(next, 0).error().code, "conflict")
+        << "a row is there now";
+    EXPECT_EQ(store.update_account_balance(next, written->version + 7).error().code, "conflict");
+    auto refused = next;
+    refused.overdraft_limit_micros = -1;
+    EXPECT_EQ(store.update_account_balance(refused, written->version).error().code,
+              "invalid_input");
+
+    lake::control::BalanceCredit credit;
+    credit.customer_id = customer_id;
+    credit.kind = "top_up";
+    credit.amount_micros = 20'000'000;
+    credit.provider = "stripe";
+    credit.reference = "cs_contract_1";
+    credit.event_id = "evt_contract_1";
+    auto applied = store.apply_balance_credit(credit);
+    ASSERT_TRUE(applied) << applied.error().message;
+    EXPECT_FALSE(applied->duplicate);
+    EXPECT_FALSE(applied->credit.id.empty());
+    EXPECT_EQ(applied->balance.balance_micros(), 20'000'000);
+    EXPECT_FALSE(applied->balance.first_top_up_at.empty());
+    EXPECT_TRUE(applied->balance.negative_notified_at.empty()) << "a credit resets the marks";
+    EXPECT_EQ(applied->balance.auto_top_up_pending, "lake-auto-top-up-x-1")
+        << "only an auto top-up's credit clears the charge in flight";
+    EXPECT_TRUE(store.apply_balance_credit(credit)->duplicate) << "the same event";
+    credit.event_id = "evt_contract_1_async";
+    EXPECT_TRUE(store.apply_balance_credit(credit)->duplicate) << "the same payment";
+    credit.reference = "pi_contract_2";
+    credit.event_id = "evt_contract_2";
+    credit.kind = "auto_top_up";
+    credit.amount_micros = 30'000'000;
+    applied = store.apply_balance_credit(credit);
+    ASSERT_TRUE(applied) << applied.error().message;
+    EXPECT_EQ(applied->balance.credits_micros, 50'000'000);
+    EXPECT_EQ(applied->balance.credit_count, 2);
+    EXPECT_TRUE(applied->balance.auto_top_up_pending.empty());
+    credit.amount_micros = 0;
+    credit.reference = "pi_contract_3";
+    EXPECT_EQ(store.apply_balance_credit(credit).error().code, "invalid_input");
+    const auto credits = store.balance_credits(customer_id, 10);
+    ASSERT_TRUE(credits) << credits.error().message;
+    ASSERT_EQ(credits->size(), 2U);
+    EXPECT_EQ((*credits)[0].reference, "pi_contract_2") << "newest first";
+
+    ASSERT_TRUE(store.set_balance_charge({customer_id, "2026-09", 7'000'000, "usage-a", {}, {}}));
+    ASSERT_TRUE(store.set_balance_charge({customer_id, "2026-10", 5'000'000, "usage-a", {}, {}}));
+    ASSERT_TRUE(store.set_balance_charge({customer_id, "2026-10", 6'000'000, "usage-a", {}, {}}));
+    EXPECT_EQ(store.account_balance(customer_id)->charges_micros, 13'000'000);
+    lake::control::Invoice invoice;
+    invoice.customer_id = customer_id;
+    invoice.period = "2026-09";
+    invoice.plan_id = "usage-a";
+    invoice.plan_name = "Usage";
+    invoice.currency = "USD";
+    invoice.total_micros = 7'250'000;
+    invoice.provider = "balance";
+    const auto issued = store.create_invoice(invoice);
+    ASSERT_TRUE(issued) << issued.error().message;
+    ASSERT_TRUE(
+        store.set_balance_charge({customer_id, "2026-09", 7'250'000, "usage-a", issued->id, {}}));
+    ASSERT_TRUE(store.set_balance_charge({customer_id, "2026-09", 1, "usage-b", {}, {}}));
+    const auto charges = store.balance_charges(customer_id);
+    ASSERT_TRUE(charges) << charges.error().message;
+    ASSERT_EQ(charges->size(), 2U);
+    EXPECT_EQ((*charges)[0].period, "2026-10") << "newest month first";
+    EXPECT_EQ((*charges)[1].amount_micros, 7'250'000) << "frozen by its invoice";
+    EXPECT_EQ((*charges)[1].invoice_id, issued->id);
+    EXPECT_EQ(store.account_balance(customer_id)->balance_micros(), 50'000'000 - 13'250'000);
+
+    const auto listed = store.balance_customers();
+    ASSERT_TRUE(listed);
+    EXPECT_NE(std::ranges::find(*listed, customer_id), listed->end());
+}
+
+TEST(MemoryBilling, AccountBalancesFollowTheContract) {
+    lake::control::InMemoryStore store;
+    const auto user =
+        store.create_user({"taap:1:ed25519:balance", "balance@example.com", "Balance"});
+    ASSERT_TRUE(user) << user.error().message;
+    const auto customer = store.create_customer({"individual", user->id, "", "balance"});
+    ASSERT_TRUE(customer) << customer.error().message;
+    account_balance_contract(store, customer->id);
+}
+
+TEST(PostgresBilling, AccountBalancesFollowTheContract) {
+    const char* uri = lake::test::postgres_uri();
+    if (uri == nullptr || std::string(uri).empty()) {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not set";
+    }
+    auto store = lake::control::make_postgres_store(
+        uri, "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff");
+    ASSERT_TRUE(store->ping()) << store->ping().error().message;
+    {
+        pqxx::connection connection(uri);
+        pqxx::work tx(connection);
+        for (const char* table : {"account_balances",
+                                  "account_balance_credits",
+                                  "account_balance_charges",
+                                  "account_balances_guard"}) {
+            EXPECT_FALSE(
+                tx.exec_params("SELECT to_regclass($1)", std::string(table))[0][0].is_null())
+                << table;
+        }
+        EXPECT_FALSE(
+            tx.exec("SELECT 1 FROM schema_migrations WHERE version = '0099_account_balances'")
+                .empty());
+    }
+    const std::string suffix = lake::control::new_uuid_v4().substr(0, 8);
+    const auto user = store->create_user(
+        {"taap:1:ed25519:balance-" + suffix, "balance-" + suffix + "@example.com", "Balance"});
+    ASSERT_TRUE(user) << user.error().message;
+    const auto customer = store->create_customer({"individual", user->id, "", "balance-" + suffix});
+    ASSERT_TRUE(customer) << customer.error().message;
+    account_balance_contract(*store, customer->id);
+
+    // The tables' own checks hold for a writer other than lake's store.
+    pqxx::connection connection(uri);
+    for (const char* statement :
+         {"UPDATE account_balances SET auto_top_up_amount_micros = 0 WHERE customer_id = $1::uuid",
+          "INSERT INTO account_balance_credits (customer_id, kind, amount_micros, provider, "
+          "reference) VALUES ($1::uuid, 'gift', 1, 'stripe', 'x')",
+          "INSERT INTO account_balance_charges (customer_id, period, amount_micros) VALUES "
+          "($1::uuid, '2026-13', 0)"}) {
+        pqxx::work tx(connection);
+        EXPECT_THROW(tx.exec_params(statement, customer->id), pqxx::check_violation) << statement;
+    }
+}
+
 TEST(MemoryBilling, BillingContactsFollowTheContract) {
     lake::control::InMemoryStore store;
     const auto user =

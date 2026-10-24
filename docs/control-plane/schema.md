@@ -1395,3 +1395,28 @@ also record `last_used_step` in `public_data`, updated while holding the credent
 The operator must vendor this schema and select `authentication_attempts_guard` before deployment.
 Change the store budgets and their contract tests
 together; verify with `ctest --test-dir <build> --timeout 600 -R AuthenticationLimits`.
+
+## Account balances (migration `0099_account_balances`)
+
+`0099_account_balances` (lake#1114, [`../api/billing.md#balance`](../api/billing.md#balance)) adds the
+prepaid balance's billing records (decision 56), every row cascading with its customer:
+
+- `account_balances`, one row per account: `first_top_up_at`, `overdraft_limit_micros` (the
+  operator's, null for the instance's, 0 to $1,000,000), the last refresh (`charges_refreshed_at`)
+  and the last failed one (`refresh_error` ≤ 1024, `refresh_failed_at`), the crossings' email marks
+  (`limit_warning_notified_at`, `negative_notified_at`, `blocked_notified_at`), auto top-up
+  (`auto_top_up` false by default, `auto_top_up_threshold_micros` default 5,000,000,
+  `auto_top_up_amount_micros` default 20,000,000 and at least 1, `auto_top_up_payment_method` the
+  provider's `pm_` id, never a card, `auto_top_up_pending` the idempotency key in flight or
+  `card_setup`, `auto_top_up_started_at`, `auto_top_up_sequence`, `auto_top_up_day` and
+  `auto_top_ups_today`, `auto_top_up_off_reason`, `auto_top_up_failure_notified_at`) and `version`,
+  which every write compares and increments;
+- `account_balance_credits`: one row per paid top-up (`kind` `top_up` or `auto_top_up`,
+  `amount_micros` > 0, `provider`, `reference` the Checkout Session or PaymentIntent, unique with
+  the provider, `event_id`), indexed by account and time;
+- `account_balance_charges`: one row per account and month (`period` `YYYY-MM`, `amount_micros` ≥ 0,
+  `price_list_id`, `invoice_id` once an invoice froze it, `refreshed_at`).
+
+A credit and its `billing_payment_events` row are written in one transaction. Lake alone writes the
+tables. Additive and idempotent; guard `account_balances_guard`. The operator vendors the schema and
+selects that guard before a lake with this change is rolled.
